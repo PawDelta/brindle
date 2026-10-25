@@ -87,7 +87,12 @@ BRANCH_REF = re.compile(r"refs/heads/[A-Za-z0-9._/-]+")
 PUSH_URL = re.compile(r"(?:https|ssh)://[^\s:]+(?::[0-9]+)?/\S+|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s:]\S*")
 # Set, any of these could send an approved push somewhere else or push more than one ref.
 PUSH_CONFIG = ("core.sshCommand", "core.hooksPath", "remote.{r}.receivepack", "remote.{r}.vcs",
-               "remote.{r}.mirror", "push.followTags", "push.recurseSubmodules")
+               "remote.{r}.mirror", "push.followTags", "push.recurseSubmodules", "remote.{r}.push",
+               "remote.{r}.proxy", "credential.helper", "http.proxy", "core.gitProxy", "core.askPass")
+# Families of keys (matched on the lower-cased name `git config --get-regexp` reports) with the same effect.
+PUSH_CONFIG_PATTERNS = (r"^protocol\.", r"^credential\.(.*\.)?helper$", r"^http\.(.*\.)?proxy$")
+# Release trigger refs: a push there starts a signed build, so it always asks, whatever was remembered.
+PROTECTED_REF = re.compile(r"refs/heads/release(/|$)", re.IGNORECASE)
 PUSH_HOOKS = ("pre-push", "reference-transaction")
 PUSH_FORM = "only `git push <remote> <full commit sha>:refs/heads/<branch>` can be allowed once"
 
@@ -603,6 +608,8 @@ def push_scope(req: Request, lim: Limits) -> tuple[dict | None, str]:
     if (not REMOTE.fullmatch(remote) or not SHA.fullmatch(commit) or not BRANCH_REF.fullmatch(ref)
             or _git(cwd, "check-ref-format", ref)[0] != 0):
         return None, PUSH_FORM
+    if PROTECTED_REF.match(ref):
+        return None, f"{ref} is a release ref, and a push there always needs the person's own approval"
     code, urls = _git(cwd, "remote", "get-url", "--push", "--all", remote)
     if code != 0 or len(urls) != 1:
         return None, f"remote {remote} has no single push URL"
@@ -614,6 +621,10 @@ def push_scope(req: Request, lim: Limits) -> tuple[dict | None, str]:
         code, _ = _git(cwd, "config", "--get-all", name)
         if code != 1:
             return None, f"{name} is set (or can't be read), and could change where or what it pushes"
+    for pattern in PUSH_CONFIG_PATTERNS:
+        code, _ = _git(cwd, "config", "--get-regexp", pattern)
+        if code != 1:
+            return None, f"a setting matching {pattern} is set (or can't be read), and could change where or what it pushes"
     for hook in PUSH_HOOKS:
         code, out = _git(cwd, "rev-parse", "--git-path", f"hooks/{hook}")
         if code != 0 or not out or os.path.exists(os.path.join(cwd, out[0])):
