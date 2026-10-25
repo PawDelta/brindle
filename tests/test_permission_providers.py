@@ -156,15 +156,17 @@ def test_codex_checks_and_profile_commands(db, ws, monkeypatch, provider, comman
     assert (json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] if out else None) == expected
 
 
-def test_explicit_ask_survives_codex_profile_fallback(db, ws, monkeypatch):
+def test_codex_dontask_turns_ask_into_deny(db, ws, monkeypatch):
     from brindle.daemon import grants
 
     turn_on(ws)
+    command = "uv run python - <<'PY'\nimport os; os.remove('x')\nPY"
+    assert codex_behavior(db, ws, "reviewer-codex", command) == "deny"
+    a = worker(db, ws)
     with permissions.editing() as store:
         store.rules = [Rule("bash", "uv run", "prefix", "ask")]
     monkeypatch.setattr(agents, "_hold_for_app", lambda *a, **kw: None)
     monkeypatch.setattr(grants, "use", lambda *a, **kw: None)
-    a = worker(db, ws)
     out = agents.hook_main(db, a.id, "codex-permission-request", json.dumps(
         codex_payload("Bash", {"command": "uv run pytest tests/test_x.py"}, ws.path)))
     assert out == ""
@@ -383,14 +385,6 @@ def codex_behavior(db, ws, profile, command):
 def test_codex_compound_command_covered_is_allowed(db, ws, command, expected):
     turn_on(ws)
     assert codex_behavior(db, ws, "developer-codex", command.format(ws=ws.path)) == expected
-
-
-def test_codex_dontask_turns_ask_into_deny(db, ws):
-    # A heredoc's body isn't a command: uv run:* mustn't cover it, and the
-    # unwatched reviewer must be refused rather than left at a prompt.
-    turn_on(ws)
-    command = "uv run python - <<'PY'\nimport os; os.remove('x')\nPY"
-    assert codex_behavior(db, ws, "reviewer-codex", command) == "deny"
 
 
 def test_hook_invocation_skips_worktree_python(ws, monkeypatch, tmp_path):
@@ -891,7 +885,7 @@ def strict_answer(db, ws, tool, args, **extra):
     return json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=True))
 
 
-@pytest.mark.parametrize("command,expected", [
+REVIEWER_COMMANDS = [
     ("git log --oneline main..HEAD && echo --- && git diff --stat main..HEAD", "allow"),
     ("git -C {ws} log -n 15 --oneline", "allow"),
     pytest.param("grep -n feature app.py && head -n 5 app.py | tail -n 2", "allow",
@@ -908,12 +902,7 @@ def strict_answer(db, ws, tool, args, **extra):
     pytest.param("git -C /outside log", "deny", marks=pytest.mark.variant("git outside the workspace")),
     pytest.param("git -c core.pager=sh log", "deny", marks=pytest.mark.variant("git configuration can execute programs")),
     pytest.param("git log $(rm app.py)", "deny", marks=pytest.mark.variant("shell substitution bypass")),
-])
-def test_reviewer_chain_through_agy_hook(db, ws, monkeypatch, command, expected):
-    a = worker(db, ws, provider="antigravity")
-    db.update_agent(a.id, profile="reviewer", mode="review")
-    monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
-    assert strict_answer(db, ws, "run_command", {"CommandLine": command.format(ws=ws.path)})["decision"] == expected
+]
 
 
 def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, monkeypatch, tmp_path):
@@ -960,10 +949,15 @@ def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, mo
     assert len(rows) == 9 and all(r.result.startswith("deny:") for r in rows)
 
 
-def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch):
+@pytest.mark.parametrize("command,expected", [(None, None), *REVIEWER_COMMANDS])
+def test_agy_strict_closes_the_ways_around_the_hook(db, ws, monkeypatch, command, expected):
     a = worker(db, ws, provider="antigravity", id_="g1")
     turn_on(ws)
     monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
+    if command is not None:
+        db.update_agent(a.id, profile="reviewer", mode="review")
+        assert strict_answer(db, ws, "run_command", {"CommandLine": command.format(ws=ws.path)})["decision"] == expected
+        return
 
     def decision(tool, args):
         return strict_answer(db, ws, tool, args)["decision"]

@@ -347,11 +347,35 @@ def test_supervisor_action_negations(summary):
     assert pipeline.has_supervisor_action(summary) is False
 
 
-def test_issue186_review_state_tells_silence_apart(db, repo, monkeypatch):
+@pytest.mark.parametrize("case", [None, "old merge", "old verdict", "paused reviewer", "old reviewer", "recorded", "standing"])
+def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypatch, case):
     """Both list tools and the sidebar expose the branch's actual review stage."""
     from dataclasses import replace
 
     from brindle import mcp_server, tasks, view, watch
+    from brindle.db import Workspace
+
+    if case is not None:
+        ws = Workspace("repo/feat", str(tmp_path), "feat", "worktree", "feat", "main",
+                       str(tmp_path), None, "session", time.time())
+        db.add_workspace(ws)
+        monkeypatch.setattr(gates, "head", lambda ws_: "current")
+        add(db, ws, "w1", "assign", result="done", pipeline="reviewing")
+        expected = "waiting for review: nothing is checking or reviewing it"
+        if case == "old merge":
+            db.set_merged(ws.id, "old")
+        elif case in ("paused reviewer", "old reviewer"):
+            add(db, ws, "r1", "review", status="paused" if case == "paused reviewer" else "processing")
+            db.update_agent("r1", review_sha="old" if case == "old reviewer" else "current")
+        else:
+            db.add_review(ws.id, "old" if case == "old verdict" else "current", "r1", False, "fix")
+            if case != "recorded":
+                db.update_agent("w1", pipeline=None)
+            if case == "standing":
+                db.add_review(ws.id, "current", "r2", True, "ok")
+            expected = None if case == "old verdict" else "changes requested at current"
+        assert pipeline.review_state(db, ws) == expected
+        return
 
     (repo / ".brindle").mkdir()
     (repo / ".brindle" / "config.json").write_text(json.dumps({"review": True}))
@@ -410,28 +434,3 @@ def test_issue186_review_state_tells_silence_apart(db, repo, monkeypatch):
     assert entry["review_state"] == state
     [w1] = [a for a in entry["agents"] if a["id"] == "w1"]
     assert watch.awaiting_review(w1, entry) == state
-
-
-@pytest.mark.parametrize("case", ["old merge", "old verdict", "paused reviewer", "old reviewer", "recorded", "standing"])
-def test_issue186_review_state_tracks_current_commit(db, tmp_path, monkeypatch, case):
-    from brindle.db import Workspace
-
-    ws = Workspace("repo/feat", str(tmp_path), "feat", "worktree", "feat", "main",
-                   str(tmp_path), None, "session", time.time())
-    db.add_workspace(ws)
-    monkeypatch.setattr(gates, "head", lambda ws_: "current")
-    add(db, ws, "w1", "assign", result="done", pipeline="reviewing")
-    expected = "waiting for review: nothing is checking or reviewing it"
-    if case == "old merge":
-        db.set_merged(ws.id, "old")
-    elif case in ("paused reviewer", "old reviewer"):
-        add(db, ws, "r1", "review", status="paused" if case == "paused reviewer" else "processing")
-        db.update_agent("r1", review_sha="old" if case == "old reviewer" else "current")
-    else:
-        db.add_review(ws.id, "old" if case == "old verdict" else "current", "r1", False, "fix")
-        if case != "recorded":
-            db.update_agent("w1", pipeline=None)
-        if case == "standing":
-            db.add_review(ws.id, "current", "r2", True, "ok")
-        expected = None if case == "old verdict" else "changes requested at current"
-    assert pipeline.review_state(db, ws) == expected

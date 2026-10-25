@@ -947,9 +947,34 @@ APPROVAL_PROMPT = """\
 """
 
 
-@pytest.mark.parametrize("brief_visible", [True, False])
+@pytest.mark.parametrize("brief_visible", [
+    True, False, "hooks",
+    pytest.param("error", marks=pytest.mark.variant(
+        "a fresh tool error above an active approval is not a failed launch")),
+])
 def test_codex_at_an_approval_prompt_is_delivered_or_at_least_not_failed(db, health, monkeypatch, brief_visible):
     lh, a, now, _, _, reports = health
+    if isinstance(brief_visible, str):
+        screen = ("Hooks need review\n› 1. Enable hooks\n  2. Skip hooks\nEnter to confirm"
+                  if brief_visible == "hooks" else "■ Error: model not found\n" + APPROVAL_PROMPT)
+        delivered = brief_visible == "error"
+        monkeypatch.setattr(tmux, "send_keys", lambda *a, **kw: None)
+        monkeypatch.setattr(tmux, "paste", lambda *a, **kw: None)
+        lh.verify_delivery(db, a, a.task)
+        monkeypatch.setattr(lh, "capture", lambda a: screen)
+        if delivered:
+            lh.delivered(db, a)
+            now[0] += lh.FOLLOWUP_SECONDS
+            assert lh.inspect(db, a.id, wait=False) == "waiting"
+        else:
+            lh.verify_pending(db, a.id, a._launch_health_token)
+        assert db.get_agent(a.id).status == "waiting"
+        assert now[0] == 100.0 + (lh.FOLLOWUP_SECONDS if delivered else 0)
+        assert len(reports) == 1
+        lh.inspect(db, a.id, wait=False)
+        assert db.get_agent(a.id).status == "waiting"
+        assert len(reports) == 1
+        return
     # #240: earlier tool output and analysis above an approval prompt, no Working row.
     head = (f"› {a.task}\n\n• Explored\n  └ Read feature.py\n\n• The change looks small; running its tests.\n\n"
             if brief_visible else "")
@@ -965,31 +990,6 @@ def test_codex_at_an_approval_prompt_is_delivered_or_at_least_not_failed(db, hea
     assert len(reports) == 1 and "uv run pytest tests/test_feature.py" in reports[0][1]
     assert db.get_agent(a.id).status == "waiting"
     assert now[0] == 100.0
-
-
-@pytest.mark.parametrize("screen,delivered", [
-    ("Hooks need review\n› 1. Enable hooks\n  2. Skip hooks\nEnter to confirm", False),
-    pytest.param("■ Error: model not found\n" + APPROVAL_PROMPT, True,
-                 marks=pytest.mark.variant("a fresh tool error above an active approval is not a failed launch")),
-])
-def test_blocking_prompt_survives_delivery_and_health_checks(db, health, monkeypatch, screen, delivered):
-    lh, a, now, _, _, reports = health
-    monkeypatch.setattr(tmux, "send_keys", lambda *a, **kw: None)
-    monkeypatch.setattr(tmux, "paste", lambda *a, **kw: None)
-    lh.verify_delivery(db, a, a.task)
-    monkeypatch.setattr(lh, "capture", lambda a: screen)
-    if delivered:
-        lh.delivered(db, a)
-        now[0] += lh.FOLLOWUP_SECONDS
-        assert lh.inspect(db, a.id, wait=False) == "waiting"
-    else:
-        lh.verify_pending(db, a.id, a._launch_health_token)
-    assert db.get_agent(a.id).status == "waiting"
-    assert now[0] == 100.0 + (lh.FOLLOWUP_SECONDS if delivered else 0)
-    assert len(reports) == 1
-    lh.inspect(db, a.id, wait=False)
-    assert db.get_agent(a.id).status == "waiting"
-    assert len(reports) == 1
 
 
 @pytest.mark.parametrize("started,clears", [(True, True), (False, True), (False, False)])

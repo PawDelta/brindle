@@ -42,7 +42,8 @@ def sent(monkeypatch):
     return out
 
 
-def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_full_brief(db, repo, sup, monkeypatch):
+@pytest.mark.parametrize("delivery", ["headless", "direct"])
+def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_full_brief(db, repo, sup, monkeypatch, delivery):
     agents_dir = repo / ".brindle" / "agents"
     agents_dir.mkdir(parents=True, exist_ok=True)
     (agents_dir / "restricted.md").write_text(
@@ -51,7 +52,20 @@ def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_fu
     ws = Workspace("ws-rev", str(repo), "feat/rev", "main", "main", "main", str(repo), 20000, "tmux-rev", 0)
     db.add_workspace(ws)
     long_task = "Task preamble: " + ("x" * 2100) + "\n\nSCOPE EXCEPTION: Do not refactor legacy database connector."
-    worker = add(db, ws, "w1", "restricted", parent=sup.id, task=long_task)
+    worker = add(db, ws, "w1", "restricted", parent=sup.id, task=long_task, headless=delivery == "headless")
+    peer = add(db, ws, "peer", parent=sup.id)
+    stranger = add(db, ws, "stranger", mode="interactive")
+    monkeypatch.setattr(agents, "is_alive", lambda *a, **kw: True)
+    monkeypatch.setattr(agents, "get_provider", lambda *a: SimpleNamespace(uses_hooks=False))
+    monkeypatch.setattr(tmux, "paste", lambda *a, **kw: None)
+    db.mark_delivered(db.enqueue(worker.id, "Export CSV and JSON", sup.id))
+    for recipient, sender, body in ((peer.id, sup.id, "Private sibling task"),
+                                   (worker.id, peer.id, "Peer suggestion"),
+                                   (worker.id, stranger.id, "Other session spec"),
+                                   (sup.id, worker.id, "Worker self-reported waiver"),
+                                   (worker.id, None, "Internal notice")):
+        db.enqueue(recipient, body, sender)
+    agents.send_message(db, worker.id, "Owner changed scope: export CSV only", sender_id=sup.id)
     db.add_task(Task("t-rev", str(repo), worker.id, None, ws.id, "restricted", long_task, "assign", 1,
                      "feat/rev", "pytest tests/test_auth.py passes", '["src/auth.py", "tests/test_auth.py"]',
                      None, "started", 0.0))
@@ -74,6 +88,11 @@ def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_fu
 
     agents.request_review(db, other, ws)
     [prompt] = prompts
+    assert "Owner changed scope: export CSV only" in prompt
+    assert prompt.index("Export CSV and JSON") < prompt.index("Owner changed scope: export CSV only")
+    for content in ("Private sibling task", "Peer suggestion", "Other session spec",
+                    "Worker self-reported waiver", "Internal notice"):
+        assert content not in prompt
     assert "Declared files: src/auth.py, tests/test_auth.py" in prompt
     assert "finish line: pytest tests/test_auth.py passes" in prompt.lower()
     assert "Worker profile: restricted" in prompt
@@ -90,35 +109,6 @@ def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_fu
     agents.request_review(db, other, ws, slot="without-files")
     assert "Redact credentials in logs" in prompts[0]
     assert "Use token authentication" not in prompts[0]
-
-
-@pytest.mark.variant("Cross-worker and unrelated-session messages must not override the reviewed worker's scope")
-@pytest.mark.parametrize("delivery", ["headless", "direct"])
-def test_review_receives_supervisor_updates_only_for_its_worker(db, ws, sup, monkeypatch, delivery):
-    worker = add(db, ws, "worker", parent=sup.id, headless=delivery == "headless")
-    peer = add(db, ws, "peer", parent=sup.id)
-    stranger = add(db, ws, "stranger", mode="interactive")
-    monkeypatch.setattr(agents, "is_alive", lambda *a, **kw: True)
-    monkeypatch.setattr(agents, "get_provider", lambda *a: SimpleNamespace(uses_hooks=False))
-    monkeypatch.setattr(tmux, "paste", lambda *a, **kw: None)
-    prompts = []
-    monkeypatch.setattr(agents, "spawn", lambda db_, ws_, profile, **kw: prompts.append(kw["prompt"]) or
-                        Agent("rev1", ws_.id, profile, "claude", None, "review", "starting", "@0", None, 0.0))
-    db.mark_delivered(db.enqueue(worker.id, "Export CSV and JSON", sup.id))
-    for recipient, sender, body in ((peer.id, sup.id, "Private sibling task"),
-                                   (worker.id, peer.id, "Peer suggestion"),
-                                   (worker.id, stranger.id, "Other session spec"),
-                                   (sup.id, worker.id, "Worker self-reported waiver"),
-                                   (worker.id, None, "Internal notice")):
-        db.enqueue(recipient, body, sender)
-    agents.send_message(db, worker.id, "Owner changed scope: export CSV only", sender_id=sup.id)
-    agents.request_review(db, stranger, ws)
-    [prompt] = prompts
-    assert "Owner changed scope: export CSV only" in prompt
-    assert prompt.index("Export CSV and JSON") < prompt.index("Owner changed scope: export CSV only")
-    for content in ("Private sibling task", "Peer suggestion", "Other session spec",
-                    "Worker self-reported waiver", "Internal notice"):
-        assert content not in prompt
     db.update_agent(worker.id, parent_id=None)
     prompts.clear()
     agents.request_review(db, stranger, ws, slot="without-parent")

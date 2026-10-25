@@ -61,23 +61,49 @@ def test_scoped_exclusions_and_ask_reach_every_matching_path(monkeypatch):
     assert p.mirror_agy([builtin_ask], []) == {"allow": [], "deny": []}
 
 
-@pytest.mark.parametrize("match,removed", [("deploy", True), ("deploy prod", False)])
-def test_auto_resolution_saves_full_shadow_or_enforced_partial_exclusion(tmp_path, match, removed):
+def assert_shadow_resolution(tmp_path, monkeypatch, match, protected):
+    import json
     from brindle import permission_editor as e
 
+    monkeypatch.setattr(p.time, "time", lambda: 100)
     repo = str(tmp_path)
     p.reset()
-    old = p.add_rule("bash", "deploy", "allow", "prefix")
+    temporary = protected is not None
+    old = p.add_rule("bash", "deploy", "allow", "exact" if temporary else "prefix")
+    if protected == "org":
+        from brindle.pro.team_policy import GrantPolicy, OrgPolicy
+
+        monkeypatch.setattr(e, "policy", lambda repo: OrgPolicy("org", 1, permission_grants=GrantPolicy(
+            True, ("bash",), (), 30, 2, deny=("bash exact deploy",))))
+    elif protected:
+        path = p.repo_rules_path(repo)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"rules": [spec("deploy", "deny", match_type="exact", expires_at=200)]}))
+    rule = (spec("unrelated", "deny", match_type="exact") if protected else
+            spec("deploy", "ask", match_type="exact", repo_root=repo, expires_at=200)
+            if temporary else spec(match, "ask"))
     before = e.snapshot(repo)
     body = {"repo": repo, "revision": before["revision"], "operation": "upsert",
-            "rule": spec(match, "ask"), "resolution": "auto"}
+            "rule": rule, "resolution": "auto"}
     review = e.review(body)
     assert review["can_save"], review
-    assert any(c["type"] == ("removed" if removed else "updated") and c["id"] == old.id
-               for c in review["changes"])
+    removed = not temporary and match == "deploy"
+    if temporary:
+        assert not any(c["type"] == "removed" for c in review["changes"])
+    else:
+        assert any(c["type"] == ("removed" if removed else "updated") and c["id"] == old.id
+                   for c in review["changes"])
     assert p.load_store().rules == [old]
     e.save({**body, "proposal": review["proposal"]})
     rules = p.load_store().rules
+    if temporary:
+        assert any(r.id == old.id for r in rules)
+        request = p.Request("claude", "bash", "Bash", repo_root=repo, command="deploy")
+        assert p.decide(request, rules=rules).decision == "ask"
+        assert p.decide(replace(request, repo_root="/elsewhere"), rules=rules).decision == "allow"
+        monkeypatch.setattr(p.time, "time", lambda: 201)
+        assert p.decide(request, rules=rules).decision == ("ask" if protected == "org" else "allow")
+        return
     assert (len(rules) == 1) is removed
     assert p.decide(p.Request("claude", "bash", "Bash", command="deploy prod"), rules=rules).decision == "ask"
     assert p.decide(p.Request("claude", "bash", "Bash", command="deploy dev"), rules=rules).decision == (
@@ -111,85 +137,9 @@ def test_save_rechecks_policy_inside_store_lock_and_rejects_tampered_proposal(tm
         e.save({**body, "proposal": review["proposal"]})
     assert stale.value.http_status == 409
     assert p.load_store().rules == []
+    monkeypatch.setattr(p, "editing", original)
 
-
-@pytest.mark.parametrize("protected", [False, True, "org"])
-def test_temporary_repo_restriction_keeps_allow_for_other_repos_and_after_expiry(tmp_path, monkeypatch, protected):
-    import json
-    from brindle import permission_editor as e
-
-    monkeypatch.setattr(p.time, "time", lambda: 100)
-    repo = str(tmp_path)
-    p.reset()
-    old = p.add_rule("bash", "deploy", "allow", "exact")
-    if protected == "org":
-        from brindle.pro.team_policy import GrantPolicy, OrgPolicy
-
-        monkeypatch.setattr(e, "policy", lambda repo: OrgPolicy("org", 1, permission_grants=GrantPolicy(
-            True, ("bash",), (), 30, 2, deny=("bash exact deploy",))))
-    elif protected:
-        path = p.repo_rules_path(repo)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"rules": [spec("deploy", "deny", match_type="exact", expires_at=200)]}))
-    body = {"repo": repo, "revision": e.snapshot(repo)["revision"], "operation": "upsert",
-            "rule": (spec("unrelated", "deny", match_type="exact") if protected else
-                     spec("deploy", "ask", match_type="exact", repo_root=repo, expires_at=200)),
-            "resolution": "auto"}
-    reviewed = e.review(body)
-    assert reviewed["can_save"] and not any(c["type"] == "removed" for c in reviewed["changes"])
-    e.save({**body, "proposal": reviewed["proposal"]})
-    rules = p.load_store().rules
-    assert any(r.id == old.id for r in rules)
-    request = p.Request("claude", "bash", "Bash", repo_root=repo, command="deploy")
-    assert p.decide(request, rules=rules).decision == "ask"
-    assert p.decide(replace(request, repo_root="/elsewhere"), rules=rules).decision == "allow"
-    monkeypatch.setattr(p.time, "time", lambda: 201)
-    assert p.decide(request, rules=rules).decision == ("ask" if protected == "org" else "allow")
-
-
-@pytest.mark.parametrize("count,depth,valid", [
-    (None, 1, True), (100, 0, True), (101, 0, False), (1, 7, True), (1, 8, False),
-])
-def test_auto_resolution_preserves_a_peer_with_existing_exclusions(tmp_path, count, depth, valid):
-    from brindle import permission_editor as e
-
-    nested = ()
-    for index in range(depth):
-        nested = (p.Rule("fetch", f"https://private.test/except/{index}", "exact", "deny", exclusions=nested),)
-    with p.editing() as store:
-        store.rules = ([p.Rule("fetch", "https://", "prefix", "ask", created=50,
-                              exclusions=(p.Rule("fetch", "https://public.test", "exact", "deny"),))]
-                       if count is None else [
-                           p.Rule("fetch", f"https://private.test/{index}", "exact", "deny", exclusions=nested)
-                           for index in range(count)])
-    original = p.load_store().rules
-    before = p.store_path().read_bytes()
-    body = {"repo": str(tmp_path), "revision": e.snapshot(str(tmp_path))["revision"], "operation": "upsert",
-            "rule": {"kind": "fetch", "match": "https://", "match_type": "prefix", "decision": "allow"},
-            "resolution": "auto"}
-    if not valid:
-        with pytest.raises(ServiceError):
-            e.review(body)
-        with pytest.raises(ServiceError):
-            e.save({**body, "proposal": "unrepresentable"})
-        assert p.store_path().read_bytes() == before
-        return
-    reviewed = e.review(body)
-    assert reviewed["can_save"]
-    e.save({**body, "proposal": reviewed["proposal"]})
-    rules = p.load_store().rules
-    assert len(rules) == len(original) + 1
-    assert all(rule in rules for rule in original)
-    assert rules == [p.Rule.from_dict(r) for r in reviewed["rules"] if r["editable"]]
-    assert p.decide(p.Request("codex", "fetch", "WebFetch", url="https://public.test")).decision == "allow"
-    assert p.decide(p.Request("codex", "fetch", "WebFetch", url="https://private.test/0")).decision == (
-        "ask" if count is None else "deny")
-
-
-def test_unknown_overlap_and_protected_denies_cannot_be_auto_removed(tmp_path):
-    from brindle import permission_editor as e
-
-    repo = str(tmp_path)
+    # Uncertain overlap and protected rules cannot authorize a save either.
     p.reset()
     p.add_rule("bash", "deploy * prod", "deny", "glob")
     body = {"repo": repo, "revision": e.snapshot(repo)["revision"], "operation": "upsert",
@@ -202,11 +152,7 @@ def test_unknown_overlap_and_protected_denies_cannot_be_auto_removed(tmp_path):
     body.update(operation="remove", id="d-git-push", resolution="manual")
     with pytest.raises(ServiceError):
         e.review(body)
-
-
-def test_editable_and_repository_rules_with_same_pattern_keep_separate_ownership(tmp_path, monkeypatch):
     import json
-    from brindle import permission_editor as e
     from brindle.pro.team_policy import GrantPolicy, OrgPolicy
 
     p.reset()
@@ -252,6 +198,52 @@ def test_editable_and_repository_rules_with_same_pattern_keep_separate_ownership
     reviewed = e.review(body)
     e.save({**body, "proposal": reviewed["proposal"]})
     assert p.decide(p.Request("codex", "fetch", "WebFetch", url="https://other.example/")).decision == "ask"
+
+
+@pytest.mark.parametrize("count,depth,valid,match,protected", [
+    (None, 1, True, None, None), (100, 0, True, None, None), (101, 0, False, None, None),
+    (1, 7, True, None, None), (1, 8, False, None, None),
+    (None, None, True, "deploy", None), (None, None, True, "deploy prod", None),
+    (None, None, True, "deploy", False), (None, None, True, "deploy", True),
+    (None, None, True, "deploy", "org"),
+])
+def test_auto_resolution_preserves_a_peer_with_existing_exclusions(tmp_path, monkeypatch, count, depth, valid, match, protected):
+    from brindle import permission_editor as e
+
+    if match is not None:
+        assert_shadow_resolution(tmp_path, monkeypatch, match, protected)
+        return
+    nested = ()
+    for index in range(depth):
+        nested = (p.Rule("fetch", f"https://private.test/except/{index}", "exact", "deny", exclusions=nested),)
+    with p.editing() as store:
+        store.rules = ([p.Rule("fetch", "https://", "prefix", "ask", created=50,
+                              exclusions=(p.Rule("fetch", "https://public.test", "exact", "deny"),))]
+                       if count is None else [
+                           p.Rule("fetch", f"https://private.test/{index}", "exact", "deny", exclusions=nested)
+                           for index in range(count)])
+    original = p.load_store().rules
+    before = p.store_path().read_bytes()
+    body = {"repo": str(tmp_path), "revision": e.snapshot(str(tmp_path))["revision"], "operation": "upsert",
+            "rule": {"kind": "fetch", "match": "https://", "match_type": "prefix", "decision": "allow"},
+            "resolution": "auto"}
+    if not valid:
+        with pytest.raises(ServiceError):
+            e.review(body)
+        with pytest.raises(ServiceError):
+            e.save({**body, "proposal": "unrepresentable"})
+        assert p.store_path().read_bytes() == before
+        return
+    reviewed = e.review(body)
+    assert reviewed["can_save"]
+    e.save({**body, "proposal": reviewed["proposal"]})
+    rules = p.load_store().rules
+    assert len(rules) == len(original) + 1
+    assert all(rule in rules for rule in original)
+    assert rules == [p.Rule.from_dict(r) for r in reviewed["rules"] if r["editable"]]
+    assert p.decide(p.Request("codex", "fetch", "WebFetch", url="https://public.test")).decision == "allow"
+    assert p.decide(p.Request("codex", "fetch", "WebFetch", url="https://private.test/0")).decision == (
+        "ask" if count is None else "deny")
 
 
 @pytest.mark.parametrize("match_type,match", [

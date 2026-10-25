@@ -105,9 +105,17 @@ def sweeps(db, clock, n=2):
                  marks=pytest.mark.variant("#250: reviewer startup menu")),
     pytest.param("Would you like to run the following command?\n$ make probe", ["1. Yes", "2. No"], "review", "processing", None, "codex",
                  marks=pytest.mark.variant("#250: reviewer command approval")),
+    pytest.param(TRUST, ["Not now", "Allow this folder"], "assign", "hooked", None, "antigravity",
+                 marks=pytest.mark.variant("bypass attempt: a menu the agent raises mid-task; the only test of the hook ending startup")),
 ])
-def test_active_worker_menu_is_forwarded_immediately(db, launch, monkeypatch, question, options, mode, status, screen, provider):
-    pane, asked = launch(question, options, {}, provider=provider, mode=mode, status=status)
+def test_a_menu_after_the_session_started_is_never_answered(db, launch, monkeypatch, question, options, mode, status, screen, provider):
+    pane, asked = launch(question, options, {"kind": "trust", "option": "Allow this folder"},
+                         provider=provider, mode=mode, status="processing" if status == "hooked" else status)
+    if status == "hooked":
+        agents.handle_hook(db, "w1", "prompt-submit", {})
+        sweeps(db, launch.clock)
+        assert pane.keys == [] and asked == []
+        return
     if screen is not None:
         monkeypatch.setattr(pane, "render", lambda: screen)
     monkeypatch.setattr(agents, "pane_owners", lambda *a: {})
@@ -120,27 +128,6 @@ def test_active_worker_menu_is_forwarded_immediately(db, launch, monkeypatch, qu
     assert not cull.note_stuck(db, launch.clock[0], {})
     assert db.pending_count("boss") == 1
     assert not pane.keys and not asked
-
-
-@pytest.mark.variant("busy, answered, and echoed transcript bypass attempts must not become pending questions")
-@pytest.mark.parametrize("suffix,echo,provider", [
-    ("\n• Working (esc to interrupt)\n› \n97% context left", False, "codex"),
-    ("\n› Use SQLite\n• Implemented SQLite.\n› \n97% context left", False, "codex"),
-    ("\n› \n97% context left", True, "codex"),
-    ("\n" + CLAUDE_BUSY, False, "claude"),
-    ("\n❯ Use SQLite\n⏺ Implemented SQLite." + BOX, False, "claude"),
-    (BOX, True, "claude"),
-    (BOX.replace("❯ ", "❯ Use SQLite"), False, "claude"),
-])
-def test_numbered_transcript_without_pending_question_is_not_forwarded(db, launch, monkeypatch, suffix, echo, provider):
-    question = "Which storage should I use?\n\n1. SQLite\n2. Postgres"
-    pane, _ = launch("", [], {}, provider=provider, status="idle")
-    monkeypatch.setattr(pane, "render", lambda: question + suffix)
-    if echo:
-        db.update_agent("w1", task=question)
-    assert not cull.note_stuck(db, launch.clock[0], {})
-    assert db.get_agent("w1").status == "idle"
-    assert db.pending_count("boss") == 0
 
 
 @pytest.mark.parametrize("question,options,reply,keys,chosen,told", [
@@ -207,17 +194,6 @@ def test_sweep_leaves_codex_to_its_inflight_startup_helper(db, launch, monkeypat
     assert prompt_answer.pending(db) == []
 
 
-@pytest.mark.variant("bypass attempt: a menu the agent raises mid-task; the only test of the hook ending startup")
-def test_a_menu_after_the_session_started_is_never_answered(db, launch):
-    # A hook ran, so the session is going: a menu now is the agent's own
-    # question, even though after_launch never saw the input box.
-    pane, asked = launch(TRUST, ["Not now", "Allow this folder"],
-                         {"kind": "trust", "option": "Allow this folder"}, status="processing")
-    agents.handle_hook(db, "w1", "prompt-submit", {})
-    sweeps(db, launch.clock)
-    assert pane.keys == [] and asked == []
-
-
 def test_model_calls_are_capped_per_launch_across_sweeps(db, launch):
     _, asked = launch("Loading {n}", ["step", "next"], {"kind": "not_a_prompt", "option": ""})
     prompt_answer.finish_launch(db, db.get_agent("w1"))
@@ -278,7 +254,31 @@ def test_a_goal_brief_rendered_as_markdown_is_never_the_prompt(db, launch, monke
     assert db.get_agent("w1").status != "waiting"
 
 
-def test_brief_not_prompt_when_its_start_has_scrolled_off(db, launch, monkeypatch):
+@pytest.mark.parametrize("suffix,echo,provider", [
+    (None, False, "claude"),
+    *[pytest.param(suffix, echo, provider, marks=pytest.mark.variant(
+        "busy, answered, and echoed transcript bypass attempts must not become pending questions"))
+      for suffix, echo, provider in [
+          ("\n• Working (esc to interrupt)\n› \n97% context left", False, "codex"),
+          ("\n› Use SQLite\n• Implemented SQLite.\n› \n97% context left", False, "codex"),
+          ("\n› \n97% context left", True, "codex"),
+          ("\n" + CLAUDE_BUSY, False, "claude"),
+          ("\n❯ Use SQLite\n⏺ Implemented SQLite." + BOX, False, "claude"),
+          (BOX, True, "claude"),
+          (BOX.replace("❯ ", "❯ Use SQLite"), False, "claude"),
+      ]],
+])
+def test_brief_not_prompt_when_its_start_has_scrolled_off(db, launch, monkeypatch, suffix, echo, provider):
+    if suffix is not None:
+        question = "Which storage should I use?\n\n1. SQLite\n2. Postgres"
+        pane, _ = launch("", [], {}, provider=provider, status="idle")
+        monkeypatch.setattr(pane, "render", lambda: question + suffix)
+        if echo:
+            db.update_agent("w1", task=question)
+        assert not cull.note_stuck(db, launch.clock[0], {})
+        assert db.get_agent("w1").status == "idle"
+        assert db.pending_count("boss") == 0
+        return
     # Only the tail of a long brief is on screen: a numbered list, "press
     # enter" and key/budget words, with no first line to match it by.
     from brindle import launch_health

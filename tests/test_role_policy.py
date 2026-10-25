@@ -36,7 +36,7 @@ def test_a_malformed_effective_policy_fails_closed(team, effective):
     assert not plugin(team).check_assign(assign()).allowed
 
 
-def test_effective_grant_limits_override_base_and_survive_cache(team, monkeypatch):
+def test_a_copy_cached_for_another_role_is_never_a_fallback(team, monkeypatch):
     from brindle import permission_grants
 
     broad = {"allow": True, "kinds": ["bash"], "overridable": ["git-push"],
@@ -53,6 +53,11 @@ def test_effective_grant_limits_override_base_and_survive_cache(team, monkeypatc
     assert not cached.enforced.permission_grants.allow_persistent
     assert cached.enforced.permission_grants.scopes == ("remote",)
     assert cached.enforced.permission_grants.lifetimes == ("session",)
+    # A role change must reject even this previously valid cached policy.
+    assert plugin(team).check_assign(assign()).allowed
+    login(team, team_claims(policy_role="contractor"))
+    team.routes[GET] = [auth.TransportError("down")]
+    assert not plugin(team).check_assign(assign()).allowed
 
 
 @pytest.mark.parametrize("roles", [
@@ -62,19 +67,6 @@ def test_effective_grant_limits_override_base_and_survive_cache(team, monkeypatc
 def test_malformed_role_overrides_fail_closed(team, roles):
     role_policy(team)
     team.policy_body["policy"]["roles"] = roles
-    assert not plugin(team).check_assign(assign()).allowed
-
-
-# -- the cache follows the member's role ---------------------------------------------------------
-
-
-def test_a_copy_cached_for_another_role_is_never_a_fallback(team):
-    # After a role change, a failed refetch must not fall back to the old
-    # role's (possibly looser) rules: it fails closed.
-    role_policy(team)
-    assert plugin(team).check_assign(assign()).allowed
-    login(team, team_claims(policy_role="contractor"))
-    team.routes[GET] = [auth.TransportError("down")]
     assert not plugin(team).check_assign(assign()).allowed
 
 

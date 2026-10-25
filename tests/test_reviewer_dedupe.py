@@ -67,14 +67,6 @@ def fake_spawn(monkeypatch):
     return started
 
 
-def test_second_request_for_the_same_commit_reuses_the_running_reviewer(db, ws, monkeypatch):
-    started = fake_spawn(monkeypatch)
-    first = agents.request_review(db, None, ws, "reviewer")
-    second = agents.request_review(db, None, ws, "reviewer")
-    assert second.id == first.id
-    assert len(started) == 1
-
-
 def test_new_commit_replaces_the_old_reviewer(db, ws, monkeypatch):
     started = fake_spawn(monkeypatch)
     old = agents.request_review(db, None, ws, "reviewer")
@@ -111,9 +103,19 @@ def run_helper(ws, argv):
                                 **slot)
 
 
-@pytest.mark.parametrize("checks", [[], ["suite"]], ids=["direct", "checks"])
-@pytest.mark.variant("#262: real MCP requests with a live holder of a different profile")
-def test_mcp_explicit_profile_keeps_other_profile_running(db, ws, boss, monkeypatch, checks):
+@pytest.mark.parametrize("checks", [
+    None,
+    pytest.param([], marks=pytest.mark.variant("#262: real MCP requests with a live holder of a different profile")),
+    pytest.param(["suite"], marks=pytest.mark.variant("#262: real MCP requests with a live holder of a different profile")),
+], ids=["same-profile", "direct", "checks"])
+def test_second_request_for_the_same_commit_reuses_the_running_reviewer(db, ws, boss, monkeypatch, checks):
+    if checks is None:
+        started = fake_spawn(monkeypatch)
+        first = agents.request_review(db, None, ws, "reviewer")
+        second = agents.request_review(db, None, ws, "reviewer")
+        assert second.id == first.id
+        assert len(started) == 1
+        return
     cfg = RepoConfig(checks=checks, review_profile="reviewer")
     queued = piped_worker(db, ws, boss, monkeypatch, cfg)
     monkeypatch.setattr(mcp_server, "load_repo_config", lambda _: cfg)

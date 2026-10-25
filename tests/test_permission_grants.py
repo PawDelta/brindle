@@ -49,21 +49,31 @@ def request(repo, kind, target):
 PUSH = "git push origin {sha}:refs/heads/feat"
 
 
-@pytest.mark.parametrize("kind,target,extra,lim,offered", [
-    ("bash", "npm test", [], LOCAL, "allow_for"),
-    ("bash", "npm test && npm run lint", [], LOCAL, None),       # no exact scope for a compound command
-    ("bash", PUSH, [], LOCAL, "override"),
-    ("bash", PUSH, [ORG_DENY], LOCAL, None),                      # another deny matches: hard
-    pytest.param("bash", "git push --force origin {sha}:refs/heads/feat", [], LOCAL, None,
+@pytest.mark.parametrize("kind,target,extra,lim,offered,setup", [
+    ("bash", PUSH, [], LOCAL, None, "git config --add remote.origin.pushurl https://example.com/o/other.git"),
+    ("bash", PUSH, [], LOCAL, None, "git config url.ext::sh.insteadOf https://"),
+    ("bash", PUSH, [], LOCAL, None, "git config push.followTags true"),
+    ("bash", PUSH, [], LOCAL, None, "printf '#!/bin/sh\\n' > .git/hooks/pre-push"),
+    ("bash", "git push origin abc123:refs/heads/feat", [], LOCAL, None, "true"),
+    ("bash", "npm test", [], LOCAL, "allow_for", ""),
+    ("bash", "npm test && npm run lint", [], LOCAL, None, ""),
+    ("bash", PUSH, [], LOCAL, "override", ""),
+    ("bash", PUSH, [ORG_DENY], LOCAL, None, ""),
+    pytest.param("bash", "git push --force origin {sha}:refs/heads/feat", [], LOCAL, None, "",
                  marks=pytest.mark.variant("d-git-push answers first, but d-git-force still holds")),
-    ("bash", PUSH, [], replace(LOCAL, protected=True), None),
-    ("bash", PUSH, [], replace(LOCAL, overridable=("env",)), None),
-    ("bash", PUSH, [], replace(LOCAL, allow=False), None),
-    ("read", "{repo}/.env", [], LOCAL, "override"),
-    ("read", "~/.ssh/id_ed25519", [], LOCAL, None),               # a credential deny is never lifted
+    ("bash", PUSH, [], replace(LOCAL, protected=True), None, ""),
+    ("bash", PUSH, [], replace(LOCAL, overridable=("env",)), None, ""),
+    ("bash", PUSH, [], replace(LOCAL, allow=False), None, ""),
+    ("read", "{repo}/.env", [], LOCAL, "override", ""),
+    ("read", "~/.ssh/id_ed25519", [], LOCAL, None, ""),
 ])
-def test_only_asks_and_adapted_built_in_denies_are_offered(repo, pushable, kind, target, extra, lim, offered):
+def test_only_asks_and_adapted_built_in_denies_are_offered(repo, pushable, kind, target, extra, lim, offered, setup):
+    if setup:
+        sh(setup, repo)
     req = request(repo, kind, target.replace("{sha}", pushable))
+    if setup:
+        scope, why = permission_grants.push_scope(req, lim)
+        assert scope is None and why
     rules = [*permissions.DEFAULT_RULES, *extra]
     decision = permissions.decide(req, rules=rules)
     lifted, why = permission_grants.override(req, decision, rules, [], lim)
@@ -73,20 +83,28 @@ def test_only_asks_and_adapted_built_in_denies_are_offered(repo, pushable, kind,
                          and decision.rule.id in permission_grants.OVERRIDABLE)
 
 
-@pytest.mark.parametrize("setup,command", [
-    ("git config --add remote.origin.pushurl https://example.com/o/other.git", PUSH),
-    ("git config url.ext::sh.insteadOf https://", PUSH),     # rewrites the push URL as git push would
-    ("git config push.followTags true", PUSH),
-    ("printf '#!/bin/sh\\n' > .git/hooks/pre-push", PUSH),
-    ("true", "git push origin abc123:refs/heads/feat"),
-])
-def test_push_scope_refuses_what_could_push_elsewhere_or_more(repo, pushable, setup, command):
-    sh(setup, repo)
-    scope, why = permission_grants.push_scope(request(repo, "bash", command.replace("{sha}", pushable)), LOCAL)
-    assert scope is None and why
-
-
-def test_grants_expire_run_out_are_revoked_and_race_for_the_last_use(monkeypatch):
+def test_grants_expire_run_out_are_revoked_and_race_for_the_last_use(monkeypatch, db, repo, world, answering):
+    config.set_local(world.repo_root, "permission_policy", "on")
+    monkeypatch.setattr(permission_grants, "LOCAL_USES", 3)
+    monkeypatch.setattr(permission_grants, "LOCAL_MINUTES", 7)
+    codex_worker(db)
+    for provider, agent_id, payload in (
+        ("claude", "wk", {"tool_name": "WebFetch", "tool_input": {"url": "https://example.com/docs", "prompt": "read"}}),
+        ("codex", "co", {"tool_name": "Bash", "tool_input": {"command": "terraform plan"}}),
+    ):
+        payload = {**payload, "cwd": str(repo)}
+        hook = Hook(db, monkeypatch, agent_id, payload, provider)
+        assert "allow_for" in [c.choice for c in hook.shown.choices]
+        assert hook.answer("allow_for", minutes=3, scope="remote")[0] == 409
+        code, reply = hook.answer("allow_for", minutes=3)
+        assert code == 200 and reply["grant"] and hook.verdict() == "allow"
+        again = agents.permission_request_decision(db, db.get_agent(agent_id), payload, provider)
+        assert _verdict(again) == "allow"
+        [live] = _send("GET", "/v1/grants")[1]
+        assert (live["uses_left"], live["expires_at"] - live["created"]) == (1, 3 * 60)
+        assert _send("POST", f"/v1/grants/{reply['grant']}/revoke", peer_pid=310)[0] == 403
+        assert _send("POST", f"/v1/grants/{reply['grant']}/revoke")[0] == 200
+        assert _send("GET", "/v1/grants")[1] == []
     now = [1000.0]
     store = grants.Grants(clock=lambda: now[0])
     g = store.add("a1", "/r", "bash", "npm test", 1, 2)
@@ -178,31 +196,6 @@ class Hook:
     def verdict(self):
         self.thread.join(5)
         return _verdict(self.out[0])
-
-
-@pytest.mark.parametrize("provider,agent_id,payload", [
-    ("claude", "wk", {"tool_name": "WebFetch", "tool_input": {"url": "https://example.com/docs", "prompt": "read"}}),
-    ("codex", "co", {"tool_name": "Bash", "tool_input": {"command": "terraform plan"}}),
-])
-def test_allow_for_lets_one_agent_repeat_one_request_until_revoked(db, repo, world, answering, monkeypatch,
-                                                                    provider, agent_id, payload):
-    config.set_local(world.repo_root, "permission_policy", "on")
-    monkeypatch.setattr(permission_grants, "LOCAL_USES", 3)
-    monkeypatch.setattr(permission_grants, "LOCAL_MINUTES", 7)
-    codex_worker(db)
-    payload = {**payload, "cwd": str(repo)}
-    hook = Hook(db, monkeypatch, agent_id, payload, provider)
-    assert "allow_for" in [c.choice for c in hook.shown.choices]
-    assert hook.answer("allow_for", minutes=3, scope="remote")[0] == 409
-    code, reply = hook.answer("allow_for", minutes=3)
-    assert code == 200 and reply["grant"] and hook.verdict() == "allow"
-    again = agents.permission_request_decision(db, db.get_agent(agent_id), payload, provider)
-    assert _verdict(again) == "allow"                    # the grant: no hold this time
-    [live] = _send("GET", "/v1/grants")[1]
-    assert (live["uses_left"], live["expires_at"] - live["created"]) == (1, 3 * 60)
-    assert _send("POST", f"/v1/grants/{reply['grant']}/revoke", peer_pid=310)[0] == 403   # never an agent
-    assert _send("POST", f"/v1/grants/{reply['grant']}/revoke")[0] == 200
-    assert _send("GET", "/v1/grants")[1] == []
 
 
 class _Unreachable(_HookConnection):
