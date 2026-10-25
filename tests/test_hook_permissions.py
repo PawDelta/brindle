@@ -44,13 +44,18 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cd ~ && ls")) is None
 
 
-@pytest.mark.parametrize("command", [
-    pytest.param("ls *.py", id="shell_syntax_fallback-glob"),
-    pytest.param("git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\"", id="shell_syntax_fallback-heredoc"),
-    pytest.param('git commit -m "$(date)"', id="shell_syntax_fallback-substitution",
+@pytest.mark.parametrize("command, bound", [
+    pytest.param("ls *.py", False, id="shell_syntax_fallback-glob"),
+    pytest.param("git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\"", False, id="shell_syntax_fallback-heredoc"),
+    pytest.param('git commit -m "$(date)"', False, id="shell_syntax_fallback-substitution",
                  marks=pytest.mark.variant("reported substitution fallback regression")),
+    pytest.param("{ rm -rf build; }", True, id="shell_syntax_fallback-hidden_restriction"),
+    pytest.param("{ r''m -rf *.py; }", True, id="shell_syntax_fallback-split_quoted_name",
+                 marks=pytest.mark.variant("review: split quoting hid an active deny")),
+    pytest.param("{ rm -r''f *.py; }", True, id="shell_syntax_fallback-split_quoted_flag",
+                 marks=pytest.mark.variant("review: split quoting hid an active deny")),
 ])
-def test_an_uncovered_part_is_left_to_claude_code(db, ws, command):
+def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound):
     from brindle import permissions as p
     from brindle.config import set_local
 
@@ -66,9 +71,11 @@ def test_an_uncovered_part_is_left_to_claude_code(db, ws, command):
         store.rules = [p.Rule("bash", "rm -rf", "prefix", "deny"),
                        p.Rule("bash", command, "exact", "deny", repo_root="/other"),
                        p.Rule("bash", command, "exact", "ask", expires_at=1)]
-    assert agents.pre_tool_decision(db, a, bash(command)) == fallback
-    hidden = agents.pre_tool_decision(db, a, bash("{ rm -rf build; }"))
-    assert hidden["hookSpecificOutput"]["permissionDecision"] == "ask"
+    decision = agents.pre_tool_decision(db, a, bash(command))
+    if bound:
+        assert decision["hookSpecificOutput"]["permissionDecision"] == "ask"
+    else:
+        assert decision == fallback
 
 
 def test_other_tools_and_unknown_profiles_are_left_alone(db, ws):

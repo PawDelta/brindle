@@ -71,7 +71,7 @@ KINDS = ("read", "write", "edit", "bash", "fetch", "mcp", "other")
 PATH_KINDS = ("read", "write", "edit")
 DECISIONS = ("allow", "deny", "ask")
 MATCH_TYPES = ("exact", "prefix", "glob")
-BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "curl-readonly", "git-push", "git-force")
+BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "git-push", "git-force")
 SOURCES = ("default", "repo", "user", "learned")
 SUGGEST_AFTER = 2
 FILE = "permissions.json"
@@ -80,6 +80,7 @@ STORE_VERSION = 2
 # A command an allow rule may cover: one simple command, nothing the shell
 # would treat specially.
 SIMPLE_COMMAND = re.compile(r"[A-Za-z0-9_\-./:=@%+, ]+")
+_NO_TILDE = re.compile(r"[^~]")
 # The operators a compound command may join its parts with ("" ends it).
 COMPOUND_SEPARATORS = ("&&", ";", "|", "")
 READONLY_GIT = ("status", "diff", "log", "show")
@@ -241,8 +242,6 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     _default("d-tracked", "read", "a file git tracks in the worktree or repo root", "tracked", "allow"),
     _default("d-checks", "bash", "exactly one of the repo's `checks` commands", "check", "allow"),
     _default("d-git-ro", "bash", "git status / diff / log / show", "git-readonly", "allow"),
-    _default("d-curl-ro", "bash", "curl HTTPS read of a public host without uploads, redirects or file output",
-             "curl-readonly", "allow"),
     _default("d-echo", "bash", "echo", "exact", "allow"),
     _default("d-echo-args", "bash", "echo ", "prefix", "allow"),
     _default("d-git-push", "bash", "git push", "git-push", "deny"),
@@ -809,13 +808,17 @@ def allowlist_decision(req: Request | None, rules: list[Rule], checks: list[str]
     (a redirection that writes a file, a heredoc, ...)."""
     from dataclasses import replace
 
-    from brindle.native.permissions import split_commands, uncovered_part
+    from brindle.native.permissions import _tokens, split_commands, uncovered_part
 
     if req is None or req.kind != "bash" or not req.command:
         return None
     whole = decide(req, checks=checks, rules=rules)
     if whole.decision == "deny" or (whole.decision == "ask" and whole.rule is not None):
         return whole
+    # The shell rewrites an unquoted tilde word (``~/x``, ``a=~/x``,
+    # ``a=b:~/x``) after this check; HEAD~1 stays a literal (see _tokens).
+    if _tokens(req.command, word_pattern=_NO_TILDE) is None:
+        return None
     if uncovered_part(_allow_specs(rules, checks), req.command, cd_root=cd_root) is not None:
         return None
     for part in split_commands(req.command):
@@ -988,68 +991,21 @@ def _is_force(arg: str) -> bool:
 
 
 def _readonly_command(rule: Rule, req: Request, argv: list[str]) -> bool:
-    """Validate the arguments of a read-only git or HTTP probe."""
-    if rule.kind != "bash" or not argv:
+    """Validate the arguments of a read-only git probe. There is no built-in
+    curl read: where a host name leads is only known when curl connects, so
+    any fetch, even https to a public-looking name, needs a rule or approval."""
+    if rule.kind != "bash" or not argv or rule.match_type != "git-readonly" or argv[0] != "git":
         return False
-    if rule.match_type == "git-readonly" and argv[0] == "git":
-        args = argv[1:]
-        if args[:1] == ["-C"]:
-            if len(args) < 3:
-                return False
-            path = os.path.realpath(os.path.join(req.cwd or req.worktree, args[1]))
-            if not any(path == os.path.realpath(root) or _inside(path, root) for root in _roots(req)):
-                return False
-            args = args[2:]
-        return bool(args and args[0] in READONLY_GIT
-                    and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in args[1:]))
-    if rule.match_type != "curl-readonly" or argv[0] != "curl":
-        return False
-    # curlrc can add uploads or file output. Suppression only takes effect
-    # in the first argument, before any other option or URL.
-    if len(argv) < 2 or argv[1] not in ("-q", "--disable"):
-        return False
-    # Enumerate read-only flags; unknown options (including config, data,
-    # uploads, method overrides, redirects and output files) require approval.
-    urls = 0
-    args = iter(argv[2:])
-    for arg in args:
-        if arg in ("-s", "-S", "-sS", "-I", "-i", "-f", "-q",
-                   "--silent", "--show-error", "--head", "--include", "--fail", "--disable"):
-            continue
-        if arg in ("-D", "--dump-header", "-o", "--output"):
-            value = next(args, None)
-            if value != "/dev/null" and not (arg in ("-D", "--dump-header") and value == "-"):
-                return False
-        elif _public_https(arg):
-            urls += 1
-        else:
+    args = argv[1:]
+    if args[:1] == ["-C"]:
+        if len(args) < 3:
             return False
-    return urls > 0
-
-
-# Names that only resolve on the local machine or network.
-_PRIVATE_SUFFIXES = ("localhost", "local", "internal", "lan", "home.arpa", "localdomain", "arpa")
-
-
-def _public_https(url: str) -> bool:
-    """An https URL naming a public DNS host: never plain http, an IP literal
-    in any notation (curl reads ``2852039166`` and ``127.1`` as addresses),
-    credentials, or a local-only name. Names are not resolved, so a public
-    name pointing at a private address is still allowed."""
-    from urllib.parse import urlsplit
-
-    if not url.startswith("https://"):
-        return False
-    try:
-        parts = urlsplit(url)
-        host, _port = parts.hostname or "", parts.port
-    except ValueError:
-        return False
-    if "@" in parts.netloc or not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", host):
-        return False
-    if not re.fullmatch(r"[a-z]{2,63}|xn--[a-z0-9-]+", host.rsplit(".", 1)[1]):
-        return False
-    return not any(host == s or host.endswith("." + s) for s in _PRIVATE_SUFFIXES)
+        path = os.path.realpath(os.path.join(req.cwd or req.worktree, args[1]))
+        if not any(path == os.path.realpath(root) or _inside(path, root) for root in _roots(req)):
+            return False
+        args = args[2:]
+    return bool(args and args[0] in READONLY_GIT
+                and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in args[1:]))
 
 
 def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
@@ -1060,7 +1016,7 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
         return False
     if rule.match_type == "check":
         return simple_argv(command) is not None and command in [c.strip() for c in checks]
-    if rule.match_type in ("git-readonly", "curl-readonly"):
+    if rule.match_type == "git-readonly":
         argv = simple_argv(command)
         return bool(argv and _readonly_command(rule, req, argv))
     if rule.match_type == "git-push":
@@ -1281,15 +1237,21 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
 
 def _may_restrict(rule: Rule, command: str) -> bool:
     """Whether ``rule`` could match ``command`` once the shell expands it:
-    the text the rule needs appears somewhere in the command."""
+    the text the rule needs appears in the command, as written or with its
+    quotes and escapes removed (``r''m -r\\f`` is ``rm -rf``). Expansions
+    that assemble a word from pieces (``$'\\x72m'``, ``$X``, ``${X}``,
+    ``{r,}m``) could produce any text, so they always could."""
+    if re.search(r"\$['\"{\w@*#?!$-]|\{[^}\s]*,", command):
+        return True
+    text = command + "\n" + re.sub(r"[\"'\\]", "", command)
     if rule.match_type == "git-push":
-        return "git" in command and "push" in command
+        return "git" in text and "push" in text
     if rule.match_type == "git-force":
-        return "git" in command and any(_is_force(w.strip("\"'`$(){};|&<>")) for w in command.split())
+        return "git" in text and any(_is_force(w.strip("`$(){};|&<>")) for w in text.split())
     if rule.match_type not in MATCH_TYPES:
         return True
     literals = re.split(r"[*?\[\]]+", rule.match) if rule.match_type == "glob" else [rule.match]
-    return all(word in command for literal in literals for word in literal.split())
+    return all(word in text for literal in literals for word in literal.split())
 
 
 def deny_in_parts(req: Request, *, checks: list[str] | None = None,
