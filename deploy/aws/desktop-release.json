@@ -4,8 +4,8 @@
   "Parameters": {
     "GitHubRepo": {
       "Type": "String",
-      "Description": "GitHub owner/repo, matching this repository's OIDC subject.",
-      "AllowedPattern": "^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$"
+      "Description": "The repository part of its OIDC subject: owner/repo, or owner@ID/repo@ID when the repository uses immutable subjects (gh api repos/OWNER/REPO/actions/oidc/customization/sub, without the repo: prefix).",
+      "AllowedPattern": "^[A-Za-z0-9-]+(@[0-9]+)?/[A-Za-z0-9._-]+(@[0-9]+)?$"
     },
     "DownloadsBucket": {
       "Type": "String",

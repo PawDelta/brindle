@@ -600,6 +600,9 @@ this source change creates no environments, roles, secrets or protection rules.
    policies granting staff broader writes or role assumption. Inspect the
    repository's actual OIDC subject format before applying; the template
    assumes `repo:OWNER/REPO:environment:NAME`, without custom subject claims.
+   With immutable subjects (`gh api repos/OWNER/REPO/actions/oidc/customization/sub`
+   shows `use_immutable_subject: true`), pass `GitHubRepo=OWNER@ID/REPO@ID`
+   from its `sub_claim_prefix`, without the `repo:` prefix.
    The staff role has `PutObject` on `release/*`, `GetObject` on
    `release/latest.json`, and unconditioned `ListBucket` so a missing initial
    feed returns NoSuchKey. ListBucket exposes key names but grants no writes.
