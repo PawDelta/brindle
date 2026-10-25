@@ -44,19 +44,33 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cd ~ && ls")) is None
 
 
-@pytest.mark.parametrize("command, bound", [
-    pytest.param("ls *.py", False, id="shell_syntax_fallback-glob"),
-    pytest.param("git commit -m \"$(cat <<'EOF'\nfix\nEOF\n)\"", False, id="shell_syntax_fallback-heredoc"),
-    pytest.param('git commit -m "$(date)"', False, id="shell_syntax_fallback-substitution",
+@pytest.mark.parametrize("command, bound, deny", [
+    pytest.param("ls *.py", False, None, id="shell_syntax_fallback-glob"),
+    pytest.param("git commit -m \"$(cat <<'EOF'\n* fix\nEOF\n)\"", False, None, id="shell_syntax_fallback-heredoc"),
+    pytest.param('git commit -m "$(date)"', False, None, id="shell_syntax_fallback-substitution",
                  marks=pytest.mark.variant("reported substitution fallback regression")),
-    pytest.param("{ rm -rf build; }", True, id="shell_syntax_fallback-hidden_restriction",
+    pytest.param("ls '*.py'", False, None, id="shell_syntax_fallback-quoted_glob",
+                 marks=pytest.mark.variant("a quoted pattern stays a literal argument")),
+    pytest.param("{ rm -rf build; }", True, None, id="shell_syntax_fallback-hidden_restriction",
                  marks=pytest.mark.variant("a live deny in syntax brindle can't parse keeps the bound ask")),
-    pytest.param("{ r''m -rf *.py; }", True, id="shell_syntax_fallback-split_quoted_name",
+    pytest.param("{ r''m -rf *.py; }", True, None, id="shell_syntax_fallback-split_quoted_name",
                  marks=pytest.mark.variant("review: split quoting hid an active deny")),
-    pytest.param("{ rm -r''f *.py; }", True, id="shell_syntax_fallback-split_quoted_flag",
+    pytest.param("{ rm -r''f *.py; }", True, None, id="shell_syntax_fallback-split_quoted_flag",
                  marks=pytest.mark.variant("review: split quoting hid an active deny")),
+    pytest.param("git [p]ush", True, None, id="shell_syntax_fallback-glob_subcommand",
+                 marks=pytest.mark.variant("supervisor: a pattern selected the denied push")),
+    pytest.param("git reset --f*", True, None, id="shell_syntax_fallback-glob_force",
+                 marks=pytest.mark.variant("supervisor: a pattern selected a force option")),
+    pytest.param("rm *.py", True, "rm secret.py", id="shell_syntax_fallback-glob_operand",
+                 marks=pytest.mark.variant("supervisor: a pattern expanded to a denied operand")),
+    pytest.param("ls *.py", True, "ls secret.py", id="shell_syntax_fallback-glob_ls_overlap",
+                 marks=pytest.mark.variant("supervisor: the ls exemption can't skip an ls rule")),
+    pytest.param("cat < *.json", True, None, id="shell_syntax_fallback-glob_redirect",
+                 marks=pytest.mark.variant("supervisor: an expanded redirect could read daemon.json")),
+    pytest.param("{ git [p]ush; }", True, None, id="shell_syntax_fallback-glob_unparsed",
+                 marks=pytest.mark.variant("a pattern inside syntax neither parse reads")),
 ])
-def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound):
+def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound, deny):
     from brindle import permissions as p
     from brindle.config import set_local
 
@@ -71,7 +85,8 @@ def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound):
     with p.editing() as store:
         store.rules = [p.Rule("bash", "rm -rf", "prefix", "deny"),
                        p.Rule("bash", command, "exact", "deny", repo_root="/other"),
-                       p.Rule("bash", command, "exact", "ask", expires_at=1)]
+                       p.Rule("bash", command, "exact", "ask", expires_at=1),
+                       *([p.Rule("bash", deny, "exact", "deny")] if deny else [])]
     decision = agents.pre_tool_decision(db, a, bash(command))
     if bound:
         assert decision["hookSpecificOutput"]["permissionDecision"] == "ask"

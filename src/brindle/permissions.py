@@ -81,6 +81,11 @@ STORE_VERSION = 2
 # would treat specially.
 SIMPLE_COMMAND = re.compile(r"[A-Za-z0-9_\-./:=@%+, ]+")
 _NO_TILDE = re.compile(r"[^~]")
+# SIMPLE_COMMAND plus unquoted pathname patterns, only to decide whether a
+# restriction could apply. Never used to grant allows.
+RESTRICTION_WORD = re.compile(r"[A-Za-z0-9_\-./:=@%+, *?\[\]]+")
+# A heredoc's body, from its delimiter line to the closing line.
+_HEREDOC = re.compile(r"<<-?[ \t]*([\"']?)(\w+)\1[^\n]*\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.DOTALL)
 # The operators a compound command may join its parts with ("" ends it).
 COMPOUND_SEPARATORS = ("&&", ";", "|", "")
 READONLY_GIT = ("status", "diff", "log", "show")
@@ -1151,18 +1156,20 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     return Decision("ask", f"{why}; asking the user")
 
 
-def _restriction_parts(command: str) -> list[list[str]] | None:
+def _restriction_parts(command: str, *, word_pattern: re.Pattern[str] = SIMPLE_COMMAND) -> list[list[str]] | None:
     """Command arguments without redirects, solely for restrictive matching.
 
-    Unlike the allow parser, this accepts output files. Quoted operators remain
-    arguments; redirects and their operands are removed wherever they occur.
+    Unlike the allow parser, this accepts output files. With RESTRICTION_WORD
+    it also accepts unquoted pathname patterns in arguments, for deciding
+    whether a restriction could apply, not for literal matching. Quoted
+    operators remain arguments; redirects and their operands are removed.
     Unsupported syntax is unknown, never evidence that restrictions are absent.
     """
     from brindle.native.permissions import _SEPARATORS, _tokens
 
     if "$(" in command or "`" in command:
         return None
-    tokens = _tokens(command, word_pattern=SIMPLE_COMMAND)
+    tokens = _tokens(command, word_pattern=word_pattern)
     if tokens is None:
         return None
     parts: list[list[str]] = []
@@ -1182,6 +1189,8 @@ def _restriction_parts(command: str) -> list[list[str]] | None:
             index += 1
             if index >= len(tokens) or tokens[index][0]:
                 return None
+            if word_pattern is RESTRICTION_WORD and any(c in tokens[index][1] for c in "*?["):
+                return None  # an expanded redirect can select a protected file
         else:
             return None
         index += 1
@@ -1195,7 +1204,34 @@ def _restriction_parts(command: str) -> list[list[str]] | None:
         if not words or words[0] in ("!", "{", "}", "if", "then", "else", "elif", "fi", "for", "while",
                                      "until", "do", "done", "case", "esac", "select", "function", "[[", "time", "coproc"):
             return None
+        # A pattern in the executable position can select a different program.
+        if word_pattern is RESTRICTION_WORD and any(c in words[0] for c in "*?["):
+            return None
     return parts
+
+
+def _globs_excluded(parts: list[list[str]], rules: list[Rule]) -> bool:
+    """Whether no restriction can apply to what the patterns in ``parts``
+    expand to. Only plain ``ls`` has a proof: listing names can't push, force
+    a git action or read a file's contents, so the default git and daemon
+    denies don't apply, nor do exact/prefix rules that don't overlap the
+    words before its first pattern. Any other program may treat an expanded
+    name as a subcommand, option or file to act on."""
+    for words in parts:
+        first = next((i for i, word in enumerate(words) if any(c in word for c in "*?[")), None)
+        if first is None:
+            continue
+        if words[0] != "ls":
+            return False
+        prefix = " ".join(" ".join(words[:first]).split()) + " "
+        for rule in rules:
+            if rule.source == "default" and rule.id in ("d-git-push", "d-git-force", "d-daemon-sh"):
+                continue
+            if (rule.match_type in ("exact", "prefix")
+                    and not prefix.startswith(rule.match) and not rule.match.startswith(prefix)):
+                continue
+            return False
+    return True
 
 
 def _matching_restriction(parts: list[Request], checks: list[str] | None,
@@ -1222,12 +1258,17 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
     if not rules:
         return None
     parsed = _restriction_parts(req.command)
-    words = parsed if parsed is not None else _segments(req.command)
+    patterns = _restriction_parts(req.command, word_pattern=RESTRICTION_WORD) if parsed is None else None
+    words = parsed if parsed is not None else patterns if patterns is not None else _segments(req.command)
     parts = [replace(req, command=" ".join(" ".join(part).split())) for part in words]
     matched = _matching_restriction(parts, checks, rules)
     if matched is not None:
         return matched
-    if parsed is None and any(_may_restrict(rule, req.command) for rule in rules):
+    if patterns is not None:
+        uncertain = not _globs_excluded(patterns, rules)
+    else:
+        uncertain = parsed is None and any(_may_restrict(rule, req.command) for rule in rules)
+    if uncertain:
         # A bound built-in ask prevents provider/profile fallback from treating
         # unsupported shell syntax as an ordinary unmatched request.
         return Decision("ask", "shell syntax cannot be checked safely",
@@ -1240,18 +1281,27 @@ def _may_restrict(rule: Rule, command: str) -> bool:
     the text the rule needs appears in the command, as written or with its
     quotes and escapes removed (``r''m -r\\f`` is ``rm -rf``). Expansions
     that assemble a word from pieces (``$'\\x72m'``, ``$X``, ``${X}``,
-    ``{r,}m``) could produce any text, so they always could."""
+    ``{r,}m``) could produce any text, so they always could. A pathname
+    pattern (``[p]ush``, ``--f*``) could be any word it matches; heredoc
+    bodies are never expanded into names."""
     if re.search(r"\$['\"{\w@*#?!$-]|\{[^}\s]*,", command):
         return True
     text = command + "\n" + re.sub(r"[\"'\\]", "", command)
+    names = _HEREDOC.sub("\n", text)
+    patterns = [w for w in re.split(r"[\s;&|()<>`]+", names) if any(c in w for c in "*?[")]
+
+    def seen(word: str) -> bool:
+        return word in text or any(fnmatch.fnmatchcase(word, p) for p in patterns)
+
     if rule.match_type == "git-push":
-        return "git" in text and "push" in text
+        return seen("git") and seen("push")
     if rule.match_type == "git-force":
-        return "git" in text and any(_is_force(w.strip("`$(){};|&<>")) for w in text.split())
+        return seen("git") and (any(_is_force(w.strip("`$(){};|&<>")) for w in text.split())
+                                or any(seen(flag) for flag in ("-f", *FORCE_OPTIONS)))
     if rule.match_type not in MATCH_TYPES:
         return True
     literals = re.split(r"[*?\[\]]+", rule.match) if rule.match_type == "glob" else [rule.match]
-    return all(word in text for literal in literals for word in literal.split())
+    return all(seen(word) for literal in literals for word in literal.split())
 
 
 def deny_in_parts(req: Request, *, checks: list[str] | None = None,
