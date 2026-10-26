@@ -8,7 +8,7 @@ import pytest
 from conftest import sh
 
 from brindle import agents, bus, tmux, workspaces
-from brindle.db import Agent
+from brindle.db import DB, Agent
 from brindle.providers import ClaudeCode, LaunchContext
 from brindle.profiles import load_profile
 
@@ -253,6 +253,62 @@ def test_midturn_delivery_types_into_busy_codex_and_agy(db, ws, monkeypatch, pro
     assert pasted == (["queued message"] if typed else [])
     assert db.pending_count("a1") == (0 if typed else 1)
     assert db.get_agent("a1").status == "processing"
+
+
+def test_midturn_delivery_waits_for_a_paste_in_flight(db, ws, monkeypatch):
+    # The first flush wins the idle claim and is still pasting; the second
+    # finds the agent busy and would type mid-turn over it. It must wait.
+    import threading
+    from contextlib import contextmanager
+
+    from brindle import pipeline
+
+    db.add_agent(Agent("a1", ws.id, "developer", "codex", None, "interactive", "idle", "@0",
+                       None, time.time()))
+    db.enqueue("a1", "first", None)
+    db.enqueue("a1", "second", None)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CODEX_BUSY)
+    in_flight, release, second_moved = threading.Event(), threading.Event(), threading.Event()
+    pasted = []
+
+    def paste(target, body, **k):
+        pasted.append(body)
+        if body == "first":
+            in_flight.set()
+            release.wait()
+    monkeypatch.setattr(tmux, "paste", paste)
+    real_file_lock = pipeline._file_lock
+
+    @contextmanager
+    def file_lock(name, wait=True):
+        if threading.current_thread().name == "second" and name.startswith("deliver-"):
+            second_moved.set()  # about to block on the lock the first holds
+        with real_file_lock(name, wait):
+            yield
+    monkeypatch.setattr(pipeline, "_file_lock", file_lock)
+    results = {}
+
+    def run():
+        # Its own connection, as a second sender would be another process.
+        name = threading.current_thread().name
+        try:
+            results[name] = agents.flush(DB(db.path), "a1")
+        finally:
+            if name == "second":
+                second_moved.set()  # without the lock it pastes and returns
+    first = threading.Thread(target=run, name="first")
+    first.start()
+    in_flight.wait()
+    second = threading.Thread(target=run, name="second")
+    second.start()
+    second_moved.wait()
+    while_first_in_flight = list(pasted)
+    release.set()
+    first.join()
+    second.join()
+    assert while_first_in_flight == ["first"]  # the second was held at the lock, not typing
+    assert pasted == ["first", "second"] and results == {"first": True, "second": True}
+    assert db.pending_count("a1") == 0
 
 
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):

@@ -2062,11 +2062,35 @@ def flush(db: DB, agent_id: str) -> bool:
                 break
         if delivered:
             return True
+    # One paste into the pane at a time, whichever path: the idle claim alone
+    # leaves the agent busy for a second sender's mid-turn paste while the
+    # first is still typing, reordering or merging the two.
+    with delivery_lock(agent_id):
+        return _flush_pane(db, agent_id)
+
+
+def delivery_lock(agent_id: str):
+    """Held across processes by whoever types a queued message into
+    ``agent_id``'s pane (``flush``), from the look at its state to the end of
+    the paste. A lock file under the brindle home, so a holder that dies gives
+    it back; re-entrant within a thread."""
+    from brindle import pipeline
+
+    return pipeline._reentrant_lock("deliver-" + hashlib.sha1(agent_id.encode()).hexdigest()[:16])
+
+
+def _flush_pane(db: DB, agent_id: str) -> bool:
+    """``flush``'s typed delivery, under its delivery_lock. The queue and the
+    agent are read afresh: another sender may have delivered while it waited."""
+    from brindle import launch_health
+
     if db.pending_count(agent_id) == 0:
         return False
     claimed_at = db.claim_idle(agent_id)
     if claimed_at is None:
         return _flush_midturn(db, agent_id)
+    agent = db.get_agent(agent_id)
+    assert agent is not None
     if _paste_blocked(agent):
         # Leave it queued: the next flush (a later message, or a resumed
         # session's start-up) gets another chance.
@@ -2076,8 +2100,6 @@ def flush(db: DB, agent_id: str) -> bool:
     if not msg:
         db.set_status(agent_id, "idle", only_if="processing")
         return False
-    agent = db.get_agent(agent_id)
-    assert agent is not None
     from brindle import antigravity
     warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
     try:
@@ -2095,7 +2117,7 @@ def flush(db: DB, agent_id: str) -> bool:
 
 
 def _flush_midturn(db: DB, agent_id: str) -> bool:
-    """``flush`` for a busy interactive chat whose CLI keeps input typed
+    """``_flush_pane`` for a busy interactive chat whose CLI keeps input typed
     mid-turn until its current step finishes (Codex, agy): the oldest queued
     message goes in now instead of at the turn-end notify or Stop. Never into
     an approval prompt ('waiting', or one on screen the hooks haven't
