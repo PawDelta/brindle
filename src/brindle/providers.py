@@ -1605,10 +1605,8 @@ class Codex(Provider):
             argv += ["-c", f"model_reasoning_effort={json.dumps(ctx.profile.effort)}"]
         if ctx.resume:
             argv += ["resume", ctx.resume]
-            if ctx.initial_prompt:
-                argv.append(ctx.initial_prompt)
-            return argv
-        # Codex has no system-prompt flag; lead the first message with the profile.
+        # Codex has no system-prompt flag; lead each launch's message with the
+        # profile, including when resuming a conversation.
         first = "\n\n".join(p for p in (ctx.profile.prompt, ctx.initial_prompt) if p)
         if first:
             argv.append(first)

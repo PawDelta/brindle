@@ -372,6 +372,30 @@ def test_add_dir_is_never_the_last_flag():
     assert argv[last + 2].startswith("--"), argv[last:]
 
 
+@pytest.mark.parametrize("provider", ["codex", "antigravity"])
+def test_supervisor_resume_keeps_prompt(db, ws, monkeypatch, provider):
+    agent = Agent("boss", ws.id, "supervisor", provider, None, "interactive", "idle", "@0", None, time.time())
+    db.add_agent(agent)
+    monkeypatch.setenv("BRINDLE_CODEX_BIN", "/bin/codex")
+    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
+    monkeypatch.setattr(agents, "launch_blockers", lambda *a, **k: [])
+    launched = []
+
+    def open_window(db, agent, ws, name, argv, *a, **k):
+        launched.extend(argv)
+        raise RuntimeError("launch captured")
+
+    monkeypatch.setattr(agents, "_open_window", open_window)
+    with pytest.raises(RuntimeError, match="launch captured"):
+        agents._launch(db, agent, ws, prompt="continue the task", resume="saved-session",
+                       watch_pane=False, model_checked=True)
+    queued = [m.body for m in iter(lambda: db.pop_pending(agent.id), None)]
+    assert "saved-session" in launched
+    delivered = "\n".join([*launched, *queued])
+    assert load_profile("supervisor", ws.repo_root).prompt.strip() in delivered
+    assert "continue the task" in delivered
+
+
 def test_repo_read_dirs_become_read_only_allow_rules(ws):
     """worker_extra_read_dirs reach Claude Code as Read allow rules, never --add-dir (which also writes)."""
     from pathlib import Path

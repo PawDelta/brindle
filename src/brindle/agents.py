@@ -1110,10 +1110,11 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane, m=m)
         return
     if provider.prompt_after_ready:
-        # Typed in once it's ready, after a warm-up carrying its instructions:
+        # Typed in once it's ready, after a warm-up carrying its instructions
+        # on both fresh starts and resumes:
         # agy connects its MCP servers only once a conversation has started,
         # so the task must arrive as a second turn (see brindle.antigravity).
-        for text in ((provider.warmup(profile) if not resume else None), prompt):
+        for text in (provider.warmup(profile), prompt):
             if text:
                 db.enqueue(agent.id, text, None)
         prompt = None
