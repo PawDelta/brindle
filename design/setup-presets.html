@@ -48,14 +48,14 @@ h1{font-size:24px;font-weight:600;letter-spacing:-.5px;margin:0 0 8px}.lede{colo
 </button>
 <button type="button" class="preset" role="radio" data-p="Permissive" aria-checked="false">
  <div class="head"><span class="radio"></span><span class="name">Permissive</span></div>
- <p class="who">Work inside the worktree runs freely; anything else asks, and you can remember the answer.</p>
- <ul class="rows"><li><span class="k run">Runs on its own</span><span class="v">Reading tracked files, writing and editing files in the worktree, everyday dev tools (npm, uv, pytest, docker, gh...), checks</span></li><li><span class="k ask">Asks you</span><span class="v">Other commands, files outside the worktree, pushes, web and connected tools; pushing into release/* every time</span></li><li><span class="k block">Blocked</span><span class="v">Force pushes, deleting the root or home folder, reading credential files</span></li></ul>
+ <p class="who">Files in the worktree and everyday tools run freely; other requests ask, and you can remember the answer.</p>
+ <ul class="rows"><li><span class="k run">Runs on its own</span><span class="v">Reading tracked files, reading, writing and editing files in the worktree, everyday dev tools (npm, uv, pytest, docker, gh...), checks, read-only commands</span></li><li><span class="k ask">Asks you</span><span class="v">Other commands, files outside the worktree, pushes, web and connected tools; pushing into release/* every time</span></li><li><span class="k block">Blocked</span><span class="v">Force pushes, deleting the root or home folder, reading credential files</span></li></ul>
  <div class="meter">Interruptions <span class="bar"><i class="on"></i><i class="on"></i><i></i><i></i></span> sometimes</div>
 </button>
 <button type="button" class="preset" role="radio" data-p="Standard" aria-checked="false">
  <div class="head"><span class="radio"></span><span class="name">Standard</span></div>
- <p class="who">Agents read and run everyday tools freely but check with you before changing files. Good while you're getting to know brindle.</p>
- <ul class="rows"><li><span class="k run">Runs on its own</span><span class="v">Reading tracked files, everyday dev tools (npm, uv, pytest, docker, gh...), checks</span></li><li><span class="k ask">Asks you</span><span class="v">Writing and editing files, other commands, pushes, web and tool access; pushing into release/* every time</span></li><li><span class="k block">Blocked</span><span class="v">Force pushes, deleting the root or home folder, reading credential files</span></li></ul>
+ <p class="who">Agents read and run everyday tools freely but ask before writing or editing files directly. Good while you're getting to know brindle.</p>
+ <ul class="rows"><li><span class="k run">Runs on its own</span><span class="v">Reading tracked files, everyday dev tools (npm, uv, pytest, docker, gh...; these can change files), checks</span></li><li><span class="k ask">Asks you</span><span class="v">Direct file writes and edits, other commands, pushes, web and tool access; pushing into release/* every time</span></li><li><span class="k block">Blocked</span><span class="v">Force pushes, deleting the root or home folder, reading credential files</span></li></ul>
  <div class="meter">Interruptions <span class="bar"><i class="on"></i><i class="on"></i><i class="on"></i><i></i></span> often</div>
 </button>
 <button type="button" class="preset" role="radio" data-p="Secure" aria-checked="false">
@@ -73,7 +73,7 @@ h1{font-size:24px;font-weight:600;letter-spacing:-.5px;margin:0 0 8px}.lede{colo
 </div>
 <script>
 const cards=[...document.querySelectorAll('.preset')],go=document.getElementById('go'),note=document.getElementById('note');
-const notes={Autonomous:'With Autonomous, brindle also groups similar requests (for example every push into your default branch) so one answer covers them all.',Permissive:'Permissive asks for anything outside the worktree and the everyday tools. Remembered answers stop repeat questions.',Standard:'Standard pauses agents often. If they stall, switch to Autonomous in Settings → Permissions, or allow the noisiest rules there.',Secure:'Secure pauses agents on almost every step and denies anything no rule covers. Expect to approve requests often.'};
+const notes={Autonomous:'With Autonomous, brindle also groups similar requests (for example every push into your default branch) so one answer covers them all.',Permissive:'Permissive asks for other commands, files outside the worktree and pushes. Remembered answers stop repeat questions.',Standard:'Standard pauses agents often. If they stall, switch to Autonomous in Settings → Permissions, or allow the noisiest rules there.',Secure:'Secure pauses agents on almost every step and denies anything no rule covers. Expect to approve requests often.'};
 function pick(c){cards.forEach(x=>{x.setAttribute('aria-checked',String(x===c));x.tabIndex=x===c?0:-1});go.textContent='Continue with '+c.dataset.p;note.textContent=notes[c.dataset.p]}
 cards.forEach((c,i)=>{c.onclick=()=>pick(c);c.onkeydown=e=>{const d={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[e.key];if(d){e.preventDefault();const n=cards[(i+d+cards.length)%cards.length];pick(n);n.focus()}}});pick(cards[0]);
 go.onclick=()=>{const p=document.querySelector('.preset[aria-checked="true"]').dataset.p,d=document.getElementById('done');d.style.display='block';d.textContent=p+' applied. You can change it any time in Settings → Permissions. (Preview only.)'};
