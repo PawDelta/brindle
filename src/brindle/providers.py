@@ -111,6 +111,9 @@ class Provider:
     # how long to give it after its input box appears.
     prompt_after_ready = False
     ready_delay = 3
+    # Whether input typed into its pane mid-turn waits in the CLI until the
+    # current step finishes, so a queued message can go in while it's busy.
+    types_midturn = False
     # False for providers whose work happens outside brindle (see Subagent):
     # no process, no tmux window; the caller records the result itself.
     launches_process = True
@@ -1496,6 +1499,7 @@ class Codex(Provider):
     uses_hooks = True
     announces_turns = False
     announces_start = False
+    types_midturn = True
     # The MCP connection alone can take 120s under load. The launch observer
     # must not abandon readiness before that connection has had its budget.
     STARTUP_SECONDS = 150
@@ -1695,6 +1699,7 @@ class Antigravity(Provider):
     # the agent never sees brindle's tools in that first turn.
     prompt_after_ready = True
     ready_delay = 5
+    types_midturn = True
 
     def warmup(self, profile: Profile) -> str | None:
         from brindle import antigravity

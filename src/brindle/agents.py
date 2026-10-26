@@ -2032,23 +2032,18 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
 
 def flush(db: DB, agent_id: str) -> bool:
     """Deliver the agent's oldest pending message: through its inbox if it
-    has one, else typed into its pane once it's idle. A chat with a live
+    has one, else typed into its pane once it's idle (or while busy, for a
+    CLI that holds mid-turn input: see _flush_midturn). A chat with a live
     waiter (brindle.wake) is left to it, and one that runs a waiter never
     uses the inbox. Returns True if something was delivered."""
     from brindle import inbox
     from brindle import launch_health
-    from brindle import login_pause
     from brindle import wake
 
     agent = db.get_agent(agent_id)
-    if agent is None or agent.headless:
-        return False  # its runner takes messages from the inbox itself
-    if login_pause.holding(db, agent_id):
-        return False  # its session waits on an expired cloud login; resuming flushes it
-    waits = wake.enabled(agent)
-    if waits and wake.live(agent):
-        return False  # its waiter hands the queue over (brindle.wake)
-    if not waits and inbox.usable(agent):
+    if _delivery_held(db, agent):
+        return False
+    if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
             baseline = launch_health.before_delivery(db, agent)
@@ -2061,11 +2056,48 @@ def flush(db: DB, agent_id: str) -> bool:
                 break
         if delivered:
             return True
-    if db.pending_count(agent_id) == 0:
+    # One paste into the pane at a time, whichever path: the idle claim alone
+    # leaves the agent busy for a second sender's mid-turn paste while the
+    # first is still typing, reordering or merging the two.
+    with delivery_lock(agent_id):
+        return _flush_pane(db, agent_id)
+
+
+def delivery_lock(agent_id: str):
+    """Held across processes by whoever types a queued message into
+    ``agent_id``'s pane (``flush``), from the look at its state to the end of
+    the paste. A lock file under the brindle home, so a holder that dies gives
+    it back; re-entrant within a thread."""
+    from brindle import pipeline
+
+    return pipeline._reentrant_lock("deliver-" + hashlib.sha1(agent_id.encode()).hexdigest()[:16])
+
+
+def _delivery_held(db: DB, agent: Agent | None) -> bool:
+    """Whether ``flush`` must leave the queue alone: the agent is gone or
+    headless (its runner takes messages from the inbox itself), its session
+    waits on an expired cloud login (resuming flushes it), or a live waiter
+    hands the queue over (brindle.wake)."""
+    from brindle import login_pause
+    from brindle import wake
+
+    return (agent is None or agent.headless or login_pause.holding(db, agent.id)
+            or (wake.enabled(agent) and wake.live(agent)))
+
+
+def _flush_pane(db: DB, agent_id: str) -> bool:
+    """``flush``'s typed delivery, under its delivery_lock. The queue and the
+    agent are read afresh: while it waited, another sender may have delivered,
+    or the session been paused."""
+    from brindle import launch_health
+
+    if _delivery_held(db, db.get_agent(agent_id)) or db.pending_count(agent_id) == 0:
         return False
     claimed_at = db.claim_idle(agent_id)
     if claimed_at is None:
-        return False
+        return _flush_midturn(db, agent_id)
+    agent = db.get_agent(agent_id)
+    assert agent is not None
     if _paste_blocked(agent):
         # Leave it queued: the next flush (a later message, or a resumed
         # session's start-up) gets another chance.
@@ -2075,8 +2107,6 @@ def flush(db: DB, agent_id: str) -> bool:
     if not msg:
         db.set_status(agent_id, "idle", only_if="processing")
         return False
-    agent = db.get_agent(agent_id)
-    assert agent is not None
     from brindle import antigravity
     warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
     try:
@@ -2090,6 +2120,34 @@ def flush(db: DB, agent_id: str) -> bool:
         raise
     if not warmup:
         launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
+    return True
+
+
+def _flush_midturn(db: DB, agent_id: str) -> bool:
+    """``_flush_pane`` for a busy interactive chat whose CLI keeps input typed
+    mid-turn until its current step finishes (Codex, agy): the oldest queued
+    message goes in now instead of at the turn-end notify or Stop. Never into
+    an approval prompt ('waiting', or one on screen the hooks haven't
+    reported), where the keys would answer it."""
+    agent = db.get_agent(agent_id)
+    if (agent is None or agent.status != "processing" or agent.mode != "interactive"
+            or not get_provider(agent.provider).types_midturn):
+        return False
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=40, server=server_of(agent))
+    except tmux.TmuxError:
+        return False
+    if get_provider(agent.provider).screen_state(screen) == "waiting" or _paste_blocked(agent):
+        return False
+    msg = db.pop_pending(agent_id)
+    if not msg:
+        return False
+    try:
+        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
+                   server=server_of(agent))
+    except BaseException:
+        db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
+        raise
     return True
 
 
