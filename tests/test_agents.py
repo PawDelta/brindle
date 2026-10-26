@@ -2,6 +2,7 @@ import os
 import shutil
 import time
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from conftest import sh
@@ -162,11 +163,8 @@ def test_claude_screen_state(screen, want):
     assert ClaudeCode().screen_state(screen) == want
 
 
-@pytest.mark.parametrize("screen,want", [
-    (CLAUDE_BUSY_REAL_CAPTURE, True),
-])
-def test_claude_busy_in_footer(screen, want):
-    assert ClaudeCode().busy_in_footer(screen) is want
+def test_claude_busy_in_footer():
+    assert ClaudeCode().busy_in_footer(CLAUDE_BUSY_REAL_CAPTURE)
 
 
 # The real agent-view screen: its footer ("ctrl+x to delete") is the reliable
@@ -239,8 +237,6 @@ def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch)
 
 
 def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
-    from pathlib import Path
-
     (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
     (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": false}')
     from brindle import mcp_server
@@ -357,7 +353,6 @@ def test_no_goal_command_when_hooks_are_disabled(db, ws):
     assert "Finish line: tests pass" in prompt
 
 
-
 def test_add_dir_is_never_the_last_flag():
     """--add-dir is variadic, so a flag must follow the last one.
 
@@ -372,10 +367,28 @@ def test_add_dir_is_never_the_last_flag():
     assert argv[last + 2].startswith("--"), argv[last:]
 
 
+@pytest.mark.parametrize("provider", ["codex", "antigravity"])
+def test_supervisor_resume_keeps_prompt(db, ws, monkeypatch, provider):
+    agent = Agent("boss", ws.id, "supervisor", provider, None, "interactive", "idle", "@0", None, time.time())
+    db.add_agent(agent)
+    monkeypatch.setenv("BRINDLE_CODEX_BIN", "/bin/codex")
+    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
+    monkeypatch.setattr(agents, "launch_blockers", lambda *a, **k: [])
+    window = Mock(side_effect=RuntimeError("launch captured"))
+    monkeypatch.setattr(agents, "_open_window", window)
+    with pytest.raises(RuntimeError, match="launch captured"):
+        agents._launch(db, agent, ws, prompt="continue the task", resume="saved-session",
+                       watch_pane=False, model_checked=True)
+    queued = [m.body for m in iter(lambda: db.pop_pending(agent.id), None)]
+    launched = window.call_args.args[4]
+    assert "saved-session" in launched
+    delivered = "\n".join([*launched, *queued])
+    assert load_profile("supervisor", ws.repo_root).prompt.strip() in delivered
+    assert "continue the task" in delivered
+
+
 def test_repo_read_dirs_become_read_only_allow_rules(ws):
     """worker_extra_read_dirs reach Claude Code as Read allow rules, never --add-dir (which also writes)."""
-    from pathlib import Path
-
     (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
     (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"worker_extra_read_dirs": ["results", "/srv/data/"]}')
     argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer", ws.repo_root), "do the thing"))
@@ -387,23 +400,15 @@ def test_repo_read_dirs_become_read_only_allow_rules(ws):
 def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
     """Claude Code ignores an --add-dir that does not exist, so launch says so,
     once, however many times the profile is loaded on the way."""
-    from pathlib import Path
-
-    class Launched(Exception):
-        pass
-
-    def stop(*a, **k):
-        raise Launched
-
     config = Path(ws.repo_root) / ".brindle" / "config.json"
     config.parent.mkdir(exist_ok=True)
     config.write_text('{"add_dirs": ["/no/such/cache"]}')
     # Stopped at the window, so every profile load on the way (spawn's own and
     # _profile_for's) has happened.
-    monkeypatch.setattr(agents, "_open_window", stop)
+    monkeypatch.setattr(agents, "_open_window", Mock(side_effect=RuntimeError("launch captured")))
     monkeypatch.setattr("brindle.providers.trust_folder", lambda path: None)
 
-    with pytest.raises(Launched):
+    with pytest.raises(RuntimeError, match="launch captured"):
         agents.spawn(db, ws, "developer", prompt="hi", mode="assign")
     assert capsys.readouterr().err.count("/no/such/cache") == 1
 
