@@ -3644,7 +3644,7 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     shows waiting meanwhile, as at that prompt."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline, answer, prompted = time.monotonic() + hold, None, False
+    deadline, answer = time.monotonic() + hold, None
     while True:
         now = db.get_agent(agent.id)
         recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
@@ -3653,12 +3653,11 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
         if (now is None or now.status in ("done", "paused") or now.dismissed_at is not None
                 or recorded is None or left <= 0):
             break
-        # Answered at its CLI's own prompt: an allow ends the prompt (its tool runs), a
-        # deny or a dismissal the turn, which no PostToolUse removes the row after.
-        state = _pane_state(now)
-        if state == "idle" or (prompted and state == "busy"):
+        # Its CLI shows its own prompt for as long as this hook holds the request: a pane
+        # past it was answered there, whether or not a look caught the prompt. An allow
+        # runs the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
+        if _pane_state(now) in ("idle", "busy"):
             break
-        prompted = prompted or state == "waiting"
         held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
         if answer is not None or not held:
             break
@@ -3670,16 +3669,18 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
 
 def _pane_state(agent: Agent) -> str | None:
     """What the pane of an agent whose CLI shows its own prompt while its
-    hook holds a request reads as ('idle', 'busy' or 'waiting'), or None."""
+    hook holds a request reads as: 'prompt' (any permission prompt), else
+    'idle', 'busy' or 'waiting', or None."""
     from brindle.service.inbox import TERMINAL_PROMPT_VISIBLE
 
+    provider = get_provider(agent.provider)
     if agent.headless or not agent.tmux_window or not TERMINAL_PROMPT_VISIBLE.get(agent.provider):
         return None
     try:
-        return get_provider(agent.provider).screen_state(
-            tmux.capture(agent.tmux_window, lines=60, server=server_of(agent)))
+        screen = tmux.capture(agent.tmux_window, lines=60, server=server_of(agent))
     except tmux.TmuxError:
         return None
+    return "prompt" if provider.tool_permission(screen) else provider.screen_state(screen)
 
 
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:

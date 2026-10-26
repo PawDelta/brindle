@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import sh
+from test_reliability import CLAUDE_BUSY, CLAUDE_IDLE
 
 from brindle import agents, autopilot, bus, config, coordinator, pipeline, preflight, providers, workspaces
 from brindle.daemon import peer, routes_actions
@@ -1239,23 +1240,23 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     assert code == 409 and pressed == [], reply
 
 
-def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, world, answering, monkeypatch):
-    from test_reliability import CLAUDE_BUSY, CLAUDE_IDLE
-
+@pytest.mark.parametrize("screen", [CLAUDE_IDLE, pytest.param(CLAUDE_BUSY, marks=pytest.mark.variant(
+    "review: allowed in the pane, its tool still running, so no PostToolUse yet"))], ids=["denied", "allowed"])
+def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, world, answering, monkeypatch, screen):
     from brindle import tmux
-    from brindle.daemon import holds
     from brindle.db import DB
     from brindle.service import inbox
 
-    # Its prompt came and went between two of the hook's looks: they saw it busy, then idle.
-    screen, waited, take, wk = [CLAUDE_BUSY], threading.Event(), holds.HOLDS.take, db.get_agent("wk")
-    monkeypatch.setattr(tmux, "capture", lambda target, **kw: screen[0])
-    monkeypatch.setattr(holds.HOLDS, "take", lambda request_id, nonce: (waited.set(), take(request_id, nonce))[1])
+    # Answered in the pane before the hook's first look, which only sees the pane past the prompt.
+    looked, asked, publish, wk = threading.Event(), threading.Event(), bus.publish_agent, db.get_agent("wk")
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: (looked.wait(5), screen)[1])
+    monkeypatch.setattr(bus, "publish_agent", lambda d, kind, *a, **k: (
+        kind == "permission.pending" and asked.set(), publish(d, kind, *a, **k))[1])
     hook = threading.Thread(target=lambda: agents.permission_request_decision(DB(), wk, {**ASK, "cwd": str(repo)}))
     hook.start()
     shown = lambda: [i.kind for i in inbox.items(db, str(repo), panes={"%2": True}) if i.agent_id == "wk"]  # noqa: E731
-    assert waited.wait(5) and shown() == ["permission"]
-    screen[0] = CLAUDE_IDLE     # denied in the pane: the turn is over, and no PostToolUse comes
+    assert asked.wait(5) and shown() == ["permission"]
+    looked.set()
     hook.join(HOLD / 2)         # well before the hold would end
     assert not hook.is_alive() and shown() == []
 
