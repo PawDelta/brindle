@@ -115,7 +115,7 @@ section{display:flex;flex-direction:column;gap:16px}
   <h2>Three new or rebuilt screens</h2>
   <div class="grid">
     <div class="feat"><span class="where">Setup · new step</span><h3>Choose a preset</h3><ul><li>Autonomous (default), Permissive, Standard, Secure</li><li>Each explains what runs, what asks, what's blocked</li><li>Skipping keeps Autonomous</li></ul></div>
-    <div class="feat"><span class="where">Settings → Permissions · rebuilt</span><h3>Rules you own</h3><ul><li>Edit or remove any rule, with undo</li><li>"What interrupts your agents" with one-click allow</li><li>Saved actions tab: allows and denies, slide-out editor</li><li>Activity log; org approval limits for enterprise</li></ul></div>
+    <div class="feat"><span class="where">Settings → Permissions · rebuilt</span><h3>Rules you own</h3><ul><li>Edit or remove any rule, with undo</li><li>"What interrupts your agents" with one-click allow</li><li>Saved actions tab: allows and denies, slide-out editor</li><li>Activity log; org approval limits for Team organizations</li></ul></div>
     <div class="feat"><span class="where">Inbox · rebuilt</span><h3>Grouped requests</h3><ul><li>One item per kind of request, offered in its general form</li><li>"Narrow to this request" before granting</li><li>Allow once / for N / always, deny, always deny</li></ul></div>
     <div class="feat"><span class="where">Inbox · new</span><h3>Stall notice</h3><ul><li>Names every paused worker and what it waits on</li><li>Allow all / Always allow within policy limits</li><li>One-click exception for deny-blocked requests</li></ul></div>
   </div>
@@ -127,13 +127,13 @@ section{display:flex;flex-direction:column;gap:16px}
   <div class="changes">
     <div class="change"><span class="badge b-pass">New</span><p><b>Presets as ordinary rules.</b> Choosing a preset seeds editable rules. Nothing is built in, so the old <code>git push</code> and <code>.env</code> denies become removable preset rules.</p></div>
     <div class="change"><span class="badge b-pass">New</span><p><b>Saved actions.</b> Allows and denies saved from the Inbox keep their scope, the original request and an expiry. A saved allow applies only within the current rule's limits; deny rules beat saved allows; expired ones never apply.</p></div>
-    <div class="change"><span class="badge b-pass">New</span><p><b>Generalized, grouped requests.</b> Pushes are keyed on where they land ("into main from any branch"), file writes on their folder, commands on their family, tools on tool or server. A request something you already allowed covers never reaches the Inbox.</p></div>
-    <div class="change"><span class="badge b-pass">New</span><p><b>Read-only commands always run.</b> <code>grep</code>, <code>cat</code>, <code>ls</code>, <code>git log</code> and similar pass even with pipes or escapes brindle can't fully parse. Redirects to files and <code>$(…)</code> still go through the rules.</p></div>
+    <div class="change"><span class="badge b-pass">New</span><p><b>Generalized, grouped requests.</b> Pushes are keyed on where they land ("into the default branch from any branch"), file writes on their folder, commands on their family, tools on tool or server. A request something you already allowed covers never reaches the Inbox.</p></div>
+    <div class="change"><span class="badge b-pass">New</span><p><b>Read-only commands run.</b> <code>grep</code>, <code>cat</code>, <code>ls</code>, <code>git log</code> and similar run as a removable allow rule (Secure doesn't seed it) once brindle has checked their syntax, programs, options and the files they read. Anything it can't fully parse goes through the rules.</p></div>
     <div class="change"><span class="badge b-br">Changed</span><p><b>Every tool is checked.</b> Claude's pre-tool check now covers file, web and MCP tools, not only shell commands, for every provider.</p></div>
-    <div class="change"><span class="badge b-br">Changed</span><p><b>Pushes into <code>release/*</code> always ask.</b> Ported from main as a removable preset rule.</p></div>
+    <div class="change"><span class="badge b-br">Changed</span><p><b>Pushes into <code>release</code> and <code>release/*</code> ask every time, in every preset.</b> Ported from main as a removable preset rule; saved allows can't settle them. Pushes into the default branch ask too, but a saved approval can last (up to forever in Autonomous, 15 minutes in Secure).</p></div>
     <div class="change"><span class="badge b-br">Migrated</span><p><b>0.4.7 settings convert on first launch.</b> Lenient → Permissive, Balanced → Standard, Strict → Secure (none → Autonomous); custom rules become rules; remembered pushes and grants become saved actions with their scope, remote, owner and remaining uses. Old files are left in place.</p></div>
     <div class="change"><span class="badge b-sap">Removed</span><p><b>The parallel 0.4.7 system:</b> its rule editor (<code>PermissionRules.tsx</code>, <code>permission_editor.py</code>), Lenient/Balanced/Strict presets, daemon-held grants (<code>daemon/grants.py</code>) and their routes.</p></div>
-    <div class="change"><span class="badge b-sap">Removed</span><p><b><code>permission_essentials</code>.</b> Its read-only allowance moved into the main rules. An old config that still sets it loads fine and the key is ignored. <code>permission_policy</code> is the only switch.</p></div>
+    <div class="change"><span class="badge b-sap">Removed</span><p><b><code>permission_essentials</code>.</b> Its read-only allowance moved into the main rules. An old config that still sets it loads fine and the key is ignored. <code>permission_policy</code> is the only switch; with no explicit setting it defaults on only with the learned-rules license capability.</p></div>
   </div>
 </section>
 
@@ -142,7 +142,7 @@ section{display:flex;flex-direction:column;gap:16px}
   <h2>Holes closed before merge</h2>
   <div class="changes">
     <div class="change"><span class="badge b-sap">Security</span><p>File, web and MCP tools skipped the new checks in a launched CLI.</p></div>
-    <div class="change"><span class="badge b-sap">Security</span><p>A saved deny on pushes into main could be bypassed with a wildcard refspec.</p></div>
+    <div class="change"><span class="badge b-sap">Security</span><p>A saved deny on pushes into the default branch could be bypassed with a wildcard refspec.</p></div>
     <div class="change"><span class="badge b-sap">Security</span><p>A push naming several branches could slip into <code>release/*</code> without asking.</p></div>
     <div class="change"><span class="badge b-sap">Security</span><p><code>sort --out=</code> and <code>--compress-prog=</code> were treated as read-only.</p></div>
     <div class="change"><span class="badge b-fawn">Usability</span><p><code>git push origin HEAD</code>, bare <code>git push</code> and multi-branch pushes can now be approved once for exactly that request.</p></div>
