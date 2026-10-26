@@ -142,6 +142,34 @@ export const appUpdater: AppUpdater = {
   restart: () => invoke<void>("app_restart"),
 };
 
+/* How the shell's release-branch install goes (src-tauri/src/updates.rs
+   ReleaseProgress): the build found, the bytes downloaded so far (of
+   `total`, when known), installing. */
+export type ReleaseProgress =
+  | { kind: "found"; version: string }
+  | { kind: "downloading"; downloaded: number; total: number | null }
+  | { kind: "installing" };
+
+/* Settings' staff-only "Install latest release-branch build"
+   (app_release_build_install, src-tauri/src/updates.rs): `install` installs
+   the release/desktop pipeline's latest build, telling `progress` how it
+   goes, and answers its version, or null when this build is it already or
+   newer; `restart` starts the app again on it. The shell picks the feed and
+   checks staff itself; nothing here names a URL. */
+export interface ReleaseBuildUpdater {
+  install: (progress: (p: ReleaseProgress) => void) => Promise<string | null>;
+  restart: () => Promise<void>;
+}
+
+export const releaseBuildUpdater: ReleaseBuildUpdater = {
+  install: (progress) => {
+    const onProgress = new Channel<ReleaseProgress>();
+    onProgress.onmessage = progress;
+    return invoke<string | null>("app_release_build_install", { onProgress });
+  },
+  restart: () => invoke<void>("app_restart"),
+};
+
 /* Settings' About (src-tauri/src/about.rs): the app's version and the license
    files the bundle carries, each null when this build has none (a dev build). */
 export interface About {

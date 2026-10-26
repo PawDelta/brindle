@@ -109,13 +109,20 @@ def probe_version(path: str) -> str | None:
 
 
 def signed_in(provider: str) -> bool | None:
-    """True where it is cheap to know: a key in the environment, a recent
-    status check that said so, or (Codex) its auth file existing, never read.
-    None when it isn't known without running the CLI."""
+    """Confirm the CLI's login, including one just finished in the desktop.
+
+    Pending logins are checked in their destination home before accepting
+    cached evidence from elsewhere. None means the CLI gave no answer.
+    """
     from brindle import providers
 
+    pending = provider_homes.confirm_login(provider)
+    if pending is not None:
+        return pending
     if any(os.environ.get(k) for k in providers._ENV_AUTH.get(provider, ())):
         return True
+    if providers.signed_out(provider) is not None:
+        return False
     if providers.seen_signed_in(provider):
         return True
     if provider == "codex" and os.path.exists(providers.codex_auth_path()):

@@ -4,9 +4,9 @@ field names are the engine's own and the drift test keeps them in step."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from brindle.db import Agent, Autopilot, Milestone
 from brindle.profiles import Profile
@@ -18,6 +18,82 @@ class _DTO(BaseModel):
 
     def to_json(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
+
+
+class OrgIdentityDTO(_DTO):
+    sub: str
+    org_id: str
+    role: str | None
+    policy_role: str | None
+
+
+class OrgRoleDTO(_DTO):
+    name: str
+    builtin: bool
+    permissions: list[str]
+    holders: list[str] = []
+    okta_group: str | None = None
+    team_weight: float = 1
+
+
+class OrgMemberDTO(_DTO):
+    sub: str
+    email: str
+    role: str
+    policy_role: str | None = None
+
+
+class OrgGrantPolicyDTO(_DTO):
+    """Account GrantPolicy (account-api 8fd09374); a complete replacement block."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    allow: StrictBool
+    kinds: list[Literal["read", "write", "edit", "bash", "fetch", "mcp", "other"]]
+    overridable: list[Literal["git-push", "env"]]
+    max_minutes: Annotated[StrictInt, Field(ge=1, le=1440)]
+    max_uses: Annotated[StrictInt, Field(ge=1, le=1000)]
+    deny: list[str] = []
+    allow_persistent: StrictBool = False
+    lifetimes: list[Literal["session", "time", "forever"]] = ["session", "time"]
+    scopes: list[Literal["branch", "remote", "repo", "all"]] = ["branch"]
+
+
+class OrgApprovalPolicyDTO(_DTO):
+    version: int
+    permission_grants: OrgGrantPolicyDTO | None
+    roles: dict[str, OrgGrantPolicyDTO | None]
+
+
+class OrgPermissionsDTO(_DTO):
+    identity: OrgIdentityDTO
+    roles: list[OrgRoleDTO]
+    members: list[OrgMemberDTO]
+    inventory_error: str | None = None
+    policy: OrgApprovalPolicyDTO
+    can_edit_policy: bool
+    policy_readonly_reason: str | None
+
+
+class OrgAssignmentRequestDTO(_DTO):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    org_id: str
+    actor_sub: str
+    sub: Annotated[str, Field(min_length=1, max_length=128)]
+    role: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]
+
+
+class OrgAssignmentDTO(_DTO):
+    org_id: str
+    sub: str
+    role: str
+
+
+class OrgPolicyRequestDTO(_DTO):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    org_id: str
+    actor_sub: str
+    if_version: Annotated[StrictInt, Field(ge=0)]
+    role: str | None
+    permission_grants: OrgGrantPolicyDTO | None
 
 
 class NativeSubagentDTO(_DTO):
@@ -373,8 +449,9 @@ class PermissionRuleDTO(_DTO):
     """One rule of the person's store (GET /permissions). ``decision`` allow |
     deny | ask; ``source`` preset | user | learned; ``match_type`` exact |
     prefix | glob or a named matcher (permissions.BUILTIN_MATCHERS; a
-    ``push`` rule's match is "<source> → <destination>"). ``prompts``: asks
-    it caused in the last day."""
+    ``push`` rule's match is "<source> → <destination>"). ``repo_root``: the
+    one repo it applies in (None: every repo). ``prompts``: asks it caused
+    in the last day."""
     id: str
     kind: str
     match: str
@@ -388,6 +465,7 @@ class PermissionRuleDTO(_DTO):
     expires: float | None = None
     expired: bool = False
     exclusions: list[PermissionExceptionDTO] = []
+    repo_root: str | None = None
     prompts: int = 0
 
 

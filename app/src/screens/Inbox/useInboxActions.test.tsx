@@ -18,6 +18,23 @@ function Harness({ daemon, inbox, out }: { daemon: FakeDaemon; inbox: InboxItemD
 }
 
 describe("inbox actions", () => {
+  it("rejects changed permission digests and keeps a repeated action attached to its in-flight request", async () => {
+    const item: InboxItemDTO = { ...plan, kind: "permission", permission: { via: "hook", request_id: "r", digest: "old" } };
+    const daemon = new FakeDaemon({ workspaces: [root], inbox: [item] });
+    const out: { actions?: InboxActions } = {};
+    const { rerender } = render(<Harness daemon={daemon} inbox={[item]} out={out} />);
+    const changed = { ...item, permission: { ...item.permission!, digest: "new" } };
+    rerender(<Harness daemon={daemon} inbox={[changed]} out={out} />);
+    act(() => out.actions!.run(item, "permission", { choice: "allow_once" }));
+    expect(daemon.requests.filter((r) => r.method === "POST")).toHaveLength(0);
+    act(() => {
+      out.actions!.run(changed, "permission", { choice: "allow_once" });
+      out.actions!.run(changed, "permission", { choice: "deny" });
+    });
+    await waitFor(() => expect(out.actions!.busy.size).toBe(0));
+    expect(daemon.requests.filter((r) => r.method === "POST")).toHaveLength(1);
+  });
+
   it("binds a decision to what the card showed: an item the inbox has since replaced isn't acted on, and the card says so", async () => {
     const daemon = new FakeDaemon({ workspaces: [root], inbox: [plan] });
     const out: { actions?: InboxActions } = {};

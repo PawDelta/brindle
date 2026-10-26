@@ -33,7 +33,7 @@ import { DaemonContext } from "./api/context";
 import { checkEngine, type EngineStatus } from "./api/engine";
 import { openExternal, pickFolder as nativePicker, type OpenUrl, type PickFolder } from "./api/open";
 import type { SessionDTO } from "./api/schema";
-import type { About, AppUpdater, CliLink } from "./api/tauri";
+import type { About, AppUpdater, CliLink, ReleaseBuildUpdater } from "./api/tauri";
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
 import { Sidebar } from "./components/Sidebar";
@@ -74,6 +74,8 @@ export interface AppProps {
   installCli?: () => Promise<CliLink | void>;
   /* Settings' staff-only app Update: the shell's in the app, none in a browser tab. */
   appUpdater?: AppUpdater;
+  /* Settings' staff-only release-branch build install: the shell's in the app, none in a browser tab. */
+  releaseBuildUpdater?: ReleaseBuildUpdater;
   /* Settings' About license files: the shell's in the app, none in a browser tab. */
   readAbout?: () => Promise<About>;
 }
@@ -107,7 +109,7 @@ export function landing(repos: { repo_root: string }[], sessions: Record<string,
 /* Agents' "Connect …" links and the Inbox's rule links: each press asks Settings to scroll (and open the rule) again. */
 let providerAsks = 0;
 
-function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, readAbout }: {
+function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, releaseBuildUpdater, readAbout }: {
   route: Route;
   navigate(route: Route): void;
   client: DaemonClient;
@@ -117,6 +119,7 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
   pickFolder?: PickFolder;
   installCli?: AppProps["installCli"];
   appUpdater?: AppProps["appUpdater"];
+  releaseBuildUpdater?: AppProps["releaseBuildUpdater"];
   readAbout?: AppProps["readAbout"];
 }) {
   const openSession = (root: string, repo: string, agent?: string, sheet?: SheetRef) => navigate({ screen: "session", root, repo, agent, sheet });
@@ -127,7 +130,7 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     case "settings":
-      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} readAbout={readAbout} section={route.section} ask={route.ask} rule={route.rule} />;
+      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} section={route.section} ask={route.ask} rule={route.rule} />;
     case "account":
       return <AccountScreen client={client} openUrl={openUrl} onNavigate={(screen) => navigate({ screen })} section={route.section} ask={route.ask} />;
     case "new":
@@ -182,7 +185,7 @@ function Banner({ status, onRetry, client, store }: { status: EngineStatus; onRe
   );
 }
 
-function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, readAbout }: AppProps) {
+function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, releaseBuildUpdater, readAbout }: AppProps) {
   // Until the sessions are known the app shows the empty state, quietly; then it lands.
   const [route, setRoute] = useState<Route | null>(initialRoute ?? null);
   const navigate = useCallback((to: Route) => setRoute(to), []);
@@ -233,8 +236,8 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
             {client ? (
               route ? (
                 <div className={`relative flex min-h-0 flex-1 flex-col ${shown.screen === "inbox" ? "gap-s2 p-s3" : ""}`}>
-                  <Screen route={route} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} readAbout={readAbout} />
-                </div>
+                  <Screen route={route} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
+</div>
               ) : feedError ? (
                 // Nothing to land on: the sessions couldn't be read (the engine itself may be fine). Ask again.
                 <div role="alert" className={`${alert} m-s3 flex items-center gap-s2`} data-testid="sessions-failed">

@@ -13,9 +13,15 @@ import type {
   DecisionDTO,
   GoalDTO,
   InboxItemDTO,
+  OrgApprovalPolicyDTO,
+  OrgAssignmentDTO,
+  OrgAssignmentRequestDTO,
+  OrgPermissionsDTO,
+  OrgPolicyRequestDTO,
   PermissionLimitsDTO,
   PermissionPolicyDTO,
   PermissionRuleDTO,
+  PreflightItemDTO,
   ProfileDTO,
   RoutingDTO,
   SavedActionDTO,
@@ -126,13 +132,13 @@ export interface KeyStored {
   set: boolean;
 }
 
-/* GET /providers/{p}/preflight (engine branch desktop/provider-preflight;
-   stubbed in the fake daemon until it merges): what a provider's CLI needs
+/* GET /providers/{p}/preflight: what a provider's CLI needs
    before brindle can launch it, each a thing the app can settle natively:
    a sign-in (ProviderSignIn), a key (PUT /keys/{name}), the CLI's trust of
    the folder, or a consent it asks for once. A start or continue that
    would launch a provider with an item still open is refused with 409
-   {error: {code: "preflight"}, preflight: PreflightDTO}. */
+   {error: {code: "preflight"}, preflight: PreflightItemDTO[]}.
+   The client adapts those unresolved items to the card's PreflightDTO. */
 export type PreflightKind = "signin" | "key" | "trust" | "consent";
 
 export interface PreflightItem {
@@ -143,12 +149,28 @@ export interface PreflightItem {
   done: boolean;
   /* The key's name (kind "key"). */
   key_name?: string | null;
+  action?: PreflightItemDTO["action"];
 }
 
 export interface PreflightDTO {
   provider: string;
   ok: boolean;
   items: PreflightItem[];
+}
+
+/* The engine sends only unresolved items. The desktop's original contract
+   grouped items with done flags; keep both shapes at the API boundary. */
+function preflightResult(value: PreflightDTO | PreflightItemDTO[], provider = ""): PreflightDTO {
+  if (!Array.isArray(value)) return value;
+  return {
+    provider: provider || value[0]?.provider || "",
+    ok: value.length === 0,
+    items: value.map((item) => ({
+      ...item, kind: item.kind as PreflightKind, label: item.title, done: false,
+      key_name: item.kind === "key" && item.action?.name === "set_key"
+        ? item.action.path.match(/^\/v1\/keys\/([A-Z][A-Z0-9_]*)$/)?.[1] : undefined,
+    })),
+  };
 }
 
 /* GET /workspaces/{id}/file?path= (engine branch desktop/review-edit,
@@ -944,12 +966,25 @@ export class DaemonClient {
   }
 
   /* What a provider's CLI still needs before brindle can launch it. */
-  preflight(provider: string) {
-    return this.get<PreflightDTO>(`/providers/${encodeURIComponent(provider)}/preflight`);
+  async preflight(provider: string, repo?: string | null, context?: Record<string, unknown> | null) {
+    const path = `/providers/${encodeURIComponent(provider)}/preflight`;
+    const result = context?.repo && context?.profile
+      ? await this.post<PreflightItemDTO[]>(path, context)
+      : await this.get<PreflightDTO | PreflightItemDTO[]>(path, { repo });
+    return preflightResult(result, provider);
   }
 
   /* A trust or consent item settled by the person here. */
-  settlePreflight(provider: string, item: string) {
+  async settlePreflight(provider: string, item: string, action?: PreflightItemDTO["action"], repo?: string | null) {
+    if (action?.name === "check") return this.preflight(provider, repo, action.body);
+    if (action) {
+      await this.request(this.url(action.path.replace(/^\/v1(?=\/)/, "")), {
+        method: action.method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...action.body, accept: true }),
+      });
+      return this.preflight(provider, repo);
+    }
     return this.post<PreflightDTO>(`/providers/${encodeURIComponent(provider)}/preflight/${encodeURIComponent(item)}`, { accept: true });
   }
 
@@ -1112,6 +1147,20 @@ export class DaemonClient {
     return this.post<AllowAllPlanDTO>("/permissions/asks/unblock", { repo, forever });
   }
 
+  /* The organization's approval administration (routes_org_permissions): its members' roles
+     and the approval policy. */
+  orgPermissions() {
+    return this.get<OrgPermissionsDTO>("/org-permissions");
+  }
+
+  assignOrgRole(body: OrgAssignmentRequestDTO) {
+    return this.put<OrgAssignmentDTO>("/org-permissions/role-assignment", body);
+  }
+
+  saveOrgApprovalPolicy(body: OrgPolicyRequestDTO) {
+    return this.put<OrgApprovalPolicyDTO>("/org-permissions/policy", body);
+  }
+
   /* Starts a sign-in as a job: a job.progress event carries the URL to open
      in the system browser (or, with `device`, the code to type); job.done
      means the daemon stored the tokens. */
@@ -1172,8 +1221,8 @@ export class DaemonClient {
      claude's claudeai / console / sso, codex's device). `restart`: a login
      still running is ended and the CLI started afresh, rather than its
      terminal handed back (Try again). */
-  providerLogin(provider: string, method?: string, restart = false) {
-    return this.post<ActionTerminal>(`/providers/${encodeURIComponent(provider)}/login`, { ...(method ? { method } : {}), ...(restart ? { restart } : {}) });
+  providerLogin(provider: string, method?: string, restart = false, context?: Record<string, unknown> | null) {
+    return this.post<ActionTerminal>(`/providers/${encodeURIComponent(provider)}/login`, { ...context, ...(method ? { method } : {}), ...(restart ? { restart } : {}) });
   }
 
   /* Each provider CLI as brindle detects it: where it is, its version, whether it's signed in. */
@@ -1331,10 +1380,13 @@ export class DaemonClient {
     }
     const body: unknown = await response.json().catch(() => undefined);
     if (!response.ok) {
-      const got = body as { error?: { code?: string; message?: string }; conflict?: SessionConflict; preflight?: PreflightDTO; reasons?: string[] } | undefined;
+      const got = body as { error?: { code?: string; message?: string }; conflict?: SessionConflict; preflight?: PreflightDTO | PreflightItemDTO[]; reasons?: string[] } | undefined;
       if (got?.conflict) throw new DaemonError("conflict", got.conflict.message, response.status, got.conflict);
       const err = got?.error;
-      if (got?.preflight) throw new DaemonError("preflight", err?.message ?? `${got.preflight.provider} needs setting up first`, response.status, undefined, got.preflight);
+      if (got?.preflight) {
+        const preflight = preflightResult(got.preflight);
+        throw new DaemonError("preflight", err?.message ?? `${preflight.provider} needs setting up first`, response.status, undefined, preflight);
+      }
       throw new DaemonError(err?.code ?? "http", err?.message ?? response.statusText, response.status, undefined, undefined, Array.isArray(got?.reasons) ? got.reasons : undefined);
     }
     return body as T;

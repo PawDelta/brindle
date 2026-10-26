@@ -163,9 +163,12 @@ def test_repo_rules_can_only_add_denies(ws):
     path.write_text(json.dumps({"rules": [
         {"kind": "bash", "match": "git log", "match_type": "prefix", "decision": "deny"},
         {"kind": "bash", "match": "rm", "match_type": "prefix", "decision": "allow"},
+        {"kind": "fetch", "match": "https://private", "decision": "deny", "roles": ["admin"]},
     ]}))
     assert decide(bash(ws, "git log")).decision == "deny"
     assert decide(bash(ws, "rm x")).decision == "ask"
+    assert decide(Request("claude", "fetch", "WebFetch", repo_root=ws.repo_root,
+                          url="https://private")).decision == "deny"
 
 
 # -- user rules and learning ------------------------------------------------------------------
@@ -236,18 +239,19 @@ def test_approval_after_ask_is_learned_and_end_of_turn_is_not(db, ws):
     assert [(s.match, s.count) for s in permissions.suggestions()] == [("make docs", 2)]
 
 
-def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch):
+@pytest.mark.parametrize("mode,age", [("assign", 1000), ("review", 0)])
+def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch, mode, age):
     a = worker(db, ws)
     turn_on(ws)
     agents.hook_main(db, a.id, "permission-request", json.dumps(
         claude_payload("Bash", {"command": "make deploy"})))
     db.set_status(a.id, "waiting")
-    db.update_agent(a.id, status_since=time.time() - 1000)
+    db.update_agent(a.id, mode=mode, status_since=time.time() - age)
     sent = []
     monkeypatch.setattr(agents, "pane_owners", lambda db, panes: {})
     monkeypatch.setattr(agents, "owns_pane", lambda db, a, owners: True)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    monkeypatch.setattr(cull.tmux, "capture", lambda *a, **k: "Do you want to proceed?")
+    monkeypatch.setattr(cull.tmux, "capture", lambda *a, **k: "")
     monkeypatch.setattr(agents, "send_message", lambda db, to, body, sender_id=None: sent.append(body))
     cull.note_stuck(db, time.time(), {})
     assert "Bash: make deploy" in sent[0] and "Only the user can answer it" in sent[0]
@@ -263,7 +267,17 @@ def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch):
 # -- the CLI ----------------------------------------------------------------------------------
 
 
-def test_cli_rules_and_suggestions(ws, monkeypatch):
+@pytest.mark.parametrize("stored, expected", [
+    pytest.param({"version": 1, "rules": [{"kind": "bash", "match": "deploy", "decision": "ask", "roles": ["admin"]}],
+                  "future_policy": {"team": "restricted"}}, "deny", id="store_version-unknown_fields"),
+    pytest.param({"version": 2, "rules": [{"kind": "bash", "match": "deploy", "decision": "deny", "future_scope": "team"}]},
+                 "deny", id="store_version-unknown_deny_scope",
+                 marks=pytest.mark.variant("unknown future scope previously broadened instead of being dropped")),
+    pytest.param({"version": 2, "rules": [{"kind": "bash", "match": "deploy", "decision": "allow", "roles": ["dev"]}]},
+                 "allow", id="store_version-unknown_allow_scope"),
+    pytest.param({"version": 4, "rules": []}, "deny", id="store_version-future"),
+])
+def test_cli_rules_and_suggestions(ws, monkeypatch, stored, expected):
     monkeypatch.chdir(ws.repo_root)
     r = CliRunner()
     res = r.invoke(app, ["permissions", "allow", "bash", "make lint"])
@@ -292,3 +306,25 @@ def test_cli_rules_and_suggestions(ws, monkeypatch):
     assert r.invoke(app, ["permissions", "reset", "--yes"]).exit_code == 0
     store = permissions.load_store()
     assert {r.source for r in store.rules} == {"preset"} and store.rule("d-push-default") and store.approvals == {}
+    path = permissions.store_path()
+    stored["remembered"] = [{"id": "preference", "uses_spent": 0}]
+    path.write_text(json.dumps(stored))
+    before = path.read_text()
+    if stored["version"] > permissions.STORE_VERSION:
+        with pytest.raises(ValueError):
+            with permissions.editing() as store:
+                store.rules.clear()
+        assert path.read_text() == before
+    else:
+        with permissions.editing() as store:
+            store.rules.clear()
+        saved = json.loads(path.read_text())
+        # Rows it can't read and keys it doesn't know survive a rewrite as they were.
+        assert all(row in saved["rules"] for row in stored["rules"])
+        assert all(saved[key] == value for key, value in stored.items() if key not in ("version", "rules"))
+    # An unrecognized restriction cannot disappear behind a known allow; an
+    # unrecognized allow just doesn't apply.
+    rules = [*permissions.all_rules(), Rule("bash", "deploy", "exact", "allow")]
+    assert decide(bash(ws, "deploy"), rules=rules).decision == expected
+    # A request with no target is blocked too; else (a 0.4.7 store, now Autonomous) unmatched runs.
+    assert decide(Request("claude", "bash", "Bash"), rules=rules).decision == expected

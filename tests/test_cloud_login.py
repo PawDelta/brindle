@@ -98,11 +98,12 @@ def test_azure_expiry_comes_from_the_cli_token(proc, now, ok):
     assert calls == [(["az", "account", "get-access-token", "--output", "json"], "/prof")]
 
 
-@pytest.mark.parametrize("proc, ok", [
-    (SimpleNamespace(returncode=0, stdout="ya29.SECRET\n", stderr=""), True),
-    (SimpleNamespace(returncode=1, stdout="", stderr="invalid_grant: Bad Request invalid_rapt"), False),
+@pytest.mark.parametrize("proc, ok, left", [
+    (SimpleNamespace(returncode=0, stdout="ya29.SECRET\n", stderr=""), True, 1800.0),
+    (SimpleNamespace(returncode=1, stdout="", stderr="invalid_grant: Bad Request invalid_rapt"), False, None),
+    (SimpleNamespace(returncode=0, stdout="ya29.SECRET\n", stderr=""), False, 0.0),
 ])
-def test_google_status_refreshes_through_gcloud_in_the_given_env(proc, ok, tmp_path):
+def test_google_status_refreshes_through_gcloud_in_the_given_env(proc, ok, left, tmp_path):
     calls = []
 
     def fake_run(cmd, **kw):
@@ -113,15 +114,15 @@ def test_google_status_refreshes_through_gcloud_in_the_given_env(proc, ok, tmp_p
 
     def fake_expiry(token):
         seen.append(token)
-        return 1800.0       # an impersonated token: not the usual hour
+        return left       # an impersonated token: not the usual hour
 
     env = {"GOOGLE_APPLICATION_CREDENTIALS": "/profile/adc.json"}
     s = cloud_login.status("vertex", env=env, home=tmp_path, now=NOW, run=fake_run, expiry=fake_expiry)
     assert s.ok is ok and calls == [(["gcloud", "auth", "application-default", "print-access-token"],
                                      "/profile/adc.json")]
-    assert s.refresh_cmd == "gcloud auth application-default login" and "SECRET" not in repr(s)
-    assert s.expires_at == (NOW + 1800.0 if ok else None)
-    assert bool(seen) is ok
+    assert "SECRET" not in repr(s)
+    assert s.expires_at == (NOW + left if left is not None else None)
+    assert bool(seen) is (proc.returncode == 0)
 
 
 @pytest.mark.parametrize("provider, stderr", [
@@ -146,6 +147,22 @@ def test_signed_out_never_prompts(provider, stderr, tmp_path):
     how = cloud_login.sign_in(provider, env=env, home=tmp_path, now=NOW, last_input=NOW,
                               run=lambda cmd, **kw: failed, popen=browser)   # the person is right there
     assert how == "no lapse"
+
+
+def test_custom_adc_lapse_does_not_open_a_different_login(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / "home"))
+    env = {"CLAUDE_CODE_USE_VERTEX": "1", "GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "adc.json")}
+    opened = []
+    how = cloud_login.sign_in(env=env, home=tmp_path, now=NOW, last_input=NOW,
+        run=lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr=VERTEX_ERROR),
+        popen=lambda *a, **kw: opened.append(a) or SimpleNamespace(pid=1))
+    assert how == "manual" and opened == []
+    assert cloud_login.login_command(env) is None
+    assert cloud_login.interactive_sign_in(env=env, run=lambda *a, **kw: opened.append(a)) == 1
+    assert opened == []
+    for extra in ({"AWS_ACCESS_KEY_ID": "FAKE"}, {"AWS_WEB_IDENTITY_TOKEN_FILE": "/token"}):
+        assert cloud_login.configured_status({"CLAUDE_CODE_USE_BEDROCK": "1", **extra}) is None
+    assert cloud_login.configured_status({**env, "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "1"}) is None
 
 
 @pytest.mark.parametrize("have, opener", [

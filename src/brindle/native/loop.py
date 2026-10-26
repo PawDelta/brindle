@@ -56,6 +56,7 @@ class NativeAgent:
                  on_status: Callable[[str], None] | None = None,
                  inbox: Callable[[], list[str]] | None = None,
                  ask: Callable[[str, dict], bool] | None = None,
+                 policy: Callable[[str, dict], str | None] | None = None,
                  log: Callable[[str], None] | None = None,
                  on_text: Callable[[str], None] | None = None):
         self.client = client
@@ -67,6 +68,7 @@ class NativeAgent:
         self._on_status = on_status or (lambda s: None)
         self._inbox = inbox or (lambda: [])
         self._ask = ask  # None: nobody to ask, so 'ask' means refuse
+        self._policy = policy  # The runner owns identity and shared policy; CLI helpers do not.
         self._log = log or (lambda s: None)
         self._on_text = on_text  # streamed text deltas of the model's replies
         self.messages: list[dict] = []
@@ -120,7 +122,9 @@ class NativeAgent:
             return ToolResult(call.parse_error, True)
         if call.name not in self.toolbox.tools:
             return self.toolbox.call(call.name, call.arguments)  # the "unknown tool" error
-        verdict = self.permissions.decide(call.name, call.arguments)
+        verdict = self._policy(call.name, call.arguments) if self._policy is not None else None
+        if verdict is None:
+            verdict = self.permissions.decide(call.name, call.arguments)
         if verdict == "ask":
             if self._ask is not None:
                 self._on_status("waiting")

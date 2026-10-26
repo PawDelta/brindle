@@ -36,7 +36,7 @@ def rule_dto(rule: permissions.Rule, prompts: dict[str, int] | None = None) -> P
         limits=limits_dto(rule.limits), expires=rule.expires, expired=rule.expired(),
         exclusions=[PermissionExceptionDTO(kind=x.kind, match=x.match, match_type=x.match_type, describe=x.describe())
                     for x in rule.exclusions],
-        prompts=(prompts or {}).get(rule.id, 0))
+        repo_root=rule.repo_root, prompts=(prompts or {}).get(rule.id, 0))
 
 
 def saved_dto(action: permissions.SavedAction) -> SavedActionDTO:
@@ -85,7 +85,9 @@ def _modes(g: grants.Group) -> list[str]:
     limits = (g.policy.rule.limits if g.policy.rule else None) or {}
     life = limits.get("life")
     out = ["once", "deny", "always-deny"]
-    if life == "time":
+    if life == "once" or any((r.limits or {}).get("life") == "once" for a in g.items for r in a.policy.asks):
+        pass    # nothing it asks for may be saved (a push into a release branch)
+    elif life == "time":
         out.append("timed")
     elif life == "session":
         out.append("session")

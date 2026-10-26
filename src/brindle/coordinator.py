@@ -195,7 +195,8 @@ def reorder_queue(db: DB, coord: Agent, task_id: str, after: list[str], reason: 
     caller_ws = db.get_workspace(t.caller_ws_id)
     if caller_ws is not None:
         try:
-            tasks.unmet_dependencies(db, caller_ws, added)
+            tasks.unmet_dependencies(db, caller_ws, added, caller_id=t.caller_id,
+                                     dependent_task_id=t.id)
         except agents.AgentError as e:
             raise CoordinatorError(str(e)) from e
     new = old + added

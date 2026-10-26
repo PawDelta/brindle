@@ -1,0 +1,97 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Separate desktop staff and production publishing roles. Requires an existing GitHub OIDC provider and protected GitHub environments; see app/README.md.",
+  "Parameters": {
+    "GitHubRepo": {
+      "Type": "String",
+      "Description": "The repository part of its OIDC subject: owner/repo, or owner@ID/repo@ID when the repository uses immutable subjects (gh api repos/OWNER/REPO/actions/oidc/customization/sub, without the repo: prefix).",
+      "AllowedPattern": "^[A-Za-z0-9-]+(@[0-9]+)?/[A-Za-z0-9._-]+(@[0-9]+)?$"
+    },
+    "DownloadsBucket": {
+      "Type": "String",
+      "Description": "Existing downloads bucket name, without s3:// or a path.",
+      "AllowedPattern": "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$"
+    }
+  },
+  "Resources": {
+    "StaffRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Principal": {"Federated": {"Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"}},
+            "Condition": {"StringEquals": {
+              "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+              "token.actions.githubusercontent.com:sub": {"Fn::Sub": "repo:${GitHubRepo}:environment:desktop-staff-release"}
+            }}
+          }]
+        },
+        "Policies": [{
+          "PolicyName": "staff-release-only",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": ["s3:PutObject"],
+                "Resource": {"Fn::Sub": "arn:${AWS::Partition}:s3:::${DownloadsBucket}/brindle/downloads/desktop/release/*"}
+              },
+              {
+                "Effect": "Allow",
+                "Action": ["s3:GetObject"],
+                "Resource": {"Fn::Sub": "arn:${AWS::Partition}:s3:::${DownloadsBucket}/brindle/downloads/desktop/release/latest.json"}
+              },
+              {
+                "Effect": "Allow",
+                "Action": ["s3:ListBucket"],
+                "Resource": {"Fn::Sub": "arn:${AWS::Partition}:s3:::${DownloadsBucket}"}
+              }
+            ]
+          }
+        }]
+      }
+    },
+    "ProductionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Action": "sts:AssumeRoleWithWebIdentity",
+            "Principal": {"Federated": {"Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"}},
+            "Condition": {"StringEquals": {
+              "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+              "token.actions.githubusercontent.com:sub": {"Fn::Sub": "repo:${GitHubRepo}:environment:desktop-release"}
+            }}
+          }]
+        },
+        "Policies": [{
+          "PolicyName": "production-desktop-only",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": ["s3:PutObject"],
+                "Resource": {"Fn::Sub": "arn:${AWS::Partition}:s3:::${DownloadsBucket}/brindle/downloads/desktop/*"}
+              },
+              {
+                "Effect": "Deny",
+                "Action": ["s3:PutObject"],
+                "Resource": {"Fn::Sub": "arn:${AWS::Partition}:s3:::${DownloadsBucket}/brindle/downloads/desktop/release/*"}
+              }
+            ]
+          }
+        }]
+      }
+    }
+  },
+  "Outputs": {
+    "StaffRoleArn": {"Value": {"Fn::GetAtt": ["StaffRole", "Arn"]}},
+    "ProductionRoleArn": {"Value": {"Fn::GetAtt": ["ProductionRole", "Arn"]}}
+  }
+}

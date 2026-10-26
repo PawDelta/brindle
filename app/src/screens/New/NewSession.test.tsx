@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonContext } from "../../api/context";
 import type { SessionDTO } from "../../api/schema";
@@ -34,6 +34,63 @@ function setup(daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj"
 const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "POST");
 
 describe("NewSession", () => {
+  it.each([["claude", false, false], ["antigravity", false, false], ["antigravity", true, false], ["claude", false, true], ["claude", false, "manual"]] as const)("unblocks %s sign-in using unresolved preflight items (API key: %s, cloud: %s)", async (provider, key, cloud) => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], workspaces: [root], sessions: [] });
+    let signed = false;
+    let agreed = !!cloud || provider !== "claude";
+    let checked = !cloud;
+    const context = cloud ? { repo: REPO, profile: "company-developer" } : undefined;
+    const fetch = daemon.fetch;
+    daemon.fetch = async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      const body = init?.body ? JSON.parse(String(init.body)) : {};
+      const selected = body.repo === REPO && body.profile === "company-developer";
+      if (cloud && path.endsWith("/login")) {
+        if (!selected) return Response.json({ error: { code: "invalid", message: "Missing identity" } }, { status: 400 });
+        signed = true;
+      }
+      if (cloud && path.endsWith("/preflight") && init?.method === "POST" && selected) checked = signed;
+      if (path.endsWith("/consent") && JSON.parse(String(init?.body)).accept) {
+        agreed = true;
+        return Response.json({ recorded: true });
+      }
+      const items = (signed && checked) || (key && daemon.keysStored.includes("GEMINI_API_KEY"))
+        ? agreed ? [] : [{ id: "claude.onboarding", provider, kind: "consent", title: "Security notes", detail: "", action: { method: "POST", path: "/v1/providers/claude/consent", body: { id: "claude.onboarding" } } }]
+        : key ? [{ id: "key.GEMINI_API_KEY", provider, kind: "key", title: "Add your Gemini API key", detail: "", action: { name: "set_key", method: "PUT", path: "/v1/keys/GEMINI_API_KEY" } }]
+        : [{ id: `${provider}.signin`, provider, kind: "signin", title: "Sign in", detail: "", action: { name: cloud === "manual" ? "check" : "login", method: "POST", path: `/v1/providers/${provider}/${cloud === "manual" ? "preflight" : "login"}`, body: context } }];
+      if (path.endsWith("/preflight")) return Response.json(items);
+      if (path.endsWith("/sessions") && init?.method === "POST" && items.length) return Response.json({ error: { code: "preflight", message: "Sign in" }, preflight: items }, { status: 409 });
+      return fetch(input, init);
+    };
+    const { onOpen, stop } = setup(daemon);
+    fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix login" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    const card = await screen.findByTestId("preflight");
+    expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
+    if (key) {
+      fireEvent.change(within(card).getByLabelText(/ value$/), { target: { value: "fixture-key" } });
+      fireEvent.click(within(card).getByRole("button", { name: "Save" }));
+    } else if (cloud === "manual") {
+      signed = true;
+      fireEvent.click(within(card).getByRole("button", { name: "Check again" }));
+    } else {
+      vi.useFakeTimers();
+      try {
+        await act(async () => { fireEvent.click(within(card).getByRole("button", { name: /Sign in to/ })); });
+        if (!cloud) signed = true;
+        await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+        expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", !agreed);
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+    if (!agreed) fireEvent.click(within(card).getByRole("button", { name: "Agree" }));
+    await waitFor(() => expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
+    fireEvent.click(within(card).getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
+    stop();
+  });
+
   it("starts a session from the composer past a running one, and opens it", async () => {
     const { daemon, onOpen, stop } = setup();
     const prompt = await screen.findByLabelText("What should brindle work on?");

@@ -35,7 +35,8 @@
    pane. The doctor (GET /v1/doctor) is read once per repo and on demand;
    its update line feeds the engine row (its sign-in lines stay out of the
    health list: the provider rows say that).
-   The command-line
+   Organization (OrgApprovals.tsx, read only when opened): the organization's
+   members, roles and approval limits (/v1/org-permissions). The command-line
    tool's install is the shell's (install_cli, api/tauri.ts): App passes it
    in the app, where the row then says where the link went; in a browser
    tab there is none and the button stays disabled. Staff alone (GET
@@ -45,6 +46,8 @@
    build's feed (a release candidate's rc channel) and installs what it
    finds, then offers a restart. It is how a release candidate updates at
    all: an rc build never checks by itself (src-tauri/src/updates.rs).
+   Beside it, staff can install the release branch's latest build, before
+   it ships, and restart into it (ReleaseBuildUpdate).
    Last, About: the app's version and its license files (About.tsx). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -52,14 +55,16 @@ import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorChec
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
 import type { Install } from "../../api/providersInstall";
-import type { About as AboutInfo, AppUpdater, CliLink } from "../../api/tauri";
+import type { About as AboutInfo, AppUpdater, CliLink, ReleaseBuildUpdater } from "../../api/tauri";
 import { plain } from "../../api/wording";
 import { UpgradeCard, useEngineUpgrade } from "../../components/EngineUpgrade";
 import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { About } from "./About";
+import { OrgApprovals } from "./OrgApprovals";
 import { Permissions } from "./Permissions";
+import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
 import { alert, button, card, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
 import { useProviders } from "../../store/providers";
@@ -96,6 +101,9 @@ export interface SettingsScreenProps {
      api/tauri.ts), shown to staff only. Without one (a browser tab) there is
      no such row. */
   appUpdater?: AppUpdater;
+  /* Staff's install of the release branch's latest build (the shell's
+     app_release_build_install, api/tauri.ts): a row under App update. */
+  releaseBuildUpdater?: ReleaseBuildUpdater;
   /* About's license files (the shell's about_read, api/tauri.ts). Without
      one (a browser tab) About only names them. */
   readAbout?: () => Promise<AboutInfo>;
@@ -430,10 +438,11 @@ function DebugLogging({ client }: { client: DaemonClient }) {
 }
 
 /* Staff-only app update (owner decision): a release candidate never updates
-   by itself, so staff update it here. Shown only when GET /debug says this
+   by itself, so staff update it here, and can install the release branch's
+   latest build (ReleaseBuildUpdate). Shown only when GET /debug says this
    account is staff and the shell gives an updater; anyone else sees nothing.
    The shell checks staff again before installing. */
-function AppUpdate({ client, updater }: { client: DaemonClient; updater?: AppUpdater }) {
+function AppUpdate({ client, updater, release }: { client: DaemonClient; updater?: AppUpdater; release?: ReleaseBuildUpdater }) {
   const [staff, setStaff] = useState(false);
   const [state, setState] = useState<"idle" | "checking" | "latest" | "installed" | "restarting">("idle");
   const [installed, setInstalled] = useState<string | null>(null);
@@ -450,8 +459,8 @@ function AppUpdate({ client, updater }: { client: DaemonClient; updater?: AppUpd
       live = false;
     };
   }, [client]);
-  if (!staff || !updater) return null;
-  const update = async () => {
+  if (!staff || (!updater && !release)) return null;
+  const update = async (updater: AppUpdater) => {
     setState("checking");
     setError(null);
     try {
@@ -463,7 +472,7 @@ function AppUpdate({ client, updater }: { client: DaemonClient; updater?: AppUpd
       setState("idle");
     }
   };
-  const restart = async () => {
+  const restart = async (updater: AppUpdater) => {
     setState("restarting");
     try {
       await updater.restart();
@@ -480,17 +489,20 @@ function AppUpdate({ client, updater }: { client: DaemonClient; updater?: AppUpd
         : "Checks for a newer build of this app (a beta checks the beta channel) and installs it.";
   return (
     <Section id="app-update" title="App update" testId="app-update">
-      <Row label="Update the app" help={help} testId="app-update-row">
-        {state === "installed" || state === "restarting" ? (
-          <button type="button" className={primary} disabled={state === "restarting"} onClick={() => void restart()}>
-            Restart
-          </button>
-        ) : (
-          <button type="button" className={button} disabled={state === "checking"} onClick={() => void update()}>
-            {state === "checking" ? "Updating…" : "Update"}
-          </button>
-        )}
-      </Row>
+      {updater && (
+        <Row label="Update the app" help={help} testId="app-update-row">
+          {state === "installed" || state === "restarting" ? (
+            <button type="button" className={primary} disabled={state === "restarting"} onClick={() => void restart(updater)}>
+              Restart
+            </button>
+          ) : (
+            <button type="button" className={button} disabled={state === "checking"} onClick={() => void update(updater)}>
+              {state === "checking" ? "Updating…" : "Update"}
+            </button>
+          )}
+        </Row>
+      )}
+      {release && <ReleaseBuildUpdate updater={release} />}
       {error && (
         <p role="alert" className={`${alert} m-s2`}>
           Could not update: {error}
@@ -712,7 +724,7 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
   );
 }
 
-export function SettingsScreen({ client, installCli, appUpdater, readAbout, section, ask, rule }: SettingsScreenProps) {
+export function SettingsScreen({ client, installCli, appUpdater, releaseBuildUpdater, readAbout, section, ask, rule }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const pick = useRepo();
@@ -932,6 +944,12 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
 
       <Permissions client={client} rule={rule} ask={ask} />
 
+      <Section id="organization" title="Organization" blurb="Your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
+        <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
+          <OrgApprovals client={client} />
+        </Row>
+      </Section>
+
       <Section
         id="providers"
         title="Providers"
@@ -1125,7 +1143,7 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
 
       <DebugLogging client={client} />
 
-      <AppUpdate client={client} updater={appUpdater} />
+      <AppUpdate client={client} updater={appUpdater} release={releaseBuildUpdater} />
 
       <About read={readAbout} />
 

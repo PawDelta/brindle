@@ -51,11 +51,12 @@ TOOL_PERMISSION = re.compile(r"(?i)requesting permission for|run this command\?|
 NUMBERED = re.compile(rf"^\s*(?:[{CURSOR}]\s*)?\d+[.)]\s+\S")
 HINT = re.compile(r"(?i)\benter to (?:confirm|continue|select|proceed)\b|\bpress enter\b")
 # A CLI's own input box and footer: the CLI is ready (or busy), not asking.
-INPUT_BOX = re.compile(r"\? for shortcuts|\d+% context left|esc to interrupt"
+INPUT_BOX = re.compile(r"\? for shortcuts|\d+% context left|esc to interrupt|⏵⏵|⏸"
                        r"|\S…\s*\((?:\d+m\s*)?\d+s\b", re.I)   # the last: a busy spinner, "✳ Clauding… (1m 37s)"
 # A turn under way: a spinner before its timer shows ("✻ Pondering…"), or a
 # tool call or reply ("⏺ Read(…)", "⎿ Running…"). No startup prompt has these.
-WORKING = re.compile(r"(?m)^\s*(?:[·✢✳✶✻✽*]\s*[^\W\d_][\w-]*…|[⏺⎿])")
+BUSY_SPINNER = re.compile(r"(?m)^\s*[·✢✳✶✻✽*]\s*[^\W\d_][\w-]*…")
+WORKING = re.compile(BUSY_SPINNER.pattern + r"|^\s*[⏺⎿]")
 BRIEF_LETTERS = 10   # fewest letters in a screen line taken as part of the brief
 # Only the person answers these, whatever the model makes of them: their
 # accounts and data, anything that widens what the agent may run (a
@@ -184,6 +185,69 @@ def looks_like_prompt(screen: str) -> bool:
             if o and (NUMBERED.match(other) and NUMBERED.match(line) or o.start(2) == m.start(2)):
                 return True
     return False
+
+
+def blocking_prompt(screen: str, provider: str, brief: str = "") -> bool:
+    """A live approval or menu, shared by delivery health and pane sweeps."""
+    from brindle.providers import get_provider
+
+    if brief_draft(screen, brief):
+        return False
+    screen = "\n".join(_tail(_past_brief(screen, brief)))
+    return (get_provider(provider).tool_permission(screen)
+            or _numbered_question(screen)
+            or (looks_like_prompt(screen) and cached_kind(screen) != "not_a_prompt"))
+
+
+def _numbered_question(screen: str) -> bool:
+    """An unanswered task question, with consecutive choices at the end
+    of the transcript. An empty composer is allowed; later replies aren't.
+    This only forwards questions, never grants startup-menu approval."""
+    # Claude's ⏺ responses and ⎿ tool results remain in completed turns;
+    # only a live spinner disqualifies a question in that transcript.
+    if BUSY_SPINNER.search(screen):
+        return False
+    lines = [line.strip() for line in screen.splitlines() if line.strip()]
+    # Claude's bordered empty composer has a status line beneath it. Match
+    # the entire suffix so a filled composer or later reply stays visible.
+    if (len(lines) >= 4 and re.fullmatch(r"─+", lines[-4]) and lines[-3] == "❯"
+            and re.fullmatch(r"─+", lines[-2])
+            and re.match(r"⏵⏵|⏸|\? for shortcuts", lines[-1])):
+        del lines[-4:]
+    if lines and re.fullmatch(r"\d+% context left|\? for shortcuts", lines[-1], re.I):
+        lines.pop()
+    if lines and re.fullmatch(rf"[{CURSOR}]", lines[-1]):
+        lines.pop()
+    if INPUT_BOX.search("\n".join(lines)):
+        return False
+    numbers = []
+    while lines:
+        option = re.match(r"(\d+)[.)]\s+\S", lines[-1])
+        if not option:
+            break
+        numbers.append(int(option[1]))
+        lines.pop()
+    return bool(len(numbers) >= 2 and numbers[::-1] == list(range(1, len(numbers) + 1))
+                and lines and lines[-1].endswith("?"))
+
+
+def _past_brief(screen: str, brief: str) -> str:
+    """Remove the echoed brief, including markdown wrapping and scrolled
+    numbered instructions, before interpreting the remaining pane as UI."""
+    brief = _letters(brief)
+    if not brief:
+        return screen
+    keep, rest = [], ""
+    for line in screen.splitlines():
+        text = _letters(line)
+        if rest and rest.startswith(text):
+            rest = rest[len(text):]
+        elif len(text) >= BRIEF_LETTERS and text in brief:
+            rest = brief[brief.index(text) + len(text):]
+        else:
+            rest = ""
+            keep.append(line)
+    return "\n".join(keep)
 
 
 def normalize(screen: str) -> str:
@@ -398,25 +462,7 @@ class Startup:
         self.brief = " ".join(((row["submitted_prompt"] if row else "") or "").split())
 
     def _past_brief(self, screen: str) -> str:
-        """``screen`` without the brief brindle sent, which the CLI echoes as
-        "❯ <brief>" with wrapped lines: that echo is not a prompt, nor is its
-        tail when the start has scrolled off (a numbered list, "press enter").
-        Lines are compared by their letters and digits only, since Claude Code
-        renders the echo as markdown (no backticks) and wraps it anywhere."""
-        brief = _letters(self.brief)
-        if not brief:
-            return screen
-        keep, rest = [], ""   # rest: the brief still to come, inside its echo
-        for line in screen.splitlines():
-            text = _letters(line)
-            if rest and rest.startswith(text):
-                rest = rest[len(text):]
-            elif len(text) >= BRIEF_LETTERS and text in brief:
-                rest = brief[brief.index(text) + len(text):]
-            else:
-                rest = ""
-                keep.append(line)
-        return "\n".join(keep)
+        return _past_brief(screen, self.brief)
 
     def draft(self, screen: str) -> bool:
         return brief_draft(screen, self.brief)
@@ -494,9 +540,8 @@ class Startup:
 
 
 def tell(db, agent, prompt: str) -> bool:
-    """Tell ``agent``'s supervisor that it stopped on a startup prompt only
-    the person can answer: once per spell of waiting (the same mark
-    cull.note_stuck keeps, so it doesn't tell again)."""
+    """Forward a blocking prompt once per spell of waiting, sharing the
+    mark with cull.note_stuck so the sweep doesn't tell again."""
     from brindle import agents
 
     a = db.get_agent(agent.id)
@@ -506,10 +551,12 @@ def tell(db, agent, prompt: str) -> bool:
     a = db.get_agent(a.id)
     ws = db.get_workspace(a.workspace_id)
     attach = f"Attach with `brindle attach {ws.name}` to answer it" if ws else "Answer it in its pane"
-    body = (f"Worker {a.id} ({a.profile}) stopped at a startup prompt that brindle won't answer "
-            f"for the user (signing in, keys, payment, deleting data or access outside its worktree, "
-            f"or a prompt brindle couldn't read). {attach}, or remove the workspace if it's no "
-            f"longer needed.\n\nThe prompt:\n{prompt}")
+    pending = agents.pending_permission(db, a.id)
+    request = f"\n\n{pending} Only the user can answer it." if pending else ""
+    prompt = redact(prompt)
+    summary = " | ".join(prompt.splitlines())
+    body = (f"Worker {a.id} ({a.profile}) is waiting on a prompt: {summary}\n\n"
+            f"{attach}, or send it guidance if it is asking a task question.{request}\n\nThe prompt:\n{prompt}")
     try:
         agents.send_message(db, a.parent_id, body, sender_id=a.id)
     except agents.AgentError:

@@ -28,6 +28,10 @@ NATIVE_SUBAGENT_STALE = 2 * 3600
 # Ended rows are dropped from the table entirely after this long.
 NATIVE_SUBAGENT_PRUNE_AFTER = 3600
 
+# SQLite user_version: 0 identifies databases written before version tracking.
+# Bump this when changing SCHEMA or _migrate so older engines refuse the result.
+SCHEMA_VERSION = 1
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workspaces (
     id TEXT PRIMARY KEY,
@@ -87,7 +91,8 @@ CREATE TABLE IF NOT EXISTS inbox (
     created_at REAL NOT NULL,
     delivered_at REAL,
     held INTEGER,                  -- 1: a pull-mode message, read with read_messages instead of being delivered
-    noticed_at REAL                -- when a "new messages" notice covering it went out
+    noticed_at REAL,               -- when a "new messages" notice covering it went out
+    supervisor_context INTEGER    -- authenticated before a handover changed the recipient's ancestry
 );
 -- Autopilot: one row per session (keyed by its supervisor) that has it on.
 CREATE TABLE IF NOT EXISTS autopilot (
@@ -874,11 +879,23 @@ class DB:
         self.path = p
         self.conn = sqlite3.connect(p, timeout=30, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.executescript(SCHEMA)
-        self._enforce_permissions()
-        self._migrate()
+        try:
+            version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    "This database was written by a newer brindle. Update brindle."
+                )
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA foreign_keys=ON")
+            self.conn.executescript(SCHEMA)
+            self._enforce_permissions()
+            self._migrate()
+            # Mark the upgrade only after all required migrations succeed.
+            if version < SCHEMA_VERSION:
+                self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        except BaseException:
+            self.conn.close()
+            raise
 
     def _enforce_permissions(self) -> None:
         if self.path == ":memory:":
@@ -967,7 +984,8 @@ class DB:
         if "transcript_path" not in mark_cols:
             self.conn.execute("ALTER TABLE history_usage_mark ADD COLUMN transcript_path TEXT")
         inbox_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(inbox)")}
-        for col, kind in (("held", "INTEGER"), ("noticed_at", "REAL")):
+        for col, kind in (("held", "INTEGER"), ("noticed_at", "REAL"),
+                          ("supervisor_context", "INTEGER")):
             if col not in inbox_cols:
                 self.conn.execute(f"ALTER TABLE inbox ADD COLUMN {col} {kind}")
         tables = {r["name"] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -1403,6 +1421,12 @@ class DB:
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), row["id"]))
             return _load(Message, row)
 
+    def release_pending(self, message_id: int, agent_id: str) -> None:
+        """Put a message pop_pending claimed back in the queue, as it was."""
+        with self.tx() as c:
+            c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
+                      (message_id, agent_id))
+
     def retry_pending(self, message_id: int, agent_id: str, idle_since: float) -> None:
         """Release the caller's failed delivery claim without creating a second message.
 
@@ -1481,6 +1505,24 @@ class DB:
             "SELECT * FROM inbox WHERE id=? AND agent_id=?", (message_id, agent_id)
         ).fetchone()
         return _load(Message, row) if row else None
+
+    def review_messages(self, agent_id: str, supervisor_ids: list[str]) -> list[Message]:
+        """This worker's current and authenticated former supervisor updates.
+
+        Include delivered and queued updates; delivery notices carry no spec.
+        Handover marks only existing messages from the departing supervisor
+        to its descendants, retaining their original sender and recipient.
+        An empty current ancestry still admits those marked rows, never an
+        unrelated sender's messages or later messages from a former supervisor.
+        """
+        placeholders = ",".join("?" for _ in supervisor_ids) or "NULL"
+        rows = self.conn.execute(
+            "SELECT * FROM inbox WHERE agent_id=? "
+            f"AND (supervisor_context=1 OR sender_id IN ({placeholders})) "
+            "AND (held=1 OR noticed_at IS NULL) ORDER BY id",
+            (agent_id, *supervisor_ids),
+        )
+        return [_load(Message, row) for row in rows]
 
     def unread(self, agent_id: str) -> list[Message]:
         rows = self.conn.execute(

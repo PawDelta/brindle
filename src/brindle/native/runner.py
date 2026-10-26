@@ -260,6 +260,38 @@ def conversation_path(agent_id: str) -> Path:
     return brindle_home() / "native" / f"{agent_id}.json"
 
 
+def permission_decision(db: DB, agent_id: str, ws: Workspace, tool: str, args: dict) -> str | None:
+    """With permission_policy on, the shared rules' word on a native tool call
+    before the profile's own permissions: a deny, an ask a rule makes, or an
+    allow by the person's own rules or saved actions. None leaves it to the
+    profile (an allow a preset makes, or an ask no rule made)."""
+    from brindle import permissions
+    from brindle.antigravity import tool_names
+    from brindle.config import load_repo_config
+    from brindle.profiles import profile_rules_for
+
+    cfg = load_repo_config(ws.repo_root)
+    if cfg.permission_policy != "on":
+        return None
+    agent = db.get_agent(agent_id)
+    if agent is None:
+        return "deny"
+    name = f"mcp__brindle__{tool}" if tool in tool_names() else tool
+    req = permissions.from_claude({"tool_name": name, "tool_input": args, "cwd": ws.path},
+                                  ws.path, ws.repo_root)
+    if req is None:
+        return "deny"
+    req = dataclasses.replace(req, provider="native")
+    rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+    decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=agents._session_of(db, agent),
+                                  spend=True)
+    rule = decision.rule
+    if decision.decision == "deny" or rule is not None and (
+            decision.decision == "ask" or rule.decision == "ask" or rule.source in ("user", "learned")):
+        return decision.decision
+    return None
+
+
 def ask_person(db: DB, agent_id: str, ws: Workspace, tool: str, args: dict) -> bool:
     """A call the profile's permissions leave to a person: held for the app's
     answer while it's open (agents._hold_for_app), refused when it isn't or
@@ -336,6 +368,7 @@ def _run_native(db: DB, agent_id: str, resume: str | None, poll: float,
         on_status=lambda s: db.set_status(agent_id, s),
         inbox=lambda: _drain(db, agent_id),
         log=log, on_text=show, ask=lambda tool, args: ask_person(db, agent_id, ws, tool, args),
+        policy=lambda tool, args: permission_decision(db, agent_id, ws, tool, args),
     )
     if resume and loop.load(resume):
         print(f"brindle: resumed the conversation ({len(loop.messages)} messages)", flush=True)

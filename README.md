@@ -847,26 +847,43 @@ command, path or URL; brindle never reads the screen) and brindle answers
 **allow**, **deny**, or **ask**, which leaves the prompt to you as usual. Any
 error is ask.
 
-The starting rules:
+Nothing is built in. Every rule lives in `~/.brindle/permissions.json`, and
+you can edit or remove any of them, including the ones a **preset** seeded.
+Pick a preset in Settings → Permissions or at setup:
 
-- **allow** reading a file git tracks in the worktree or repo root (exact
-  path, symlinks resolved and kept inside the root; never `.git/`, ignored or
-  untracked files);
-- **allow** a Bash command that is exactly one of the repo's `checks`, and
-  `git status` / `git diff` / `git log` / `git show`, but only as a single
-  simple command: anything with `;`, `|`, `&`, `$`, backticks, quotes,
-  redirections or globs is never auto-allowed;
-- **deny** `git push`, git force flags, and reading `~/.ssh`, `~/.aws`,
-  `~/.gnupg` or `.env*`;
-- **ask** for everything else.
+- **Autonomous** (the default): everything runs, except pushes into the
+  repo's default branch (ask) and destructive actions (deny: git force flags,
+  deleting a branch by push, a recursive `rm` of `/`, a top-level folder or
+  home);
+- **Permissive**: edits in the worktree and everyday commands run, the rest asks;
+- **Standard**: routine reads and everyday commands run, changes ask;
+- **Secure**: short approvals, and a deny for anything no rule covers.
 
-A deny beats any allow; nothing else is ranked. Add your own with
-`brindle permissions allow|deny KIND MATCH` (kinds: `read`, `write`, `edit`,
-`bash`, `fetch`, `mcp`, `other`; the match is exact unless `--prefix` or
-`--glob`); they're kept in `~/.brindle/permissions.json`. A repo's
+Every preset also denies reading `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env*` and
+the daemon's token, and asks before every push into a `release` or
+`release/*` branch, which starts a signed build (an approval there is never
+saved). It allows reading files git tracks, the repo's `checks`, read-only
+git commands and read-only pipelines (grep, rg, ls, cat, head, `sed -n` ...
+joined by pipes or `&&`, quoting read as the shell reads it). A pipeline
+stops being read-only when it writes a file, substitutes a command, sets a
+variable, recurses into a tree with a file a read deny covers, or reads such a
+file. Precedence: a deny wins, then an ask, then an allow, then the preset's
+setting for what no rule covers (ask, allow or deny). A deny or ask also
+catches a part of a compound command however it's spelled (spacing, quotes,
+assignments, redirects, `$(...)`, patterns the shell expands); when brindle
+can't read the syntax and a deny or ask could match it, it asks.
+
+Add your own with `brindle permissions allow|deny KIND MATCH` (kinds: `read`,
+`write`, `edit`, `bash`, `fetch`, `mcp`, `other`; the match is exact unless
+`--prefix` or `--glob`) or in the app, which can also make ask rules with
+limits on saved approvals, timed rules and exceptions. A repo's
 `.brindle/permissions.json` (`{"rules": [...]}`, same format) can only add
 denies. `brindle permissions list` shows every rule and where it came from,
-`forget ID` removes one of yours, `reset` goes back to the starting rules.
+`forget ID` removes one, `reset` goes back to the preset's rules. A store
+written by brindle 0.4.7 is migrated on first load: its permission editor's
+preset becomes Permissive, Standard or Secure (Autonomous when it chose
+none), its own rules stay, and its remembered approvals become saved actions;
+its old rows stay in the file.
 Profiles can add narrower, profile-local denies with a JSON array in frontmatter,
 for example `permission_denies: ["read glob ~/.private*", "bash prefix deploy"]`.
 Built-in profiles ship with no profile-specific denies by default. These denies
@@ -886,6 +903,30 @@ it, and `brindle permissions accept ID` makes it a rule. A prompt the turn ended
 on without the tool running counts for nothing. Every decision is in
 `brindle history --kind permission`, and when a worker sits on a prompt, its
 supervisor is told exactly which request is pending (only you can answer it).
+
+**Saved actions.** The app's Inbox groups pending asks by kind and general
+form (a push by its destination, a file by its top folder, a command by its
+first two words, an MCP tool or its server). One decision answers the group:
+once, for the session, for a time, until revoked, deny, or always deny. Anything
+kept is a saved action, listed and editable under Settings → Permissions. A
+saved deny stops every ask it covers. A saved allow settles an ask only within
+the limits of the ask rule that asked (its scope and how long approvals may
+last), never past a deny rule, and never once it has expired. Every use reads
+the current rules again.
+
+In a Team org, the org policy's `permission_grants` block bounds what a saved
+allow may do. It is read again on every request:
+
+```json
+"permission_grants": {"allow": true, "kinds": ["bash", "fetch"], "max_minutes": 30,
+                      "allow_persistent": true, "lifetimes": ["session", "time", "forever"],
+                      "scopes": ["branch", "remote"], "deny": ["bash prefix terraform apply"]}
+```
+
+- `deny` entries are enforced for every provider and can't be lifted.
+- A saved allow applies only for the listed `kinds`, `lifetimes` and `scopes`, with timed ones capped at `max_minutes`; one that lasts until revoked also needs `allow_persistent`.
+- A policy without the block, one that can't be read, or a paused or shut-down member: no saved allow applies.
+- Org admins edit the block in Settings → Organization approvals. It is enforced from the cached policy, or in air-gap mode from `.brindle/policy.json`.
 
 **Codex.** Codex runs a hook only once it's trusted, so with
 `permission_policy` on, brindle trusts its own hook the first time a Codex worker
@@ -2079,8 +2120,10 @@ folder; `brindle profile new` writes one.
 ---
 name: developer-bedrock
 provider: claude
+auth: cloud
 model: us.anthropic.claude-haiku-4-5-20251001-v1:0   # a Bedrock model id your account can use
 env.CLAUDE_CODE_USE_BEDROCK: 1
+env.AWS_PROFILE: company
 env.AWS_REGION: us-east-1
 ---
 ```
@@ -2107,9 +2150,124 @@ list it under `routing` in `.brindle/config.json`.
   `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`, and
   export `GEMINI_API_KEY` in your shell, or put it in a profile in your user
   profiles folder; never in a profile under `.brindle/agents/`, which is committed. For a
-  Gemini-compatible gateway, set `env.GOOGLE_GEMINI_BASE_URL` to its URL. As of
-  1.3.4, `agy` ignores Vertex AI credentials, so use a Gemini API key or gateway.
+  Gemini-compatible gateway, set `env.GOOGLE_GEMINI_BASE_URL` to its URL.
+  The Vertex login path in `agy` has not been validated by brindle; see the
+  OpenCode alternative below for Gemini on Vertex.
   The full setup is in [Google Antigravity](#google-antigravity) below.
+
+For Claude on an existing AWS SSO profile or Google ADC, launch preflight checks
+the configured cloud login and offers its cloud sign-in instead of Claude's
+personal sign-in. The action keeps the profile's project, region and credential
+location through both desktop sign-in and the completion check; repeated presses
+reuse its running terminal. Custom credential files offer a manual refresh check.
+Desktop and automatic sign-in share the credential source's lock, so a second
+flow leaves an existing cloud login running.
+`brindle doctor` groups
+profiles by cloud identity and reports credential availability, expiry when
+known, and refresh instructions. AWS account and role are selected by the named
+SSO profile. To isolate Google ADC, set `env.CLOUDSDK_CONFIG` to that identity's
+gcloud directory alongside the Vertex project and region.
+Use `auth: cloud` to remove inherited model API keys, including Bedrock bearer
+keys that would otherwise bypass the AWS SSO profile.
+
+`GOOGLE_APPLICATION_CREDENTIALS` selects a specific credential file. A browser
+ADC login writes the selected gcloud directory's default file. If the explicit
+credential file is elsewhere, brindle asks you to refresh it directly instead of
+opening a login that would update a different identity. Existing
+federated credentials and non-SSO AWS credential chains keep their existing
+handling; the new profile checks do not validate their expiry. Expired cloud
+credentials hold session delivery until refreshed, including when a cloud
+worker belongs to a Codex or other provider's supervisor. A session using several
+cloud identities stays held until all of them work again.
+
+Company-cloud routes (#265):
+
+| Model route | Agent and identity | Validation still needed |
+| --- | --- | --- |
+| Claude on Bedrock | Claude Code, AWS SSO profile and `AWS_REGION` | Live cloud validation |
+| Claude on Vertex | Claude Code, ADC, `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` | Live cloud validation |
+| Gemini on Vertex | OpenCode, `auth: cloud`, `google-vertex/<model-id>`, project/region and ADC | Live cloud validation |
+| Azure OpenAI | OpenCode, `auth: cloud`, `azure/<deployment>`, Azure CLI and Entra connection | Live cloud validation |
+
+For Gemini Vertex, put these fields in an agent profile (choose a model available
+in your project and region):
+
+```yaml
+provider: opencode
+model: google-vertex/gemini-2.5-pro
+auth: cloud
+env.GOOGLE_CLOUD_PROJECT: your-project
+env.VERTEX_LOCATION: us-central1
+env.CLOUDSDK_CONFIG: /absolute/path/to/company-gcloud
+```
+
+brindle passes that directory's `application_default_credentials.json` explicitly
+to OpenCode's SDK and checks the same file, while retaining browser refresh through
+gcloud. The profile's project and region override inherited OpenCode aliases.
+An explicit profile `CLOUDSDK_CONFIG` also overrides an inherited ADC file selector;
+set `env.GOOGLE_APPLICATION_CREDENTIALS` in the profile to select a custom file instead.
+
+For Azure OpenAI, select a separate Azure CLI directory for this identity and
+your deployed model's name:
+
+```yaml
+provider: opencode
+model: azure/your-deployment
+auth: cloud
+env.AZURE_CONFIG_DIR: /absolute/path/to/company-azure
+env.AZURE_RESOURCE_NAME: your-resource
+env.AZURE_TENANT_ID: your-tenant
+env.AZURE_SUBSCRIPTION_ID: your-subscription
+```
+
+Azure's directory and resource are required. Tenant and subscription, when set,
+must match the CLI's active identity. The sign-in action runs `az login` for that
+identity when needed, then OpenCode's `auth login --provider azure --method
+"Microsoft Entra ID (Azure CLI)"`. It checks a Cognitive Services access token
+and the connection for the selected resource before allowing launch. It never
+switches the default Azure CLI configuration behind your back.
+
+OpenCode cloud profiles receive an isolated connection store beneath
+`~/.brindle/cloud-opencode/` (or `BRINDLE_HOME`), keyed by their cloud identity
+and project/resource. `auth: cloud` removes inherited API keys that could select
+personal billing. Existing API-key profiles keep their behavior: a qualified
+model alone does not enable cloud login. Both cloud paths share profile-aware
+preflight/doctor checks, one in-flight sign-in per credential source, expiry
+holds, and live/paused-session recovery.
+
+OpenCode's [provider documentation](https://opencode.ai/docs/providers/) describes
+both alternatives. For Azure, its Entra connection is a required setup step;
+an Azure endpoint alone does not select CLI authentication. This is Azure OpenAI,
+separate from Claude on Foundry. The installed CLI inspected for these options
+was OpenCode 1.19.3. brindle's native client can send bearer-authenticated OpenAI
+chat requests, but it does not yet acquire or renew Google/Azure CLI tokens.
+Those routes need token lifecycle support before native cloud login can be claimed.
+
+Focused fake-based checks:
+
+```sh
+uv run pytest tests/test_daemon_actions.py -q -k 'cloud_profile_login or opencode_cloud_identity or login_and_secret or a_sign_in or preflight'
+uv run pytest tests/test_cloud_login.py -q
+uv run pytest tests/test_login_pause.py -q
+uv run pytest tests/test_doctor_signin.py -q
+uv run pytest tests/test_auth_failure_handling.py -q
+uv run pytest tests/test_opencode_provider.py -q
+uv run pytest tests/test_profile_auth.py -q
+npm --prefix app test -- --run src/screens/New/NewSession.test.tsx
+npm --prefix app test -- --run src/components/ProviderSignIn.test.tsx
+npm --prefix app run typecheck
+```
+
+`cloud_profile_login` and `opencode_cloud_identity` exercise real profile/environment
+resolution and HTTP login/preflight dispatch, identity propagation, duplicate
+actions, doctor expiry and live/paused credential-block recovery. The login-pause
+tests cover structured OpenCode expiry events, cross-provider supervisors,
+multiple expired identities and held-message delivery after recovery.
+Cloud commands and panes are fakes. No live AWS SSO, Google ADC, Azure login,
+model inference, or user cloud-config changes were used for validation. Provider
+permissions, deployed model availability, browser flows and token renewal against
+real cloud services still need manual validation. Gemini/Azure use OpenCode;
+native SDK and Antigravity cloud integration are not added by this change.
 
 If your org runs brindle for a team, its admins can set a route for everyone in
 the org's Routing settings on the brindle dashboard; an enforced org route replaces

@@ -79,6 +79,8 @@ export function ruleSummary(r: Pick<PermissionRuleDTO, "decision">): string {
 
 /* How far and how long an ask rule's approvals may reach, in words. */
 export function limitsText(limits: PermissionLimitsDTO | null | undefined): string {
+  // "once": no saved approval settles it (pushes into a release branch); each request is decided on its own.
+  if (limits?.life === "once") return "Approvals are never saved";
   const life = limits?.life === "time" && limits.minutes ? `up to ${minutesText(limits.minutes)}` : limits?.life === "session" ? "for the session" : "until revoked";
   const scope = limits?.max_scope;
   const reach = !scope || scope === "*" || scope === "**" ? "" : LEVELS.includes(scope as PermissionLevel) ? ` · ${LEVEL_LABEL[scope]}` : ` · within ${scope}`;

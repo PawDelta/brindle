@@ -431,7 +431,8 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
             pass
     from brindle.agents import _session_of
 
-    decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
+    # Only strict mode runs a call on brindle's allow (agy ignores a hook's allow otherwise).
+    decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent), spend=strict)
     if decision.decision == "ask":
         permissions.note_prompt(decision)
     if strict and decision.decision == "ask":
