@@ -1237,7 +1237,7 @@ def _restriction_parts(command: str, *, word_pattern: re.Pattern[str] = SIMPLE_C
 
 
 def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
-                    path_denies: list[Rule], assigned: list[bool]) -> bool:
+                    path_denies: list[Rule], assigned: list[bool], redirects: list[tuple[str, str]]) -> bool:
     """Whether no restriction can apply to what the patterns in ``parts``
     expand to. Plain ``ls`` has a proof: listing names can't push, force
     a git action or read a file's contents, so the default git and daemon
@@ -1246,8 +1246,10 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
     patterns are expanded (_stage_reads), but releasing the command
     releases every part of it, so then every part must be ls, a read-only
     git command (no pattern reaches here) or a READERS program whose
-    expanded command no restriction matches and whose reads no deny covers. Any other program may treat an expanded name as a
-    subcommand, option or file to act on."""
+    expanded command no restriction matches and whose reads no deny covers,
+    with no input redirect (a file it reads that no argument names). Any
+    other program may treat an expanded name as a subcommand, option or
+    file to act on."""
     readers = False
     for words in parts:
         first = next((i for i, word in enumerate(words) if any(c in word for c in "*?[")), None)
@@ -1270,6 +1272,8 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
         return True
     if any(assigned):
         return False  # an assignment (LD_PRELOAD=..., a tool's config path) changes what any program does
+    if any(op in ("<", "<>") or op == "<&" and not operand.isdigit() for op, operand in redirects):
+        return False
     for words in parts:
         if words[0] == "ls" or words[0] == "git" and _readonly_command(_GIT_READONLY, req, words):
             continue
@@ -1323,7 +1327,21 @@ def _stage_reads(req: Request, words: list[str], path_denies: list[Rule]) -> lis
     return argv
 
 
-# rg's options _reads_only_named accepts: flags, and those taking a value.
+# The options _reads_only_named accepts, written out in full: GNU tools
+# also take any unambiguous abbreviation of a long option (--recur is
+# --recursive), so an option not listed here is refused, never guessed.
+# grep: flags (a cluster may end in one taking a value, attached or next),
+# then long flags and long options taking a value.
+_GREP_SHORT = re.compile(r"-[nilcwvoxFEGHhsqLZaIUz0-9]*(?P<value>[efmABC].*)?", re.DOTALL)
+_GREP_FLAGS = ("--line-number", "--ignore-case", "--no-ignore-case", "--count", "--word-regexp", "--line-regexp",
+               "--invert-match", "--only-matching", "--fixed-strings", "--extended-regexp", "--basic-regexp",
+               "--perl-regexp", "--with-filename", "--no-filename", "--no-messages", "--quiet", "--silent",
+               "--files-with-matches", "--files-without-match", "--null", "--null-data", "--text",
+               "--byte-offset", "--initial-tab", "--color", "--colour")
+_GREP_VALUES = ("--regexp", "--file", "--max-count", "--after-context", "--before-context", "--context",
+                "--label", "--color", "--colour", "--binary-files")
+_WC = re.compile(r"-[cmlwL]+|--(bytes|chars|lines|words|max-line-length)")
+# rg's (it takes no abbreviations, but the same rule holds): flags, and those taking a value.
 _RG_FLAGS = re.compile(r"-[nilcwvoxFsSHNu]+|--(line-number|ignore-case|smart-case|case-sensitive|files-with-matches"
                        r"|count|word-regexp|invert-match|only-matching|fixed-strings|no-heading|heading"
                        r"|with-filename|no-filename|hidden|no-ignore|json|vimgrep)")
@@ -1331,19 +1349,40 @@ _RG_VALUES = ("-e", "--regexp", "-m", "--max-count", "-A", "-B", "-C", "--after-
               "--before-context", "--context", "-t", "--type", "-T", "--type-not")
 
 
+def _grep_options_known(args: list[str]) -> bool:
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            return True
+        if arg.startswith("--"):
+            name, eq, _ = arg.partition("=")
+            if eq and name not in _GREP_VALUES or not eq and name not in (*_GREP_FLAGS, *_GREP_VALUES):
+                return False
+            if not eq and name in _GREP_VALUES and name not in _GREP_FLAGS:
+                i += 1  # its value is the next word
+        elif arg.startswith("-") and arg != "-":
+            short = _GREP_SHORT.fullmatch(arg)
+            if short is None:
+                return False
+            if short.group("value") is not None and len(short.group("value")) == 1:
+                i += 1  # its value is the next word
+        i += 1
+    return True
+
+
 def _reads_only_named(program: str, args: list[str], cwd: str) -> bool:
     """Whether ``program`` with ``args`` reads only files its arguments
     name: no recursion into a directory, no list of names read from a
-    file, no command run (rg's --pre). grep's recursion is refused
-    outright; rg always recurses, so it must name files and no directory,
-    with only the options it knows (anything else could take the operand
-    that would have been a path)."""
+    file, no command run (rg's --pre). grep and wc take only the options
+    listed above (so no recursion or --files0-from, however spelled); rg
+    always recurses, so it must name files and no directory, with only the
+    options it knows (anything else could take the operand that would have
+    been a path)."""
     if program == "grep":
-        return not any(a in ("--recursive", "--dereference-recursive", "recurse")
-                       or a.startswith("--directories") or re.fullmatch(r"-[^-]*[rR].*", a, re.DOTALL)
-                       for a in args)
+        return _grep_options_known(args)
     if program == "wc":
-        return not any(a.startswith("--files0") for a in args)
+        return all(_WC.fullmatch(a) or a == "-" or not a.startswith("-") for a in args)
     if program != "rg":
         return True
     positional, patterned, i = [], False, 0
@@ -1377,13 +1416,17 @@ def essential(req: Request, rules: list[Rule], checks: list[str] | None = None) 
     program whose reads _stage_reads proves clear of the read denies in
     ``rules``; no substitution, leading assignment, or redirect but to
     /dev/null or another descriptor; and no deny or ask in ``rules``
-    applies (_restriction_in_parts, which also expands patterns)."""
+    applies, to the whole command or any part of it (_restriction_in_parts,
+    which also expands patterns)."""
     if req.kind != "bash" or not req.command:
         return False
     assigned: list[bool] = []
     redirects: list[tuple[str, str]] = []
     parts = _restriction_parts(req.command, word_pattern=RESTRICTION_WORD, assigned=assigned, redirects=redirects)
     if parts is None or any(assigned) or not all(_redirect_safe(*r) for r in redirects):
+        return False
+    # The whole command as written (an exact deny on a pipeline), then each part of it.
+    if any(r.decision in ("deny", "ask") and rule_matches(r, req, checks) for r in rules):
         return False
     if _restriction_in_parts(req, checks=checks, rules=rules) is not None:
         return False
@@ -1505,7 +1548,8 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
         req = substituted
     parsed = _restriction_parts(req.command)
     assigned: list[bool] = []
-    patterns = (_restriction_parts(req.command, word_pattern=RESTRICTION_WORD, assigned=assigned)
+    redirects: list[tuple[str, str]] = []
+    patterns = (_restriction_parts(req.command, word_pattern=RESTRICTION_WORD, assigned=assigned, redirects=redirects)
                 if parsed is None else None)
     words = parsed if parsed is not None else patterns if patterns is not None else _segments(req.command)
     parts = [replace(req, command=" ".join(" ".join(part).split())) for part in words]
@@ -1513,7 +1557,7 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
     if matched is not None:
         return matched
     if patterns is not None:
-        uncertain = not _globs_excluded(req, patterns, rules, path_denies, assigned)
+        uncertain = not _globs_excluded(req, patterns, rules, path_denies, assigned, redirects)
     else:
         uncertain = parsed is None and any(_may_restrict(rule, req.command) for rule in rules)
     return _syntax_ask(req) if uncertain else None

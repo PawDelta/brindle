@@ -121,6 +121,10 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
                  marks=pytest.mark.variant("review: a pattern-free stage read a denied file")),
     pytest.param("LD_PRELOAD=x cat *.py", True, None, id="read_only_no_stall-assignment",
                  marks=pytest.mark.variant("an assignment can make any program run code")),
+    pytest.param("grep --recur SECRET *", True, None, id="read_only_no_stall-abbreviated_option",
+                 marks=pytest.mark.variant("review: GNU grep takes --recur for --recursive")),
+    pytest.param("cat < ../../../.env | head *.py", True, None, id="read_only_no_stall-input_redirect",
+                 marks=pytest.mark.variant("review: an input redirect read a denied file")),
 ])
 def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound, extra):
     from brindle import permissions as p
@@ -164,6 +168,11 @@ def test_a_profile_without_bash_rules_allows_only_essentials(db, ws, monkeypatch
     # permission_essentials, on by default: read-only inspection needs no rule.
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && grep -n hi *.py | tail -1")) is not None
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cat ../../../.env")) is None   # a read deny still wins
+    from brindle import permissions as p
+
+    with p.editing() as store:   # ...and a deny on the whole pipeline, with the policy off
+        store.rules = [p.Rule("bash", "cat app.py | head -5", "exact", "deny")]
+    assert agents.handle_hook(db, a.id, "pre-tool", bash("cat app.py | head -5")) is None
     set_local(ws.repo_root, "permission_essentials", False)
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status")) is None
 
