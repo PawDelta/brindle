@@ -1,0 +1,82 @@
+<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Setup · Permissions</title><style>:root{
+  --canvas:#09090b;--canvas-2:#121214;--surface:#16161a;--surface-2:#1c1b1f;
+  --line:rgba(63,63,70,.42);--line-strong:rgba(82,82,91,.6);
+  --ink:#eee6dc;--ink-2:#b9ab9b;--ink-3:#948677;
+  --sap:#e8875a;--sap-soft:rgba(232,135,90,.12);--pass:#34d399;--pass-soft:rgba(52,211,153,.12);
+  --fawn:#d7af87;--fawn-soft:rgba(215,175,135,.1);--branch:#a99be0;--branch-soft:rgba(169,155,224,.12);--on-branch:#15102a;
+  --sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;color-scheme:dark}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){--canvas:#f6f3ef;--canvas-2:#efeae4;--surface:#fff;--surface-2:#f8f5f1;--line:rgba(120,104,88,.2);--line-strong:rgba(120,104,88,.34);--ink:#211a14;--ink-2:#5a4d41;--ink-3:#75685b;--sap:#9b4724;--sap-soft:rgba(155,71,36,.1);--pass:#046e50;--pass-soft:rgba(4,110,80,.1);--fawn:#86572a;--fawn-soft:rgba(134,87,42,.09);--branch:#6350b3;--branch-soft:rgba(99,80,179,.1);--on-branch:#fff;color-scheme:light}}
+:root[data-theme="light"]{--canvas:#f6f3ef;--canvas-2:#efeae4;--surface:#fff;--surface-2:#f8f5f1;--line:rgba(120,104,88,.2);--line-strong:rgba(120,104,88,.34);--ink:#211a14;--ink-2:#5a4d41;--ink-3:#75685b;--sap:#9b4724;--sap-soft:rgba(155,71,36,.1);--pass:#046e50;--pass-soft:rgba(4,110,80,.1);--fawn:#86572a;--fawn-soft:rgba(134,87,42,.09);--branch:#6350b3;--branch-soft:rgba(99,80,179,.1);--on-branch:#fff;color-scheme:light}
+*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased}
+button{font:inherit;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:36px;border:1px solid var(--line-strong);border-radius:8px;padding:6px 18px;background:var(--surface);color:var(--ink);font-weight:500}
+button:hover{background:var(--surface-2)}button:focus-visible,.preset:focus-visible{outline:2px solid var(--branch);outline-offset:2px}
+.primary{border-color:transparent;background:var(--branch);color:var(--on-branch)}.primary:hover{background:var(--branch);opacity:.9}.link{border-color:transparent;background:transparent;color:var(--ink-2)}
+.shell{max-width:960px;margin:0 auto;padding:40px 24px 48px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:40px;font-size:12px;color:var(--ink-3)}
+.brand{display:flex;align-items:center;gap:8px;font-size:18px;font-weight:600;color:var(--ink)}.brand svg{width:30px;height:21px}
+.steps{display:flex;gap:6px;align-items:center}.steps span{width:28px;height:4px;border-radius:2px;background:var(--line-strong)}.steps .done{background:var(--branch)}.steps .now{background:var(--branch);width:44px}
+h1{font-size:24px;font-weight:600;letter-spacing:-.5px;margin:0 0 8px}.lede{color:var(--ink-2);max-width:640px;margin:0 0 32px}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.preset{position:relative;text-align:left;display:flex;flex-direction:column;gap:12px;align-items:stretch;justify-content:flex-start;border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:20px;font-weight:400;min-height:0}
+.preset:hover{background:var(--surface);border-color:var(--line-strong)}.preset[aria-checked="true"]{border-color:var(--branch);background:var(--branch-soft)}
+.head{display:flex;align-items:center;gap:10px}.radio{width:18px;height:18px;border-radius:50%;border:2px solid var(--line-strong);flex-shrink:0}.preset[aria-checked="true"] .radio{border-color:var(--branch);box-shadow:inset 0 0 0 4px var(--surface);background:var(--branch)}
+.name{font-size:16px;font-weight:600}.tag{font-size:10px;font-weight:600;letter-spacing:.06em;border-radius:4px;padding:2px 6px;color:var(--branch);background:var(--branch-soft);margin-left:auto}
+.who{font-size:13px;color:var(--ink-2)}
+.rows{display:grid;gap:6px;margin:0;padding:12px 0 0;border-top:1px solid var(--line);list-style:none;font-size:13px}.rows li{display:grid;grid-template-columns:96px 1fr;gap:8px}
+.k{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding-top:2px}.k.run{color:var(--pass)}.k.ask{color:var(--fawn)}.k.block{color:var(--sap)}.v{color:var(--ink-2)}
+.meter{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--ink-3)}.bar{display:flex;gap:3px}.bar i{width:14px;height:6px;border-radius:2px;background:var(--line-strong)}.bar i.on{background:var(--sap)}
+.note{display:flex;gap:10px;align-items:flex-start;margin-top:24px;padding:14px 16px;border-radius:8px;background:var(--canvas-2);border:1px solid var(--line);font-size:13px;color:var(--ink-2)}
+.foot{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-top:32px;flex-wrap:wrap}.foot .hint{font-size:12px;color:var(--ink-3)}.foot .btns{display:flex;gap:8px;margin-left:auto}
+.done{display:none;margin-top:24px;padding:14px 16px;border-radius:8px;background:var(--pass-soft);color:var(--pass);font-size:13px}
+.theme{font-size:12px;min-height:28px;padding:2px 10px}
+@media(max-width:720px){.shell{padding:24px 16px 32px}.grid{grid-template-columns:minmax(0,1fr)}.rows li{grid-template-columns:84px 1fr}.top{margin-bottom:28px}}
+</style></head><body>
+<div class="shell">
+<div class="top"><div class="brand"><svg viewBox="1.2 5.6 29.6 20.8" aria-hidden="true"><g fill="none" stroke-width="3" stroke-linecap="round"><path stroke="#a99be0" d="M9 16 H23"/><path stroke="#e8875a" d="M8 16 C11 16 11.5 7.5 16 7.5 C20.5 7.5 21 16 24 16"/><path stroke="#34d399" d="M8 16 C11 16 11.5 24.5 16 24.5 C20.5 24.5 21 16 24 16"/><path stroke="#d7af87" stroke-width="4.8" d="M3.8 16 H9"/><path stroke="#34d399" stroke-width="4.8" d="M23 16 H28.2"/></g></svg>brindle</div>
+<div class="steps" aria-label="Setup step 3 of 4"><span class="done"></span><span class="done"></span><span class="now"></span><span></span></div>
+<button type="button" class="theme" id="theme">Light theme</button></div>
+
+<h1>How much should your agents do on their own?</h1>
+<p class="lede">Agents stop and wait whenever they need your permission. Pick how often that happens. You can change this, and edit or remove any rule it adds, in Settings → Permissions.</p>
+
+<div class="grid" role="radiogroup" aria-label="Permission preset">
+<button type="button" class="preset" role="radio" data-p="Autonomous" aria-checked="true">
+ <div class="head"><span class="radio"></span><span class="name">Autonomous</span><span class="tag">RECOMMENDED</span></div>
+ <p class="who">Agents work start to finish without stopping. Best for most people: you review the result, not every step.</p>
+ <ul class="rows"><li><span class="k run">Runs on its own</span><span class="v">Reading, writing and editing files, running commands, fetching docs, pushing to work branches</span></li><li><span class="k ask">Asks you</span><span class="v">Pushing into your default branch (e.g. main)</span></li><li><span class="k block">Blocked</span><span class="v">Deleting repositories, reading credential files (~/.ssh, ~/.aws, .env)</span></li></ul>
+ <div class="meter">Interruptions <span class="bar"><i class="on"></i><i></i><i></i><i></i></span> rarely</div>
+</button>
+<button type="button" class="preset" role="radio" data-p="Permissive" aria-checked="false">
+ <div class="head"><span class="radio"></span><span class="name">Permissive</span></div>
+ <p class="who">Local work runs freely; anything that leaves your machine asks once, and you can remember the answer.</p>
+ <ul class="rows"><li><span class="k run">Runs on its own</span><span class="v">Reading, writing and editing files, running commands</span></li><li><span class="k ask">Asks you</span><span class="v">Pushing, fetching web content, using connected tools (GitHub, Slack)</span></li><li><span class="k block">Blocked</span><span class="v">Deleting repositories, reading credential files</span></li></ul>
+ <div class="meter">Interruptions <span class="bar"><i class="on"></i><i class="on"></i><i></i><i></i></span> sometimes</div>
+</button>
+<button type="button" class="preset" role="radio" data-p="Standard" aria-checked="false">
+ <div class="head"><span class="radio"></span><span class="name">Standard</span></div>
+ <p class="who">Agents read freely but check with you before changing things. Good while you're getting to know brindle.</p>
+ <ul class="rows"><li><span class="k run">Runs on its own</span><span class="v">Reading files, your project's test and check commands</span></li><li><span class="k ask">Asks you</span><span class="v">Writing and editing files, other commands, pushing, web and tool access</span></li><li><span class="k block">Blocked</span><span class="v">Deleting repositories, reading credential files</span></li></ul>
+ <div class="meter">Interruptions <span class="bar"><i class="on"></i><i class="on"></i><i class="on"></i><i></i></span> often</div>
+</button>
+<button type="button" class="preset" role="radio" data-p="Secure" aria-checked="false">
+ <div class="head"><span class="radio"></span><span class="name">Secure</span></div>
+ <p class="who">For sensitive code: almost everything asks, approvals expire after 15 minutes, and only owners and admins can push.</p>
+ <ul class="rows"><li><span class="k run">Runs on its own</span><span class="v">Reading tracked files</span></li><li><span class="k ask">Asks you</span><span class="v">Every change, command, push and tool, remembered for at most 15 minutes</span></li><li><span class="k block">Blocked</span><span class="v">Deleting repositories, credential and .env files, anything no rule covers</span></li></ul>
+ <div class="meter">Interruptions <span class="bar"><i class="on"></i><i class="on"></i><i class="on"></i><i class="on"></i></span> constantly</div>
+</button>
+</div>
+
+<div class="note"><span style="color:var(--branch)">◇</span><span id="note">With Autonomous, brindle also groups similar requests (for example every push into main) so one answer covers them all.</span></div>
+<div class="done" id="done" role="status"></div>
+
+<div class="foot"><span class="hint">Nothing is locked in. Every rule a preset adds can be edited or removed later.</span><div class="btns"><button type="button" class="link" id="back">Back</button><button type="button" class="primary" id="go">Continue with Autonomous</button></div></div>
+</div>
+<script>
+const cards=[...document.querySelectorAll('.preset')],go=document.getElementById('go'),note=document.getElementById('note');
+const notes={Autonomous:'With Autonomous, brindle also groups similar requests (for example every push into main) so one answer covers them all.',Permissive:'Permissive asks before anything leaves your machine. Remembered answers stop repeat questions.',Standard:'Standard pauses agents often. If they stall, switch to Autonomous in Settings → Permissions, or allow the noisiest rules there.',Secure:'Secure pauses agents on almost every step and denies anything no rule covers. Expect to approve requests often.'};
+function pick(c){cards.forEach(x=>{x.setAttribute('aria-checked',String(x===c));x.tabIndex=x===c?0:-1});go.textContent='Continue with '+c.dataset.p;note.textContent=notes[c.dataset.p]}
+cards.forEach((c,i)=>{c.onclick=()=>pick(c);c.onkeydown=e=>{const d={ArrowRight:1,ArrowDown:1,ArrowLeft:-1,ArrowUp:-1}[e.key];if(d){e.preventDefault();const n=cards[(i+d+cards.length)%cards.length];pick(n);n.focus()}}});pick(cards[0]);
+go.onclick=()=>{const p=document.querySelector('.preset[aria-checked="true"]').dataset.p,d=document.getElementById('done');d.style.display='block';d.textContent=p+' applied. You can change it any time in Settings → Permissions. (Preview only.)'};
+document.getElementById('back').onclick=()=>{};
+document.getElementById('theme').onclick=e=>{const light=document.documentElement.dataset.theme!=='light';document.documentElement.dataset.theme=light?'light':'dark';e.target.textContent=light?'Dark theme':'Light theme'};
+</script></body></html>
