@@ -1247,16 +1247,21 @@ def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, w
     from brindle.db import DB
     from brindle.service import inbox
 
-    # Answered in the pane before the hook's first look, which only sees the pane past the prompt.
-    looked, asked, publish, wk = threading.Event(), threading.Event(), bus.publish_agent, db.get_agent("wk")
-    monkeypatch.setattr(tmux, "capture", lambda target, **kw: (looked.wait(5), screen)[1])
-    monkeypatch.setattr(bus, "publish_agent", lambda d, kind, *a, **k: (
-        kind == "permission.pending" and asked.set(), publish(d, kind, *a, **k))[1])
+    looks, third, go = iter([screen, "Do you want to proceed?\n❯ 1. Yes"]), threading.Event(), threading.Event()
+    wk = db.get_agent("wk")
+
+    def capture(target, **kw):  # the hook's looks: past the prompt, the prompt again, then past it for good
+        if (read := next(looks, None)) is None and not third.is_set():
+            third.set()         # its third look waits on the test
+            go.wait(5)
+        return read or screen
+
+    monkeypatch.setattr(tmux, "capture", capture)
     hook = threading.Thread(target=lambda: agents.permission_request_decision(DB(), wk, {**ASK, "cwd": str(repo)}))
     hook.start()
     shown = lambda: [i.kind for i in inbox.items(db, str(repo), panes={"%2": True}) if i.agent_id == "wk"]  # noqa: E731
-    assert asked.wait(5) and shown() == ["permission"]
-    looked.set()
+    assert third.wait(5) and shown() == ["permission"]      # one read past the prompt doesn't end the hold
+    go.set()
     hook.join(HOLD / 2)         # well before the hold would end
     assert not hook.is_alive() and shown() == []
 
