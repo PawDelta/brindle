@@ -24,6 +24,9 @@ so a broad grant never resolves a request its policy forbids."""
 from __future__ import annotations
 
 import fnmatch
+import hashlib
+import os
+import subprocess
 import time
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
@@ -265,9 +268,55 @@ def covers(action: SavedAction, req: Request, rules: list[Rule] | None = None) -
     hits = [scope_matches(action.kind, action.pattern, key, loose=deny) for key in ask_keys(req)]
     if deny:
         return any(hits)
-    if not all(hits):
+    if not all(hits) or action.binding and not _binding_holds(action.binding, req):
         return False
     return action.kind != "push" or _other_parts_allowed(req, rules)
+
+
+GIT_SECONDS = 5
+
+
+def _git(repo: str, *args: str) -> str | None:
+    try:
+        res = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=GIT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return res.stdout.strip() if res.returncode == 0 else None
+
+
+def _owner_now(repo_root: str | None) -> str | None:
+    """Who approves now, as brindle 0.4.7 bound its remembered approvals: the
+    licensed account (within its org), or "local" without a licence; None when
+    an org's member can't be verified."""
+    from brindle.pro import license
+
+    lim = org_limits(repo_root)
+    owner = lim.owner if lim else "local"
+    try:
+        subject = license.current(refresh=False).sub
+    except license.LicenseError:
+        return "local" if owner == "local" else None
+    return hashlib.sha256(f"{owner}:{subject}".encode()).hexdigest()
+
+
+def _binding_holds(binding: dict, req: Request) -> bool:
+    """Whether what a saved allow was bound to still holds for ``req``: the
+    approving identity (``owner``), the repository's git directory
+    (``git_dir``) and, for a push, the URL every pushed-to remote resolves to
+    (``url``). Anything that can't be read doesn't hold."""
+    repo = req.repo_root or req.worktree or req.cwd
+    if "owner" in binding and binding["owner"] != _owner_now(req.repo_root or None):
+        return False
+    if "git_dir" in binding:
+        found = _git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir") if repo else None
+        if found is None or os.path.realpath(found) != os.path.realpath(binding["git_dir"]):
+            return False
+    if "url" in binding:
+        remotes = {p.remote for p in permissions.push_calls(req.command or "")}
+        if not remotes or any(r == UNKNOWN_REF or _git(repo, "remote", "get-url", "--push", r) != binding["url"]
+                              for r in remotes):
+            return False
+    return True
 
 
 def limits_allow(action_level: str | None, action_pattern: str, action_life: str, action_minutes: float | None,
@@ -321,6 +370,7 @@ class OrgLimits:
     allow_persistent: bool = False
     deny: tuple[Rule, ...] = ()
     why: str = ""                 # why no saved allow applies
+    owner: str = "local"          # "org:<id>": whose approvals these are (_owner_now)
 
 
 def org_rule(spec: str) -> Rule:
@@ -350,13 +400,14 @@ def org_limits(repo_root: str | None) -> OrgLimits | None:
         return None if p.allowed else OrgLimits(False, why=p.reason)
     g = p.permission_grants
     deny = tuple(org_rule(s) for s in g.deny) if g else ()
+    owner = f"org:{p.org_id}"
     blocked = status.block_reason(p)
     if blocked:
-        return OrgLimits(False, deny=deny, why=f"org {p.org_id}: {blocked}")
+        return OrgLimits(False, deny=deny, why=f"org {p.org_id}: {blocked}", owner=owner)
     if g is None:
-        return OrgLimits(False, why=f"org {p.org_id}'s policy sets no permission_grants")
+        return OrgLimits(False, why=f"org {p.org_id}'s policy sets no permission_grants", owner=owner)
     return OrgLimits(g.allow, tuple(g.kinds), g.max_minutes, tuple(g.lifetimes), tuple(g.scopes),
-                     g.allow_persistent, deny, "" if g.allow else f"org {p.org_id} allows no saved approvals")
+                     g.allow_persistent, deny, "" if g.allow else f"org {p.org_id} allows no saved approvals", owner)
 
 
 def org_denies(repo_root: str | None) -> list[Rule]:
@@ -384,12 +435,16 @@ def org_refuses(lim: OrgLimits | None, kind: str, life: str, minutes: float | No
 
 
 def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session: str | None = None,
-           rules: list[Rule] | None = None, now: float | None = None, denies_only: bool = False) -> Decision | None:
+           rules: list[Rule] | None = None, now: float | None = None, denies_only: bool = False,
+           asks: tuple = (), spend: bool = False) -> Decision | None:
     """The saved action that settles an ask for ``req`` (``rule``: the ask
-    rule that asked, None for an unmatched ask), as a Decision, or None. A
-    saved deny always stops it; a saved allow only within the rule's limits
-    (``denies_only``: look for a deny alone, before the policy's own allows).
-    ``session``: the asking agent's session, for saved actions that last one."""
+    rule that asked, None for an unmatched ask; ``asks``: every ask rule that
+    matches it, when several do), as a Decision, or None. A saved deny always
+    stops it; a saved allow only within the limits of every one of those
+    rules and the org's, while it has uses left (``spend``: the call runs on
+    it, so one is spent). ``denies_only``: look for a deny alone, before the
+    policy's own allows. ``session``: the asking agent's session, for saved
+    actions that last one."""
     now = time.time() if now is None else now
     hits = [s for s in saved if not s.expired(now) and (s.life != "session" or (session and s.session == session))
             and (s.decision == "deny" or not denies_only) and covers(s, req, rules)]
@@ -400,8 +455,9 @@ def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session
         return None
     lim = org_limits(req.repo_root or None) if hits else None
     for s in hits:
-        if (limits_allow(s.level, s.pattern, s.life, s.minutes, rule) is None
-                and org_refuses(lim, s.kind, s.life, s.minutes, s.level, s.scope) is None):
+        if (all(limits_allow(s.level, s.pattern, s.life, s.minutes, r) is None for r in asks or [rule])
+                and org_refuses(lim, s.kind, s.life, s.minutes, s.level, s.scope) is None
+                and (s.uses_left is None or s.uses_left > 0 and (not spend or permissions.spend_saved_use(s.id)))):
             return Decision("allow", f"covered by your saved action {s.id} ({s.kind} {s.pattern})", rule)
     return None
 
@@ -490,7 +546,7 @@ def _restrictive(policies: list[Decision]) -> Decision:
     def rank(p: Decision) -> tuple:
         limits = (p.rule.limits if p.rule else None) or {}
         life = limits.get("life")
-        return ({"time": 0, "session": 1}.get(life, 2), limits.get("minutes") or 0)
+        return ({"once": -1, "time": 0, "session": 1}.get(life, 2), limits.get("minutes") or 0)
 
     return sorted(policies, key=rank)[0]
 
@@ -526,7 +582,8 @@ def eligible(ask: PendingAsk, scope: dict, mode: str, minutes: float | None) -> 
     if mode == "once":
         return None
     life = {"session": "session", "timed": "time", "forever": "forever"}[mode]
-    return (limits_allow(scope.get("level"), scope["pattern"], life, minutes, ask.rule)
+    return (next((why for r in ask.policy.asks or [ask.rule]
+                  if (why := limits_allow(scope.get("level"), scope["pattern"], life, minutes, r))), None)
             or org_refuses(org_limits(ask.repo_root or None), ask.ask.kind, life, minutes, scope.get("level"),
                            scope["value"]))
 
@@ -615,6 +672,10 @@ def decide_group(db, key: str, scope_value: str, mode: str, minutes: float | Non
     if not hits:
         raise _error("conflict", "nothing in this scope can be approved: "
                      + "; ".join(sorted(set(reasons.values()))), 409)
+    # What is saved is the decision on this item: it must be one its own ask permits.
+    own = eligible(g.rep, scope, mode, minutes) if mode in ("session", "timed", "forever") else None
+    if own:
+        raise _error("conflict", f"this can't be saved: {own}", 409)
     grant = None
     if mode in ("session", "timed", "forever"):
         grant = _grant(g, scope, "allow", {"session": "session", "timed": "time", "forever": "forever"}[mode],

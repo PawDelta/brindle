@@ -3517,7 +3517,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             if profile is not None:
                 rules += permissions.profile_bash_allows(profile)
             decision = permissions.Decision("ask", "not in the profile's allowed_tools") if review_only \
-                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
+                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session, spend=True)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>)
                 # wins before any part-by-part allow below.
@@ -3599,7 +3599,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             return None
         if policy:
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=session)
+            decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=session, spend=True)
             _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
             permissions.note_prompt(decision)
         else:

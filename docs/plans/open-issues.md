@@ -22,7 +22,7 @@ This plan covers the 18 open GitHub issues on `brindle` as of 2026-10-23. It is 
    Paths it prints are relative to the repo root. The map can lag, so trust the files when they differ.
 3. **One issue, one branch.** Branch from `main` as `fix/<short-name>` or `feat/<short-name>`. Do not mix issues on one branch.
 4. **Test first for bugs.** For every issue marked BUG, write a test that reproduces the reported symptom and **fails on the unmodified code**. Run it, confirm it fails, then fix the root cause, then confirm it passes. A test that passes before your change is not evidence of a fix.
-5. **Tests must earn their place** (repo rule). Add the fewest tests that would fail without your change: usually one regression test. Extend an existing test or parametrize table before adding a new test function. Do not test wording, help text, constants, defaults or enum values. Do not assert that a mock was called with what the test just gave it. Use database rows and fakes, not real tmux sessions, subprocesses or `sleep`, unless timing is the thing being tested.
+5. **Tests must earn their place** (repo rule). Add the fewest tests that would fail without your change: usually one regression test. Extend an existing test or parametrize table before adding a new test function. Do not test wording, help text, constants, defaults or enum values. Do not assert that a mock was called with what the test just gave it. Use database rows and fakes, not real tmux sessions, subprocesses or timed waits, unless timing is the thing being tested.
 6. **Mock every new call.** If your change makes a function call a new function, add mocks for that new call in every existing test that patches the original function.
 7. **Verify.** Run the targeted tests with `uv run pytest <file> -q`. Run the full suite once at the end of a phase with `uv run pytest -q`.
 8. **Commit** on your branch with a clear message. Do not push or open a PR unless the supervisor says to. Add this trailer:
@@ -65,7 +65,7 @@ Blocked:
 - **Symptom.** `tests/test_auth_failure_handling.py::test_stop_failure_payloads_with_enums_and_last_assistant_message` fails on macOS with xdist: `TmuxError: ... no server running on /private/tmp/tmux-501/brindle-test-<pid>`.
 - **Likely cause.** tmux exits when its last session closes. A detached helper from an earlier test on the same xdist worker, or teardown racing a background spawn, kills the server.
 - **Find.** `graphify query "isolated tmux server test fixture" --graph graphify-out/graph.json`. Look in `tests/conftest.py` (the `sh()` helper is at line 22) and `src/brindle/tmux.py`.
-- **Fix.** Make each test's tmux server own its lifetime: keep a dummy session alive for the server's lifetime, or wait for teardown of the previous test before the next one creates a server. Do not add a sleep or retry loop (the repo's lint check rejects them).
+- **Fix.** Make each test's tmux server own its lifetime: keep a dummy session alive for the server's lifetime, or wait for teardown of the previous test before the next one creates a server. Do not add timed waits or try-again loops (the repo's lint check rejects them).
 - **Test.** Write a deterministic test that creates the server, closes the first session, and then adds a window. On unmodified code it must fail. Do not rely on timing.
 - **Done when.** The new test fails before the fix and passes after. `uv run pytest tests/test_auth_failure_handling.py -q` passes.
 
@@ -148,7 +148,7 @@ Do these in order, one commit each, on one branch `feat/review-pipeline`.
 
 - **8a. Auto-start review after a report.** When a worker reports and no review is running after a configurable short delay (default 60 seconds; add the setting to the config), start the review without the supervisor calling `request_review`. Find `report_result` and `request_review` in `mcp_server.py`. Test with the real report path and a fake clock.
 - **8b. Expose review state.** Add a per-branch state to `list_agents` and `list_tasks`: `waiting_for_checks`, `checks_running`, `reviewer_running`, `verdict_recorded`, `merge_failed` (with the reason). Test the state transitions with database rows.
-- **8c. Retry one merge on transient failure.** When an approved branch fails a merge check, retry the merge once. Send the full failing check output to the supervisor, not just the first line. Test with a fake check that fails once, then passes.
+- **8c. Attempt a merge a second time on transient failure.** When an approved branch fails a merge check, attempt the merge once more. Send the full failing check output to the supervisor, not just the first line. Test with a fake check that fails once, then passes.
 - **8d. Ignore untracked scratch files.** When deciding whether a worker "left uncommitted changes", ignore untracked files, or name the file in the message. Find the check in `workspaces.py` or `cli.py`. Test with one untracked file present and the work committed: the branch must be reviewable.
 - **8e. Run review in parallel with checks (optional, only if 8a–8d are done and green).** Start the reviewer as soon as the diff is ready and hand it the check results when they finish. This changes the pipeline's ordering, so skip it if you are unsure, and say so in your report.
 - **Done when.** Each sub-task's test fails before and passes after. Run the full suite once at the end.

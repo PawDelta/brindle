@@ -5,6 +5,7 @@ read-only pipeline allowance, prompt counts and the daemon's policy API."""
 import asyncio
 import json
 import os
+import subprocess
 import time
 
 import pytest
@@ -57,7 +58,7 @@ def _send(method, path, body=None):
     return sent[0]["status"], json.loads(out)
 
 
-def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_its_rules(monkeypatch):
+def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_its_rules(monkeypatch, repo):
     monkeypatch.setattr(permissions, "DEFAULT_PRESET", "autonomous")   # conftest pins the tests to Standard
     store = permissions.load_store()
     assert store.preset == "autonomous" and store.unmatched == "allow"
@@ -81,30 +82,43 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     assert json.loads(permissions.store_path().read_text())["preset"] == "standard"   # migrated once, on disk
     # A 0.4.7 store (version 2): its editor's Balanced preset for a repo becomes
     # Standard, its own rule stays (repo and expiry kept), a remembered push
-    # becomes a saved action with its reach and expiry, an expired one is dropped.
+    # becomes a saved action with its reach, expiry, remote URL and remaining
+    # uses; an expired or used-up one is dropped.
     now = time.time()
     balanced = {"read": "allow", "write": "allow", "edit": "allow", "bash": "ask", "fetch": "ask", "mcp": "ask",
                 "other": "ask"}
-    push = {"owner": "local", "repo_root": "/r", "kind": "bash", "action": "git-push", "scope_level": "branch",
-            "scope": {"repo": "/r", "git_dir": "/r/.git", "remote": "origin", "url": "https://x/y.git",
-                      "ref": "refs/heads/feature"}, "lifetime": "time", "created": now, "match": "push"}
+    root = os.path.realpath(repo)
+    url = subprocess.run(["git", "-C", root, "remote", "get-url", "origin"], capture_output=True, text=True).stdout.strip()
+    push = {"owner": "local", "repo_root": root, "kind": "bash", "action": "git-push", "scope_level": "branch",
+            "scope": {"repo": root, "git_dir": os.path.join(root, ".git"), "remote": "origin", "url": url,
+                      "ref": "refs/heads/feature"}, "lifetime": "time", "created": now, "match": "push",
+            "max_uses": 2, "uses_spent": 1}
     v2 = {"version": 2,
           "rules": [*({"id": f"{i:016x}", "kind": k, "match": "*", "match_type": "glob", "decision": d,
                        "source": "user", "created": 0, "repo_root": "/r"} for i, (k, d) in enumerate(balanced.items())),
                     {"id": "abcdef0123456789", "kind": "bash", "match": "make deploy", "match_type": "exact",
                      "decision": "ask", "source": "user", "created": 1, "repo_root": "/r", "expires_at": now + 3600}],
           "remembered": [{**push, "id": "remembered-a", "expires_at": now + 600},
-                         {**push, "id": "remembered-b", "expires_at": now - 1}]}
+                         {**push, "id": "remembered-b", "expires_at": now - 1},
+                         {**push, "id": "remembered-c", "expires_at": now + 600, "uses_spent": 2}]}
     permissions.store_path().write_text(json.dumps(v2))
     store = permissions.load_store()
     assert store.preset == "standard"
     assert [(r.match, r.repo_root, r.expires) for r in store.rules if r.source != "preset"] == [
         ("make deploy", "/r", now + 3600)]
     (saved,) = store.saved
-    assert (saved.id, saved.kind, saved.pattern, saved.level, saved.life, saved.expires, saved.repo) == (
-        "remembered-a", "push", "* → feature @ origin", "destination", "time", now + 600, "/r")
+    assert (saved.id, saved.kind, saved.pattern, saved.level, saved.life, saved.expires, saved.repo, saved.uses_left) == (
+        "remembered-a", "push", "* → feature @ origin", "destination", "time", now + 600, root, 1)
     on_disk = json.loads(permissions.store_path().read_text())
     assert on_disk["remembered"] == v2["remembered"] and on_disk["v2_rules"] == v2["rules"]   # nothing deleted
+    # It covers that push while origin is still the remote it was approved for, for its one use left.
+    push_cmd = Request("claude", "bash", "Bash", root, root, root, command="git push origin HEAD:feature")
+    assert decide(push_cmd).decision == "allow"
+    subprocess.run(["git", "-C", root, "remote", "set-url", "origin", "https://elsewhere.example/y.git"], check=True)
+    assert decide(push_cmd).decision == "ask"                    # origin points elsewhere now
+    subprocess.run(["git", "-C", root, "remote", "set-url", "origin", url], check=True)
+    assert decide(push_cmd, spend=True).decision == "allow"      # the call runs on it: its last use
+    assert decide(push_cmd).decision == "ask"
 
 
 @pytest.mark.parametrize("request_of, decision, rule", [

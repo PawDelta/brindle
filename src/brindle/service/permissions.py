@@ -85,7 +85,9 @@ def _modes(g: grants.Group) -> list[str]:
     limits = (g.policy.rule.limits if g.policy.rule else None) or {}
     life = limits.get("life")
     out = ["once", "deny", "always-deny"]
-    if life == "time":
+    if life == "once" or any((r.limits or {}).get("life") == "once" for a in g.items for r in a.policy.asks):
+        pass    # nothing it asks for may be saved (a push into a release branch)
+    elif life == "time":
         out.append("timed")
     elif life == "session":
         out.append("session")

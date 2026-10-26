@@ -290,7 +290,10 @@ class SavedAction:
     scope ladder the pattern is (exact, general, repository, ...); ``request``
     is the exact request it was saved from; ``life`` session (of ``session``,
     a root agent), time (``minutes``, until ``expires``) or forever; ``repo``
-    the repo root it applies in, or None for every repo."""
+    the repo root it applies in, or None for every repo. One migrated from
+    brindle 0.4.7 may also carry its ``binding`` (the approving ``owner``,
+    the repo's ``git_dir``, a push's remote ``url``: permission_grants
+    ._binding_holds) and ``uses_left`` (None: no use budget)."""
     id: str
     kind: str
     pattern: str
@@ -305,6 +308,8 @@ class SavedAction:
     repo: str | None = None
     created: float = 0.0
     note: str = ""
+    binding: dict = field(default_factory=dict)
+    uses_left: int | None = None
 
     def expired(self, now: float | None = None) -> bool:
         return self.expires is not None and self.expires <= (time.time() if now is None else now)
@@ -324,9 +329,14 @@ class SavedAction:
         life = data.get("life") if data.get("life") in LIVES else "forever"
         request = data.get("request") if isinstance(data.get("request"), dict) else {}
         text = {k: (data.get(k) if isinstance(data.get(k), str) else None) for k in ("level", "session", "repo")}
+        binding = data.get("binding", {})
+        uses = data.get("uses_left")
+        if (not isinstance(binding, dict) or not all(isinstance(v, str) for v in binding.values())
+                or uses is not None and (type(uses) is not int or uses < 0)):
+            return None    # a bound it can't read: never an unbounded allow
         return cls(id_, kind, pattern, decision, str(data.get("scope") or "exact"), text["level"], request, life,
                    _number(data.get("minutes")), _number(data.get("expires")), text["session"], text["repo"],
-                   _number(data.get("created")) or 0.0, str(data.get("note") or ""))
+                   _number(data.get("created")) or 0.0, str(data.get("note") or ""), dict(binding), uses)
 
 
 @dataclass(frozen=True)
@@ -334,6 +344,9 @@ class Decision:
     decision: str  # allow | deny | ask
     reason: str
     rule: Rule | None = None
+    # An ask's: every ask rule that matches it (its parts and each push included).
+    # ``rule`` is the strictest of them; a saved allow must fit all of their limits.
+    asks: tuple = ()
 
 
 def rule_id(kind: str, match_type: str, match: str, decision: str) -> str:
@@ -1865,12 +1878,14 @@ def _rule_decision(req: Request, rules: list[Rule], checks: list[str] | None) ->
 
 def decide(req: Request | None, *, checks: list[str] | None = None,
            rules: list[Rule] | None = None, unmatched: str | None = None,
-           session: str | None = None, saved: list[SavedAction] | None = None) -> Decision:
+           session: str | None = None, saved: list[SavedAction] | None = None,
+           spend: bool = False) -> Decision:
     """The policy's answer for ``req``: deny > ask > allow > ``unmatched``
     (the store's setting when None). An ask a saved action covers (within
-    the ask rule's limits; ``session``: the asking agent's session, for
-    saved actions that last one) is settled by it. ``saved``: the saved
-    actions to consider (the store's when None)."""
+    every matching ask rule's limits; ``session``: the asking agent's
+    session, for saved actions that last one) is settled by it. ``saved``:
+    the saved actions to consider (the store's when None). ``spend``: the
+    answer lets the call run, so a saved action with a use budget spends a use."""
     if req is None or req.kind not in KINDS:
         return Decision("ask", "brindle couldn't read the request")
     store = None
@@ -1919,12 +1934,25 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
         # Nothing covers it, not even a part hiding in it (cd x && git push
         # origin main: _restriction_in_parts above): it runs.
         return Decision("allow", "no rule covers it; unmatched actions run")
+    if ruled is not None and ruled.decision == "ask":
+        # Several ask rules may match (git push origin HEAD:main HEAD:release):
+        # the strictest is the one shown, and a saved allow must fit every one.
+        asks = tuple(dict.fromkeys([*(r for r in [ruled.rule] if r is not None), *_asks_in_force(req, rules, checks)]))
+        # Shown: the strictest that surely applies (a push whose branch only git
+        # knows may fit any push rule; nothing saved covers it anyway).
+        sure = [r for r in asks if r.match_type != "push" or push_matches(r.match, req, loose=False)]
+        strictest = min(sure, key=_ask_strictness) if sure else None
+        if strictest is not None and strictest is not ruled.rule:
+            ruled = Decision("ask", f"{VERBS['ask']} by {strictest.source} rule {strictest.id} "
+                                    f"({strictest.describe()})", strictest)
+        ruled = replace(ruled, asks=asks)
     if saved:
-        settled = permission_grants.settle(req, ruled.rule if ruled else None, saved, session=session)
+        settled = permission_grants.settle(req, ruled.rule if ruled else None, saved, session=session,
+                                           asks=ruled.asks if ruled else (), spend=spend)
         if settled is not None:
             return settled
     if ruled is not None:
-        return Decision("ask", ruled.reason + "; asking the user", ruled.rule)
+        return Decision("ask", ruled.reason + "; asking the user", ruled.rule, ruled.asks)
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
         why = "the command isn't a single simple command, so no allow rule applies"
     elif req.kind == "read" and req.path:
@@ -2089,6 +2117,27 @@ def _matching_restriction(parts: list[Request], checks: list[str] | None,
                     return Decision(wanted, f"{VERBS[wanted]} by {rule.source} rule {rule.id} ({rule.describe()})",
                                     rule)
     return None
+
+
+def _asks_in_force(req: Request, rules: list[Rule], checks: list[str] | None) -> list[Rule]:
+    """Every ask rule that matches ``req`` as a whole or, for a shell
+    command, any part of it (read as _restriction_in_parts reads it)."""
+    parts = [req]
+    if req.kind == "bash" and req.command:
+        words = (_restriction_parts(req.command)
+                 or _restriction_parts(req.command, word_pattern=RESTRICTION_WORD) or _segments(req.command))
+        parts += [replace(req, command=" ".join(" ".join(w).split())) for w in words]
+    return [r for r in rules if r.decision == "ask" and any(rule_matches(r, p, checks) for p in parts)]
+
+
+def _ask_strictness(rule: Rule) -> tuple:
+    """Sorts ask rules strictest first: by how long a saved approval may
+    last (never, a time, the session, until revoked), then how wide."""
+    limits = rule.limits or {}
+    life = {"once": 0, "time": 1, "session": 2}.get(limits.get("life"), 3)
+    scope = limits.get("max_scope")
+    reach = LEVELS.index(scope) if scope in LEVELS else len(LEVELS) if not scope or scope in ("*", "**") else 0
+    return life, limits.get("minutes") or 0, reach
 
 
 def _restriction_in_parts(req: Request, *, checks: list[str] | None,
@@ -2510,8 +2559,10 @@ def _editor_preset(rules: list[Rule]) -> tuple[str | None, set[str]]:
 
 def _v2_saved(record: dict, now: float) -> SavedAction | None:
     """A 0.4.7 remembered permission (a lifted push, or a .env read) as a
-    saved allow with the same reach and expiry; None for one that has
-    expired or that this engine can't express."""
+    saved allow with the same reach, expiry and remaining uses, bound to
+    what it was (the approving owner, the repo's git directory, a push's
+    remote URL); None for one that has expired, is used up, or that this
+    engine can't express."""
     scope = record.get("scope") if isinstance(record.get("scope"), dict) else {}
     life = record.get("lifetime") or ("time" if "expires_at" in record else "forever")
     expires = _number(record.get("expires_at"))
@@ -2519,13 +2570,24 @@ def _v2_saved(record: dict, now: float) -> SavedAction | None:
     repo = record.get("repo_root") if isinstance(record.get("repo_root"), str) else None
     if life not in LIVES or life == "time" and (expires is None or expires <= now):
         return None
+    uses = None
+    if "max_uses" in record:
+        budget, spent = record.get("max_uses"), record.get("uses_spent", 0)
+        if type(budget) is not int or type(spent) is not int or spent >= budget:
+            return None
+        uses = budget - spent
+    if not isinstance(record.get("owner"), str):
+        return None
+    binding = {"owner": record["owner"], **{k: scope[k] for k in ("git_dir", "url") if isinstance(scope.get(k), str)}}
     session = record.get("session", {}).get("id") if isinstance(record.get("session"), dict) else None
     if life == "session" and not isinstance(session, str):
         return None
     if record.get("action") == "git-push":
         level, value = V2_PUSH_LEVELS.get(record.get("scope_level") or "branch", (None, None))
         remote, ref = scope.get("remote"), scope.get("ref")
-        if level is None or level in ("destination", "remote") and not isinstance(remote, str):
+        if level is None or level in ("destination", "remote") and not (isinstance(remote, str) and "url" in binding):
+            return None
+        if level != "all" and "git_dir" not in binding:
             return None
         if level == "destination":
             if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
@@ -2544,7 +2606,7 @@ def _v2_saved(record: dict, now: float) -> SavedAction | None:
     id_ = record.get("id") if isinstance(record.get("id"), str) and record.get("id") else "s-" + secrets.token_hex(6)
     return SavedAction(id_, kind, pattern, "allow", value, level, {}, life,
                        (expires - created) / 60 if life == "time" else None, expires if life == "time" else None,
-                       session, None if level == "all" else repo, created, "saved in brindle 0.4.7")
+                       session, None if level == "all" else repo, created, "saved in brindle 0.4.7", binding, uses)
 
 
 def _migrate(store: Store, data: dict) -> None:
@@ -2816,6 +2878,16 @@ def update_saved_action(id_: str, **changes) -> SavedAction | None:
         _stamp(new)
         store.saved = [new if s.id == id_ else s for s in store.saved]
     return new
+
+
+def spend_saved_use(id_: str) -> bool:
+    """Spend one use of saved action ``id_``'s budget; whether one was left."""
+    with editing() as store:
+        action = store.saved_action(id_)
+        if action is None or action.uses_left is None or action.uses_left <= 0:
+            return action is not None and action.uses_left is None
+        action.uses_left -= 1
+    return True
 
 
 def delete_saved_action(id_: str) -> SavedAction | None:
