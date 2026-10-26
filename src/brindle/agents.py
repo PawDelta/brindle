@@ -1110,10 +1110,11 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane, m=m)
         return
     if provider.prompt_after_ready:
-        # Typed in once it's ready, after a warm-up carrying its instructions:
+        # Typed in once it's ready, after a warm-up carrying its instructions
+        # on both fresh starts and resumes:
         # agy connects its MCP servers only once a conversation has started,
         # so the task must arrive as a second turn (see brindle.antigravity).
-        for text in ((provider.warmup(profile) if not resume else None), prompt):
+        for text in (provider.warmup(profile), prompt):
             if text:
                 db.enqueue(agent.id, text, None)
         prompt = None
@@ -2031,23 +2032,18 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
 
 def flush(db: DB, agent_id: str) -> bool:
     """Deliver the agent's oldest pending message: through its inbox if it
-    has one, else typed into its pane once it's idle. A chat with a live
+    has one, else typed into its pane once it's idle (or while busy, for a
+    CLI that holds mid-turn input: see _flush_midturn). A chat with a live
     waiter (brindle.wake) is left to it, and one that runs a waiter never
     uses the inbox. Returns True if something was delivered."""
     from brindle import inbox
     from brindle import launch_health
-    from brindle import login_pause
     from brindle import wake
 
     agent = db.get_agent(agent_id)
-    if agent is None or agent.headless:
-        return False  # its runner takes messages from the inbox itself
-    if login_pause.holding(db, agent_id):
-        return False  # its session waits on an expired cloud login; resuming flushes it
-    waits = wake.enabled(agent)
-    if waits and wake.live(agent):
-        return False  # its waiter hands the queue over (brindle.wake)
-    if not waits and inbox.usable(agent):
+    if _delivery_held(db, agent):
+        return False
+    if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
             baseline = launch_health.before_delivery(db, agent)
@@ -2060,11 +2056,48 @@ def flush(db: DB, agent_id: str) -> bool:
                 break
         if delivered:
             return True
-    if db.pending_count(agent_id) == 0:
+    # One paste into the pane at a time, whichever path: the idle claim alone
+    # leaves the agent busy for a second sender's mid-turn paste while the
+    # first is still typing, reordering or merging the two.
+    with delivery_lock(agent_id):
+        return _flush_pane(db, agent_id)
+
+
+def delivery_lock(agent_id: str):
+    """Held across processes by whoever types a queued message into
+    ``agent_id``'s pane (``flush``), from the look at its state to the end of
+    the paste. A lock file under the brindle home, so a holder that dies gives
+    it back; re-entrant within a thread."""
+    from brindle import pipeline
+
+    return pipeline._reentrant_lock("deliver-" + hashlib.sha1(agent_id.encode()).hexdigest()[:16])
+
+
+def _delivery_held(db: DB, agent: Agent | None) -> bool:
+    """Whether ``flush`` must leave the queue alone: the agent is gone or
+    headless (its runner takes messages from the inbox itself), its session
+    waits on an expired cloud login (resuming flushes it), or a live waiter
+    hands the queue over (brindle.wake)."""
+    from brindle import login_pause
+    from brindle import wake
+
+    return (agent is None or agent.headless or login_pause.holding(db, agent.id)
+            or (wake.enabled(agent) and wake.live(agent)))
+
+
+def _flush_pane(db: DB, agent_id: str) -> bool:
+    """``flush``'s typed delivery, under its delivery_lock. The queue and the
+    agent are read afresh: while it waited, another sender may have delivered,
+    or the session been paused."""
+    from brindle import launch_health
+
+    if _delivery_held(db, db.get_agent(agent_id)) or db.pending_count(agent_id) == 0:
         return False
     claimed_at = db.claim_idle(agent_id)
     if claimed_at is None:
-        return False
+        return _flush_midturn(db, agent_id)
+    agent = db.get_agent(agent_id)
+    assert agent is not None
     if _paste_blocked(agent):
         # Leave it queued: the next flush (a later message, or a resumed
         # session's start-up) gets another chance.
@@ -2074,8 +2107,6 @@ def flush(db: DB, agent_id: str) -> bool:
     if not msg:
         db.set_status(agent_id, "idle", only_if="processing")
         return False
-    agent = db.get_agent(agent_id)
-    assert agent is not None
     from brindle import antigravity
     warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
     try:
@@ -2089,6 +2120,34 @@ def flush(db: DB, agent_id: str) -> bool:
         raise
     if not warmup:
         launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
+    return True
+
+
+def _flush_midturn(db: DB, agent_id: str) -> bool:
+    """``_flush_pane`` for a busy interactive chat whose CLI keeps input typed
+    mid-turn until its current step finishes (Codex, agy): the oldest queued
+    message goes in now instead of at the turn-end notify or Stop. Never into
+    an approval prompt ('waiting', or one on screen the hooks haven't
+    reported), where the keys would answer it."""
+    agent = db.get_agent(agent_id)
+    if (agent is None or agent.status != "processing" or agent.mode != "interactive"
+            or not get_provider(agent.provider).types_midturn):
+        return False
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=40, server=server_of(agent))
+    except tmux.TmuxError:
+        return False
+    if get_provider(agent.provider).screen_state(screen) == "waiting" or _paste_blocked(agent):
+        return False
+    msg = db.pop_pending(agent_id)
+    if not msg:
+        return False
+    try:
+        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
+                   server=server_of(agent))
+    except BaseException:
+        db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
+        raise
     return True
 
 
@@ -3346,17 +3405,30 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
         from brindle.profiles import profile_rules_for
 
         cfg = load_repo_config(ws.repo_root)
-        if cfg.permission_policy == "on":
+        essentials = tool == "Bash" and cfg.permission_essentials is not False
+        if cfg.permission_policy == "on" or essentials:
             req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root),
                      *permission_grants.limits(ws.repo_root).deny]
             restrictions = [r for r in rules if r.decision in ("ask", "deny")]
+            # A deny or ask in force reaches the person before any allow below
+            # (essentials, the profile's allowed_tools) could pass the command.
+            # With the policy off, only a rule's own: syntax brindle can't
+            # check (d-shell-syntax) stays the profile's and Claude Code's call,
+            # as it was before permission_essentials.
             decision = permissions.decide(req, checks=cfg.checks, rules=restrictions)
-            if decision.rule is not None:
+            if decision.rule is not None and (cfg.permission_policy == "on" or decision.rule.id != "d-shell-syntax"):
                 return {"hookSpecificOutput": {
                     "hookEventName": "PreToolUse", "permissionDecision": "ask",
                     "permissionDecisionReason": f"brindle: {decision.reason}",
                 }}
+        # The permission_essentials group, whatever permission_policy says:
+        # read-only inspection no deny or ask covers runs without a prompt.
+        if essentials and req is not None and permissions.essential(req, restrictions, cfg.checks):
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "allow",
+                "permissionDecisionReason": "brindle: a read-only command workers need (permission_essentials)",
+            }}
     if tool != "Bash":
         return None
     command = str((payload.get("tool_input") or {}).get("command", ""))
@@ -3439,7 +3511,10 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         # allowed_tools cover and nothing else of brindle's: every other
         # answer is Codex's own.
         review_only = not policy and provider == "codex"
-        if not policy and provider != "claude" and not (review_only and agent.mode == "review"):
+        # And any Codex worker while permission_essentials is on: its hook
+        # answers those commands alone.
+        essentials = review_only and cfg.permission_essentials is not False
+        if not policy and provider != "claude" and not (review_only and (agent.mode == "review" or essentials)):
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         if provider == "codex":
@@ -3450,6 +3525,13 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 return None
             lim = permission_grants.limits(ws.repo_root)
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules, *lim.deny]
+            if essentials and len(reqs) == 1 and permissions.essential(
+                    reqs[0], [r for r in rules if r.decision in ("ask", "deny")], cfg.checks):
+                decision = permissions.Decision("allow", "a read-only command workers need (permission_essentials)")
+                _record_permission(db, agent, ws, reqs[0].summary(), f"allow: {decision.reason}")
+                return permissions.codex_output(decision)
+            if review_only and agent.mode != "review":
+                return None  # as Codex would without brindle: its own prompt or refusal
             from dataclasses import replace
 
             from brindle.native.permissions import Permissions, split_commands, uncovered_part
@@ -3588,6 +3670,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
 # Seconds a hold waits on the daemon at a time between looks at whether the
 # agent was closed or its request answered at the CLI's own prompt.
 HOLD_LOOK_SECONDS = 5.0
+# Looks in a row (HOLD_LOOK_SECONDS apart) a pane must read past its CLI's own
+# permission prompt, busy or idle, before the hold ends: longer than one look,
+# so a read while the prompt is redrawn doesn't take it for answered. Any
+# other read starts the count over.
+ANSWERED_LOOKS = 3
 # Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
 # so the hook gives the request to the prompt itself before the CLI cancels it.
 HOOK_SLACK = 30
@@ -3638,12 +3725,13 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     ``holder`` (brindle.daemon.holds), or None after ``hold`` seconds, when
     the person asks to answer in the terminal, once the agent is closed or
     killed, once its CLI's own prompt took the request (its PostToolUse
-    removed the row), or if the daemon goes away: then the request goes to
-    the CLI's own prompt (or, where there is none, is refused). The agent
-    shows waiting meanwhile, as at that prompt."""
+    removed the row, or its pane stayed past the prompt for ANSWERED_LOOKS),
+    or if the daemon goes away: then the request goes to the CLI's own
+    prompt (or, where there is none, is refused). The agent shows waiting
+    meanwhile, as at that prompt."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline, answer = time.monotonic() + hold, None
+    deadline, answer, past = time.monotonic() + hold, None, 0
     while True:
         now = db.get_agent(agent.id)
         recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
@@ -3652,6 +3740,13 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
         if (now is None or now.status in ("done", "paused") or now.dismissed_at is not None
                 or recorded is None or left <= 0):
             break
+        # Its CLI shows its own prompt for as long as this hook holds the request: a pane
+        # past it was answered there, whether or not a look caught the prompt. An allow
+        # runs the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
+        state = _pane_state(now)
+        past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
+        if past >= ANSWERED_LOOKS:
+            break
         held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
         if answer is not None or not held:
             break
@@ -3659,6 +3754,22 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     if answer:
         db.set_status(agent.id, "processing", only_if="waiting")
     return answer
+
+
+def _pane_state(agent: Agent) -> str | None:
+    """What the pane of an agent whose CLI shows its own prompt while its
+    hook holds a request reads as: 'prompt' (any permission prompt), else
+    'idle', 'busy' or 'waiting', or None."""
+    from brindle.service.inbox import TERMINAL_PROMPT_VISIBLE
+
+    provider = get_provider(agent.provider)
+    if agent.headless or not agent.tmux_window or not TERMINAL_PROMPT_VISIBLE.get(agent.provider):
+        return None
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=60, server=server_of(agent))
+    except tmux.TmuxError:
+        return None
+    return "prompt" if provider.tool_permission(screen) else provider.screen_state(screen)
 
 
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
@@ -3837,7 +3948,15 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # 'waiting' before the session even started was its trust dialog
         # (see screen_status), which has now been answered.
         db.set_status(agent_id, "idle", only_if="waiting")
-        if db.pending_count(agent_id) and not agent.headless:
+        if db.pending_count(agent_id) and not agent.headless and not get_provider(agent.provider).announces_start:
+            # No start hook ran: this is `ready`, called once after_launch saw
+            # the CLI's input box, so it takes input now (agy's warm-up, then
+            # its task, would otherwise wait out ready_delay first).
+            try:
+                flush(db, agent_id)
+            except tmux.TmuxError:
+                pass  # stays queued for the next flush
+        elif db.pending_count(agent_id) and not agent.headless:
             # Claude Code hasn't drawn its input box yet; deliver shortly after,
             # from a detached process so this hook returns immediately.
             import subprocess

@@ -45,6 +45,8 @@ export interface Setting {
   common?: boolean;
   /* The unit a number is in, after the field. */
   unit?: string;
+  /* For a boolean: what turning it off costs, shown while it is off. */
+  offWarning?: string;
 }
 
 export const SETTINGS: Setting[] = [
@@ -52,6 +54,14 @@ export const SETTINGS: Setting[] = [
   { key: "max_agents", label: "Workers at once", kind: "number", fallback: 5, common: true, blurb: "How many workers a session runs at the same time. 0 means no cap." },
   { key: "autopilot", label: "Autopilot", kind: "boolean", fallback: true, common: true, blurb: "A new session's supervisor keeps driving toward the goal on its own." },
   { key: "plan_first", label: "Plan first", kind: "boolean", fallback: false, common: true, blurb: "Workers propose a plan and wait for your approval before they edit anything." },
+  {
+    key: "permission_essentials",
+    label: "Necessary to function",
+    kind: "boolean",
+    fallback: true,
+    blurb: "Workers run read-only inspection (grep, rg, head, tail, cat, wc, ls, sed -n, git status/diff/log/show) without asking. Deny rules still apply.",
+    offWarning: "Turning this off can cause performance issues: workers will stall on approval prompts for routine commands.",
+  },
   {
     key: "overlap",
     label: "Overlapping tasks",

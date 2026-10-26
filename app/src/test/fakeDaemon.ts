@@ -1445,6 +1445,17 @@ export class FakeDaemon {
       if (after) rules.push(after);
       review = { revision: state.revision, proposal: `proposal-${++this.permissionSequence}`, rules, conflicts: [], unresolved: [], can_save: true,
         changes: [{ type: after ? before ? "updated" : "added" : "removed", id: (after ?? before)!.id, before, after }] };
+      if (body.operation === "preset") {
+        const preset = state.presets.find((item) => item.id === body.preset);
+        if (!preset) return error("invalid", "Unknown permission preset.", 400);
+        const removed = state.rules.filter((item) => item.repo_root === body.repo && item.editable && !item.protected);
+        const added = (preset.rules ?? []).map((item) => ({ ...item, id: `rule-${++this.permissionSequence}`, repo_root: body.repo }));
+        review.rules = [...state.rules.filter((item) => !removed.includes(item)), ...added];
+        review.changes = [
+          ...removed.map((item) => ({ type: "removed" as const, id: item.id, before: item, after: null })),
+          ...added.map((item) => ({ type: "added" as const, id: item.id, before: null, after: item })),
+        ];
+      }
     }
     this.permissionProposal = { request: structuredClone(body), review: structuredClone(review) };
     return json(review);

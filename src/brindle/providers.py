@@ -87,6 +87,16 @@ class LaunchContext:
     mcp_recovery: bool = False  # a fresh reviewer after a failed MCP connection
 
 
+def _uv_cache_env(ctx: LaunchContext) -> dict[str, str]:
+    """uv's cache inside the worktree, so a sandboxed worker's `uv run`
+    needs no write access outside it. uv writes a `*` .gitignore into its
+    cache, so it never shows as uncommitted work. A profile's own
+    ``env.UV_CACHE_DIR`` wins."""
+    if not ctx.cwd or "UV_CACHE_DIR" in (ctx.profile.env or {}):
+        return {}
+    return {"UV_CACHE_DIR": os.path.join(ctx.cwd, ".uv-cache")}
+
+
 class Provider:
     name = "base"
     uses_hooks = False
@@ -101,6 +111,9 @@ class Provider:
     # how long to give it after its input box appears.
     prompt_after_ready = False
     ready_delay = 3
+    # Whether input typed into its pane mid-turn waits in the CLI until the
+    # current step finishes, so a queued message can go in while it's busy.
+    types_midturn = False
     # False for providers whose work happens outside brindle (see Subagent):
     # no process, no tmux window; the caller records the result itself.
     launches_process = True
@@ -693,7 +706,7 @@ class ClaudeCode(Provider):
             # report_result/submit_review. --settings env is applied before MCP
             # servers connect. Not agents.agent_env: that feeds the launch
             # fingerprint and would reset stored refusals.
-            "env": {"MCP_TIMEOUT": self._mcp_timeout(ctx)},
+            "env": {"MCP_TIMEOUT": self._mcp_timeout(ctx), **_uv_cache_env(ctx)},
             # Claude Code runs the person's gcpAuthRefresh (often `gcloud auth
             # application-default login`) whenever its own ADC probe fails, once
             # per process: across a session's many panes that opens a Google
@@ -1486,6 +1499,7 @@ class Codex(Provider):
     uses_hooks = True
     announces_turns = False
     announces_start = False
+    types_midturn = True
     # The MCP connection alone can take 120s under load. The launch observer
     # must not abandon readiness before that connection has had its budget.
     STARTUP_SECONDS = 150
@@ -1587,6 +1601,9 @@ class Codex(Provider):
             # machine; without it a worker can start without brindle's tools (#159).
             "-c", "mcp_servers.brindle.startup_timeout_sec=120",
             "-c", f"notify={json.dumps(notify)}",
+            # Only this launch's shell commands; the person's config.toml is untouched.
+            *(a for k, v in _uv_cache_env(ctx).items()
+              for a in ("-c", f"shell_environment_policy.set.{k}={json.dumps(v)}")),
         ]
         # brindle's permission policy, when it's on and the person has trusted
         # brindle's hook once (`brindle permissions install-codex-hook`; see
@@ -1605,10 +1622,8 @@ class Codex(Provider):
             argv += ["-c", f"model_reasoning_effort={json.dumps(ctx.profile.effort)}"]
         if ctx.resume:
             argv += ["resume", ctx.resume]
-            if ctx.initial_prompt:
-                argv.append(ctx.initial_prompt)
-            return argv
-        # Codex has no system-prompt flag; lead the first message with the profile.
+        # Codex has no system-prompt flag; lead each launch's message with the
+        # profile, including when resuming a conversation.
         first = "\n\n".join(p for p in (ctx.profile.prompt, ctx.initial_prompt) if p)
         if first:
             argv.append(first)
@@ -1684,6 +1699,7 @@ class Antigravity(Provider):
     # the agent never sees brindle's tools in that first turn.
     prompt_after_ready = True
     ready_delay = 5
+    types_midturn = True
 
     def warmup(self, profile: Profile) -> str | None:
         from brindle import antigravity

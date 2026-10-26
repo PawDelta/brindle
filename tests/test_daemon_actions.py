@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import sh
+from test_reliability import CLAUDE_BUSY, CLAUDE_IDLE
 
 from brindle import agents, autopilot, bus, config, coordinator, pipeline, preflight, providers, workspaces
 from brindle.daemon import peer, routes_actions
@@ -1237,6 +1238,33 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
         assert code == 400 and pressed == [], reply
     code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": "allow_for", "scope": "repo"})
     assert code == 409 and pressed == [], reply
+
+
+@pytest.mark.parametrize("screen", [CLAUDE_IDLE, pytest.param(CLAUDE_BUSY, marks=pytest.mark.variant(
+    "review: allowed in the pane, its tool still running, so no PostToolUse yet"))], ids=["denied", "allowed"])
+def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, world, answering, monkeypatch, screen):
+    from brindle import tmux
+    from brindle.db import DB
+    from brindle.service import inbox
+
+    # The hook's looks: past the prompt twice, one it can't tell (the window starts over), then past it for good.
+    looks, paused, go = iter([screen, screen, "", screen, screen]), threading.Event(), threading.Event()
+    wk = db.get_agent("wk")
+
+    def capture(target, **kw):
+        if (read := next(looks, None)) is None and not paused.is_set():
+            paused.set()        # its sixth look waits on the test
+            go.wait(5)
+        return screen if read is None else read
+
+    monkeypatch.setattr(tmux, "capture", capture)
+    hook = threading.Thread(target=lambda: agents.permission_request_decision(DB(), wk, {**ASK, "cwd": str(repo)}))
+    hook.start()
+    shown = lambda: [i.kind for i in inbox.items(db, str(repo), panes={"%2": True}) if i.agent_id == "wk"]  # noqa: E731
+    assert paused.wait(5) and shown() == ["permission"]     # an interrupted window doesn't end the hold
+    go.set()
+    hook.join(HOLD / 2)         # well before the hold would end
+    assert not hook.is_alive() and shown() == []
 
 
 @pytest.fixture

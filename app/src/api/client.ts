@@ -522,7 +522,8 @@ export type PermissionEditorSaved = PermissionSaveDTO;
 export interface PermissionEditorRequest {
   repo: string;
   revision: string;
-  operation: "upsert" | "remove";
+  operation: "upsert" | "remove" | "preset";
+  preset?: string;
   rule?: Partial<PermissionEditorRule>;
   id?: string;
   resolution: "manual" | "auto" | "existing" | "new";

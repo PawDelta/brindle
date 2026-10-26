@@ -102,6 +102,29 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
                  marks=pytest.mark.variant("supervisor: an expanded redirect could read daemon.json")),
     pytest.param("{ git [p]ush; }", True, None, id="shell_syntax_fallback-glob_unparsed",
                  marks=pytest.mark.variant("a pattern inside syntax neither parse reads")),
+    pytest.param("grep -n hi *.py | head -5", False, None, id="read_only_no_stall-grep_head"),
+    pytest.param("grep -n SECRET ../../../.e*", True, None, id="read_only_no_stall-denied_file"),
+    pytest.param("grep -n hi *.py", True, ("grep -n hi app.py", "deny"), id="read_only_no_stall-denied_expansion"),
+    pytest.param("sed -n '/^print/p' *.py", False, None, id="read_only_no_stall-sed_print"),
+    pytest.param("sed -n 's/a/b/w out' *.py", True, None, id="read_only_no_stall-sed_write"),
+    pytest.param("{ awk '{print $1}' app.py; }", False, None, id="read_only_no_stall-single_quoted"),
+    pytest.param("rg -n hi *.py | tail -3", False, None, id="read_only_no_stall-rg_tail"),
+    pytest.param("grep -f../../../.env *.py", True, None, id="read_only_no_stall-attached_file_option",
+                 marks=pytest.mark.variant("review: -fFILE named a denied file")),
+    pytest.param("grep --file=../../../.env *.py", True, None, id="read_only_no_stall-long_file_option",
+                 marks=pytest.mark.variant("review: --file=FILE named a denied file")),
+    pytest.param("grep -r SECRET *", True, None, id="read_only_no_stall-recursive",
+                 marks=pytest.mark.variant("review: recursion reads files no argument names")),
+    pytest.param("rg -n hi ../*", True, None, id="read_only_no_stall-rg_directory",
+                 marks=pytest.mark.variant("rg recurses into a directory operand")),
+    pytest.param("cat *.py | head ../../../.env", True, None, id="read_only_no_stall-denied_other_stage",
+                 marks=pytest.mark.variant("review: a pattern-free stage read a denied file")),
+    pytest.param("LD_PRELOAD=x cat *.py", True, None, id="read_only_no_stall-assignment",
+                 marks=pytest.mark.variant("an assignment can make any program run code")),
+    pytest.param("grep --recur SECRET *", True, None, id="read_only_no_stall-abbreviated_option",
+                 marks=pytest.mark.variant("review: GNU grep takes --recur for --recursive")),
+    pytest.param("cat < ../../../.env | head *.py", True, None, id="read_only_no_stall-input_redirect",
+                 marks=pytest.mark.variant("review: an input redirect read a denied file")),
 ])
 def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound, extra):
     from brindle import permissions as p
@@ -132,13 +155,36 @@ def test_other_tools_and_unknown_profiles_are_left_alone(db, ws):
     assert agents.handle_hook(db, a.id, "pre-tool", {"tool_name": "Write", "tool_input": {"file_path": "x"}}) is None
     b = Agent("w2", ws.id, "no-such-profile", "claude", "boss", "assign", "processing", "%w2", None, time.time())
     db.add_agent(b)
-    assert agents.handle_hook(db, "w2", "pre-tool", bash("git status")) is None
+    assert agents.handle_hook(db, "w2", "pre-tool", bash("pytest -q")) is None
 
 
-def test_a_profile_without_bash_rules_never_allows(db, ws, monkeypatch):
+def test_necessary_group_default_on_allows_read_only_commands_and_keeps_restrictions(db, ws, monkeypatch):
+    from brindle import permissions as p
+    from brindle.config import set_local
+
+    a = worker(db, ws)
+    # With the policy off, a deny or ask on a whole pipeline reaches the person
+    # before the default developer profile's allowed_tools could pass it.
+    with p.editing() as store:
+        store.rules = [p.Rule("bash", "cat app.py | head -5", "exact", "deny"),
+                       p.Rule("bash", "grep -n hi app.py | head -1", "exact", "ask"),
+                       p.Rule("bash", "grep -r hi *.py | head -5", "exact", "ask")]
+    # The last also can't be checked (a pattern read recursively): its ask wins over that.
+    for command in ("cat app.py | head -5", "grep -n hi app.py | head -1", "grep -r hi *.py | head -5"):
+        decision = agents.handle_hook(db, a.id, "pre-tool", bash(command))
+        assert decision["hookSpecificOutput"]["permissionDecision"] == "ask"
     bare = replace(load_profile("developer"), allowed_tools=["Edit", "Read"])
     monkeypatch.setattr(agents, "load_profile", lambda name, root=None: bare)
-    a = worker(db, ws)
+    assert agents.handle_hook(db, a.id, "pre-tool", bash("pytest -q")) is None
+    # permission_essentials, on by default: read-only inspection needs no rule.
+    assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && grep -n hi *.py | tail -1")) is not None
+    assert agents.handle_hook(db, a.id, "pre-tool", bash("cat ../../../.env")) is None   # a read deny still wins
+    # Writes, the network, push, rm and nested shells still ask.
+    for command in ("sed -i s/a/b/ app.py", "cat app.py > ../out", "curl https://example.com", "git push",
+                    "rm app.py", "bash -c 'ls'", "sh -c ls"):
+        decision = agents.handle_hook(db, a.id, "pre-tool", bash(command)) or {"hookSpecificOutput": {}}
+        assert decision["hookSpecificOutput"].get("permissionDecision") != "allow", command
+    set_local(ws.repo_root, "permission_essentials", False)
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status")) is None
 
 

@@ -14,10 +14,16 @@ import json
 import os
 import time
 from dataclasses import asdict, replace
+from importlib.resources import files
 
 from brindle import permissions as p
 from brindle.policy import Decision
 from brindle.service.errors import ServiceError
+
+
+def presets() -> list[dict]:
+    """The settings UI and its tests share this backend-owned inventory."""
+    return json.loads(files("brindle").joinpath("permission_presets.json").read_text())
 
 
 def policy(repo: str):
@@ -116,7 +122,9 @@ def _state(repo: str, store: p.Store) -> tuple[dict, list[p.Rule]]:
 def snapshot(repo: str) -> dict:
     state, _ = _state(_repo(repo), p.load_store())
     return {**state, "catalog": catalog(),
-            "presets": [{"id": r.id, "name": r.describe(), "rule": _row(r)} for r in p.PRESET_RULES]}
+            "presets": [{**preset, "rules": [_row(p.Rule.from_dict(raw)) for raw in preset["rules"]]}
+                        for preset in presets()] +
+                       [{"id": r.id, "name": r.describe(), "rule": _row(r)} for r in p.PRESET_RULES]}
 
 
 def _pattern_covers(a: p.Rule, b: p.Rule) -> bool:
@@ -265,7 +273,7 @@ def _propose(body: dict, store: p.Store) -> tuple[dict, list[p.Rule]]:
     if not state["restrictions"]["editable"]:
         raise ServiceError("forbidden", state["restrictions"]["reason"], 403)
     operation, resolution, id_ = body.get("operation"), body.get("resolution", "manual"), body.get("id")
-    if operation not in ("upsert", "remove") or resolution not in ("manual", "auto", "existing", "new"):
+    if operation not in ("upsert", "remove", "preset") or resolution not in ("manual", "auto", "existing", "new"):
         raise ServiceError("invalid", "unsupported operation or resolution")
     if id_ is not None and not any(r.id == id_ for r in store.rules):
         raise ServiceError("forbidden", "only your editable rules can be changed", 403)
@@ -273,6 +281,24 @@ def _propose(body: dict, store: p.Store) -> tuple[dict, list[p.Rule]]:
         raise ServiceError("invalid", "removing a rule requires id")
     before = list(store.rules)
     after = [r for r in before if r.id != id_]
+    if operation == "preset":
+        preset = next((item for item in presets() if item["id"] == body.get("preset")), None)
+        if preset is None or id_ is not None:
+            raise ServiceError("invalid", "choose an available permission preset")
+        # Presets replace only this repository's editable rules. Global rules,
+        # other repositories and all external protections retain their ownership.
+        after = [r for r in before if r.repo_root != repo]
+        # Edits retain IDs even when their scope becomes global. Use the
+        # reviewed revision for new IDs, reserving every existing identity so
+        # reapplying a preset cannot alias an edited or removed rule.
+        used_ids = {r.id for r in [*before, *protected]}
+        for index, raw in enumerate(preset["rules"]):
+            rule = p.Rule.from_dict({**raw, "repo_root": repo})
+            identity = _digest([state["revision"], preset["id"], index, rule.to_dict()])[:16]
+            while identity in used_ids:
+                identity = _digest([state["revision"], identity])[:16]
+            used_ids.add(identity)
+            after.append(replace(rule, id=identity))
     existing = next((r for r in before if r.id == id_), None)
     draft = _draft(body.get("rule"), repo, existing) if operation == "upsert" else None
     if draft:
@@ -291,13 +317,19 @@ def _propose(body: dict, store: p.Store) -> tuple[dict, list[p.Rule]]:
             raise ServiceError("conflict", "cannot replace protected or unproven overlapping scopes", 409)
         removed = {c["right"] if c["left"] == draft.id else c["left"] for c in relevant}
         after = [r for r in after if r.id not in removed]
-    elif resolution == "auto" and not any(c["overlap"] == "unknown" for c in found):
+    elif (resolution == "auto" or operation == "preset") and not any(
+            c["overlap"] == "unknown" for c in found
+            if operation != "preset" or not c["protected"]):
         rank = {"allow": 0, "ask": 1, "deny": 2}
         # Take all intersections from the original rules, then apply their
         # exclusions together. This keeps a chain of conflicts deterministic.
         additions: dict[str, list[p.Rule]] = {}
         all_by_id = {r.id: r for r in [*protected, *after]}
         for conflict in found:
+            # Preset reviews resolve editable overlaps conservatively. Fixed
+            # denies already win and need no exclusions or ownership changes.
+            if operation == "preset" and conflict["protected"]:
+                continue
             a, b = (all_by_id[conflict[k]] for k in ("left", "right"))
             weak, strong = sorted((a, b), key=lambda r: rank[r.decision])
             if weak.source in ("user", "learned"):
@@ -316,7 +348,10 @@ def _propose(body: dict, store: p.Store) -> tuple[dict, list[p.Rule]]:
         raise ServiceError("conflict", "resolution exceeds supported rule persistence limits", 409)
     if state["restrictions"]["managed"] and not _tightens(before, after):
         raise ServiceError("forbidden", "managed policy permits only proven local tightening", 403)
-    unresolved = _conflicts(after, protected)
+    # A protected peer is always a deny, and denies win wherever scopes overlap
+    # (permissions.decide), so it is shown but leaves nothing to resolve; no
+    # edit could ever resolve it, and counting it would block every save.
+    unresolved = [c for c in _conflicts(after, protected) if not c["protected"]]
     # Existing conflicts outside this edit are shown too; saving may never claim
     # to have resolved a policy that still contains contradictory scopes.
     can_save = resolution == "existing" or not unresolved

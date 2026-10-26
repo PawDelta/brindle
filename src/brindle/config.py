@@ -137,6 +137,10 @@ class RepoConfig:
     # "on": brindle answers workers' permission requests by its rules (see
     # brindle.permissions). Unset, it's "on" for Pro and up and "off" on Free.
     permission_policy: str = "off"
+    # Allow the read-only commands a worker needs to function (grep, rg, head,
+    # tail, cat, wc, ls, sed -n, read-only git; see permissions.essential)
+    # without a prompt, whatever permission_policy says. Denies still win.
+    permission_essentials: bool = True
     # Seconds brindle's permission hook holds a request left to the person for
     # the app's answer (brindle.agents._hold_for_app): a day, so in practice
     # until the person answers it, sends it to the terminal, or the agent is
@@ -347,6 +351,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "auto_pr", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
+                "permission_essentials",
                 "permission_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
                 "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks"):

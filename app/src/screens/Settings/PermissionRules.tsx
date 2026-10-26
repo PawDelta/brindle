@@ -576,7 +576,17 @@ function LocalPermissionRules({ client, repo }: { client: DaemonClient; repo: st
     <div className="flex flex-wrap items-center gap-s1"><button type="button" className={primary} disabled={busy || !state.restrictions.editable} onClick={() => begin()}>Add rule</button><button type="button" className={button} disabled={busy || !state.restrictions.editable} onClick={() => setShowPresets(!showPresets)}>Presets</button></div>
     {state.restrictions.reason && <p className="text-xs text-ink-3">{state.restrictions.reason}</p>}
     {state.limitations.map((limitation) => <p key={limitation} className="text-xs text-ink-3">{limitation}</p>)}
-    {showPresets && <div className="grid gap-s2 sm:grid-cols-3" aria-label="Permission presets">{state.presets.map((preset) => <article key={preset.id} className={`${card} p-s2`}><h3 className="text-sm font-medium">{preset.name}</h3><p className="my-s1 break-all text-xs text-ink-3">{preset.rule.kind} · {preset.rule.decision} · {preset.rule.match}</p><button type="button" className={button} disabled={busy || !state.restrictions.editable} onClick={() => begin({ ...preset.rule, id: "" })}>Use {preset.name}</button></article>)}</div>}
+    {showPresets && <section aria-label="Permission presets" className="space-y-s2">
+      <p className="text-xs text-ink-3">Presets replace this repository’s local rules after review. Global rules and protected denies still apply. You can edit each rule afterward.</p>
+      <div className="grid gap-s2 sm:grid-cols-3">{state.presets.map((preset) => <article key={preset.id} className={`${card} p-s2`}>
+        <h3 className="text-sm font-medium">{preset.name}</h3>
+        <p className="my-s1 break-all text-xs text-ink-3">{preset.description || (preset.rule && `${preset.rule.kind} · ${preset.rule.decision} · ${preset.rule.match}`)}</p>
+        <button type="button" className={button} disabled={busy || !state.restrictions.editable} onClick={() => {
+          if (preset.rule) begin({ ...preset.rule, id: "" });
+          else void inspect({ repo, revision: state.revision, operation: "preset", preset: preset.id, resolution: "manual" });
+        }}>Use {preset.name}</button>
+      </article>)}</div>
+    </section>}
     <RuleTable rules={state.rules.map(view)} busy={busy || !state.restrictions.editable} onEdit={(rule) => begin(state.rules.find((item) => item.id === rule.id))} onRemove={(rule) => void inspect({ repo, revision: state.revision, operation: "remove", id: rule.id, resolution: "manual" })} />
     {error && !editor && !review && <p role="alert" className={alert}>{error}</p>}
     {(editor || reviewView) && <RuleDialog title={reviewView ? "Review rule changes" : editor?.original?.id ? "Edit rule" : "Add rule"} onClose={close}>
