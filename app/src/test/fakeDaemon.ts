@@ -587,6 +587,9 @@ export class FakeDaemon {
   /* The engine is dead (`die()`): every request is refused and every socket
      closes at once, until `revive()` brings it back as a new process. */
   dead = false;
+  /* Hold PUT /permissions/preset until pendingPreset() is called. */
+  holdPreset = false;
+  pendingPreset: (() => void) | null = null;
   /* Hold a sign-in after its URL went out, until completeLogin(): the browser hasn't come back yet. */
   deferLogin = false;
   private pendingLogins: Array<{ job: string; finish(): void }> = [];
@@ -1832,7 +1835,13 @@ export class FakeDaemon {
       const terminal = path.match(/^\/terminals\/([^/]+)$/);
       if (method === "DELETE" && terminal) return this.closeTerminal(terminal[1]);
       if (method === "DELETE") return error("not_found", `no route DELETE ${path}`, 404);
-      if (path === "/permissions/preset") return json({ preset: (body as { preset: string }).preset, presets: [], rules: [], saved: [], unmatched: "ask" });
+      if (path === "/permissions/preset") {
+        const applied = () => json({ preset: (body as { preset: string }).preset, presets: [], rules: [], saved: [], unmatched: "ask" });
+        if (!this.holdPreset) return applied();
+        return new Promise<Response>((resolve) => {
+          this.pendingPreset = () => resolve(applied());
+        });
+      }
       if (path === "/routing") return this.putRouting((body ?? {}) as Record<string, unknown>);
       if (path === "/debug") return this.putDebug((body ?? {}) as Record<string, unknown>);
       const key = path.match(/^\/keys\/([^/]+)$/);

@@ -139,12 +139,16 @@ describe("Onboarding", () => {
     expect(daemon.installs).toEqual([]);
     expect(posts(daemon).some((p) => p.endsWith("/install"))).toBe(false);
 
-    // A different choice changes the note and the button, and that preset is the one applied.
+    // A different choice is the one applied, and the cards are locked while the request is pending.
+    daemon.holdPreset = true;
     fireEvent.click(screen.getByRole("button", { name: "Continue" }));
     await step("permissions");
     fireEvent.click(screen.getByTestId("onb-preset-secure"));
-    expect(screen.getByTestId("onb-preset-note").textContent).toContain("Secure pauses agents");
     fireEvent.click(screen.getByRole("button", { name: "Continue with Secure" }));
+    await waitFor(() => expect(daemon.pendingPreset).not.toBeNull());
+    fireEvent.click(screen.getByTestId("onb-preset-autonomous"));
+    expect(screen.getByTestId("onb-preset-secure").getAttribute("aria-checked")).toBe("true");
+    daemon.pendingPreset?.();
     await step("project");
     expect(daemon.requests.filter((r) => r.path === "/permissions/preset").map((r) => r.body)).toEqual([{ preset: "secure" }]);
   });

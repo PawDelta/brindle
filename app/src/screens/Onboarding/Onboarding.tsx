@@ -481,16 +481,17 @@ const PRESETS: PresetCopy[] = [
   },
 ];
 
-function PresetCard({ copy, on, buttonRef, onPick, onKey }: { copy: PresetCopy; on: boolean; buttonRef(el: HTMLButtonElement | null): void; onPick(): void; onKey(e: KeyboardEvent<HTMLButtonElement>): void }) {
+function PresetCard({ copy, on, disabled, buttonRef, onPick, onKey }: { copy: PresetCopy; on: boolean; disabled: boolean; buttonRef(el: HTMLButtonElement | null): void; onPick(): void; onKey(e: KeyboardEvent<HTMLButtonElement>): void }) {
   return (
     <button
       ref={buttonRef}
       type="button"
       role="radio"
       aria-checked={on}
+      disabled={disabled}
       tabIndex={on ? 0 : -1}
       data-testid={`onb-preset-${copy.preset}`}
-      className={`${card} flex flex-col items-stretch gap-s1 p-s2 text-left ${on ? "border-branch bg-branch-soft" : ""}`}
+      className={`${card} flex flex-col items-stretch gap-s1 p-s2 text-left aria-checked:border-branch aria-checked:bg-branch-soft`}
       onClick={onPick}
       onKeyDown={onKey}
     >
@@ -561,6 +562,7 @@ function Permissions({ client, onNext }: { client: DaemonClient; onNext(): void 
             key={p.preset}
             copy={p}
             on={p.preset === choice}
+            disabled={busy}
             buttonRef={(el) => void (refs.current[p.preset] = el)}
             onPick={() => setChoice(p.preset)}
             onKey={(e) => {
