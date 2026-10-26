@@ -102,6 +102,12 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
                  marks=pytest.mark.variant("supervisor: an expanded redirect could read daemon.json")),
     pytest.param("{ git [p]ush; }", True, None, id="shell_syntax_fallback-glob_unparsed",
                  marks=pytest.mark.variant("a pattern inside syntax neither parse reads")),
+    pytest.param("grep -n hi *.py | head -5", False, None, id="read_only_no_stall-grep_head"),
+    pytest.param("grep -n SECRET ../../../.e*", True, None, id="read_only_no_stall-denied_file"),
+    pytest.param("grep -n hi *.py", True, ("grep -n hi app.py", "deny"), id="read_only_no_stall-denied_expansion"),
+    pytest.param("sed -n '/^print/p' *.py", False, None, id="read_only_no_stall-sed_print"),
+    pytest.param("sed -n 's/a/b/w out' *.py", True, None, id="read_only_no_stall-sed_write"),
+    pytest.param("{ awk '{print $1}' app.py; }", False, None, id="read_only_no_stall-single_quoted"),
 ])
 def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound, extra):
     from brindle import permissions as p
@@ -155,6 +161,19 @@ def test_claude_launch_outlasts_default_mcp_startup_timeout(monkeypatch):
     argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "go"))
     settings = json.loads(argv[argv.index("--settings") + 1])
     assert int(settings["env"]["MCP_TIMEOUT"]) > 30000
+
+
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+def test_read_only_no_stall_uv_cache_stays_in_worktree(provider, tmp_path):
+    from brindle.providers import Codex
+
+    cache = str(tmp_path / ".uv-cache")
+    ctx = LaunchContext("abc", load_profile("developer"), "go", cwd=str(tmp_path))
+    if provider == "claude":
+        argv = ClaudeCode().command(ctx)
+        assert json.loads(argv[argv.index("--settings") + 1])["env"]["UV_CACHE_DIR"] == cache
+    else:
+        assert f"shell_environment_policy.set.UV_CACHE_DIR={json.dumps(cache)}" in Codex().command(ctx)
 
 
 def test_stuck_message_says_when_auto_mode_should_have_answered(db, ws, monkeypatch):

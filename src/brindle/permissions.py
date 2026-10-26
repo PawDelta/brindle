@@ -51,6 +51,7 @@ rule on its own: a pattern approved at least SUGGEST_AFTER times is shown by
 from __future__ import annotations
 
 import fnmatch
+import glob
 import hashlib
 import json
 import math
@@ -1210,16 +1211,25 @@ def _restriction_parts(command: str, *, word_pattern: re.Pattern[str] = SIMPLE_C
     return parts
 
 
-def _globs_excluded(parts: list[list[str]], rules: list[Rule]) -> bool:
+def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
+                    path_denies: list[Rule]) -> bool:
     """Whether no restriction can apply to what the patterns in ``parts``
-    expand to. Only plain ``ls`` has a proof: listing names can't push, force
+    expand to. Plain ``ls`` has a proof: listing names can't push, force
     a git action or read a file's contents, so the default git and daemon
     denies don't apply, nor do exact/prefix rules that don't overlap the
-    words before its first pattern. Any other program may treat an expanded
-    name as a subcommand, option or file to act on."""
+    words before its first pattern. A READ_ONLY_PROGRAMS one (or a sed that
+    only prints) has one once its patterns are expanded: it only reads its
+    files, so it is enough that no restriction matches the expanded command
+    and no deny covers a file it names. Any other program may treat an
+    expanded name as a subcommand, option or file to act on."""
+    moved = any(words[0] in ("cd", "pushd", "popd") for words in parts)
     for words in parts:
         first = next((i for i, word in enumerate(words) if any(c in word for c in "*?[")), None)
         if first is None:
+            continue
+        if words[0] in (*READ_ONLY_PROGRAMS, "sed") and not moved:
+            if not _reads_excluded(req, words, rules, path_denies):
+                return False
             continue
         if words[0] != "ls":
             return False
@@ -1232,6 +1242,114 @@ def _globs_excluded(parts: list[list[str]], rules: list[Rule]) -> bool:
                 continue
             return False
     return True
+
+
+# Programs that only read the files they're given; a pattern among their
+# arguments is checked by expanding it (_reads_excluded).
+READ_ONLY_PROGRAMS = ("grep", "head", "cat", "wc")
+
+
+def _reads_excluded(req: Request, words: list[str], rules: list[Rule], path_denies: list[Rule]) -> bool:
+    """Whether the read-only command ``words`` is clear of ``rules`` and of
+    ``path_denies`` once its patterns are expanded the way the shell would
+    in ``req.cwd``. Dotfiles are expanded too, and each pattern is also
+    checked as the literal name it stays when nothing matches. Patterns the
+    expansion here can't read exactly (``[[:alpha:]]``) are never clear."""
+    cwd = req.cwd or req.worktree
+    if not cwd:
+        return False
+    argv, names = [words[0]], []
+    for word in words[1:]:
+        if any(c in word for c in "*?["):
+            if "[:" in word or "[=" in word or "[." in word:
+                return False
+            found = sorted(glob.glob(word.replace("[^", "[!"), root_dir=cwd, include_hidden=True))
+            argv += found or [word]
+            names += [word, *found]
+        else:
+            argv.append(word)
+            names.append(word)
+    if argv[0] == "sed" and not _sed_prints_only(argv[1:]):
+        return False
+    if _matching_restriction([replace(req, command=" ".join(argv))], None, rules) is not None:
+        return False
+    reads = [replace(req, kind="read", command=None, path=os.path.join(cwd, name)) for name in names]
+    return not any(rule_matches(rule, read) for rule in path_denies for read in reads)
+
+
+def _sed_prints_only(args: list[str]) -> bool:
+    """Whether sed with ``args`` runs under -n and its scripts only print:
+    no -i or -f, no w/W/e/r/R/a/i/c commands and no s flags beyond g, p, I
+    and a number."""
+    quiet, scripts, rest, i = False, [], [], 0
+    while i < len(args):
+        arg = args[i]
+        option = re.fullmatch(r"-([nErsuz]*)(e(.*))?", arg, re.DOTALL)
+        if arg in ("--quiet", "--silent"):
+            quiet = True
+        elif arg.startswith("--expression="):
+            scripts.append(arg.partition("=")[2])
+        elif arg == "--expression" or option and option.group(2) and not option.group(3):
+            if i + 1 >= len(args):
+                return False
+            scripts.append(args[i + 1])
+            quiet = quiet or bool(option and "n" in option.group(1))
+            i += 1
+        elif option and arg != "-":
+            quiet = quiet or "n" in option.group(1)
+            if option.group(2):
+                scripts.append(option.group(3))
+        elif arg.startswith("-") and arg != "-":
+            return False
+        else:
+            rest.append(arg)
+        i += 1
+    if not scripts and rest:
+        scripts.append(rest[0])
+    return quiet and bool(scripts) and all(_sed_script_prints_only(s) for s in scripts)
+
+
+def _sed_script_prints_only(script: str) -> bool:
+    i = 0
+    while i < len(script):
+        c = script[i]
+        if c in " \t\n;!{}0123456789,$~+" or c in "pPlqQnNdDhHgGx=":
+            i += 1
+        elif c in "/\\":
+            delim, start = ("/", i + 1) if c == "/" else (script[i + 1:i + 2], i + 2)
+            end = _sed_delimited(script, start, delim)
+            if end is None:
+                return False
+            i = end + 1
+            while i < len(script) and script[i] in "IM":
+                i += 1
+        elif c in "sy":
+            delim = script[i + 1:i + 2]
+            if not delim or delim in "\n\\":
+                return False
+            middle = _sed_delimited(script, i + 2, delim)
+            end = _sed_delimited(script, middle + 1, delim) if middle is not None else None
+            if end is None:
+                return False
+            i = end + 1
+            while c == "s" and i < len(script) and script[i] in "gpI0123456789":
+                i += 1
+        else:
+            return False
+    return True
+
+
+def _sed_delimited(script: str, start: int, delim: str) -> int | None:
+    """The index of the first unescaped ``delim`` from ``start``."""
+    i = start
+    while i < len(script):
+        if script[i] == "\\":
+            i += 2
+        elif script[i] == delim:
+            return i
+        else:
+            i += 1
+    return None
 
 
 def _matching_restriction(parts: list[Request], checks: list[str] | None,
@@ -1252,6 +1370,7 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
         return None
     # Unsupported syntax is not itself a restriction. Only an active Bash
     # restriction can require us to withhold the provider's ordinary fallback.
+    path_denies = [r for r in rules if r.kind == "read" and r.decision == "deny"]
     rules = [r for r in rules if r.kind == "bash" and r.decision in ("deny", "ask")
              and (not r.repo_root or bool(req.repo_root) and os.path.realpath(req.repo_root) == r.repo_root)
              and (r.expires_at is None or time.time() < r.expires_at)]
@@ -1270,7 +1389,7 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
     if matched is not None:
         return matched
     if patterns is not None:
-        uncertain = not _globs_excluded(patterns, rules)
+        uncertain = not _globs_excluded(req, patterns, rules, path_denies)
     else:
         uncertain = parsed is None and any(_may_restrict(rule, req.command) for rule in rules)
     return _syntax_ask(req) if uncertain else None
@@ -1452,8 +1571,9 @@ def _may_restrict(rule: Rule, command: str) -> bool:
     that assemble a word from pieces (``$'\\x72m'``, ``$X``, ``${X}``,
     ``{r,}m``) could produce any text, so they always could. A pathname
     pattern (``[p]ush``, ``--f*``) could be any word it matches; heredoc
-    bodies are never expanded into names."""
-    if re.search(r"\$['\"{\w@*#?!$-]|\{[^}\s]*,", command):
+    bodies are never expanded into names. Single-quoted text is never
+    expanded either (``awk '{print $1}'``)."""
+    if re.search(r"\$['\"{\w@*#?!$-]|\{[^}\s]*,", _unquoted(command)):
         return True
     # The shell deletes \<newline> before anything else: r\<newline>m is rm.
     text = command + "\n" + re.sub(r"[\"'\\]", "", command.replace("\\\n", ""))
@@ -1472,6 +1592,28 @@ def _may_restrict(rule: Rule, command: str) -> bool:
         return True
     literals = re.split(r"[*?\[\]]+", rule.match) if rule.match_type == "glob" else [rule.match]
     return all(seen(word) for literal in literals for word in literal.split())
+
+
+def _unquoted(command: str) -> str:
+    """``command`` with the text inside single quotes removed (the quotes
+    stay, so ``$'...'`` still reads as an expansion). A single quote inside
+    double quotes or after a backslash is literal and starts nothing."""
+    out, quote, i = [], "", 0
+    while i < len(command):
+        c = command[i]
+        if quote == "'":
+            if c == "'":
+                quote = ""
+                out.append(c)
+        elif c == "\\":
+            out.append(command[i:i + 2])
+            i += 1
+        else:
+            if c == "'" and not quote or c == '"':
+                quote = "" if quote else c
+            out.append(c)
+        i += 1
+    return "".join(out)
 
 
 def deny_in_parts(req: Request, *, checks: list[str] | None = None,
