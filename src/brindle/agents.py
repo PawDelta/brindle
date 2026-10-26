@@ -3309,7 +3309,10 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 # A deny on one part of a compound command (cd x && <denied>)
                 # wins before any part-by-part allow below.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
-            if decision.decision == "ask" and profile is not None:
+            # A rule that asks explicitly is the person's to decide, whatever the
+            # profile's allowed_tools cover: only an ask no rule made falls to them.
+            explicit = decision.decision == "ask" and decision.rule is not None
+            if decision.decision == "ask" and profile is not None and not explicit:
                 perms = Permissions(profile.permission_mode, profile.allowed_tools)
                 command = reqs[0].command or ""
                 specs = [spec for name, spec in perms.rules
@@ -3366,6 +3369,13 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+            if decision.decision == "ask" and decision.rule is not None:
+                # A rule asks explicitly, and this plugin can't hold a request for the
+                # person: it fails closed rather than let OpenCode's own config run it.
+                permissions.note_prompt(decision)
+                decision = permissions.Decision(
+                    "deny", f"{decision.reason.removesuffix('; asking the user')}, and OpenCode can't wait for "
+                    "the person's answer. Ask your supervisor (send_message) or the person for it, or do without it")
             if decision.decision != "deny":
                 return None
             req = reqs[0]

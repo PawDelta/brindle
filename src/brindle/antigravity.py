@@ -437,9 +437,11 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
     if strict and decision.decision == "ask":
         # A part a rule denies is a deny, never escalated; else a compound or
         # quoted command whose every part is allowed, read as Claude Code's
-        # hook reads a profile's allowed_tools.
+        # hook reads a profile's allowed_tools. An ask a rule makes explicitly
+        # stays an ask: the person decides it, not the profile.
         decision = ((req is not None and permissions.deny_in_parts(req, checks=cfg.checks, rules=rules))
-                    or permissions.allowlist_decision(req, rules, cfg.checks, cd_root=ws.path) or decision)
+                    or (decision.rule is None and permissions.allowlist_decision(req, rules, cfg.checks, cd_root=ws.path))
+                    or decision)
     spaces = payload.get("workspacePaths")
     spaces = [s for s in spaces if isinstance(s, str) and s] if isinstance(spaces, list) else []
     if strict:

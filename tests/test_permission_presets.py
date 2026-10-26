@@ -10,6 +10,7 @@ import time
 import pytest
 
 from brindle import permissions, workspaces
+from brindle.db import Agent
 from brindle.permissions import Request, decide
 
 TOKEN = "t" * 43
@@ -88,8 +89,14 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "git push origin main"), "ask", "d-push-default"),
     (lambda ws: bash(ws, "git push"), "ask", "d-push-default"),               # its upstream may be main
     (lambda ws: bash(ws, "cd sub && git push origin HEAD:main"), "ask", "d-push-default"),
+    (lambda ws: bash(ws, "git push origin HEAD"), "ask", "d-push-default"),     # HEAD may be the default branch
     (lambda ws: bash(ws, "git push --force origin feature"), "deny", "d-git-force"),
-    (lambda ws: bash(ws, "rm -rf / --no-preserve-root"), "deny", "d-rm-root"),
+    (lambda ws: bash(ws, "git push origin +topic:feature"), "deny", "d-git-force"),   # a forced refspec
+    (lambda ws: bash(ws, "git push origin :feature"), "deny", "d-git-force"),         # deletes the branch
+    (lambda ws: bash(ws, "rm -rf / --no-preserve-root"), "deny", "d-rm"),
+    (lambda ws: bash(ws, "rm -fr /"), "deny", "d-rm"),
+    (lambda ws: bash(ws, "rm -Rf ~/"), "deny", "d-rm"),
+    (lambda ws: bash(ws, "rm -rf build/"), "allow", None),
     (lambda ws: read(ws, os.path.expanduser("~/.aws/credentials")), "deny", "d-aws"),
     (lambda ws: read(ws, os.path.join(ws.repo_root, ".env")), "deny", "d-env"),
 ])
@@ -135,6 +142,11 @@ def test_every_rule_can_be_edited_or_removed_and_a_preset_change_keeps_the_perso
     ("ls | xargs rm", "ask"),                                      # a part that isn't read-only
     ("find . -name '*.pyc' -delete", "ask"),
     ("sed -i s/a/b/ src/x.py", "ask"),
+    ("sed -n -e p -e w/tmp/output input", "ask"),                  # a second script that writes
+    ("rg --pre=evil needle input", "ask"),                         # runs a program on each file
+    ("xxd -r input output", "ask"),                                # not an audited program
+    ("uniq in out", "ask"),                                        # its second operand is an output file
+    ("fd -x rm", "ask"),
     ("sort -o out.txt in.txt", "ask"),
     ("cat x | tee copy.txt", "ask"),
 ])
@@ -143,6 +155,46 @@ def test_read_only_pipelines_run_but_writes_substitutions_and_other_programs_do_
     assert got.decision == decision, got.reason
     if decision == "allow":
         assert got.rule.id == "d-readonly"
+
+
+@pytest.mark.parametrize("provider", ["codex", "opencode", "antigravity"])
+def test_an_explicit_ask_survives_every_providers_fallbacks(db, ws, provider, monkeypatch):
+    """A rule that asks is the person's to decide: not the profile's allowed_tools
+    (Codex), not OpenCode's own config (the plugin fails closed), not agy's
+    in-workspace default (the strict hook denies and escalates)."""
+    from pathlib import Path
+
+    from brindle import agents, antigravity, opencode
+    from brindle.config import set_local
+
+    set_local(ws.repo_root, "permission_policy", "on")
+    agents_dir = Path(ws.repo_root) / ".brindle" / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    (agents_dir / "developer.md").write_text("---\nname: developer\nallowed_tools: [Bash(git push:*)]\n---\n")
+    a = Agent("p1", ws.id, "developer", provider, "boss", "assign", "processing", "%p1", None, time.time())
+    db.add_agent(a)
+    monkeypatch.setattr(agents, "_hold_for_app", lambda *args, **kw: None)     # no daemon: the CLI's prompt asks
+    if provider == "codex":
+        out = agents.permission_request_decision(
+            db, a, {"tool_name": "Bash", "tool_input": {"command": "git push origin main"}, "cwd": ws.path}, "codex")
+        assert out is None                                                     # ask, not the profile's allow
+        out = agents.permission_request_decision(
+            db, a, {"tool_name": "Bash", "tool_input": {"command": "git push origin feature"}, "cwd": ws.path}, "codex")
+        assert out["hookSpecificOutput"]["decision"]["behavior"] == "allow"    # no rule asks: allowed_tools cover it
+    elif provider == "opencode":
+        out = json.loads(opencode.hook_main(db, a.id, "opencode-pre-tool", json.dumps(
+            {"session_id": "s", "tool": "bash", "args": {"command": "git push origin main"}})))
+        assert out["decision"] == "deny" and "can't wait for the person's answer" in out["reason"]
+        assert opencode.hook_main(db, a.id, "opencode-pre-tool", json.dumps(
+            {"session_id": "s", "tool": "bash", "args": {"command": "git push origin feature"}})) == ""
+    else:
+        permissions.apply_preset("secure")                                     # writes ask explicitly
+        payload = {"toolCall": {"name": "write_to_file", "args": {"TargetFile": os.path.join(ws.path, "x.py")}},
+                   "conversationId": "c", "workspacePaths": [ws.path]}
+        assert antigravity.pre_tool_decision(db, a.id, payload, strict=True)["decision"] == "deny"
+        permissions.apply_preset("standard")                                   # unmatched: agy's own default runs it
+        assert antigravity.pre_tool_decision(db, a.id, payload, strict=True)["decision"] == "allow"
+    assert permissions.prompt_counts().get("d-push-default" if provider != "antigravity" else "d-write-ask") == 1
 
 
 def test_prompt_counts_count_the_asks_of_the_last_day_per_rule(ws, monkeypatch):

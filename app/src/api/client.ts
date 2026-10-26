@@ -495,10 +495,12 @@ export type PermissionDecision = "allow" | "deny" | "ask";
 export type PermissionKind = "read" | "write" | "edit" | "bash" | "fetch" | "mcp" | "other";
 /* A saved action's kind: a request kind, or a git push. */
 export type SavedActionKind = PermissionKind | "push";
-/* exact | prefix | glob, or a named matcher: tracked, check, git-readonly, git-push, git-force,
-   push ("<source> → <destination>", @default for the repo's default branch), worktree, readonly-pipeline. */
+/* exact | prefix | glob, or a named matcher: tracked, check, git-readonly, git-push, git-force (a force
+   flag, a +refspec or a branch deletion), push ("<source> → <destination>[ @ <remote>]", @default for
+   the repo's default branch; a saved push action's pattern always carries its remote), worktree,
+   readonly-pipeline, rm-destructive. */
 export type PermissionMatchType = "exact" | "prefix" | "glob" | "tracked" | "check" | "git-readonly" | "git-push"
-  | "git-force" | "push" | "worktree" | "readonly-pipeline";
+  | "git-force" | "push" | "worktree" | "readonly-pipeline" | "rm-destructive";
 export type PermissionLife = "session" | "time" | "forever";
 /* How far a saved push approval may reach, narrowest first. */
 export type PermissionLevel = "branch" | "destination" | "remote" | "repository" | "all";

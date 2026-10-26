@@ -95,7 +95,7 @@ PATH_KINDS = ("read", "write", "edit")
 DECISIONS = ("allow", "deny", "ask")
 MATCH_TYPES = ("exact", "prefix", "glob")
 BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "git-push", "git-force", "push", "worktree",
-                    "readonly-pipeline")
+                    "readonly-pipeline", "rm-destructive")
 SOURCES = ("preset", "repo", "user", "learned", "profile")
 STORE_SOURCES = ("preset", "user", "learned")    # what the person's store holds
 UNMATCHED = ("ask", "allow", "deny")             # Store.unmatched: what no rule covers
@@ -352,9 +352,10 @@ ROUTINE_ALLOWS: tuple[Rule, ...] = (
           "readonly-pipeline", "allow"),
 )
 DESTRUCTIVE_DENIES: tuple[Rule, ...] = (
-    _seed("d-git-force", "bash", "a git command with a force flag", "git-force", "deny"),
-    _seed("d-rm-root", "bash", "rm -rf /", "prefix", "deny"),
-    _seed("d-rm-home", "bash", "rm -rf ~", "prefix", "deny"),
+    _seed("d-git-force", "bash", "a git command with a force flag, or a push that forces or deletes a branch",
+          "git-force", "deny"),
+    _seed("d-rm", "bash", "a recursive rm of the root, a top-level folder or the home directory",
+          "rm-destructive", "deny"),
 )
 # The rules of before presets, kept for stores written then (load_store migrates them).
 LEGACY_DEFAULT_IDS = ("d-tracked", "d-checks", "d-git-ro", "d-git-push", "d-git-force", "d-ssh", "d-aws",
@@ -905,7 +906,10 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
         return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
     if decision is not None and decision.decision == "allow":
         return {"decision": "allow", "reason": f"brindle: {decision.reason}"}
-    if req is not None:
+    # An ask a rule asks for explicitly is the person's to decide: not even a
+    # file in the workspace runs on agy's default then.
+    explicit = decision is not None and decision.rule is not None and decision.rule.decision == "ask"
+    if req is not None and not explicit:
         path = os.path.realpath(req.path) if req.kind in PATH_KINDS and req.path else None
         # Protected wherever the workspaces list says the workspace is: the
         # anchors are brindle's own worktree and repo root.
@@ -981,9 +985,11 @@ def allowlist_decision(req: Request | None, rules: list[Rule], checks: list[str]
     if uncovered_part(_allow_specs(rules, checks), req.command, cd_root=cd_root) is not None:
         return None
     for part in split_commands(req.command):
-        denied = decide(replace(req, command=part), checks=checks, rules=rules, unmatched="ask", saved=[])
-        if denied.decision == "deny":
-            return denied
+        got = decide(replace(req, command=part), checks=checks, rules=rules, unmatched="ask", saved=[])
+        if got.decision == "deny":
+            return got
+        if got.rule is not None and got.rule.decision == "ask":
+            return None    # a part an ask rule covers is the person's to decide, whatever the profile allows
     return Decision("allow", "every part of the command is allowed by a rule or the profile's allowed_tools")
 
 
@@ -1154,22 +1160,51 @@ def _is_force(arg: str) -> bool:
 
 # git push options that take a value as a separate word.
 PUSH_VALUE_OPTIONS = ("-o", "--push-option", "--receive-pack", "--exec", "--repo")
+PUSH_ALL_OPTIONS = ("--all", "--branches", "--mirror", "--tags")
 UNKNOWN_REF = "?"   # a push whose source or destination the command doesn't say (its upstream's)
+PUSH_AT = " @ "     # an ask key's "<source> → <destination> @ <remote>"
 
 
-def push_calls(command: str) -> list[tuple[str, str, str]]:
-    """``(remote, source, destination)`` for every ``git push`` in ``command``,
-    branch names without ``refs/heads/``; UNKNOWN_REF where the command
-    leaves it to git's configuration (``git push`` alone)."""
+@dataclass(frozen=True)
+class Push:
+    """One ``git push`` as the command spells it: the remote, and the source
+    and destination branch (UNKNOWN_REF where git's configuration or the
+    checkout decides: no refspec, ``HEAD``, ``@{u}``, ``--all``). ``force``:
+    a force flag or a ``+refspec``; ``delete``: it deletes the destination."""
+    remote: str
+    source: str
+    destination: str
+    force: bool = False
+    delete: bool = False
+
+    def key(self) -> str:
+        return f"{self.source}{PUSH_ARROW}{self.destination}{PUSH_AT}{self.remote}"
+
+
+def _branch_name(ref: str) -> str:
+    """A refspec side as a branch name, or UNKNOWN_REF when only git can tell
+    which branch it means (HEAD, @{upstream}, a revision expression)."""
+    ref = ref.removeprefix("refs/heads/")
+    if not ref or ref == "HEAD" or ref.startswith("@") or any(c in ref for c in "~^@{}"):
+        return UNKNOWN_REF
+    return ref
+
+
+def push_calls(command: str) -> list[Push]:
+    """Every ``git push`` in ``command``, one per refspec."""
     out = []
     for sub, args in _git_calls(command):
         if sub != "push":
             continue
-        positional, delete, i = [], False, 0
+        positional, delete, force, everything, i = [], False, False, False, 0
         while i < len(args):
             a = args[i]
             if a in ("-d", "--delete"):
                 delete = True
+            elif _is_force(a):
+                force = True
+            elif a in PUSH_ALL_OPTIONS or a == "--prune":
+                everything = True
             elif a in PUSH_VALUE_OPTIONS:
                 i += 1
             elif not a.startswith("-"):
@@ -1177,18 +1212,22 @@ def push_calls(command: str) -> list[tuple[str, str, str]]:
             i += 1
         remote = positional[0] if positional else UNKNOWN_REF
         refspecs = positional[1:] or [UNKNOWN_REF]
+        if everything:
+            refspecs = [UNKNOWN_REF]
         for spec in refspecs:
+            forced = force or spec.startswith("+")
             spec = spec.lstrip("+")
             if spec == UNKNOWN_REF:
                 src = dst = UNKNOWN_REF
+            elif delete:
+                src, dst = "(delete)", _branch_name(spec.split(":", 1)[-1])
             elif ":" in spec:
-                src, dst = spec.split(":", 1)
-                src = src or "(delete)"
+                left, right = spec.split(":", 1)
+                src, dst = (_branch_name(left) if left else "(delete)"), _branch_name(right)
+                delete = delete or not left
             else:
-                src = dst = spec
-            if delete:
-                src, dst = "(delete)", spec.split(":", 1)[-1]
-            out.append((remote, src, dst.removeprefix("refs/heads/") or UNKNOWN_REF))
+                src = dst = _branch_name(spec)
+            out.append(Push(remote, src, dst, forced, delete or src == "(delete)"))
     return out
 
 
@@ -1212,12 +1251,14 @@ def default_branch(repo_root: str) -> str | None:
     return name
 
 
-def push_pattern(match: str) -> tuple[str, str] | None:
-    """The (source, destination) globs of a push rule's match, or None."""
+def push_pattern(match: str) -> tuple[str, str, str] | None:
+    """The (source, destination, remote) globs of a push pattern
+    ``"<source> → <destination>[ @ <remote>]"``, or None."""
     if PUSH_ARROW not in match:
         return None
+    match, _, remote = match.partition(PUSH_AT)
     src, dst = (part.strip() for part in match.split(PUSH_ARROW, 1))
-    return (src or "*", dst or "*")
+    return (src or "*", dst or "*", remote.strip() or "*")
 
 
 def _ref_matches(pattern: str, ref: str, repo_root: str, loose: bool) -> bool:
@@ -1230,14 +1271,21 @@ def _ref_matches(pattern: str, ref: str, repo_root: str, loose: bool) -> bool:
     return fnmatch.fnmatchcase(ref, pattern)
 
 
+def push_fits(match: str, push: Push, repo_root: str, loose: bool) -> bool:
+    """Whether one push fits push pattern ``match`` (see _ref_matches)."""
+    pattern = push_pattern(match)
+    if pattern is None:
+        return False
+    src_pat, dst_pat, remote_pat = pattern
+    return (_ref_matches(src_pat, push.source, repo_root, loose) and _ref_matches(dst_pat, push.destination, repo_root, loose)
+            and _ref_matches(remote_pat, push.remote, repo_root, loose))
+
+
 def push_matches(match: str, req: Request, loose: bool) -> bool:
     """Whether any git push in ``req``'s command fits push pattern ``match``."""
-    pattern = push_pattern(match)
-    if pattern is None or not req.command:
+    if not req.command:
         return False
-    src_pat, dst_pat = pattern
-    return any(_ref_matches(src_pat, src, req.repo_root, loose) and _ref_matches(dst_pat, dst, req.repo_root, loose)
-               for _, src, dst in push_calls(req.command))
+    return any(push_fits(match, push, req.repo_root, loose) for push in push_calls(req.command))
 
 
 # -- read-only pipelines -------------------------------------------------------------------------
@@ -1248,17 +1296,60 @@ def push_matches(match: str, req: Request, loose: bool) -> bool:
 # that writes a file (a redirection other than to /dev/null), substitutes a
 # command, or runs a program not on the list goes through the normal decision.
 
-READONLY_PROGRAMS = frozenset({
-    "grep", "egrep", "fgrep", "rg", "ag", "ls", "cat", "head", "tail", "wc", "sort", "uniq", "cut", "tr",
-    "diff", "cmp", "file", "stat", "du", "df", "pwd", "echo", "printf", "which", "whereis", "type", "basename",
-    "dirname", "realpath", "readlink", "true", "false", "test", "whoami", "hostname", "uname",
-    "printenv", "column", "nl", "tac", "rev", "strings", "od", "xxd", "hexdump", "md5", "md5sum", "shasum",
-    "sha256sum", "jq", "yq", "tree", "fd", "fdfind", "locate", "comm", "paste", "fold", "expand",
-    "unexpand", "seq", "tee",
-})
+# program -> the options that make it write a file or run another program
+# (any argument starting with one of them refuses the command). Only programs
+# audited for such options are listed; ``uniq``'s second operand is an output
+# file, so it takes one operand at most (see _readonly_part).
+READONLY_PROGRAMS: dict[str, tuple[str, ...]] = {
+    "grep": (), "egrep": (), "fgrep": (), "rg": ("--pre",), "ag": (),
+    "ls": (), "cat": (), "head": (), "tail": (), "wc": (), "nl": (), "tac": (), "rev": (), "fold": (),
+    "expand": (), "unexpand": (), "cut": (), "tr": (), "paste": (), "comm": (), "column": (), "seq": (),
+    "sort": ("-o", "--output", "--compress-program", "-S"), "uniq": (),
+    "diff": (), "cmp": (), "file": ("-C", "--compile"), "stat": (), "du": (), "df": (), "pwd": (),
+    "echo": (), "printf": (), "which": (), "whereis": (), "type": (), "basename": (), "dirname": (),
+    "realpath": (), "readlink": (), "true": (), "false": (), "test": (), "whoami": (), "uname": (),
+    "printenv": (), "strings": (), "od": (), "hexdump": (), "md5": (), "md5sum": (), "shasum": (),
+    "sha256sum": (), "jq": (), "yq": ("-i", "--inplace"), "tree": ("-o",), "locate": (),
+}
+ONE_OPERAND = frozenset({"uniq"})
 FIND_WRITING = ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls", "-fprint0")
-SED_PRINT = re.compile(r"^(\d+|\$|/.*/|\d+,(\d+|\$)|/.*/,/.*/)?[pP=]$")
-TEE_WRITES = re.compile(r"^[^-]")
+# A sed script that only prints: an optional address (line numbers, $, /re/)
+# then p, P, l or =. Anything else (s///w, w, r, e ...) may write or run.
+SED_PRINT = re.compile(r"^(\d+|\$|/[^/]*/|\d+,(\d+|\$)|/[^/]*/,/[^/]*/)?\s*[pPl=]$")
+SED_SCRIPT_OPTIONS = ("-e", "--expression")
+
+
+def _sed_readonly(args: list[str]) -> bool:
+    """``sed -n`` printing only: every script (``-e``, ``--expression=`` or the
+    first operand) must be a print command; no in-place edit, no script file."""
+    scripts, operands, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if a in SED_SCRIPT_OPTIONS:
+            if i + 1 >= len(args):
+                return False
+            scripts.append(args[i + 1])
+            i += 2
+            continue
+        if a.startswith("--expression="):
+            scripts.append(a.split("=", 1)[1])
+        elif a.startswith("-e") and a != "-e":
+            scripts.append(a[2:])
+        elif a.startswith(("-i", "--in-place", "-f", "--file", "-s")):
+            return False
+        elif a.startswith("-") and a != "-":
+            if not re.fullmatch(r"-n|--quiet|--silent|-E|-r|--regexp-extended|--posix|-z|--null-data|-u|--unbuffered|--debug", a):
+                return False
+        else:
+            operands.append(a)
+        i += 1
+    if not any(a in ("-n", "--quiet", "--silent") for a in args):
+        return False
+    if not scripts:
+        if not operands:
+            return False
+        scripts, operands = operands[:1], operands[1:]
+    return all(SED_PRINT.fullmatch(s.strip()) for s in scripts)
 
 
 def _readonly_part(words: list[str]) -> bool:
@@ -1273,14 +1364,24 @@ def _readonly_part(words: list[str]) -> bool:
     if program == "find":
         return not any(a in FIND_WRITING for a in args)
     if program == "sed":
-        scripts = [a for a in args if not a.startswith("-")][:1]
-        return "-n" in args and not any(a.startswith(("-i", "--in-place")) for a in args) \
-            and bool(scripts) and bool(SED_PRINT.fullmatch(scripts[0].strip()))
+        return _sed_readonly(args)
+    if program in ("fd", "fdfind"):
+        # -x/-X run a program; a short-option cluster may hide them.
+        return not any(a.startswith(("--exec", "--exec-batch", "-l")) or (a.startswith("-") and not a.startswith("--")
+                                                                            and any(c in a for c in "xX"))
+                       for a in args)
     if program == "tee":
-        return not any(TEE_WRITES.match(a) for a in args)   # tee with no file only echoes
-    if program == "sort" and any(a == "-o" or a.startswith(("-o", "--output")) for a in args):
+        return not any(not a.startswith("-") for a in args)   # tee with no file only echoes
+    if program == "hostname":
+        return not any(not a.startswith("-") for a in args)   # with an operand it sets the name
+    forbidden = READONLY_PROGRAMS.get(program)
+    if forbidden is None:
         return False
-    return program in READONLY_PROGRAMS
+    if any(a.startswith(forbidden) for a in args if forbidden):
+        return False
+    if program in ONE_OPERAND and sum(1 for a in args if not a.startswith("-")) > 1:
+        return False
+    return True
 
 
 def readonly_pipeline(command: str | None) -> bool:
@@ -1296,6 +1397,35 @@ def readonly_pipeline(command: str | None) -> bool:
     if not parsed or any(after not in (*COMPOUND_SEPARATORS, "||") for _, after in parsed):
         return False
     return all(_readonly_part(words) for words, _ in parsed)
+
+
+# -- destructive commands --------------------------------------------------------------------------
+
+# What a recursive rm must not be pointed at: the root, a top-level folder, or the home directory.
+DESTRUCTIVE_TARGETS = re.compile(r"^(/|/\*|/[^/]+/?|~|~/|~/\*|\$HOME|\$\{HOME\}|\$HOME/|\$HOME/\*|\.\.?/?)$")
+
+
+def destructive_rm(command: str) -> bool:
+    """Whether ``command`` runs ``rm`` recursively (``-r``/``-R``/``--recursive``,
+    in any flag cluster or spelling) at the root, a top-level folder, the home
+    directory or the working directory itself, or with ``--no-preserve-root``."""
+    for words in _segments(command):
+        if not words or os.path.basename(words[0]) != "rm":
+            continue
+        flags = [w for w in words[1:] if w.startswith("-")]
+        targets = [w for w in words[1:] if not w.startswith("-")]
+        if any(f == "--no-preserve-root" for f in flags):
+            return True
+        recursive = any(f in ("--recursive",) or (not f.startswith("--") and any(c in f for c in "rR")) for f in flags)
+        home = os.path.expanduser("~")
+        if recursive and any(DESTRUCTIVE_TARGETS.fullmatch(t) or t.rstrip("/") == home for t in targets):
+            return True
+    return False
+
+
+def forced_push(command: str) -> bool:
+    """A push that forces (a flag, or a ``+refspec``) or deletes a branch."""
+    return any(p.force or p.delete for p in push_calls(command))
 
 
 def _in_worktree(req: Request) -> bool:
@@ -1329,7 +1459,9 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
     if rule.match_type == "push":
         return push_matches(rule.match, req, loose=rule.decision != "allow")
     if rule.match_type == "git-force":
-        return any(_is_force(a) for _, args in _git_calls(command) for a in args)
+        return any(_is_force(a) for _, args in _git_calls(command) for a in args) or forced_push(command)
+    if rule.match_type == "rm-destructive":
+        return destructive_rm(command)
     if rule.match_type == "readonly-pipeline":
         return readonly_pipeline(command)
     return False
@@ -1444,7 +1576,17 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     if saved is None:
         saved = store.saved
     ruled = _rule_decision(req, rules, checks)
-    if ruled is not None and ruled.decision != "ask":
+    if ruled is not None and ruled.decision == "deny":
+        return ruled
+    if saved:
+        from brindle import permission_grants
+
+        # A saved deny stops it before any automatic allow; a saved allow is
+        # weighed only once the policy's own answer is known (below).
+        stopped = permission_grants.settle(req, None, saved, session=session, denies_only=True)
+        if stopped is not None:
+            return stopped
+    if ruled is not None and ruled.decision == "allow":
         return ruled
     if ruled is None and req.kind == "bash" and req.command and simple_argv(req.command) is None:
         parts = compound_parts(req.command)
@@ -1456,23 +1598,23 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
             if all(answer.decision == "allow" for answer in answers):
                 return Decision("allow", "every part of the command is allowed by a rule")
             ruled = next((a for a in answers if a.decision == "ask" and a.rule is not None), None)
+    if ruled is None and unmatched == "deny":
+        return Decision("deny", "no rule covers it, and unmatched actions are denied")
+    if ruled is None and unmatched == "allow":
+        # Nothing covers it: it runs, unless a part of the command a deny or ask
+        # rule covers hides in it (cd x && git push origin main).
+        within = decide_in_parts(req, checks=checks, rules=rules)
+        if within is None:
+            return Decision("allow", "no rule covers it; unmatched actions run")
+        if within.decision == "deny":
+            return within
+        ruled = within
     if saved:
-        from brindle import permission_grants
-
         settled = permission_grants.settle(req, ruled.rule if ruled else None, saved, session=session)
         if settled is not None:
             return settled
     if ruled is not None:
         return Decision("ask", ruled.reason + "; asking the user", ruled.rule)
-    if unmatched == "allow":
-        # Nothing covers it: it runs, unless a part of the command a deny or ask
-        # rule covers hides in it (cd x && git push origin main).
-        within = decide_in_parts(req, checks=checks, rules=rules)
-        if within is not None:
-            return within
-        return Decision("allow", "no rule covers it; unmatched actions run")
-    if unmatched == "deny":
-        return Decision("deny", "no rule covers it, and unmatched actions are denied")
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
         why = "the command isn't a single simple command, so no allow rule applies"
     elif req.kind == "read" and req.path:
@@ -2020,6 +2162,35 @@ def _agy_entry(rule: Rule) -> str | None:
     return None
 
 
+def _literal_prefix(rule: Rule) -> str | None:
+    """What every request a rule matches starts with, if that can be said:
+    the whole match for exact and prefix rules, a glob's text before its
+    first wildcard. None for a named matcher (anything may match)."""
+    if rule.match_type in ("exact", "prefix"):
+        return rule.match
+    if rule.match_type == "glob":
+        return re.split(r"[*?\[]", rule.match, 1)[0]
+    return None
+
+
+def _may_overlap(ask: Rule, allow: Rule) -> bool:
+    """Whether a request could fit both ``ask`` and ``allow`` (same kind), so
+    that mirroring the allow into a provider's own settings would let it run
+    where the hook asks. Errs toward overlap."""
+    if ask.kind != allow.kind:
+        return False
+    if ask.match_type == "push":
+        head = _literal_prefix(allow)
+        if head is None:
+            return False    # a named matcher (read-only git, checks, pipelines): never a push
+        head = head.strip()
+        return "git".startswith(head) or head.startswith("git")
+    a, b = _literal_prefix(ask), _literal_prefix(allow)
+    if a is None or b is None:
+        return True
+    return a.startswith(b) or b.startswith(a)
+
+
 def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
     """The agy settings entries for ``rules`` (the built-in ones expanded:
     the read-only git commands as exact commands, git push as a deny), as
@@ -2027,6 +2198,7 @@ def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
     agy's settings apply to every project, and a check runs whatever that
     repo defines, so it's allowed only for brindle workers in that repo."""
     out: dict[str, list[str]] = {"allow": [], "deny": []}
+    asks = [r for r in rules if r.decision == "ask" and not r.expired()]
 
     def add(decision: str, entry: str | None) -> None:
         if entry and entry not in out[decision]:
@@ -2035,6 +2207,8 @@ def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
     for rule in rules:
         if rule.decision == "ask" or rule.exclusions or rule.expired():
             continue  # only the hook can ask, or weigh an exception
+        if rule.decision == "allow" and any(_may_overlap(ask, rule) for ask in asks):
+            continue  # agy would run it on the allow where the hook asks; left to the hook
         if rule.match_type == "check":
             continue
         elif rule.match_type == "git-readonly" and rule.decision == "allow":
@@ -2042,7 +2216,7 @@ def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
                 add("allow", f"command(regex:^git {sub}$)")
         elif rule.match_type == "git-push" and rule.decision == "deny":
             add("deny", "command(git push)")
-        elif rule.match_type == "push" and rule.decision == "deny" and push_pattern(rule.match) == ("*", "*"):
+        elif rule.match_type == "push" and rule.decision == "deny" and push_pattern(rule.match) == ("*", "*", "*"):
             add("deny", "command(git push)")
         elif rule.match_type in BUILTIN_MATCHERS:
             continue  # tracked files, force flags, pipelines, branches: only the hook can tell

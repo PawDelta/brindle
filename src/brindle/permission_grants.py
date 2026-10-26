@@ -32,6 +32,7 @@ from brindle import permissions
 from brindle.permissions import (
     LEVELS,
     PUSH_ARROW,
+    PUSH_AT,
     UNKNOWN_REF,
     Decision,
     Request,
@@ -60,14 +61,21 @@ def grant_kind(req: Request) -> str:
     return req.kind
 
 
+def ask_keys(req: Request) -> list[str]:
+    """Every key a saved action must cover for ``req``: one per push the
+    command makes (``"source → destination @ remote"``), else the one ask_key."""
+    if grant_kind(req) == "push":
+        return [p.key() for p in permissions.push_calls(req.command or "")]
+    return [ask_key(req)]
+
+
 def ask_key(req: Request) -> str:
     """What a saved action's pattern is matched against: a push's "source →
-    destination", a file's path relative to the worktree, the command, the
-    URL or the tool name."""
+    destination @ remote" (the first, when a command pushes several), a
+    file's path relative to the worktree, the command, the URL or the tool name."""
     kind = grant_kind(req)
     if kind == "push":
-        _, src, dst = permissions.push_calls(req.command or "")[0]
-        return f"{src}{PUSH_ARROW}{dst}"
+        return permissions.push_calls(req.command or "")[0].key()
     if req.kind in permissions.PATH_KINDS:
         pattern = permissions.learnable_pattern(req)
         return pattern[1] if pattern else (req.path or "")
@@ -86,12 +94,15 @@ def scopes_for(kind: str, key: str, name: str = "") -> list[dict]:
     """The scope ladder for a request of ``kind`` with ask key ``key``,
     narrowest first; the general form is the one valued GENERAL."""
     if kind == "push":
-        src, _, dst = key.partition(PUSH_ARROW)
-        return [_scope(EXACT, key, f"This push only · {key}", "branch"),
-                _scope(GENERAL, f"*{PUSH_ARROW}{dst}", f"Into {dst} from any branch", "destination"),
-                _scope("remote", f"*{PUSH_ARROW}*", "All branches on this remote", "remote"),
-                _scope("repository", f"*{PUSH_ARROW}*", "All pushes in this repository", "repository"),
-                _scope("all", f"*{PUSH_ARROW}*", "All pushes in every repository", "all")]
+        refs, _, remote = key.partition(PUSH_AT)
+        src, _, dst = refs.partition(PUSH_ARROW)
+        remote = remote or "*"
+        return [_scope(EXACT, key, f"This push only · {src} into {dst} on {remote}", "branch"),
+                _scope(GENERAL, f"*{PUSH_ARROW}{dst}{PUSH_AT}{remote}", f"Into {dst} from any branch on {remote}",
+                       "destination"),
+                _scope("remote", f"*{PUSH_ARROW}*{PUSH_AT}{remote}", f"All branches on {remote}", "remote"),
+                _scope("repository", f"*{PUSH_ARROW}*{PUSH_AT}*", "All pushes in this repository", "repository"),
+                _scope("all", f"*{PUSH_ARROW}*{PUSH_AT}*", "All pushes in every repository", "all")]
     if kind in permissions.PATH_KINDS:
         verb = {"read": "reads", "write": "writes", "edit": "edits"}[kind]
         top = key.split("/")[0] if "/" in key else ""
@@ -161,8 +172,8 @@ def scope_matches(kind: str, pattern: str, key: str) -> bool:
     if kind == "push":
         if PUSH_ARROW not in pattern or PUSH_ARROW not in key:
             return False
-        for pat, ref in zip(pattern.split(PUSH_ARROW, 1), key.split(PUSH_ARROW, 1)):
-            pat, ref = pat.strip() or "*", ref.strip()
+        pats, refs = permissions.push_pattern(pattern), permissions.push_pattern(key)
+        for pat, ref in zip(pats, refs):
             if ref == UNKNOWN_REF and pat != "*" or not fnmatch.fnmatchcase(ref, pat):
                 return False
         return True
@@ -200,11 +211,13 @@ def _other_parts_allowed(req: Request, rules: list[Rule] | None) -> bool:
 
 
 def covers(action: SavedAction, req: Request, rules: list[Rule] | None = None) -> bool:
+    """Whether ``action``'s pattern covers ``req``: every push the command
+    makes, for a push action, and nothing else runs alongside them."""
     if action.kind != grant_kind(req):
         return False
     if action.repo is not None and req.repo_root and action.repo != req.repo_root:
         return False
-    if not scope_matches(action.kind, action.pattern, ask_key(req)):
+    if not all(scope_matches(action.kind, action.pattern, key) for key in ask_keys(req)):
         return False
     return action.kind != "push" or _other_parts_allowed(req, rules)
 
@@ -233,17 +246,20 @@ def limits_allow(action_level: str | None, action_pattern: str, action_life: str
 
 
 def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session: str | None = None,
-           rules: list[Rule] | None = None, now: float | None = None) -> Decision | None:
+           rules: list[Rule] | None = None, now: float | None = None, denies_only: bool = False) -> Decision | None:
     """The saved action that settles an ask for ``req`` (``rule``: the ask
     rule that asked, None for an unmatched ask), as a Decision, or None. A
-    saved deny always stops it; a saved allow only within the rule's limits.
+    saved deny always stops it; a saved allow only within the rule's limits
+    (``denies_only``: look for a deny alone, before the policy's own allows).
     ``session``: the asking agent's session, for saved actions that last one."""
     now = time.time() if now is None else now
     hits = [s for s in saved if not s.expired(now) and (s.life != "session" or (session and s.session == session))
-            and covers(s, req, rules)]
+            and (s.decision == "deny" or not denies_only) and covers(s, req, rules)]
     for s in hits:
         if s.decision == "deny":
             return Decision("deny", f"stopped by your saved deny {s.id} ({s.kind} {s.pattern})")
+    if denies_only:
+        return None
     for s in hits:
         if limits_allow(s.level, s.pattern, s.life, s.minutes, rule) is None:
             return Decision("allow", f"covered by your saved action {s.id} ({s.kind} {s.pattern})", rule)
@@ -364,9 +380,15 @@ def eligible(ask: PendingAsk, scope: dict, mode: str, minutes: float | None) -> 
 
 
 def candidates(asks: list[PendingAsk], g: Group, scope: dict) -> list[PendingAsk]:
-    """Every pending ask of the group's kind and repo the scope covers."""
+    """Every pending ask of the group's kind and repo the scope covers (every
+    push of a command that makes several)."""
     return [a for a in asks if a.repo_root == g.repo_root and a.ask.kind == g.kind
-            and scope_matches(g.kind, scope["pattern"], a.ask.exact)]
+            and all(scope_matches(g.kind, scope["pattern"], key) for key in ask_keys(a.request))]
+
+
+def _result(a: PendingAsk, why: str | None = None) -> dict:
+    row = {"agent_id": a.agent_id, "request_id": a.request_id, "exact": a.ask.exact}
+    return {**row, "why": why} if why else row
 
 
 def _answer(db, ask: PendingAsk, choice: str) -> str | None:
@@ -393,8 +415,7 @@ def _resolve(db, hits: list[PendingAsk], choice: str) -> tuple[list[dict], list[
     done, failed = [], []
     for a in hits:
         why = _answer(db, a, choice)
-        (failed if why else done).append({"agent_id": a.agent_id, "request_id": a.request_id,
-                                          "exact": a.ask.exact, **({"why": why} if why else {})})
+        (failed if why else done).append(_result(a, why))
     return done, failed
 
 
@@ -417,7 +438,9 @@ def decide_group(db, key: str, scope_value: str, mode: str, minutes: float | Non
         raise _error("invalid", f"scope must be one of {', '.join(s['value'] for s in g.rep.ask.scopes)}")
     if mode == "timed" and (minutes is None or minutes <= 0):
         raise _error("invalid", "a timed grant needs positive minutes")
-    exact = scope["value"] == EXACT or scope["pattern"] == g.rep.ask.exact
+    # Narrowed to the exact request, "once" and "deny" resolve the oldest ask
+    # alone; at any wider scope the whole item (a grant: every ask it covers).
+    exact = scope["value"] == EXACT
     wanted = ([g.rep] if exact else list(g.items)) if mode in ("once", "deny") else candidates(asks, g, scope)
     reasons: dict[str, str] = {}
     hits = []
@@ -440,8 +463,7 @@ def decide_group(db, key: str, scope_value: str, mode: str, minutes: float | Non
     return {"mode": mode, "scope": scope, "grant": grant.to_dict() if grant else None,
             "resumed": done if mode not in ("deny", "always-deny") else [],
             "stopped": done if mode in ("deny", "always-deny") else [],
-            "skipped": [{"request_id": a.request_id, "exact": a.ask.exact, "why": reasons[a.request_id]}
-                        for a in wanted if a.request_id in reasons],
+            "skipped": [_result(a, reasons[a.request_id]) for a in wanted if a.request_id in reasons],
             "failed": failed}
 
 
@@ -495,8 +517,7 @@ def plan_to_json(planned: dict) -> dict:
                         "mode": e["mode"], "minutes": e["minutes"],
                         "requests": [a.request_id for a in e["hits"]]} for e in planned["plan"]],
             "resumes": len(planned["done"]),
-            "skipped": [{"request_id": a.request_id, "exact": a.ask.exact,
-                         "why": "blocked by a deny rule" if a.blocked else "outside its own limits"}
+            "skipped": [_result(a, "blocked by a deny rule" if a.blocked else "outside its own limits")
                         for a in planned["skipped"]]}
 
 
@@ -552,5 +573,4 @@ def unblock_denied(db, repo_root: str | None = None, forever: bool = False) -> d
             a.policy = _policy(req, a.repo_root)
     free = [a for a in denied if a not in locked and not a.blocked]
     out = allow_all(db, repo_root, forever, asks=asks, only=free)
-    return {**out, "excepted": excepted, "added": added,
-            "locked": [{"request_id": a.request_id, "exact": a.ask.exact} for a in locked]}
+    return {**out, "excepted": excepted, "added": added, "locked": [_result(a) for a in locked]}
