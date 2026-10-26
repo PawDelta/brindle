@@ -3639,12 +3639,12 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     ``holder`` (brindle.daemon.holds), or None after ``hold`` seconds, when
     the person asks to answer in the terminal, once the agent is closed or
     killed, once its CLI's own prompt took the request (its PostToolUse
-    removed the row), or if the daemon goes away: then the request goes to
+    removed the row, or the prompt left its pane), or if the daemon goes away: then the request goes to
     the CLI's own prompt (or, where there is none, is refused). The agent
     shows waiting meanwhile, as at that prompt."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline, answer = time.monotonic() + hold, None
+    deadline, answer, prompted = time.monotonic() + hold, None, False
     while True:
         now = db.get_agent(agent.id)
         recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
@@ -3653,6 +3653,12 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
         if (now is None or now.status in ("done", "paused") or now.dismissed_at is not None
                 or recorded is None or left <= 0):
             break
+        # Its CLI's own prompt, drawn meanwhile and gone since, was answered there: a
+        # deny or a dismissal runs no PostToolUse to remove the row.
+        shown = _permission_prompt_shown(now)
+        if prompted and shown is False:
+            break
+        prompted = prompted or bool(shown)
         held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
         if answer is not None or not held:
             break
@@ -3660,6 +3666,18 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     if answer:
         db.set_status(agent.id, "processing", only_if="waiting")
     return answer
+
+
+def _permission_prompt_shown(agent: Agent) -> bool | None:
+    """Whether ``agent``'s pane shows its CLI's own permission prompt, or
+    None when there is no pane to read."""
+    if agent.headless or not agent.tmux_window:
+        return None
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=60, server=server_of(agent))
+    except tmux.TmuxError:
+        return None
+    return get_provider(agent.provider).tool_permission(screen)
 
 
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:

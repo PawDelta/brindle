@@ -1239,6 +1239,37 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     assert code == 409 and pressed == [], reply
 
 
+def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, world, answering, monkeypatch):
+    from test_reliability import CLAUDE_IDLE
+
+    from brindle import tmux
+    from brindle.daemon import holds
+    from brindle.db import DB
+    from brindle.service import inbox
+
+    screen = ["Bash command\n  npm test\nDo you want to proceed?\n" + "\n".join(
+        f"{'❯' if i == 0 else ' '} {i + 1}. {o}" for i, o in enumerate(OPTIONS))]
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: screen[0])
+    asked, waited, publish, take = threading.Event(), threading.Event(), bus.publish_agent, holds.HOLDS.take
+    monkeypatch.setattr(bus, "publish_agent", lambda d, kind, *a, **k: (
+        kind == "permission.pending" and asked.set(), publish(d, kind, *a, **k))[1])
+    monkeypatch.setattr(holds.HOLDS, "take", lambda request_id, nonce: (waited.set(), take(request_id, nonce))[1])
+    out, wk = [], db.get_agent("wk")
+    hook = threading.Thread(target=lambda: out.append(
+        agents.permission_request_decision(DB(), wk, {**ASK, "cwd": str(repo)})))
+    hook.start()
+
+    def shown():
+        return [i.kind for i in inbox.items(db, str(repo), panes={"%1": True, "%2": True}) if i.agent_id == "wk"]
+
+    assert asked.wait(5) and waited.wait(5)     # held for the app, with Claude Code's own prompt up too
+    assert "permission" in shown()
+    screen[0] = CLAUDE_IDLE     # the person denied it in the pane: the prompt is gone, no PostToolUse comes
+    hook.join(HOLD / 2)         # well before the hold would end
+    assert not hook.is_alive() and [_verdict(o) for o in out] == [None]
+    assert shown() == []        # nor left waiting: its pane says what it does now
+
+
 @pytest.fixture
 def lead(db, repo, tmp_path, monkeypatch):
     """A session ``lead`` on branch ``sess`` (base main) in its own checkout, its goal reached; jobs run inline."""
