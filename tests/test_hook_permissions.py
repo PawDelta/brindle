@@ -158,7 +158,7 @@ def test_other_tools_and_unknown_profiles_are_left_alone(db, ws):
     assert agents.handle_hook(db, "w2", "pre-tool", bash("pytest -q")) is None
 
 
-def test_permission_essentials_allow_read_only_commands_and_keep_restrictions(db, ws, monkeypatch):
+def test_necessary_group_default_on_allows_read_only_commands_and_keeps_restrictions(db, ws, monkeypatch):
     from brindle import permissions as p
     from brindle.config import set_local
 
@@ -179,6 +179,11 @@ def test_permission_essentials_allow_read_only_commands_and_keep_restrictions(db
     # permission_essentials, on by default: read-only inspection needs no rule.
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && grep -n hi *.py | tail -1")) is not None
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cat ../../../.env")) is None   # a read deny still wins
+    # Writes, the network, push, rm and nested shells still ask.
+    for command in ("sed -i s/a/b/ app.py", "cat app.py > ../out", "curl https://example.com", "git push",
+                    "rm app.py", "bash -c 'ls'", "sh -c ls"):
+        decision = agents.handle_hook(db, a.id, "pre-tool", bash(command)) or {"hookSpecificOutput": {}}
+        assert decision["hookSpecificOutput"].get("permissionDecision") != "allow", command
     set_local(ws.repo_root, "permission_essentials", False)
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status")) is None
 
