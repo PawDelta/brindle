@@ -3653,12 +3653,12 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
         if (now is None or now.status in ("done", "paused") or now.dismissed_at is not None
                 or recorded is None or left <= 0):
             break
-        # Its CLI's own prompt, drawn meanwhile and gone since, was answered there: a
-        # deny or a dismissal runs no PostToolUse to remove the row.
-        shown = _permission_prompt_shown(now)
-        if prompted and shown is False:
+        # Answered at its CLI's own prompt: an allow ends the prompt (its tool runs), a
+        # deny or a dismissal the turn, which no PostToolUse removes the row after.
+        state = _pane_state(now)
+        if state == "idle" or (prompted and state == "busy"):
             break
-        prompted = prompted or bool(shown)
+        prompted = prompted or state == "waiting"
         held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
         if answer is not None or not held:
             break
@@ -3668,16 +3668,18 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     return answer
 
 
-def _permission_prompt_shown(agent: Agent) -> bool | None:
-    """Whether ``agent``'s pane shows its CLI's own permission prompt, or
-    None when there is no pane to read."""
-    if agent.headless or not agent.tmux_window:
+def _pane_state(agent: Agent) -> str | None:
+    """What the pane of an agent whose CLI shows its own prompt while its
+    hook holds a request reads as ('idle', 'busy' or 'waiting'), or None."""
+    from brindle.service.inbox import TERMINAL_PROMPT_VISIBLE
+
+    if agent.headless or not agent.tmux_window or not TERMINAL_PROMPT_VISIBLE.get(agent.provider):
         return None
     try:
-        screen = tmux.capture(agent.tmux_window, lines=60, server=server_of(agent))
+        return get_provider(agent.provider).screen_state(
+            tmux.capture(agent.tmux_window, lines=60, server=server_of(agent)))
     except tmux.TmuxError:
         return None
-    return get_provider(agent.provider).tool_permission(screen)
 
 
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
