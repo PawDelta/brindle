@@ -3590,8 +3590,9 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
 # agent was closed or its request answered at the CLI's own prompt.
 HOLD_LOOK_SECONDS = 5.0
 # Looks in a row (HOLD_LOOK_SECONDS apart) a pane must read past its CLI's own
-# permission prompt before the hold ends: longer than one look, so a read
-# while the prompt is redrawn doesn't take it for answered.
+# permission prompt, busy or idle, before the hold ends: longer than one look,
+# so a read while the prompt is redrawn doesn't take it for answered. Any
+# other read starts the count over.
 ANSWERED_LOOKS = 3
 # Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
 # so the hook gives the request to the prompt itself before the CLI cancels it.
@@ -3662,7 +3663,7 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
         # past it was answered there, whether or not a look caught the prompt. An allow
         # runs the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
         state = _pane_state(now)
-        past = past + 1 if state in ("idle", "busy") else 0 if state == "prompt" else past
+        past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
         if past >= ANSWERED_LOOKS:
             break
         held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
