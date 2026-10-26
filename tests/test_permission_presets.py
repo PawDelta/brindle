@@ -150,6 +150,8 @@ def test_every_rule_can_be_edited_or_removed_and_a_preset_change_keeps_the_perso
     ("fd -x rm", "ask"),
     ("sort -o out.txt in.txt", "ask"),
     ("sort -ro out.txt in.txt", "ask"),                            # the writing flag inside a cluster
+    ("sort --out=/tmp/x in", "ask"),                               # getopt takes a prefix of a long option
+    pytest.param("sort --compress-prog=p in", "ask", marks=pytest.mark.variant("runs a program, as a prefix")),
     ("file -bC -m magic input", "ask"),
     ("tree -fo out.txt", "ask"),
     ("cat x | tee copy.txt", "ask"),

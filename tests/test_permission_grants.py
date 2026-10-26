@@ -78,11 +78,14 @@ def test_saved_actions_settle_asks_only_within_policy_limits_and_never_past_a_de
     assert decide(bash(ws, "git push origin fix:main && curl https://x")).decision == "ask"   # the grant covers pushes
     assert decide(bash(ws, "git push upstream fix:main")).decision == "ask"                  # another remote
     assert decide(bash(ws, "git push origin fix:main fix:release")).decision == "ask"        # every push must be covered
+    assert decide(bash(ws, "git push origin HEAD")).decision == "ask"           # a branch only git knows: never covered
     assert decide(bash(ws, "git push --force origin fix:main")).decision == "deny"           # a deny rule still wins
     assert decide(bash(ws, "git push origin +fix:main")).decision == "deny"                  # a forced refspec too
-    # A saved deny stops a command as soon as one of its pushes matches, whatever else it pushes.
+    # A saved deny stops a command as soon as one of its pushes matches, whatever else it pushes,
+    # or may match: a wildcard refspec (or HEAD) can land on the denied branch.
     release = permissions.save_action("push", "* → release @ origin", "deny", scope="general", level="destination")
     assert decide(bash(ws, "git push origin fix:main fix:release")).decision == "deny"
+    assert decide(bash(ws, "git push origin refs/heads/*:refs/heads/*")).decision == "deny"
     assert decide(push).decision == "allow"
     permissions.update_saved_action(long.id, minutes=1)
     permissions.load_store()
@@ -153,13 +156,16 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     hooks = [Hook(db, "w1", write(ws, "src/auth/login.ts")), Hook(db, "w2", write(ws, "src/auth/session.ts")),
              Hook(db, "w3", bash(ws, "git push origin fix:main")), Hook(db, "w1", bash(ws, "npm test -- auth")),
              Hook(db, "w2", mcp(ws, "mcp__github__create_issue")), Hook(db, "w3", mcp(ws, "mcp__github__create_issue")),
-             Hook(db, "w1", bash(ws, "git push origin fix:main fix:release"))]
+             Hook(db, "w1", bash(ws, "git push origin fix:main fix:release")),
+             Hook(db, "w2", bash(ws, "git push origin HEAD"))]
     items = grants.groups(grants.pending_asks(db, ws.repo_root))
-    # A command pushing to two destinations is its own item, at the remote: no destination grant covers it.
+    # A command pushing to two destinations is its own item, generalized to both destinations.
     assert [(g.kind, g.rep.ask.general["pattern"], len(g.items)) for g in items] == [
         ("write", "src/**", 2), ("push", "* → main @ origin", 1), ("bash", "npm test *", 1),
-        ("mcp", "mcp__github__create_issue", 2), ("push", "* → * @ origin", 1)]
+        ("mcp", "mcp__github__create_issue", 2), ("push", "* → main @ origin, * → release @ origin", 1),
+        ("push", "* → ? @ origin", 1)]
     assert items[4].rep.ask.exact == "fix → main @ origin, fix → release @ origin"
+    assert items[4].rep.ask.scope("exact")["pattern"] == items[4].rep.ask.exact
     assert items[1].policy.rule.id == "d-push-default" and items[0].policy.rule is None
     # An MCP tool's general form is the tool itself: "once" at that scope still resolves the whole item.
     out = grants.decide_group(db, items[3].key, "general", "once")
@@ -188,7 +194,19 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     both = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.rep.agent_id == "w1" and g.kind == "push")
     with pytest.raises(Exception, match="outside its approval scope"):  # the remote is past the push rule's limit
         grants.decide_group(db, both.key, "remote", "timed", 5)
-    assert len(grants.decide_group(db, both.key, "remote", "deny")["stopped"]) == 1 and hooks[6].done.wait(5)
+    # Its general form covers both destinations, each push checked against them.
+    out = grants.decide_group(db, both.key, "general", "timed", 5)
+    assert out["grant"]["pattern"] == "* → main @ origin, * → release @ origin" and len(out["resumed"]) == 1
+    assert hooks[6].done.wait(5) and hooks[6].answer == "allow_once"
+    assert decide(bash(ws, "git push origin fix:main fix:release")).decision == "allow"
+    assert decide(bash(ws, "git push origin fix:main fix:dev")).decision == "ask"
+    # A push whose branch only git knows is approved once by its own identity; nothing saved covers it.
+    head = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.rep.agent_id == "w2" and g.kind == "push")
+    with pytest.raises(Exception, match="approve it once"):
+        grants.decide_group(db, head.key, "exact", "session")
+    out = grants.decide_group(db, head.key, "exact", "once")
+    assert out["grant"] is None and len(out["resumed"]) == 1 and hooks[7].done.wait(5) and hooks[7].answer == "allow_once"
+    assert decide(bash(ws, "git push origin HEAD")).decision == "ask"
     # Always deny stops the group and saves the deny.
     tests = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.kind == "bash")
     out = grants.decide_group(db, tests.key, "general", "always-deny")
@@ -201,12 +219,13 @@ def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_b
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
     worker(db, ws, "w1"), worker(db, ws, "w2")
     hooks = [Hook(db, "w1", bash(ws, "git push origin fix:main")), Hook(db, "w2", bash(ws, "terraform apply prod")),
-             Hook(db, "w2", bash(ws, "terraform apply dev"))]
+             Hook(db, "w2", bash(ws, "terraform apply dev")), Hook(db, "w1", bash(ws, "git push origin fix:main fix:release"))]
     permissions.add_rule("bash", "terraform apply prod", "deny")      # added while it waited: now blocked
     planned = grants.plan_to_json(grants.plan_allow_all(grants.pending_asks(db, ws.repo_root)))
     assert [(g["kind"], g["scope"]["pattern"], g["mode"], g["minutes"]) for g in planned["grants"]] == [
-        ("push", "* → main @ origin", "timed", 30), ("bash", "terraform apply *", "session", None)]
-    assert planned["resumes"] == 2 and planned["skipped"][0]["why"] == "blocked by a deny rule"
+        ("push", "* → main @ origin", "timed", 30), ("bash", "terraform apply *", "session", None),
+        ("push", "* → main @ origin, * → release @ origin", "timed", 30)]
+    assert planned["resumes"] == 3 and planned["skipped"][0]["why"] == "blocked by a deny rule"
     assert svc.plan_dto(planned).skipped[0].agent_id == "w2"           # the API's shape, blocked requests included
     lasting = grants.plan_to_json(grants.plan_allow_all(grants.pending_asks(db, ws.repo_root), forever=True))
     assert [g["kind"] for g in lasting["grants"]] == ["bash"]           # the push rule permits no lasting grant
@@ -222,7 +241,8 @@ def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_b
     assert decide(bash(ws, "terraform apply prod")).decision == "ask"
 
     out = grants.allow_all(db, ws.repo_root)
-    assert sorted(r["exact"] for r in out["resumed"]) == ["fix → main @ origin", "terraform apply dev"]
+    assert sorted(r["exact"] for r in out["resumed"]) == [
+        "fix → main @ origin", "fix → main @ origin, fix → release @ origin", "terraform apply dev"]
     assert all(h.done.wait(5) and h.answer == "allow_once" for h in hooks)
     lives = {(s.kind, s.life, s.minutes) for s in permissions.load_store().saved}
     assert lives == {("bash", "session", None), ("push", "time", 30.0)}
