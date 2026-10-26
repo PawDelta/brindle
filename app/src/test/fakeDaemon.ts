@@ -2075,7 +2075,14 @@ export class FakeDaemon {
       return error("unauthorized", "missing or wrong token (see ~/.brindle/daemon.json)", 401);
     }
     const policy = this.permissionRoute(method, path, (body ?? {}) as Record<string, unknown>, query);
-    if (policy) return policy;
+    if (policy) {
+      if (method === "PUT" && path === "/permissions/preset" && this.holdPreset) {
+        return new Promise<Response>((resolve) => {
+          this.pendingPreset = () => resolve(policy);
+        });
+      }
+      return policy;
+    }
     if (method === "POST" && /^\/sessions(\/|$)/.test(path)) return this.write(path, (body ?? {}) as Record<string, unknown>);
     if (method === "PUT" || method === "DELETE") {
       const sessionFile = path.match(/^\/sessions\/([^/]+)\/file$/);
@@ -2087,13 +2094,6 @@ export class FakeDaemon {
       const terminal = path.match(/^\/terminals\/([^/]+)$/);
       if (method === "DELETE" && terminal) return this.closeTerminal(terminal[1]);
       if (method === "DELETE") return error("not_found", `no route DELETE ${path}`, 404);
-      if (path === "/permissions/preset") {
-        const applied = () => json({ preset: (body as { preset: string }).preset, presets: [], rules: [], saved: [], unmatched: "ask" });
-        if (!this.holdPreset) return applied();
-        return new Promise<Response>((resolve) => {
-          this.pendingPreset = () => resolve(applied());
-        });
-      }
       if (path === "/routing") return this.putRouting((body ?? {}) as Record<string, unknown>);
       if (path === "/debug") return this.putDebug((body ?? {}) as Record<string, unknown>);
       const key = path.match(/^\/keys\/([^/]+)$/);
