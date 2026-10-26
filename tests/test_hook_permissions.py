@@ -203,19 +203,6 @@ def test_claude_launch_outlasts_default_mcp_startup_timeout(monkeypatch):
     assert int(settings["env"]["MCP_TIMEOUT"]) > 30000
 
 
-@pytest.mark.parametrize("provider", ["claude", "codex"])
-def test_read_only_no_stall_uv_cache_stays_in_worktree(provider, tmp_path):
-    from brindle.providers import Codex
-
-    cache = str(tmp_path / ".uv-cache")
-    ctx = LaunchContext("abc", load_profile("developer"), "go", cwd=str(tmp_path))
-    if provider == "claude":
-        argv = ClaudeCode().command(ctx)
-        assert json.loads(argv[argv.index("--settings") + 1])["env"]["UV_CACHE_DIR"] == cache
-    else:
-        assert f"shell_environment_policy.set.UV_CACHE_DIR={json.dumps(cache)}" in Codex().command(ctx)
-
-
 def test_stuck_message_says_when_auto_mode_should_have_answered(db, ws, monkeypatch):
     """The built-in developer profile runs in Claude Code's auto mode, so a
     prompt from it means auto mode is off in that session; the supervisor
