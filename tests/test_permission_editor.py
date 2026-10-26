@@ -110,7 +110,7 @@ def assert_shadow_resolution(tmp_path, monkeypatch, match, protected):
         "ask" if removed else "allow")
 
 
-def test_save_rechecks_policy_inside_store_lock_and_rejects_tampered_proposal(tmp_path, monkeypatch):
+def test_save_rechecks_policy_inside_store_lock_and_permission_edit_unblocked(tmp_path, monkeypatch):
     from contextlib import contextmanager
     from brindle import permission_editor as e
 
@@ -190,7 +190,9 @@ def test_save_rechecks_policy_inside_store_lock_and_rejects_tampered_proposal(tm
     assert reviewed["can_save"]
     e.save({**body, "proposal": reviewed["proposal"]})
     assert p.decide(p.Request("codex", "bash", "Bash", command="audit")).decision == "deny"
-    # Narrow an existing local allow without publishing or weakening org policy.
+    # Narrow an existing local allow without publishing or weakening org policy,
+    # even beside an allow that overlaps a built-in deny (which always wins).
+    p.add_rule("bash", "git ", "allow", "prefix")
     allow = p.add_rule("fetch", "https://", "allow", "prefix")
     body.update(revision=e.snapshot(str(tmp_path))["revision"], id=allow.id,
                 rule={"kind": "fetch", "match": "https://safe.example/", "match_type": "prefix",
