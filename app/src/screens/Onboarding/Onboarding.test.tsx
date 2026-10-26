@@ -151,6 +151,7 @@ describe("Onboarding", () => {
     daemon.pendingPreset?.();
     await step("project");
     expect(daemon.requests.filter((r) => r.path === "/permissions/preset").map((r) => r.body)).toEqual([{ preset: "secure" }]);
+    expect(daemon.data.policy.preset).toBe("secure");
   });
 
   it("onboarding: an install that fails says what the installer said on its card, and Retry runs it again inline", async () => {
