@@ -3612,6 +3612,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
 # Seconds a hold waits on the daemon at a time between looks at whether the
 # agent was closed or its request answered at the CLI's own prompt.
 HOLD_LOOK_SECONDS = 5.0
+# Looks in a row (HOLD_LOOK_SECONDS apart) a pane must read past its CLI's own
+# permission prompt, busy or idle, before the hold ends: longer than one look,
+# so a read while the prompt is redrawn doesn't take it for answered. Any
+# other read starts the count over.
+ANSWERED_LOOKS = 3
 # Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
 # so the hook gives the request to the prompt itself before the CLI cancels it.
 HOOK_SLACK = 30
@@ -3662,12 +3667,13 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     ``holder`` (brindle.daemon.holds), or None after ``hold`` seconds, when
     the person asks to answer in the terminal, once the agent is closed or
     killed, once its CLI's own prompt took the request (its PostToolUse
-    removed the row), or if the daemon goes away: then the request goes to
-    the CLI's own prompt (or, where there is none, is refused). The agent
-    shows waiting meanwhile, as at that prompt."""
+    removed the row, or its pane stayed past the prompt for ANSWERED_LOOKS),
+    or if the daemon goes away: then the request goes to the CLI's own
+    prompt (or, where there is none, is refused). The agent shows waiting
+    meanwhile, as at that prompt."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline, answer = time.monotonic() + hold, None
+    deadline, answer, past = time.monotonic() + hold, None, 0
     while True:
         now = db.get_agent(agent.id)
         recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
@@ -3676,6 +3682,13 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
         if (now is None or now.status in ("done", "paused") or now.dismissed_at is not None
                 or recorded is None or left <= 0):
             break
+        # Its CLI shows its own prompt for as long as this hook holds the request: a pane
+        # past it was answered there, whether or not a look caught the prompt. An allow
+        # runs the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
+        state = _pane_state(now)
+        past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
+        if past >= ANSWERED_LOOKS:
+            break
         held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
         if answer is not None or not held:
             break
@@ -3683,6 +3696,22 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     if answer:
         db.set_status(agent.id, "processing", only_if="waiting")
     return answer
+
+
+def _pane_state(agent: Agent) -> str | None:
+    """What the pane of an agent whose CLI shows its own prompt while its
+    hook holds a request reads as: 'prompt' (any permission prompt), else
+    'idle', 'busy' or 'waiting', or None."""
+    from brindle.service.inbox import TERMINAL_PROMPT_VISIBLE
+
+    provider = get_provider(agent.provider)
+    if agent.headless or not agent.tmux_window or not TERMINAL_PROMPT_VISIBLE.get(agent.provider):
+        return None
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=60, server=server_of(agent))
+    except tmux.TmuxError:
+        return None
+    return "prompt" if provider.tool_permission(screen) else provider.screen_state(screen)
 
 
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
