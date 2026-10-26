@@ -2032,7 +2032,8 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
 
 def flush(db: DB, agent_id: str) -> bool:
     """Deliver the agent's oldest pending message: through its inbox if it
-    has one, else typed into its pane once it's idle. A chat with a live
+    has one, else typed into its pane once it's idle (or while busy, for a
+    CLI that holds mid-turn input: see _flush_midturn). A chat with a live
     waiter (brindle.wake) is left to it, and one that runs a waiter never
     uses the inbox. Returns True if something was delivered."""
     from brindle import inbox
@@ -2065,7 +2066,7 @@ def flush(db: DB, agent_id: str) -> bool:
         return False
     claimed_at = db.claim_idle(agent_id)
     if claimed_at is None:
-        return False
+        return _flush_midturn(db, agent_id)
     if _paste_blocked(agent):
         # Leave it queued: the next flush (a later message, or a resumed
         # session's start-up) gets another chance.
@@ -2090,6 +2091,34 @@ def flush(db: DB, agent_id: str) -> bool:
         raise
     if not warmup:
         launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
+    return True
+
+
+def _flush_midturn(db: DB, agent_id: str) -> bool:
+    """``flush`` for a busy interactive chat whose CLI keeps input typed
+    mid-turn until its current step finishes (Codex, agy): the oldest queued
+    message goes in now instead of at the turn-end notify or Stop. Never into
+    an approval prompt ('waiting', or one on screen the hooks haven't
+    reported), where the keys would answer it."""
+    agent = db.get_agent(agent_id)
+    if (agent is None or agent.status != "processing" or agent.mode != "interactive"
+            or not get_provider(agent.provider).types_midturn):
+        return False
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=40, server=server_of(agent))
+    except tmux.TmuxError:
+        return False
+    if get_provider(agent.provider).screen_state(screen) == "waiting" or _paste_blocked(agent):
+        return False
+    msg = db.pop_pending(agent_id)
+    if not msg:
+        return False
+    try:
+        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
+                   server=server_of(agent))
+    except BaseException:
+        db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
+        raise
     return True
 
 
