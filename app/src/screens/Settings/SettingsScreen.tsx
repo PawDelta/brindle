@@ -273,7 +273,18 @@ function SettingRow({ s, value, dirty, disabled, onChange }: { s: Setting; value
   return (
     <Row
       label={s.label}
-      help={s.blurb}
+      help={
+        s.offWarning && value === false ? (
+          <>
+            {s.blurb}
+            <span role="alert" className="block text-fawn" data-testid="setting-warning">
+              {s.offWarning}
+            </span>
+          </>
+        ) : (
+          s.blurb
+        )
+      }
       htmlFor={`setting-${s.key}`}
       wide={s.kind === "list"}
       badges={

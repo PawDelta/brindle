@@ -142,6 +142,12 @@ describe("settings screen", () => {
     fireEvent.click(within(repoSettings).getByRole("button", { name: /^More/ }));
     expect(screen.getByRole("combobox", { name: "Overlapping tasks" })).toBeTruthy();
     expect(screen.getByRole("switch", { name: "Coordinator" })).toBeTruthy();
+    // Necessary to function: on by default; switched off, the row warns what it costs.
+    const essentials = screen.getByRole("switch", { name: "Necessary to function" });
+    expect(essentials.getAttribute("aria-checked")).toBe("true");
+    expect(screen.queryByTestId("setting-warning")).toBeNull();
+    fireEvent.click(essentials);
+    expect(repoSettings.querySelector('[data-setting="permission_essentials"] [data-testid="setting-warning"]')).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Everything else/ }));
     expect(screen.getByTestId("config-rest").textContent).toContain("default_agent");
     fireEvent.click(screen.getByRole("button", { name: /Your defaults for every repo/ }));

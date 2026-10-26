@@ -108,6 +108,19 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
     pytest.param("sed -n '/^print/p' *.py", False, None, id="read_only_no_stall-sed_print"),
     pytest.param("sed -n 's/a/b/w out' *.py", True, None, id="read_only_no_stall-sed_write"),
     pytest.param("{ awk '{print $1}' app.py; }", False, None, id="read_only_no_stall-single_quoted"),
+    pytest.param("rg -n hi *.py | tail -3", False, None, id="read_only_no_stall-rg_tail"),
+    pytest.param("grep -f../../../.env *.py", True, None, id="read_only_no_stall-attached_file_option",
+                 marks=pytest.mark.variant("review: -fFILE named a denied file")),
+    pytest.param("grep --file=../../../.env *.py", True, None, id="read_only_no_stall-long_file_option",
+                 marks=pytest.mark.variant("review: --file=FILE named a denied file")),
+    pytest.param("grep -r SECRET *", True, None, id="read_only_no_stall-recursive",
+                 marks=pytest.mark.variant("review: recursion reads files no argument names")),
+    pytest.param("rg -n hi ../*", True, None, id="read_only_no_stall-rg_directory",
+                 marks=pytest.mark.variant("rg recurses into a directory operand")),
+    pytest.param("cat *.py | head ../../../.env", True, None, id="read_only_no_stall-denied_other_stage",
+                 marks=pytest.mark.variant("review: a pattern-free stage read a denied file")),
+    pytest.param("LD_PRELOAD=x cat *.py", True, None, id="read_only_no_stall-assignment",
+                 marks=pytest.mark.variant("an assignment can make any program run code")),
 ])
 def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound, extra):
     from brindle import permissions as p
@@ -138,13 +151,20 @@ def test_other_tools_and_unknown_profiles_are_left_alone(db, ws):
     assert agents.handle_hook(db, a.id, "pre-tool", {"tool_name": "Write", "tool_input": {"file_path": "x"}}) is None
     b = Agent("w2", ws.id, "no-such-profile", "claude", "boss", "assign", "processing", "%w2", None, time.time())
     db.add_agent(b)
-    assert agents.handle_hook(db, "w2", "pre-tool", bash("git status")) is None
+    assert agents.handle_hook(db, "w2", "pre-tool", bash("pytest -q")) is None
 
 
-def test_a_profile_without_bash_rules_never_allows(db, ws, monkeypatch):
+def test_a_profile_without_bash_rules_allows_only_essentials(db, ws, monkeypatch):
+    from brindle.config import set_local
+
     bare = replace(load_profile("developer"), allowed_tools=["Edit", "Read"])
     monkeypatch.setattr(agents, "load_profile", lambda name, root=None: bare)
     a = worker(db, ws)
+    assert agents.handle_hook(db, a.id, "pre-tool", bash("pytest -q")) is None
+    # permission_essentials, on by default: read-only inspection needs no rule.
+    assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && grep -n hi *.py | tail -1")) is not None
+    assert agents.handle_hook(db, a.id, "pre-tool", bash("cat ../../../.env")) is None   # a read deny still wins
+    set_local(ws.repo_root, "permission_essentials", False)
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status")) is None
 
 

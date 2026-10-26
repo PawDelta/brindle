@@ -66,13 +66,13 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Iterator
 
-from brindle.config import CONFIG_DIR, config_root, brindle_home
+from brindle.config import CONFIG_DIR, config_root, brindle_home, load_repo_config
 
 KINDS = ("read", "write", "edit", "bash", "fetch", "mcp", "other")
 PATH_KINDS = ("read", "write", "edit")
 DECISIONS = ("allow", "deny", "ask")
 MATCH_TYPES = ("exact", "prefix", "glob")
-BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "git-push", "git-force")
+BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "git-push", "git-force", "essential")
 SOURCES = ("default", "repo", "user", "learned")
 SUGGEST_AFTER = 2
 FILE = "permissions.json"
@@ -261,6 +261,11 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     _default("d-env", "read", "*/.env*", "glob", "deny"),
     _default("d-env-rel", "read", ".env*", "glob", "deny"),
 )
+# The permission_essentials group, in force unless that setting is off
+# (all_rules). Only decide evaluates it (essential()), with the denies it
+# is given.
+ESSENTIALS = _default("d-essentials", "bash", "read-only commands a worker needs (grep, rg, head, tail, cat, "
+                      "wc, ls, sed -n, read-only git)", "essential", "allow")
 
 
 # -- providers: Claude Code ------------------------------------------------------------------
@@ -1071,7 +1076,18 @@ def all_rules(repo_root: str | None = None) -> list[Rule]:
     """Every rule in force: defaults, the repo's denies, the user's and
     learned rules."""
     store = load_store()
-    return [*DEFAULT_RULES, *(repo_rules(repo_root) if repo_root else []), *store.rules, *store.blocking_rules]
+    return [*DEFAULT_RULES, *([ESSENTIALS] if essentials_on(repo_root) else []),
+            *(repo_rules(repo_root) if repo_root else []), *store.rules, *store.blocking_rules]
+
+
+def essentials_on(repo_root: str | None) -> bool:
+    """The repo's permission_essentials setting (on unless turned off)."""
+    if not repo_root:
+        return True
+    try:
+        return load_repo_config(repo_root).permission_essentials is not False
+    except (OSError, ValueError):
+        return True
 
 
 def profile_rules(profile) -> list[Rule]:
@@ -1134,7 +1150,8 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
         if restricted is not None and restricted.decision == wanted:
             return restricted
         for rule in rules:
-            if rule.decision == wanted and rule_matches(rule, req, checks):
+            if rule.decision == wanted and (essential(req, rules, checks) if rule.match_type == "essential"
+                                            else rule_matches(rule, req, checks)):
                 verb = {"deny": "denied", "ask": "approval required", "allow": "allowed"}[wanted]
                 return Decision(wanted, f"{verb} by {rule.source} rule {rule.id} ({rule.describe()})", rule)
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
@@ -1157,13 +1174,17 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     return Decision("ask", f"{why}; asking the user")
 
 
-def _restriction_parts(command: str, *, word_pattern: re.Pattern[str] = SIMPLE_COMMAND) -> list[list[str]] | None:
+def _restriction_parts(command: str, *, word_pattern: re.Pattern[str] = SIMPLE_COMMAND,
+                       assigned: list[bool] | None = None,
+                       redirects: list[tuple[str, str]] | None = None) -> list[list[str]] | None:
     """Command arguments without redirects, solely for restrictive matching.
 
     Unlike the allow parser, this accepts output files. With RESTRICTION_WORD
     it also accepts unquoted pathname patterns in arguments, for deciding
     whether a restriction could apply, not for literal matching. Quoted
-    operators remain arguments; redirects and their operands are removed.
+    operators remain arguments; redirects and their operands are removed
+    (into ``redirects``, as (operator, operand), when given), and so are
+    leading assignments (``assigned`` gets whether each part had any).
     Unsupported syntax is unknown, never evidence that restrictions are absent.
     """
     from brindle.native.permissions import _SEPARATORS, _tokens
@@ -1192,6 +1213,8 @@ def _restriction_parts(command: str, *, word_pattern: re.Pattern[str] = SIMPLE_C
                 return None
             if word_pattern is RESTRICTION_WORD and any(c in tokens[index][1] for c in "*?["):
                 return None  # an expanded redirect can select a protected file
+            if redirects is not None:
+                redirects.append((value, tokens[index][1]))
         else:
             return None
         index += 1
@@ -1200,6 +1223,8 @@ def _restriction_parts(command: str, *, word_pattern: re.Pattern[str] = SIMPLE_C
     elif not parts or tokens[-1][1] in ("&&", "||", "|", "|&"):
         return None
     for words in parts:
+        if assigned is not None:
+            assigned.append(bool(words) and bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])))
         while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
             words.pop(0)
         if not words or words[0] in ("!", "{", "}", "if", "then", "else", "elif", "fi", "for", "while",
@@ -1212,24 +1237,24 @@ def _restriction_parts(command: str, *, word_pattern: re.Pattern[str] = SIMPLE_C
 
 
 def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
-                    path_denies: list[Rule]) -> bool:
+                    path_denies: list[Rule], assigned: list[bool]) -> bool:
     """Whether no restriction can apply to what the patterns in ``parts``
     expand to. Plain ``ls`` has a proof: listing names can't push, force
     a git action or read a file's contents, so the default git and daemon
     denies don't apply, nor do exact/prefix rules that don't overlap the
-    words before its first pattern. A READ_ONLY_PROGRAMS one (or a sed that
-    only prints) has one once its patterns are expanded: it only reads its
-    files, so it is enough that no restriction matches the expanded command
-    and no deny covers a file it names. Any other program may treat an
-    expanded name as a subcommand, option or file to act on."""
-    moved = any(words[0] in ("cd", "pushd", "popd") for words in parts)
+    words before its first pattern. A READERS program has one once its
+    patterns are expanded (_stage_reads), but releasing the command
+    releases every part of it, so then every part must be ls, a read-only
+    git command (no pattern reaches here) or a READERS program whose
+    expanded command no restriction matches and whose reads no deny covers. Any other program may treat an expanded name as a
+    subcommand, option or file to act on."""
+    readers = False
     for words in parts:
         first = next((i for i, word in enumerate(words) if any(c in word for c in "*?[")), None)
         if first is None:
             continue
-        if words[0] in (*READ_ONLY_PROGRAMS, "sed") and not moved:
-            if not _reads_excluded(req, words, rules, path_denies):
-                return False
+        if words[0] in READERS:
+            readers = True
             continue
         if words[0] != "ls":
             return False
@@ -1241,40 +1266,137 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
                     and not prefix.startswith(rule.match) and not rule.match.startswith(prefix)):
                 continue
             return False
+    if not readers:
+        return True
+    if any(assigned):
+        return False  # an assignment (LD_PRELOAD=..., a tool's config path) changes what any program does
+    for words in parts:
+        if words[0] == "ls" or words[0] == "git" and _readonly_command(_GIT_READONLY, req, words):
+            continue
+        argv = _stage_reads(req, words, path_denies)
+        if argv is None or _matching_restriction([replace(req, command=" ".join(argv))], None, rules) is not None:
+            return False
     return True
 
 
-# Programs that only read the files they're given; a pattern among their
-# arguments is checked by expanding it (_reads_excluded).
-READ_ONLY_PROGRAMS = ("grep", "head", "cat", "wc")
+# Programs that only read files: those their arguments name (grep without
+# recursion, rg with file operands only; sed under -n with a print-only
+# script, see _sed_prints_only). _stage_reads proves which.
+READ_ONLY_PROGRAMS = ("grep", "rg", "head", "tail", "cat", "wc")
+READERS = (*READ_ONLY_PROGRAMS, "sed")
+_GIT_READONLY = next(r for r in DEFAULT_RULES if r.id == "d-git-ro")
 
 
-def _reads_excluded(req: Request, words: list[str], rules: list[Rule], path_denies: list[Rule]) -> bool:
-    """Whether the read-only command ``words`` is clear of ``rules`` and of
-    ``path_denies`` once its patterns are expanded the way the shell would
-    in ``req.cwd``. Dotfiles are expanded too, and each pattern is also
-    checked as the literal name it stays when nothing matches. Patterns the
-    expansion here can't read exactly (``[[:alpha:]]``) are never clear."""
+def _stage_reads(req: Request, words: list[str], path_denies: list[Rule]) -> list[str] | None:
+    """The READERS command ``words`` with its patterns expanded the way the
+    shell would in ``req.cwd``, or None unless everything it reads is
+    named by its arguments and no deny in ``path_denies`` covers any of
+    them. Every argument counts as a name it may read, including an
+    option's attached value (``-fFILE``, ``--file=FILE``); dotfiles are
+    expanded too, and each pattern is also checked as the literal name it
+    stays when nothing matches. Patterns the expansion here can't read
+    exactly (``[[:alpha:]]``) are never clear."""
     cwd = req.cwd or req.worktree
-    if not cwd:
-        return False
+    if not cwd or words[0] not in READERS:
+        return None
     argv, names = [words[0]], []
     for word in words[1:]:
+        found = []
         if any(c in word for c in "*?["):
             if "[:" in word or "[=" in word or "[." in word:
-                return False
+                return None
             found = sorted(glob.glob(word.replace("[^", "[!"), root_dir=cwd, include_hidden=True))
-            argv += found or [word]
-            names += [word, *found]
-        else:
-            argv.append(word)
-            names.append(word)
+        argv += found or [word]
+        for name in (word, *found):
+            names.append(name)
+            if name.startswith("--"):
+                names.append(name.partition("=")[2])
+            elif name.startswith("-"):
+                names += [name[i:] for i in range(2, len(name))]
     if argv[0] == "sed" and not _sed_prints_only(argv[1:]):
+        return None
+    if not _reads_only_named(argv[0], argv[1:], cwd):
+        return None
+    reads = [replace(req, kind="read", command=None, path=os.path.join(cwd, name)) for name in names if name]
+    if any(rule_matches(rule, read) for rule in path_denies for read in reads):
+        return None
+    return argv
+
+
+# rg's options _reads_only_named accepts: flags, and those taking a value.
+_RG_FLAGS = re.compile(r"-[nilcwvoxFsSHNu]+|--(line-number|ignore-case|smart-case|case-sensitive|files-with-matches"
+                       r"|count|word-regexp|invert-match|only-matching|fixed-strings|no-heading|heading"
+                       r"|with-filename|no-filename|hidden|no-ignore|json|vimgrep)")
+_RG_VALUES = ("-e", "--regexp", "-m", "--max-count", "-A", "-B", "-C", "--after-context",
+              "--before-context", "--context", "-t", "--type", "-T", "--type-not")
+
+
+def _reads_only_named(program: str, args: list[str], cwd: str) -> bool:
+    """Whether ``program`` with ``args`` reads only files its arguments
+    name: no recursion into a directory, no list of names read from a
+    file, no command run (rg's --pre). grep's recursion is refused
+    outright; rg always recurses, so it must name files and no directory,
+    with only the options it knows (anything else could take the operand
+    that would have been a path)."""
+    if program == "grep":
+        return not any(a in ("--recursive", "--dereference-recursive", "recurse")
+                       or a.startswith("--directories") or re.fullmatch(r"-[^-]*[rR].*", a, re.DOTALL)
+                       for a in args)
+    if program == "wc":
+        return not any(a.startswith("--files0") for a in args)
+    if program != "rg":
+        return True
+    positional, patterned, i = [], False, 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            positional += args[i + 1:]
+            break
+        if arg in _RG_VALUES:
+            patterned = patterned or arg in ("-e", "--regexp")
+            i += 2
+            continue
+        if not _RG_FLAGS.fullmatch(arg) and arg.startswith("-") and arg != "-":
+            return False
+        if not _RG_FLAGS.fullmatch(arg):
+            positional.append(arg)
+        i += 1
+    paths = positional if patterned else positional[1:]
+    return bool(paths) and not any(os.path.isdir(os.path.join(cwd, p)) for p in paths)
+
+
+def _redirect_safe(operator: str, operand: str) -> bool:
+    """A redirect that reads and writes no file: to /dev/null, or onto another descriptor (``2>&1``)."""
+    return operand == "/dev/null" and operator in (">", ">>", "&>", "&>>") or operator == ">&" and operand.isdigit()
+
+
+def essential(req: Request, rules: list[Rule], checks: list[str] | None = None) -> bool:
+    """Whether ``req`` is a command a worker needs to function (the
+    permission_essentials group): every part of it ``ls``, a read-only git
+    command (as d-git-ro reads it, never with a pattern) or a READERS
+    program whose reads _stage_reads proves clear of the read denies in
+    ``rules``; no substitution, leading assignment, or redirect but to
+    /dev/null or another descriptor; and no deny or ask in ``rules``
+    applies (_restriction_in_parts, which also expands patterns)."""
+    if req.kind != "bash" or not req.command:
         return False
-    if _matching_restriction([replace(req, command=" ".join(argv))], None, rules) is not None:
+    assigned: list[bool] = []
+    redirects: list[tuple[str, str]] = []
+    parts = _restriction_parts(req.command, word_pattern=RESTRICTION_WORD, assigned=assigned, redirects=redirects)
+    if parts is None or any(assigned) or not all(_redirect_safe(*r) for r in redirects):
         return False
-    reads = [replace(req, kind="read", command=None, path=os.path.join(cwd, name)) for name in names]
-    return not any(rule_matches(rule, read) for rule in path_denies for read in reads)
+    if _restriction_in_parts(req, checks=checks, rules=rules) is not None:
+        return False
+    path_denies = [r for r in rules if r.kind == "read" and r.decision == "deny"]
+    for words in parts:
+        if words[0] == "ls":
+            continue
+        if words[0] == "git":
+            if any(c in word for word in words for c in "*?[") or not _readonly_command(_GIT_READONLY, req, words):
+                return False
+        elif _stage_reads(req, words, path_denies) is None:
+            return False
+    return True
 
 
 def _sed_prints_only(args: list[str]) -> bool:
@@ -1382,14 +1504,16 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
             return substituted
         req = substituted
     parsed = _restriction_parts(req.command)
-    patterns = _restriction_parts(req.command, word_pattern=RESTRICTION_WORD) if parsed is None else None
+    assigned: list[bool] = []
+    patterns = (_restriction_parts(req.command, word_pattern=RESTRICTION_WORD, assigned=assigned)
+                if parsed is None else None)
     words = parsed if parsed is not None else patterns if patterns is not None else _segments(req.command)
     parts = [replace(req, command=" ".join(" ".join(part).split())) for part in words]
     matched = _matching_restriction(parts, checks, rules)
     if matched is not None:
         return matched
     if patterns is not None:
-        uncertain = not _globs_excluded(req, patterns, rules, path_denies)
+        uncertain = not _globs_excluded(req, patterns, rules, path_denies, assigned)
     else:
         uncertain = parsed is None and any(_may_restrict(rule, req.command) for rule in rules)
     return _syntax_ask(req) if uncertain else None

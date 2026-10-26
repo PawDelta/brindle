@@ -3347,17 +3347,26 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
         from brindle.profiles import profile_rules_for
 
         cfg = load_repo_config(ws.repo_root)
-        if cfg.permission_policy == "on":
+        essentials = tool == "Bash" and cfg.permission_essentials is not False
+        if cfg.permission_policy == "on" or essentials:
             req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root),
                      *permission_grants.limits(ws.repo_root).deny]
             restrictions = [r for r in rules if r.decision in ("ask", "deny")]
+        if cfg.permission_policy == "on":
             decision = permissions.decide(req, checks=cfg.checks, rules=restrictions)
             if decision.rule is not None:
                 return {"hookSpecificOutput": {
                     "hookEventName": "PreToolUse", "permissionDecision": "ask",
                     "permissionDecisionReason": f"brindle: {decision.reason}",
                 }}
+        # The permission_essentials group, whatever permission_policy says:
+        # read-only inspection no deny or ask covers runs without a prompt.
+        if essentials and req is not None and permissions.essential(req, restrictions, cfg.checks):
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "allow",
+                "permissionDecisionReason": "brindle: a read-only command workers need (permission_essentials)",
+            }}
     if tool != "Bash":
         return None
     command = str((payload.get("tool_input") or {}).get("command", ""))
