@@ -116,10 +116,6 @@ export const listOf = (text: string): string[] =>
     .map((l) => l.trim())
     .filter(Boolean);
 
-/* permissions.KINDS and MATCH_TYPES: what a rule can be about, and how its match reads. */
-export const PERMISSION_KINDS = ["read", "write", "edit", "bash", "fetch", "mcp", "other"];
-export const MATCH_TYPES = ["exact", "prefix", "glob"];
-
 /* doctor's levels, as marks. */
 export const MARK: Record<string, string> = { ok: "✓", warn: "!", fail: "✗" };
 

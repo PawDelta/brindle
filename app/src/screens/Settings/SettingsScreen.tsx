@@ -1,7 +1,7 @@
-/* Settings: this machine's brindle, in five sections (About last) with a small nav at
+/* Settings: this machine's brindle, in six sections (About last) with a small nav at
    the top: This repo (the handful of settings people change most, the rest
    behind More), You (how Claude's permission requests are handled, your
-   permission rules, your defaults for every repo), Providers (one row per
+   defaults for every repo), Permissions (the permission policy: Permissions.tsx), Providers (one row per
    provider CLI and per key, each with its state and its buttons) and
    Engine & health (the engine's version and update, the command-line tool,
    and the doctor as a short health list with a fix where the app has one).
@@ -35,8 +35,7 @@
    pane. The doctor (GET /v1/doctor) is read once per repo and on demand;
    its update line feeds the engine row (its sign-in lines stay out of the
    health list: the provider rows say that).
-   Permission rules (POST /v1/permissions) are added or reset here; the list
-   itself is the terminal's until the daemon serves it. The command-line
+   The command-line
    tool's install is the shell's (install_cli, api/tauri.ts): App passes it
    in the app, where the row then says where the link went; in a browser
    tab there is none and the button stays disabled. Staff alone (GET
@@ -49,7 +48,7 @@
    Last, About: the app's version and its license files (About.tsx). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, Meta, PermissionChange, ProviderInstalled, UserSettings } from "../../api/client";
+import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, Meta, ProviderInstalled, UserSettings } from "../../api/client";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
 import type { Install } from "../../api/providersInstall";
@@ -60,14 +59,13 @@ import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { About } from "./About";
+import { Permissions } from "./Permissions";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
-import { alert, button, card, danger, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
 import { useProviders } from "../../store/providers";
 import { StoreContext } from "../../store/useStore";
 import {
   MARK,
-  MATCH_TYPES,
-  PERMISSION_KINDS,
   SCOPES,
   SETTINGS,
   changed,
@@ -101,10 +99,12 @@ export interface SettingsScreenProps {
   /* About's license files (the shell's about_read, api/tauri.ts). Without
      one (a browser tab) About only names them. */
   readAbout?: () => Promise<AboutInfo>;
-  /* The section to scroll to on opening: "providers" from the sidebar's problem line. */
-  section?: "providers";
+  /* The section to scroll to on opening: "providers" from the sidebar's problem line, "permissions" from the Inbox. */
+  section?: "providers" | "permissions";
   /* A new value asks to scroll to `section` again, the page already open. */
   ask?: number;
+  /* A permission rule to open in its editor (the Inbox's "Open the deny rule"). */
+  rule?: string;
 }
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -112,6 +112,7 @@ const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e)
 const SECTIONS = [
   { id: "this-repo", label: "This repo" },
   { id: "you", label: "You" },
+  { id: "permissions", label: "Permissions" },
   { id: "providers", label: "Providers" },
   { id: "engine", label: "Engine & health" },
   { id: "about", label: "About" },
@@ -499,96 +500,6 @@ function AppUpdate({ client, updater }: { client: DaemonClient; updater?: AppUpd
   );
 }
 
-/* A rule for brindle's permission policy: allow or deny a kind of request. */
-function PermissionRules({ client }: { client: DaemonClient }) {
-  const [decision, setDecision] = useState<"allow" | "deny">("allow");
-  const [kind, setKind] = useState("bash");
-  const [matchType, setMatchType] = useState("exact");
-  const [match, setMatch] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [said, setSaid] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [confirmReset, setConfirmReset] = useState(false);
-
-  const run = async (body: PermissionChange, what: string) => {
-    setBusy(true);
-    setError(null);
-    setSaid(null);
-    try {
-      const got = await client.changePermissions(body);
-      setSaid("reset" in got ? "Your rules and learned rules are gone; the defaults stay." : `Added: ${got.describe} (${got.rule})`);
-      if (what === "add") setMatch("");
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setBusy(false);
-      setConfirmReset(false);
-    }
-  };
-
-  return (
-    <Row label="Permission rules" help="With the permission policy on, brindle answers workers' requests by these rules instead of asking you. Rules learned from your approvals count too." wide testId="permissions">
-      <form
-        className="flex w-full flex-wrap items-center gap-s1"
-        aria-label="Add a rule"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (match.trim()) void run({ op: decision, kind, match: match.trim(), match_type: matchType }, "add");
-        }}
-      >
-        <select className={field} aria-label="Decision" value={decision} disabled={busy} onChange={(e) => setDecision(e.target.value as "allow" | "deny")}>
-          <option value="allow">Allow</option>
-          <option value="deny">Deny</option>
-        </select>
-        <select className={field} aria-label="Kind" value={kind} disabled={busy} onChange={(e) => setKind(e.target.value)}>
-          {PERMISSION_KINDS.map((k) => (
-            <option key={k} value={k}>
-              {k}
-            </option>
-          ))}
-        </select>
-        <select className={field} aria-label="Match type" value={matchType} disabled={busy} onChange={(e) => setMatchType(e.target.value)}>
-          {MATCH_TYPES.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-        <input className={`${field} min-w-48 flex-1 font-mono`} aria-label="Match" placeholder={kind === "bash" ? "npm test" : "src/**"} value={match} disabled={busy} onChange={(e) => setMatch(e.target.value)} />
-        <button type="submit" className={button} disabled={busy || !match.trim()}>
-          Add rule
-        </button>
-        <span className="flex-1" />
-        {confirmReset ? (
-          <>
-            <span className="text-sm text-sap">Forget every rule you added and every learned one?</span>
-            <button type="button" className={danger} disabled={busy} onClick={() => void run({ op: "reset" }, "reset")}>
-              Reset rules
-            </button>
-            <button type="button" className={quiet} disabled={busy} onClick={() => setConfirmReset(false)}>
-              Keep them
-            </button>
-          </>
-        ) : (
-          <button type="button" className={quiet} disabled={busy} onClick={() => setConfirmReset(true)}>
-            Reset your rules…
-          </button>
-        )}
-      </form>
-      {said && (
-        <p role="status" className={`${notice} w-full`}>
-          {said}
-        </p>
-      )}
-      {error && (
-        <p role="alert" className={`${alert} w-full`}>
-          {error}
-        </p>
-      )}
-    </Row>
-  );
-}
-
 /* One key's value, typed into a password field and sent to PUT /keys/{name}
    (write-only: the engine stores it as `brindle keys set` does and answers
    the last four). The value lives in this field until Save and nowhere
@@ -801,7 +712,7 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
   );
 }
 
-export function SettingsScreen({ client, installCli, appUpdater, readAbout, section, ask }: SettingsScreenProps) {
+export function SettingsScreen({ client, installCli, appUpdater, readAbout, section, ask, rule }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const pick = useRepo();
@@ -945,7 +856,7 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
   // Opened from the sidebar's problem line: scrolled to Providers, again once the sections above it have loaded.
   const placed = config !== null;
   useEffect(() => {
-    if (section === "providers") document.getElementById("providers")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    if (section) document.getElementById(section)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   }, [section, ask, placed]);
   const install = async () => {
     if (!installCli) return;
@@ -1008,9 +919,8 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
       )}
 
       {config && (
-        <Section id="you" title="You" blurb="How Claude's requests reach you, your permission rules, and your defaults for every repo." testId="user-settings">
+        <Section id="you" title="You" blurb="How Claude's requests reach you, and your defaults for every repo." testId="user-settings">
           <PermissionMode client={client} />
-          <PermissionRules client={client} />
           {yourLines.length > 0 && (
             <div className="flex flex-col gap-1 px-s2 py-1">
               <More open={yours} onToggle={() => setYours((y) => !y)} label="Your defaults for every repo" count={yourLines.length} />
@@ -1019,6 +929,8 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
           )}
         </Section>
       )}
+
+      <Permissions client={client} rule={rule} ask={ask} />
 
       <Section
         id="providers"
