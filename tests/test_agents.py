@@ -229,6 +229,35 @@ def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, mon
     assert db.pending_count("a1") == 1
 
 
+@pytest.mark.parametrize("pane_gone", [False, True])
+def test_provider_latency_agy_warmup_goes_in_once_ready_without_a_delayed_flush(db, ws, monkeypatch, pane_gone):
+    # agy runs no start hook: `ready` is called once after_launch saw its
+    # input box, so the queued warm-up must go in then, not after ready_delay.
+    import subprocess
+
+    from brindle import antigravity
+
+    fake_agent(db, ws, status="starting", mode="assign")
+    db.update_agent("a1", provider="antigravity")
+    db.enqueue("a1", antigravity.warmup(None), None)
+    spawned, pasted = [], []
+    real_popen = subprocess.Popen
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda argv, **k: spawned.append(argv) if "_flush" in argv else real_popen(argv, **k))
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: "> \n? for shortcuts\n")
+
+    def paste(target, body, **k):
+        if pane_gone:
+            raise tmux.TmuxError("can't find pane")
+        pasted.append(body)
+
+    monkeypatch.setattr(tmux, "paste", paste)
+    agents.ready(db, "a1")
+    assert pasted == ([] if pane_gone else [antigravity.warmup(None)])
+    assert db.pending_count("a1") == int(pane_gone)   # a failed paste stays queued
+    assert spawned == []
+
+
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):
     fake_agent(db, ws, status="processing")
     screens = iter([CLAUDE_IDLE, CLAUDE_BUSY])

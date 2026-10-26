@@ -94,8 +94,7 @@ def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
     assert a.mode == "interactive" and a.task is None
     expected = agents._profile_for(db, a, ws).prompt
     assert expected and db.pending_count(a.id) == 1
-    agents.ready(db, a.id)
-    assert agents.flush(db, a.id)
+    agents.ready(db, a.id)   # delivers the warm-up itself
     delivered = fake_tmux[0][1]
     assert expected in delivered and antigravity.TOOLS_NOTE in delivered
     assert "Delegation rule:" in delivered
@@ -162,13 +161,14 @@ def test_agy_warmup_queued_before_task(db, boss, launcher_inbox, fake_tmux, help
     worker = db.get_agent(m.group(1))
     assert worker.provider == "antigravity" and worker.tmux_window == "@9" and not worker.inbox_socket
     assert any("_after-launch" in argv and worker.id in argv for argv in helpers)
-    # What the detached _after-launch helper does once agy shows its prompt.
+    assert db.pending_count(worker.id) == 2
+    # What the detached _after-launch helper does once agy shows its prompt:
+    # the warm-up goes in at once.
     agents.ready(db, worker.id)
     assert not db.get_agent(worker.id).inbox_socket
-    assert db.pending_count(worker.id) == 2
+    assert db.pending_count(worker.id) == 1
     from brindle import launch_health
     monkeypatch.setattr(launch_health.time, "sleep", lambda _: pytest.fail("flush waited for delivery"))
-    assert agents.flush(db, worker.id)
     agents.handle_hook(db, worker.id, "prompt-submit", {})
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (worker.id,)).fetchone()
     assert not row["verifying"] and row["delivered_at"] is None and not row["submitted_prompt"]
