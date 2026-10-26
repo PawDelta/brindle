@@ -316,7 +316,10 @@ def _propose(body: dict, store: p.Store) -> tuple[dict, list[p.Rule]]:
         raise ServiceError("conflict", "resolution exceeds supported rule persistence limits", 409)
     if state["restrictions"]["managed"] and not _tightens(before, after):
         raise ServiceError("forbidden", "managed policy permits only proven local tightening", 403)
-    unresolved = _conflicts(after, protected)
+    # A protected peer is always a deny, and denies win wherever scopes overlap
+    # (permissions.decide), so it is shown but leaves nothing to resolve; no
+    # edit could ever resolve it, and counting it would block every save.
+    unresolved = [c for c in _conflicts(after, protected) if not c["protected"]]
     # Existing conflicts outside this edit are shown too; saving may never claim
     # to have resolved a policy that still contains contradictory scopes.
     can_save = resolution == "existing" or not unresolved

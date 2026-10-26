@@ -200,6 +200,27 @@ def test_save_rechecks_policy_inside_store_lock_and_rejects_tampered_proposal(tm
     assert p.decide(p.Request("codex", "fetch", "WebFetch", url="https://other.example/")).decision == "ask"
 
 
+def test_permission_edit_unblocked_by_a_saved_allow_that_overlaps_a_protected_deny(tmp_path, monkeypatch):
+    from brindle import permission_editor as e
+    from brindle.pro.team_policy import OrgPolicy
+
+    # As reported: an org member whose store holds an allow overlapping a
+    # built-in deny could save no edit at all, not even a removal.
+    monkeypatch.setattr(e, "policy", lambda repo: OrgPolicy("org", 24))
+    repo = str(tmp_path)
+    p.reset()
+    p.add_rule("bash", "git ", "allow", "prefix")
+    old = p.add_rule("bash", "npm test", "allow", "exact")
+    body = {"repo": repo, "revision": e.snapshot(repo)["revision"], "operation": "remove",
+            "id": old.id, "resolution": "manual"}
+    reviewed = e.review(body)
+    assert any(c["right"] == "d-git-push" for c in reviewed["conflicts"])
+    assert reviewed["can_save"], reviewed["unresolved"]
+    e.save({**body, "proposal": reviewed["proposal"]})
+    assert [r.match for r in p.load_store().rules] == ["git "]
+    assert p.decide(p.Request("codex", "bash", "Bash", command="git push")).decision == "deny"
+
+
 @pytest.mark.parametrize("count,depth,valid,match,protected", [
     (None, 1, True, None, None), (100, 0, True, None, None), (101, 0, False, None, None),
     (1, 7, True, None, None), (1, 8, False, None, None),
