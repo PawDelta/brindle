@@ -1,0 +1,44 @@
+[
+  {
+    "id": "lenient",
+    "name": "Lenient",
+    "description": "Allow routine file, command and network actions. Ask for MCP and unknown actions.",
+    "rules": [
+      {"kind": "read", "match": "*", "match_type": "glob", "decision": "allow"},
+      {"kind": "write", "match": "*", "match_type": "glob", "decision": "allow"},
+      {"kind": "edit", "match": "*", "match_type": "glob", "decision": "allow"},
+      {"kind": "bash", "match": "*", "match_type": "glob", "decision": "allow"},
+      {"kind": "fetch", "match": "*", "match_type": "glob", "decision": "allow"},
+      {"kind": "mcp", "match": "*", "match_type": "glob", "decision": "ask"},
+      {"kind": "other", "match": "*", "match_type": "glob", "decision": "ask"}
+    ]
+  },
+  {
+    "id": "balanced",
+    "name": "Balanced",
+    "description": "Allow file work. Ask before commands, network access, MCP and unknown actions.",
+    "rules": [
+      {"kind": "read", "match": "*", "match_type": "glob", "decision": "allow"},
+      {"kind": "write", "match": "*", "match_type": "glob", "decision": "allow"},
+      {"kind": "edit", "match": "*", "match_type": "glob", "decision": "allow"},
+      {"kind": "bash", "match": "*", "match_type": "glob", "decision": "ask"},
+      {"kind": "fetch", "match": "*", "match_type": "glob", "decision": "ask"},
+      {"kind": "mcp", "match": "*", "match_type": "glob", "decision": "ask"},
+      {"kind": "other", "match": "*", "match_type": "glob", "decision": "ask"}
+    ]
+  },
+  {
+    "id": "strict",
+    "name": "Strict",
+    "description": "Ask before every action, including reads and configured checks.",
+    "rules": [
+      {"kind": "read", "match": "*", "match_type": "glob", "decision": "ask"},
+      {"kind": "write", "match": "*", "match_type": "glob", "decision": "ask"},
+      {"kind": "edit", "match": "*", "match_type": "glob", "decision": "ask"},
+      {"kind": "bash", "match": "*", "match_type": "glob", "decision": "ask"},
+      {"kind": "fetch", "match": "*", "match_type": "glob", "decision": "ask"},
+      {"kind": "mcp", "match": "*", "match_type": "glob", "decision": "ask"},
+      {"kind": "other", "match": "*", "match_type": "glob", "decision": "ask"}
+    ]
+  }
+]
