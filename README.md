@@ -372,7 +372,7 @@ your own status line prints, so what you see doesn't change.
 | `brindle cost [--days N] [--all]` | dollar spend at list prices over the last 30 days, by model |
 | `brindle cost report [--days N] [--all]` | Pro: spend by day, profile and goal, cost per merged branch, review pass rate per worker profile |
 | `brindle history --share [--session ID]` | a few lines about this session to paste into Slack or a post: goal, milestones verified, workers, merges, reviews (and how many by a different model), parallel speedup, tokens |
-| `brindle permissions list / check / suggestions / accept / allow / deny / forget / reset` | the rules brindle answers workers' permission requests with, and what it suggests from your approvals (see "Permission policy") |
+| `brindle permissions list / check / preset / suggestions / accept / allow / deny / forget / reset` | the rules brindle answers workers' permission requests with, the preset they started from, and what it suggests from your approvals (see "Permission policy"; saved actions are managed in the app for now, [#285](https://github.com/PawDelta/brindle/issues/285)) |
 | `brindle permissions install-codex-hook [--yes]` / `brindle permissions sync-agy` | trust brindle's Codex permission hook now (brindle does it itself when needed); copy your rules into Antigravity's settings (see "Permission policy") |
 | `brindle cost request --usd N --reason "..." [--goal TEXT]` | Enterprise (cost centers): ask an admin to approve spend over your budget. A budget refusal points here. Once approved, this month's limit (or the named goal's) goes up by the approved amount, for the month it was approved in |
 | `brindle cost requests` | Enterprise: your approval requests and their status; checks pending ones with the server (the cull pass also does, every few minutes). With cost centers, spend events also carry the repo (`owner/name`) so the org can total spend per center |
@@ -659,7 +659,7 @@ Autopilot, merge gates and cleanup:
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
-| `permission_policy` | `"off"` | `"on"`: brindle answers Claude Code workers' permission prompts from its rules (see "Permission policy" below); off, the prompts behave as they always did |
+| `permission_policy` | `"on"` with a Pro license, else `"off"` | `"on"`: brindle answers workers' permission requests from its rules (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. The only permission switch: a leftover `permission_essentials` key is ignored |
 | `agy_approvals` | unset | `"brindle"`: Antigravity agents run without approval prompts and brindle's hook allows or denies every call, applying the profile's `allowed_tools` (see "Antigravity" under "Permission policy"); `"prompt"`: agy asks as usual. Unset, workers get `"brindle"` and interactive agy sessions `"prompt"` |
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
 | `plan_first` | `false` | workers propose a plan (`submit_plan`) and wait for `approve_plan` before editing |
@@ -913,6 +913,14 @@ saved deny stops every ask it covers. A saved allow settles an ask only within
 the limits of the ask rule that asked (its scope and how long approvals may
 last), never past a deny rule, and never once it has expired. Every use reads
 the current rules again.
+
+Saved actions and the grouped Inbox are in the app only for now. From the
+CLI, saved actions still apply to every worker, but you can't list, edit or
+delete one (`brindle permissions reset` removes them all, with your own and
+learned rules), and without the app a held request falls back to the worker
+CLI's own prompt in its pane, one exact request at a time. CLI commands for
+both are tracked in
+[#285](https://github.com/PawDelta/brindle/issues/285).
 
 In a Team org, the org policy's `permission_grants` block bounds what a saved
 allow may do. It is read again on every request:
