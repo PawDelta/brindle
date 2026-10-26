@@ -74,8 +74,10 @@ rule on its own: a pattern approved at least SUGGEST_AFTER times is shown by
 from __future__ import annotations
 
 import fnmatch
+import glob
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -96,8 +98,11 @@ DECISIONS = ("allow", "deny", "ask")
 MATCH_TYPES = ("exact", "prefix", "glob")
 BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "git-push", "git-force", "push", "worktree",
                     "readonly-pipeline", "rm-destructive")
-SOURCES = ("preset", "repo", "user", "learned", "profile")
+SOURCES = ("preset", "repo", "user", "learned", "profile", "org")
 STORE_SOURCES = ("preset", "user", "learned")    # what the person's store holds
+# Every field a stored rule may have (Rule.to_dict, and the 0.4.7 editor's rows).
+RULE_FIELDS = frozenset({"id", "kind", "match", "match_type", "decision", "source", "created", "limits", "expires",
+                         "exclusions", "label", "repo_root", "expires_at", "editable", "protected"})
 UNMATCHED = ("ask", "allow", "deny")             # Store.unmatched: what no rule covers
 # How far a saved approval of a push may reach (an ask rule's limits.max_scope), narrowest first.
 LEVELS = ("branch", "destination", "remote", "repository", "all")
@@ -107,10 +112,20 @@ DEFAULT_BRANCH = "@default"                       # in a push pattern: the repo'
 SUGGEST_AFTER = 2
 PROMPT_WINDOW = 86400.0                           # seconds of asks kept for per-rule prompt counts
 FILE = "permissions.json"
+# 1: before presets (built-in rules outside the store); 2: the 0.4.7 engine's
+# (built-ins, editor rules, remembered grants); 3: presets and saved actions.
+# A newer store is read fail-closed and never rewritten (Store.unsupported_version).
+STORE_VERSION = 3
 
 # A command an allow rule may cover: one simple command, nothing the shell
 # would treat specially.
 SIMPLE_COMMAND = re.compile(r"[A-Za-z0-9_\-./:=@%+, ]+")
+_NO_TILDE = re.compile(r"[^~]")
+# SIMPLE_COMMAND plus unquoted pathname patterns, only to decide whether a
+# restriction could apply. Never used to grant allows.
+RESTRICTION_WORD = re.compile(r"[A-Za-z0-9_\-./:=@%+, *?\[\]]+")
+# A heredoc's body, from its delimiter line to the closing line.
+_HEREDOC = re.compile(r"<<-?[ \t]*([\"']?)(\w+)\1[^\n]*\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.DOTALL)
 # The operators a compound command may join its parts with ("" ends it).
 COMPOUND_SEPARATORS = ("&&", ";", "|", "")
 READONLY_GIT = ("status", "diff", "log", "show")
@@ -158,8 +173,9 @@ def _number(value: object) -> float | None:
 
 def clean_limits(limits: object) -> dict | None:
     """An ask rule's limits, validated: ``max_scope`` (a LEVELS entry for
-    pushes, else a pattern a saved action must stay inside), ``life`` and,
-    for life "time", ``minutes``. None when nothing valid is given."""
+    pushes, else a pattern a saved action must stay inside), ``life`` (a
+    LIVES entry, or "once": no saved approval settles it) and, for life
+    "time", ``minutes``. None when nothing valid is given."""
     if not isinstance(limits, dict):
         return None
     out: dict = {}
@@ -167,7 +183,7 @@ def clean_limits(limits: object) -> dict | None:
     if isinstance(scope, str) and scope:
         out["max_scope"] = scope
     life = limits.get("life")
-    if life in LIVES:
+    if life in (*LIVES, "once"):
         out["life"] = life
         minutes = _number(limits.get("minutes"))
         if life == "time":
@@ -190,6 +206,7 @@ class Rule:
     expires: float | None = None        # a timed rule: epoch seconds after which it no longer applies
     exclusions: tuple = ()              # Rules: a request any of them matches is not this rule's
     label: str = ""                     # a person's name for it (the app's)
+    repo_root: str | None = None        # the one repo (resolved) it applies in; None: every repo
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -216,11 +233,19 @@ class Rule:
             out["exclusions"] = [x.to_dict() for x in self.exclusions]
         if self.label:
             out["label"] = self.label
+        if self.repo_root:
+            out["repo_root"] = self.repo_root
         return out
 
     @classmethod
-    def from_dict(cls, data: dict, source: str | None = None) -> "Rule | None":
-        """A rule read from a file, or None if it isn't a valid one."""
+    def from_dict(cls, data: dict, source: str | None = None, *, depth: int = 0) -> "Rule | None":
+        """A rule read from a file, or None if it isn't a valid one. A field
+        this engine doesn't know may narrow the rule in a way it can't
+        evaluate, so such a row is not a rule here (load_store keeps it, see
+        Store.blocking_rules). ``expires_at`` is the 0.4.7 engine's name for
+        ``expires``."""
+        if not isinstance(data, dict) or data.keys() - RULE_FIELDS or depth > 8:
+            return None
         try:
             kind, match = str(data["kind"]), str(data["match"])
             match_type = str(data.get("match_type", "exact"))
@@ -237,13 +262,24 @@ class Rule:
             created = float(data.get("created") or 0)
         except (TypeError, ValueError):
             created = 0.0
-        expires = _number(data.get("expires"))
-        exclusions = tuple(x for x in (cls.from_dict(d, src) for d in data.get("exclusions") or []
-                                       if isinstance(d, dict)) if x)
+        raw = data.get("expires", data.get("expires_at"))
+        expires = _number(raw)
+        if raw is not None and (expires is None or not math.isfinite(expires) or expires <= 0):
+            return None
+        repo = data.get("repo_root")
+        if repo is not None and (not isinstance(repo, str) or not os.path.isabs(repo)):
+            return None
+        rows = data.get("exclusions") or []
+        if not isinstance(rows, list) or len(rows) > 100:
+            return None
+        exclusions = tuple(cls.from_dict(d, src, depth=depth + 1) for d in rows)
+        if any(x is None or x.kind != kind for x in exclusions):
+            return None    # an exception it can't read: the rule might apply to less than it says
         id_ = data.get("id") if isinstance(data.get("id"), str) else ""
         label = data.get("label") if isinstance(data.get("label"), str) else ""
         return cls(kind, match, match_type, decision, src, created, id_,
-                   clean_limits(data.get("limits")) if decision == "ask" else None, expires, exclusions, label)
+                   clean_limits(data.get("limits")) if decision == "ask" else None, expires, exclusions, label,
+                   os.path.realpath(repo) if repo else None)
 
 
 @dataclass
@@ -357,6 +393,12 @@ DESTRUCTIVE_DENIES: tuple[Rule, ...] = (
     _seed("d-rm", "bash", "a recursive rm of the root, a top-level folder or the home directory",
           "rm-destructive", "deny"),
 )
+# A push into a release branch starts a signed build (app-release.yml): every
+# preset asks for it each time, and no saved approval settles it (life "once").
+RELEASE_ASKS: tuple[Rule, ...] = (
+    _seed("d-push-release", "bash", f"*{PUSH_ARROW}release", "push", "ask", limits={"life": "once"}),
+    _seed("d-push-release-sub", "bash", f"*{PUSH_ARROW}release/*", "push", "ask", limits={"life": "once"}),
+)
 # The rules of before presets, kept for stores written then (load_store migrates them).
 LEGACY_DEFAULT_IDS = ("d-tracked", "d-checks", "d-git-ro", "d-git-push", "d-git-force", "d-ssh", "d-aws",
                       "d-gnupg", "d-daemon", "d-daemon-sh", "d-env", "d-env-rel")
@@ -372,7 +414,7 @@ def _push_default(max_scope: str, life: str, minutes: float | None = None) -> Ru
 
 def _autonomous() -> list[Rule]:
     return [*ROUTINE_ALLOWS, *PRESET_RULES, *CREDENTIAL_DENIES, *DESTRUCTIVE_DENIES,
-            _push_default("all", "forever")]
+            _push_default("all", "forever"), *RELEASE_ASKS]
 
 
 def _permissive() -> list[Rule]:
@@ -380,18 +422,18 @@ def _permissive() -> list[Rule]:
             _seed("d-read-worktree", "read", "a file in the worktree", "worktree", "allow"),
             _seed("d-write-worktree", "write", "a file in the worktree", "worktree", "allow"),
             _seed("d-edit-worktree", "edit", "a file in the worktree", "worktree", "allow"),
-            *CREDENTIAL_DENIES, *DESTRUCTIVE_DENIES, _push_default("remote", "forever")]
+            *CREDENTIAL_DENIES, *DESTRUCTIVE_DENIES, _push_default("remote", "forever"), *RELEASE_ASKS]
 
 
 def _standard() -> list[Rule]:
     return [*ROUTINE_ALLOWS, *PRESET_RULES, *CREDENTIAL_DENIES, *DESTRUCTIVE_DENIES,
-            _push_default("destination", "time", 30)]
+            _push_default("destination", "time", 30), *RELEASE_ASKS]
 
 
 def _secure() -> list[Rule]:
     short = {"max_scope": "*", "life": "time", "minutes": 15}
     return [*ROUTINE_ALLOWS[:3], *CREDENTIAL_DENIES, *DESTRUCTIVE_DENIES,
-            _push_default("branch", "time", 15),
+            _push_default("branch", "time", 15), *RELEASE_ASKS,
             _seed("d-write-ask", "write", "*", "glob", "ask", limits=short),
             _seed("d-edit-ask", "edit", "*", "glob", "ask", limits=short),
             _seed("d-bash-ask", "bash", "*", "glob", "ask", limits=short),
@@ -942,7 +984,9 @@ def _allow_specs(rules: list[Rule], checks: list[str] | None) -> list[str]:
     """The bash allow rules and checks as uncovered_part's specs."""
     specs = [c.strip() for c in checks or []]
     for rule in rules:
-        if rule.kind == "bash" and rule.decision == "allow" and rule.match.strip():
+        # A rule scoped to a repo, a time or with exceptions is only the policy's to weigh.
+        if (rule.kind == "bash" and rule.decision == "allow" and rule.match.strip()
+                and not (rule.repo_root or rule.expires is not None or rule.exclusions)):
             if rule.match_type == "exact":
                 specs.append(rule.match.strip())
             elif rule.match_type == "prefix":
@@ -980,9 +1024,18 @@ def allowlist_decision(req: Request | None, rules: list[Rule], checks: list[str]
     (a redirection that writes a file, a heredoc, ...)."""
     from dataclasses import replace
 
-    from brindle.native.permissions import split_commands, uncovered_part
+    from brindle.native.permissions import _tokens, split_commands, uncovered_part
 
     if req is None or req.kind != "bash" or not req.command:
+        return None
+    restricted = _restriction_in_parts(req, checks=checks, rules=rules)
+    if restricted is not None and restricted.decision == "deny":
+        return restricted
+    if restricted is not None:
+        return None    # an ask, or syntax brindle can't check against one: the person's to decide
+    # The shell rewrites an unquoted tilde word (``~/x``, ``a=~/x``,
+    # ``a=b:~/x``) after this check; HEAD~1 stays a literal (see _tokens).
+    if _tokens(req.command, word_pattern=_NO_TILDE) is None:
         return None
     if uncovered_part(_allow_specs(rules, checks), req.command, cd_root=cd_root) is not None:
         return None
@@ -1040,16 +1093,15 @@ def _part_decision(req: Request, words: list[str], checks: list[str] | None,
     mistake argument text for shell syntax."""
     from brindle.native.permissions import _joined
 
-    denied = decide(replace(req, command=_joined(words)), checks=checks,
-                    rules=[rule for rule in rules if rule.decision == "deny"], unmatched="ask", saved=[])
-    if denied.decision == "deny":
+    denied = _matching_restriction([replace(req, command=_joined(words))], checks, rules)
+    if denied is not None:
         return denied
     if all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words):
         return decide(replace(req, command=" ".join(words)), checks=checks, rules=rules, unmatched="ask", saved=[])
     for rule in rules:
         head = rule.match.split()
         if (rule.kind == "bash" and rule.decision == "allow" and rule.match_type == "prefix"
-                and head and words[:len(head)] == head):
+                and head and words[:len(head)] == head and _in_scope(rule, req, checks)):
             return Decision("allow", f"allowed by {rule.source} rule {rule.id} ({rule.describe()})", rule)
     return Decision("ask", "no rule allows it")
 
@@ -1156,6 +1208,23 @@ def _git_calls(command: str) -> list[tuple[str, list[str]]]:
 def _is_force(arg: str) -> bool:
     return (arg.startswith(FORCE_OPTIONS)
             or bool(re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", arg)))
+
+
+def _readonly_git(req: Request, argv: list[str]) -> bool:
+    """Whether ``argv`` is a read-only git command (READONLY_GIT, no unsafe or
+    force option), with ``-C`` only into the worktree or repo root."""
+    if not argv or argv[0] != "git":
+        return False
+    args = argv[1:]
+    if args[:1] == ["-C"]:
+        if len(args) < 3:
+            return False
+        path = os.path.realpath(os.path.join(req.cwd or req.worktree, args[1]))
+        if not any(path == os.path.realpath(root) or _inside(path, root) for root in _roots(req)):
+            return False
+        args = args[2:]
+    return bool(args and args[0] in READONLY_GIT
+                and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in args[1:]))
 
 
 # -- pushes -------------------------------------------------------------------------------------
@@ -1291,26 +1360,32 @@ def push_matches(match: str, req: Request, loose: bool) -> bool:
     return any(push_fits(match, push, req.repo_root, loose) for push in push_calls(req.command))
 
 
-# -- read-only pipelines -------------------------------------------------------------------------
+# -- read-only commands ---------------------------------------------------------------------------
 #
 # A command whose every part only reads (grep, ls, cat, head ...) joined by
 # pipes or &&, with quoting the shell may read any way (an escaped regex), is
-# safe to run even when it can't be parsed into exact allow rules. Anything
-# that writes a file (a redirection other than to /dev/null), substitutes a
-# command, or runs a program not on the list goes through the normal decision.
+# safe to run even when it can't be parsed into exact allow rules: the
+# preset rule d-readonly allows it (a readonly-pipeline rule, which decide
+# reads through ``readonly_pipeline`` with the rules in force). Anything that writes a
+# file (a redirection other than to /dev/null), reads one through an input
+# redirect, substitutes a command, sets a variable first, runs a program not
+# on the list (or one named by a path), recurses into a directory, or reads a
+# file a read deny covers goes through the normal decision.
 
-# program -> (short option letters, long options) that make it write a file
-# or run another program; a short letter counts anywhere in an option cluster
-# (``sort -ro out``), a long option with or without ``=value``. Only programs
-# audited for such options are listed; ``uniq``'s second operand is an output
-# file, so it takes one operand at most (see _readonly_part).
+# program -> (short option letters, long options) that make it write a file,
+# run another program or read a whole tree; a short letter counts anywhere in
+# an option cluster (``sort -ro out``), a long option with or without
+# ``=value``. Only programs audited for such options are listed; ``uniq``'s
+# second operand is an output file, so it takes one operand at most (see
+# _readonly_part). grep, rg and wc take only the options OPTION_CHECKS knows.
 READONLY_PROGRAMS: dict[str, tuple[str, tuple[str, ...]]] = {
-    "grep": ("", ()), "egrep": ("", ()), "fgrep": ("", ()), "rg": ("", ("--pre", "--pre-glob")), "ag": ("", ()),
+    "grep": ("", ()), "egrep": ("", ()), "fgrep": ("", ()), "rg": ("", ("--pre", "--pre-glob")),
     "ls": ("", ()), "cat": ("", ()), "head": ("", ()), "tail": ("", ()), "wc": ("", ()), "nl": ("", ()),
     "tac": ("", ()), "rev": ("", ()), "fold": ("", ()), "expand": ("", ()), "unexpand": ("", ()),
     "cut": ("", ()), "tr": ("", ()), "paste": ("", ()), "comm": ("", ()), "column": ("", ()), "seq": ("", ()),
-    "sort": ("o", ("--output", "--compress-program")), "uniq": ("", ()),
-    "diff": ("", ()), "cmp": ("", ()), "file": ("C", ("--compile",)), "stat": ("", ()), "du": ("", ()),
+    "sort": ("o", ("--output", "--compress-program", "--files0-from")), "uniq": ("", ()),
+    "diff": ("r", ("--recursive",)), "cmp": ("", ()), "file": ("C", ("--compile",)), "stat": ("", ()),
+    "du": ("", ()),
     "df": ("", ()), "pwd": ("", ()), "echo": ("", ()), "printf": ("", ()), "which": ("", ()),
     "whereis": ("", ()), "type": ("", ()), "basename": ("", ()), "dirname": ("", ()), "realpath": ("", ()),
     "readlink": ("", ()), "true": ("", ()), "false": ("", ()), "test": ("", ()), "whoami": ("", ()),
@@ -1320,6 +1395,129 @@ READONLY_PROGRAMS: dict[str, tuple[str, tuple[str, ...]]] = {
     "fd": ("xX", ("--exec", "--exec-batch")), "fdfind": ("xX", ("--exec", "--exec-batch")),
 }
 ONE_OPERAND = frozenset({"uniq"})
+# Programs that read names, never a file's contents: no read deny is checked against their arguments.
+NAME_ONLY = frozenset({"ls", "tree", "find", "du", "df", "stat", "pwd", "echo", "printf", "which", "whereis",
+                       "type", "basename", "dirname", "realpath", "readlink", "true", "false", "test", "whoami",
+                       "uname", "seq", "locate", "fd", "fdfind", "hostname"})
+
+# The options _reads_only_named accepts, written out in full: GNU tools
+# also take any unambiguous abbreviation of a long option (--recur is
+# --recursive), so an option not listed here is refused, never guessed.
+# grep: flags (a cluster may end in one taking a value, attached or next),
+# then long flags and long options taking a value.
+_GREP_SHORT = re.compile(r"-[nilcwvoxFEGHhsqLZaIUrRz0-9]*(?P<value>[efmABC].*)?", re.DOTALL)
+_GREP_FLAGS = ("--line-number", "--ignore-case", "--no-ignore-case", "--count", "--word-regexp", "--line-regexp",
+               "--invert-match", "--only-matching", "--fixed-strings", "--extended-regexp", "--basic-regexp",
+               "--perl-regexp", "--with-filename", "--no-filename", "--no-messages", "--quiet", "--silent",
+               "--files-with-matches", "--files-without-match", "--null", "--null-data", "--text",
+               "--byte-offset", "--initial-tab", "--color", "--colour", "--recursive", "--dereference-recursive")
+_GREP_VALUES = ("--regexp", "--file", "--max-count", "--after-context", "--before-context", "--context",
+                "--label", "--color", "--colour", "--binary-files", "--include", "--exclude", "--exclude-dir")
+_GREP_RECURSIVE = re.compile(r"-[^-]*[rR].*|--(recursive|dereference-recursive)")
+# The most files a recursive read is checked across (_reads_clear); past it, it isn't clear.
+WALK_LIMIT = 5000
+_WC = re.compile(r"-[cmlwL]+|--(bytes|chars|lines|words|max-line-length)")
+# rg's (it takes no abbreviations, but the same rule holds): flags, and those taking a value.
+_RG_FLAGS = re.compile(r"-[nilcwvoxFsSHNu]+|--(line-number|ignore-case|smart-case|case-sensitive|files-with-matches"
+                       r"|count|word-regexp|invert-match|only-matching|fixed-strings|no-heading|heading"
+                       r"|with-filename|no-filename|hidden|no-ignore|json|vimgrep)")
+_RG_VALUES = ("-e", "--regexp", "-m", "--max-count", "-A", "-B", "-C", "--after-context",
+              "--before-context", "--context", "-t", "--type", "-T", "--type-not")
+
+
+def _grep_options_known(args: list[str]) -> bool:
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            return True
+        if arg.startswith("--"):
+            name, eq, _ = arg.partition("=")
+            if eq and name not in _GREP_VALUES or not eq and name not in (*_GREP_FLAGS, *_GREP_VALUES):
+                return False
+            if not eq and name in _GREP_VALUES and name not in _GREP_FLAGS:
+                i += 1  # its value is the next word
+        elif arg.startswith("-") and arg != "-":
+            short = _GREP_SHORT.fullmatch(arg)
+            if short is None:
+                return False
+            if short.group("value") is not None and len(short.group("value")) == 1:
+                i += 1  # its value is the next word
+        i += 1
+    return True
+
+
+def _reads_only_named(program: str, args: list[str], cwd: str) -> bool:
+    """Whether ``program`` with ``args`` reads only files its arguments
+    name, or the trees of the directories they name when it recurses (which
+    _reads_clear then walks): no list of names read from a file, no command
+    run (rg's --pre). grep and wc take only the options listed above (so no
+    --files0-from or --devices, however spelled); rg only the options it
+    knows (anything else could take the operand that would have been a path)."""
+    if program in ("grep", "egrep", "fgrep"):
+        return _grep_options_known(args)
+    if program == "wc":
+        return all(_WC.fullmatch(a) or a == "-" or not a.startswith("-") for a in args)
+    if program != "rg":
+        return True
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            break
+        if arg in _RG_VALUES:
+            i += 2
+            continue
+        if not _RG_FLAGS.fullmatch(arg) and arg.startswith("-") and arg != "-":
+            return False
+        i += 1
+    return True
+
+
+def _recurses(words: list[str]) -> bool:
+    """Whether the read-only command ``words`` reads whole directory trees."""
+    if words[0] == "rg":
+        return True
+    return words[0] in ("grep", "egrep", "fgrep") and any(_GREP_RECURSIVE.fullmatch(a) for a in words[1:]
+                                                          if a.startswith("-"))
+
+
+def _search_paths(words: list[str]) -> list[str]:
+    """The paths a grep or rg command ``words`` searches: its operands after
+    the pattern (none when the pattern came from -e or -f)."""
+    values = (_RG_VALUES if words[0] == "rg"
+              else ("-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", *_GREP_VALUES))
+    positional, patterned, i = [], False, 1
+    while i < len(words):
+        arg = words[i]
+        if arg == "--":
+            positional += words[i + 1:]
+            break
+        if arg in values:
+            patterned = patterned or arg in ("-e", "-f", "--regexp", "--file")
+            i += 2
+            continue
+        if arg.startswith("-") and arg != "-":
+            patterned = patterned or arg.startswith(("--regexp=", "--file=")) or bool(
+                re.fullmatch(r"-[^-]*[ef].+", arg))
+        else:
+            positional.append(arg)
+        i += 1
+    return positional if patterned else positional[1:]
+
+
+def _tree(root: str, budget: list[int]) -> list[str] | None:
+    """Every file and directory under ``root`` (``.git`` aside), or None past
+    ``budget`` (shared across a command's walks)."""
+    out = []
+    for top, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for name in (*dirs, *files):
+            budget[0] -= 1
+            if budget[0] < 0:
+                return None
+            out.append(os.path.join(top, name))
+    return out
 
 
 def _has_option(args: list[str], short: str, long: tuple[str, ...]) -> bool:
@@ -1375,15 +1573,19 @@ def _sed_readonly(args: list[str]) -> bool:
     return all(SED_PRINT.fullmatch(s.strip()) for s in scripts)
 
 
-def _readonly_part(words: list[str]) -> bool:
-    if not words:
+def _readonly_part(req: Request, words: list[str]) -> bool:
+    """Whether the simple command ``words`` only reads (see the section above).
+    A program named by a path (``./cat``) could be anything."""
+    if not words or "/" in words[0]:
         return False
-    program = os.path.basename(words[0])
+    program = words[0]
     args = words[1:]
     if program == "git":
-        argv = [a for a in args if not a.startswith("-")]
-        return bool(argv and argv[0] in READONLY_GIT
-                    and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in args))
+        while args[:1] == ["--no-pager"]:
+            args = args[1:]
+        return _readonly_git(req, ["git", *args])
+    if not _reads_only_named(program, args, req.cwd or req.worktree):
+        return False
     if program == "find":
         return not any(a in FIND_WRITING for a in args)
     if program == "sed":
@@ -1402,19 +1604,87 @@ def _readonly_part(words: list[str]) -> bool:
     return True
 
 
-def readonly_pipeline(command: str | None) -> bool:
-    """Whether ``command`` is one or more read-only commands joined by control
-    operators, with no redirection to a file, substitution, heredoc or
-    subshell (what _simple_commands reads), each a listed program used in a
-    way that writes nothing."""
-    from brindle.native.permissions import _simple_commands
+def _expanded(req: Request, word: str) -> list[str]:
+    """The names ``word`` may stand for as the shell expands it in ``req.cwd``:
+    itself (a leading ``~`` expanded), and each file a pathname pattern in it
+    matches, dotfiles included."""
+    names = [os.path.expanduser(word)]
+    if any(c in word for c in "*?["):
+        names += sorted(glob.glob(os.path.expanduser(word).replace("[^", "[!"),
+                                  root_dir=req.cwd or req.worktree or None, include_hidden=True))
+    return names
 
-    if not command or "$(" in command or "`" in command:
+
+def _reads_clear(req: Request, words: list[str], path_denies: list[Rule]) -> bool:
+    """Whether no read deny in ``path_denies`` covers a file ``words`` may
+    read: every argument counts as a name it may read, an option's attached
+    value too (``-fFILE``, ``--file=FILE``), each pattern expanded, and for
+    a recursive grep or rg everything under each directory it names (the
+    working directory when it names none). A pattern the expansion here
+    can't read exactly (``[[:alpha:]]``), or a tree past WALK_LIMIT, is never clear."""
+    if words[0] in NAME_ONLY or not path_denies:
+        return True
+    cwd = req.cwd or req.worktree
+    names: list[str] = []
+    for word in words[1:]:
+        if any(c in word for c in "*?[") and ("[:" in word or "[=" in word or "[." in word):
+            return False
+        for name in _expanded(req, word):
+            names.append(name)
+            if name.startswith("--"):
+                names.append(name.partition("=")[2])
+            elif name.startswith("-"):
+                names += [name[i:] for i in range(2, len(name))]
+    if _recurses(words):
+        paths = [name for word in _search_paths(words) for name in _expanded(req, word)]
+        dirs = ([p for p in (os.path.join(cwd, n) for n in paths if n) if os.path.isdir(p)] if paths
+                else [cwd or "."])
+        budget = [WALK_LIMIT]
+        for d in dirs:
+            found = _tree(d, budget)
+            if found is None:
+                return False
+            names += found
+    reads = [replace(req, kind="read", command=None, path=os.path.join(cwd, name)) for name in names if name]
+    return not any(rule_matches(rule, read) for rule in path_denies for read in reads)
+
+
+def readonly_pipeline(req: Request, rules: list[Rule], checks: list[str] | None = None) -> bool:
+    """Whether ``req`` is one of the read-only commands this section describes: one or more joined by control operators,
+    with no substitution, input or file redirection, heredoc or subshell
+    (what _simple_commands reads), each a listed program used in a way that
+    writes nothing and reads no file a read deny in ``rules`` covers; and no
+    bash deny or ask in ``rules`` applies to the whole command or any part
+    of it. Quoting is read as the shell reads it, so an escaped regex
+    (``grep -v "^ \\|^$"``) is no reason to ask."""
+    from brindle.native.permissions import _joined, _simple_commands, _tokens
+
+    command = req.command
+    if req.kind != "bash" or not command or "$(" in command or "`" in command:
         return False
+    tokens = _tokens(command)
+    if tokens is None or any(is_op and "<" in text for is_op, text in tokens):
+        return False
+    if _tokens(command, word_pattern=_NO_TILDE) is None:
+        return False    # an unquoted ~ the shell expands (~/x, a=~/x), reaching outside the worktree
     parsed = _simple_commands(command)
     if not parsed or any(after not in (*COMPOUND_SEPARATORS, "||") for _, after in parsed):
         return False
-    return all(_readonly_part(words) for words, _ in parsed)
+    if not all(_readonly_part(req, words) for words, _ in parsed):
+        return False
+    restrictions = [r for r in rules if r.kind == "bash" and r.decision in ("deny", "ask")]
+    parts = [req, *(replace(req, command=_joined(words)) for words, _ in parsed)]
+    if any(rule_matches(rule, part, checks) for rule in restrictions for part in parts):
+        return False
+    path_denies = [r for r in rules if r.kind == "read" and r.decision == "deny"]
+    if restrictions and _restriction_parts(command) is None:
+        # Unquoted pathname patterns: a restriction may match what they expand to.
+        assigned: list[bool] = []
+        redirects: list[tuple[str, str]] = []
+        patterns = _restriction_parts(command, word_pattern=RESTRICTION_WORD, assigned=assigned, redirects=redirects)
+        if patterns is not None and not _globs_excluded(req, patterns, restrictions, path_denies, assigned, redirects):
+            return False
+    return all(_reads_clear(req, words, path_denies) for words, _ in parsed)
 
 
 # -- destructive commands --------------------------------------------------------------------------
@@ -1470,8 +1740,7 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
         return simple_argv(command) is not None and command in [c.strip() for c in checks]
     if rule.match_type == "git-readonly":
         argv = simple_argv(command)
-        return bool(argv and len(argv) >= 2 and argv[0] == "git" and argv[1] in READONLY_GIT
-                    and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in argv[2:]))
+        return bool(argv and _readonly_git(req, argv))
     if rule.match_type == "git-push":
         return any(sub == "push" for sub, _ in _git_calls(command))
     if rule.match_type == "push":
@@ -1481,15 +1750,25 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
     if rule.match_type == "rm-destructive":
         return destructive_rm(command)
     if rule.match_type == "readonly-pipeline":
-        return readonly_pipeline(command)
+        return readonly_pipeline(req, [], checks)   # the programs alone: decide adds the rules in force
     return False
 
 
-def rule_matches(rule: Rule, req: Request, checks: list[str] | None = None) -> bool:
+def _in_scope(rule: Rule, req: Request, checks: list[str] | None) -> bool:
+    """Whether ``rule`` applies to ``req`` at all: its kind, unexpired, in its
+    repo (if it names one) and not one of its exclusions."""
     if rule.kind != req.kind or rule.expired():
         return False
-    if any(rule_matches(x, req, checks) for x in rule.exclusions):
+    if rule.repo_root and (not req.repo_root or os.path.realpath(req.repo_root) != rule.repo_root):
         return False
+    return not any(rule_matches(x, req, checks) for x in rule.exclusions)
+
+
+def rule_matches(rule: Rule, req: Request, checks: list[str] | None = None) -> bool:
+    if not _in_scope(rule, req, checks):
+        return False
+    if rule.source == "preset" and rule.id == f"d-store-unsupported-{req.kind}":
+        return True    # Store.blocking_rules: also a request with no target (a search tool without a URL)
     if rule.match_type in BUILTIN_MATCHERS:
         return _builtin_matches(rule, req, checks or [])
     if req.kind == "bash" and rule.decision == "allow" and simple_argv(req.command) is None:
@@ -1511,9 +1790,15 @@ def rule_matches(rule: Rule, req: Request, checks: list[str] | None = None) -> b
 
 
 def all_rules(repo_root: str | None = None) -> list[Rule]:
-    """Every rule in force: the repo's denies, then the store's (the preset's,
-    the person's and learned ones)."""
-    return [*(repo_rules(repo_root) if repo_root else []), *load_store().rules]
+    """Every rule in force: the org's denies (a Team org's policy,
+    brindle.permission_grants.org_denies), the repo's, then the store's (the
+    preset's, the person's and learned ones, and the denies standing in for
+    rows it can't read)."""
+    from brindle import permission_grants
+
+    store = load_store()
+    return [*permission_grants.org_denies(repo_root), *(repo_rules(repo_root) if repo_root else []),
+            *store.rules, *store.blocking_rules]
 
 
 def profile_rules(profile) -> list[Rule]:
@@ -1569,7 +1854,11 @@ def _rule_decision(req: Request, rules: list[Rule], checks: list[str] | None) ->
     """The first rule that has a say, by precedence: deny > ask > allow."""
     for wanted in ("deny", "ask", "allow"):
         for rule in rules:
-            if rule.decision == wanted and rule_matches(rule, req, checks):
+            if rule.decision != wanted:
+                continue
+            # A read-only pipeline is one only while no rule in force restricts what it runs or reads.
+            if (_in_scope(rule, req, checks) and readonly_pipeline(req, rules, checks)
+                    if rule.match_type == "readonly-pipeline" else rule_matches(rule, req, checks)):
                 return Decision(wanted, f"{VERBS[wanted]} by {rule.source} rule {rule.id} ({rule.describe()})", rule)
     return None
 
@@ -1588,7 +1877,7 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     if rules is None or unmatched is None or saved is None:
         store = load_store()
     if rules is None:
-        rules = [*(repo_rules(req.repo_root) if req.repo_root else []), *store.rules]
+        rules = all_rules(req.repo_root or None)
     if unmatched is None:
         unmatched = store.unmatched
     if saved is None:
@@ -1596,6 +1885,14 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     ruled = _rule_decision(req, rules, checks)
     if ruled is not None and ruled.decision == "deny":
         return ruled
+    # A deny or ask on a part of the command, however it's spelled, beats an
+    # allow of the whole; a read-only pipeline was already checked part by part.
+    readonly = ruled is not None and ruled.rule is not None and ruled.rule.match_type == "readonly-pipeline"
+    restricted = None if readonly else _restriction_in_parts(req, checks=checks, rules=rules)
+    if restricted is not None and restricted.decision == "deny":
+        return restricted
+    if restricted is not None and (ruled is None or ruled.decision == "allow"):
+        ruled = restricted
     if saved:
         from brindle import permission_grants
 
@@ -1619,14 +1916,9 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     if ruled is None and unmatched == "deny":
         return Decision("deny", "no rule covers it, and unmatched actions are denied")
     if ruled is None and unmatched == "allow":
-        # Nothing covers it: it runs, unless a part of the command a deny or ask
-        # rule covers hides in it (cd x && git push origin main).
-        within = decide_in_parts(req, checks=checks, rules=rules)
-        if within is None:
-            return Decision("allow", "no rule covers it; unmatched actions run")
-        if within.decision == "deny":
-            return within
-        ruled = within
+        # Nothing covers it, not even a part hiding in it (cd x && git push
+        # origin main: _restriction_in_parts above): it runs.
+        return Decision("allow", "no rule covers it; unmatched actions run")
     if saved:
         settled = permission_grants.settle(req, ruled.rule if ruled else None, saved, session=session)
         if settled is not None:
@@ -1647,28 +1939,417 @@ def decide_in_parts(req: Request, *, checks: list[str] | None = None,
     """The deny (or ask) for any simple command inside ``req``'s shell
     command (``cd x && rm y`` holds two), a deny first, else None: an exact
     or prefix rule on the whole command never sees a part of it."""
-    if req.kind != "bash" or not req.command:
+    found = _restriction_in_parts(req, checks=checks, rules=[rule for rule in rules if rule.decision in decisions])
+    if found is None or found.decision not in decisions:
         return None
-    found: dict[str, Decision] = {}
-    rules = [rule for rule in rules if rule.decision in decisions]
-    for words in _segments(req.command):
-        # Split even inside a word, as split_commands does: an empty or
-        # spaced word (task test "" secret) mustn't dodge an exact deny.
-        command = " ".join(" ".join(words).split())
-        decision = _rule_decision(replace(req, command=command), rules, checks)
-        if decision is not None and decision.decision not in found:
-            found[decision.decision] = decision
-    for wanted in decisions:
-        if wanted in found:
-            d = found[wanted]
-            return d if wanted != "ask" else Decision("ask", d.reason + "; asking the user", d.rule)
-    return None
+    return found if found.decision != "ask" else Decision("ask", found.reason + "; asking the user", found.rule)
 
 
 def deny_in_parts(req: Request, *, checks: list[str] | None = None,
                   rules: list[Rule]) -> Decision | None:
     """The deny for any simple command inside ``req``'s shell command, else None."""
     return decide_in_parts(req, checks=checks, rules=rules, decisions=("deny",))
+
+
+# -- restrictions inside a command ---------------------------------------------------------------
+#
+# A deny or ask rule must not be dodged by spelling: spacing, quotes, leading
+# assignments, redirects, a substitution or a pattern the shell expands.
+# _restriction_in_parts finds the deny or ask any part of a command is
+# subject to; where the command's syntax can't be read and such a rule could
+# match it, it answers the bound d-shell-syntax ask (_syntax_ask) rather than
+# let it fall to an allow. It never makes an ask where no deny or ask rule
+# is in force, and a read-only pipeline (readonly_pipeline) never reaches it
+# as a whole.
+
+
+def _restriction_parts(command: str, *, word_pattern: re.Pattern[str] = SIMPLE_COMMAND,
+                       assigned: list[bool] | None = None,
+                       redirects: list[tuple[str, str]] | None = None) -> list[list[str]] | None:
+    """Command arguments without redirects, solely for restrictive matching.
+
+    Unlike the allow parser, this accepts output files. With RESTRICTION_WORD
+    it also accepts unquoted pathname patterns in arguments, for deciding
+    whether a restriction could apply, not for literal matching. Quoted
+    operators remain arguments; redirects and their operands are removed
+    (into ``redirects``, as (operator, operand), when given), and so are
+    leading assignments (``assigned`` gets whether each part had any).
+    Unsupported syntax is unknown, never evidence that restrictions are absent.
+    """
+    from brindle.native.permissions import _SEPARATORS, _tokens
+
+    if "$(" in command or "`" in command:
+        return None
+    tokens = _tokens(command, word_pattern=word_pattern)
+    if tokens is None:
+        return None
+    parts: list[list[str]] = []
+    words: list[str] = []
+    index = 0
+    while index < len(tokens):
+        operator, value = tokens[index]
+        if not operator:
+            words.append(value)
+        elif value in _SEPARATORS:
+            if words:
+                parts.append(words)
+                words = []
+            elif value != "\n":
+                return None
+        elif value in (">", ">>", ">|", "<", "<>", ">&", "<&", "&>", "&>>"):
+            index += 1
+            if index >= len(tokens) or tokens[index][0]:
+                return None
+            if word_pattern is RESTRICTION_WORD and any(c in tokens[index][1] for c in "*?["):
+                return None  # an expanded redirect can select a protected file
+            if redirects is not None:
+                redirects.append((value, tokens[index][1]))
+        else:
+            return None
+        index += 1
+    if words:
+        parts.append(words)
+    elif not parts or tokens[-1][1] in ("&&", "||", "|", "|&"):
+        return None
+    for words in parts:
+        if assigned is not None:
+            assigned.append(bool(words) and bool(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0])))
+        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+            words.pop(0)
+        if not words or words[0] in ("!", "{", "}", "if", "then", "else", "elif", "fi", "for", "while",
+                                     "until", "do", "done", "case", "esac", "select", "function", "[[", "time", "coproc"):
+            return None
+        # A pattern in the executable position can select a different program.
+        if word_pattern is RESTRICTION_WORD and any(c in words[0] for c in "*?["):
+            return None
+    return parts
+
+
+# Programs whose reads a pattern's expansion is checked for (_globs_excluded).
+READERS = ("grep", "rg", "head", "tail", "cat", "wc", "sed")
+# Rules about what a command does, not the names it lists: plain ls can't match them.
+_LISTING_SAFE = ("git-push", "git-force", "push", "rm-destructive")
+
+
+def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
+                    path_denies: list[Rule], assigned: list[bool], redirects: list[tuple[str, str]]) -> bool:
+    """Whether no restriction can apply to what the patterns in ``parts``
+    expand to. Plain ``ls`` has a proof: listing names can't push, force
+    a git action, rm or read a file's contents, so those rules (and the
+    daemon-token deny) don't apply, nor do exact/prefix rules that don't
+    overlap the words before its first pattern. A READERS program has one
+    once its patterns are expanded, but releasing the command releases every
+    part of it, so then every part must be ls, a read-only git command (no
+    pattern reaches here) or a READERS program that only reads, whose
+    expanded command no restriction matches and whose reads no deny covers,
+    with no leading assignment or input redirect (a file it reads that no
+    argument names). Any other program may treat an expanded name as a
+    subcommand, option or file to act on."""
+    readers = False
+    for words in parts:
+        first = next((i for i, word in enumerate(words) if any(c in word for c in "*?[")), None)
+        if first is None:
+            continue
+        if words[0] in READERS:
+            readers = True
+            continue
+        if words[0] != "ls":
+            return False
+        prefix = " ".join(" ".join(words[:first]).split()) + " "
+        for rule in rules:
+            if rule.match_type in _LISTING_SAFE or rule.source == "preset" and rule.id == "d-daemon-sh":
+                continue
+            if (rule.match_type in ("exact", "prefix")
+                    and not prefix.startswith(rule.match) and not rule.match.startswith(prefix)):
+                continue
+            return False
+    if not readers:
+        return True
+    if any(assigned):
+        return False  # an assignment (LD_PRELOAD=..., a tool's config path) changes what any program does
+    if any(op in ("<", "<>") or op == "<&" and not operand.isdigit() for op, operand in redirects):
+        return False
+    for words in parts:
+        if words[0] == "ls" or words[0] == "git" and _readonly_git(req, words):
+            continue
+        if words[0] not in READERS or not _readonly_part(req, words) or not _reads_clear(req, words, path_denies):
+            return False
+        argv = [words[0], *(name for word in words[1:] for name in (_expanded(req, word)[1:] or [word]))]
+        if _matching_restriction([replace(req, command=" ".join(argv))], None, rules) is not None:
+            return False
+    return True
+
+
+def _matching_restriction(parts: list[Request], checks: list[str] | None,
+                          rules: list[Rule]) -> Decision | None:
+    for wanted in ("deny", "ask"):
+        for part in parts:
+            for rule in rules:
+                if rule.decision == wanted and rule_matches(rule, part, checks):
+                    return Decision(wanted, f"{VERBS[wanted]} by {rule.source} rule {rule.id} ({rule.describe()})",
+                                    rule)
+    return None
+
+
+def _restriction_in_parts(req: Request, *, checks: list[str] | None,
+                          rules: list[Rule]) -> Decision | None:
+    """The deny (else ask) that a part of ``req``'s shell command is subject
+    to, the bound d-shell-syntax ask when its syntax can't be read and a deny
+    or ask in force could match it, else None. Shell segments are never
+    taken as allows."""
+    if req.kind != "bash" or not req.command:
+        return None
+    # Unsupported syntax is not itself a restriction. Only an active Bash
+    # restriction can require us to withhold an ordinary fallback.
+    path_denies = [r for r in rules if r.kind == "read" and r.decision == "deny"]
+    rules = [r for r in rules if r.kind == "bash" and r.decision in ("deny", "ask") and not r.expired()
+             and (not r.repo_root or bool(req.repo_root) and os.path.realpath(req.repo_root) == r.repo_root)]
+    if not rules:
+        return None
+    if "$(" in req.command or "`" in req.command:
+        substituted = _substituted(req, checks, rules)
+        if isinstance(substituted, Decision):
+            return substituted
+        req = substituted
+    parsed = _restriction_parts(req.command)
+    assigned: list[bool] = []
+    redirects: list[tuple[str, str]] = []
+    patterns = (_restriction_parts(req.command, word_pattern=RESTRICTION_WORD, assigned=assigned, redirects=redirects)
+                if parsed is None else None)
+    words = parsed if parsed is not None else patterns if patterns is not None else _segments(req.command)
+    parts = [replace(req, command=" ".join(" ".join(part).split())) for part in words]
+    matched = _matching_restriction(parts, checks, rules)
+    if matched is not None:
+        return matched
+    if patterns is not None:
+        uncertain = not _globs_excluded(req, patterns, rules, path_denies, assigned, redirects)
+    else:
+        uncertain = parsed is None and any(_may_restrict(rule, req.command) for rule in rules)
+    return _syntax_ask(req) if uncertain else None
+
+
+def _syntax_ask(req: Request) -> Decision:
+    # A bound ask keeps unsupported shell syntax from falling to an allow
+    # (the unmatched setting, a profile's allowed_tools or the CLI's own).
+    return Decision("ask", "shell syntax cannot be checked safely",
+                    Rule("bash", req.command, "exact", "ask", "preset", id="d-shell-syntax"))
+
+
+# Options whose value is only data, by (program, subcommand): the one place a
+# $(...) or backtick substitution may supply a word without approval. Its
+# inner commands are still checked.
+SUBSTITUTION_DATA_OPTIONS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("git", "commit"): ("-m", "--message"),
+    ("git", "tag"): ("-m", "--message"),
+}
+# Stands in for a substitution's output once its inner commands are checked.
+_SUBSTITUTED = "BRINDLESUBSTITUTION"
+
+
+def _substituted(req: Request, checks: list[str] | None, rules: list[Rule]) -> Request | Decision:
+    """``req`` with each top-level substitution replaced by a placeholder
+    word, or the decision that ends the check. A substitution always runs its
+    inner commands, so they get the whole restriction check (recursively,
+    quoted or not); of a quoted heredoc fed to cat, only the cat is checked,
+    as its body is data. Its output is unknown text, so it may only be the
+    entire content of one double-quoted word (unquoted, the shell splits it
+    into words) given to an option in SUBSTITUTION_DATA_OPTIONS, in a command
+    with no leading assignments."""
+    from brindle.native.permissions import _simple_commands
+
+    spans = _substitution_spans(req.command)
+    if spans is None:
+        return _syntax_ask(req)
+    for _, _, body, _ in spans:
+        inner = _restriction_in_parts(replace(req, command="cat" if _heredoc_data(body) else body),
+                                      checks=checks, rules=rules)
+        if inner is not None:
+            return inner
+    pieces, last = [], 0
+    for start, end, _, quoted in spans:
+        if not (quoted and req.command[start - 1] == '"' and req.command[end:end + 1] == '"'):
+            return _syntax_ask(req)
+        pieces += [req.command[last:start], _SUBSTITUTED]
+        last = end
+    command = "".join(pieces) + req.command[last:]
+    parsed = _simple_commands(command)
+    if parsed is None:
+        return _syntax_ask(req)
+    for words, _ in parsed:
+        for i, word in enumerate(words):
+            if _SUBSTITUTED in word and not (
+                    word == _SUBSTITUTED and i >= 3
+                    and words[i - 1] in SUBSTITUTION_DATA_OPTIONS.get((words[0], words[1]), ())
+                    and not any(_could_cover(rule, f"{words[0]} {words[1]}") for rule in rules)):
+                return _syntax_ask(req)
+    return replace(req, command=command)
+
+
+def _could_cover(rule: Rule, head: str) -> bool:
+    """Whether ``rule`` could match some command starting with ``head``,
+    whatever a substituted message makes of the rest: unless its fixed
+    leading text and ``head`` diverge, it might. A preset's rules are known
+    not to apply to a commit or tag message."""
+    if rule.source == "preset":
+        return False
+    if rule.match_type not in MATCH_TYPES:
+        return True
+    fixed = re.split(r"[*?\[]", rule.match, maxsplit=1)[0] if rule.match_type == "glob" else rule.match
+    fixed = " ".join(fixed.split())
+    return head.startswith(fixed) or fixed.startswith(head)
+
+
+def _substitution_spans(command: str) -> list[tuple[int, int, str, bool]] | None:
+    """(start, end, inner command, inside double quotes) of each outermost
+    ``$(...)`` or backtick substitution, or None when one isn't closed."""
+    spans, quote, i = [], "", 0
+    while i < len(command):
+        c = command[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote == "'":
+            quote = "" if c == "'" else quote
+        elif c == "'" and not quote:
+            quote = "'"
+        elif c == '"':
+            quote = "" if quote else '"'
+        elif command.startswith("$(", i) or c == "`":
+            end = _substitution_end(command, i)
+            if end is None:
+                return None
+            spans.append((i, end, command[i + (1 if c == "`" else 2):end - 1], quote == '"'))
+            i = end
+            continue
+        i += 1
+    return spans
+
+
+def _substitution_end(command: str, i: int) -> int | None:
+    """The index just past the substitution starting at ``i``: a backtick
+    ends at the next unescaped one; ``$(`` at its matching ``)``, skipping
+    quotes, nested substitutions and heredoc bodies inside it."""
+    if command[i] == "`":
+        j = i + 1
+        while j < len(command):
+            if command[j] == "\\":
+                j += 2
+            elif command[j] == "`":
+                return j + 1
+            else:
+                j += 1
+        return None
+    depth, j = 1, i + 2
+    while j < len(command):
+        c = command[j]
+        heredoc = re.match(r"<<-?[ \t]*([\"']?)(\w+)\1", command[j:]) if c == "<" else None
+        if c == "\\":
+            j += 2
+        elif c == "'":
+            close = command.find("'", j + 1)
+            if close < 0:
+                return None
+            j = close + 1
+        elif c == '"':
+            j += 1
+            while j < len(command) and command[j] != '"':
+                if command[j] == "\\":
+                    j += 2
+                elif command.startswith("$(", j) or command[j] == "`":
+                    end = _substitution_end(command, j)
+                    if end is None:
+                        return None
+                    j = end
+                else:
+                    j += 1
+            if j >= len(command):
+                return None
+            j += 1
+        elif command.startswith("$(", j) or c == "`":
+            end = _substitution_end(command, j)
+            if end is None:
+                return None
+            j = end
+        elif heredoc is not None:
+            close = re.compile(r"\n[ \t]*" + re.escape(heredoc.group(2)) + r"[ \t]*(?=\n|\)|$)")
+            found = close.search(command, j + heredoc.end())
+            if found is None:
+                return None
+            j = found.end()
+        else:
+            depth += {"(": 1, ")": -1}.get(c, 0)
+            j += 1
+            if depth == 0:
+                return j
+    return None
+
+
+def _heredoc_data(body: str) -> bool:
+    """Whether ``body`` only prints a quoted heredoc (``cat <<'EOF'``): its
+    text is never expanded or run, and its first delimiter line is the last."""
+    head, _, rest = body.strip(" \t\n").partition("\n")
+    found = re.fullmatch(r"cat[ \t]+<<(-?)[ \t]*([\"'])(\w+)\2[ \t]*", head)
+    if found is None:
+        return False
+    lines = rest.split("\n")
+    strip = "\t" if found.group(1) else ""
+    ends = [n for n, line in enumerate(lines) if line.lstrip(strip) == found.group(3)]
+    return bool(ends) and ends[0] == len(lines) - 1
+
+
+def _may_restrict(rule: Rule, command: str) -> bool:
+    """Whether ``rule`` could match ``command`` once the shell expands it:
+    the text the rule needs appears in the command, as written or with its
+    quotes and escapes removed (``r''m -r\\f`` is ``rm -rf``). Expansions
+    that assemble a word from pieces (``$'\\x72m'``, ``$X``, ``${X}``,
+    ``{r,}m``) could produce any text, so they always could. A pathname
+    pattern (``[p]ush``, ``--f*``) could be any word it matches; heredoc
+    bodies are never expanded into names. Single-quoted text is never
+    expanded either (``awk '{print $1}'``)."""
+    if re.search(r"\$['\"{\w@*#?!$-]|\{[^}\s]*,", _unquoted(command)):
+        return True
+    # The shell deletes \<newline> before anything else: r\<newline>m is rm.
+    text = command + "\n" + re.sub(r"[\"'\\]", "", command.replace("\\\n", ""))
+    names = _HEREDOC.sub("\n", text)
+    patterns = [w for w in re.split(r"[\s;&|()<>`]+", names) if any(c in w for c in "*?[")]
+
+    def seen(word: str) -> bool:
+        return word in text or any(fnmatch.fnmatchcase(word, p) for p in patterns)
+
+    if rule.match_type in ("git-push", "push"):
+        return seen("git") and seen("push")
+    if rule.match_type == "git-force":
+        return seen("git") and (any(_is_force(w.strip("`$(){};|&<>")) for w in text.split())
+                                or any(seen(flag) for flag in ("-f", *FORCE_OPTIONS)))
+    if rule.match_type == "rm-destructive":
+        return (bool(re.search(r"(?<![\w.-])rm(?![\w.-])", text))
+                or any(fnmatch.fnmatchcase("rm", p) for p in patterns))
+    if rule.match_type not in MATCH_TYPES:
+        return True
+    literals = re.split(r"[*?\[\]]+", rule.match) if rule.match_type == "glob" else [rule.match]
+    return all(seen(word) for literal in literals for word in literal.split())
+
+
+def _unquoted(command: str) -> str:
+    """``command`` with the text inside single quotes removed (the quotes
+    stay, so ``$'...'`` still reads as an expansion). A single quote inside
+    double quotes or after a backslash is literal and starts nothing."""
+    out, quote, i = [], "", 0
+    while i < len(command):
+        c = command[i]
+        if quote == "'":
+            if c == "'":
+                quote = ""
+                out.append(c)
+        elif c == "\\":
+            out.append(command[i:i + 2])
+            i += 1
+        else:
+            if c == "'" and not quote or c == '"':
+                quote = "" if quote else c
+            out.append(c)
+        i += 1
+    return "".join(out)
 
 
 # -- storage ----------------------------------------------------------------------------------
@@ -1689,12 +2370,14 @@ def repo_rules(repo_root: str) -> list[Rule]:
     except (OSError, ValueError):
         return []
     rows = data.get("rules") if isinstance(data, dict) else None
-    out = []
+    out, unsupported = [], []
     for row in rows if isinstance(rows, list) else []:
-        rule = Rule.from_dict(row, source="repo") if isinstance(row, dict) else None
+        rule = Rule.from_dict(row, source="repo")
         if rule and rule.decision == "deny":
             out.append(rule)
-    return out
+        elif rule is None:
+            unsupported.append(row)
+    return [*out, *Store(unsupported_rules=unsupported).blocking_rules]
 
 
 @dataclass
@@ -1720,10 +2403,34 @@ class Store:
     # The Codex hook the person trusted (brindle.codex_hook), per Codex config
     # home (its resolved path): command, key, hash, definition.
     codex_hook: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Rule rows this engine can't read, kept verbatim across writes (see blocking_rules).
+    unsupported_rules: list = field(default_factory=list)
+    # Top-level keys this engine doesn't know (a 0.4.7 store's "remembered", say), kept as they are.
+    extra: dict = field(default_factory=dict)
+    unsupported_version: bool = False   # written by a newer engine: read fail-closed, never rewritten
+
+    @property
+    def blocking_rules(self) -> list[Rule]:
+        """Policy this engine can't read can't silently defer to an allow. An
+        unreadable rule row may narrow its rule in a way that can't be
+        evaluated: it denies its whole kind until a capable engine reads it
+        (an allow it can't read just doesn't apply); a newer store denies
+        every kind. Runtime only: never saved in place of the rows."""
+        kinds = set(KINDS) if self.unsupported_version else set()
+        for row in self.unsupported_rules:
+            kind = row.get("kind") if isinstance(row, dict) else None
+            if isinstance(row, dict) and row.get("decision") == "allow" and kind in KINDS:
+                continue
+            kinds.update((kind,) if kind in KINDS else KINDS)
+        return [Rule(kind, "*", "glob", "deny", "preset", id=f"d-store-unsupported-{kind}")
+                for kind in KINDS if kind in kinds]
 
     def to_json(self) -> str:
-        data: dict = {"version": 2, "preset": self.preset, "unmatched": self.unmatched,
-                      "rules": [r.to_dict() for r in self.rules], "approvals": self.approvals}
+        if self.unsupported_version:
+            raise ValueError("permissions.json was written by a newer brindle; edit it with that version")
+        data: dict = {**self.extra, "version": STORE_VERSION, "preset": self.preset, "unmatched": self.unmatched,
+                      "rules": [*(r.to_dict() for r in self.rules), *self.unsupported_rules],
+                      "approvals": self.approvals}
         if self.saved:
             data["saved"] = [s.to_dict() for s in self.saved]
         if self.prompts:
@@ -1767,11 +2474,108 @@ def _write_store(path: Path, store: Store) -> None:
         raise
 
 
+# The 0.4.7 engine's permission editor presets, by the rule each seeded per
+# kind (a "*" glob rule scoped to one repo), and the preset each becomes.
+EDITOR_PRESETS: dict[str, tuple[dict[str, str], str]] = {
+    "strict": ({kind: "ask" for kind in KINDS}, "secure"),
+    "balanced": ({**{kind: "ask" for kind in KINDS}, "read": "allow", "write": "allow", "edit": "allow"},
+                 "standard"),
+    "lenient": ({**{kind: "allow" for kind in KINDS}, "mcp": "ask", "other": "ask"}, "permissive"),
+}
+V2_PRESET = "autonomous"    # a 0.4.7 store whose editor chose no preset
+# A 0.4.7 remembered push's scope level -> (saved action level, scope value).
+V2_PUSH_LEVELS = {"branch": ("destination", "general"), "remote": ("remote", "remote"),
+                  "repo": ("repository", "repository"), "all": ("all", "all")}
+STORE_KEYS = ("version", "preset", "unmatched", "rules", "approvals", "saved", "prompts", "agy_managed",
+              "agy_created", "agy_repos", "codex_hook")
+
+
+def _editor_preset(rules: list[Rule]) -> tuple[str | None, set[str]]:
+    """The preset a 0.4.7 store's editor chose, as one of PRESETS (the
+    strictest, when repos chose differently; None for none), and the ids of
+    the rules it seeded."""
+    by_repo: dict[str, dict[str, Rule]] = {}
+    for r in rules:
+        if r.repo_root and r.match == "*" and r.match_type == "glob" and not r.exclusions and r.expires is None:
+            by_repo.setdefault(r.repo_root, {})[r.kind] = r
+    chosen, seeded = [], set()
+    for kinds in by_repo.values():
+        for shape, preset in EDITOR_PRESETS.values():
+            if {k: r.decision for k, r in kinds.items()} == shape:
+                chosen.append(preset)
+                seeded.update(r.id for r in kinds.values())
+    order = ("secure", "standard", "permissive")
+    return (min(chosen, key=order.index) if chosen else None), seeded
+
+
+def _v2_saved(record: dict, now: float) -> SavedAction | None:
+    """A 0.4.7 remembered permission (a lifted push, or a .env read) as a
+    saved allow with the same reach and expiry; None for one that has
+    expired or that this engine can't express."""
+    scope = record.get("scope") if isinstance(record.get("scope"), dict) else {}
+    life = record.get("lifetime") or ("time" if "expires_at" in record else "forever")
+    expires = _number(record.get("expires_at"))
+    created = _number(record.get("created")) or now
+    repo = record.get("repo_root") if isinstance(record.get("repo_root"), str) else None
+    if life not in LIVES or life == "time" and (expires is None or expires <= now):
+        return None
+    session = record.get("session", {}).get("id") if isinstance(record.get("session"), dict) else None
+    if life == "session" and not isinstance(session, str):
+        return None
+    if record.get("action") == "git-push":
+        level, value = V2_PUSH_LEVELS.get(record.get("scope_level") or "branch", (None, None))
+        remote, ref = scope.get("remote"), scope.get("ref")
+        if level is None or level in ("destination", "remote") and not isinstance(remote, str):
+            return None
+        if level == "destination":
+            if not isinstance(ref, str) or not ref.startswith("refs/heads/"):
+                return None
+            pattern = f"*{PUSH_ARROW}{ref.removeprefix('refs/heads/')}{PUSH_AT}{remote}"
+        else:
+            pattern = f"*{PUSH_ARROW}*{PUSH_AT}{remote if level == 'remote' else '*'}"
+        kind = "push"
+    elif record.get("action") == "env" and isinstance(scope.get("path"), str):
+        level, value, kind = None, "exact", "read"
+        path = scope["path"]
+        pattern = (os.path.relpath(path, repo) if repo and os.path.isabs(path) and _inside(path, repo)
+                   else path)
+    else:
+        return None
+    id_ = record.get("id") if isinstance(record.get("id"), str) and record.get("id") else "s-" + secrets.token_hex(6)
+    return SavedAction(id_, kind, pattern, "allow", value, level, {}, life,
+                       (expires - created) / 60 if life == "time" else None, expires if life == "time" else None,
+                       session, None if level == "all" else repo, created, "saved in brindle 0.4.7")
+
+
+def _migrate(store: Store, data: dict) -> None:
+    """Seed a store from before presets. Version 1 (built-in rules outside
+    the store, the person's command allows written with source "user")
+    amounted to MIGRATED_PRESET. Version 2 (brindle 0.4.7): its editor's
+    preset becomes ours (EDITOR_PRESETS; V2_PRESET when it chose none), its
+    other rules stay the person's and its remembered permissions become
+    saved actions. Nothing it held is deleted: its rows stay in the file
+    (``v2_rules``, and ``remembered`` as it was)."""
+    name = MIGRATED_PRESET
+    if data.get("version") == 2:
+        chosen, seeded = _editor_preset(store.rules)
+        name = chosen or V2_PRESET
+        store.rules = [r for r in store.rules if r.id not in seeded]
+        now = time.time()
+        rows = data.get("remembered") if isinstance(data.get("remembered"), list) else []
+        known = {s.id for s in store.saved}
+        store.saved += [s for s in (_v2_saved(r, now) for r in rows if isinstance(r, dict))
+                        if s and s.id not in known]
+        store.extra.setdefault("v2_rules", data.get("rules") or [])
+    seed = {(r.kind, r.match, r.match_type, r.decision) for r in preset_rules(name)}
+    store.rules = [r for r in store.rules if (r.kind, r.match, r.match_type, r.decision) not in seed]
+    seed_preset(store, name)
+
+
 def load_store() -> Store:
     """The person's store. A new one is seeded from DEFAULT_PRESET; one from
-    before presets (version 1: built-in rules outside it) is migrated to
-    MIGRATED_PRESET, keeping its user and learned rules, approvals and the
-    provider records."""
+    before presets is migrated (_migrate), keeping its user and learned
+    rules, approvals and the provider records. One a newer engine wrote is
+    read fail-closed (Store.blocking_rules) and never rewritten."""
     path = store_path()
     if not path.exists():
         store = seed_preset(Store(), DEFAULT_PRESET)
@@ -1786,9 +2590,17 @@ def load_store() -> Store:
         return Store()
     if not isinstance(data, dict):
         return Store()
+    version = data.get("version", 1)
+    if type(version) is not int or not 1 <= version <= STORE_VERSION:
+        return Store(unsupported_version=True, unmatched="deny")
     legacy = "preset" not in data
-    rules = [r for r in (Rule.from_dict(d) for d in data.get("rules") or [] if isinstance(d, dict))
-             if r and r.source in STORE_SOURCES and not (legacy and r.source == "preset")]
+    rules, unsupported = [], []
+    for row in data.get("rules") or []:
+        rule = Rule.from_dict(row)
+        if rule is None:
+            unsupported.append(row)
+        elif rule.source in STORE_SOURCES and not (legacy and rule.source == "preset"):
+            rules.append(rule)
     approvals = data.get("approvals")
     approvals = {k: v for k, v in approvals.items() if isinstance(v, dict)} if isinstance(approvals, dict) else {}
     saved = [s for s in (SavedAction.from_dict(d) for d in data.get("saved") or [] if isinstance(d, dict)) if s]
@@ -1814,14 +2626,9 @@ def load_store() -> Store:
     codex = {home: {k: v for k, v in rec.items() if isinstance(v, str)}
              for home, rec in codex.items() if isinstance(rec, dict)}
     store = Store(rules, approvals, preset, unmatched, saved, prompts, managed, strings(data.get("agy_created")),
-                  repos, codex)
+                  repos, codex, unsupported, {k: v for k, v in data.items() if k not in STORE_KEYS})
     if legacy:
-        # Before presets: the built-in rules lived outside the store, and the
-        # person's command allows were written with source "user". What those
-        # amounted to is the Standard preset; its seed takes their place.
-        seed = {(r.kind, r.match, r.match_type, r.decision) for r in preset_rules(MIGRATED_PRESET)}
-        store.rules = [r for r in store.rules if (r.kind, r.match, r.match_type, r.decision) not in seed]
-        seed_preset(store, MIGRATED_PRESET)
+        _migrate(store, data)
         try:
             _write_store(path, store)
         except OSError:
@@ -1895,7 +2702,7 @@ def update_rule(id_: str, **changes) -> Rule | None:
             source = "user"     # edited: the person's now
         rule = make_rule(fields.pop("kind"), fields.pop("match"), fields.pop("decision"), fields.pop("match_type"),
                          source, id_=id_, **fields)
-        rule = replace(rule, created=old.created or rule.created)
+        rule = replace(rule, created=old.created or rule.created, repo_root=old.repo_root)   # never broadened
         store.rules = [rule if r.id == id_ else r for r in store.rules]
     return rule
 
@@ -2223,8 +3030,8 @@ def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
             out[decision].append(entry)
 
     for rule in rules:
-        if rule.decision == "ask" or rule.exclusions or rule.expired():
-            continue  # only the hook can ask, or weigh an exception
+        if rule.decision == "ask" or rule.exclusions or rule.expired() or rule.repo_root:
+            continue  # only the hook can ask, weigh an exception, or tell one repo from another
         if rule.decision == "allow" and any(_may_overlap(ask, rule) for ask in asks):
             continue  # agy would run it on the allow where the hook asks; left to the hook
         if rule.match_type == "check":

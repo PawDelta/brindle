@@ -11,7 +11,8 @@ from brindle.db import DB, Agent
 
 
 def fake_agent(db, ws, status="processing", mode="assign", parent=None, agent_id="a1"):
-    a = Agent(agent_id, ws.id, "developer", "claude", parent, mode, status, "@0", None, time.time())
+    a = Agent(agent_id, ws.id, "developer", "claude", parent, mode, status,
+              f"%fake-{agent_id}", None, time.time())
     db.add_agent(a)
     return a
 

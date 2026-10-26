@@ -276,6 +276,8 @@ def limits_allow(action_level: str | None, action_pattern: str, action_life: str
     limits (the ask rule that asked; None for an unmatched ask, which has no
     limits), or None when it is within them."""
     limits = (rule.limits if rule is not None else None) or {}
+    if limits.get("life") == "once":
+        return "approvable only once at a time"
     scope = limits.get("max_scope")
     if scope:
         if action_level is not None:
@@ -290,6 +292,94 @@ def limits_allow(action_level: str | None, action_pattern: str, action_life: str
         cap = limits.get("minutes")
         if action_life != "time" or action_minutes is None or (cap is not None and action_minutes > cap):
             return f"over its {cap:g} minute limit" if cap is not None else "over its time limit"
+    return None
+
+
+# -- the org's limits ----------------------------------------------------------------------------
+#
+# For a member of a Team org, the org policy's ``permission_grants`` block
+# (brindle.pro.team_policy.GrantPolicy) bounds what a saved allow may do, read
+# again on every use: the kinds it may cover, its lifetimes (forever only
+# with allow_persistent), at most max_minutes for a timed one, and its
+# scope (branch/remote/repo/all). Its deny rules are in force for every
+# provider (permissions.all_rules). No block, a policy that can't be read,
+# or a member the org paused: no saved allow applies. Without a Team org,
+# nothing here limits the person's own.
+
+# A saved action's level or scope value -> the org scope it needs.
+ORG_SCOPES = {"branch": "branch", "destination": "branch", "exact": "branch", "general": "branch",
+              "remote": "remote", "repository": "repo", "server": "repo", "all": "all"}
+
+
+@dataclass(frozen=True)
+class OrgLimits:
+    allow: bool
+    kinds: tuple[str, ...] = ()
+    max_minutes: int = 0
+    lifetimes: tuple[str, ...] = ()
+    scopes: tuple[str, ...] = ()
+    allow_persistent: bool = False
+    deny: tuple[Rule, ...] = ()
+    why: str = ""                 # why no saved allow applies
+
+
+def org_rule(spec: str) -> Rule:
+    """An org policy deny ("<kind> <match_type> <match>", as a profile's permission_denies) as a rule."""
+    kind, match_type, match = spec.split(None, 2)
+    return Rule(kind, match, match_type, "deny", "org")
+
+
+def _plugin(repo_root: str):
+    from brindle.pro.team_policy import ProPolicy
+
+    return ProPolicy(repo_root)
+
+
+def org_limits(repo_root: str | None) -> OrgLimits | None:
+    """The Team org's limits in ``repo_root`` now, or None without a Team org."""
+    from brindle.policy import Decision as PolicyDecision
+    from brindle.pro import status
+
+    if not repo_root:
+        return None
+    try:
+        p = _plugin(repo_root).policy()
+    except Exception as e:  # noqa: BLE001 - fail closed
+        return OrgLimits(False, why=f"the org policy can't be read ({e})")
+    if isinstance(p, PolicyDecision):
+        return None if p.allowed else OrgLimits(False, why=p.reason)
+    g = p.permission_grants
+    deny = tuple(org_rule(s) for s in g.deny) if g else ()
+    blocked = status.block_reason(p)
+    if blocked:
+        return OrgLimits(False, deny=deny, why=f"org {p.org_id}: {blocked}")
+    if g is None:
+        return OrgLimits(False, why=f"org {p.org_id}'s policy sets no permission_grants")
+    return OrgLimits(g.allow, tuple(g.kinds), g.max_minutes, tuple(g.lifetimes), tuple(g.scopes),
+                     g.allow_persistent, deny, "" if g.allow else f"org {p.org_id} allows no saved approvals")
+
+
+def org_denies(repo_root: str | None) -> list[Rule]:
+    lim = org_limits(repo_root)
+    return list(lim.deny) if lim else []
+
+
+def org_refuses(lim: OrgLimits | None, kind: str, life: str, minutes: float | None, level: str | None,
+                scope: str) -> str | None:
+    """Why the org's limits ``lim`` don't let a saved allow of ``kind`` with this
+    lifetime and reach apply, or None (always None without a Team org)."""
+    if lim is None:
+        return None
+    if not lim.allow:
+        return lim.why or "the org allows no saved approvals"
+    if ("bash" if kind == "push" else kind) not in lim.kinds:
+        return f"the org allows no saved approvals of {kind}"
+    if life not in lim.lifetimes or life == "forever" and not lim.allow_persistent:
+        return f"the org doesn't allow approvals that last {'until revoked' if life == 'forever' else 'a ' + life}"
+    if life == "time" and (minutes is None or minutes > lim.max_minutes):
+        return f"over the org's {lim.max_minutes} minute limit"
+    if ORG_SCOPES.get(level or scope, "all") not in lim.scopes:
+        return "wider than the org allows"
     return None
 
 
@@ -308,8 +398,10 @@ def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session
             return Decision("deny", f"stopped by your saved deny {s.id} ({s.kind} {s.pattern})")
     if denies_only:
         return None
+    lim = org_limits(req.repo_root or None) if hits else None
     for s in hits:
-        if limits_allow(s.level, s.pattern, s.life, s.minutes, rule) is None:
+        if (limits_allow(s.level, s.pattern, s.life, s.minutes, rule) is None
+                and org_refuses(lim, s.kind, s.life, s.minutes, s.level, s.scope) is None):
             return Decision("allow", f"covered by your saved action {s.id} ({s.kind} {s.pattern})", rule)
     return None
 
@@ -434,7 +526,9 @@ def eligible(ask: PendingAsk, scope: dict, mode: str, minutes: float | None) -> 
     if mode == "once":
         return None
     life = {"session": "session", "timed": "time", "forever": "forever"}[mode]
-    return limits_allow(scope.get("level"), scope["pattern"], life, minutes, ask.rule)
+    return (limits_allow(scope.get("level"), scope["pattern"], life, minutes, ask.rule)
+            or org_refuses(org_limits(ask.repo_root or None), ask.ask.kind, life, minutes, scope.get("level"),
+                           scope["value"]))
 
 
 def _is_exact(ask: PendingAsk, scope: dict) -> bool:

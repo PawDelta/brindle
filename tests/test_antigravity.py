@@ -212,6 +212,10 @@ def strict(db, ws, tool, args):
 
 @pytest.mark.parametrize("command,expected", [
     ("git diff HEAD~1..HEAD", "allow"),  # ~ makes it no simple command
+    pytest.param("git diff HEAD^..HEAD", "allow", marks=pytest.mark.variant("review 95: literal caret revision")),
+    pytest.param("git diff ~/file", "deny", marks=pytest.mark.variant("leading tilde expansion")),
+    pytest.param("git diff path=~/file", "deny", marks=pytest.mark.variant("assignment tilde expansion")),
+    pytest.param("git diff path=one:~/file", "deny", marks=pytest.mark.variant("assignment path tilde expansion")),
     ('grep -rn "x" .', "allow"),  # quoted
     ("git diff a..b | grep x", "allow"),  # compound: each part is allowed
     ("cd sub && git status", "allow"),  # a cd inside the worktree

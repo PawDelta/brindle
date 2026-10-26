@@ -79,6 +79,32 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     assert [r for r in store.rules if r.match == "npm "] and store.rule("d-push-default")
     assert store.approvals["x"]["count"] == 2 and store.codex_hook == {"/h": {"command": "c", "key": "k", "hash": "h"}}
     assert json.loads(permissions.store_path().read_text())["preset"] == "standard"   # migrated once, on disk
+    # A 0.4.7 store (version 2): its editor's Balanced preset for a repo becomes
+    # Standard, its own rule stays (repo and expiry kept), a remembered push
+    # becomes a saved action with its reach and expiry, an expired one is dropped.
+    now = time.time()
+    balanced = {"read": "allow", "write": "allow", "edit": "allow", "bash": "ask", "fetch": "ask", "mcp": "ask",
+                "other": "ask"}
+    push = {"owner": "local", "repo_root": "/r", "kind": "bash", "action": "git-push", "scope_level": "branch",
+            "scope": {"repo": "/r", "git_dir": "/r/.git", "remote": "origin", "url": "https://x/y.git",
+                      "ref": "refs/heads/feature"}, "lifetime": "time", "created": now, "match": "push"}
+    v2 = {"version": 2,
+          "rules": [*({"id": f"{i:016x}", "kind": k, "match": "*", "match_type": "glob", "decision": d,
+                       "source": "user", "created": 0, "repo_root": "/r"} for i, (k, d) in enumerate(balanced.items())),
+                    {"id": "abcdef0123456789", "kind": "bash", "match": "make deploy", "match_type": "exact",
+                     "decision": "ask", "source": "user", "created": 1, "repo_root": "/r", "expires_at": now + 3600}],
+          "remembered": [{**push, "id": "remembered-a", "expires_at": now + 600},
+                         {**push, "id": "remembered-b", "expires_at": now - 1}]}
+    permissions.store_path().write_text(json.dumps(v2))
+    store = permissions.load_store()
+    assert store.preset == "standard"
+    assert [(r.match, r.repo_root, r.expires) for r in store.rules if r.source != "preset"] == [
+        ("make deploy", "/r", now + 3600)]
+    (saved,) = store.saved
+    assert (saved.id, saved.kind, saved.pattern, saved.level, saved.life, saved.expires, saved.repo) == (
+        "remembered-a", "push", "* → feature @ origin", "destination", "time", now + 600, "/r")
+    on_disk = json.loads(permissions.store_path().read_text())
+    assert on_disk["remembered"] == v2["remembered"] and on_disk["v2_rules"] == v2["rules"]   # nothing deleted
 
 
 @pytest.mark.parametrize("request_of, decision, rule", [
@@ -91,6 +117,8 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "cd sub && git push origin HEAD:main"), "ask", "d-push-default"),
     (lambda ws: bash(ws, "git push origin HEAD"), "ask", "d-push-default"),     # HEAD may be the default branch
     (lambda ws: bash(ws, "git push origin refs/heads/*:refs/heads/*"), "ask", "d-push-default"),   # so may a wildcard
+    (lambda ws: bash(ws, "git push origin HEAD:refs/heads/release/desktop"), "ask", "d-push-release-sub"),
+    (lambda ws: bash(ws, 'git show --stat abc def | grep -v "^ \\|^$"'), "allow", "d-readonly"),   # no syntax ask
     (lambda ws: bash(ws, "git push --force origin feature"), "deny", "d-git-force"),
     (lambda ws: bash(ws, "git push origin +topic:feature"), "deny", "d-git-force"),   # a forced refspec
     (lambda ws: bash(ws, "git push origin :feature"), "deny", "d-git-force"),         # deletes the branch

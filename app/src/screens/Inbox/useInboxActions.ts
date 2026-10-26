@@ -45,6 +45,7 @@ const without = (set: Set<string>, key: string) => {
 
 export function useInboxActions(client: DaemonClient, refresh: () => Promise<void>, _undoMs: number, inbox: InboxItemDTO[]): InboxActions {
   const [busy, setBusy] = useState<Set<string>>(new Set());
+  const inFlight = useRef(new Set<string>());
   /* Acknowledged, waiting for the next inbox to say what became of the item. */
   const [settled, setSettled] = useState<Set<string>>(new Set());
   const [notes, setNotes] = useState<Record<string, Note>>({});
@@ -59,6 +60,7 @@ export function useInboxActions(client: DaemonClient, refresh: () => Promise<voi
   const run = useCallback<InboxActions["run"]>(
     (item, action, body = {}) => {
       const key = itemKey(item);
+      if (inFlight.current.has(key)) return;
       setNotes((n) => {
         const { [key]: _, ...rest } = n;
         return rest;
@@ -66,10 +68,11 @@ export function useInboxActions(client: DaemonClient, refresh: () => Promise<voi
       // The decision binds to what the card showed: an item the engine has since replaced (another plan, other
       // checks, a different request) isn't acted on from the old card; it says so and shows the new one.
       const now = latest.current.find((i) => itemKey(i) === key);
-      if (!now || now.detail !== item.detail || now.reason !== item.reason || now.permission?.request_id !== item.permission?.request_id) {
+      if (!now || now.detail !== item.detail || now.reason !== item.reason || now.permission?.request_id !== item.permission?.request_id || now.permission?.digest !== item.permission?.digest) {
         setNotes((n) => ({ ...n, [key]: { text: "This changed while you decided; have another look.", failed: true } }));
         return;
       }
+      inFlight.current.add(key);
       setBusy((b) => new Set(b).add(key));
       void client
         .inboxAction(actionId(item), action, body)
@@ -80,7 +83,10 @@ export function useInboxActions(client: DaemonClient, refresh: () => Promise<voi
         .catch((e: unknown) => {
           setNotes((n) => ({ ...n, [key]: { text: e instanceof Error ? e.message : String(e), failed: true } }));
         })
-        .finally(() => setBusy((b) => without(b, key)));
+        .finally(() => {
+          inFlight.current.delete(key);
+          setBusy((b) => without(b, key));
+        });
     },
     [client, refresh],
   );

@@ -3,8 +3,8 @@ browser sign-in, every session on that login paused until it's back, and then
 everything picks up where it was.
 
 Part of the cull sweep (``cull.sweep``). For each running session (a root agent
-and everything it started, interactive or not) whose Claude Code agents use a
-cloud route (Bedrock, Vertex, Foundry; see ``cloud_login``):
+and everything it started, interactive or not) whose Claude Code or OpenCode
+agents use a cloud route (see ``cloud_login``):
 
 * A login within ``LOOKAHEAD`` of expiry, or an agent whose last reply ended
   on an expired-login API error, gets a silent refresh
@@ -88,11 +88,11 @@ def _last_input() -> float | None:
 def _env(db: DB, a: Agent) -> dict[str, str]:
     ws = db.get_workspace(a.workspace_id)
     if ws is None:
-        return {}
+        return {"BRINDLE_CLOUD_ROUTE": ""}
     try:
         return agents.agent_env(ws, a.id, a)
-    except Exception:  # noqa: BLE001 - an unreadable env is the ambient one
-        return {}
+    except Exception:  # noqa: BLE001 - an unreadable identity cannot borrow the launcher's
+        return {"BRINDLE_CLOUD_ROUTE": ""}
 
 
 def _on_cloud(env: dict[str, str]) -> bool:
@@ -106,7 +106,7 @@ def _session_name(db: DB, root: Agent) -> str | None:
 
 def _members(db: DB, root: Agent, panes) -> list[Agent]:
     return [a for a in agents.tree(db, root.id)
-            if a.provider == "claude" and a.status not in ("paused", "done")
+            if a.provider in ("claude", "opencode") and a.status not in ("paused", "done")
             and a.dismissed_at is None and agents.runs_process(a) and agents.is_alive(a, panes)]
 
 
@@ -114,6 +114,8 @@ def _logins(db: DB, root: Agent, members: list[Agent]) -> list[tuple[Agent, dict
     """One agent (and its env) per distinct cloud login in the session."""
     seen, out = set(), []
     for a in [root, *(m for m in members if m.id != root.id)]:
+        if a.provider not in ("claude", "opencode"):
+            continue
         env = _env(db, a)
         key = cloud_login.login_key({**os.environ, **env}) if _on_cloud(env) else None
         if key is not None and key not in seen:
@@ -130,10 +132,44 @@ def _screen(a: Agent) -> str | None:
 
 
 def _ended_on_expired_login(db: DB, a: Agent) -> bool:
-    if db.pending_count(a.id):
+    if a.provider != "claude" or db.pending_count(a.id):
         return False    # already told to go on (or about to be)
     screen = _screen(a)
     return bool(screen) and model_access.expired_login(ClaudeCode.api_error(screen)) is not None
+
+
+def expired_hook(db: DB, agent: Agent, error: str) -> bool:
+    """OpenCode's structured expiry event joins the same session hold as culling.
+
+    API-key errors and ordinary provider failures keep their existing handling.
+    An expiry event never replaces an already running recovery flow.
+    """
+    from brindle import autopilot
+
+    if model_access.expired_login(error) is None:
+        return False
+    env = _env(db, agent)
+    if not env.get("BRINDLE_CLOUD_ROUTE"):
+        return False
+    root = db.get_agent(autopilot.root_of(db, agent.id))
+    if root is None:
+        return False
+    if paused(db, root.id):
+        db.set_status(agent.id, "idle")
+        db.clear_permission_requests(agent.id)
+        st = db.get_login_state(root.id)
+        db.set_login_state(root.id, interrupted=json.dumps(sorted({*_ids(st.interrupted), agent.id})))
+        return True
+    s = cloud_login.refresh(env=env)
+    if not s.expired and not s.ok:
+        return False
+    db.set_status(agent.id, "idle")
+    db.clear_permission_requests(agent.id)
+    if s.expired:
+        _pause(db, root, agent, s, env, _members(db, root, None), time.time(), _last_input())
+    else:
+        _send(db, agent.id, "Cloud credentials restored: continue where you left off.")
+    return True
 
 
 def _send(db: DB, to: str, text: str) -> bool:
@@ -150,7 +186,7 @@ def sweep(db: DB, now: float | None = None, panes=None) -> list[str]:
     last_input = _last_input()
     done: list[str] = []
     for root in db.list_agents():
-        if (root.parent_id or root.provider != "claude"
+        if (root.parent_id
                 or root.status in ("paused", "done") or root.dismissed_at is not None
                 or not agents.runs_process(root)):
             continue
@@ -202,13 +238,12 @@ def _interrupt(members: list[Agent], root: Agent, away: bool) -> list[str]:
     can only fail. The person's own chat only while they're away: a turn there
     may be theirs. Returns who was escaped: each gets a turn back once the
     login works. A headless runner waits the lapse out itself."""
-    claude = get_provider("claude")
     escaped = []
     for a in members:
         if a.headless or (a.id == root.id and not away):
             continue
         screen = _screen(a)
-        if screen and claude.screen_state(screen) == "busy":
+        if screen and get_provider(a.provider).screen_state(screen) == "busy":
             try:
                 tmux.send_keys(a.tmux_window, "Escape", server=agents.server_of(a))
             except tmux.TmuxError:
@@ -226,6 +261,8 @@ def _ids(text: str | None) -> list[str]:
 
 
 def _todo(how: str, cmd: str) -> str:
+    if not cmd:
+        return "refresh the configured cloud credential file"
     if how == "manual":
         return f"run `{cmd}`"
     return f"sign in with the browser tab brindle opens (or run `{cmd}`)"
@@ -260,7 +297,7 @@ def _pause(db: DB, root: Agent, culprit: Agent, s: cloud_login.LoginStatus, env:
                        noticed="+".join(told) or None, next_check=now + FIRST_DELAY,
                        delay=FIRST_DELAY, interrupted=json.dumps(escaped),
                        account=cloud_login.account(env=env))
-    return [f"paused {root.id}: its cloud login expired and needs `{s.refresh_cmd}` "
+    return [f"paused {root.id}: its cloud login expired; {todo} "
             f"(sign-in {how}; told by {'+'.join(told) or 'nothing'})"]
 
 
@@ -296,6 +333,21 @@ def _recheck(db: DB, root: Agent, st: LoginState, env: dict[str, str], members: 
         st.next_check, st.delay = now + delay, delay
         return []
     cloud_login.end_signin(env=env)     # a tab still open is no use now
+    # A session can share work across several cloud accounts. Keep every
+    # stopped turn and its queued messages held until all accounts work.
+    for a, other_env in _logins(db, root, members):
+        if cloud_login.login_key(other_env) == cloud_login.login_key(env):
+            continue
+        other = cloud_login.refresh(env=other_env)
+        if not other.ok:
+            interrupted = {*_ids(st.interrupted), *([st.agent_id] if st.agent_id else [])}
+            db.set_login_state(root.id, agent_id=a.id, refresh_cmd=other.refresh_cmd,
+                               account=cloud_login.account(env=other_env),
+                               interrupted=json.dumps(sorted(interrupted)),
+                               next_check=now + FIRST_DELAY, delay=FIRST_DELAY)
+            if other.expired:
+                cloud_login.sign_in(env=other_env, now=now, last_input=_last_input())
+            return [f"{root.id} still held for {a.id}'s cloud login"]
     session = _session_name(db, root)
     if session is not None:
         tmux.set_alert(session, "")
@@ -310,7 +362,7 @@ def _recheck(db: DB, root: Agent, st: LoginState, env: dict[str, str], members: 
     stopped = [a for a in members
                if not a.headless and not (a.id == root.id and root.mode == "interactive")
                and not db.pending_count(a.id)
-               and (a.id in escaped or _ended_on_expired_login(db, a))]
+               and (a.id in escaped or a.id == st.agent_id or _ended_on_expired_login(db, a))]
     for a in agents.tree(db, root.id):
         if db.pending_count(a.id):
             try:

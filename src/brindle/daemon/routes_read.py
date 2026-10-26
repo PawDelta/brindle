@@ -339,10 +339,12 @@ def get_permission_plan(db: DB, request: Request) -> Any:
 
 @_json
 def get_debug(db: DB, request: Request) -> Any:
-    """``{enabled, staff}`` for debug logs (only a brindle staff account may turn them on)."""
+    """``{enabled, staff}`` for debug logs (only a brindle staff account may turn them on).
+    ``?fresh=1`` asks the backend now instead of the cached answer (the app does,
+    right before a staff-only update), and says not staff when it can't be asked."""
     from brindle import debuglog
 
-    return debuglog.checked()
+    return debuglog.checked(fresh=request.query_params.get("fresh") == "1")
 
 
 @_json
@@ -445,10 +447,11 @@ def provider_preflight(db: DB, request: Request) -> Any:
     turn: the items POST /v1/sessions answers 409 with, for the identity its
     chat would run as (see brindle.preflight). Native, which runs no chat,
     and a request without ``repo`` get the provider's checks as brindle sees it."""
-    from brindle import preflight
+    from brindle import preflight, provider_homes
     from brindle.daemon.routes_actions import session_blockers
 
     provider, repo = request.path_params["provider"], _repo(request)
+    provider_homes.confirm_login(provider)
     if repo is None or provider == "native":
         items = preflight.check(provider, repo)
     else:
@@ -464,7 +467,7 @@ def providers_installed(db: DB, request: Request) -> Any:
     """Each provider CLI as a terminal would find it (PATH, then the makers'
     standard places): ``state`` "installed", "missing" or "off" (turned off
     in brindle), the path brindle runs and its version, whether it is signed
-    in where that is cheap to know (else null), every install found, and
+    in according to its CLI (null if unknown), every install found, and
     brindle's config home for it (null for Antigravity, which shares ~/.gemini)."""
     from brindle import providers_install
 

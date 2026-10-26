@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import sh
+from test_reliability import CLAUDE_BUSY, CLAUDE_IDLE
 
 from brindle import agents, autopilot, bus, config, coordinator, pipeline, preflight, providers, workspaces
 from brindle.daemon import peer, routes_actions
@@ -53,6 +54,8 @@ def _send(method: str, path: str, body: dict | None = None, peer_pid: int | None
 def world(db, repo, monkeypatch):
     """A session ``sup`` in the checkout and its plan-first worker ``wk`` in worktree ``w-1``;
     jobs run inline."""
+    from brindle import provider_homes
+
     root = workspaces.adopt_root(db, str(repo))
     db.add_workspace(Workspace("w-1", root.repo_root, "feat", "worktree", "feat", "main", str(repo),
                                None, "brindle-x", time.time()))
@@ -65,6 +68,7 @@ def world(db, repo, monkeypatch):
     db.add_autopilot("sup")
     monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
     monkeypatch.setattr(preflight, "check", lambda provider, repo_root=None, **kw: [])
+    monkeypatch.setattr(provider_homes, "confirm_login", lambda provider: None)
     return root
 
 
@@ -594,6 +598,282 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     assert len(typed) == 2
 
 
+@pytest.mark.parametrize("route", ["bedrock", "vertex"])
+def test_cloud_profile_login_uses_launch_identity(db, world, tmp_path, monkeypatch, route):
+    import hashlib
+
+    from brindle import cloud_login, company_login, doctor, tmux
+
+    _provider_setup(tmp_path, monkeypatch)
+    cloud = {"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_PROFILE": "company dev", "AWS_REGION": "us-east-1"}
+    aws = tmp_path / "aws-config"
+    aws.write_text("[profile company dev]\nsso_session = company\n")
+    cloud["AWS_CONFIG_FILE"] = str(aws)
+    if route == "vertex":
+        cloud = {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "company-project",
+                 "CLOUD_ML_REGION": "us-east5", "CLOUDSDK_CONFIG": str(tmp_path / "gcloud")}
+    directory = Path(world.repo_root) / ".brindle" / "agents"
+    directory.mkdir(parents=True, exist_ok=True)
+    # Stored company env must resolve just as profile-local env does.
+    local = cloud if route == "vertex" else {}
+    monkeypatch.setattr(company_login, "stored_env", lambda: {} if local else cloud)
+    (directory / "developer.md").write_text("---\nname: developer\nprovider: claude\nauth: cloud\n" +
+        "".join(f"env.{k}: {v}\n" for k, v in local.items()) + "---\nWork.\n")
+    real_status = cloud_login.status
+    answer = SimpleNamespace(returncode=1, stdout="", stderr="invalid_grant: invalid_rapt")
+    monkeypatch.setattr(cloud_login, "status", lambda *a, **kw: real_status(
+        *a, **kw, home=tmp_path, run=lambda *a, **kw: answer, expiry=lambda _: 3600.0))
+    worker, ws = db.get_agent("wk"), db.get_workspace("w-1")
+    # A Claude worker can be dispatched by an OpenCode cloud supervisor.
+    monkeypatch.setenv("BRINDLE_CLOUD_ROUTE", "azure")
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "other-supervisor-project")
+    if route == "bedrock":
+        monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "FAKE_PERSONAL_KEY")
+        monkeypatch.setattr(tmux, "inherited_env", lambda *a: dict(os.environ))
+        assert not agents._effective_window_env(worker, ws).get("AWS_BEARER_TOKEN_BEDROCK")
+    identity = agents.launch_identity(worker, ws)[0]
+    assert cloud_login.provider_from_env(identity) == route
+    assert all(identity.get(k) == v for k, v in cloud.items())
+    items = agents.launch_blockers(worker, ws)
+    item = next(i for i in items if i.kind == "signin")
+    assert item.action.body["profile"] == "developer"
+    code, pending = _send("POST", "/v1/providers/claude/preflight", item.action.body)
+    assert code == 200 and any(i["id"] == "claude.cloud" for i in pending)
+    windows = {}
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
+    monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag:
+                        windows.setdefault(tag[1], (name, argv, env)) and f"%{len(windows)}")
+    monkeypatch.setattr(tmux, "tagged_panes", lambda *a: [
+        (f"%{i + 1}", name, True, tid) for i, (tid, (name, _, _)) in enumerate(windows.items())])
+    code, opened = _send("POST", item.action.path, item.action.body)
+    assert code == 200, opened
+    _, argv, env = windows[opened["terminal"]]
+    assert all(env.get(k) == v for k, v in cloud.items())
+    assert cloud_login.provider_from_env(env) == route
+    commands = []
+    login_key = cloud_login.login_key(identity)
+
+    def cloud_command(command, **kwargs):
+        assert cloud_login.login_key(env) == login_key
+        assert cloud_login.signing_in(env=env)
+        assert cloud_login.sign_in(env=env, now=1e12, last_input=1e12) == "waiting"
+        assert cloud_login.interactive_sign_in(env=env, run=cloud_command) == 1
+        commands.append(command)
+        return SimpleNamespace(returncode=0)
+
+    # Execute the dispatched module with a fake cloud CLI, without a subprocess.
+    import importlib.util
+    import runpy
+    import subprocess
+
+    with monkeypatch.context() as launched:
+        launched.setenv("BRINDLE_HOME", str(tmp_path / "old-tmux-home"))
+        for name, value in env.items():
+            launched.setenv(name, value)
+        launched.setattr(subprocess, "run", cloud_command)
+        with pytest.raises(SystemExit) as exited:
+            runpy.run_path(importlib.util.find_spec(argv[2]).origin, run_name="__main__")
+        assert exited.value.code == 0
+    assert commands == ([["aws", "sso", "login", "--profile", "company dev"]] if route == "bedrock"
+                        else [["gcloud", "auth", "application-default", "login", "--project", "company-project"]])
+    assert not cloud_login.signing_in(env=env)
+    code, again = _send("POST", item.action.path, item.action.body)
+    assert code == 200 and not again["started"] and again["terminal"] == opened["terminal"]
+    assert len(windows) == 1
+    shared = {**cloud, ("AWS_REGION" if route == "bedrock" else "CLOUD_ML_REGION"): "other-region"}
+    (directory / "shared.md").write_text("---\nname: shared\nprovider: claude\nauth: cloud\n" +
+        "".join(f"env.{k}: {v}\n" for k, v in shared.items()) + "---\nWork.\n")
+    code, same_login = _send("POST", item.action.path, {**item.action.body, "profile": "shared"})
+    assert code == 200 and same_login["terminal"] == opened["terminal"] and len(windows) == 1
+    checks = doctor.cloud_checks(world.repo_root)
+    assert checks and all(c.level != doctor.OK for c in checks)
+    assert _send("POST", item.action.path, {"repo": world.repo_root})[0] == 400
+    assert _send("POST", "/v1/providers/unknown/preflight", item.action.body)[0] == 400
+    assert _send("POST", item.action.path, {**item.action.body, "method": "console"})[0] == 400
+    # A second profile must not inherit the in-flight login's selected identity.
+    other = {**cloud, ("AWS_PROFILE" if route == "bedrock" else "CLOUDSDK_CONFIG"): "other"}
+    aws.write_text(aws.read_text() + "[profile other]\nsso_session = other\n")
+    (directory / "other.md").write_text("---\nname: other\nprovider: claude\nauth: cloud\n" +
+        "".join(f"env.{k}: {v}\n" for k, v in other.items()) + "---\nWork.\n")
+    code, separate = _send("POST", item.action.path, {**item.action.body, "profile": "other"})
+    assert code == 200 and separate["terminal"] != opened["terminal"] and len(windows) == 2
+    # The original identity becomes usable without changing profile or worker config.
+    answer.returncode, answer.stdout = 0, "FAKE_TOKEN"
+    cache = tmp_path / ".aws" / "sso" / "cache"
+    cache.mkdir(parents=True)
+    (cache / (hashlib.sha1(b"company").hexdigest() + ".json")).write_text(
+        json.dumps({"accessToken": "FAKE_TOKEN", "expiresAt": "2099-01-01T00:00:00Z"}))
+    assert not agents.launch_blockers(worker, ws)
+    code, ready = _send("POST", "/v1/providers/claude/preflight", item.action.body)
+    assert code == 200 and not ready
+    assert any(c.level == doctor.OK for c in doctor.cloud_checks(world.repo_root))
+    assert "FAKE_TOKEN" not in doctor.render(doctor.cloud_checks(world.repo_root))
+    if route == "vertex":
+        selected = {**cloud, "GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "selected-adc.json")}
+        (directory / "developer.md").write_text("---\nname: developer\nprovider: claude\n" +
+            "".join(f"env.{k}: {v}\n" for k, v in selected.items()) + "---\nWork.\n")
+        answer.returncode = 1
+        manual = next(i for i in agents.launch_blockers(worker, ws) if i.kind == "signin")
+        code, pending = _send(manual.action.method, manual.action.path, manual.action.body)
+        assert code == 200 and pending and len(windows) == 2
+        assert _send("POST", item.action.path, manual.action.body)[0] == 400
+        answer.returncode = 0
+        assert _send(manual.action.method, manual.action.path, manual.action.body) == (200, [])
+
+
+@pytest.mark.parametrize("route", ["vertex", "azure"])
+def test_opencode_cloud_identity_dispatch(db, world, tmp_path, monkeypatch, route):
+    from brindle import cloud_login, doctor, procs, tmux
+    from brindle.profiles import ProfileError
+
+    monkeypatch.setattr(providers, "which_cli", lambda _: None)
+    _provider_setup(tmp_path, monkeypatch)
+    cloud = ({"GOOGLE_CLOUD_PROJECT": "company", "VERTEX_LOCATION": "us-central1",
+              "CLOUDSDK_CONFIG": str(tmp_path / "gcloud")} if route == "vertex" else
+             {"AZURE_CONFIG_DIR": str(tmp_path / "azure"), "AZURE_RESOURCE_NAME": "company-models",
+              "AZURE_TENANT_ID": "company-tenant", "AZURE_SUBSCRIPTION_ID": "company-subscription"})
+    model = "google-vertex/gemini-2.5-pro" if route == "vertex" else "azure/gpt-4.1"
+    directory = Path(world.repo_root) / ".brindle" / "agents"
+    directory.mkdir(parents=True, exist_ok=True)
+    profile = directory / "developer.md"
+    content = (f"---\nname: developer\nprovider: opencode\nmodel: {model}\nauth: cloud\n" +
+               "".join(f"env.{k}: {v}\n" for k, v in cloud.items()) + "---\nWork.\n")
+    profile.write_text(content)
+    db.update_agent("wk", provider="opencode")
+    worker, ws = db.get_agent("wk"), db.get_workspace("w-1")
+    required = "GOOGLE_CLOUD_PROJECT" if route == "vertex" else "AZURE_CONFIG_DIR"
+    monkeypatch.delenv(required, raising=False)
+    profile.write_text(content.replace(f"env.{required}: {cloud[required]}\n", ""))
+    with pytest.raises(ProfileError):
+        agents.launch_identity(worker, ws)
+    profile.write_text(content)
+    monkeypatch.setenv("AZURE_API_KEY", "FAKE_PERSONAL_KEY")
+    monkeypatch.setenv("GOOGLE_API_KEY", "FAKE_PERSONAL_KEY")
+    if route == "vertex":
+        monkeypatch.setenv("HOME", str(tmp_path / "personal-home"))
+        default_adc = Path.home() / ".config" / "gcloud" / "application_default_credentials.json"
+        selected_adc = Path(cloud["CLOUDSDK_CONFIG"]) / "application_default_credentials.json"
+        for path, account in ((default_adc, "personal"), (selected_adc, "company")):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"account": account}))
+        for name in ("GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION", "GOOGLE_CLOUD_LOCATION"):
+            monkeypatch.setenv(name, "personal")
+    monkeypatch.setattr(tmux, "inherited_env", lambda *a: dict(os.environ))
+    identity = agents.launch_identity(worker, ws)[0]
+    actual = agents._effective_window_env(worker, ws)
+    assert all(actual[k] == v for k, v in cloud.items())
+    assert not actual.get("AZURE_API_KEY") and not actual.get("GOOGLE_API_KEY")
+    assert identity["XDG_DATA_HOME"] == actual["XDG_DATA_HOME"]
+    if route == "vertex":
+        # OpenCode's SDK uses this ADC lookup and these project/location precedences.
+        account = json.loads(Path(actual.get("GOOGLE_APPLICATION_CREDENTIALS") or default_adc).read_text())["account"]
+        project = actual.get("GOOGLE_VERTEX_PROJECT") or actual.get("GOOGLE_CLOUD_PROJECT")
+        location = actual.get("GOOGLE_VERTEX_LOCATION") or actual.get("GOOGLE_CLOUD_LOCATION") or actual.get("VERTEX_LOCATION")
+        assert (account, project, location) == ("company", "company", "us-central1")
+        selected_names = ("GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_VERTEX_PROJECT", "GOOGLE_VERTEX_LOCATION", "GOOGLE_CLOUD_LOCATION")
+        assert all(identity[k] == actual[k] for k in selected_names)
+        monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(default_adc))
+    healthy = False
+    tenant = "company-tenant"
+
+    def probe(command, **kw):
+        if not healthy:
+            return SimpleNamespace(returncode=1, stdout="", stderr="invalid_grant AADSTS700082")
+        if route == "vertex":
+            adc = Path(kw["env"].get("GOOGLE_APPLICATION_CREDENTIALS") or selected_adc)
+            assert json.loads(adc.read_text())["account"] == "company"
+        token = {"accessToken": "FAKE_TOKEN", "expires_on": 4070908800,
+                 "tenant": tenant, "subscription": "company-subscription"}
+        if route == "azure" and "https://cognitiveservices.azure.com/.default" not in command:
+            return SimpleNamespace(returncode=1, stdout="", stderr="wrong audience")
+        return SimpleNamespace(returncode=0, stdout=json.dumps(token) if route == "azure" else "FAKE_TOKEN", stderr="")
+
+    real_status = cloud_login.status
+    monkeypatch.setattr(cloud_login, "status", lambda *a, **kw: real_status(
+        *a, **{**kw, "run": probe, "expiry": lambda _: 3600.0}))
+    if route == "azure":
+        healthy = True
+        assert agents.launch_blockers(worker, ws)  # A token alone is not an OpenCode Entra connection.
+        healthy = False
+    pending = agents.launch_blockers(worker, ws)
+    item = next(i for i in pending if i.kind == "signin")
+    assert any(c.level != doctor.OK for c in doctor.cloud_checks(world.repo_root))
+    windows = {}
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
+    monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag:
+                        windows.setdefault(tag[1], (name, argv, env)) and f"%{len(windows)}")
+    monkeypatch.setattr(tmux, "tagged_panes", lambda *a: [
+        (f"%{i + 1}", name, True, tid) for i, (tid, (name, _, _)) in enumerate(windows.items())])
+    code, opened = _send("POST", item.action.path, item.action.body)
+    assert code == 200, opened
+    assert _send("POST", item.action.path, {**item.action.body, "restart": True})[1]["terminal"] == opened["terminal"]
+    _, argv, env = windows[opened["terminal"]]
+    assert all(env[k] == v for k, v in cloud.items()) and env["XDG_DATA_HOME"] == identity["XDG_DATA_HOME"]
+    if route == "vertex":
+        assert all(env[k] == identity[k] for k in selected_names)
+    def login(command, **kw):
+        nonlocal healthy
+        if command == ["gcloud", "auth", "application-default", "login", "--project", "company"]:
+            refreshed_adc = Path(kw["env"]["CLOUDSDK_CONFIG"]) / "application_default_credentials.json"
+            refreshed_adc.write_text(json.dumps({"account": "company"}))
+            healthy = True
+        elif command == ["az", "login", "--tenant", "company-tenant", "--subscription", "company-subscription"]:
+            healthy = True
+        elif healthy and command[-4:] == ["--provider", "azure", "--method", "Microsoft Entra ID (Azure CLI)"]:
+            auth = Path(kw["env"]["XDG_DATA_HOME"]) / "opencode" / "auth.json"
+            auth.parent.mkdir(parents=True, exist_ok=True)
+            auth.write_text(json.dumps({"azure": {"type": "oauth", "accountId": "company-models"}}))
+        else:
+            return SimpleNamespace(returncode=1)
+        return SimpleNamespace(returncode=0)
+
+    assert cloud_login.interactive_sign_in(env=env, run=login, probe=probe) == 0
+    assert _send("POST", "/v1/providers/opencode/preflight", item.action.body) == (200, [])
+    assert not agents.launch_blockers(worker, ws)
+    assert any(c.level == doctor.OK for c in doctor.cloud_checks(world.repo_root))
+    if route == "azure":
+        tenant = "another-company"
+        assert agents.launch_blockers(worker, ws)
+        tenant = "company-tenant"
+        profile.write_text(content.replace("company-models", "another-resource"))
+        other = db.get_agent("wk")
+        assert agents.launch_identity(other, ws)[0]["XDG_DATA_HOME"] != identity["XDG_DATA_HOME"]
+        action = next(i.action for i in agents.launch_blockers(other, ws) if i.kind == "signin")
+        code, another = _send("POST", action.path, action.body)
+        assert code == 200 and another["terminal"] != opened["terminal"]
+        assert windows[another["terminal"]][2]["AZURE_RESOURCE_NAME"] == "another-resource"
+        profile.write_text(content)
+    # The real continuation dispatch checks credentials before either live
+    # recovery or resuming a paused session, and clears the same block after.
+    monkeypatch.setattr(agents, "is_alive", lambda a, *args: a.status not in ("paused", "failed"))
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: False)
+    monkeypatch.setattr(procs, "stop", lambda *a, **kw: 0)
+    monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: db.set_status(a.id, "idle"))
+    for state in ("failed", "paused"):
+        db.set_status("sup", "idle" if state == "failed" else "paused")
+        db.set_status("wk", state)
+        db.update_autopilot("sup", state="blocked", note="Credentials need attention")
+        healthy = False
+        assert _send("POST", "/v1/sessions/sup/continue")[0] == 409
+        assert db.get_autopilot("sup").state == "blocked"
+        healthy = True
+        code, reply = _send("POST", "/v1/sessions/sup/continue")
+        assert code == 200, reply
+        assert db.get_agent("wk").status == "idle" and db.get_autopilot("sup").state == "running"
+    if route == "vertex":
+        custom = tmp_path / "custom-adc.json"
+        custom.write_text(json.dumps({"account": "company"}))
+        profile.write_text(content.replace("auth: cloud\n", f"auth: cloud\nenv.GOOGLE_APPLICATION_CREDENTIALS: {custom}\n"))
+        custom_identity = agents.launch_identity(db.get_agent("wk"), ws)[0]
+        assert custom_identity["GOOGLE_APPLICATION_CREDENTIALS"] == str(custom)
+        assert cloud_login.login_command(custom_identity) is None
+    profile.write_text(content.replace("auth: cloud", "auth: auto"))
+    worker = db.get_agent("wk")
+    assert "XDG_DATA_HOME" not in agents.launch_identity(worker, ws)[0]
+    assert agents._effective_window_env(worker, ws)["GOOGLE_API_KEY"] == "FAKE_PERSONAL_KEY"
+    assert not agents.launch_blockers(worker, ws)
+
+
 def test_a_shell_opens_in_the_repo_each_call_and_closes(world, repo, tmp_path, monkeypatch):
     from brindle import tmux
 
@@ -954,6 +1234,33 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     assert code == 409 and pressed == [], reply
 
 
+@pytest.mark.parametrize("screen", [CLAUDE_IDLE, pytest.param(CLAUDE_BUSY, marks=pytest.mark.variant(
+    "review: allowed in the pane, its tool still running, so no PostToolUse yet"))], ids=["denied", "allowed"])
+def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, world, answering, monkeypatch, screen):
+    from brindle import tmux
+    from brindle.db import DB
+    from brindle.service import inbox
+
+    # The hook's looks: past the prompt twice, one it can't tell (the window starts over), then past it for good.
+    looks, paused, go = iter([screen, screen, "", screen, screen]), threading.Event(), threading.Event()
+    wk = db.get_agent("wk")
+
+    def capture(target, **kw):
+        if (read := next(looks, None)) is None and not paused.is_set():
+            paused.set()        # its sixth look waits on the test
+            go.wait(5)
+        return screen if read is None else read
+
+    monkeypatch.setattr(tmux, "capture", capture)
+    hook = threading.Thread(target=lambda: agents.permission_request_decision(DB(), wk, {**ASK, "cwd": str(repo)}))
+    hook.start()
+    shown = lambda: [i.kind for i in inbox.items(db, str(repo), panes={"%2": True}) if i.agent_id == "wk"]  # noqa: E731
+    assert paused.wait(5) and shown() == ["permission"]     # an interrupted window doesn't end the hold
+    go.set()
+    hook.join(HOLD / 2)         # well before the hold would end
+    assert not hook.is_alive() and shown() == []
+
+
 @pytest.fixture
 def lead(db, repo, tmp_path, monkeypatch):
     """A session ``lead`` on branch ``sess`` (base main) in its own checkout, its goal reached; jobs run inline."""
@@ -975,6 +1282,7 @@ def _commit(path, name: str, text: str, message: str = "work") -> str:
 
 
 def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
+    from brindle import gates
     from brindle.daemon import session_review
     from brindle.db import Task
 
@@ -1004,6 +1312,8 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
                                None, "brindle-f", time.time()))
     db.add_agent(Agent("wf", "proj/w-f", "developer", "claude", "lead", "assign", "idle", "%6", "done", time.time()))
     db.update_agent("wf", merge_failed="conflict in a.py")     # as the pipeline records it
+    real_head = gates.head
+    monkeypatch.setattr(gates, "head", lambda ws: head if ws.id == "proj/w-f" else real_head(ws))
     assert missing() == 5 and _send("GET", "/v1/sessions/lead/diff")[0] == 409
     assert watch.sweep(db) == []
     db.set_merged("proj/w-f", head)
@@ -1224,7 +1534,7 @@ def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:
     """Every CLI installed (a stub), Claude Code's and Codex's config dirs present."""
     monkeypatch.setattr(preflight, "check", REAL_PREFLIGHT)
     monkeypatch.setattr(providers, "claude_onboarded", REAL_ONBOARDED)
-    for env in ("BRINDLE_CLAUDE_BIN", "BRINDLE_CODEX_BIN", "BRINDLE_AGY_BIN"):
+    for env in ("BRINDLE_CLAUDE_BIN", "BRINDLE_CODEX_BIN", "BRINDLE_AGY_BIN", "BRINDLE_OPENCODE_BIN"):
         (tmp_path / env).write_text("")
         monkeypatch.setenv(env, str(tmp_path / env))
     claude = tmp_path / "claude-config" / ".claude.json"

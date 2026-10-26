@@ -10,14 +10,35 @@ import { DaemonClient } from "../../api/client";
 import { BASE_URL, FAKE_PRESETS, FakeDaemon, TOKEN, flush, freshProviders, type DaemonData } from "../../test/fakeDaemon";
 import { PtyViewsProvider } from "../../api/ptyView";
 import { REPO } from "../../test/fixtures";
+import { releaseBuildUpdater } from "../../api/tauri";
 import { SettingsScreen } from ".";
 import type { SettingsScreenProps } from "./SettingsScreen";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
-afterEach(cleanup);
+/* The shell's IPC, for the real release-build updater (api/tauri.ts): each
+   invoke recorded, the install's answer held until the test gives it. */
+const ipc = vi.hoisted(() => {
+  const calls: Array<{ cmd: string; args: Record<string, unknown> }> = [];
+  const answers: Array<(value: unknown) => void> = [];
+  class Channel<T> {
+    onmessage: ((message: T) => void) | null = null;
+  }
+  const invoke = vi.fn((cmd: string, args: Record<string, unknown> = {}) => {
+    calls.push({ cmd, args });
+    return new Promise((resolve) => answers.push(resolve));
+  });
+  return { calls, answers, Channel, invoke };
+});
+vi.mock("@tauri-apps/api/core", () => ({ Channel: ipc.Channel, invoke: ipc.invoke, isTauri: () => true }));
 
-function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps["installCli"], appUpdater?: SettingsScreenProps["appUpdater"], rule?: string) {
+afterEach(() => {
+  cleanup();
+  ipc.calls.length = 0;
+  ipc.answers.length = 0;
+});
+
+function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps["installCli"], appUpdater?: SettingsScreenProps["appUpdater"], releaseUpdater?: SettingsScreenProps["releaseBuildUpdater"], rule?: string) {
   const daemon = new FakeDaemon({
     repos: [{ repo_root: REPO, name: "proj" }],
     config: {
@@ -57,7 +78,7 @@ function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps[
           <ProvidersProvider client={client}>
             {/* A sign-in's CLI read through the fake daemon's pty views, as the shell's show it. */}
             <PtyViewsProvider value={daemon.ptyViews()}>
-              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} rule={rule} />
+              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} rule={rule} />
             </PtyViewsProvider>
           </ProvidersProvider>
         </SessionsProvider>
@@ -181,7 +202,7 @@ describe("settings screen", () => {
 
   it("permissions: a rule opens in a three-step editor, saves its limits, and a new rule that disagrees with one is checked and auto-resolved", async () => {
     const npm = { id: "u-npm", kind: "bash", match: "npm ", match_type: "prefix", decision: "allow", source: "user", created: 1, describe: "bash prefix 'npm '", exclusions: [] };
-    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), npm], saved: [], prompts: {} } }, undefined, undefined, "d-push-default");
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), npm], saved: [], prompts: {} } }, undefined, undefined, undefined, "d-push-default");
     // Opened for a rule (the Inbox's "Open the deny rule"): its editor, at once.
     const editor = await screen.findByTestId("rule-editor");
     expect(within(editor).getByRole("combobox", { name: "Action" })).toHaveProperty("value", "push");
@@ -550,14 +571,40 @@ describe("settings screen", () => {
 
   it("staff update: hides the app's Update from anyone the daemon doesn't call staff", async () => {
     const updater = { install: vi.fn(async () => "0.1.0-rc.8"), restart: vi.fn(async () => {}) };
-    const { daemon, stop } = setup({ debug: { staff: false, enabled: false } }, undefined, updater);
+    const { daemon, stop } = setup({ debug: { staff: false, enabled: false } }, undefined, updater, releaseBuildUpdater);
     await screen.findByTestId("engine");
     await waitFor(() => expect(daemon.requests.some((r) => r.method === "GET" && r.path === "/debug")).toBe(true));
     await flush();
     expect(screen.queryByTestId("app-update")).toBeNull();
     expect(screen.queryByTestId("app-update-row")).toBeNull();
+    expect(screen.queryByTestId("release-build-row")).toBeNull();
     expect(screen.queryByText("Update the app")).toBeNull();
     expect(updater.install).not.toHaveBeenCalled();
+    expect(ipc.calls).toEqual([]);
+    stop();
+  });
+
+  it("staff update: installs the release branch's latest build through the shell, following its download, then restarts into it", async () => {
+    const build = "0.1.0-rc.9+release.42.fedcba987654";
+    const { stop } = setup({ debug: { staff: true, enabled: false } }, undefined, undefined, releaseBuildUpdater);
+    const row = await within(await screen.findByTestId("app-update")).findByTestId("release-build-row");
+    fireEvent.click(within(row).getByRole("button", { name: "Install" }));
+    // The shell's command, given only the channel it reports on: no feed, no version.
+    const [{ cmd, args }] = ipc.calls;
+    expect(cmd).toBe("app_release_build_install");
+    expect(Object.keys(args)).toEqual(["onProgress"]);
+    const progress = (args.onProgress as InstanceType<typeof ipc.Channel>).onmessage!;
+    progress({ kind: "found", version: build });
+    progress({ kind: "downloading", downloaded: 3_000_000, total: 12_000_000 });
+    const bar = await within(row).findByRole("progressbar");
+    expect([bar.getAttribute("value"), bar.getAttribute("max")]).toEqual(["3000000", "12000000"]);
+    progress({ kind: "installing" });
+    await waitFor(() => expect(within(row).queryByRole("progressbar")).toBeNull());
+    ipc.answers[0](build);
+    const restart = await within(row).findByRole("button", { name: "Restart" });
+    expect(row.textContent).toContain(build);
+    fireEvent.click(restart);
+    await waitFor(() => expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_release_build_install", "app_restart"]));
     stop();
   });
 

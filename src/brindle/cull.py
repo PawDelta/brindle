@@ -321,30 +321,42 @@ def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
 
 
 def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
-    """Tell each supervisor, once, about a worker that has been waiting on a
-    prompt (a permission request, or Claude Code's folder-trust dialog) for
-    STUCK_AFTER seconds: it can't go on until someone answers, and nobody
-    may be looking at its pane. The screen is read here too, since a trust
-    dialog comes up before any hook runs to report it."""
+    """Forward live menus immediately, including questions left by idle
+    workers. Hook-only reviewer requests are immediate too; other waiting
+    states retain their grace period. Report once per spell of waiting."""
+    from brindle import prompt_answer
+
     done = []
     owners = agents.pane_owners(db, panes)
     for a in db.list_agents():
         if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
-                or a.dismissed_at is not None or a.status not in ("starting", "processing", "waiting")
+                or a.dismissed_at is not None or a.status not in ("starting", "processing", "waiting", "idle")
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        try:
+            screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
+        except tmux.TmuxError:
+            screen = ""
+        health = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?",
+                                 (a.id,)).fetchone()
+        brief = (health["submitted_prompt"] if health else None) or a.task or ""
+        if prompt_answer.brief_draft(screen, brief):
+            continue
+        if prompt_answer.blocking_prompt(screen, a.provider, brief):
+            if prompt_answer.tell(db, a, "\n".join(prompt_answer._tail(screen))):
+                done.append(f"told {a.parent_id} that worker {a.id} is waiting on input")
+            continue
+        if a.status == "idle":
             continue
         if a.status != "waiting":
             agents.screen_status(db, a, samples=1)
             a = db.get_agent(a.id) or a
         since = a.status_since or a.created_at
-        if a.status != "waiting" or now - since < STUCK_AFTER or a.stuck_noted == since:
+        if (a.status != "waiting" or a.stuck_noted == since
+                or (a.mode != "review" and now - since < STUCK_AFTER)):
             continue
         ws = db.get_workspace(a.workspace_id)
-        try:
-            screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
-        except tmux.TmuxError:
-            screen = ""
         tail = "\n".join([ln for ln in screen.rstrip().splitlines() if ln.strip()][-12:])
         where = f" on branch `{ws.branch}`" if ws else ""
         attach = f" Attach with `brindle attach {ws.name}` to answer it," if ws else " Answer it in its pane,"
@@ -490,14 +502,15 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
                 and pipeline._settled(db, ws) is None):
             try:
                 head = gates.head(ws)
-                wait = agents.expected_check_wait(db, ws, load_repo_config(ws.repo_root)) or 0.0
+                cfg = load_repo_config(ws.repo_root)
+                wait = agents.expected_check_wait(db, ws, cfg) or 0.0
             except (git.GitError, ValueError):
                 continue
             # The spell starts at the report that put it in review, or at a
             # later reviewer's start (a fallback review, say).
             reviewers = [r for r in db.list_agents(ws.id) if r.mode == "review"]
             since = max([a.reviewing_since] + [r.created_at for r in reviewers])
-            if (now - since < pipeline.RESTART_REVIEW_AFTER or db.latest_review(ws.id, head)
+            if (now - since < cfg.review_start_delay or db.latest_review(ws.id, head)
                     or any(r.dismissed_at is None and r.status not in ("paused", "done")
                            and agents.is_alive(r, panes) for r in reviewers)):
                 continue

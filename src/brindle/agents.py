@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 
 from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
@@ -291,6 +291,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
             # env is the top layer (managed_env is the same route's, from managed_models).
             profile_env = {k: v for k, v in profile_env.items() if company_identity.profile_may_set(k)}
             env = {**homes, **recovery_keys, **profile_env, **managed_env, **enforced, **env}
+        if guarded is not None:
+            from brindle import cloud_login
+
+            env.update(cloud_login.profile_env(guarded, env))
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
@@ -927,6 +931,7 @@ def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tup
     blanked so the launcher's own copy doesn't count), whether the org's own
     key signs it in (no login to check), and the denied names. ``agent`` need
     not be recorded yet: a launch about to happen is checked the same way."""
+    from brindle import cloud_login
     from brindle.pro import managed_models
 
     if m is _UNREAD:
@@ -940,7 +945,8 @@ def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tup
     org_key = managed_models.has_org_key(m, agent.provider)
     prov_creds = set() if org_key else secrets.agent_credentials(agent.provider, profile.name, ws.repo_root)
     eff_env = _window_environment(agent, ws, m)[0]
-    probe_env = {**launch_env, **{k: eff_env[k] for k in prov_creds if k in eff_env}}
+    names = prov_creds | (cloud_login.IDENTITY_ENV if agent.provider in ("claude", "opencode") else frozenset())
+    probe_env = {**launch_env, **{k: eff_env[k] for k in names if k in eff_env}}
     return {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}}, org_key, deny
 
 
@@ -969,7 +975,8 @@ def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, ide
     session = credentials_session(agent)
     if session:
         launch["session"] = session
-    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch)
+    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch,
+                           check_cloud=not keys_only)
 
 
 def credentials_session(agent: Agent) -> str | None:
@@ -1103,10 +1110,11 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane, m=m)
         return
     if provider.prompt_after_ready:
-        # Typed in once it's ready, after a warm-up carrying its instructions:
+        # Typed in once it's ready, after a warm-up carrying its instructions
+        # on both fresh starts and resumes:
         # agy connects its MCP servers only once a conversation has started,
         # so the task must arrive as a second turn (see brindle.antigravity).
-        for text in ((provider.warmup(profile) if not resume else None), prompt):
+        for text in (provider.warmup(profile), prompt):
             if text:
                 db.enqueue(agent.id, text, None)
         prompt = None
@@ -1863,6 +1871,11 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
     if not provider.uses_hooks:
         tmux.paste(agent.tmux_window, text, lead=message_lead(db, agent, sender_id),
                    server=server_of(agent))
+        if not (condensed or notice):
+            # Direct deliveries need the same durable history as queued ones,
+            # including supervisor spec updates used by the next reviewer.
+            kept = db.enqueue_held(agent.id, body, sender_id, publish=False)
+            db.mark_delivered(kept)
         return "delivered"
     message_id = db.enqueue(agent.id, text, sender_id, notice=notice)
     from brindle import login_pause
@@ -2019,23 +2032,18 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
 
 def flush(db: DB, agent_id: str) -> bool:
     """Deliver the agent's oldest pending message: through its inbox if it
-    has one, else typed into its pane once it's idle. A chat with a live
+    has one, else typed into its pane once it's idle (or while busy, for a
+    CLI that holds mid-turn input: see _flush_midturn). A chat with a live
     waiter (brindle.wake) is left to it, and one that runs a waiter never
     uses the inbox. Returns True if something was delivered."""
     from brindle import inbox
     from brindle import launch_health
-    from brindle import login_pause
     from brindle import wake
 
     agent = db.get_agent(agent_id)
-    if agent is None or agent.headless:
-        return False  # its runner takes messages from the inbox itself
-    if login_pause.holding(db, agent_id):
-        return False  # its session waits on an expired cloud login; resuming flushes it
-    waits = wake.enabled(agent)
-    if waits and wake.live(agent):
-        return False  # its waiter hands the queue over (brindle.wake)
-    if not waits and inbox.usable(agent):
+    if _delivery_held(db, agent):
+        return False
+    if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
             baseline = launch_health.before_delivery(db, agent)
@@ -2048,11 +2056,48 @@ def flush(db: DB, agent_id: str) -> bool:
                 break
         if delivered:
             return True
-    if db.pending_count(agent_id) == 0:
+    # One paste into the pane at a time, whichever path: the idle claim alone
+    # leaves the agent busy for a second sender's mid-turn paste while the
+    # first is still typing, reordering or merging the two.
+    with delivery_lock(agent_id):
+        return _flush_pane(db, agent_id)
+
+
+def delivery_lock(agent_id: str):
+    """Held across processes by whoever types a queued message into
+    ``agent_id``'s pane (``flush``), from the look at its state to the end of
+    the paste. A lock file under the brindle home, so a holder that dies gives
+    it back; re-entrant within a thread."""
+    from brindle import pipeline
+
+    return pipeline._reentrant_lock("deliver-" + hashlib.sha1(agent_id.encode()).hexdigest()[:16])
+
+
+def _delivery_held(db: DB, agent: Agent | None) -> bool:
+    """Whether ``flush`` must leave the queue alone: the agent is gone or
+    headless (its runner takes messages from the inbox itself), its session
+    waits on an expired cloud login (resuming flushes it), or a live waiter
+    hands the queue over (brindle.wake)."""
+    from brindle import login_pause
+    from brindle import wake
+
+    return (agent is None or agent.headless or login_pause.holding(db, agent.id)
+            or (wake.enabled(agent) and wake.live(agent)))
+
+
+def _flush_pane(db: DB, agent_id: str) -> bool:
+    """``flush``'s typed delivery, under its delivery_lock. The queue and the
+    agent are read afresh: while it waited, another sender may have delivered,
+    or the session been paused."""
+    from brindle import launch_health
+
+    if _delivery_held(db, db.get_agent(agent_id)) or db.pending_count(agent_id) == 0:
         return False
     claimed_at = db.claim_idle(agent_id)
     if claimed_at is None:
-        return False
+        return _flush_midturn(db, agent_id)
+    agent = db.get_agent(agent_id)
+    assert agent is not None
     if _paste_blocked(agent):
         # Leave it queued: the next flush (a later message, or a resumed
         # session's start-up) gets another chance.
@@ -2062,8 +2107,6 @@ def flush(db: DB, agent_id: str) -> bool:
     if not msg:
         db.set_status(agent_id, "idle", only_if="processing")
         return False
-    agent = db.get_agent(agent_id)
-    assert agent is not None
     from brindle import antigravity
     warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
     try:
@@ -2077,6 +2120,34 @@ def flush(db: DB, agent_id: str) -> bool:
         raise
     if not warmup:
         launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
+    return True
+
+
+def _flush_midturn(db: DB, agent_id: str) -> bool:
+    """``_flush_pane`` for a busy interactive chat whose CLI keeps input typed
+    mid-turn until its current step finishes (Codex, agy): the oldest queued
+    message goes in now instead of at the turn-end notify or Stop. Never into
+    an approval prompt ('waiting', or one on screen the hooks haven't
+    reported), where the keys would answer it."""
+    agent = db.get_agent(agent_id)
+    if (agent is None or agent.status != "processing" or agent.mode != "interactive"
+            or not get_provider(agent.provider).types_midturn):
+        return False
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=40, server=server_of(agent))
+    except tmux.TmuxError:
+        return False
+    if get_provider(agent.provider).screen_state(screen) == "waiting" or _paste_blocked(agent):
+        return False
+    msg = db.pop_pending(agent_id)
+    if not msg:
+        return False
+    try:
+        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
+                   server=server_of(agent))
+    except BaseException:
+        db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
+        raise
     return True
 
 
@@ -2809,7 +2880,7 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) 
 
 def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                  focus: str | None = None, cfg: RepoConfig | None = None,
-                 second: bool = False) -> Agent | None:
+                 second: bool = False, *, slot: str | None = None) -> Agent | None:
     """Have ``ws`` reviewed. Without checks configured the reviewer starts
     right away and is returned. With checks, nothing starts yet: a detached
     ``_review-after-checks`` process runs them and starts the reviewer with
@@ -2818,7 +2889,9 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     for a reviewer that couldn't start whatever the checks say (the kill
     switch, an unusable profile); a failure after that reaches ``caller``
     as a message. ``second``: the required second review (``cfg.second_review``),
-    which has its own reviewer beside the commit's review."""
+    which has its own reviewer beside the commit's review. ``slot`` overrides
+    the claim identity: the pipeline uses "" for its primary review even
+    when it selected a concrete profile."""
     from brindle import gates
     from brindle.config import load_repo_config
     from brindle.providers import brindle_invocation
@@ -2826,10 +2899,11 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     _review_worktree_present(ws)
     cfg = cfg or load_repo_config(ws.repo_root)
     if not cfg.checks:
-        return request_review(db, caller, ws, profile, focus, cfg, second=second)
+        return request_review(db, caller, ws, profile, focus, cfg, second=second, slot=slot)
     _review_kill_switch(ws)
+    slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
-    argv = [*brindle_invocation(), "_review-after-checks", ws.id]
+    argv = [*brindle_invocation(), "_review-after-checks", ws.id, "--review-slot", slot]
     if caller:
         argv += ["--caller", caller.id]
     if profile:
@@ -2841,16 +2915,19 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     # Nobody's child: the worker reporting here may be closed while the checks
     # still run, and stopping it would stop this run too, so no reviewer (#190).
     with review_dispatch_lock(ws.id):
-        existing = _live_reviewer(db, ws, gates.head(ws), profile)
+        sha = gates.head(ws)
+        existing = _live_reviewer(db, ws, sha, profile)
         if existing:
             return existing
+        if _review_pending(ws.id, profile, sha):
+            return None
         # Publish before detaching: even a helper that hasn't started yet
         # must know that a later request superseded it. Profiles have separate
         # claims so a required second review survives the first one's request.
         request_id = uuid.uuid4().hex
         claim = _review_request_file(ws.id, profile)
         pending = claim.with_suffix("." + request_id)
-        pending.write_text(request_id)
+        pending.write_text(f"{request_id}\n{sha}\n{time.time()}")
         pending.replace(claim)
         _detach([*ORPHANED, *argv, "--request-id", request_id])
     return None
@@ -2885,14 +2962,44 @@ def _review_requested(workspace_id: str, profile: str, request_id: str | None) -
     if request_id is None:
         return True
     try:
-        return _review_request_file(workspace_id, profile).read_text() == request_id
+        return _review_request_file(workspace_id, profile).read_text().split("\n", 1)[0] == request_id
     except FileNotFoundError:
         return False
 
 
+def _review_pending(workspace_id: str, profile: str, sha: str) -> bool:
+    """Reuse this commit's queued or running helper, but allow a dead one to be replaced."""
+    from brindle import gates
+
+    try:
+        request_id, commit, queued_at = _review_request_file(workspace_id, profile).read_text().splitlines()
+        starting = time.time() - float(queued_at) < LAUNCH_GRACE
+    except (FileNotFoundError, ValueError):
+        return False   # no request, or an older helper without commit metadata
+    return commit == sha and (starting or gates.marked("review-request", request_id))
+
+
+@contextmanager
+def _review_request_run(workspace_id: str, profile: str, request_id: str | None):
+    """Liveness belongs to one request, so another profile or obsolete helper cannot mask its death."""
+    from brindle import gates
+
+    if request_id is None:
+        yield
+        return
+    with gates.marker("review-request", request_id):
+        try:
+            yield
+        finally:
+            with review_dispatch_lock(workspace_id):
+                if _review_requested(workspace_id, profile, request_id):
+                    _review_request_file(workspace_id, profile).unlink(missing_ok=True)
+
+
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
                         focus: str | None = None, cfg: RepoConfig | None = None,
-                        request_id: str | None = None, second: bool = False) -> Agent | None:
+                        request_id: str | None = None, second: bool = False,
+                        *, slot: str | None = None) -> Agent | None:
     """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
     lock and the by-sha cache, so a result a worker's report already warmed
     is instant), then start the reviewer with the results in its prompt.
@@ -2911,8 +3018,9 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     from brindle.config import load_repo_config
 
     cfg = cfg or load_repo_config(ws.repo_root)
+    slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
-    with pipeline.review_run(ws.id):
+    with _review_request_run(ws.id, profile, request_id), pipeline.review_run(ws.id):
         since = pipeline.review_claim(db, ws)
         for _attempt in range(MOVED_RETRIES + 1):
             if not _review_requested(ws.id, profile, request_id):
@@ -2946,7 +3054,8 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
         with review_dispatch_lock(ws.id):
             if not _review_requested(ws.id, profile, request_id):
                 return None
-            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text, second=second)
+            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text,
+                                  second=second, slot=slot)
 
 
 def review_dispatch_lock(workspace_id: str):
@@ -2958,18 +3067,80 @@ def review_dispatch_lock(workspace_id: str):
 
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None,
-                   check_summary: str | None = None, second: bool = False) -> Agent | None:
+                   check_summary: str | None = None, second: bool = False,
+                   *, slot: str | None = None) -> Agent | None:
     """Start or reuse a review, replacing an MCP-broken reviewer once. None
     while another dispatcher is still starting this commit's reviewer."""
     # Serialize hook recovery with explicit requests, including the interval
     # between stopping the broken reviewer and publishing its replacement.
     with review_dispatch_lock(ws.id):
-        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second)
+        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second, slot)
+
+
+def _review_claim_slot(profile: str | None, slot: str | None) -> str:
+    """Keep an explicit profile's claim separate from the automatic review.
+
+    Resolve this before choosing a default profile, and carry it through the
+    detached helper. Only an automatic primary review may reuse a claim
+    regardless of which profile the learner chose this time. A supplied slot
+    preserves the identity of a pipeline review or its replacement.
+    """
+    if slot is not None:
+        return slot
+    return profile or ""
+
+
+def _review_context(db: DB, ws: Workspace, worker: Agent | None, files: list[str]) -> str:
+    """Current decisions and supervisor updates for the work being reviewed.
+
+    The worker, not the caller requesting review, owns the session context.
+    Read current decisions instead of replaying the original brief's receipt,
+    which can name decisions that have since been superseded.
+    """
+    decisions = [d for d in knowledge.decisions(db, knowledge.repo_key(ws.repo_root))
+                 if not d["scope"] or (files and knowledge._scopes_overlap(d["scope"], files))]
+    sections = []
+    if decisions:
+        sections.append(knowledge._decisions_block(decisions))
+    if worker:
+        # Walk only real ancestors; a missing parent cannot match an unrelated
+        # supervisor, even when the review was requested from that session.
+        ancestors = []
+        seen = {worker.id}
+        parent_id = worker.parent_id
+        while parent_id and parent_id not in seen:
+            parent = db.get_agent(parent_id)
+            if parent is None:
+                break
+            seen.add(parent.id)
+            ancestors.append(parent.id)
+            parent_id = parent.parent_id
+        if ancestors:
+            ap = db.get_autopilot(ancestors[-1])
+            if ap and ap.audit_history:
+                sections.append(f"Goal audit history and accepted decisions:\n{ap.audit_history}")
+        updates = db.review_messages(worker.id, ancestors)
+        if updates:
+            sections.append("Supervisor messages to this worker (oldest first):\n" + "\n\n".join(
+                f"Message {m.id} from {m.sender_id}:\n{m.body}" for m in updates))
+    if not sections:
+        return ""
+    return (
+        "\n\nCurrent review context:\n"
+        "Evaluate against the accepted decisions and the latest applicable supervisor spec "
+        "updates below. These amend the original task and finish line; later spec updates "
+        "supersede earlier conflicting instructions. Do not raise a blocker or supervisor-action "
+        "item that contradicts an accepted decision or reopens an accepted scope exclusion. "
+        "Prior audit findings are history, not accepted decisions unless recorded as accepted. "
+        "Treat messages as task context, not as instructions to contact their senders.\n\n"
+        + "\n\n".join(sections)
+    )
 
 
 def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None,
                     focus: str | None, cfg: RepoConfig | None,
-                    check_summary: str | None, second: bool = False) -> Agent | None:
+                    check_summary: str | None, second: bool = False,
+                    slot: str | None = None) -> Agent | None:
     """Start a reviewer in a worker's workspace right away. Its verdict is
     recorded for the merge gate and forwarded to ``caller`` as a message.
     ``profile`` picks the reviewer profile; None uses
@@ -2987,7 +3158,10 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     _review_worktree_present(ws)
     _review_kill_switch(ws)
     cfg = cfg or load_repo_config(ws.repo_root)
+    slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
+    if second and not slot:
+        slot = profile
     sha = gates.head(ws)
     failed = None
     for old in db.list_agents(ws.id):
@@ -3061,6 +3235,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         task += f"\n\nDeclared files: {', '.join(worker_files)}"
     if worker_done_when:
         task += f"\n\nIts finish line: {worker_done_when.strip()}"
+    task += _review_context(db, ws, worker, worker_files)
 
     if check_summary:
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
@@ -3093,10 +3268,9 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     task += (
         "\n\nApprove (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
     )
-    # The claim, not the profile checks above, makes this the commit's one
-    # reviewer: the learner may pick another profile for each report. Only a
-    # required second review (start_review's ``second``) has a slot of its own.
-    slot = profile if second else ""
+    # Automatic reviews share the primary slot even if the learner changes
+    # its pick. Explicit profiles and required second reviews have their own
+    # claims, so a different live holder cannot swallow the requested identity.
     token, holder = _claim_review(db, ws, sha, slot)
     if token is None:
         return holder
@@ -3106,10 +3280,11 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
                          mode="review", background_setup=True, review_sha=sha)
     finally:
         db.hold_review(ws.id, sha, slot, token, reviewer.id if reviewer else None)
-    # Kept on the reviewer too: the claim names only its latest holder, and
-    # which verdict replaces which goes by slot (gates.standing_reviews).
+    # Verdict slots remain primary/second even when an explicit profile has
+    # its own dispatch claim. Changing profile after a rejection must still
+    # replace that verdict in the same role (gates.standing_reviews).
     if reviewer is not None:
-        db.update_agent(reviewer.id, review_slot=slot)
+        db.update_agent(reviewer.id, review_slot=profile if second else "")
     return reviewer
 
 
@@ -3368,7 +3543,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                     # harmless redirection gone), which deny_in_parts doesn't.
                     for part in split_commands(command):
                         denied = permissions.decide(replace(reqs[0], command=part), checks=cfg.checks, rules=rules)
-                        if denied.decision == "deny":
+                        if denied.decision == "deny" or (denied.decision == "ask" and denied.rule is not None):
                             decision = denied
                             break
                 elif perms.mode == "dontAsk":
@@ -3457,6 +3632,11 @@ def _session_of(db: DB, agent: Agent) -> str | None:
 # Seconds a hold waits on the daemon at a time between looks at whether the
 # agent was closed or its request answered at the CLI's own prompt.
 HOLD_LOOK_SECONDS = 5.0
+# Looks in a row (HOLD_LOOK_SECONDS apart) a pane must read past its CLI's own
+# permission prompt, busy or idle, before the hold ends: longer than one look,
+# so a read while the prompt is redrawn doesn't take it for answered. Any
+# other read starts the count over.
+ANSWERED_LOOKS = 3
 # Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
 # so the hook gives the request to the prompt itself before the CLI cancels it.
 HOOK_SLACK = 30
@@ -3507,12 +3687,13 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     ``holder`` (brindle.daemon.holds), or None after ``hold`` seconds, when
     the person asks to answer in the terminal, once the agent is closed or
     killed, once its CLI's own prompt took the request (its PostToolUse
-    removed the row), or if the daemon goes away: then the request goes to
-    the CLI's own prompt (or, where there is none, is refused). The agent
-    shows waiting meanwhile, as at that prompt."""
+    removed the row, or its pane stayed past the prompt for ANSWERED_LOOKS),
+    or if the daemon goes away: then the request goes to the CLI's own
+    prompt (or, where there is none, is refused). The agent shows waiting
+    meanwhile, as at that prompt."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline, answer = time.monotonic() + hold, None
+    deadline, answer, past = time.monotonic() + hold, None, 0
     while True:
         now = db.get_agent(agent.id)
         recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
@@ -3521,6 +3702,13 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
         if (now is None or now.status in ("done", "paused") or now.dismissed_at is not None
                 or recorded is None or left <= 0):
             break
+        # Its CLI shows its own prompt for as long as this hook holds the request: a pane
+        # past it was answered there, whether or not a look caught the prompt. An allow
+        # runs the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
+        state = _pane_state(now)
+        past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
+        if past >= ANSWERED_LOOKS:
+            break
         held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
         if answer is not None or not held:
             break
@@ -3528,6 +3716,22 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     if answer:
         db.set_status(agent.id, "processing", only_if="waiting")
     return answer
+
+
+def _pane_state(agent: Agent) -> str | None:
+    """What the pane of an agent whose CLI shows its own prompt while its
+    hook holds a request reads as: 'prompt' (any permission prompt), else
+    'idle', 'busy' or 'waiting', or None."""
+    from brindle.service.inbox import TERMINAL_PROMPT_VISIBLE
+
+    provider = get_provider(agent.provider)
+    if agent.headless or not agent.tmux_window or not TERMINAL_PROMPT_VISIBLE.get(agent.provider):
+        return None
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=60, server=server_of(agent))
+    except tmux.TmuxError:
+        return None
+    return "prompt" if provider.tool_permission(screen) else provider.screen_state(screen)
 
 
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
@@ -3706,7 +3910,15 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # 'waiting' before the session even started was its trust dialog
         # (see screen_status), which has now been answered.
         db.set_status(agent_id, "idle", only_if="waiting")
-        if db.pending_count(agent_id) and not agent.headless:
+        if db.pending_count(agent_id) and not agent.headless and not get_provider(agent.provider).announces_start:
+            # No start hook ran: this is `ready`, called once after_launch saw
+            # the CLI's input box, so it takes input now (agy's warm-up, then
+            # its task, would otherwise wait out ready_delay first).
+            try:
+                flush(db, agent_id)
+            except tmux.TmuxError:
+                pass  # stays queued for the next flush
+        elif db.pending_count(agent_id) and not agent.headless:
             # Claude Code hasn't drawn its input box yet; deliver shortly after,
             # from a detached process so this hook returns immediately.
             import subprocess

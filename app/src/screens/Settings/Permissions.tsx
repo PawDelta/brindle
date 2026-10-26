@@ -506,7 +506,8 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
   const [decision, setDecision] = useState(rule?.decision ?? "ask");
   const limits = rule?.limits;
   const [maxScope, setMaxScope] = useState(limits?.max_scope ?? (push ? "destination" : ""));
-  const [life, setLife] = useState<PermissionLife>((limits?.life as PermissionLife) ?? "session");
+  // "once": no saved approval settles the ask (the release-branch push rules).
+  const [life, setLife] = useState<PermissionLife | "once">((limits?.life as PermissionLife | "once") ?? "session");
   const cap = splitMinutes(limits?.minutes ?? 30);
   const [amount, setAmount] = useState(String(cap.value));
   const [unit, setUnit] = useState<Unit>(cap.unit);
@@ -735,7 +736,8 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
               )}
               <label className={fieldLabel}>
                 Remember approvals for
-                <select className={field} aria-label="Remember approvals for" value={life} onChange={(e) => setLife(e.target.value as PermissionLife)}>
+                <select className={field} aria-label="Remember approvals for" value={life} onChange={(e) => setLife(e.target.value as PermissionLife | "once")}>
+                  <option value="once">Never: ask every time</option>
                   <option value="session">This session</option>
                   <option value="time">Up to a duration</option>
                   <option value="forever">Until revoked</option>
@@ -748,7 +750,7 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
                 </div>
               )}
               <p className="text-xs text-ink-3 sm:col-span-2">
-                {life === "session" ? "An approval ends with the session it was given in." : life === "forever" ? "Approvals can be saved until you delete them in Saved actions." : "You may approve once or for up to this long. Time starts when you approve."}
+                {life === "once" ? "Each request asks: an approval is never saved." : life === "session" ? "An approval ends with the session it was given in." : life === "forever" ? "Approvals can be saved until you delete them in Saved actions." : "You may approve once or for up to this long. Time starts when you approve."}
               </p>
             </Step>
           )}
