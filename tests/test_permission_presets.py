@@ -90,6 +90,7 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "git push"), "ask", "d-push-default"),               # its upstream may be main
     (lambda ws: bash(ws, "cd sub && git push origin HEAD:main"), "ask", "d-push-default"),
     (lambda ws: bash(ws, "git push origin HEAD"), "ask", "d-push-default"),     # HEAD may be the default branch
+    (lambda ws: bash(ws, "git push origin refs/heads/*:refs/heads/*"), "ask", "d-push-default"),   # so may a wildcard
     (lambda ws: bash(ws, "git push --force origin feature"), "deny", "d-git-force"),
     (lambda ws: bash(ws, "git push origin +topic:feature"), "deny", "d-git-force"),   # a forced refspec
     (lambda ws: bash(ws, "git push origin :feature"), "deny", "d-git-force"),         # deletes the branch
@@ -148,6 +149,9 @@ def test_every_rule_can_be_edited_or_removed_and_a_preset_change_keeps_the_perso
     ("uniq in out", "ask"),                                        # its second operand is an output file
     ("fd -x rm", "ask"),
     ("sort -o out.txt in.txt", "ask"),
+    ("sort -ro out.txt in.txt", "ask"),                            # the writing flag inside a cluster
+    ("file -bC -m magic input", "ask"),
+    ("tree -fo out.txt", "ask"),
     ("cat x | tee copy.txt", "ask"),
 ])
 def test_read_only_pipelines_run_but_writes_substitutions_and_other_programs_do_not(ws, command, decision):
@@ -157,11 +161,12 @@ def test_read_only_pipelines_run_but_writes_substitutions_and_other_programs_do_
         assert got.rule.id == "d-readonly"
 
 
-@pytest.mark.parametrize("provider", ["codex", "opencode", "antigravity"])
+@pytest.mark.parametrize("provider", ["claude", "codex", "opencode", "antigravity"])
 def test_an_explicit_ask_survives_every_providers_fallbacks(db, ws, provider, monkeypatch):
     """A rule that asks is the person's to decide: not the profile's allowed_tools
-    (Codex), not OpenCode's own config (the plugin fails closed), not agy's
-    in-workspace default (the strict hook denies and escalates)."""
+    (Claude Code's PreToolUse approval, Codex), not OpenCode's own config (the
+    plugin fails closed), not agy's in-workspace default (the strict hook
+    denies and escalates)."""
     from pathlib import Path
 
     from brindle import agents, antigravity, opencode
@@ -174,6 +179,15 @@ def test_an_explicit_ask_survives_every_providers_fallbacks(db, ws, provider, mo
     a = Agent("p1", ws.id, "developer", provider, "boss", "assign", "processing", "%p1", None, time.time())
     db.add_agent(a)
     monkeypatch.setattr(agents, "_hold_for_app", lambda *args, **kw: None)     # no daemon: the CLI's prompt asks
+    if provider == "claude":
+        pre = lambda command: agents.pre_tool_decision(  # noqa: E731
+            db, a, {"tool_name": "Bash", "tool_input": {"command": command}})["hookSpecificOutput"]
+        assert pre("git push origin main")["permissionDecision"] == "ask"      # forces the prompt the hook holds
+        assert pre("git push origin feature")["permissionDecision"] == "allow"  # no rule asks: allowed_tools cover it
+        assert pre("git push --force origin feature")["permissionDecision"] == "deny"
+        assert agents.pre_tool_decision(db, a, {"tool_name": "Read", "tool_input": {
+            "file_path": os.path.join(ws.path, ".env")}})["hookSpecificOutput"]["permissionDecision"] == "deny"
+        return                                                                  # PermissionRequest counts the ask
     if provider == "codex":
         out = agents.permission_request_decision(
             db, a, {"tool_name": "Bash", "tool_input": {"command": "git push origin main"}, "cwd": ws.path}, "codex")
@@ -184,7 +198,7 @@ def test_an_explicit_ask_survives_every_providers_fallbacks(db, ws, provider, mo
     elif provider == "opencode":
         out = json.loads(opencode.hook_main(db, a.id, "opencode-pre-tool", json.dumps(
             {"session_id": "s", "tool": "bash", "args": {"command": "git push origin main"}})))
-        assert out["decision"] == "deny" and "can't wait for the person's answer" in out["reason"]
+        assert out["decision"] == "deny"                                       # fails closed: it can't hold the ask
         assert opencode.hook_main(db, a.id, "opencode-pre-tool", json.dumps(
             {"session_id": "s", "tool": "bash", "args": {"command": "git push origin feature"}})) == ""
     else:

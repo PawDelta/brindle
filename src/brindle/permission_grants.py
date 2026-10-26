@@ -158,7 +158,14 @@ class Ask:
 
 
 def generalize(req: Request) -> Ask:
+    """``req`` generalized. A command that pushes to several destinations has
+    no single exact or destination form: its ladder starts at the remote
+    (every branch on it), and its exact form lists every push."""
     kind = grant_kind(req)
+    keys = ask_keys(req)
+    if kind == "push" and len(set(keys)) > 1:
+        scopes = [s for s in scopes_for(kind, keys[0]) if s["value"] not in (EXACT, GENERAL)]
+        return Ask(kind, ", ".join(dict.fromkeys(keys)), scopes)
     return Ask(kind, ask_key(req), scopes_for(kind, ask_key(req), req.tool))
 
 
@@ -211,13 +218,17 @@ def _other_parts_allowed(req: Request, rules: list[Rule] | None) -> bool:
 
 
 def covers(action: SavedAction, req: Request, rules: list[Rule] | None = None) -> bool:
-    """Whether ``action``'s pattern covers ``req``: every push the command
-    makes, for a push action, and nothing else runs alongside them."""
+    """Whether ``action``'s pattern covers ``req``. A deny covers it as soon as
+    any push the command makes matches; an allow only when every push does
+    and nothing else runs alongside them."""
     if action.kind != grant_kind(req):
         return False
     if action.repo is not None and req.repo_root and action.repo != req.repo_root:
         return False
-    if not all(scope_matches(action.kind, action.pattern, key) for key in ask_keys(req)):
+    hits = [scope_matches(action.kind, action.pattern, key) for key in ask_keys(req)]
+    if action.decision == "deny":
+        return any(hits)
+    if not all(hits):
         return False
     return action.kind != "push" or _other_parts_allowed(req, rules)
 
@@ -373,7 +384,11 @@ def eligible(ask: PendingAsk, scope: dict, mode: str, minutes: float | None) -> 
     """Why ``ask`` can't be resolved by a grant of ``scope`` in ``mode``, or None."""
     if ask.blocked:
         return "blocked by a deny rule"
-    if mode in ("once", "deny", "always-deny"):
+    if mode in ("deny", "always-deny"):
+        return None
+    if not all(scope_matches(ask.ask.kind, scope["pattern"], key) for key in ask_keys(ask.request)):
+        return "pushes outside this scope"     # a command pushing to more than the scope covers
+    if mode == "once":
         return None
     life = {"session": "session", "timed": "time", "forever": "forever"}[mode]
     return limits_allow(scope.get("level"), scope["pattern"], life, minutes, ask.rule)
@@ -445,7 +460,8 @@ def decide_group(db, key: str, scope_value: str, mode: str, minutes: float | Non
     reasons: dict[str, str] = {}
     hits = []
     for a in wanted:
-        why = eligible(a, scope, mode, minutes)
+        # A deny needs no coverage: it stops what the person points at.
+        why = eligible(a, scope, mode, minutes) if mode not in ("deny", "always-deny") else None
         if why:
             reasons[a.request_id] = why
         else:

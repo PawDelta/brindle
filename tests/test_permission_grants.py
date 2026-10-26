@@ -80,6 +80,10 @@ def test_saved_actions_settle_asks_only_within_policy_limits_and_never_past_a_de
     assert decide(bash(ws, "git push origin fix:main fix:release")).decision == "ask"        # every push must be covered
     assert decide(bash(ws, "git push --force origin fix:main")).decision == "deny"           # a deny rule still wins
     assert decide(bash(ws, "git push origin +fix:main")).decision == "deny"                  # a forced refspec too
+    # A saved deny stops a command as soon as one of its pushes matches, whatever else it pushes.
+    release = permissions.save_action("push", "* → release @ origin", "deny", scope="general", level="destination")
+    assert decide(bash(ws, "git push origin fix:main fix:release")).decision == "deny"
+    assert decide(push).decision == "allow"
     permissions.update_saved_action(long.id, minutes=1)
     permissions.load_store()
     with permissions.editing() as store:
@@ -95,7 +99,7 @@ def test_saved_actions_settle_asks_only_within_policy_limits_and_never_past_a_de
     stop = permissions.save_action("write", "src/auth/**", "deny", scope="general")
     assert decide(write(ws, "src/auth/login.ts"), session="boss").decision == "deny"   # a saved deny beats a saved allow
     assert decide(write(ws, "src/api/client.ts"), session="boss").decision == "allow"
-    assert {s.id for s in permissions.load_store().saved} == {long.id, mine.id, stop.id}
+    assert {s.id for s in permissions.load_store().saved} == {long.id, release.id, mine.id, stop.id}
 
     # A saved deny also beats an automatic allow rule, so it keeps working when the ask goes away.
     permissions.add_rule("bash", "npm ", "allow", "prefix")
@@ -148,15 +152,18 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     worker(db, ws, "w1"), worker(db, ws, "w2"), worker(db, ws, "w3")
     hooks = [Hook(db, "w1", write(ws, "src/auth/login.ts")), Hook(db, "w2", write(ws, "src/auth/session.ts")),
              Hook(db, "w3", bash(ws, "git push origin fix:main")), Hook(db, "w1", bash(ws, "npm test -- auth")),
-             Hook(db, "w2", mcp(ws, "mcp__github__create_issue")), Hook(db, "w3", mcp(ws, "mcp__github__create_issue"))]
+             Hook(db, "w2", mcp(ws, "mcp__github__create_issue")), Hook(db, "w3", mcp(ws, "mcp__github__create_issue")),
+             Hook(db, "w1", bash(ws, "git push origin fix:main fix:release"))]
     items = grants.groups(grants.pending_asks(db, ws.repo_root))
+    # A command pushing to two destinations is its own item, at the remote: no destination grant covers it.
     assert [(g.kind, g.rep.ask.general["pattern"], len(g.items)) for g in items] == [
         ("write", "src/**", 2), ("push", "* → main @ origin", 1), ("bash", "npm test *", 1),
-        ("mcp", "mcp__github__create_issue", 2)]
+        ("mcp", "mcp__github__create_issue", 2), ("push", "* → * @ origin", 1)]
+    assert items[4].rep.ask.exact == "fix → main @ origin, fix → release @ origin"
     assert items[1].policy.rule.id == "d-push-default" and items[0].policy.rule is None
     # An MCP tool's general form is the tool itself: "once" at that scope still resolves the whole item.
     out = grants.decide_group(db, items[3].key, "general", "once")
-    assert len(out["resumed"]) == 2 and all(h.done.wait(5) and h.answer == "allow_once" for h in hooks[4:])
+    assert len(out["resumed"]) == 2 and all(h.done.wait(5) and h.answer == "allow_once" for h in hooks[4:6])
     assert svc.decision_dto(out).grant is None
 
     writes = items[0]
@@ -175,8 +182,13 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     pushes = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.kind == "push")
     with pytest.raises(Exception, match="nothing in this scope can be approved: not permitted until revoked"):
         grants.decide_group(db, pushes.key, "general", "forever")
-    out = grants.decide_group(db, pushes.key, "exact", "once")
+    out = grants.decide_group(db, pushes.key, "general", "once")
     assert out["grant"] is None and len(out["resumed"]) == 1 and hooks[2].done.wait(5) and hooks[2].answer == "allow_once"
+    assert not hooks[6].done.is_set()                                   # the two-destination push waits on its own
+    both = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.rep.agent_id == "w1" and g.kind == "push")
+    with pytest.raises(Exception, match="outside its approval scope"):  # the remote is past the push rule's limit
+        grants.decide_group(db, both.key, "remote", "timed", 5)
+    assert len(grants.decide_group(db, both.key, "remote", "deny")["stopped"]) == 1 and hooks[6].done.wait(5)
     # Always deny stops the group and saves the deny.
     tests = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.kind == "bash")
     out = grants.decide_group(db, tests.key, "general", "always-deny")

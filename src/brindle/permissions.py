@@ -1185,7 +1185,8 @@ def _branch_name(ref: str) -> str:
     """A refspec side as a branch name, or UNKNOWN_REF when only git can tell
     which branch it means (HEAD, @{upstream}, a revision expression)."""
     ref = ref.removeprefix("refs/heads/")
-    if not ref or ref == "HEAD" or ref.startswith("@") or any(c in ref for c in "~^@{}"):
+    # A wildcard refspec (refs/heads/*) names a set of branches only git knows.
+    if not ref or ref == "HEAD" or ref.startswith("@") or any(c in ref for c in "~^@{}*?["):
         return UNKNOWN_REF
     return ref
 
@@ -1296,22 +1297,40 @@ def push_matches(match: str, req: Request, loose: bool) -> bool:
 # that writes a file (a redirection other than to /dev/null), substitutes a
 # command, or runs a program not on the list goes through the normal decision.
 
-# program -> the options that make it write a file or run another program
-# (any argument starting with one of them refuses the command). Only programs
+# program -> (short option letters, long options) that make it write a file
+# or run another program; a short letter counts anywhere in an option cluster
+# (``sort -ro out``), a long option with or without ``=value``. Only programs
 # audited for such options are listed; ``uniq``'s second operand is an output
 # file, so it takes one operand at most (see _readonly_part).
-READONLY_PROGRAMS: dict[str, tuple[str, ...]] = {
-    "grep": (), "egrep": (), "fgrep": (), "rg": ("--pre",), "ag": (),
-    "ls": (), "cat": (), "head": (), "tail": (), "wc": (), "nl": (), "tac": (), "rev": (), "fold": (),
-    "expand": (), "unexpand": (), "cut": (), "tr": (), "paste": (), "comm": (), "column": (), "seq": (),
-    "sort": ("-o", "--output", "--compress-program", "-S"), "uniq": (),
-    "diff": (), "cmp": (), "file": ("-C", "--compile"), "stat": (), "du": (), "df": (), "pwd": (),
-    "echo": (), "printf": (), "which": (), "whereis": (), "type": (), "basename": (), "dirname": (),
-    "realpath": (), "readlink": (), "true": (), "false": (), "test": (), "whoami": (), "uname": (),
-    "printenv": (), "strings": (), "od": (), "hexdump": (), "md5": (), "md5sum": (), "shasum": (),
-    "sha256sum": (), "jq": (), "yq": ("-i", "--inplace"), "tree": ("-o",), "locate": (),
+READONLY_PROGRAMS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "grep": ("", ()), "egrep": ("", ()), "fgrep": ("", ()), "rg": ("", ("--pre", "--pre-glob")), "ag": ("", ()),
+    "ls": ("", ()), "cat": ("", ()), "head": ("", ()), "tail": ("", ()), "wc": ("", ()), "nl": ("", ()),
+    "tac": ("", ()), "rev": ("", ()), "fold": ("", ()), "expand": ("", ()), "unexpand": ("", ()),
+    "cut": ("", ()), "tr": ("", ()), "paste": ("", ()), "comm": ("", ()), "column": ("", ()), "seq": ("", ()),
+    "sort": ("o", ("--output", "--compress-program")), "uniq": ("", ()),
+    "diff": ("", ()), "cmp": ("", ()), "file": ("C", ("--compile",)), "stat": ("", ()), "du": ("", ()),
+    "df": ("", ()), "pwd": ("", ()), "echo": ("", ()), "printf": ("", ()), "which": ("", ()),
+    "whereis": ("", ()), "type": ("", ()), "basename": ("", ()), "dirname": ("", ()), "realpath": ("", ()),
+    "readlink": ("", ()), "true": ("", ()), "false": ("", ()), "test": ("", ()), "whoami": ("", ()),
+    "uname": ("", ()), "printenv": ("", ()), "strings": ("", ()), "od": ("", ()), "hexdump": ("", ()),
+    "md5": ("", ()), "md5sum": ("", ()), "shasum": ("", ()), "sha256sum": ("", ()), "jq": ("", ()),
+    "yq": ("i", ("--inplace",)), "tree": ("o", ()), "locate": ("", ()),
+    "fd": ("xX", ("--exec", "--exec-batch")), "fdfind": ("xX", ("--exec", "--exec-batch")),
 }
 ONE_OPERAND = frozenset({"uniq"})
+
+
+def _has_option(args: list[str], short: str, long: tuple[str, ...]) -> bool:
+    """Whether any of ``args`` carries one of the short letters (in any
+    cluster, ``-ro``) or long options (``--output`` or ``--output=x``)."""
+    for a in args:
+        if a.startswith("--"):
+            name = a.split("=", 1)[0]
+            if name in long:
+                return True
+        elif a.startswith("-") and len(a) > 1 and any(c in short for c in a[1:]):
+            return True
+    return False
 FIND_WRITING = ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls", "-fprint0")
 # A sed script that only prints: an optional address (line numbers, $, /re/)
 # then p, P, l or =. Anything else (s///w, w, r, e ...) may write or run.
@@ -1365,19 +1384,14 @@ def _readonly_part(words: list[str]) -> bool:
         return not any(a in FIND_WRITING for a in args)
     if program == "sed":
         return _sed_readonly(args)
-    if program in ("fd", "fdfind"):
-        # -x/-X run a program; a short-option cluster may hide them.
-        return not any(a.startswith(("--exec", "--exec-batch", "-l")) or (a.startswith("-") and not a.startswith("--")
-                                                                            and any(c in a for c in "xX"))
-                       for a in args)
     if program == "tee":
         return not any(not a.startswith("-") for a in args)   # tee with no file only echoes
     if program == "hostname":
         return not any(not a.startswith("-") for a in args)   # with an operand it sets the name
-    forbidden = READONLY_PROGRAMS.get(program)
-    if forbidden is None:
+    audited = READONLY_PROGRAMS.get(program)
+    if audited is None:
         return False
-    if any(a.startswith(forbidden) for a in args if forbidden):
+    if _has_option(args, *audited):
         return False
     if program in ONE_OPERAND and sum(1 for a in args if not a.startswith("-")) > 1:
         return False
