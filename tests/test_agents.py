@@ -229,6 +229,32 @@ def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, mon
     assert db.pending_count("a1") == 1
 
 
+CODEX_BUSY = "• Working (4s • esc to interrupt)\n\n› \n\n  ? for shortcuts\n"
+AGY_BUSY = "Working\n> \n───\nesc to cancel\n"
+AGY_APPROVAL = "Requesting permission for:\n  git push\nRun this command?\n  Yes / No\nesc to cancel\n"
+
+
+@pytest.mark.parametrize("provider,screen,typed", [
+    ("codex", CODEX_BUSY, True),
+    pytest.param("antigravity", AGY_BUSY, True,
+                 marks=pytest.mark.variant("agy reads its composer differently from Codex")),
+    ("antigravity", AGY_APPROVAL, False),  # keys typed now would answer the approval
+])
+def test_midturn_delivery_types_into_busy_codex_and_agy(db, ws, monkeypatch, provider, screen, typed):
+    # Codex and agy hold input typed mid-turn until the current step ends, so a
+    # queued message needn't wait for the turn-end notify / Stop flush.
+    db.add_agent(Agent("a1", ws.id, "developer", provider, None, "interactive", "processing", "@0",
+                       None, time.time()))
+    db.enqueue("a1", "queued message", None)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: screen)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    assert agents.flush(db, "a1") is typed
+    assert pasted == (["queued message"] if typed else [])
+    assert db.pending_count("a1") == (0 if typed else 1)
+    assert db.get_agent("a1").status == "processing"
+
+
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):
     fake_agent(db, ws, status="processing")
     screens = iter([CLAUDE_IDLE, CLAUDE_BUSY])

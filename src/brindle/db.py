@@ -1421,6 +1421,12 @@ class DB:
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), row["id"]))
             return _load(Message, row)
 
+    def release_pending(self, message_id: int, agent_id: str) -> None:
+        """Put a message pop_pending claimed back in the queue, as it was."""
+        with self.tx() as c:
+            c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
+                      (message_id, agent_id))
+
     def retry_pending(self, message_id: int, agent_id: str, idle_since: float) -> None:
         """Release the caller's failed delivery claim without creating a second message.
 
