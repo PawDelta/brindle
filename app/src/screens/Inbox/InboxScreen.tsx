@@ -19,7 +19,9 @@
    done, or shows the job's error). Everything else (an agent waiting at
    its own prompt, a permission only that prompt can take, a failure, a
    branch to review or merge again) says so in one quiet line and only
-   goes to the session.
+   goes to the session. Requests brindle's hook holds come grouped instead,
+   above the rest (PermissionAsks.tsx): one item per kind and general form,
+   decided at once for every request in it, under the stall notice.
 
    The same items count on the sidebar's "Inbox · N" at its top, and
    nowhere else: the Inbox is where what needs a person is read and acted
@@ -36,6 +38,7 @@ import { useSessions } from "../../store/sessions";
 import { useAppState } from "../../store/useStore";
 import { useJob } from "../Branch/useJob";
 import { ItemActions } from "./ItemActions";
+import { PermissionAsks, usePermissionAsks } from "./PermissionAsks";
 import { FIXES, KIND_SHORT, answerable, describeItem, fixable, forgetGone, itemKey, kindLabel, permissionAnswer, permissionLine, seenAt } from "./items";
 import { useInboxActions } from "./useInboxActions";
 
@@ -49,6 +52,8 @@ export interface InboxScreenProps {
   session?: string | null;
   /* Back to everything. */
   onShowAll?(): void;
+  /* Settings › Permissions with a rule's editor open (none: the unmatched setting). */
+  onOpenRule?(rule?: string): void;
 }
 
 interface Group {
@@ -79,21 +84,25 @@ const PLAIN = "border-line-strong bg-surface text-ink hover:bg-surface-2";
 const GHOST = "border-transparent text-ink-3 hover:text-ink";
 const LINK = "text-[11.5px] text-branch hover:underline";
 
-export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll }: InboxScreenProps) {
+export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll, onOpenRule }: InboxScreenProps) {
   const inbox = useAppState((s) => s.inbox);
   const workspaces = useAppState((s) => s.workspaces);
   const synced = useAppState((s) => s.synced);
   const error = useAppState((s) => s.error);
   const { find, repoOf, hidden, repos } = useSessions();
   const actions = useInboxActions(client, refresh, 0, inbox);
+  const asks = usePermissionAsks(client, inbox);
 
   useEffect(() => forgetGone(inbox), [inbox]);
 
   const agents = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []), [workspaces]);
 
   // On one session: the items of any of its agents (the whole tree), none from elsewhere.
+  // A request the permission items hold is theirs, not a card of its own.
   const inSession = (i: InboxItemDTO) => session === null || (!!i.agent_id && rootOf(agents, i.agent_id, hidden) === session);
-  const here = useMemo(() => (session === null ? inbox : inbox.filter(inSession)).filter((i) => !actions.hidden.has(itemKey(i))), [inbox, session, agents, hidden, actions.hidden]); // eslint-disable-line react-hooks/exhaustive-deps
+  const here = useMemo(() => (session === null ? inbox : inbox.filter(inSession)).filter((i) => !actions.hidden.has(itemKey(i)) && !asks.held(i)), [inbox, session, agents, hidden, actions.hidden, asks.held]); // eslint-disable-line react-hooks/exhaustive-deps
+  const askGroups = useMemo(() => (session === null ? asks.groups : asks.groups.map((g) => ({ ...g, items: g.items.filter((a) => a.root_id === session) })).filter((g) => g.items.length > 0)), [asks.groups, session]);
+  const waiting = here.length + askGroups.length;
   const sessionTitle = session === null ? null : (find(session)?.goal ?? session);
 
   /* By session: the root each item's agent hangs under, with the session's
@@ -141,8 +150,8 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
       <PageHeader
         title="Inbox"
         lede={
-          synced && here.length > 0
-            ? `${here.length} waiting across ${withSession} session${withSession === 1 ? "" : "s"}${sessionTitle ? ` (only ${sessionTitle})` : ""}. Every card goes to its session; permissions brindle holds are answered here, the rest in the agent's terminal.`
+          synced && waiting > 0
+            ? `${waiting} waiting across ${withSession} session${withSession === 1 ? "" : "s"}${sessionTitle ? ` (only ${sessionTitle})` : ""}. Every card goes to its session; permissions brindle holds are answered here, the rest in the agent's terminal.`
             : sessionTitle
               ? `Nothing waits on you in ${sessionTitle}.`
               : "Nothing waits on you."
@@ -170,8 +179,17 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
         </div>
       )}
       {!synced && !error && <p className="text-ink-3">Loading…</p>}
-      {synced && here.length === 0 && <AllClear />}
+      {synced && waiting === 0 && <AllClear />}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-[18px] overflow-y-auto pb-s3" aria-label="Queue">
+        <PermissionAsks
+          client={client}
+          groups={askGroups}
+          onOpenRule={onOpenRule}
+          onDone={() => {
+            void asks.reload();
+            void refresh();
+          }}
+        />
         {groups.map((group) => (
           <section key={group.key} className="flex flex-col gap-s1" aria-label={group.title}>
             <header className="flex items-baseline gap-[10px] px-0.5">

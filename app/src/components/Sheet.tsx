@@ -22,6 +22,8 @@ export interface SheetProps {
   onKey?(e: KeyboardEvent<HTMLDivElement>): void;
   /* A wide sheet (a diff) takes most of the screen; the default fits a reading column. */
   wide?: boolean;
+  /* Over the whole window, for a screen that scrolls (Settings); the default covers the screen it is in. */
+  fixed?: boolean;
   testId?: string;
 }
 
@@ -31,7 +33,7 @@ export const inControl = (e: KeyboardEvent): boolean => {
   return target !== e.currentTarget && !!target.closest("button, a, input, textarea, select, [contenteditable]");
 };
 
-export function Sheet({ label, title, subtitle, children, footer, onClose, onKey, wide = false, testId }: SheetProps) {
+export function Sheet({ label, title, subtitle, children, footer, onClose, onKey, wide = false, fixed = false, testId }: SheetProps) {
   const host = useRef<HTMLDivElement>(null);
   useEffect(() => {
     host.current?.focus();
@@ -45,7 +47,7 @@ export function Sheet({ label, title, subtitle, children, footer, onClose, onKey
     onKey?.(e);
   };
   return (
-    <div className="sheet-layer absolute inset-0 z-20 flex justify-end" data-testid={testId ?? "sheet"}>
+    <div className={`sheet-layer ${fixed ? "fixed" : "absolute"} inset-0 z-20 flex justify-end`} data-testid={testId ?? "sheet"}>
       <div className="absolute inset-0 bg-canvas/60 backdrop-blur-[1px]" aria-hidden onClick={onClose} />
       <div
         ref={host}
