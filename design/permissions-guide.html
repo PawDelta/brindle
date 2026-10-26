@@ -123,16 +123,15 @@ td.col-def{background:var(--branch-soft)}
 
 <section>
   <span class="eyebrow">The decision ladder</span>
-  <h2>A request is checked top to bottom. The first match decides.</h2>
+  <h2>A request is checked against every rule. Deny beats ask, and ask beats allow.</h2>
   <div class="req"><span class="pill">agent wants: git push origin fix/login → main</span><span class="arrow">↓</span></div>
   <div class="ladder" role="list">
-    <div class="step" role="listitem"><span class="num">1</span><div class="what"><h3>Organization rules</h3><p>Limits an org admin set. Members can't override them. Enterprise only.</p></div><div class="out"><span class="chip block"><i></i>can block</span></div></div>
+    <div class="step" role="listitem"><span class="num">1</span><div class="what"><h3>Organization rules</h3><p>Limits an org admin set. Members can't override them. Team organizations.</p></div><div class="out"><span class="chip block"><i></i>can block</span></div></div>
     <div class="step" role="listitem"><span class="num">2</span><div class="what"><h3>Your deny rules and saved denies</h3><p>A deny always wins. Credential files (<code>~/.ssh</code>, <code>.env</code>, brindle's token) start here as ordinary rules you can remove.</p></div><div class="out"><span class="chip block"><i></i>blocked</span></div></div>
-    <div class="step" role="listitem"><span class="num">3</span><div class="what"><h3>Saved allows</h3><p>Things you allowed from the Inbox, within their scope and until they expire.</p></div><div class="out"><span class="chip run"><i></i>runs</span></div></div>
-    <div class="step" role="listitem"><span class="num">4</span><div class="what"><h3>Allow rules</h3><p>From your preset or added by you.</p></div><div class="out"><span class="chip run"><i></i>runs</span></div></div>
-    <div class="step" role="listitem"><span class="num">5</span><div class="what"><h3>Read-only commands</h3><p><code>grep</code>, <code>cat</code>, <code>ls</code>, <code>git log</code> and friends, even with pipes or escapes brindle can't fully parse.</p></div><div class="out"><span class="chip run"><i></i>runs</span></div></div>
-    <div class="step" role="listitem"><span class="num">6</span><div class="what"><h3>Ask rules</h3><p>The request goes to your Inbox in its general form, grouped with similar ones.</p></div><div class="out"><span class="chip ask"><i></i>asks once</span></div></div>
-    <div class="step" role="listitem"><span class="num">7</span><div class="what"><h3>Nothing matched</h3><p>Your "unmatched actions" setting: ask, allow and log it, or deny.</p></div><div class="out"><span class="chip br"><i></i>your choice</span></div></div>
+    <div class="step" role="listitem"><span class="num">3</span><div class="what"><h3>Ask rules</h3><p>The request goes to your Inbox in its general form, grouped with similar ones.</p></div><div class="out"><span class="chip ask"><i></i>asks once</span></div></div>
+    <div class="step" role="listitem"><span class="num">4</span><div class="what"><h3>Saved allows</h3><p>Things you allowed from the Inbox settle an ask, but only within the rule's current limits and until they expire.</p></div><div class="out"><span class="chip run"><i></i>runs</span></div></div>
+    <div class="step" role="listitem"><span class="num">5</span><div class="what"><h3>Allow rules</h3><p>From your preset or added by you. This includes read-only commands (<code>grep</code>, <code>cat</code>, <code>ls</code>, <code>git log</code>), which run only when brindle can fully parse them and no stronger restriction applies. Secure omits the pipeline allow, and its broad bash ask means even git and check commands ask.</p></div><div class="out"><span class="chip run"><i></i>runs</span></div></div>
+    <div class="step" role="listitem"><span class="num">6</span><div class="what"><h3>Nothing matched</h3><p>Your "unmatched actions" setting: ask, allow and log it, or deny.</p></div><div class="out"><span class="chip br"><i></i>your choice</span></div></div>
   </div>
 </section>
 
@@ -150,7 +149,7 @@ td.col-def{background:var(--branch-soft)}
       <span><strong>Allow pushes into main from any branch?</strong><br><span style="font-size:12.5px;color:var(--ink-3)">3 requests · 3 workers · Generalized from fix/login → main</span></span>
       <span class="btns"><span class="btn">Narrow to this request</span><span class="btn">Deny</span><span class="btn">Always allow</span><span class="btn p">Allow for 30 min</span></span>
     </div>
-    <p style="font-size:13px">Files group by folder (<code>src/**</code>), commands by family (<code>npm test *</code>), tools by tool or server. A request that something you already allowed covers never reaches the Inbox; it shows up in Activity as resumed.</p>
+    <p style="font-size:13px">Files group by folder (<code>src/**</code>), commands by family (<code>npm test *</code>), tools by single tool (not a whole server). A request that a saved allow covers can skip the Inbox, but only while it is within the rule's current limits and the provider enforces it.</p>
   </div>
 </section>
 
@@ -168,7 +167,7 @@ td.col-def{background:var(--branch-soft)}
       <span class="where">Settings → Permissions</span>
       <h3>Shape the rules</h3>
       <div class="mini"><div class="row"><span>Write files</span><span class="chip ask" style="font-size:10px;padding:1px 6px">31× asked</span></div><div class="row"><span>Edit files</span><span class="chip ask" style="font-size:10px;padding:1px 6px">24× asked</span></div></div>
-      <ul><li><b>Rules</b>: edit or remove any rule</li><li><b>What interrupts your agents</b>: one click to stop a noisy ask</li><li><b>Saved actions</b>: your remembered allows and denies</li><li><b>Activity</b>: what ran, what was stopped</li></ul>
+      <ul><li><b>Rules</b>: edit or remove any rule</li><li><b>What interrupts your agents</b>: one click to stop a noisy ask</li><li><b>Saved actions</b>: your remembered allows and denies</li><li><b>Activity</b>: policy and saved-action timestamps and screen changes, not a full execution log</li></ul>
     </div>
     <div class="place">
       <span class="where">Inbox · as needed</span>
@@ -186,18 +185,20 @@ td.col-def{background:var(--branch-soft)}
     <table>
       <thead><tr><th>Action</th><th class="def">Autonomous</th><th>Permissive</th><th>Standard</th><th>Secure</th></tr></thead>
       <tbody>
-        <tr><th>Read files</th><td class="col-def"><span class="chip run"><i></i>runs</span></td><td><span class="chip run"><i></i>runs</span></td><td><span class="chip run"><i></i>runs</span></td><td><span class="chip run"><i></i>runs</span></td></tr>
-        <tr><th>Write and edit files</th><td class="col-def"><span class="chip run"><i></i>runs</span></td><td><span class="chip run"><i></i>runs</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks · 15 min</span></td></tr>
-        <tr><th>Run commands</th><td class="col-def"><span class="chip run"><i></i>runs</span></td><td><span class="chip run"><i></i>runs</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks · 15 min</span></td></tr>
-        <tr><th>Push to a work branch</th><td class="col-def"><span class="chip run"><i></i>runs</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>owners only</span></td></tr>
-        <tr><th>Push into main or release/*</th><td class="col-def"><span class="chip ask"><i></i>asks once</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>owners only</span></td></tr>
-        <tr><th>Web and connected tools</th><td class="col-def"><span class="chip run"><i></i>runs</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks · 15 min</span></td></tr>
-        <tr><th>Credential files, deleting repos</th><td class="col-def"><span class="chip block"><i></i>blocked</span></td><td><span class="chip block"><i></i>blocked</span></td><td><span class="chip block"><i></i>blocked</span></td><td><span class="chip block"><i></i>blocked</span></td></tr>
+        <tr><th>Read tracked files</th><td class="col-def"><span class="chip run"><i></i>runs</span></td><td><span class="chip run"><i></i>runs</span></td><td><span class="chip run"><i></i>runs</span></td><td><span class="chip run"><i></i>runs</span></td></tr>
+        <tr><th>Read other files</th><td class="col-def"><span class="chip run"><i></i>runs</span></td><td><span class="chip run"><i></i>runs in the worktree, else asks</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip block"><i></i>blocked</span></td></tr>
+        <tr><th>Write and edit files</th><td class="col-def"><span class="chip run"><i></i>runs</span></td><td><span class="chip run"><i></i>runs in the worktree, else asks</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks · 15 min</span></td></tr>
+        <tr><th>Run commands</th><td class="col-def"><span class="chip run"><i></i>runs</span></td><td><span class="chip run"><i></i>everyday tools run, others ask</span></td><td><span class="chip run"><i></i>everyday tools run, others ask</span></td><td><span class="chip ask"><i></i>asks · 15 min</span></td></tr>
+        <tr><th>Push to a work branch</th><td class="col-def"><span class="chip run"><i></i>runs</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks · 15 min</span></td></tr>
+        <tr><th>Push into the default branch</th><td class="col-def"><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks · 30 min</span></td><td><span class="chip ask"><i></i>asks · 15 min</span></td></tr>
+        <tr><th>Push into release or release/*</th><td class="col-def"><span class="chip ask"><i></i>asks every time</span></td><td><span class="chip ask"><i></i>asks every time</span></td><td><span class="chip ask"><i></i>asks every time</span></td><td><span class="chip ask"><i></i>asks every time</span></td></tr>
+        <tr><th>Web and connected tools</th><td class="col-def"><span class="chip run"><i></i>runs</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>web asks · 15 min; tools blocked</span></td></tr>
+        <tr><th>Credential files, force pushes, deleting root or home</th><td class="col-def"><span class="chip block"><i></i>blocked</span></td><td><span class="chip block"><i></i>blocked</span></td><td><span class="chip block"><i></i>blocked</span></td><td><span class="chip block"><i></i>blocked</span></td></tr>
         <tr><th>Anything no rule covers</th><td class="col-def"><span class="chip run"><i></i>runs · logged</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip ask"><i></i>asks</span></td><td><span class="chip block"><i></i>blocked</span></td></tr>
       </tbody>
     </table>
   </div>
-  <p style="font-size:13px">Every cell is an ordinary rule. Change or remove any of them in Settings → Permissions.</p>
+  <p style="font-size:13px">Most cells are ordinary rules; "anything no rule covers" is the unmatched setting. Change or remove any of them in Settings → Permissions.</p>
 </section>
 
 <section>
@@ -217,11 +218,11 @@ td.col-def{background:var(--branch-soft)}
     <div class="card after">
       <h3>After PR #281</h3>
       <ul>
-        <li><span class="ok">✓</span><span>No built-in rules. Every rule, defaults included, is editable and removable</span></li>
-        <li><span class="ok">✓</span><span>Read-only commands always run</span></li>
+        <li><span class="ok">✓</span><span>No built-in preset rules: every seeded rule is editable and removable. Safety decisions such as the shell-syntax ask and blocks for unreadable policy are still synthesized by the engine</span></li>
+        <li><span class="ok">✓</span><span>Eligible read-only commands run when no stronger restriction applies</span></li>
         <li><span class="ok">✓</span><span>Grouped, generalized requests: one answer covers them all</span></li>
         <li><span class="ok">✓</span><span>One system: presets, rules, saved actions. Your old settings convert automatically</span></li>
-        <li><span class="ok">✓</span><span>Org approval limits for enterprise stay as they are</span></li>
+        <li><span class="ok">✓</span><span>Org approval limits for Team organizations stay as they are</span></li>
       </ul>
     </div>
   </div>
@@ -229,7 +230,7 @@ td.col-def{background:var(--branch-soft)}
 
 <section>
   <span class="eyebrow">One switch left in config</span>
-  <div class="note"><span class="chip br" style="flex-shrink:0"><i></i>config</span><span><b><code>permission_policy</code></b> (on by default) turns all of this on or off for a repo. Turning it off makes the agent's own CLI decide instead. It is only a workaround while this PR is being finished, and goes back on once it merges.</span></div>
+  <div class="note"><span class="chip br" style="flex-shrink:0"><i></i>config</span><span><b><code>permission_policy</code></b> turns all of this on or off for a repo. Without an explicit setting it defaults on only with the learned-rules license capability, and off otherwise. Turning it off stops brindle's rules; strict agy still enforces policy and other profile and hook protections remain.</span></div>
 </section>
 
 <p class="foot">Describes the design merging in PR #281 (PawDelta/brindle). The merge with main is still in progress; details are rechecked against the final code before release.</p>
