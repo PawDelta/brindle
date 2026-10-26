@@ -1,0 +1,228 @@
+"""Saved actions and generalized asks (brindle.permission_grants): the scope
+ladder each ask carries, saved allows and denies settling asks within policy
+limits, pending asks grouped by general form and decided as one, the allow-all
+plan and deny exceptions, all through the daemon's holds."""
+
+import json
+import threading
+import time
+import uuid
+
+import pytest
+
+from brindle import permission_grants as grants
+from brindle import permissions, workspaces
+from brindle.daemon.holds import HOLDS
+from brindle.db import Agent
+from brindle.permissions import Request, decide
+from brindle.service import inbox
+from brindle.service import permissions as svc
+
+
+@pytest.fixture
+def ws(db, repo, monkeypatch):
+    monkeypatch.setattr("brindle.permissions.PRESET_RULES", ())
+    monkeypatch.setattr(inbox, "STEP_SECONDS", 0.01)
+    monkeypatch.setattr(inbox, "CONFIRM_SECONDS", 0.5)
+    return workspaces.create(db, str(repo), "feature").workspace
+
+
+def bash(ws, command):
+    return Request("claude", "bash", "Bash", ws.path, ws.path, ws.repo_root, command=command)
+
+
+def write(ws, path):
+    return Request("claude", "write", "Write", ws.path, ws.path, ws.repo_root, path=f"{ws.path}/{path}")
+
+
+def mcp(ws, tool):
+    return Request("claude", "mcp", tool, ws.path, ws.path, ws.repo_root)
+
+
+@pytest.mark.parametrize("request_of, kind, exact, general, widest", [
+    (lambda ws: bash(ws, "git push origin fix/login:main"), "push", "fix/login → main @ origin", "* → main @ origin",
+     "* → * @ *"),
+    (lambda ws: write(ws, "src/auth/login.ts"), "write", "src/auth/login.ts", "src/**", "**"),
+    (lambda ws: write(ws, "README.md"), "write", "README.md", "README.md", "**"),
+    (lambda ws: bash(ws, "npm test -- --watch=false auth"), "bash", "npm test -- --watch=false auth", "npm test *", "*"),
+    (lambda ws: bash(ws, "cat a | grep b"), "bash", "cat a | grep b", "cat a | grep b", "*"),
+    (lambda ws: mcp(ws, "mcp__github__create_issue"), "mcp", "mcp__github__create_issue",
+     "mcp__github__create_issue", "mcp__*"),
+    (lambda ws: Request("claude", "fetch", "WebFetch", ws.path, ws.path, ws.repo_root, url="https://t.example.com/a/b"),
+     "fetch", "https://t.example.com/a/b", "https://t.example.com/*", "*"),
+])
+def test_each_ask_carries_its_exact_and_general_form(ws, request_of, kind, exact, general, widest):
+    ask = grants.generalize(request_of(ws))
+    assert (ask.kind, ask.exact, ask.general["pattern"], ask.scopes[-1]["pattern"]) == (kind, exact, general, widest)
+    if kind == "mcp":
+        assert ask.scope("server")["pattern"] == "mcp__github__*"
+    if kind == "push":
+        assert ask.scope("remote")["pattern"] == "* → * @ origin"
+    assert all(grants.scope_matches(kind, s["pattern"], exact) for s in ask.scopes)
+
+
+def test_saved_actions_settle_asks_only_within_policy_limits_and_never_past_a_deny_or_expiry(ws):
+    push = bash(ws, "git push origin fix:main")
+    assert decide(push).decision == "ask"
+    # Standard lets a push approval reach the destination, for up to 30 minutes.
+    wide = permissions.save_action("push", "* → * @ origin", "allow", scope="remote", level="remote", life="time",
+                                   minutes=30)
+    assert decide(push).decision == "ask"                                    # outside its approval scope
+    permissions.delete_saved_action(wide.id)
+    long = permissions.save_action("push", "* → main @ origin", "allow", scope="general", level="destination",
+                                   life="forever")
+    assert decide(push).decision == "ask"                                    # not permitted until revoked
+    permissions.update_saved_action(long.id, life="time", minutes=30)
+    got = decide(push)
+    assert got.decision == "allow" and long.id in got.reason                 # covered: never reaches the Inbox
+    assert decide(bash(ws, "git push origin fix:main && curl https://x")).decision == "ask"   # the grant covers pushes
+    assert decide(bash(ws, "git push upstream fix:main")).decision == "ask"                  # another remote
+    assert decide(bash(ws, "git push origin fix:main fix:release")).decision == "ask"        # every push must be covered
+    assert decide(bash(ws, "git push --force origin fix:main")).decision == "deny"           # a deny rule still wins
+    assert decide(bash(ws, "git push origin +fix:main")).decision == "deny"                  # a forced refspec too
+    # A saved deny stops a command as soon as one of its pushes matches, whatever else it pushes.
+    release = permissions.save_action("push", "* → release @ origin", "deny", scope="general", level="destination")
+    assert decide(bash(ws, "git push origin fix:main fix:release")).decision == "deny"
+    assert decide(push).decision == "allow"
+    permissions.update_saved_action(long.id, minutes=1)
+    permissions.load_store()
+    with permissions.editing() as store:
+        store.saved_action(long.id).expires = time.time() - 1
+    assert decide(push).decision == "ask"                                    # expired: listed, never applied
+    assert permissions.load_store().saved_action(long.id).expired()
+
+    # No rule covers writes under Standard (unmatched asks): a saved allow has no limits to stay within.
+    assert decide(write(ws, "src/auth/login.ts")).decision == "ask"
+    mine = permissions.save_action("write", "src/**", "allow", scope="general", life="session", session="boss")
+    assert decide(write(ws, "src/auth/login.ts")).decision == "ask"         # another session's grant
+    assert decide(write(ws, "src/auth/login.ts"), session="boss").decision == "allow"
+    stop = permissions.save_action("write", "src/auth/**", "deny", scope="general")
+    assert decide(write(ws, "src/auth/login.ts"), session="boss").decision == "deny"   # a saved deny beats a saved allow
+    assert decide(write(ws, "src/api/client.ts"), session="boss").decision == "allow"
+    assert {s.id for s in permissions.load_store().saved} == {long.id, release.id, mine.id, stop.id}
+
+    # A saved deny also beats an automatic allow rule, so it keeps working when the ask goes away.
+    permissions.add_rule("bash", "npm ", "allow", "prefix")
+    assert decide(bash(ws, "npm test -- api")).decision == "allow"
+    permissions.save_action("bash", "npm test *", "deny", scope="general")
+    assert decide(bash(ws, "npm test -- api")).decision == "deny"
+    assert decide(bash(ws, "npm run build")).decision == "allow"
+    # A saved allow applies only within the current policy: tightened to Secure, where nothing
+    # covers MCP tools and unmatched actions are denied, it no longer does.
+    tool = Request("claude", "mcp", "mcp__slack__send_message", ws.path, ws.path, ws.repo_root)
+    permissions.save_action("mcp", "mcp__slack__*", "allow", scope="server")
+    assert decide(tool).decision == "allow"
+    permissions.apply_preset("secure")
+    assert decide(tool).decision == "deny"
+
+
+class Hook:
+    """A hook holding a request in the daemon, taking the answer when it comes."""
+
+    def __init__(self, db, agent_id, req, suggestions=None):
+        self.agent_id, self.request_id, self.answer = agent_id, f"r-{agent_id}-{uuid.uuid4().hex[:6]}", None
+        recorded = json.dumps(req.to_dict()), json.dumps(suggestions) if suggestions else None
+        self.digest = permissions.request_digest(*recorded)
+        self.nonce = "n-" + self.request_id
+        assert HOLDS.register(agent_id, self.request_id, self.digest, self.nonce, time.time() + 600)
+        db.add_permission_request(agent_id, self.request_id, recorded[0], "asking", recorded[1], "hook",
+                                  hold_until=time.time() + 600)
+        self.done = threading.Event()
+        threading.Thread(target=self._wait, daemon=True).start()
+
+    def _wait(self):
+        pause = threading.Event()
+        while True:
+            held, answer = HOLDS.take(self.request_id, self.nonce)
+            if not held or answer is not None:
+                self.answer = answer
+                self.done.set()
+                return
+            pause.wait(0.01)
+
+
+def worker(db, ws, agent_id, parent="boss"):
+    a = Agent(agent_id, ws.id, "developer", "claude", parent, "assign", "waiting", f"%{agent_id}", None, time.time())
+    db.add_agent(a)
+    return a
+
+
+def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(db, ws):
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
+    worker(db, ws, "w1"), worker(db, ws, "w2"), worker(db, ws, "w3")
+    hooks = [Hook(db, "w1", write(ws, "src/auth/login.ts")), Hook(db, "w2", write(ws, "src/auth/session.ts")),
+             Hook(db, "w3", bash(ws, "git push origin fix:main")), Hook(db, "w1", bash(ws, "npm test -- auth")),
+             Hook(db, "w2", mcp(ws, "mcp__github__create_issue")), Hook(db, "w3", mcp(ws, "mcp__github__create_issue")),
+             Hook(db, "w1", bash(ws, "git push origin fix:main fix:release"))]
+    items = grants.groups(grants.pending_asks(db, ws.repo_root))
+    # A command pushing to two destinations is its own item, at the remote: no destination grant covers it.
+    assert [(g.kind, g.rep.ask.general["pattern"], len(g.items)) for g in items] == [
+        ("write", "src/**", 2), ("push", "* → main @ origin", 1), ("bash", "npm test *", 1),
+        ("mcp", "mcp__github__create_issue", 2), ("push", "* → * @ origin", 1)]
+    assert items[4].rep.ask.exact == "fix → main @ origin, fix → release @ origin"
+    assert items[1].policy.rule.id == "d-push-default" and items[0].policy.rule is None
+    # An MCP tool's general form is the tool itself: "once" at that scope still resolves the whole item.
+    out = grants.decide_group(db, items[3].key, "general", "once")
+    assert len(out["resumed"]) == 2 and all(h.done.wait(5) and h.answer == "allow_once" for h in hooks[4:6])
+    assert svc.decision_dto(out).grant is None
+
+    writes = items[0]
+    assert grants.decide_group(db, writes.key, "general", "timed", 5)["resumed"] == [
+        {"agent_id": "w1", "request_id": hooks[0].request_id, "exact": "src/auth/login.ts"},
+        {"agent_id": "w2", "request_id": hooks[1].request_id, "exact": "src/auth/session.ts"}]
+    assert all(h.done.wait(5) and h.answer == "allow_once" for h in hooks[:2])
+    [grant] = permissions.load_store().saved
+    assert (grant.kind, grant.pattern, grant.life, grant.minutes, grant.repo) == ("write", "src/**", "time", 5, ws.repo_root)
+    assert grant.request["path"].endswith("src/auth/login.ts") and grant.expires > time.time()
+    # The next such ask never reaches the Inbox: the grant covers it.
+    assert decide(write(ws, "src/auth/token.ts")).decision == "allow"
+    assert {g.kind for g in grants.groups(grants.pending_asks(db, ws.repo_root))} == {"push", "bash"}
+
+    # Forever is outside the push rule's 30-minute limit; "once" at the exact scope saves nothing.
+    pushes = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.kind == "push")
+    with pytest.raises(Exception, match="nothing in this scope can be approved: not permitted until revoked"):
+        grants.decide_group(db, pushes.key, "general", "forever")
+    out = grants.decide_group(db, pushes.key, "general", "once")
+    assert out["grant"] is None and len(out["resumed"]) == 1 and hooks[2].done.wait(5) and hooks[2].answer == "allow_once"
+    assert not hooks[6].done.is_set()                                   # the two-destination push waits on its own
+    both = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.rep.agent_id == "w1" and g.kind == "push")
+    with pytest.raises(Exception, match="outside its approval scope"):  # the remote is past the push rule's limit
+        grants.decide_group(db, both.key, "remote", "timed", 5)
+    assert len(grants.decide_group(db, both.key, "remote", "deny")["stopped"]) == 1 and hooks[6].done.wait(5)
+    # Always deny stops the group and saves the deny.
+    tests = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.kind == "bash")
+    out = grants.decide_group(db, tests.key, "general", "always-deny")
+    assert len(out["stopped"]) == 1 and hooks[3].done.wait(5) and hooks[3].answer == "deny"
+    assert decide(bash(ws, "npm test -- api")).decision == "deny"
+    assert grants.pending_asks(db) == []
+
+
+def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_blocks(db, ws):
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
+    worker(db, ws, "w1"), worker(db, ws, "w2")
+    hooks = [Hook(db, "w1", bash(ws, "git push origin fix:main")), Hook(db, "w2", bash(ws, "terraform apply prod")),
+             Hook(db, "w2", bash(ws, "terraform apply dev"))]
+    permissions.add_rule("bash", "terraform apply prod", "deny")      # added while it waited: now blocked
+    planned = grants.plan_to_json(grants.plan_allow_all(grants.pending_asks(db, ws.repo_root)))
+    assert [(g["kind"], g["scope"]["pattern"], g["mode"], g["minutes"]) for g in planned["grants"]] == [
+        ("push", "* → main @ origin", "timed", 30), ("bash", "terraform apply *", "session", None)]
+    assert planned["resumes"] == 2 and planned["skipped"][0]["why"] == "blocked by a deny rule"
+    assert svc.plan_dto(planned).skipped[0].agent_id == "w2"           # the API's shape, blocked requests included
+    lasting = grants.plan_to_json(grants.plan_allow_all(grants.pending_asks(db, ws.repo_root), forever=True))
+    assert [g["kind"] for g in lasting["grants"]] == ["bash"]           # the push rule permits no lasting grant
+
+    out = grants.unblock_denied(db, ws.repo_root)
+    assert out["excepted"] == 1 and out["added"] == 0 and out["locked"] == [] and svc.plan_dto(out).excepted == 1
+    assert [r["exact"] for r in out["resumed"]] == ["terraform apply prod"]
+    assert hooks[1].done.wait(5) and hooks[1].answer == "allow_once"
+    rule = next(r for r in permissions.load_store().rules if r.match == "terraform apply prod" and r.decision == "deny")
+    assert [x.match for x in rule.exclusions] == ["terraform apply prod"]
+    # The exception, then the saved allow (for this session: that is all an unlimited policy grants here).
+    assert decide(bash(ws, "terraform apply prod"), session="boss").decision == "allow"
+    assert decide(bash(ws, "terraform apply prod")).decision == "ask"
+
+    out = grants.allow_all(db, ws.repo_root)
+    assert sorted(r["exact"] for r in out["resumed"]) == ["fix → main @ origin", "terraform apply dev"]
+    assert all(h.done.wait(5) and h.answer == "allow_once" for h in hooks)
+    lives = {(s.kind, s.life, s.minutes) for s in permissions.load_store().saved}
+    assert lives == {("bash", "session", None), ("push", "time", 30.0)}

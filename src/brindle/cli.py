@@ -1441,7 +1441,7 @@ def coordinator_stop() -> None:
 
 @permissions_app.command("list")
 def permissions_list() -> None:
-    """Every rule in force (built-in, this repo's denies, yours and learned), with its source."""
+    """Every rule in force (this repo's denies, the preset's, yours and learned), with its source."""
     from brindle import permissions as perms
 
     repo = _here_repo()
@@ -1449,7 +1449,9 @@ def permissions_list() -> None:
         from brindle.config import load_repo_config
 
         state = load_repo_config(repo).permission_policy
-        typer.echo(f"permission_policy: {state if state == 'on' else 'off'}\n")
+        typer.echo(f"permission_policy: {state if state == 'on' else 'off'}")
+    store = perms.load_store()
+    typer.echo(f"preset: {store.preset or 'none'}; unmatched actions: {store.unmatched}\n")
     for r in perms.all_rules(repo):
         typer.echo(f"{r.id:<12} {r.decision:<5} {r.kind:<5} {r.source:<7} {r.describe()}")
 
@@ -1497,6 +1499,8 @@ def permissions_check(profile: str | None = typer.Option(None, "--profile", help
             where = "settings + hook" if mirrored else "hook; settings mirror off"
             if entry:
                 typer.echo(f"  {rule.decision:5} {rule.kind:5} {entry} ({rule.source}; {where})")
+            elif rule.decision == "ask":
+                typer.echo(f"  ask   {rule.kind:5} {rule.describe()} ({rule.source}; brindle hook asks)")
             elif rule.decision == "deny":
                 typer.echo(f"  deny  {rule.kind:5} {rule.describe()} (brindle hook only)")
             else:
@@ -1589,27 +1593,47 @@ def permissions_deny(
 
 @permissions_app.command("forget")
 def permissions_forget(rule_id: str = typer.Argument(..., metavar="ID")) -> None:
-    """Remove one of your or learned rules (or a suggestion's approval count). Built-in rules stay."""
+    """Remove a rule, whatever seeded it (or a suggestion's approval count). A repo's own denies stay."""
     from brindle import permissions as perms
 
     gone = perms.forget(rule_id)
     if gone is None:
-        typer.echo(f"no rule or suggestion {rule_id} of yours (built-in and repo rules can't be forgotten)")
+        typer.echo(f"no rule or suggestion {rule_id} in your store (a repo's own rules can't be forgotten)")
         raise typer.Exit(1)
     typer.echo(f"forgot {gone}")
     _resync_agy()
 
 
+@permissions_app.command("preset")
+def permissions_preset(name: Optional[str] = typer.Argument(None, help="autonomous, permissive, standard or secure.")) -> None:
+    """Show the presets, or start over from one (your own and learned rules stay)."""
+    from brindle import permissions as perms
+
+    if name is None:
+        current = perms.load_store().preset
+        for preset, (_, unmatched, description) in perms.PRESETS.items():
+            mark = "*" if preset == current else " "
+            typer.echo(f"{mark} {preset:<11} unmatched: {unmatched:<5} {description}")
+        return
+    try:
+        store = perms.apply_preset(name)
+    except ValueError as e:
+        typer.echo(str(e))
+        raise typer.Exit(2)
+    typer.echo(f"preset {name}: {len(store.rules)} rules; unmatched actions {store.unmatched}")
+    _resync_agy()
+
+
 @permissions_app.command("reset")
 def permissions_reset(yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")) -> None:
-    """Back to the built-in rules: drop your rules, learned rules and approval counts."""
+    """Back to the preset's rules: drop your rules, learned rules, saved actions and approval counts."""
     from brindle import permissions as perms
 
     if not yes:
-        typer.confirm("Remove all your and learned permission rules and approval counts?",
+        typer.confirm("Remove all your and learned permission rules, saved actions and approval counts?",
                       default=False, abort=True)
     perms.reset()
-    typer.echo("permission rules reset to the defaults")
+    typer.echo("permission rules reset to the preset's")
     _resync_agy()
 
 

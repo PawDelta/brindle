@@ -132,6 +132,12 @@ class Holds:
             self._purge()
             return [h for h in self._holds.values() if h.agent_id == agent_id]
 
+    def agents(self) -> list[str]:
+        """The agents with a live hold, in the order their holds were registered."""
+        with self._changed:
+            self._purge()
+            return list(dict.fromkeys(h.agent_id for h in self._holds.values()))
+
     def drop_agent(self, agent_id: str) -> None:
         """The agent was closed: none of its holds can be answered any more."""
         with self._changed:

@@ -3221,10 +3221,13 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
                     "permissionDecision": "deny",
                     "permissionDecisionReason": why,
                 }}
+    ws = db.get_workspace(agent.workspace_id)
+    ruled = _pre_tool_policy(db, agent, ws, payload)
+    if ruled is not None:
+        return ruled
     if tool != "Bash":
         return None
     command = str((payload.get("tool_input") or {}).get("command", ""))
-    ws = db.get_workspace(agent.workspace_id)
     from brindle import codemap
 
     codemap.record_query(db, agent, ws, command)
@@ -3246,6 +3249,41 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
         "permissionDecision": "allow",
         "permissionDecisionReason": "brindle: every part of the command matches the profile's allowed_tools",
     }}
+
+
+def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict) -> dict | None:
+    """With ``permission_policy`` on, the policy's word on a PreToolUse call
+    before any approval of brindle's own: a deny denies it, and an ask a rule
+    makes explicitly forces Claude Code's prompt (``permissionDecision``
+    "ask"), so the PermissionRequest hook then holds it for the person,
+    whatever the profile's allowed_tools or Claude Code's own mode would have
+    run without asking. None otherwise (an allow, or an ask no rule made,
+    leaves the rest of the hook to decide). Never raises."""
+    try:
+        if ws is None:
+            return None
+        from brindle import permissions
+        from brindle.config import load_repo_config
+        from brindle.profiles import profile_rules_for
+
+        cfg = load_repo_config(ws.repo_root)
+        if cfg.permission_policy != "on":
+            return None
+        req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
+        if req is None:
+            return None
+        rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+        decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
+        if decision.decision == "deny" or (decision.decision == "ask" and decision.rule is not None):
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": decision.decision,
+                "permissionDecisionReason": f"brindle: {decision.reason}",
+            }}
+        return None
+    except Exception:  # noqa: BLE001 - a broken policy must fall through to Claude Code's own prompt
+        log.exception("brindle: permission policy failed in PreToolUse; leaving it to the prompt")
+        return None
 
 
 def _record_permission(db: DB, agent: Agent, ws: Workspace | None, summary: str, result: str) -> None:
@@ -3284,6 +3322,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         if not policy and provider != "claude" and not (review_only and agent.mode == "review"):
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
+        session = _session_of(db, agent)   # for saved actions that last this session
         if provider == "codex":
             # No tool_use_id in Codex's payload: nothing to pair an approval
             # with, so nothing is kept for learning.
@@ -3303,12 +3342,15 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             if profile is not None:
                 rules += permissions.profile_bash_allows(profile)
             decision = permissions.Decision("ask", "not in the profile's allowed_tools") if review_only \
-                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
+                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>)
                 # wins before any part-by-part allow below.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
-            if decision.decision == "ask" and profile is not None:
+            # A rule that asks explicitly is the person's to decide, whatever the
+            # profile's allowed_tools cover: only an ask no rule made falls to them.
+            explicit = decision.decision == "ask" and decision.rule is not None
+            if decision.decision == "ask" and profile is not None and not explicit:
                 perms = Permissions(profile.permission_mode, profile.allowed_tools)
                 command = reqs[0].command or ""
                 specs = [spec for name, spec in perms.rules
@@ -3344,6 +3386,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 # The same hold for the app's answer as Claude Code's (no suggested rules here).
                 from brindle import codex_hook
 
+                permissions.note_prompt(decision)
                 # Within the timeout Codex's hook definition carries (codex_hook.TIMEOUT).
                 hold = min(cfg.permission_hold_seconds, codex_hook.TIMEOUT - HOOK_SLACK)
                 answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold)
@@ -3360,10 +3403,17 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
+            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+            if decision.decision == "ask" and decision.rule is not None:
+                # A rule asks explicitly, and this plugin can't hold a request for the
+                # person: it fails closed rather than let OpenCode's own config run it.
+                permissions.note_prompt(decision)
+                decision = permissions.Decision(
+                    "deny", f"{decision.reason.removesuffix('; asking the user')}, and OpenCode can't wait for "
+                    "the person's answer. Ask your supervisor (send_message) or the person for it, or do without it")
             if decision.decision != "deny":
                 return None
             req = reqs[0]
@@ -3374,8 +3424,9 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             return None
         if policy:
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide(req, checks=cfg.checks, rules=rules)
+            decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=session)
             _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
+            permissions.note_prompt(decision)
         else:
             decision = permissions.Decision("ask", "")
         if decision.decision == "ask":
@@ -3390,6 +3441,16 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         return permissions.claude_output(decision)
     except Exception:  # noqa: BLE001 - a broken policy must fall through to the prompt
         log.exception("brindle: permission policy failed; leaving it to the user")
+        return None
+
+
+def _session_of(db: DB, agent: Agent) -> str | None:
+    """The session (root agent) ``agent`` belongs to, for saved actions that last one."""
+    try:
+        from brindle import autopilot
+
+        return autopilot.root_of(db, agent.id)
+    except Exception:  # noqa: BLE001 - without it, only session-long saved actions are missed
         return None
 
 

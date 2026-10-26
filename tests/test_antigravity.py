@@ -215,7 +215,7 @@ def strict(db, ws, tool, args):
     ('grep -rn "x" .', "allow"),  # quoted
     ("git diff a..b | grep x", "allow"),  # compound: each part is allowed
     ("cd sub && git status", "allow"),  # a cd inside the worktree
-    pytest.param("git push", "deny", marks=pytest.mark.variant("a deny rule still wins")),
+    pytest.param("git push --force", "deny", marks=pytest.mark.variant("a deny rule still wins")),
     ("git diff $(git merge-base main HEAD)", "deny"),  # what $(...) runs can't be seen
     ("git diff > notes.txt", "deny"),  # a redirection writes where no rule says
     ("git status |& curl https://example.com", "deny"),  # |& pipes like |
@@ -265,7 +265,7 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     compound = "touch one.txt && touch two.txt"
     long_a, long_b = "touch " + "x" * 250 + "a", "touch " + "x" * 250 + "b"  # one summary
     permissions.add_rule("bash", "rm protected.txt", "deny")
-    for command in (compound, compound, long_a, long_b, "git push", "touch one.txt || rm protected.txt"):
+    for command in (compound, compound, long_a, long_b, "git push --force", "touch one.txt || rm protected.txt"):
         assert answer("w1", command) == "deny"
     stored = db.conn.execute("SELECT request FROM permission_requests WHERE agent_id='w1'").fetchall()
     assert sorted(json.loads(r["request"])["command"] for r in stored) == sorted([compound, long_a, long_b])

@@ -370,6 +370,1147 @@
       "title": "AgentDTO",
       "type": "object"
     },
+    "AllowAllGrantDTO": {
+      "$defs": {
+        "AskScopeDTO": {
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "properties": {
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "value",
+            "pattern",
+            "label"
+          ],
+          "title": "AskScopeDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "group": {
+          "title": "Group",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "minutes": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minutes"
+        },
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "requests": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Requests",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/AskScopeDTO"
+        }
+      },
+      "required": [
+        "group",
+        "kind",
+        "scope",
+        "mode"
+      ],
+      "title": "AllowAllGrantDTO",
+      "type": "object"
+    },
+    "AllowAllPlanDTO": {
+      "$defs": {
+        "AllowAllGrantDTO": {
+          "properties": {
+            "group": {
+              "title": "Group",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            },
+            "mode": {
+              "title": "Mode",
+              "type": "string"
+            },
+            "requests": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Requests",
+              "type": "array"
+            },
+            "scope": {
+              "$ref": "#/$defs/AskScopeDTO"
+            }
+          },
+          "required": [
+            "group",
+            "kind",
+            "scope",
+            "mode"
+          ],
+          "title": "AllowAllGrantDTO",
+          "type": "object"
+        },
+        "AskResultDTO": {
+          "properties": {
+            "agent_id": {
+              "title": "Agent Id",
+              "type": "string"
+            },
+            "exact": {
+              "title": "Exact",
+              "type": "string"
+            },
+            "request_id": {
+              "title": "Request Id",
+              "type": "string"
+            },
+            "why": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Why"
+            }
+          },
+          "required": [
+            "agent_id",
+            "request_id",
+            "exact"
+          ],
+          "title": "AskResultDTO",
+          "type": "object"
+        },
+        "AskScopeDTO": {
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "properties": {
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "value",
+            "pattern",
+            "label"
+          ],
+          "title": "AskScopeDTO",
+          "type": "object"
+        },
+        "SavedActionDTO": {
+          "description": "A decision saved from the Inbox (permissions.SavedAction). ``kind``: a\npermissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,\ngeneral, repository, ...) and ``pattern`` what it covers; ``request`` the\nexact request it was saved from; ``life`` session | time | forever.",
+          "properties": {
+            "created": {
+              "default": 0.0,
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "title": "Decision",
+              "type": "string"
+            },
+            "expired": {
+              "default": false,
+              "title": "Expired",
+              "type": "boolean"
+            },
+            "expires": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "life": {
+              "default": "forever",
+              "title": "Life",
+              "type": "string"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo"
+            },
+            "request": {
+              "additionalProperties": true,
+              "default": {},
+              "title": "Request",
+              "type": "object"
+            },
+            "scope": {
+              "title": "Scope",
+              "type": "string"
+            },
+            "session": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Session"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "pattern",
+            "decision",
+            "scope"
+          ],
+          "title": "SavedActionDTO",
+          "type": "object"
+        }
+      },
+      "description": "GET /permissions/asks/plan (what allowing everything waiting would\ngrant) and the result of POST /permissions/asks/allow-all and\n/unblock (``saved``, ``resumed``, ``failed`` filled in; ``excepted``,\n``added``, ``locked`` for unblock).",
+      "properties": {
+        "added": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Added"
+        },
+        "excepted": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Excepted"
+        },
+        "failed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Failed",
+          "type": "array"
+        },
+        "grants": {
+          "items": {
+            "$ref": "#/$defs/AllowAllGrantDTO"
+          },
+          "title": "Grants",
+          "type": "array"
+        },
+        "locked": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Locked",
+          "type": "array"
+        },
+        "resumed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Resumed",
+          "type": "array"
+        },
+        "resumes": {
+          "title": "Resumes",
+          "type": "integer"
+        },
+        "saved": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SavedActionDTO"
+          },
+          "title": "Saved",
+          "type": "array"
+        },
+        "skipped": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Skipped",
+          "type": "array"
+        }
+      },
+      "required": [
+        "grants",
+        "resumes"
+      ],
+      "title": "AllowAllPlanDTO",
+      "type": "object"
+    },
+    "AskDTO": {
+      "$defs": {
+        "PermissionLimitsDTO": {
+          "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
+          "properties": {
+            "life": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Life"
+            },
+            "max_scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Scope"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            }
+          },
+          "title": "PermissionLimitsDTO",
+          "type": "object"
+        }
+      },
+      "description": "One pending request, generalized. ``blocked``: a deny rule covers it\n(its ``rule``); else ``rule`` is the ask rule that asked, with its\n``limits`` (None: no rule covers it, and unmatched actions ask).",
+      "properties": {
+        "agent_id": {
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "blocked": {
+          "default": false,
+          "title": "Blocked",
+          "type": "boolean"
+        },
+        "digest": {
+          "title": "Digest",
+          "type": "string"
+        },
+        "exact": {
+          "title": "Exact",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionLimitsDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "repo": {
+          "title": "Repo",
+          "type": "string"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "root_id": {
+          "title": "Root Id",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
+        "waiting_since": {
+          "title": "Waiting Since",
+          "type": "number"
+        },
+        "worker": {
+          "default": "",
+          "title": "Worker",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "root_id",
+        "request_id",
+        "digest",
+        "repo",
+        "kind",
+        "tool",
+        "exact",
+        "summary",
+        "waiting_since"
+      ],
+      "title": "AskDTO",
+      "type": "object"
+    },
+    "AskDecisionDTO": {
+      "$defs": {
+        "AskResultDTO": {
+          "properties": {
+            "agent_id": {
+              "title": "Agent Id",
+              "type": "string"
+            },
+            "exact": {
+              "title": "Exact",
+              "type": "string"
+            },
+            "request_id": {
+              "title": "Request Id",
+              "type": "string"
+            },
+            "why": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Why"
+            }
+          },
+          "required": [
+            "agent_id",
+            "request_id",
+            "exact"
+          ],
+          "title": "AskResultDTO",
+          "type": "object"
+        },
+        "AskScopeDTO": {
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "properties": {
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "value",
+            "pattern",
+            "label"
+          ],
+          "title": "AskScopeDTO",
+          "type": "object"
+        },
+        "SavedActionDTO": {
+          "description": "A decision saved from the Inbox (permissions.SavedAction). ``kind``: a\npermissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,\ngeneral, repository, ...) and ``pattern`` what it covers; ``request`` the\nexact request it was saved from; ``life`` session | time | forever.",
+          "properties": {
+            "created": {
+              "default": 0.0,
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "title": "Decision",
+              "type": "string"
+            },
+            "expired": {
+              "default": false,
+              "title": "Expired",
+              "type": "boolean"
+            },
+            "expires": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "life": {
+              "default": "forever",
+              "title": "Life",
+              "type": "string"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo"
+            },
+            "request": {
+              "additionalProperties": true,
+              "default": {},
+              "title": "Request",
+              "type": "object"
+            },
+            "scope": {
+              "title": "Scope",
+              "type": "string"
+            },
+            "session": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Session"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "pattern",
+            "decision",
+            "scope"
+          ],
+          "title": "SavedActionDTO",
+          "type": "object"
+        }
+      },
+      "description": "POST /permissions/asks/decide: what one decision did.",
+      "properties": {
+        "failed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Failed",
+          "type": "array"
+        },
+        "grant": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SavedActionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "resumed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Resumed",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/AskScopeDTO"
+        },
+        "skipped": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Skipped",
+          "type": "array"
+        },
+        "stopped": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Stopped",
+          "type": "array"
+        }
+      },
+      "required": [
+        "mode",
+        "scope"
+      ],
+      "title": "AskDecisionDTO",
+      "type": "object"
+    },
+    "AskGroupDTO": {
+      "$defs": {
+        "AskDTO": {
+          "description": "One pending request, generalized. ``blocked``: a deny rule covers it\n(its ``rule``); else ``rule`` is the ask rule that asked, with its\n``limits`` (None: no rule covers it, and unmatched actions ask).",
+          "properties": {
+            "agent_id": {
+              "title": "Agent Id",
+              "type": "string"
+            },
+            "blocked": {
+              "default": false,
+              "title": "Blocked",
+              "type": "boolean"
+            },
+            "digest": {
+              "title": "Digest",
+              "type": "string"
+            },
+            "exact": {
+              "title": "Exact",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PermissionLimitsDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string"
+            },
+            "request_id": {
+              "title": "Request Id",
+              "type": "string"
+            },
+            "root_id": {
+              "title": "Root Id",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "tool": {
+              "title": "Tool",
+              "type": "string"
+            },
+            "waiting_since": {
+              "title": "Waiting Since",
+              "type": "number"
+            },
+            "worker": {
+              "default": "",
+              "title": "Worker",
+              "type": "string"
+            }
+          },
+          "required": [
+            "agent_id",
+            "root_id",
+            "request_id",
+            "digest",
+            "repo",
+            "kind",
+            "tool",
+            "exact",
+            "summary",
+            "waiting_since"
+          ],
+          "title": "AskDTO",
+          "type": "object"
+        },
+        "AskScopeDTO": {
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "properties": {
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "value",
+            "pattern",
+            "label"
+          ],
+          "title": "AskScopeDTO",
+          "type": "object"
+        },
+        "PermissionLimitsDTO": {
+          "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
+          "properties": {
+            "life": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Life"
+            },
+            "max_scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Scope"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            }
+          },
+          "title": "PermissionLimitsDTO",
+          "type": "object"
+        }
+      },
+      "description": "GET /permissions/asks: one Inbox item per repo, kind and general form,\ngeneralized from its oldest request. ``policy``: the tightest limits\namong its requests (a deny blocks the whole item). ``modes``: what\nPOST /permissions/asks/decide accepts for it.",
+      "properties": {
+        "blocked": {
+          "default": false,
+          "title": "Blocked",
+          "type": "boolean"
+        },
+        "general": {
+          "$ref": "#/$defs/AskScopeDTO"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/AskDTO"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionLimitsDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "modes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Modes",
+          "type": "array"
+        },
+        "repo": {
+          "title": "Repo",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        },
+        "scopes": {
+          "items": {
+            "$ref": "#/$defs/AskScopeDTO"
+          },
+          "title": "Scopes",
+          "type": "array"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "repo",
+        "kind",
+        "title",
+        "general",
+        "scopes",
+        "items"
+      ],
+      "title": "AskGroupDTO",
+      "type": "object"
+    },
+    "AskResultDTO": {
+      "properties": {
+        "agent_id": {
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "exact": {
+          "title": "Exact",
+          "type": "string"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Why"
+        }
+      },
+      "required": [
+        "agent_id",
+        "request_id",
+        "exact"
+      ],
+      "title": "AskResultDTO",
+      "type": "object"
+    },
+    "AskScopeDTO": {
+      "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Level"
+        },
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "pattern",
+        "label"
+      ],
+      "title": "AskScopeDTO",
+      "type": "object"
+    },
     "DecisionDTO": {
       "properties": {
         "body": {
@@ -1367,6 +2508,650 @@
         "via"
       ],
       "title": "PermissionDTO",
+      "type": "object"
+    },
+    "PermissionExceptionDTO": {
+      "description": "Requests a rule doesn't apply to (a deny's exception): matched like a rule.",
+      "properties": {
+        "describe": {
+          "title": "Describe",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "match": {
+          "title": "Match",
+          "type": "string"
+        },
+        "match_type": {
+          "title": "Match Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "match",
+        "match_type",
+        "describe"
+      ],
+      "title": "PermissionExceptionDTO",
+      "type": "object"
+    },
+    "PermissionLimitsDTO": {
+      "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
+      "properties": {
+        "life": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Life"
+        },
+        "max_scope": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Scope"
+        },
+        "minutes": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minutes"
+        }
+      },
+      "title": "PermissionLimitsDTO",
+      "type": "object"
+    },
+    "PermissionPolicyDTO": {
+      "$defs": {
+        "PermissionExceptionDTO": {
+          "description": "Requests a rule doesn't apply to (a deny's exception): matched like a rule.",
+          "properties": {
+            "describe": {
+              "title": "Describe",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "match",
+            "match_type",
+            "describe"
+          ],
+          "title": "PermissionExceptionDTO",
+          "type": "object"
+        },
+        "PermissionLimitsDTO": {
+          "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
+          "properties": {
+            "life": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Life"
+            },
+            "max_scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Scope"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            }
+          },
+          "title": "PermissionLimitsDTO",
+          "type": "object"
+        },
+        "PermissionPresetDTO": {
+          "properties": {
+            "current": {
+              "title": "Current",
+              "type": "boolean"
+            },
+            "description": {
+              "title": "Description",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "unmatched": {
+              "title": "Unmatched",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "description",
+            "unmatched",
+            "current"
+          ],
+          "title": "PermissionPresetDTO",
+          "type": "object"
+        },
+        "PermissionRuleDTO": {
+          "description": "One rule of the person's store (GET /permissions). ``decision`` allow |\ndeny | ask; ``source`` preset | user | learned; ``match_type`` exact |\nprefix | glob or a named matcher (permissions.BUILTIN_MATCHERS; a\n``push`` rule's match is \"<source> \u2192 <destination>\"). ``prompts``: asks\nit caused in the last day.",
+          "properties": {
+            "created": {
+              "default": 0.0,
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "title": "Decision",
+              "type": "string"
+            },
+            "describe": {
+              "title": "Describe",
+              "type": "string"
+            },
+            "exclusions": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionExceptionDTO"
+              },
+              "title": "Exclusions",
+              "type": "array"
+            },
+            "expired": {
+              "default": false,
+              "title": "Expired",
+              "type": "boolean"
+            },
+            "expires": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "label": {
+              "default": "",
+              "title": "Label",
+              "type": "string"
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PermissionLimitsDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            },
+            "prompts": {
+              "default": 0,
+              "title": "Prompts",
+              "type": "integer"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "match",
+            "match_type",
+            "decision",
+            "source",
+            "describe"
+          ],
+          "title": "PermissionRuleDTO",
+          "type": "object"
+        },
+        "SavedActionDTO": {
+          "description": "A decision saved from the Inbox (permissions.SavedAction). ``kind``: a\npermissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,\ngeneral, repository, ...) and ``pattern`` what it covers; ``request`` the\nexact request it was saved from; ``life`` session | time | forever.",
+          "properties": {
+            "created": {
+              "default": 0.0,
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "title": "Decision",
+              "type": "string"
+            },
+            "expired": {
+              "default": false,
+              "title": "Expired",
+              "type": "boolean"
+            },
+            "expires": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "life": {
+              "default": "forever",
+              "title": "Life",
+              "type": "string"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo"
+            },
+            "request": {
+              "additionalProperties": true,
+              "default": {},
+              "title": "Request",
+              "type": "object"
+            },
+            "scope": {
+              "title": "Scope",
+              "type": "string"
+            },
+            "session": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Session"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "pattern",
+            "decision",
+            "scope"
+          ],
+          "title": "SavedActionDTO",
+          "type": "object"
+        }
+      },
+      "description": "GET /permissions: the chosen preset, the unmatched setting, every rule\n(editable, the preset's included), the saved actions and per-rule prompt\ncounts (\"unmatched\" for asks no rule caused).",
+      "properties": {
+        "preset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Preset"
+        },
+        "presets": {
+          "items": {
+            "$ref": "#/$defs/PermissionPresetDTO"
+          },
+          "title": "Presets",
+          "type": "array"
+        },
+        "prompt_counts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "default": {},
+          "title": "Prompt Counts",
+          "type": "object"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/PermissionRuleDTO"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "saved": {
+          "items": {
+            "$ref": "#/$defs/SavedActionDTO"
+          },
+          "title": "Saved",
+          "type": "array"
+        },
+        "unmatched": {
+          "title": "Unmatched",
+          "type": "string"
+        }
+      },
+      "required": [
+        "preset",
+        "unmatched",
+        "presets",
+        "rules",
+        "saved"
+      ],
+      "title": "PermissionPolicyDTO",
+      "type": "object"
+    },
+    "PermissionPresetDTO": {
+      "properties": {
+        "current": {
+          "title": "Current",
+          "type": "boolean"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "unmatched": {
+          "title": "Unmatched",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "unmatched",
+        "current"
+      ],
+      "title": "PermissionPresetDTO",
+      "type": "object"
+    },
+    "PermissionRuleDTO": {
+      "$defs": {
+        "PermissionExceptionDTO": {
+          "description": "Requests a rule doesn't apply to (a deny's exception): matched like a rule.",
+          "properties": {
+            "describe": {
+              "title": "Describe",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "match",
+            "match_type",
+            "describe"
+          ],
+          "title": "PermissionExceptionDTO",
+          "type": "object"
+        },
+        "PermissionLimitsDTO": {
+          "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
+          "properties": {
+            "life": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Life"
+            },
+            "max_scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Scope"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            }
+          },
+          "title": "PermissionLimitsDTO",
+          "type": "object"
+        }
+      },
+      "description": "One rule of the person's store (GET /permissions). ``decision`` allow |\ndeny | ask; ``source`` preset | user | learned; ``match_type`` exact |\nprefix | glob or a named matcher (permissions.BUILTIN_MATCHERS; a\n``push`` rule's match is \"<source> \u2192 <destination>\"). ``prompts``: asks\nit caused in the last day.",
+      "properties": {
+        "created": {
+          "default": 0.0,
+          "title": "Created",
+          "type": "number"
+        },
+        "decision": {
+          "title": "Decision",
+          "type": "string"
+        },
+        "describe": {
+          "title": "Describe",
+          "type": "string"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionExceptionDTO"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "expired": {
+          "default": false,
+          "title": "Expired",
+          "type": "boolean"
+        },
+        "expires": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionLimitsDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "match": {
+          "title": "Match",
+          "type": "string"
+        },
+        "match_type": {
+          "title": "Match Type",
+          "type": "string"
+        },
+        "prompts": {
+          "default": 0,
+          "title": "Prompts",
+          "type": "integer"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "match",
+        "match_type",
+        "decision",
+        "source",
+        "describe"
+      ],
+      "title": "PermissionRuleDTO",
       "type": "object"
     },
     "PreflightActionDTO": {
@@ -2544,6 +4329,126 @@
       "title": "RuleDTO",
       "type": "object"
     },
+    "SavedActionDTO": {
+      "description": "A decision saved from the Inbox (permissions.SavedAction). ``kind``: a\npermissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,\ngeneral, repository, ...) and ``pattern`` what it covers; ``request`` the\nexact request it was saved from; ``life`` session | time | forever.",
+      "properties": {
+        "created": {
+          "default": 0.0,
+          "title": "Created",
+          "type": "number"
+        },
+        "decision": {
+          "title": "Decision",
+          "type": "string"
+        },
+        "expired": {
+          "default": false,
+          "title": "Expired",
+          "type": "boolean"
+        },
+        "expires": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Level"
+        },
+        "life": {
+          "default": "forever",
+          "title": "Life",
+          "type": "string"
+        },
+        "minutes": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minutes"
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        },
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repo"
+        },
+        "request": {
+          "additionalProperties": true,
+          "default": {},
+          "title": "Request",
+          "type": "object"
+        },
+        "scope": {
+          "title": "Scope",
+          "type": "string"
+        },
+        "session": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "pattern",
+        "decision",
+        "scope"
+      ],
+      "title": "SavedActionDTO",
+      "type": "object"
+    },
     "SessionDTO": {
       "properties": {
         "created_at": {
@@ -3100,8 +5005,68 @@
       "path": "/v1/meta"
     },
     {
+      "method": "GET",
+      "path": "/v1/permissions"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/permissions"
+    },
+    {
       "method": "POST",
       "path": "/v1/permissions"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/permissions/asks"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/asks/allow-all"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/asks/decide"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/permissions/asks/plan"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/asks/unblock"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/permissions/preset"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/rules"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/permissions/rules/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/permissions/rules/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/rules/{id}/exceptions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/saved"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/permissions/saved/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/permissions/saved/{id}"
     },
     {
       "method": "GET",

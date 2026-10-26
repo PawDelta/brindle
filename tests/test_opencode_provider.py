@@ -90,7 +90,7 @@ def test_launch_gives_opencode_brindles_server_plugin_instructions_and_brief(bri
                  ("git -C /otherworktree status", "git -C /otherworktree checkout status file"), "ask",
                  marks=pytest.mark.variant("same callID with changed command must still prompt; approvals expire and are single-use")),
     pytest.param("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
-                 ["git -C /worktree status", "git push origin main"], "deny",
+                 ["git -C /worktree status", "git push --force origin main"], "deny",
                  marks=pytest.mark.variant("a compound command must not hide a write after a permitted read")),
 ])
 def test_permission_mode_and_model_map_onto_opencode(brindle_home, tmp_path, mode, model, perm, flags, patterns, decision):
@@ -209,7 +209,7 @@ def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brin
     add_agent(db, ws, profile="supervisor")
     pre = lambda tool, args: opencode.hook_main(  # noqa: E731
         db, "o1", "opencode-pre-tool", json.dumps({"session_id": "ses_a", "tool": tool, "args": args}))
-    denied = {"tool": "bash", "args": {"command": "git push origin main"}}
+    denied = {"tool": "bash", "args": {"command": "git push --force origin main"}}
     assert pre(**denied) == ""   # policy off: OpenCode's own rules apply
     set_local(ws.repo_root, "permission_policy", "on")
     answer = json.loads(pre(**denied))

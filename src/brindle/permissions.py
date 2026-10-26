@@ -20,11 +20,32 @@ regular expressions). What a rule is matched against depends on the kind: a
 bash rule against the whole command; a path rule against the resolved
 absolute path, the path as given, and the path relative to the worktree and
 the repo root (``~`` in a rule means the home directory); a fetch rule
-against the URL; mcp/other against the tool name. The built-in defaults also
-use a few named matchers (``tracked``, ``check``, ``git-readonly``,
-``git-push``, ``git-force``) that are code, not patterns.
+against the URL; mcp/other against the tool name. A few named matchers
+(``tracked``, ``check``, ``git-readonly``, ``git-push``, ``git-force``,
+``push``, ``worktree``, ``readonly-pipeline``) are code, not patterns: a
+``push`` rule's match is ``"<source> → <destination>"`` (globs on both sides;
+``@default`` is the repo's default branch), matched against every ``git push``
+in the command.
 
-Precedence: any matching deny wins; else any matching allow; else ask.
+Nothing is built in: every rule in force lives in the person's store, where
+it can be edited or removed, the ones a preset seeded included (see
+``PRESETS``: Autonomous, the default for a new store, Permissive, Standard
+and Secure; ``apply_preset`` seeds the store and records the choice). A
+rule's ``decision`` is allow, deny or ask: an ask rule names what a person
+must decide, with ``limits`` on how far a saved approval may reach (its
+``max_scope`` level or pattern, and ``life``: session, time with ``minutes``,
+or forever). What no rule covers follows the store's ``unmatched`` setting
+(ask, allow or deny). A rule may carry ``expires`` (a timed rule) and
+``exclusions`` (requests it doesn't apply to: a deny's exceptions).
+
+Saved actions (``SavedAction``, from the app's Inbox) are the person's own
+allow and deny decisions, with a structured scope, the exact request they
+came from and an expiry for timed ones. A saved deny stops a matching ask;
+a saved allow resolves one only within the ask rule's limits, never past a
+deny rule, and never once expired (see brindle.permission_grants).
+
+Precedence: any matching deny wins; else any matching ask (then a saved
+action may settle it); else any matching allow; else the unmatched setting.
 Specificity never matters. An allow rule for bash only ever applies to a
 single simple command (letters, digits, spaces and ``_-./:=@%+,`` only): a
 command with any other character (``;``, ``|``, ``&``, ``$``, quotes, globs,
@@ -35,11 +56,13 @@ escaped characters treated literally) and nothing else can run or write
 (see compound_parts); a deny on any part denies it. Anything unknown or
 unparseable is ask.
 
-Where rules come from (``source``): ``default`` (built in, below), ``repo``
-(``<repo>/.brindle/permissions.json``: only its deny rules are used, so a repo
-can narrow but never broaden), ``user`` (``brindle permissions allow|deny``) and
-``learned`` (a suggestion the person accepted). User and learned rules live in
-``~/.brindle/permissions.json`` with the approval counts learning keeps.
+Where rules come from (``source``): ``preset`` (seeded by the chosen preset),
+``repo`` (``<repo>/.brindle/permissions.json``: only its deny rules are used,
+so a repo can narrow but never broaden), ``user`` (``brindle permissions
+allow|deny`` or the app) and ``learned`` (a suggestion the person accepted).
+Preset, user and learned rules live in ``~/.brindle/permissions.json`` with
+the saved actions, the approval counts learning keeps and the asks of the
+last day (per-rule prompt counts).
 
 Learning: when a request fell to ask and the person approved it in the CLI
 (for Claude Code: the tool's PostToolUse arrives for the same tool_use_id),
@@ -55,8 +78,10 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shlex
 import subprocess
+import tempfile
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
@@ -69,9 +94,18 @@ KINDS = ("read", "write", "edit", "bash", "fetch", "mcp", "other")
 PATH_KINDS = ("read", "write", "edit")
 DECISIONS = ("allow", "deny", "ask")
 MATCH_TYPES = ("exact", "prefix", "glob")
-BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "git-push", "git-force")
-SOURCES = ("default", "repo", "user", "learned")
+BUILTIN_MATCHERS = ("tracked", "check", "git-readonly", "git-push", "git-force", "push", "worktree",
+                    "readonly-pipeline", "rm-destructive")
+SOURCES = ("preset", "repo", "user", "learned", "profile")
+STORE_SOURCES = ("preset", "user", "learned")    # what the person's store holds
+UNMATCHED = ("ask", "allow", "deny")             # Store.unmatched: what no rule covers
+# How far a saved approval of a push may reach (an ask rule's limits.max_scope), narrowest first.
+LEVELS = ("branch", "destination", "remote", "repository", "all")
+LIVES = ("session", "time", "forever")           # how long a rule's approvals, or a saved action, last
+PUSH_ARROW = " → "                                # a push rule's "<source> → <destination>"
+DEFAULT_BRANCH = "@default"                       # in a push pattern: the repo's default branch
 SUGGEST_AFTER = 2
+PROMPT_WINDOW = 86400.0                           # seconds of asks kept for per-rule prompt counts
 FILE = "permissions.json"
 
 # A command an allow rule may cover: one simple command, nothing the shell
@@ -116,6 +150,33 @@ class Request:
         return cls(**{k: v for k, v in data.items() if k in names})
 
 
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def clean_limits(limits: object) -> dict | None:
+    """An ask rule's limits, validated: ``max_scope`` (a LEVELS entry for
+    pushes, else a pattern a saved action must stay inside), ``life`` and,
+    for life "time", ``minutes``. None when nothing valid is given."""
+    if not isinstance(limits, dict):
+        return None
+    out: dict = {}
+    scope = limits.get("max_scope")
+    if isinstance(scope, str) and scope:
+        out["max_scope"] = scope
+    life = limits.get("life")
+    if life in LIVES:
+        out["life"] = life
+        minutes = _number(limits.get("minutes"))
+        if life == "time":
+            if minutes is None or minutes <= 0:
+                return None
+            out["minutes"] = minutes
+    return out or None
+
+
 @dataclass(frozen=True)
 class Rule:
     kind: str
@@ -125,19 +186,37 @@ class Rule:
     source: str = "user"
     created: float = 0.0
     id: str = ""
+    limits: dict | None = field(default=None, hash=False)   # an ask rule's: how far a saved approval may reach
+    expires: float | None = None        # a timed rule: epoch seconds after which it no longer applies
+    exclusions: tuple = ()              # Rules: a request any of them matches is not this rule's
+    label: str = ""                     # a person's name for it (the app's)
 
     def __post_init__(self) -> None:
         if not self.id:
             object.__setattr__(self, "id", rule_id(self.kind, self.match_type, self.match, self.decision))
+        if not isinstance(self.exclusions, tuple):
+            object.__setattr__(self, "exclusions", tuple(self.exclusions))
 
     def describe(self) -> str:
-        if self.match_type in BUILTIN_MATCHERS:
+        if self.match_type in BUILTIN_MATCHERS and not (self.match_type == "push" and PUSH_ARROW in self.match):
             return self.match
         return f"{self.kind} {self.match_type} {self.match!r}"
 
+    def expired(self, now: float | None = None) -> bool:
+        return self.expires is not None and self.expires <= (time.time() if now is None else now)
+
     def to_dict(self) -> dict:
-        return {"id": self.id, "kind": self.kind, "match": self.match, "match_type": self.match_type,
-                "decision": self.decision, "source": self.source, "created": self.created}
+        out = {"id": self.id, "kind": self.kind, "match": self.match, "match_type": self.match_type,
+               "decision": self.decision, "source": self.source, "created": self.created}
+        if self.limits:
+            out["limits"] = dict(self.limits)
+        if self.expires is not None:
+            out["expires"] = self.expires
+        if self.exclusions:
+            out["exclusions"] = [x.to_dict() for x in self.exclusions]
+        if self.label:
+            out["label"] = self.label
+        return out
 
     @classmethod
     def from_dict(cls, data: dict, source: str | None = None) -> "Rule | None":
@@ -148,16 +227,70 @@ class Rule:
             decision = str(data["decision"])
         except (KeyError, TypeError):
             return None
-        if kind not in KINDS or match_type not in MATCH_TYPES or decision not in ("allow", "deny") or not match:
+        if (kind not in KINDS or match_type not in (*MATCH_TYPES, *BUILTIN_MATCHERS)
+                or decision not in DECISIONS or not match):
             return None
         src = source or str(data.get("source", "user"))
-        if src not in ("user", "learned", "repo"):
+        if src not in (*STORE_SOURCES, "repo"):
             src = "user"
         try:
             created = float(data.get("created") or 0)
         except (TypeError, ValueError):
             created = 0.0
-        return cls(kind, match, match_type, decision, src, created)
+        expires = _number(data.get("expires"))
+        exclusions = tuple(x for x in (cls.from_dict(d, src) for d in data.get("exclusions") or []
+                                       if isinstance(d, dict)) if x)
+        id_ = data.get("id") if isinstance(data.get("id"), str) else ""
+        label = data.get("label") if isinstance(data.get("label"), str) else ""
+        return cls(kind, match, match_type, decision, src, created, id_,
+                   clean_limits(data.get("limits")) if decision == "ask" else None, expires, exclusions, label)
+
+
+@dataclass
+class SavedAction:
+    """A decision the person saved from the Inbox: allow or deny requests of
+    ``kind`` (a KINDS entry, or ``push``) whose key (brindle.permission_grants
+    .ask_key) ``pattern`` covers. ``scope``/``level`` say which rung of the
+    scope ladder the pattern is (exact, general, repository, ...); ``request``
+    is the exact request it was saved from; ``life`` session (of ``session``,
+    a root agent), time (``minutes``, until ``expires``) or forever; ``repo``
+    the repo root it applies in, or None for every repo."""
+    id: str
+    kind: str
+    pattern: str
+    decision: str                       # allow | deny
+    scope: str = "exact"
+    level: str | None = None
+    request: dict = field(default_factory=dict)
+    life: str = "forever"
+    minutes: float | None = None
+    expires: float | None = None
+    session: str | None = None
+    repo: str | None = None
+    created: float = 0.0
+    note: str = ""
+
+    def expired(self, now: float | None = None) -> bool:
+        return self.expires is not None and self.expires <= (time.time() if now is None else now)
+
+    def to_dict(self) -> dict:
+        return {k: v for k, v in asdict(self).items() if v not in (None, "", {})}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SavedAction | None":
+        try:
+            id_, kind, pattern, decision = (str(data["id"]), str(data["kind"]), str(data["pattern"]),
+                                            str(data["decision"]))
+        except (KeyError, TypeError):
+            return None
+        if kind not in (*KINDS, "push") or decision not in ("allow", "deny") or not pattern or not id_:
+            return None
+        life = data.get("life") if data.get("life") in LIVES else "forever"
+        request = data.get("request") if isinstance(data.get("request"), dict) else {}
+        text = {k: (data.get(k) if isinstance(data.get(k), str) else None) for k in ("level", "session", "repo")}
+        return cls(id_, kind, pattern, decision, str(data.get("scope") or "exact"), text["level"], request, life,
+                   _number(data.get("minutes")), _number(data.get("expires")), text["session"], text["repo"],
+                   _number(data.get("created")) or 0.0, str(data.get("note") or ""))
 
 
 @dataclass(frozen=True)
@@ -171,15 +304,24 @@ def rule_id(kind: str, match_type: str, match: str, decision: str) -> str:
     return hashlib.sha1(f"{kind}\0{match_type}\0{match}\0{decision}".encode()).hexdigest()[:8]
 
 
-def _default(id_: str, kind: str, match: str, match_type: str, decision: str) -> Rule:
-    return Rule(kind, match, match_type, decision, "default", 0.0, id_)
+# -- presets ----------------------------------------------------------------------------------
+#
+# A preset is a named starting set of ordinary rules (source "preset") and an
+# ``unmatched`` setting. Choosing one replaces the preset-sourced rules in the
+# store and leaves the person's own and learned rules alone. Every seeded rule
+# can be edited or removed afterwards: none is built in.
+
+
+def _seed(id_: str, kind: str, match: str, match_type: str, decision: str, **extra) -> Rule:
+    return Rule(kind, match, match_type, decision, "preset", 0.0, id_, **extra)
 
 
 def _preset(kind: str, match: str, match_type: str, decision: str) -> Rule:
-    return Rule(kind, match, match_type, decision, "user", time.time(), "")
+    return Rule(kind, match, match_type, decision, "preset", 0.0, "")
 
 
 PRESET_COMMANDS = ("aws", "uv", "pytest", "python", "npm", "pnpm", "yarn", "docker", "cargo", "go", "make", "gh")
+# The everyday commands the Standard, Permissive and Autonomous presets allow outright.
 PRESET_RULES = tuple(
     rule
     for cmd in PRESET_COMMANDS
@@ -189,21 +331,101 @@ PRESET_RULES = tuple(
     )
 )
 
-DEFAULT_RULES: tuple[Rule, ...] = (
-    _default("d-tracked", "read", "a file git tracks in the worktree or repo root", "tracked", "allow"),
-    _default("d-checks", "bash", "exactly one of the repo's `checks` commands", "check", "allow"),
-    _default("d-git-ro", "bash", "git status / diff / log / show", "git-readonly", "allow"),
-    _default("d-git-push", "bash", "git push", "git-push", "deny"),
-    _default("d-git-force", "bash", "a git command with a force flag", "git-force", "deny"),
-    _default("d-ssh", "read", "~/.ssh*", "glob", "deny"),
-    _default("d-aws", "read", "~/.aws*", "glob", "deny"),
-    _default("d-gnupg", "read", "~/.gnupg*", "glob", "deny"),
-    # The local daemon's token: with it an agent could act as the person (brindle.daemon.auth).
-    _default("d-daemon", "read", "*/.brindle/daemon.json*", "glob", "deny"),
-    _default("d-daemon-sh", "bash", "*daemon.json*", "glob", "deny"),
-    _default("d-env", "read", "*/.env*", "glob", "deny"),
-    _default("d-env-rel", "read", ".env*", "glob", "deny"),
+# Credential files and the daemon's token (with it an agent could act as the
+# person, brindle.daemon.auth): denied by every preset, as ordinary rules.
+CREDENTIAL_DENIES: tuple[Rule, ...] = (
+    _seed("d-ssh", "read", "~/.ssh*", "glob", "deny"),
+    _seed("d-aws", "read", "~/.aws*", "glob", "deny"),
+    _seed("d-gnupg", "read", "~/.gnupg*", "glob", "deny"),
+    _seed("d-daemon", "read", "*/.brindle/daemon.json*", "glob", "deny"),
+    _seed("d-daemon-sh", "bash", "*daemon.json*", "glob", "deny"),
+    _seed("d-env", "read", "*/.env*", "glob", "deny"),
+    _seed("d-env-rel", "read", ".env*", "glob", "deny"),
 )
+# What every preset lets a worker do without asking: read what git tracks, run
+# the repo's checks, the read-only git commands and read-only pipelines.
+ROUTINE_ALLOWS: tuple[Rule, ...] = (
+    _seed("d-tracked", "read", "a file git tracks in the worktree or repo root", "tracked", "allow"),
+    _seed("d-checks", "bash", "exactly one of the repo's `checks` commands", "check", "allow"),
+    _seed("d-git-ro", "bash", "git status / diff / log / show", "git-readonly", "allow"),
+    _seed("d-readonly", "bash", "a pipeline of read-only commands (grep, ls, cat, head, sed -n ...)",
+          "readonly-pipeline", "allow"),
+)
+DESTRUCTIVE_DENIES: tuple[Rule, ...] = (
+    _seed("d-git-force", "bash", "a git command with a force flag, or a push that forces or deletes a branch",
+          "git-force", "deny"),
+    _seed("d-rm", "bash", "a recursive rm of the root, a top-level folder or the home directory",
+          "rm-destructive", "deny"),
+)
+# The rules of before presets, kept for stores written then (load_store migrates them).
+LEGACY_DEFAULT_IDS = ("d-tracked", "d-checks", "d-git-ro", "d-git-push", "d-git-force", "d-ssh", "d-aws",
+                      "d-gnupg", "d-daemon", "d-daemon-sh", "d-env", "d-env-rel")
+
+
+def _push_default(max_scope: str, life: str, minutes: float | None = None) -> Rule:
+    """Pushes into the repo's default branch ask, with limits on saved approvals."""
+    limits = {"max_scope": max_scope, "life": life}
+    if minutes is not None:
+        limits["minutes"] = minutes
+    return _seed("d-push-default", "bash", f"*{PUSH_ARROW}{DEFAULT_BRANCH}", "push", "ask", limits=limits)
+
+
+def _autonomous() -> list[Rule]:
+    return [*ROUTINE_ALLOWS, *PRESET_RULES, *CREDENTIAL_DENIES, *DESTRUCTIVE_DENIES,
+            _push_default("all", "forever")]
+
+
+def _permissive() -> list[Rule]:
+    return [*ROUTINE_ALLOWS, *PRESET_RULES,
+            _seed("d-read-worktree", "read", "a file in the worktree", "worktree", "allow"),
+            _seed("d-write-worktree", "write", "a file in the worktree", "worktree", "allow"),
+            _seed("d-edit-worktree", "edit", "a file in the worktree", "worktree", "allow"),
+            *CREDENTIAL_DENIES, *DESTRUCTIVE_DENIES, _push_default("remote", "forever")]
+
+
+def _standard() -> list[Rule]:
+    return [*ROUTINE_ALLOWS, *PRESET_RULES, *CREDENTIAL_DENIES, *DESTRUCTIVE_DENIES,
+            _push_default("destination", "time", 30)]
+
+
+def _secure() -> list[Rule]:
+    short = {"max_scope": "*", "life": "time", "minutes": 15}
+    return [*ROUTINE_ALLOWS[:3], *CREDENTIAL_DENIES, *DESTRUCTIVE_DENIES,
+            _push_default("branch", "time", 15),
+            _seed("d-write-ask", "write", "*", "glob", "ask", limits=short),
+            _seed("d-edit-ask", "edit", "*", "glob", "ask", limits=short),
+            _seed("d-bash-ask", "bash", "*", "glob", "ask", limits=short),
+            _seed("d-fetch-ask", "fetch", "*", "glob", "ask", limits=short)]
+
+
+# name -> (rules, unmatched, one-line description). Rules are built on each
+# call so PRESET_RULES can be adjusted (tests) before a store is seeded.
+PRESETS: dict[str, tuple] = {
+    "autonomous": (_autonomous, "allow",
+                   "Agents work without stopping. Everything runs automatically except pushes into the "
+                   "default branch and destructive actions."),
+    "permissive": (_permissive, "ask",
+                   "Fewer interruptions for trusted teams. Edits in the worktree and everyday commands run; "
+                   "the rest asks, and approvals can be saved for good."),
+    "standard": (_standard, "ask",
+                 "Routine reads and everyday commands run freely. Changes and sensitive actions ask within "
+                 "a defined scope."),
+    "secure": (_secure, "deny",
+               "Narrow scopes, 15-minute approvals and a deny for anything no rule covers."),
+}
+DEFAULT_PRESET = "autonomous"       # for a store that has none yet (a new person)
+MIGRATED_PRESET = "standard"        # for a store from before presets: what its rules amounted to
+
+
+def preset_rules(name: str) -> list[Rule]:
+    """The rules preset ``name`` seeds (ValueError for an unknown name)."""
+    if name not in PRESETS:
+        raise ValueError(f"unknown preset {name!r}: one of {', '.join(PRESETS)}")
+    return list(PRESETS[name][0]())
+
+
+def preset_unmatched(name: str) -> str:
+    return PRESETS[name][1]
 
 
 # -- providers: Claude Code ------------------------------------------------------------------
@@ -385,12 +607,13 @@ def _patch_requests(patch: str | None, cwd: str, base: dict) -> list[Request]:
 
 
 def decide_all(reqs: list[Request] | None, *, checks: list[str] | None = None,
-               rules: list[Rule] | None = None) -> Decision:
+               rules: list[Rule] | None = None, **context) -> Decision:
     """One answer for several requests (an apply_patch touching several
-    files): deny if any is denied, allow only if every one is allowed, else ask."""
+    files): deny if any is denied, allow only if every one is allowed, else
+    ask. ``context``: decide's other keyword arguments (session ...)."""
     if not reqs:
         return Decision("ask", "brindle couldn't read the request")
-    decisions = [decide(r, checks=checks, rules=rules) for r in reqs]
+    decisions = [decide(r, checks=checks, rules=rules, **context) for r in reqs]
     for d in decisions:
         if d.decision == "deny":
             return d
@@ -683,7 +906,10 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
         return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
     if decision is not None and decision.decision == "allow":
         return {"decision": "allow", "reason": f"brindle: {decision.reason}"}
-    if req is not None:
+    # An ask a rule asks for explicitly is the person's to decide: not even a
+    # file in the workspace runs on agy's default then.
+    explicit = decision is not None and decision.rule is not None and decision.rule.decision == "ask"
+    if req is not None and not explicit:
         path = os.path.realpath(req.path) if req.kind in PATH_KINDS and req.path else None
         # Protected wherever the workspaces list says the workspace is: the
         # anchors are brindle's own worktree and repo root.
@@ -759,9 +985,11 @@ def allowlist_decision(req: Request | None, rules: list[Rule], checks: list[str]
     if uncovered_part(_allow_specs(rules, checks), req.command, cd_root=cd_root) is not None:
         return None
     for part in split_commands(req.command):
-        denied = decide(replace(req, command=part), checks=checks, rules=rules)
-        if denied.decision == "deny":
-            return denied
+        got = decide(replace(req, command=part), checks=checks, rules=rules, unmatched="ask", saved=[])
+        if got.decision == "deny":
+            return got
+        if got.rule is not None and got.rule.decision == "ask":
+            return None    # a part an ask rule covers is the person's to decide, whatever the profile allows
     return Decision("allow", "every part of the command is allowed by a rule or the profile's allowed_tools")
 
 
@@ -811,11 +1039,11 @@ def _part_decision(req: Request, words: list[str], checks: list[str] | None,
     from brindle.native.permissions import _joined
 
     denied = decide(replace(req, command=_joined(words)), checks=checks,
-                    rules=[rule for rule in rules if rule.decision == "deny"])
+                    rules=[rule for rule in rules if rule.decision == "deny"], unmatched="ask", saved=[])
     if denied.decision == "deny":
         return denied
     if all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words):
-        return decide(replace(req, command=" ".join(words)), checks=checks, rules=rules)
+        return decide(replace(req, command=" ".join(words)), checks=checks, rules=rules, unmatched="ask", saved=[])
     for rule in rules:
         head = rule.match.split()
         if (rule.kind == "bash" and rule.decision == "allow" and rule.match_type == "prefix"
@@ -928,9 +1156,309 @@ def _is_force(arg: str) -> bool:
             or bool(re.fullmatch(r"-[A-Za-z]*f[A-Za-z]*", arg)))
 
 
+# -- pushes -------------------------------------------------------------------------------------
+
+# git push options that take a value as a separate word.
+PUSH_VALUE_OPTIONS = ("-o", "--push-option", "--receive-pack", "--exec", "--repo")
+PUSH_ALL_OPTIONS = ("--all", "--branches", "--mirror", "--tags")
+UNKNOWN_REF = "?"   # a push whose source or destination the command doesn't say (its upstream's)
+PUSH_AT = " @ "     # an ask key's "<source> → <destination> @ <remote>"
+
+
+@dataclass(frozen=True)
+class Push:
+    """One ``git push`` as the command spells it: the remote, and the source
+    and destination branch (UNKNOWN_REF where git's configuration or the
+    checkout decides: no refspec, ``HEAD``, ``@{u}``, ``--all``). ``force``:
+    a force flag or a ``+refspec``; ``delete``: it deletes the destination."""
+    remote: str
+    source: str
+    destination: str
+    force: bool = False
+    delete: bool = False
+
+    def key(self) -> str:
+        return f"{self.source}{PUSH_ARROW}{self.destination}{PUSH_AT}{self.remote}"
+
+
+def _branch_name(ref: str) -> str:
+    """A refspec side as a branch name, or UNKNOWN_REF when only git can tell
+    which branch it means (HEAD, @{upstream}, a revision expression)."""
+    ref = ref.removeprefix("refs/heads/")
+    # A wildcard refspec (refs/heads/*) names a set of branches only git knows.
+    if not ref or ref == "HEAD" or ref.startswith("@") or any(c in ref for c in "~^@{}*?["):
+        return UNKNOWN_REF
+    return ref
+
+
+def push_calls(command: str) -> list[Push]:
+    """Every ``git push`` in ``command``, one per refspec."""
+    out = []
+    for sub, args in _git_calls(command):
+        if sub != "push":
+            continue
+        positional, delete, force, everything, i = [], False, False, False, 0
+        while i < len(args):
+            a = args[i]
+            if a in ("-d", "--delete"):
+                delete = True
+            elif _is_force(a):
+                force = True
+            elif a in PUSH_ALL_OPTIONS or a == "--prune":
+                everything = True
+            elif a in PUSH_VALUE_OPTIONS:
+                i += 1
+            elif not a.startswith("-"):
+                positional.append(a)
+            i += 1
+        remote = positional[0] if positional else UNKNOWN_REF
+        refspecs = positional[1:] or [UNKNOWN_REF]
+        if everything:
+            refspecs = [UNKNOWN_REF]
+        for spec in refspecs:
+            forced = force or spec.startswith("+")
+            spec = spec.lstrip("+")
+            if spec == UNKNOWN_REF:
+                src = dst = UNKNOWN_REF
+            elif delete:
+                src, dst = "(delete)", _branch_name(spec.split(":", 1)[-1])
+            elif ":" in spec:
+                left, right = spec.split(":", 1)
+                src, dst = (_branch_name(left) if left else "(delete)"), _branch_name(right)
+                delete = delete or not left
+            else:
+                src = dst = _branch_name(spec)
+            out.append(Push(remote, src, dst, forced, delete or src == "(delete)"))
+    return out
+
+
+_DEFAULT_BRANCHES: dict[str, tuple[float, str]] = {}
+
+
+def default_branch(repo_root: str) -> str | None:
+    """The repo's default branch (brindle.git), remembered a minute."""
+    if not repo_root:
+        return None
+    hit = _DEFAULT_BRANCHES.get(repo_root)
+    if hit and hit[0] > time.monotonic():
+        return hit[1]
+    try:
+        from brindle import git
+
+        name = git.default_branch(repo_root)
+    except Exception:  # noqa: BLE001 - not a repo: no default branch to match
+        name = None
+    _DEFAULT_BRANCHES[repo_root] = (time.monotonic() + 60, name)
+    return name
+
+
+def push_pattern(match: str) -> tuple[str, str, str] | None:
+    """The (source, destination, remote) globs of a push pattern
+    ``"<source> → <destination>[ @ <remote>]"``, or None."""
+    if PUSH_ARROW not in match:
+        return None
+    match, _, remote = match.partition(PUSH_AT)
+    src, dst = (part.strip() for part in match.split(PUSH_ARROW, 1))
+    return (src or "*", dst or "*", remote.strip() or "*")
+
+
+def _ref_matches(pattern: str, ref: str, repo_root: str, loose: bool) -> bool:
+    """``ref`` under a push pattern's glob; an unknown ref matches only ``*``,
+    unless ``loose`` (a deny or ask, which errs toward matching)."""
+    if pattern == DEFAULT_BRANCH:
+        pattern = default_branch(repo_root) or "main"
+    if ref == UNKNOWN_REF:
+        return loose or pattern == "*"
+    return fnmatch.fnmatchcase(ref, pattern)
+
+
+def push_fits(match: str, push: Push, repo_root: str, loose: bool) -> bool:
+    """Whether one push fits push pattern ``match`` (see _ref_matches)."""
+    pattern = push_pattern(match)
+    if pattern is None:
+        return False
+    src_pat, dst_pat, remote_pat = pattern
+    return (_ref_matches(src_pat, push.source, repo_root, loose) and _ref_matches(dst_pat, push.destination, repo_root, loose)
+            and _ref_matches(remote_pat, push.remote, repo_root, loose))
+
+
+def push_matches(match: str, req: Request, loose: bool) -> bool:
+    """Whether any git push in ``req``'s command fits push pattern ``match``."""
+    if not req.command:
+        return False
+    return any(push_fits(match, push, req.repo_root, loose) for push in push_calls(req.command))
+
+
+# -- read-only pipelines -------------------------------------------------------------------------
+#
+# A command whose every part only reads (grep, ls, cat, head ...) joined by
+# pipes or &&, with quoting the shell may read any way (an escaped regex), is
+# safe to run even when it can't be parsed into exact allow rules. Anything
+# that writes a file (a redirection other than to /dev/null), substitutes a
+# command, or runs a program not on the list goes through the normal decision.
+
+# program -> (short option letters, long options) that make it write a file
+# or run another program; a short letter counts anywhere in an option cluster
+# (``sort -ro out``), a long option with or without ``=value``. Only programs
+# audited for such options are listed; ``uniq``'s second operand is an output
+# file, so it takes one operand at most (see _readonly_part).
+READONLY_PROGRAMS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "grep": ("", ()), "egrep": ("", ()), "fgrep": ("", ()), "rg": ("", ("--pre", "--pre-glob")), "ag": ("", ()),
+    "ls": ("", ()), "cat": ("", ()), "head": ("", ()), "tail": ("", ()), "wc": ("", ()), "nl": ("", ()),
+    "tac": ("", ()), "rev": ("", ()), "fold": ("", ()), "expand": ("", ()), "unexpand": ("", ()),
+    "cut": ("", ()), "tr": ("", ()), "paste": ("", ()), "comm": ("", ()), "column": ("", ()), "seq": ("", ()),
+    "sort": ("o", ("--output", "--compress-program")), "uniq": ("", ()),
+    "diff": ("", ()), "cmp": ("", ()), "file": ("C", ("--compile",)), "stat": ("", ()), "du": ("", ()),
+    "df": ("", ()), "pwd": ("", ()), "echo": ("", ()), "printf": ("", ()), "which": ("", ()),
+    "whereis": ("", ()), "type": ("", ()), "basename": ("", ()), "dirname": ("", ()), "realpath": ("", ()),
+    "readlink": ("", ()), "true": ("", ()), "false": ("", ()), "test": ("", ()), "whoami": ("", ()),
+    "uname": ("", ()), "printenv": ("", ()), "strings": ("", ()), "od": ("", ()), "hexdump": ("", ()),
+    "md5": ("", ()), "md5sum": ("", ()), "shasum": ("", ()), "sha256sum": ("", ()), "jq": ("", ()),
+    "yq": ("i", ("--inplace",)), "tree": ("o", ()), "locate": ("", ()),
+    "fd": ("xX", ("--exec", "--exec-batch")), "fdfind": ("xX", ("--exec", "--exec-batch")),
+}
+ONE_OPERAND = frozenset({"uniq"})
+
+
+def _has_option(args: list[str], short: str, long: tuple[str, ...]) -> bool:
+    """Whether any of ``args`` carries one of the short letters (in any
+    cluster, ``-ro``) or long options (``--output`` or ``--output=x``)."""
+    for a in args:
+        if a.startswith("--"):
+            name = a.split("=", 1)[0]
+            if name in long:
+                return True
+        elif a.startswith("-") and len(a) > 1 and any(c in short for c in a[1:]):
+            return True
+    return False
+FIND_WRITING = ("-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls", "-fprint0")
+# A sed script that only prints: an optional address (line numbers, $, /re/)
+# then p, P, l or =. Anything else (s///w, w, r, e ...) may write or run.
+SED_PRINT = re.compile(r"^(\d+|\$|/[^/]*/|\d+,(\d+|\$)|/[^/]*/,/[^/]*/)?\s*[pPl=]$")
+SED_SCRIPT_OPTIONS = ("-e", "--expression")
+
+
+def _sed_readonly(args: list[str]) -> bool:
+    """``sed -n`` printing only: every script (``-e``, ``--expression=`` or the
+    first operand) must be a print command; no in-place edit, no script file."""
+    scripts, operands, i = [], [], 0
+    while i < len(args):
+        a = args[i]
+        if a in SED_SCRIPT_OPTIONS:
+            if i + 1 >= len(args):
+                return False
+            scripts.append(args[i + 1])
+            i += 2
+            continue
+        if a.startswith("--expression="):
+            scripts.append(a.split("=", 1)[1])
+        elif a.startswith("-e") and a != "-e":
+            scripts.append(a[2:])
+        elif a.startswith(("-i", "--in-place", "-f", "--file", "-s")):
+            return False
+        elif a.startswith("-") and a != "-":
+            if not re.fullmatch(r"-n|--quiet|--silent|-E|-r|--regexp-extended|--posix|-z|--null-data|-u|--unbuffered|--debug", a):
+                return False
+        else:
+            operands.append(a)
+        i += 1
+    if not any(a in ("-n", "--quiet", "--silent") for a in args):
+        return False
+    if not scripts:
+        if not operands:
+            return False
+        scripts, operands = operands[:1], operands[1:]
+    return all(SED_PRINT.fullmatch(s.strip()) for s in scripts)
+
+
+def _readonly_part(words: list[str]) -> bool:
+    if not words:
+        return False
+    program = os.path.basename(words[0])
+    args = words[1:]
+    if program == "git":
+        argv = [a for a in args if not a.startswith("-")]
+        return bool(argv and argv[0] in READONLY_GIT
+                    and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in args))
+    if program == "find":
+        return not any(a in FIND_WRITING for a in args)
+    if program == "sed":
+        return _sed_readonly(args)
+    if program == "tee":
+        return not any(not a.startswith("-") for a in args)   # tee with no file only echoes
+    if program == "hostname":
+        return not any(not a.startswith("-") for a in args)   # with an operand it sets the name
+    audited = READONLY_PROGRAMS.get(program)
+    if audited is None:
+        return False
+    if _has_option(args, *audited):
+        return False
+    if program in ONE_OPERAND and sum(1 for a in args if not a.startswith("-")) > 1:
+        return False
+    return True
+
+
+def readonly_pipeline(command: str | None) -> bool:
+    """Whether ``command`` is one or more read-only commands joined by control
+    operators, with no redirection to a file, substitution, heredoc or
+    subshell (what _simple_commands reads), each a listed program used in a
+    way that writes nothing."""
+    from brindle.native.permissions import _simple_commands
+
+    if not command or "$(" in command or "`" in command:
+        return False
+    parsed = _simple_commands(command)
+    if not parsed or any(after not in (*COMPOUND_SEPARATORS, "||") for _, after in parsed):
+        return False
+    return all(_readonly_part(words) for words, _ in parsed)
+
+
+# -- destructive commands --------------------------------------------------------------------------
+
+# What a recursive rm must not be pointed at: the root, a top-level folder, or the home directory.
+DESTRUCTIVE_TARGETS = re.compile(r"^(/|/\*|/[^/]+/?|~|~/|~/\*|\$HOME|\$\{HOME\}|\$HOME/|\$HOME/\*|\.\.?/?)$")
+
+
+def destructive_rm(command: str) -> bool:
+    """Whether ``command`` runs ``rm`` recursively (``-r``/``-R``/``--recursive``,
+    in any flag cluster or spelling) at the root, a top-level folder, the home
+    directory or the working directory itself, or with ``--no-preserve-root``."""
+    for words in _segments(command):
+        if not words or os.path.basename(words[0]) != "rm":
+            continue
+        flags = [w for w in words[1:] if w.startswith("-")]
+        targets = [w for w in words[1:] if not w.startswith("-")]
+        if any(f == "--no-preserve-root" for f in flags):
+            return True
+        recursive = any(f in ("--recursive",) or (not f.startswith("--") and any(c in f for c in "rR")) for f in flags)
+        home = os.path.expanduser("~")
+        if recursive and any(DESTRUCTIVE_TARGETS.fullmatch(t) or t.rstrip("/") == home for t in targets):
+            return True
+    return False
+
+
+def forced_push(command: str) -> bool:
+    """A push that forces (a flag, or a ``+refspec``) or deletes a branch."""
+    return any(p.force or p.delete for p in push_calls(command))
+
+
+def _in_worktree(req: Request) -> bool:
+    """A path (resolved) inside the worktree or repo root, not under .git."""
+    if not req.path:
+        return False
+    real = os.path.realpath(req.path)
+    for root in _roots(req):
+        rel = _inside(real, root)
+        if rel and ".git" not in Path(rel).parts:
+            return True
+    return False
+
+
 def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
     if rule.match_type == "tracked":
         return req.kind == "read" and is_tracked(req.path, _roots(req))
+    if rule.match_type == "worktree":
+        return req.kind in PATH_KINDS and _in_worktree(req)
     command = (req.command or "").strip()
     if not command:
         return False
@@ -942,13 +1470,21 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
                     and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in argv[2:]))
     if rule.match_type == "git-push":
         return any(sub == "push" for sub, _ in _git_calls(command))
+    if rule.match_type == "push":
+        return push_matches(rule.match, req, loose=rule.decision != "allow")
     if rule.match_type == "git-force":
-        return any(_is_force(a) for _, args in _git_calls(command) for a in args)
+        return any(_is_force(a) for _, args in _git_calls(command) for a in args) or forced_push(command)
+    if rule.match_type == "rm-destructive":
+        return destructive_rm(command)
+    if rule.match_type == "readonly-pipeline":
+        return readonly_pipeline(command)
     return False
 
 
 def rule_matches(rule: Rule, req: Request, checks: list[str] | None = None) -> bool:
-    if rule.kind != req.kind:
+    if rule.kind != req.kind or rule.expired():
+        return False
+    if any(rule_matches(x, req, checks) for x in rule.exclusions):
         return False
     if rule.match_type in BUILTIN_MATCHERS:
         return _builtin_matches(rule, req, checks or [])
@@ -971,9 +1507,9 @@ def rule_matches(rule: Rule, req: Request, checks: list[str] | None = None) -> b
 
 
 def all_rules(repo_root: str | None = None) -> list[Rule]:
-    """Every rule in force: defaults, the repo's denies, the user's and
-    learned rules."""
-    return [*DEFAULT_RULES, *(repo_rules(repo_root) if repo_root else []), *load_store().rules]
+    """Every rule in force: the repo's denies, then the store's (the preset's,
+    the person's and learned ones)."""
+    return [*(repo_rules(repo_root) if repo_root else []), *load_store().rules]
 
 
 def profile_rules(profile) -> list[Rule]:
@@ -1022,19 +1558,51 @@ def invalid_profile_rules(profile) -> list[str]:
     return invalid
 
 
-def decide(req: Request | None, *, checks: list[str] | None = None,
-           rules: list[Rule] | None = None) -> Decision:
-    """The policy's answer for ``req``: deny > allow > ask."""
-    if req is None or req.kind not in KINDS:
-        return Decision("ask", "brindle couldn't read the request")
-    if rules is None:
-        rules = all_rules(req.repo_root or None)
-    for wanted in ("deny", "allow"):
+VERBS = {"deny": "denied", "ask": "asked for", "allow": "allowed"}
+
+
+def _rule_decision(req: Request, rules: list[Rule], checks: list[str] | None) -> Decision | None:
+    """The first rule that has a say, by precedence: deny > ask > allow."""
+    for wanted in ("deny", "ask", "allow"):
         for rule in rules:
             if rule.decision == wanted and rule_matches(rule, req, checks):
-                verb = "denied" if wanted == "deny" else "allowed"
-                return Decision(wanted, f"{verb} by {rule.source} rule {rule.id} ({rule.describe()})", rule)
-    if req.kind == "bash" and req.command and simple_argv(req.command) is None:
+                return Decision(wanted, f"{VERBS[wanted]} by {rule.source} rule {rule.id} ({rule.describe()})", rule)
+    return None
+
+
+def decide(req: Request | None, *, checks: list[str] | None = None,
+           rules: list[Rule] | None = None, unmatched: str | None = None,
+           session: str | None = None, saved: list[SavedAction] | None = None) -> Decision:
+    """The policy's answer for ``req``: deny > ask > allow > ``unmatched``
+    (the store's setting when None). An ask a saved action covers (within
+    the ask rule's limits; ``session``: the asking agent's session, for
+    saved actions that last one) is settled by it. ``saved``: the saved
+    actions to consider (the store's when None)."""
+    if req is None or req.kind not in KINDS:
+        return Decision("ask", "brindle couldn't read the request")
+    store = None
+    if rules is None or unmatched is None or saved is None:
+        store = load_store()
+    if rules is None:
+        rules = [*(repo_rules(req.repo_root) if req.repo_root else []), *store.rules]
+    if unmatched is None:
+        unmatched = store.unmatched
+    if saved is None:
+        saved = store.saved
+    ruled = _rule_decision(req, rules, checks)
+    if ruled is not None and ruled.decision == "deny":
+        return ruled
+    if saved:
+        from brindle import permission_grants
+
+        # A saved deny stops it before any automatic allow; a saved allow is
+        # weighed only once the policy's own answer is known (below).
+        stopped = permission_grants.settle(req, None, saved, session=session, denies_only=True)
+        if stopped is not None:
+            return stopped
+    if ruled is not None and ruled.decision == "allow":
+        return ruled
+    if ruled is None and req.kind == "bash" and req.command and simple_argv(req.command) is None:
         parts = compound_parts(req.command)
         if parts:
             answers = [_part_decision(req, words, checks, rules) for words in parts]
@@ -1043,6 +1611,25 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
                     return answer
             if all(answer.decision == "allow" for answer in answers):
                 return Decision("allow", "every part of the command is allowed by a rule")
+            ruled = next((a for a in answers if a.decision == "ask" and a.rule is not None), None)
+    if ruled is None and unmatched == "deny":
+        return Decision("deny", "no rule covers it, and unmatched actions are denied")
+    if ruled is None and unmatched == "allow":
+        # Nothing covers it: it runs, unless a part of the command a deny or ask
+        # rule covers hides in it (cd x && git push origin main).
+        within = decide_in_parts(req, checks=checks, rules=rules)
+        if within is None:
+            return Decision("allow", "no rule covers it; unmatched actions run")
+        if within.decision == "deny":
+            return within
+        ruled = within
+    if saved:
+        settled = permission_grants.settle(req, ruled.rule if ruled else None, saved, session=session)
+        if settled is not None:
+            return settled
+    if ruled is not None:
+        return Decision("ask", ruled.reason + "; asking the user", ruled.rule)
+    if req.kind == "bash" and req.command and simple_argv(req.command) is None:
         why = "the command isn't a single simple command, so no allow rule applies"
     elif req.kind == "read" and req.path:
         why = "not a file git tracks in the worktree, and no rule allows it"
@@ -1051,22 +1638,33 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     return Decision("ask", f"{why}; asking the user")
 
 
-def deny_in_parts(req: Request, *, checks: list[str] | None = None,
-                  rules: list[Rule]) -> Decision | None:
-    """The deny for any simple command inside ``req``'s shell command
-    (``cd x && rm y`` holds two), else None: an exact or prefix deny on the
-    whole command never sees a part of it."""
+def decide_in_parts(req: Request, *, checks: list[str] | None = None,
+                    rules: list[Rule], decisions: tuple[str, ...] = ("deny", "ask")) -> Decision | None:
+    """The deny (or ask) for any simple command inside ``req``'s shell
+    command (``cd x && rm y`` holds two), a deny first, else None: an exact
+    or prefix rule on the whole command never sees a part of it."""
     if req.kind != "bash" or not req.command:
         return None
-    denies = [rule for rule in rules if rule.decision == "deny"]
+    found: dict[str, Decision] = {}
+    rules = [rule for rule in rules if rule.decision in decisions]
     for words in _segments(req.command):
         # Split even inside a word, as split_commands does: an empty or
         # spaced word (task test "" secret) mustn't dodge an exact deny.
         command = " ".join(" ".join(words).split())
-        decision = decide(replace(req, command=command), checks=checks, rules=denies)
-        if decision.decision == "deny":
-            return decision
+        decision = _rule_decision(replace(req, command=command), rules, checks)
+        if decision is not None and decision.decision not in found:
+            found[decision.decision] = decision
+    for wanted in decisions:
+        if wanted in found:
+            d = found[wanted]
+            return d if wanted != "ask" else Decision("ask", d.reason + "; asking the user", d.rule)
     return None
+
+
+def deny_in_parts(req: Request, *, checks: list[str] | None = None,
+                  rules: list[Rule]) -> Decision | None:
+    """The deny for any simple command inside ``req``'s shell command, else None."""
+    return decide_in_parts(req, checks=checks, rules=rules, decisions=("deny",))
 
 
 # -- storage ----------------------------------------------------------------------------------
@@ -1100,6 +1698,13 @@ class Store:
     rules: list[Rule] = field(default_factory=list)
     # pattern id -> {"kind", "match", "count", "last"}: approvals the person gave
     approvals: dict[str, dict] = field(default_factory=dict)
+    # The preset the rules were seeded from (PRESETS), and what no rule covers (UNMATCHED).
+    preset: str | None = None
+    unmatched: str = "ask"
+    # The person's saved allow and deny decisions from the Inbox.
+    saved: list[SavedAction] = field(default_factory=list)
+    # The asks of the last PROMPT_WINDOW seconds: [{"rule": rule id or "unmatched", "ts"}].
+    prompts: list[dict] = field(default_factory=list)
     # What brindle put in agy's settings.json (brindle.antigravity.sync_permissions):
     # {"allow": [...], "deny": [...]}, only entries brindle added itself, and the
     # containers it created ("file", "permissions", "permissions.allow", ...).
@@ -1113,20 +1718,61 @@ class Store:
     codex_hook: dict[str, dict[str, str]] = field(default_factory=dict)
 
     def to_json(self) -> str:
-        data: dict = {"version": 1, "rules": [r.to_dict() for r in self.rules], "approvals": self.approvals}
+        data: dict = {"version": 2, "preset": self.preset, "unmatched": self.unmatched,
+                      "rules": [r.to_dict() for r in self.rules], "approvals": self.approvals}
+        if self.saved:
+            data["saved"] = [s.to_dict() for s in self.saved]
+        if self.prompts:
+            data["prompts"] = self.prompts
         for name in ("agy_managed", "agy_created", "agy_repos", "codex_hook"):
             if getattr(self, name):
                 data[name] = getattr(self, name)
         return json.dumps(data, indent=2) + "\n"
 
+    def rule(self, id_: str) -> Rule | None:
+        return next((r for r in self.rules if r.id == id_), None)
+
+    def saved_action(self, id_: str) -> SavedAction | None:
+        return next((s for s in self.saved if s.id == id_), None)
+
+    def live_saved(self, now: float | None = None) -> list[SavedAction]:
+        """The saved actions that still apply (expired ones stay listed, to edit or delete)."""
+        return [s for s in self.saved if not s.expired(now)]
+
+
+def seed_preset(store: Store, name: str) -> Store:
+    """Seed ``store`` from preset ``name``: its rules replace the preset-sourced
+    ones (the person's own and learned rules stay), and its unmatched setting
+    and name are recorded."""
+    kept = [r for r in store.rules if r.source != "preset"]
+    ids = {r.id for r in kept}    # a seeded rule the person edited keeps their version
+    store.rules = [*(r for r in preset_rules(name) if r.id not in ids), *kept]
+    store.preset, store.unmatched = name, preset_unmatched(name)
+    return store
+
+
+def _write_store(path: Path, store: Store) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(store.to_json())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
 
 def load_store() -> Store:
+    """The person's store. A new one is seeded from DEFAULT_PRESET; one from
+    before presets (version 1: built-in rules outside it) is migrated to
+    MIGRATED_PRESET, keeping its user and learned rules, approvals and the
+    provider records."""
     path = store_path()
     if not path.exists():
-        store = Store(rules=list(PRESET_RULES))
+        store = seed_preset(Store(), DEFAULT_PRESET)
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(store.to_json(), encoding="utf-8")
+            _write_store(path, store)
         except OSError:
             pass
         return store
@@ -1136,10 +1782,17 @@ def load_store() -> Store:
         return Store()
     if not isinstance(data, dict):
         return Store()
+    legacy = "preset" not in data
     rules = [r for r in (Rule.from_dict(d) for d in data.get("rules") or [] if isinstance(d, dict))
-             if r and r.source in ("user", "learned")]
+             if r and r.source in STORE_SOURCES and not (legacy and r.source == "preset")]
     approvals = data.get("approvals")
     approvals = {k: v for k, v in approvals.items() if isinstance(v, dict)} if isinstance(approvals, dict) else {}
+    saved = [s for s in (SavedAction.from_dict(d) for d in data.get("saved") or [] if isinstance(d, dict)) if s]
+    now = time.time()
+    prompts = [p for p in data.get("prompts") or [] if isinstance(p, dict) and isinstance(p.get("rule"), str)
+               and _number(p.get("ts")) is not None and now - p["ts"] < PROMPT_WINDOW]
+    preset = data.get("preset") if data.get("preset") in PRESETS else None
+    unmatched = data.get("unmatched") if data.get("unmatched") in UNMATCHED else "ask"
 
     def strings(value: object) -> list[str]:
         return [v for v in value if isinstance(v, str)] if isinstance(value, list) else []
@@ -1156,7 +1809,20 @@ def load_store() -> Store:
         codex = {os.path.realpath(provider_homes.source("codex")): codex}
     codex = {home: {k: v for k, v in rec.items() if isinstance(v, str)}
              for home, rec in codex.items() if isinstance(rec, dict)}
-    return Store(rules, approvals, managed, strings(data.get("agy_created")), repos, codex)
+    store = Store(rules, approvals, preset, unmatched, saved, prompts, managed, strings(data.get("agy_created")),
+                  repos, codex)
+    if legacy:
+        # Before presets: the built-in rules lived outside the store, and the
+        # person's command allows were written with source "user". What those
+        # amounted to is the Standard preset; its seed takes their place.
+        seed = {(r.kind, r.match, r.match_type, r.decision) for r in preset_rules(MIGRATED_PRESET)}
+        store.rules = [r for r in store.rules if (r.kind, r.match, r.match_type, r.decision) not in seed]
+        seed_preset(store, MIGRATED_PRESET)
+        try:
+            _write_store(path, store)
+        except OSError:
+            pass
+    return store
 
 
 @contextmanager
@@ -1171,32 +1837,83 @@ def editing() -> Iterator[Store]:
         fcntl.flock(lock, fcntl.LOCK_EX)
         store = load_store()
         yield store
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(store.to_json(), encoding="utf-8")
-        os.replace(tmp, path)
+        _write_store(path, store)
+
+
+def make_rule(kind: str, match: str, decision: str, match_type: str = "exact", source: str = "user", *,
+              limits: dict | None = None, expires: float | None = None, exclusions: list[Rule] | None = None,
+              label: str = "", id_: str = "") -> Rule:
+    """A validated rule (ValueError otherwise). A ``push`` rule's match is
+    ``"<source> → <destination>"``; an ask rule may carry ``limits``."""
+    if kind not in KINDS:
+        raise ValueError(f"unknown kind {kind!r}: one of {', '.join(KINDS)}")
+    if match_type not in (*MATCH_TYPES, *BUILTIN_MATCHERS):
+        raise ValueError(f"unknown match type {match_type!r}: one of {', '.join((*MATCH_TYPES, *BUILTIN_MATCHERS))}")
+    if decision not in DECISIONS:
+        raise ValueError("decision must be allow, deny or ask")
+    if not match:
+        raise ValueError("empty match")
+    if match_type == "push" and push_pattern(match) is None:
+        raise ValueError(f"a push rule's match is '<source>{PUSH_ARROW}<destination>'")
+    if source not in STORE_SOURCES:
+        raise ValueError(f"source must be one of {', '.join(STORE_SOURCES)}")
+    if limits is not None and decision == "ask" and clean_limits(limits) is None:
+        raise ValueError("limits need a positive 'minutes' for life 'time'")
+    if expires is not None and expires <= time.time():
+        raise ValueError("expires is already past")
+    return Rule(kind, match, match_type, decision, source, time.time(), id_,
+                clean_limits(limits) if decision == "ask" else None, expires, tuple(exclusions or ()), label)
 
 
 def add_rule(kind: str, match: str, decision: str, match_type: str = "exact",
-             source: str = "user") -> Rule:
-    if kind not in KINDS:
-        raise ValueError(f"unknown kind {kind!r}: one of {', '.join(KINDS)}")
-    if match_type not in MATCH_TYPES:
-        raise ValueError(f"unknown match type {match_type!r}: one of {', '.join(MATCH_TYPES)}")
-    if decision not in ("allow", "deny"):
-        raise ValueError("decision must be allow or deny")
-    if not match:
-        raise ValueError("empty match")
-    rule = Rule(kind, match, match_type, decision, source, time.time())
+             source: str = "user", **extra) -> Rule:
+    """Add a rule to the store (replacing one with the same id). ``extra``: make_rule's keyword arguments."""
+    rule = make_rule(kind, match, decision, match_type, source, **extra)
     with editing() as store:
         store.rules = [r for r in store.rules if r.id != rule.id] + [rule]
     return rule
 
 
+def update_rule(id_: str, **changes) -> Rule | None:
+    """Change rule ``id_`` (any of make_rule's fields); the new rule, which
+    keeps the id, or None when there is no such rule. ValueError when the
+    result isn't a valid rule."""
+    with editing() as store:
+        old = store.rule(id_)
+        if old is None:
+            return None
+        fields = dict(kind=old.kind, match=old.match, match_type=old.match_type, decision=old.decision,
+                      source=old.source, limits=old.limits, expires=old.expires, exclusions=list(old.exclusions),
+                      label=old.label)
+        fields.update(changes)
+        source = fields.pop("source")
+        if source == "preset":
+            source = "user"     # edited: the person's now
+        rule = make_rule(fields.pop("kind"), fields.pop("match"), fields.pop("decision"), fields.pop("match_type"),
+                         source, id_=id_, **fields)
+        rule = replace(rule, created=old.created or rule.created)
+        store.rules = [rule if r.id == id_ else r for r in store.rules]
+    return rule
+
+
+def add_exclusion(id_: str, kind: str, match: str, match_type: str = "exact") -> Rule | None:
+    """Except requests ``match`` covers from rule ``id_`` (a deny's exception);
+    the changed rule, or None for no such rule."""
+    exception = make_rule(kind, match, "deny", match_type)
+    with editing() as store:
+        old = store.rule(id_)
+        if old is None:
+            return None
+        rule = replace(old, exclusions=(*old.exclusions, exception))
+        store.rules = [rule if r.id == id_ else r for r in store.rules]
+    return rule
+
+
 def forget(id_: str) -> str | None:
-    """Remove the user or learned rule ``id_``, or the approval count behind
+    """Remove rule ``id_`` (whatever seeded it), or the approval count behind
     suggestion ``id_``; what was removed, or None if neither exists."""
     with editing() as store:
-        found = next((r for r in store.rules if r.id == id_), None)
+        found = store.rule(id_)
         store.rules = [r for r in store.rules if r.id != id_]
         approval = store.approvals.pop(id_, None)
     if found:
@@ -1207,9 +1924,122 @@ def forget(id_: str) -> str | None:
 
 
 def reset() -> None:
-    """Back to the defaults: no user or learned rules, no approval counts."""
+    """Back to the preset's seed: no user or learned rules, saved actions or
+    approval counts."""
     with editing() as store:
-        store.rules, store.approvals = [], {}
+        store.rules, store.approvals, store.saved = [], {}, []
+        seed_preset(store, store.preset or DEFAULT_PRESET)
+
+
+def apply_preset(name: str) -> Store:
+    """Seed the store from preset ``name`` (ValueError for an unknown one),
+    keeping the person's own and learned rules and saved actions."""
+    if name not in PRESETS:
+        raise ValueError(f"unknown preset {name!r}: one of {', '.join(PRESETS)}")
+    with editing() as store:
+        seed_preset(store, name)
+    return store
+
+
+def set_unmatched(value: str) -> None:
+    if value not in UNMATCHED:
+        raise ValueError(f"unmatched must be one of {', '.join(UNMATCHED)}")
+    with editing() as store:
+        store.unmatched = value
+
+
+# -- saved actions ------------------------------------------------------------------------------
+
+
+def _stamp(action: SavedAction, now: float | None = None) -> SavedAction:
+    """A timed action's expiry, from now (ValueError without positive minutes)."""
+    now = time.time() if now is None else now
+    if action.life == "time":
+        if action.minutes is None or action.minutes <= 0:
+            raise ValueError("a timed saved action needs positive minutes")
+        action.expires = now + action.minutes * 60
+    else:
+        action.minutes = action.expires = None
+    if action.life != "session":
+        action.session = None
+    if action.life == "session" and not action.session:
+        raise ValueError("a saved action for this session needs the session")
+    return action
+
+
+def save_action(kind: str, pattern: str, decision: str, *, scope: str = "exact", level: str | None = None,
+                request: dict | None = None, life: str = "forever", minutes: float | None = None,
+                session: str | None = None, repo: str | None = None, note: str = "") -> SavedAction:
+    """Save an allow or deny decision (ValueError when it isn't a valid one)."""
+    if kind not in (*KINDS, "push"):
+        raise ValueError(f"unknown kind {kind!r}")
+    if decision not in ("allow", "deny"):
+        raise ValueError("decision must be allow or deny")
+    if life not in LIVES:
+        raise ValueError(f"life must be one of {', '.join(LIVES)}")
+    if not pattern:
+        raise ValueError("empty pattern")
+    if level is not None and level not in LEVELS:
+        raise ValueError(f"level must be one of {', '.join(LEVELS)}")
+    action = _stamp(SavedAction(secrets.token_hex(4), kind, pattern, decision, scope, level, dict(request or {}),
+                                life, minutes, None, session, repo, time.time(), note))
+    with editing() as store:
+        store.saved.append(action)
+    return action
+
+
+def update_saved_action(id_: str, **changes) -> SavedAction | None:
+    """Change saved action ``id_`` (pattern, scope, level, decision, life,
+    minutes, note ...); a timed one's expiry restarts now. None for no such action."""
+    with editing() as store:
+        old = store.saved_action(id_)
+        if old is None:
+            return None
+        data = {**old.to_dict(), **changes, "id": id_}
+        new = SavedAction.from_dict(data)
+        if new is None or new.decision not in ("allow", "deny") or new.life not in LIVES:
+            raise ValueError("not a valid saved action")
+        if new.level is not None and new.level not in LEVELS:
+            raise ValueError(f"level must be one of {', '.join(LEVELS)}")
+        new.created = old.created
+        _stamp(new)
+        store.saved = [new if s.id == id_ else s for s in store.saved]
+    return new
+
+
+def delete_saved_action(id_: str) -> SavedAction | None:
+    with editing() as store:
+        found = store.saved_action(id_)
+        store.saved = [s for s in store.saved if s.id != id_]
+    return found
+
+
+# -- prompt counts ------------------------------------------------------------------------------
+
+
+def note_prompt(decision: Decision) -> None:
+    """An ask reached a person: count it against the rule that asked (or
+    "unmatched"), for the last PROMPT_WINDOW seconds. Never raises."""
+    if decision.decision != "ask":
+        return
+    try:
+        with editing() as store:
+            now = time.time()
+            store.prompts = [p for p in store.prompts if now - p["ts"] < PROMPT_WINDOW]
+            store.prompts.append({"rule": decision.rule.id if decision.rule else "unmatched", "ts": now})
+    except Exception:  # noqa: BLE001 - a count is a side record
+        pass
+
+
+def prompt_counts(store: Store | None = None, now: float | None = None) -> dict[str, int]:
+    """Asks per rule id ("unmatched" for none) over the last PROMPT_WINDOW seconds."""
+    store = store or load_store()
+    now = time.time() if now is None else now
+    out: dict[str, int] = {}
+    for p in store.prompts:
+        if now - p["ts"] < PROMPT_WINDOW:
+            out[p["rule"]] = out.get(p["rule"], 0) + 1
+    return out
 
 
 # -- learning ---------------------------------------------------------------------------------
@@ -1299,7 +2129,10 @@ def _agy_path(match: str) -> str:
 
 
 def _agy_entry(rule: Rule) -> str | None:
-    """``rule`` in agy's syntax, or None when agy can't express it safely."""
+    """``rule`` in agy's syntax, or None when agy can't express it safely
+    (an ask rule never: agy has no "ask" entry, and the hook asks for it)."""
+    if rule.decision == "ask" or rule.exclusions or rule.expired():
+        return None
     allow = rule.decision == "allow"
     if rule.kind == "bash":
         if rule.match_type == "exact":
@@ -1343,6 +2176,35 @@ def _agy_entry(rule: Rule) -> str | None:
     return None
 
 
+def _literal_prefix(rule: Rule) -> str | None:
+    """What every request a rule matches starts with, if that can be said:
+    the whole match for exact and prefix rules, a glob's text before its
+    first wildcard. None for a named matcher (anything may match)."""
+    if rule.match_type in ("exact", "prefix"):
+        return rule.match
+    if rule.match_type == "glob":
+        return re.split(r"[*?\[]", rule.match, 1)[0]
+    return None
+
+
+def _may_overlap(ask: Rule, allow: Rule) -> bool:
+    """Whether a request could fit both ``ask`` and ``allow`` (same kind), so
+    that mirroring the allow into a provider's own settings would let it run
+    where the hook asks. Errs toward overlap."""
+    if ask.kind != allow.kind:
+        return False
+    if ask.match_type == "push":
+        head = _literal_prefix(allow)
+        if head is None:
+            return False    # a named matcher (read-only git, checks, pipelines): never a push
+        head = head.strip()
+        return "git".startswith(head) or head.startswith("git")
+    a, b = _literal_prefix(ask), _literal_prefix(allow)
+    if a is None or b is None:
+        return True
+    return a.startswith(b) or b.startswith(a)
+
+
 def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
     """The agy settings entries for ``rules`` (the built-in ones expanded:
     the read-only git commands as exact commands, git push as a deny), as
@@ -1350,21 +2212,28 @@ def mirror_agy(rules: list[Rule], checks: list[str]) -> dict[str, list[str]]:
     agy's settings apply to every project, and a check runs whatever that
     repo defines, so it's allowed only for brindle workers in that repo."""
     out: dict[str, list[str]] = {"allow": [], "deny": []}
+    asks = [r for r in rules if r.decision == "ask" and not r.expired()]
 
     def add(decision: str, entry: str | None) -> None:
         if entry and entry not in out[decision]:
             out[decision].append(entry)
 
     for rule in rules:
+        if rule.decision == "ask" or rule.exclusions or rule.expired():
+            continue  # only the hook can ask, or weigh an exception
+        if rule.decision == "allow" and any(_may_overlap(ask, rule) for ask in asks):
+            continue  # agy would run it on the allow where the hook asks; left to the hook
         if rule.match_type == "check":
             continue
-        elif rule.match_type == "git-readonly":
+        elif rule.match_type == "git-readonly" and rule.decision == "allow":
             for sub in READONLY_GIT:
                 add("allow", f"command(regex:^git {sub}$)")
-        elif rule.match_type == "git-push":
+        elif rule.match_type == "git-push" and rule.decision == "deny":
+            add("deny", "command(git push)")
+        elif rule.match_type == "push" and rule.decision == "deny" and push_pattern(rule.match) == ("*", "*", "*"):
             add("deny", "command(git push)")
         elif rule.match_type in BUILTIN_MATCHERS:
-            continue  # tracked files, force flags: only the hook can tell
+            continue  # tracked files, force flags, pipelines, branches: only the hook can tell
         else:
             add(rule.decision, _agy_entry(rule))
     return out
