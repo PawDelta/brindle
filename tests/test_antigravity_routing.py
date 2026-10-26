@@ -153,7 +153,7 @@ def boss(db, ws, repo, monkeypatch, tmp_path):
     return ws
 
 
-def test_agy_warmup_queued_before_task(db, boss, launcher_inbox, fake_tmux, helpers, monkeypatch):
+def test_provider_latency_agy_warmup_queued_before_task(db, boss, launcher_inbox, fake_tmux, helpers, monkeypatch):
     # agy has no MCP tools in its first turn, so the task must be the second.
     out = asyncio.run(mcp_server.assign("developer-antigravity", "write the readme", branch="docs/readme"))
     m = re.search(r"Started worker (\S+) \(developer-antigravity\)", out)
@@ -165,6 +165,7 @@ def test_agy_warmup_queued_before_task(db, boss, launcher_inbox, fake_tmux, help
     # What the detached _after-launch helper does once agy shows its prompt:
     # the warm-up goes in at once.
     agents.ready(db, worker.id)
+    assert len(fake_tmux) == 1 and not any("_flush" in argv for argv in helpers)
     assert not db.get_agent(worker.id).inbox_socket
     assert db.pending_count(worker.id) == 1
     from brindle import launch_health
