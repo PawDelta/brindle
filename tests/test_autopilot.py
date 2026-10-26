@@ -300,13 +300,36 @@ def test_open_subagent_workers_dont_let_the_supervisor_idle(db, root, monkeypatc
     assert "complete_subagent for sub1" in out["reason"]
 
 
-def test_need_user_blocks_until_they_reply(db, root, monkeypatch):
+@pytest.mark.parametrize("independent_progress", [False, True], ids=["immediate-answer", "progress-reminder"])
+def test_need_user_blocks_until_they_reply(db, root, monkeypatch, independent_progress):
     agent, _ = root
     with_goal(db)
     monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
-    autopilot.need_user(db, "boss", "Postgres or SQLite?")
+    clock = [time.time()]
+    start = clock[0]
+    monkeypatch.setattr(autopilot.time, "time", lambda: clock[0])
+    initial = autopilot.on_stop(db, agent, {})
+    assert initial and autopilot.NUDGE_HEAD in initial["reason"]
+    autopilot.need_user(db, "boss", "Postgres or SQLite?", ask=True)
     assert autopilot.on_stop(db, agent, {}) is None
     assert "Postgres or SQLite?" in autopilot.progress(db, "boss")
+    clock[0] = start + 3599.0
+    assert autopilot.on_stop(db, agent, {}) is None
+    clock[0] = start + 3600.0
+    out = autopilot.on_stop(db, agent, {})
+    assert out and out["decision"] == "block"
+    assert autopilot.NUDGE_HEAD not in out["reason"]
+    assert "Postgres or SQLite?" in out["reason"]
+    if independent_progress:
+        clock[0] += autopilot.NUDGE_BACKOFF
+        assert autopilot.on_stop(db, agent, {}) is None
+        db.bump_progress("boss")
+        clock[0] += 3600.0
+        assert autopilot.on_stop(db, agent, {}) is None
+    autopilot.answered(db, "boss")
+    resumed = autopilot.on_stop(db, agent, {})
+    assert resumed and resumed["decision"] == "block"
+    assert autopilot.NUDGE_HEAD in resumed["reason"]
 
 
 def test_checks_verify_milestones_and_finish_the_goal(db, root, repo):

@@ -387,7 +387,7 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
     return True
 
 
-def review_state(db: DB, ws: Workspace) -> str | None:
+def review_state(db: DB, ws: Workspace, *, head_reader=None) -> str | None:
     """#186: where the branch in ``ws`` stands in review, so silence can be
     told apart: ``waiting for checks`` (a check slot), ``checks running``,
     ``reviewer running (id)``, nothing at work on a branch in review, the
@@ -395,7 +395,16 @@ def review_state(db: DB, ws: Workspace) -> str | None:
     approved), or ``merge failed: why``. None when the branch has no worker,
     is merged, or has not been through review."""
     worker = piped_worker(db, ws)
-    if worker is None or db.merged_sha(ws.id):
+    if worker is None:
+        return None
+    merged = db.merged_sha(ws.id)
+    if not (worker.pipeline or worker.merge_failed or merged or db.last_review(ws.id)):
+        return None   # an ordinary idle worker needs no git inspection on redraw
+    try:
+        sha = head_reader() if head_reader is not None else gates.head(ws)
+    except git.GitError:
+        return None   # a removed worktree has no current review to display
+    if sha is None or merged == sha:
         return None
     if worker.merge_failed and not worker.pipeline:
         why = " ".join(worker.merge_failed.split())
@@ -404,15 +413,18 @@ def review_state(db: DB, ws: Workspace) -> str | None:
     if worker.pipeline == "ready":
         merging = f"merging, {checks}" if gates.marked("merge-run", ws.id) else "waiting to merge"
         return f"approved, {merging}"
+    # Use the same standing verdicts as the merge gate, for this commit only.
+    # A recorded verdict may precede the asynchronous pipeline transition.
+    review = gates.verdict(db, ws.id, sha)
     if worker.pipeline == "reviewing":
         if review_running(ws.id):
             return checks
         for a in db.list_agents(ws.id):
-            if a.mode == "review" and a.status != "done" and a.result is None \
-                    and a.dismissed_at is None:
+            if a.mode == "review" and a.status not in ("paused", "done") and a.result is None \
+                    and a.dismissed_at is None and a.review_sha == sha:
                 return f"reviewer running ({a.id})"
-        return "waiting for review: nothing is checking or reviewing it"
-    review = db.last_review(ws.id)
+        if review is None:
+            return "waiting for review: nothing is checking or reviewing it"
     if review is None:
         return None
     return f"{'approved' if review.approved else 'changes requested'} at {review.sha[:8]}"
@@ -427,7 +439,7 @@ def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Wor
         # With a second review both calls carry a concrete profile, so the
         # reviewer dedupe compares profiles and neither can swallow the other.
         first = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task) if second else None
-        started = agents.start_review(db, parent, ws, first, None, cfg)   # with checks: after they finish
+        started = agents.start_review(db, parent, ws, first, None, cfg, slot="")
         if second:
             try:
                 agents.start_review(db, parent, ws, second, None, cfg, second=True)
@@ -445,9 +457,6 @@ def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Wor
                   f"Its report: {agents.first_line(result)}", result), worker.id)
 
 
-RESTART_REVIEW_AFTER = 120.0   # seconds a reported branch may wait with nothing checking or reviewing it
-
-
 def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
     """#186/#190: ``worker`` reported and its branch has waited in review
     since ``since`` with nothing at work on it: no check run (stopped with
@@ -463,9 +472,27 @@ def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
     parent = db.get_agent(worker.parent_id) if worker.parent_id else None
     if parent is None or not enabled(cfg, worker, ws):
         return False
-    db.update_agent(worker.id, review_restarted=since)
-    _start_review(db, cfg, parent, worker, ws, worker.result or "")
-    return True
+    with agents.review_dispatch_lock(ws.id):
+        current = db.get_agent(worker.id)
+        if (current is None or current.pipeline != "reviewing"
+                or current.reviewing_since != worker.reviewing_since
+                or current.review_restarted == since or review_running(ws.id)):
+            return False
+        # A short configured delay can expire before the detached helper's
+        # launch grace. Reusing that claim must not consume its one recovery.
+        try:
+            second = second_profile(db, cfg, current, ws)
+            first = agents.default_review_profile(cfg, current, db, ws.repo_root, current.task) if second else None
+            profile = agents._review_profile(db, ws, first, cfg)
+            sha = gates.head(ws)
+            if agents._live_reviewer(db, ws, sha, profile) or (
+                    cfg.checks and agents._review_pending(ws.id, profile, sha)):
+                return False
+        except agents.AgentError:
+            pass   # _start_review reports an unavailable reviewer through the usual escalation
+        db.update_agent(worker.id, review_restarted=since)
+        _start_review(db, cfg, parent, current, ws, current.result or "")
+        return True
 
 
 def review_claim(db: DB, ws: Workspace) -> float | None:
@@ -771,7 +798,8 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
             agents.request_review(
                 db, parent, ws, profile, focus="\n\n".join(focus_parts),
                 cfg=cfg, check_summary=check_summary,
-                second=bool(db.review_slot(reviewer.id)),   # in the stopped reviewer's place
+                second=bool(_review_slot(db, reviewer)),   # in the stopped reviewer's place
+                slot="" if db.review_slot(reviewer.id) == "" else None,
             )
             agents.close_later(reviewer.id)
             return True

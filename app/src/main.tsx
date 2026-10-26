@@ -6,7 +6,7 @@ import { DaemonClient } from "./api/client";
 import { watchDebug } from "./api/debug";
 import { AppPtyViews } from "./api/ptyView";
 import { tauriSetup } from "./api/setup";
-import { appUpdater, installCli, readAbout, tauriClient, tauriSocket } from "./api/tauri";
+import { appUpdater, installCli, readAbout, releaseBuildUpdater, tauriClient, tauriSocket } from "./api/tauri";
 import { applyTheme, readTheme } from "./components/ThemeToggle";
 import type { Route } from "./routes";
 import { createAppStore } from "./store/store";
@@ -42,6 +42,7 @@ const initialRoute: Route | undefined = client && repo && root ? { screen: "sess
 const setup = client && !devClient ? tauriSetup() : undefined;
 const cli = setup ? installCli : undefined;
 const updater = setup ? appUpdater : undefined;
+const releaseUpdater = setup ? releaseBuildUpdater : undefined;
 // Settings' About reads the bundle's license files through the shell, whichever daemon the app talks to.
 const about = isTauri() ? readAbout : undefined;
 
@@ -53,7 +54,7 @@ function app() {
     sync = startSync({ client, store, connect });
     watchDebug(client);
   }
-  return <App store={store} client={client} refresh={sync?.refresh} initialRoute={initialRoute} installCli={cli} appUpdater={updater} readAbout={about} />;
+  return <App store={store} client={client} refresh={sync?.refresh} initialRoute={initialRoute} installCli={cli} appUpdater={updater} releaseBuildUpdater={releaseUpdater} readAbout={about} />;
 }
 
 // In the app, the daemon is found (or started) first; when it can't be, the

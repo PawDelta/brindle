@@ -342,8 +342,12 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         return {"status": svc.send(db, a.id, _get(body, "text", required=True))}
     if action == "permission":
         # The person's answer to a's permission request (agent callers never get here).
+        if set(body) - {"request", "digest", "choice", "minutes", "scope"}:
+            raise ServiceError("invalid", "unsupported permission approval fields")
+        minutes = _get(body, "minutes", int, required="minutes" in body)
         return inbox.answer_permission(db, a.id, _get(body, "request"), _get(body, "digest"),
-                                       _get(body, "choice", required=True))
+                                       _get(body, "choice", required=True), minutes,
+                                       _get(body, "scope"))
     if action == "review":
         return review_workspace(db, {"id": a.workspace_id}, body)
     if action == "merge":
@@ -1280,6 +1284,30 @@ def change_permissions(db: DB, params: dict, body: Body) -> Any:
     return reply
 
 
+def revoke_grant(db: DB, params: dict, body: Body) -> Any:
+    """End the person's permission grant ``id`` now (brindle.daemon.grants)."""
+    from brindle import history
+    from brindle.daemon.grants import GRANTS
+
+    from brindle import permission_grants
+    if params["id"].startswith("remembered-"):
+        remembered = permission_grants.forget_remembered(params["id"])
+        if remembered is not None:
+            history.record_safely(db, remembered["repo_root"], "permission",
+                                  task=remembered["match"], result=f"permission preference {params['id']} revoked by the person")
+            return {"revoked": params["id"]}
+
+    grant = GRANTS.revoke(params["id"])
+    if grant is None:
+        raise ServiceError("not_found", f"no live grant {params['id']}", 404)
+    agent = db.get_agent(grant.agent_id)
+    ws = db.get_workspace(agent.workspace_id) if agent else None
+    if agent is not None and ws is not None:
+        history.record_safely(db, ws.repo_root, "permission", agent=agent, branch=ws.branch,
+                              task=f"{grant.kind}: {grant.match}", result=f"grant {grant.id} revoked by the person")
+    return {"revoked": grant.id}
+
+
 # -- account ---------------------------------------------------------------------
 
 
@@ -1332,7 +1360,8 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
     """The provider CLI's own sign-in (``claude auth login``, ``codex login``, ...).
     ``method``: how to sign in, where the CLI has a flag for it (see
     picker.LOGIN_METHODS); its own default otherwise."""
-    from brindle import picker
+    from brindle import cloud_login, company_login, picker, providers
+    from brindle.config import brindle_home
     from brindle.pro.team_policy import CLI_NAMES
 
     provider = params["provider"]
@@ -1342,6 +1371,26 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
     methods = picker.LOGIN_METHODS.get(provider, {})
     if method is not None and method not in methods:
         raise ServiceError("invalid", f"{provider} sign-in methods: {', '.join(methods) or 'none'}")
+    repo, profile = _get(body, "repo"), _get(body, "profile")
+    if bool(repo) != bool(profile):
+        raise ServiceError("invalid", "repo and profile must be supplied together")
+    identity = agents.consent_identity(db, repo, profile, provider, _get(body, "session")) if repo else (
+        company_login.stored_env() if provider == "claude" else {})
+    if ((provider == "claude" and not providers.claude_org_managed()) or
+            (provider == "opencode" and identity.get("BRINDLE_CLOUD_ROUTE"))):
+        route = cloud_login.provider_from_env({**os.environ, **identity})
+        if route in ("bedrock", "vertex", "azure"):
+            command = cloud_login.login_command(identity)
+            if method or command is None:
+                raise ServiceError("invalid", "Refresh this profile's configured cloud credentials directly")
+            browser = picker._wsl_browser_env()
+            full = {**os.environ, **identity}
+            env = {**{k: full[k] for k in cloud_login.IDENTITY_ENV if k in full}, **identity,
+                   "BRINDLE_HOME": str(brindle_home()),
+                   **({"BROWSER": browser["BROWSER"]} if browser else {})}
+            return terminal.open_action(f"login cloud-{cloud_login.action_key(identity)}",
+                                        cloud_login.interactive_command(),
+                                        env=env)
     from brindle import provider_homes
 
     browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
@@ -1351,6 +1400,22 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
     restart = _get(body, "restart", bool, False)
     return terminal.open_action(f"login {provider}", picker._login_command(provider, method), env=env,
                                 restart=restart)
+
+
+def profile_preflight(db: DB, params: dict, body: Body) -> Any:
+    """Explicitly check the launch identity named by a preflight action.
+
+    Unlike the read-only GET probe, this may run the configured cloud CLI.
+    The POST uses the same profile and session resolution as sign-in.
+    """
+    provider = params["provider"]
+    if provider not in preflight.PROVIDERS:
+        raise ServiceError("invalid", "unknown provider")
+    repo, profile = _get(body, "repo", required=True), _get(body, "profile", required=True)
+    session = _get(body, "session")
+    identity = agents.consent_identity(db, repo, profile, provider, session)
+    launch = {"repo": repo, "profile": profile, **({"session": session} if session else {})}
+    return [i.to_json() for i in preflight.check(provider, repo, env=identity, launch=launch)]
 
 
 def provider_trust(db: DB, params: dict, body: Body) -> Any:
@@ -1671,6 +1736,7 @@ ROUTES = [
     Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),
     _post("/sessions/{root:path}/pr", open_session_pr),
     _post("/inbox/{id}/{action}", inbox_action),
+    _post("/grants/{id}/revoke", revoke_grant),
     _post("/agents/{id}/message", message_agent),
     _post("/agents/{id}/close", close_agent),
     _post("/agents/{id}/kill", kill_agent),
@@ -1704,6 +1770,7 @@ ROUTES = [
     _post("/account/switch-org", account_switch_org),
     # Like every route, refused to agent callers by the guard.
     _post("/providers/{provider}/login", provider_login),
+    _post("/providers/{provider}/preflight", profile_preflight),
     _post("/providers/{provider}/trust", provider_trust),
     _post("/providers/{provider}/consent", provider_consent),
     _post("/providers/{provider}/install", install_provider),

@@ -4,9 +4,9 @@ field names are the engine's own and the drift test keeps them in step."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from brindle.db import Agent, Autopilot, Milestone
 from brindle.profiles import Profile
@@ -18,6 +18,82 @@ class _DTO(BaseModel):
 
     def to_json(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
+
+
+class OrgIdentityDTO(_DTO):
+    sub: str
+    org_id: str
+    role: str | None
+    policy_role: str | None
+
+
+class OrgRoleDTO(_DTO):
+    name: str
+    builtin: bool
+    permissions: list[str]
+    holders: list[str] = []
+    okta_group: str | None = None
+    team_weight: float = 1
+
+
+class OrgMemberDTO(_DTO):
+    sub: str
+    email: str
+    role: str
+    policy_role: str | None = None
+
+
+class OrgGrantPolicyDTO(_DTO):
+    """Account GrantPolicy (account-api 8fd09374); a complete replacement block."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    allow: StrictBool
+    kinds: list[Literal["read", "write", "edit", "bash", "fetch", "mcp", "other"]]
+    overridable: list[Literal["git-push", "env"]]
+    max_minutes: Annotated[StrictInt, Field(ge=1, le=1440)]
+    max_uses: Annotated[StrictInt, Field(ge=1, le=1000)]
+    deny: list[str] = []
+    allow_persistent: StrictBool = False
+    lifetimes: list[Literal["session", "time", "forever"]] = ["session", "time"]
+    scopes: list[Literal["branch", "remote", "repo", "all"]] = ["branch"]
+
+
+class OrgApprovalPolicyDTO(_DTO):
+    version: int
+    permission_grants: OrgGrantPolicyDTO | None
+    roles: dict[str, OrgGrantPolicyDTO | None]
+
+
+class OrgPermissionsDTO(_DTO):
+    identity: OrgIdentityDTO
+    roles: list[OrgRoleDTO]
+    members: list[OrgMemberDTO]
+    inventory_error: str | None = None
+    policy: OrgApprovalPolicyDTO
+    can_edit_policy: bool
+    policy_readonly_reason: str | None
+
+
+class OrgAssignmentRequestDTO(_DTO):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    org_id: str
+    actor_sub: str
+    sub: Annotated[str, Field(min_length=1, max_length=128)]
+    role: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]
+
+
+class OrgAssignmentDTO(_DTO):
+    org_id: str
+    sub: str
+    role: str
+
+
+class OrgPolicyRequestDTO(_DTO):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    org_id: str
+    actor_sub: str
+    if_version: Annotated[StrictInt, Field(ge=0)]
+    role: str | None
+    permission_grants: OrgGrantPolicyDTO | None
 
 
 class NativeSubagentDTO(_DTO):
@@ -81,9 +157,24 @@ class SessionDTO(_DTO):
 
 
 class PermissionChoiceDTO(_DTO):
-    choice: str                  # allow_once | allow_always | deny
+    choice: str                  # allow_once | allow_for | allow_always | deny
     label: str
-    rule: str | None = None      # allow_always: the rule it writes, and whose
+    rule: str | None = None      # allow_always: the rule it writes, and whose; allow_for: the grant
+
+
+class GrantDTO(_DTO):
+    """A live permission grant (brindle.daemon.grants): what the person let
+    one agent do again, until ``expires_at`` and for ``uses_left`` more calls.
+    GET /grants lists them; POST /grants/{id}/revoke ends one."""
+    id: str
+    agent_id: str
+    repo_root: str
+    kind: str
+    match: str
+    expires_at: float | None
+    uses_left: int | None
+    created: float
+    persistent: bool = False
 
 
 class PermissionDTO(_DTO):
@@ -94,7 +185,9 @@ class PermissionDTO(_DTO):
     "terminal" ends the hold so the CLI's own prompt asks instead) or
     "prompt" (it is at the CLI's own prompt: ``terminal`` says so, and the
     app's "Go to it", with the item's root_id and agent_id, is the way to
-    answer it; no ``choices``)."""
+    answer it; no ``choices``) or "grant" (a one-time grant the agent asked
+    for after a built-in deny refused it: the same route answers it, with
+    allow_once or deny, until ``hold_until``; ``grant`` says what it allows)."""
     via: str
     request_id: str | None = None
     digest: str | None = None         # of the exact request and suggested rule shown
@@ -106,6 +199,11 @@ class PermissionDTO(_DTO):
     tool: str | None = None
     kind: str | None = None      # brindle.permissions.KINDS
     target: str | None = None    # the command, path or URL, complete
+    grant: str | None = None     # the grant it offers (allow_for, or a one-time grant), in a line
+    max_minutes: int | None = None
+    max_uses: int | None = None
+    approval_scope: str | None = None  # scope verified by the daemon for this approval
+    approval_scopes: dict[str, str] = {}  # allowed saved scope ids and their verified descriptions
     wording: str | None = None   # the prompt as the provider words it
     choices: list[PermissionChoiceDTO] = []
 
@@ -268,6 +366,96 @@ class RuleDTO(_DTO):
     name: str
     description: str
     source: str
+
+
+class PermissionRuleDTO(_DTO):
+    id: str
+    kind: str
+    match: str
+    match_type: str
+    decision: Literal["allow", "ask", "deny"]
+    source: str
+    created: float
+    repo_root: str | None = None
+    expires_at: float | None = None
+    exclusions: list[PermissionRuleDTO] = []
+    editable: bool = False
+    protected: bool = False
+
+
+class PermissionActionDTO(_DTO):
+    id: str
+    kind: str
+    name: str
+    tool: str | None
+    source: str
+
+
+class PermissionPresetDTO(_DTO):
+    id: str
+    name: str
+    rule: PermissionRuleDTO
+
+
+class PermissionRestrictionsDTO(_DTO):
+    editable: bool
+    managed: bool
+    reason: str
+    org_id: str | None
+    policy_version: int | str | None
+    permission_grants: dict[str, Any] | None
+    protected_paths: list[str]
+    permission_policy: str
+    roles_supported: bool
+    repo_supported: bool
+    expiry_supported: bool
+    checks: list[str]
+
+
+class PermissionEditorDTO(_DTO):
+    revision: str
+    rules: list[PermissionRuleDTO]
+    catalog: list[PermissionActionDTO]
+    presets: list[PermissionPresetDTO]
+    restrictions: PermissionRestrictionsDTO
+    limitations: list[str]
+
+
+class PermissionConflictDTO(_DTO):
+    left: str
+    right: str
+    overlap: Literal["yes", "unknown"]
+    protected: bool
+
+
+class PermissionChangeDTO(_DTO):
+    type: Literal["added", "updated", "removed"]
+    id: str
+    before: PermissionRuleDTO | None
+    after: PermissionRuleDTO | None
+
+
+class PermissionReviewDTO(_DTO):
+    revision: str
+    proposal: str
+    rules: list[PermissionRuleDTO]
+    changes: list[PermissionChangeDTO]
+    conflicts: list[PermissionConflictDTO]
+    unresolved: list[PermissionConflictDTO]
+    can_save: bool
+
+
+class PermissionSaveDTO(_DTO):
+    revision: str
+    rules: list[PermissionRuleDTO]
+    restrictions: PermissionRestrictionsDTO
+    limitations: list[str]
+    changes: list[PermissionChangeDTO]
+
+
+class PermissionVerifyDTO(_DTO):
+    verified: bool
+    action: PermissionActionDTO | None
 
 
 class RoutingLockDTO(_DTO):

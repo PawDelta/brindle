@@ -887,6 +887,64 @@ on without the tool running counts for nothing. Every decision is in
 `brindle history --kind permission`, and when a worker sits on a prompt, its
 supervisor is told exactly which request is pending (only you can answer it).
 
+**Grants.** When the app holds a Claude Code or Codex worker's request in the
+Inbox, you can answer **Allow for N min**. That lets this agent repeat exactly
+this request (the whole command, the resolved path, the https URL or the tool)
+in this repo until the time or the uses run out, or until you revoke it under
+Settings → Permission grants. A grant is spent when the hook allows the call,
+not when the tool succeeds (a hook can't see the result). Grants live in the
+daemon's memory, so a restart ends them all.
+
+Two built-in denies can also be lifted by an explicit approval. When nothing else
+denies the request, it is still denied at once, never held. A held request
+shows the CLI's own prompt, and an answer typed there would run it. The worker
+is told it was refused and that it asked you, and the Inbox shows the exact
+request with **Allow once**, **Deny**, and, when policy permits, **Always allow in this repository**. Allow it once, and the worker's next
+try of exactly that command uses your one-time grant. What it covers and what
+the Inbox shows are worked out by the daemon from the agent's own workspace,
+never taken from the agent. The grant expires after 15 minutes, or sooner if
+your org's `max_minutes` is shorter, even when the org shortens it later. It is
+used up even if the push then fails. If nobody answers, or the
+daemon isn't running, it stays denied.
+
+**Remembered approvals** are saved in your user permission preferences, across
+sessions and daemon restarts, until you revoke them in Settings → Permission
+grants. A remembered push covers the same repository, remote URL and destination
+branch across future commits; a file approval covers that specific file.
+Every use still checks the current policy, explicit denies and adapter protections.
+Temporary time/use limits apply to temporary grants; persistent approvals require
+their own policy permission. Turning that permission off prevents their use.
+- `git push` qualifies only as `git push <remote> <full commit sha>:refs/heads/<branch>`, run in the agent's own worktree (not another clone or a nested repository), and only when:
+  - the remote resolves (insteadOf applied) to exactly one https, ssh or `user@host:path` URL;
+  - none of `core.sshCommand`, `core.hooksPath`, the remote's receivepack/vcs/mirror, `push.followTags` or `push.recurseSubmodules` is set;
+  - there is no pre-push or reference-transaction hook;
+  - neither the repo nor your org sets protected paths (a push skips the merge check that enforces them).
+- `.env*` qualifies for one file inside the worktree.
+
+After your answer, brindle checks the policy, every rule and that scope again
+before allowing. Anything that changed meanwhile refuses it. The command then
+runs outside brindle.
+
+Never lifted: your own, the repo's, a profile's or your org's denies, git force
+flags, and reads of `~/.ssh`, `~/.aws`, `~/.gnupg` or the daemon's token.
+Antigravity and OpenCode workers get no grants: agy ignores a hook's allow, and
+OpenCode's plugin has no hold.
+
+In a Team org, only the org policy's `permission_grants` block decides what may
+be granted. It is read again on every request:
+
+```json
+"permission_grants": {"allow": true, "kinds": ["bash", "fetch"], "overridable": ["git-push"],
+                      "max_minutes": 30, "max_uses": 5, "allow_persistent": true,
+                      "deny": ["bash prefix terraform apply"]}
+```
+
+- `deny` entries are enforced for every provider and can't be lifted.
+- `allow_persistent` permits remembered overrides of these two built-in denies; omitted or false allows only temporary overrides. This setting does not control ordinary saved allow rules. The admin policy editor is not delivered by this local engine change.
+- A policy without the block, an unknown or malformed field (which makes the whole policy unusable), a policy that can't be read, or a paused or shut-down member: no grants.
+- Without a Team org, any kind can be granted, for up to 60 min and 20 uses. Both built-in denies support one-time or remembered approvals.
+- The org backend that serves this block isn't part of this repository. Until it serves one, Team orgs get no grants. It is enforced from the cached policy, or in air-gap mode from `.brindle/policy.json`.
+
 **Codex.** Codex runs a hook only once it's trusted, so with
 `permission_policy` on, brindle trusts its own hook the first time a Codex worker
 needs it (and says so at `brindle start`). It adds one entry,
@@ -2079,8 +2137,10 @@ folder; `brindle profile new` writes one.
 ---
 name: developer-bedrock
 provider: claude
+auth: cloud
 model: us.anthropic.claude-haiku-4-5-20251001-v1:0   # a Bedrock model id your account can use
 env.CLAUDE_CODE_USE_BEDROCK: 1
+env.AWS_PROFILE: company
 env.AWS_REGION: us-east-1
 ---
 ```
@@ -2107,9 +2167,124 @@ list it under `routing` in `.brindle/config.json`.
   `"modelProvider": "gemini"` in `~/.gemini/antigravity-cli/settings.json`, and
   export `GEMINI_API_KEY` in your shell, or put it in a profile in your user
   profiles folder; never in a profile under `.brindle/agents/`, which is committed. For a
-  Gemini-compatible gateway, set `env.GOOGLE_GEMINI_BASE_URL` to its URL. As of
-  1.3.4, `agy` ignores Vertex AI credentials, so use a Gemini API key or gateway.
+  Gemini-compatible gateway, set `env.GOOGLE_GEMINI_BASE_URL` to its URL.
+  The Vertex login path in `agy` has not been validated by brindle; see the
+  OpenCode alternative below for Gemini on Vertex.
   The full setup is in [Google Antigravity](#google-antigravity) below.
+
+For Claude on an existing AWS SSO profile or Google ADC, launch preflight checks
+the configured cloud login and offers its cloud sign-in instead of Claude's
+personal sign-in. The action keeps the profile's project, region and credential
+location through both desktop sign-in and the completion check; repeated presses
+reuse its running terminal. Custom credential files offer a manual refresh check.
+Desktop and automatic sign-in share the credential source's lock, so a second
+flow leaves an existing cloud login running.
+`brindle doctor` groups
+profiles by cloud identity and reports credential availability, expiry when
+known, and refresh instructions. AWS account and role are selected by the named
+SSO profile. To isolate Google ADC, set `env.CLOUDSDK_CONFIG` to that identity's
+gcloud directory alongside the Vertex project and region.
+Use `auth: cloud` to remove inherited model API keys, including Bedrock bearer
+keys that would otherwise bypass the AWS SSO profile.
+
+`GOOGLE_APPLICATION_CREDENTIALS` selects a specific credential file. A browser
+ADC login writes the selected gcloud directory's default file. If the explicit
+credential file is elsewhere, brindle asks you to refresh it directly instead of
+opening a login that would update a different identity. Existing
+federated credentials and non-SSO AWS credential chains keep their existing
+handling; the new profile checks do not validate their expiry. Expired cloud
+credentials hold session delivery until refreshed, including when a cloud
+worker belongs to a Codex or other provider's supervisor. A session using several
+cloud identities stays held until all of them work again.
+
+Company-cloud routes (#265):
+
+| Model route | Agent and identity | Validation still needed |
+| --- | --- | --- |
+| Claude on Bedrock | Claude Code, AWS SSO profile and `AWS_REGION` | Live cloud validation |
+| Claude on Vertex | Claude Code, ADC, `ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` | Live cloud validation |
+| Gemini on Vertex | OpenCode, `auth: cloud`, `google-vertex/<model-id>`, project/region and ADC | Live cloud validation |
+| Azure OpenAI | OpenCode, `auth: cloud`, `azure/<deployment>`, Azure CLI and Entra connection | Live cloud validation |
+
+For Gemini Vertex, put these fields in an agent profile (choose a model available
+in your project and region):
+
+```yaml
+provider: opencode
+model: google-vertex/gemini-2.5-pro
+auth: cloud
+env.GOOGLE_CLOUD_PROJECT: your-project
+env.VERTEX_LOCATION: us-central1
+env.CLOUDSDK_CONFIG: /absolute/path/to/company-gcloud
+```
+
+brindle passes that directory's `application_default_credentials.json` explicitly
+to OpenCode's SDK and checks the same file, while retaining browser refresh through
+gcloud. The profile's project and region override inherited OpenCode aliases.
+An explicit profile `CLOUDSDK_CONFIG` also overrides an inherited ADC file selector;
+set `env.GOOGLE_APPLICATION_CREDENTIALS` in the profile to select a custom file instead.
+
+For Azure OpenAI, select a separate Azure CLI directory for this identity and
+your deployed model's name:
+
+```yaml
+provider: opencode
+model: azure/your-deployment
+auth: cloud
+env.AZURE_CONFIG_DIR: /absolute/path/to/company-azure
+env.AZURE_RESOURCE_NAME: your-resource
+env.AZURE_TENANT_ID: your-tenant
+env.AZURE_SUBSCRIPTION_ID: your-subscription
+```
+
+Azure's directory and resource are required. Tenant and subscription, when set,
+must match the CLI's active identity. The sign-in action runs `az login` for that
+identity when needed, then OpenCode's `auth login --provider azure --method
+"Microsoft Entra ID (Azure CLI)"`. It checks a Cognitive Services access token
+and the connection for the selected resource before allowing launch. It never
+switches the default Azure CLI configuration behind your back.
+
+OpenCode cloud profiles receive an isolated connection store beneath
+`~/.brindle/cloud-opencode/` (or `BRINDLE_HOME`), keyed by their cloud identity
+and project/resource. `auth: cloud` removes inherited API keys that could select
+personal billing. Existing API-key profiles keep their behavior: a qualified
+model alone does not enable cloud login. Both cloud paths share profile-aware
+preflight/doctor checks, one in-flight sign-in per credential source, expiry
+holds, and live/paused-session recovery.
+
+OpenCode's [provider documentation](https://opencode.ai/docs/providers/) describes
+both alternatives. For Azure, its Entra connection is a required setup step;
+an Azure endpoint alone does not select CLI authentication. This is Azure OpenAI,
+separate from Claude on Foundry. The installed CLI inspected for these options
+was OpenCode 1.19.3. brindle's native client can send bearer-authenticated OpenAI
+chat requests, but it does not yet acquire or renew Google/Azure CLI tokens.
+Those routes need token lifecycle support before native cloud login can be claimed.
+
+Focused fake-based checks:
+
+```sh
+uv run pytest tests/test_daemon_actions.py -q -k 'cloud_profile_login or opencode_cloud_identity or login_and_secret or a_sign_in or preflight'
+uv run pytest tests/test_cloud_login.py -q
+uv run pytest tests/test_login_pause.py -q
+uv run pytest tests/test_doctor_signin.py -q
+uv run pytest tests/test_auth_failure_handling.py -q
+uv run pytest tests/test_opencode_provider.py -q
+uv run pytest tests/test_profile_auth.py -q
+npm --prefix app test -- --run src/screens/New/NewSession.test.tsx
+npm --prefix app test -- --run src/components/ProviderSignIn.test.tsx
+npm --prefix app run typecheck
+```
+
+`cloud_profile_login` and `opencode_cloud_identity` exercise real profile/environment
+resolution and HTTP login/preflight dispatch, identity propagation, duplicate
+actions, doctor expiry and live/paused credential-block recovery. The login-pause
+tests cover structured OpenCode expiry events, cross-provider supervisors,
+multiple expired identities and held-message delivery after recovery.
+Cloud commands and panes are fakes. No live AWS SSO, Google ADC, Azure login,
+model inference, or user cloud-config changes were used for validation. Provider
+permissions, deployed model availability, browser flows and token renewal against
+real cloud services still need manual validation. Gemini/Azure use OpenCode;
+native SDK and Antigravity cloud integration are not added by this change.
 
 If your org runs brindle for a team, its admins can set a route for everyone in
 the org's Routing settings on the brindle dashboard; an enforced org route replaces

@@ -294,14 +294,14 @@ def screens(monkeypatch):
 
 def test_trust_dialog_nobody_answered_is_reported_by_the_sweep(db, root, screens):
     """No hook runs before the trust dialog is answered, so the sweep reads
-    the screen itself, then reports it once it's been waiting long enough."""
+    the screen itself and forwards the live menu immediately."""
     _, ws = root
     screens["%w1"] = TRUST_SCREEN
     worker_on(db, ws, "starting", time.time() - 600)
     now = time.time()
-    assert cull.note_stuck(db, now, {}) == []  # just noticed: waiting from now on
+    assert cull.note_stuck(db, now, {}) != []
     assert db.get_agent("w1").status == "waiting"
-    assert cull.note_stuck(db, now + cull.STUCK_AFTER + 1, {}) != []
+    assert cull.note_stuck(db, now + cull.STUCK_AFTER + 1, {}) == []
     assert db.pending_count("boss") == 1
 
 
@@ -370,7 +370,7 @@ def health(db, root, monkeypatch):
     monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(lh, "capture", lambda a: "working")
-    monkeypatch.setattr(agents, "send_message", lambda db, to, body: reports.append((to, body)))
+    monkeypatch.setattr(agents, "send_message", lambda db, to, body, **kw: reports.append((to, body)))
     lh.prepare(db, a, "effective-account")
     lh.bind(db, a, a.tmux_window)
     return lh, a, now, sleeps, started, reports
@@ -903,16 +903,26 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
     ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", True, False),
     ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", False, True),
     ("• Ran git status --short\n  └ clean", False, "history"),
+    ("• Working (6m 26s • esc to interrupt)", False, "collapsed"),
+    ("• Working (6m 26s • \x1b[1mesc\x1b[0m to interrupt)", False, "styled-followup"),
 ])
 def test_codex_turn_under_submitted_brief_confirms_delivery(db, health, monkeypatch, output, stale, draft):
     lh, a, _, _, _, reports = health
+    if draft == "collapsed":
+        a.task = "Implement the approved permission editor using the real backend and preserve all provider protections."
+        db.update_agent(a.id, task=a.task)
     # #236: submitted brief and turn output above the captured Codex footer,
     # without a second › separating the transcript from the composer.
     screen = f"› {a.task}\n\n{output}\n\n" + CODEX_EMPTY_PANE.split("\n", 1)[1]
     if draft == "history":
         screen = f"› previous task\n\n{output}\n\n› {a.task}\n\n  90% context left\n"
+    elif draft == "collapsed":
+        screen = screen.replace(a.task, a.task[:64] + "…")
+    elif draft == "styled-followup":
+        screen = "› Supervisor follow-up…\n\n" + output + "\n\n" + CODEX_EMPTY_PANE
     elif draft:
         screen = screen.replace(a.task, "an unrelated draft quoting tool output")
+    rejected = bool(stale or draft and draft not in ("collapsed", "styled-followup"))
     cleared = []
     monkeypatch.setattr(lh, "capture", lambda a: screen)
     monkeypatch.setattr(tmux, "paste", lambda *a, **k: pytest.fail("brief submitted twice"))
@@ -920,10 +930,10 @@ def test_codex_turn_under_submitted_brief_confirms_delivery(db, health, monkeypa
     lh.verify_delivery(db, a, a.task, baseline=screen if stale else "")
     lh.verify_pending(db, a.id, a._launch_health_token)
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
-    assert (row["delivered_at"] is not None) == (not stale and not draft)
-    assert (row["outcome"] == "delivery-failed") == bool(stale or draft)
-    assert bool(reports) == bool(stale or draft)
-    assert bool(cleared) == bool(stale or draft)
+    assert (row["delivered_at"] is not None) == (not rejected)
+    assert (row["outcome"] == "delivery-failed") == rejected
+    assert bool(reports) == rejected
+    assert bool(cleared) == rejected
 
 
 APPROVAL_PROMPT = """\
@@ -937,9 +947,34 @@ APPROVAL_PROMPT = """\
 """
 
 
-@pytest.mark.parametrize("brief_visible", [True, False])
+@pytest.mark.parametrize("brief_visible", [
+    True, False, "hooks",
+    pytest.param("error", marks=pytest.mark.variant(
+        "a fresh tool error above an active approval is not a failed launch")),
+])
 def test_codex_at_an_approval_prompt_is_delivered_or_at_least_not_failed(db, health, monkeypatch, brief_visible):
-    lh, a, _, _, _, reports = health
+    lh, a, now, _, _, reports = health
+    if isinstance(brief_visible, str):
+        screen = ("Hooks need review\n› 1. Enable hooks\n  2. Skip hooks\nEnter to confirm"
+                  if brief_visible == "hooks" else "■ Error: model not found\n" + APPROVAL_PROMPT)
+        delivered = brief_visible == "error"
+        monkeypatch.setattr(tmux, "send_keys", lambda *a, **kw: None)
+        monkeypatch.setattr(tmux, "paste", lambda *a, **kw: None)
+        lh.verify_delivery(db, a, a.task)
+        monkeypatch.setattr(lh, "capture", lambda a: screen)
+        if delivered:
+            lh.delivered(db, a)
+            now[0] += lh.FOLLOWUP_SECONDS
+            assert lh.inspect(db, a.id, wait=False) == "waiting"
+        else:
+            lh.verify_pending(db, a.id, a._launch_health_token)
+        assert db.get_agent(a.id).status == "waiting"
+        assert now[0] == 100.0 + (lh.FOLLOWUP_SECONDS if delivered else 0)
+        assert len(reports) == 1
+        lh.inspect(db, a.id, wait=False)
+        assert db.get_agent(a.id).status == "waiting"
+        assert len(reports) == 1
+        return
     # #240: earlier tool output and analysis above an approval prompt, no Working row.
     head = (f"› {a.task}\n\n• Explored\n  └ Read feature.py\n\n• The change looks small; running its tests.\n\n"
             if brief_visible else "")
@@ -953,6 +988,8 @@ def test_codex_at_an_approval_prompt_is_delivered_or_at_least_not_failed(db, hea
     assert (row["delivered_at"] is not None) == brief_visible
     assert row["outcome"] == (None if brief_visible else "awaiting-approval")
     assert len(reports) == 1 and "uv run pytest tests/test_feature.py" in reports[0][1]
+    assert db.get_agent(a.id).status == "waiting"
+    assert now[0] == 100.0
 
 
 @pytest.mark.parametrize("started,clears", [(True, True), (False, True), (False, False)])

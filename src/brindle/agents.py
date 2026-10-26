@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 
 from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
@@ -291,6 +291,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
             # env is the top layer (managed_env is the same route's, from managed_models).
             profile_env = {k: v for k, v in profile_env.items() if company_identity.profile_may_set(k)}
             env = {**homes, **recovery_keys, **profile_env, **managed_env, **enforced, **env}
+        if guarded is not None:
+            from brindle import cloud_login
+
+            env.update(cloud_login.profile_env(guarded, env))
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
@@ -927,6 +931,7 @@ def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tup
     blanked so the launcher's own copy doesn't count), whether the org's own
     key signs it in (no login to check), and the denied names. ``agent`` need
     not be recorded yet: a launch about to happen is checked the same way."""
+    from brindle import cloud_login
     from brindle.pro import managed_models
 
     if m is _UNREAD:
@@ -940,7 +945,8 @@ def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tup
     org_key = managed_models.has_org_key(m, agent.provider)
     prov_creds = set() if org_key else secrets.agent_credentials(agent.provider, profile.name, ws.repo_root)
     eff_env = _window_environment(agent, ws, m)[0]
-    probe_env = {**launch_env, **{k: eff_env[k] for k in prov_creds if k in eff_env}}
+    names = prov_creds | (cloud_login.IDENTITY_ENV if agent.provider in ("claude", "opencode") else frozenset())
+    probe_env = {**launch_env, **{k: eff_env[k] for k in names if k in eff_env}}
     return {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}}, org_key, deny
 
 
@@ -969,7 +975,8 @@ def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, ide
     session = credentials_session(agent)
     if session:
         launch["session"] = session
-    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch)
+    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch,
+                           check_cloud=not keys_only)
 
 
 def credentials_session(agent: Agent) -> str | None:
@@ -1863,6 +1870,11 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
     if not provider.uses_hooks:
         tmux.paste(agent.tmux_window, text, lead=message_lead(db, agent, sender_id),
                    server=server_of(agent))
+        if not (condensed or notice):
+            # Direct deliveries need the same durable history as queued ones,
+            # including supervisor spec updates used by the next reviewer.
+            kept = db.enqueue_held(agent.id, body, sender_id, publish=False)
+            db.mark_delivered(kept)
         return "delivered"
     message_id = db.enqueue(agent.id, text, sender_id, notice=notice)
     from brindle import login_pause
@@ -2809,7 +2821,7 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) 
 
 def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                  focus: str | None = None, cfg: RepoConfig | None = None,
-                 second: bool = False) -> Agent | None:
+                 second: bool = False, *, slot: str | None = None) -> Agent | None:
     """Have ``ws`` reviewed. Without checks configured the reviewer starts
     right away and is returned. With checks, nothing starts yet: a detached
     ``_review-after-checks`` process runs them and starts the reviewer with
@@ -2818,7 +2830,9 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     for a reviewer that couldn't start whatever the checks say (the kill
     switch, an unusable profile); a failure after that reaches ``caller``
     as a message. ``second``: the required second review (``cfg.second_review``),
-    which has its own reviewer beside the commit's review."""
+    which has its own reviewer beside the commit's review. ``slot`` overrides
+    the claim identity: the pipeline uses "" for its primary review even
+    when it selected a concrete profile."""
     from brindle import gates
     from brindle.config import load_repo_config
     from brindle.providers import brindle_invocation
@@ -2826,10 +2840,11 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     _review_worktree_present(ws)
     cfg = cfg or load_repo_config(ws.repo_root)
     if not cfg.checks:
-        return request_review(db, caller, ws, profile, focus, cfg, second=second)
+        return request_review(db, caller, ws, profile, focus, cfg, second=second, slot=slot)
     _review_kill_switch(ws)
+    slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
-    argv = [*brindle_invocation(), "_review-after-checks", ws.id]
+    argv = [*brindle_invocation(), "_review-after-checks", ws.id, "--review-slot", slot]
     if caller:
         argv += ["--caller", caller.id]
     if profile:
@@ -2841,16 +2856,19 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     # Nobody's child: the worker reporting here may be closed while the checks
     # still run, and stopping it would stop this run too, so no reviewer (#190).
     with review_dispatch_lock(ws.id):
-        existing = _live_reviewer(db, ws, gates.head(ws), profile)
+        sha = gates.head(ws)
+        existing = _live_reviewer(db, ws, sha, profile)
         if existing:
             return existing
+        if _review_pending(ws.id, profile, sha):
+            return None
         # Publish before detaching: even a helper that hasn't started yet
         # must know that a later request superseded it. Profiles have separate
         # claims so a required second review survives the first one's request.
         request_id = uuid.uuid4().hex
         claim = _review_request_file(ws.id, profile)
         pending = claim.with_suffix("." + request_id)
-        pending.write_text(request_id)
+        pending.write_text(f"{request_id}\n{sha}\n{time.time()}")
         pending.replace(claim)
         _detach([*ORPHANED, *argv, "--request-id", request_id])
     return None
@@ -2885,14 +2903,44 @@ def _review_requested(workspace_id: str, profile: str, request_id: str | None) -
     if request_id is None:
         return True
     try:
-        return _review_request_file(workspace_id, profile).read_text() == request_id
+        return _review_request_file(workspace_id, profile).read_text().split("\n", 1)[0] == request_id
     except FileNotFoundError:
         return False
 
 
+def _review_pending(workspace_id: str, profile: str, sha: str) -> bool:
+    """Reuse this commit's queued or running helper, but allow a dead one to be replaced."""
+    from brindle import gates
+
+    try:
+        request_id, commit, queued_at = _review_request_file(workspace_id, profile).read_text().splitlines()
+        starting = time.time() - float(queued_at) < LAUNCH_GRACE
+    except (FileNotFoundError, ValueError):
+        return False   # no request, or an older helper without commit metadata
+    return commit == sha and (starting or gates.marked("review-request", request_id))
+
+
+@contextmanager
+def _review_request_run(workspace_id: str, profile: str, request_id: str | None):
+    """Liveness belongs to one request, so another profile or obsolete helper cannot mask its death."""
+    from brindle import gates
+
+    if request_id is None:
+        yield
+        return
+    with gates.marker("review-request", request_id):
+        try:
+            yield
+        finally:
+            with review_dispatch_lock(workspace_id):
+                if _review_requested(workspace_id, profile, request_id):
+                    _review_request_file(workspace_id, profile).unlink(missing_ok=True)
+
+
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
                         focus: str | None = None, cfg: RepoConfig | None = None,
-                        request_id: str | None = None, second: bool = False) -> Agent | None:
+                        request_id: str | None = None, second: bool = False,
+                        *, slot: str | None = None) -> Agent | None:
     """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
     lock and the by-sha cache, so a result a worker's report already warmed
     is instant), then start the reviewer with the results in its prompt.
@@ -2911,8 +2959,9 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     from brindle.config import load_repo_config
 
     cfg = cfg or load_repo_config(ws.repo_root)
+    slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
-    with pipeline.review_run(ws.id):
+    with _review_request_run(ws.id, profile, request_id), pipeline.review_run(ws.id):
         since = pipeline.review_claim(db, ws)
         for _attempt in range(MOVED_RETRIES + 1):
             if not _review_requested(ws.id, profile, request_id):
@@ -2946,7 +2995,8 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
         with review_dispatch_lock(ws.id):
             if not _review_requested(ws.id, profile, request_id):
                 return None
-            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text, second=second)
+            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text,
+                                  second=second, slot=slot)
 
 
 def review_dispatch_lock(workspace_id: str):
@@ -2958,18 +3008,80 @@ def review_dispatch_lock(workspace_id: str):
 
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None,
-                   check_summary: str | None = None, second: bool = False) -> Agent | None:
+                   check_summary: str | None = None, second: bool = False,
+                   *, slot: str | None = None) -> Agent | None:
     """Start or reuse a review, replacing an MCP-broken reviewer once. None
     while another dispatcher is still starting this commit's reviewer."""
     # Serialize hook recovery with explicit requests, including the interval
     # between stopping the broken reviewer and publishing its replacement.
     with review_dispatch_lock(ws.id):
-        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second)
+        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second, slot)
+
+
+def _review_claim_slot(profile: str | None, slot: str | None) -> str:
+    """Keep an explicit profile's claim separate from the automatic review.
+
+    Resolve this before choosing a default profile, and carry it through the
+    detached helper. Only an automatic primary review may reuse a claim
+    regardless of which profile the learner chose this time. A supplied slot
+    preserves the identity of a pipeline review or its replacement.
+    """
+    if slot is not None:
+        return slot
+    return profile or ""
+
+
+def _review_context(db: DB, ws: Workspace, worker: Agent | None, files: list[str]) -> str:
+    """Current decisions and supervisor updates for the work being reviewed.
+
+    The worker, not the caller requesting review, owns the session context.
+    Read current decisions instead of replaying the original brief's receipt,
+    which can name decisions that have since been superseded.
+    """
+    decisions = [d for d in knowledge.decisions(db, knowledge.repo_key(ws.repo_root))
+                 if not d["scope"] or (files and knowledge._scopes_overlap(d["scope"], files))]
+    sections = []
+    if decisions:
+        sections.append(knowledge._decisions_block(decisions))
+    if worker:
+        # Walk only real ancestors; a missing parent cannot match an unrelated
+        # supervisor, even when the review was requested from that session.
+        ancestors = []
+        seen = {worker.id}
+        parent_id = worker.parent_id
+        while parent_id and parent_id not in seen:
+            parent = db.get_agent(parent_id)
+            if parent is None:
+                break
+            seen.add(parent.id)
+            ancestors.append(parent.id)
+            parent_id = parent.parent_id
+        if ancestors:
+            ap = db.get_autopilot(ancestors[-1])
+            if ap and ap.audit_history:
+                sections.append(f"Goal audit history and accepted decisions:\n{ap.audit_history}")
+        updates = db.review_messages(worker.id, ancestors)
+        if updates:
+            sections.append("Supervisor messages to this worker (oldest first):\n" + "\n\n".join(
+                f"Message {m.id} from {m.sender_id}:\n{m.body}" for m in updates))
+    if not sections:
+        return ""
+    return (
+        "\n\nCurrent review context:\n"
+        "Evaluate against the accepted decisions and the latest applicable supervisor spec "
+        "updates below. These amend the original task and finish line; later spec updates "
+        "supersede earlier conflicting instructions. Do not raise a blocker or supervisor-action "
+        "item that contradicts an accepted decision or reopens an accepted scope exclusion. "
+        "Prior audit findings are history, not accepted decisions unless recorded as accepted. "
+        "Treat messages as task context, not as instructions to contact their senders.\n\n"
+        + "\n\n".join(sections)
+    )
 
 
 def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None,
                     focus: str | None, cfg: RepoConfig | None,
-                    check_summary: str | None, second: bool = False) -> Agent | None:
+                    check_summary: str | None, second: bool = False,
+                    slot: str | None = None) -> Agent | None:
     """Start a reviewer in a worker's workspace right away. Its verdict is
     recorded for the merge gate and forwarded to ``caller`` as a message.
     ``profile`` picks the reviewer profile; None uses
@@ -2987,7 +3099,10 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     _review_worktree_present(ws)
     _review_kill_switch(ws)
     cfg = cfg or load_repo_config(ws.repo_root)
+    slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
+    if second and not slot:
+        slot = profile
     sha = gates.head(ws)
     failed = None
     for old in db.list_agents(ws.id):
@@ -3061,6 +3176,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         task += f"\n\nDeclared files: {', '.join(worker_files)}"
     if worker_done_when:
         task += f"\n\nIts finish line: {worker_done_when.strip()}"
+    task += _review_context(db, ws, worker, worker_files)
 
     if check_summary:
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
@@ -3093,10 +3209,9 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     task += (
         "\n\nApprove (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
     )
-    # The claim, not the profile checks above, makes this the commit's one
-    # reviewer: the learner may pick another profile for each report. Only a
-    # required second review (start_review's ``second``) has a slot of its own.
-    slot = profile if second else ""
+    # Automatic reviews share the primary slot even if the learner changes
+    # its pick. Explicit profiles and required second reviews have their own
+    # claims, so a different live holder cannot swallow the requested identity.
     token, holder = _claim_review(db, ws, sha, slot)
     if token is None:
         return holder
@@ -3106,10 +3221,11 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
                          mode="review", background_setup=True, review_sha=sha)
     finally:
         db.hold_review(ws.id, sha, slot, token, reviewer.id if reviewer else None)
-    # Kept on the reviewer too: the claim names only its latest holder, and
-    # which verdict replaces which goes by slot (gates.standing_reviews).
+    # Verdict slots remain primary/second even when an explicit profile has
+    # its own dispatch claim. Changing profile after a rejection must still
+    # replace that verdict in the same role (gates.standing_reviews).
     if reviewer is not None:
-        db.update_agent(reviewer.id, review_slot=slot)
+        db.update_agent(reviewer.id, review_slot=profile if second else "")
     return reviewer
 
 
@@ -3221,6 +3337,26 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
                     "permissionDecision": "deny",
                     "permissionDecisionReason": why,
                 }}
+    # Saved restrictions must reach PermissionRequest even when the CLI/profile
+    # already allows this tool. That hook owns the final deny and human grants.
+    ws = db.get_workspace(agent.workspace_id)
+    if ws is not None:
+        from brindle import permission_grants, permissions
+        from brindle.config import load_repo_config
+        from brindle.profiles import profile_rules_for
+
+        cfg = load_repo_config(ws.repo_root)
+        if cfg.permission_policy == "on":
+            req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
+            rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root),
+                     *permission_grants.limits(ws.repo_root).deny]
+            restrictions = [r for r in rules if r.decision in ("ask", "deny")]
+            decision = permissions.decide(req, checks=cfg.checks, rules=restrictions)
+            if decision.rule is not None:
+                return {"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse", "permissionDecision": "ask",
+                    "permissionDecisionReason": f"brindle: {decision.reason}",
+                }}
     if tool != "Bash":
         return None
     command = str((payload.get("tool_input") or {}).get("command", ""))
@@ -3256,6 +3392,28 @@ def _record_permission(db: DB, agent: Agent, ws: Workspace | None, summary: str,
                               task=summary, result=result)
 
 
+def _decide_with_grants(agent: Agent, req, checks: list[str], rules: list):
+    """The policy's answer for one request with the person's grants
+    (brindle.permission_grants) and the org's denies, read now: an ask a
+    grant covers, or a built-in deny the person lifted once, is allowed;
+    and the ``allow_for`` offer a held ask carries, if any."""
+    from brindle import permission_grants, permissions
+
+    lim = permission_grants.limits(req.repo_root)
+    rules = [*rules, *lim.deny]
+    decision = permissions.decide(req, checks=checks, rules=rules)
+    decision = permission_grants.use_grant(agent.id, req, decision, lim)
+    decision = permission_grants.lift(agent.id, req, decision, rules, checks, lim)
+    return decision, permission_grants.offer(req, decision, lim)
+
+
+def _offering(req, offered: dict | None):
+    """``req`` as held: with the grant it offers recorded, so the answer's digest covers it."""
+    from dataclasses import replace
+
+    return replace(req, grant=json.dumps(offered, sort_keys=True)) if offered else req
+
+
 def permission_request_decision(db: DB, agent: Agent, payload: dict,
                                 provider: str = "claude") -> dict | None:
     """Claude Code's or Codex's PermissionRequest hook: brindle's permission
@@ -3267,7 +3425,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     while the app is open (_hold_for_app; a Claude one is recorded with the
     policy off too). Never raises: any failure is ask."""
     try:
-        from brindle import permissions
+        from brindle import permission_grants, permissions
         from brindle.config import load_repo_config
         from brindle.profiles import profile_rules_for
 
@@ -3290,7 +3448,8 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             reqs = permissions.from_codex(payload, worktree=ws.path, repo_root=ws.repo_root)
             if not reqs:
                 return None
-            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+            lim = permission_grants.limits(ws.repo_root)
+            rules = [*permissions.all_rules(ws.repo_root), *profile_rules, *lim.deny]
             from dataclasses import replace
 
             from brindle.native.permissions import Permissions, split_commands, uncovered_part
@@ -3318,6 +3477,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 # Like pre_tool_decision: a compound command whose every part
                 # allowed_tools covers (a cd within the worktree counts).
                 if (len(reqs) == 1 and reqs[0].kind == "bash" and specs
+                        and decision.rule is None
                         and (cwd == root or cwd.startswith(root + os.sep))
                         and uncovered_part(specs, command, cd_root=ws.path) is None):
                     decision = permissions.Decision(
@@ -3326,7 +3486,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                     # harmless redirection gone), which deny_in_parts doesn't.
                     for part in split_commands(command):
                         denied = permissions.decide(replace(reqs[0], command=part), checks=cfg.checks, rules=rules)
-                        if denied.decision == "deny":
+                        if denied.decision == "deny" or (denied.decision == "ask" and denied.rule is not None):
                             decision = denied
                             break
                 elif perms.mode == "dontAsk":
@@ -3337,6 +3497,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                         "your supervisor with the send_message tool (brindle MCP server)")
             if review_only and decision.decision != "allow":
                 return None  # as Codex would without brindle: its own prompt or refusal
+            offered = None
+            if len(reqs) == 1:   # the person's grants: see _decide_with_grants
+                decision = permission_grants.use_grant(agent.id, reqs[0], decision, lim)
+                decision = permission_grants.lift(agent.id, reqs[0], decision, rules, cfg.checks, lim)
+                offered = permission_grants.offer(reqs[0], decision, lim)
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
             _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason}")
@@ -3346,12 +3511,20 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
 
                 # Within the timeout Codex's hook definition carries (codex_hook.TIMEOUT).
                 hold = min(cfg.permission_hold_seconds, codex_hook.TIMEOUT - HOOK_SLACK)
-                answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold)
+                answer = _hold_for_app(db, agent, _offering(reqs[0], offered), decision.reason, None,
+                                       keep=False, hold=hold)
+                extra = [*profile_rules, *(permissions.profile_bash_allows(profile) if profile else [])]
+                why = (permission_grants.recheck(reqs[0], offered, cfg.checks, extra)
+                       if answer and answer != "deny" and offered else None)
                 if answer:
                     decision = permissions.Decision(
-                        "deny" if answer == "deny" else "allow",
+                        "deny" if answer == "deny" or why else "allow",
                         "the person denied this in the brindle app" if answer == "deny"
+                        else f"the person's answer no longer applies: {why}" if why
                         else "the person answered in the brindle app")
+                    if offered:
+                        _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason} "
+                                                                   f"({permission_grants.describe(offered)})")
             return permissions.codex_output(decision)
         if provider == "opencode":
             # Asked before every tool call, not only those OpenCode would prompt
@@ -3359,11 +3532,21 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root)
             if not reqs:
                 return None
-            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+            lim = permission_grants.limits(ws.repo_root)
+            rules = [*permissions.all_rules(ws.repo_root), *profile_rules, *lim.deny]
             decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+            if len(reqs) == 1:
+                # Existing trusted grants apply without a CLI prompt. A
+                # refused override can request approval in the app for later.
+                decision = permission_grants.use_grant(agent.id, reqs[0], decision, lim)
+                decision = permission_grants.lift(agent.id, reqs[0], decision, rules, cfg.checks, lim)
+            if decision.decision == "ask" and decision.rule is not None:
+                # This hook cannot open an approval prompt. An explicit ask
+                # must stop the tool instead of falling through to CLI allows.
+                decision = permissions.Decision("deny", decision.reason, decision.rule)
             if decision.decision != "deny":
                 return None
             req = reqs[0]
@@ -3372,9 +3555,10 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
         if req is None:
             return None
+        offered = None
         if policy:
-            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide(req, checks=cfg.checks, rules=rules)
+            decision, offered = _decide_with_grants(agent, req, cfg.checks,
+                                                    [*permissions.all_rules(ws.repo_root), *profile_rules])
             _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
         else:
             decision = permissions.Decision("ask", "")
@@ -3383,8 +3567,16 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             suggestions = payload.get("permission_suggestions")
             suggestions = permissions.persistent_suggestions(suggestions)
             # Recorded either way: its PostToolUse counts as the person's approval.
-            answer = _hold_for_app(db, agent, req, decision.reason, suggestions, keep=True,
+            answer = _hold_for_app(db, agent, _offering(req, offered), decision.reason, suggestions, keep=True,
                                    hold=cfg.permission_hold_seconds)
+            if answer and answer != "deny" and offered:
+                why = permission_grants.recheck(req, offered, cfg.checks, profile_rules)
+                _record_permission(db, agent, ws, req.summary(),
+                                   f"deny: the person's {answer} no longer applies: {why}" if why else
+                                   f"allow: the person's {answer} ({permission_grants.describe(offered)})")
+                if why:
+                    return permissions.claude_output(permissions.Decision(
+                        "deny", f"the person's answer no longer applies: {why}"))
             if answer:
                 return permissions.claude_answer(answer, suggestions)
         return permissions.claude_output(decision)
@@ -3399,7 +3591,7 @@ HOLD_LOOK_SECONDS = 5.0
 # Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
 # so the hook gives the request to the prompt itself before the CLI cancels it.
 HOOK_SLACK = 30
-ANSWERS = ("allow_once", "allow_always", "deny")
+ANSWERS = ("allow_once", "allow_for", "allow_always", "deny")
 
 
 def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,

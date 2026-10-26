@@ -37,6 +37,63 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
+  it.each(["allow_always", "allow_session"])("sends the selected engine-authorized scope with %s", async (choice) => {
+    const label = choice === "allow_session" ? "Allow for this session" : "Always allow";
+    const item: InboxItemDTO = { ...permission, permission: { ...permission.permission!, via: "grant",
+      approval_scopes: { branch: "This ref on origin", remote: "Every branch at origin's verified URL",
+        repo: "Every policy-permitted remote and branch in this repository" },
+      choices: [{ choice: "deny", label: "Deny" }, { choice: "allow_once", label: "Allow once" },
+        { choice, label, rule: "This ref on origin" }] } };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session],
+      workspaces: [root, worker], inbox: [item] });
+    const { sync } = mount(daemon);
+    const select = await screen.findByRole("combobox", { name: "Saved approval scope" });
+    fireEvent.change(select, { target: { value: "remote" } });
+    expect(select).toHaveProperty("value", "remote");
+    fireEvent.change(select, { target: { value: "repo" } });
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    await waitFor(() => expect(posts(daemon)[0]?.body).toEqual({ request: item.permission!.request_id,
+      digest: item.permission!.digest, choice, scope: "repo" }));
+    sync.stop();
+  });
+
+  it.each(["grant", "hook"] as const)("converts timed approvals and preserves each %s choice's scope", async (via) => {
+    const permanent = permission.permission!.choices!.find((c) => c.choice === "allow_always")!;
+    const timed: InboxItemDTO = { ...permission, permission: { ...permission.permission!, via,
+      max_minutes: 2880, max_uses: 4, approval_scope: "refs/heads/feat at https://example.com/o/r.git",
+      grant: "Push the selected commit to refs/heads/feat at https://example.com/o/r.git once",
+      choices: [{ choice: "deny", label: "Deny" }, { choice: "allow_once", label: "Allow once" },
+        { choice: "allow_for", label: "Approve for…" }, ...(via === "hook" ? [permanent] : [])] } };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session],
+      workspaces: [root, worker], inbox: [timed] });
+    const { sync } = mount(daemon);
+    const duration = await screen.findByRole("spinbutton", { name: "Approval duration" });
+    expect(screen.queryByTestId("permission-grant")).toBeNull();
+    fireEvent.click(screen.getByTestId("permission-line"));
+    expect(screen.getByTestId("permission-grant")).toBeTruthy();
+    const unit = screen.getByRole("combobox", { name: "Duration unit" });
+    fireEvent.change(unit, { target: { value: "hours" } });
+    fireEvent.change(duration, { target: { value: "49" } });
+    expect(screen.getByRole("button", { name: /Approve for/ })).toHaveProperty("disabled", true);
+    fireEvent.change(unit, { target: { value: "days" } });
+    fireEvent.change(duration, { target: { value: "3" } });
+    expect(screen.getByRole("button", { name: /Approve for/ })).toHaveProperty("disabled", true);
+    fireEvent.change(duration, { target: { value: "1" } });
+    expect(screen.getByRole("button", { name: /Approve for/ })).toHaveProperty("disabled", false);
+    if (via === "hook") {
+      expect(screen.getByRole("button", { name: permanent.label })).toHaveProperty("title", permanent.rule);
+      expect(screen.getByText(permanent.rule!)).toBeTruthy();
+      expect(screen.getByRole("button", { name: /Approve for/ })).toHaveProperty("title", timed.permission!.approval_scope);
+    } else {
+      expect(screen.queryByRole("button", { name: /Always allow/ })).toBeNull();
+    }
+    expect(screen.queryByRole("combobox", { name: /Scope/ })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: /Approve for/ }));
+    await waitFor(() => expect(posts(daemon)[0]?.body).toEqual({ request: timed.permission!.request_id,
+      digest: timed.permission!.digest, choice: "allow_for", minutes: 1440 }));
+    sync.stop();
+  });
+
   it("groups the queue by session as banner cards, each going to its session and agent; an org notice is a card to read", async () => {
     const daemon = new FakeDaemon({
       repos: [{ repo_root: REPO, name: "proj" }],
@@ -95,7 +152,7 @@ describe("inbox", () => {
     expect(within(held).getByTestId("permission-line").querySelector("code")!.textContent).toBe("npx playwright install chromium");
     fireEvent.click(within(held).getByTestId("permission-line"));
     expect(within(held).getByTestId("permission-line").getAttribute("aria-expanded")).toBe("true");
-    expect(within(held).getAllByRole("button", { name: /Allow|Deny/ }).map((b) => b.textContent)).toEqual(["Allow once", "Allow always", "Deny"]);
+    expect(within(held).getAllByRole("button", { name: /Allow|Deny/ }).map((b) => b.textContent)).toEqual(["Deny", "Allow once", "Allow always"]);
     expect(within(held).getByRole("button", { name: "Allow always" }).title).toContain("brindle's permission rule");
     expect(within(held).queryByText(/terminal instead/)).toBeNull();
     fireEvent.click(within(held).getByRole("button", { name: "Deny" }));
