@@ -3284,6 +3284,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         if not policy and provider != "claude" and not (review_only and agent.mode == "review"):
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
+        session = _session_of(db, agent)   # for saved actions that last this session
         if provider == "codex":
             # No tool_use_id in Codex's payload: nothing to pair an approval
             # with, so nothing is kept for learning.
@@ -3303,7 +3304,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             if profile is not None:
                 rules += permissions.profile_bash_allows(profile)
             decision = permissions.Decision("ask", "not in the profile's allowed_tools") if review_only \
-                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
+                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>)
                 # wins before any part-by-part allow below.
@@ -3344,6 +3345,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 # The same hold for the app's answer as Claude Code's (no suggested rules here).
                 from brindle import codex_hook
 
+                permissions.note_prompt(decision)
                 # Within the timeout Codex's hook definition carries (codex_hook.TIMEOUT).
                 hold = min(cfg.permission_hold_seconds, codex_hook.TIMEOUT - HOOK_SLACK)
                 answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold)
@@ -3360,7 +3362,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
+            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
@@ -3374,8 +3376,9 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             return None
         if policy:
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide(req, checks=cfg.checks, rules=rules)
+            decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=session)
             _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
+            permissions.note_prompt(decision)
         else:
             decision = permissions.Decision("ask", "")
         if decision.decision == "ask":
@@ -3390,6 +3393,16 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         return permissions.claude_output(decision)
     except Exception:  # noqa: BLE001 - a broken policy must fall through to the prompt
         log.exception("brindle: permission policy failed; leaving it to the user")
+        return None
+
+
+def _session_of(db: DB, agent: Agent) -> str | None:
+    """The session (root agent) ``agent`` belongs to, for saved actions that last one."""
+    try:
+        from brindle import autopilot
+
+        return autopilot.root_of(db, agent.id)
+    except Exception:  # noqa: BLE001 - without it, only session-long saved actions are missed
         return None
 
 

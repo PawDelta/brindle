@@ -1280,6 +1280,212 @@ def change_permissions(db: DB, params: dict, body: Body) -> Any:
     return reply
 
 
+def _policy_changed() -> None:
+    from brindle import antigravity
+
+    antigravity.resync_permissions()
+
+
+def _invalid(e: ValueError) -> ServiceError:
+    return ServiceError("invalid", str(e))
+
+
+def set_permission_preset(db: DB, params: dict, body: Body) -> Any:
+    """PUT /permissions/preset {preset}: seed the store from that preset (its
+    rules replace the preset's earlier ones; the person's own and learned rules
+    stay) and record the choice. Answers the whole policy."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        store = perms.apply_preset(_get(body, "preset", required=True))
+    except ValueError as e:
+        raise _invalid(e) from e
+    _policy_changed()
+    return svc.policy_dto(store).to_json()
+
+
+def patch_permissions(db: DB, params: dict, body: Body) -> Any:
+    """PATCH /permissions {unmatched}: what a request no rule covers does (ask, allow or deny)."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        perms.set_unmatched(_get(body, "unmatched", required=True))
+    except ValueError as e:
+        raise _invalid(e) from e
+    _policy_changed()
+    return svc.policy_dto().to_json()
+
+
+def _rule_fields(body: Body) -> dict[str, Any]:
+    """The rule fields a body may set (make_rule's), validated for type."""
+    out: dict[str, Any] = {}
+    for key in ("kind", "match", "match_type", "decision", "label"):
+        value = _get(body, key)
+        if value is not None:
+            out[key] = value
+    for key in ("limits",):
+        value = _get(body, key, dict)
+        if value is not None or key in body:
+            out[key] = value
+    if "expires" in body:
+        out["expires"] = _get(body, "expires", (int, float))
+    if "minutes" in body:    # a timed rule: expires this many minutes from now
+        minutes = _get(body, "minutes", (int, float))
+        out["expires"] = time.time() + minutes * 60 if minutes else None
+    return out
+
+
+def create_permission_rule(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/rules {kind, match, match_type?, decision, limits?, minutes?|expires?, label?}."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    fields = _rule_fields(body)
+    for key in ("kind", "match", "decision"):
+        if key not in fields:
+            raise ServiceError("invalid", f"{key} is required")
+    try:
+        rule = perms.add_rule(fields.pop("kind"), fields.pop("match"), fields.pop("decision"),
+                              fields.pop("match_type", "exact"), **fields)
+    except ValueError as e:
+        raise _invalid(e) from e
+    _policy_changed()
+    return svc.rule_dto(rule).to_json()
+
+
+def update_permission_rule(db: DB, params: dict, body: Body) -> Any:
+    """PUT /permissions/rules/{id}: change any of a rule's fields (a preset's rule becomes the person's)."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        rule = perms.update_rule(params["id"], **_rule_fields(body))
+    except ValueError as e:
+        raise _invalid(e) from e
+    if rule is None:
+        raise ServiceError("not_found", f"no rule {params['id']}", 404)
+    _policy_changed()
+    return svc.rule_dto(rule).to_json()
+
+
+def delete_permission_rule(db: DB, params: dict, body: Body) -> Any:
+    from brindle import permissions as perms
+
+    gone = perms.forget(params["id"])
+    if gone is None:
+        raise ServiceError("not_found", f"no rule {params['id']}", 404)
+    _policy_changed()
+    return {"deleted": params["id"], "describe": gone}
+
+
+def add_permission_exception(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/rules/{id}/exceptions {kind, match, match_type?}: except those requests from the rule."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        rule = perms.add_exclusion(params["id"], _get(body, "kind", required=True), _get(body, "match", required=True),
+                                   _get(body, "match_type", default="exact"))
+    except ValueError as e:
+        raise _invalid(e) from e
+    if rule is None:
+        raise ServiceError("not_found", f"no rule {params['id']}", 404)
+    _policy_changed()
+    return svc.rule_dto(rule).to_json()
+
+
+def _saved_fields(body: Body) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in ("kind", "pattern", "decision", "scope", "level", "life", "session", "repo", "note"):
+        value = _get(body, key)
+        if value is not None or key in body:
+            out[key] = value
+    if "minutes" in body:
+        out["minutes"] = _get(body, "minutes", (int, float))
+    if "request" in body:
+        out["request"] = _get(body, "request", dict)
+    return out
+
+
+def create_saved_action(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/saved {kind, pattern, decision, scope?, level?, request?, life?, minutes?, session?, repo?, note?}."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    fields = _saved_fields(body)
+    for key in ("kind", "pattern", "decision"):
+        if not fields.get(key):
+            raise ServiceError("invalid", f"{key} is required")
+    try:
+        action = perms.save_action(fields.pop("kind"), fields.pop("pattern"), fields.pop("decision"),
+                                   **{k: v for k, v in fields.items() if v is not None})
+    except ValueError as e:
+        raise _invalid(e) from e
+    return svc.saved_dto(action).to_json()
+
+
+def update_saved_action(db: DB, params: dict, body: Body) -> Any:
+    """PUT /permissions/saved/{id}: change its scope, pattern, decision or how long it lasts (a timed one restarts)."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        action = perms.update_saved_action(params["id"], **_saved_fields(body))
+    except ValueError as e:
+        raise _invalid(e) from e
+    if action is None:
+        raise ServiceError("not_found", f"no saved action {params['id']}", 404)
+    return svc.saved_dto(action).to_json()
+
+
+def delete_saved_action(db: DB, params: dict, body: Body) -> Any:
+    from brindle import permissions as perms
+
+    gone = perms.delete_saved_action(params["id"])
+    if gone is None:
+        raise ServiceError("not_found", f"no saved action {params['id']}", 404)
+    return {"deleted": params["id"]}
+
+
+def decide_asks(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/asks/decide {key, scope, mode, minutes?}: one decision
+    on an Inbox item (GET /permissions/asks). ``mode``: once | session | timed |
+    forever | deny | always-deny; ``scope``: one of the item's scope values."""
+    from brindle import permission_grants
+    from brindle.service import permissions as svc
+
+    minutes = _get(body, "minutes", (int, float))
+    result = permission_grants.decide_group(db, _get(body, "key", required=True), _get(body, "scope", required=True),
+                                            _get(body, "mode", required=True), minutes)
+    return svc.decision_dto(result).to_json()
+
+
+def allow_all_asks(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/asks/allow-all {repo?, forever?}: the stall notice's
+    automated fix: allow everything waiting that its own policy permits, one
+    grant per item at the general scope where every request's policy allows
+    it, an exact grant where only that is permitted."""
+    from brindle import permission_grants
+    from brindle.service import permissions as svc
+
+    result = permission_grants.allow_all(db, _get(body, "repo"), _get(body, "forever", bool, False))
+    return svc.plan_dto(result).to_json()
+
+
+def unblock_asks(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/asks/unblock {repo?, forever?}: except the blocked
+    requests from the deny rules that block them (a rule for them where
+    unmatched actions are denied), then allow them."""
+    from brindle import permission_grants
+    from brindle.service import permissions as svc
+
+    result = permission_grants.unblock_denied(db, _get(body, "repo"), _get(body, "forever", bool, False))
+    _policy_changed()
+    return svc.plan_dto(result).to_json()
+
+
 # -- account ---------------------------------------------------------------------
 
 
@@ -1699,6 +1905,19 @@ ROUTES = [
     _post("/debug/log", post_debug_log),
     _post("/profiles", create_profile),
     _post("/permissions", change_permissions),
+    # The permission policy (brindle.permissions, brindle.permission_grants); agents never get here.
+    Route("/v1/permissions", _endpoint(patch_permissions), methods=["PATCH"]),
+    Route("/v1/permissions/preset", _endpoint(set_permission_preset), methods=["PUT"]),
+    _post("/permissions/rules", create_permission_rule),
+    Route("/v1/permissions/rules/{id}", _endpoint(update_permission_rule), methods=["PUT"]),
+    Route("/v1/permissions/rules/{id}", _endpoint(delete_permission_rule), methods=["DELETE"]),
+    _post("/permissions/rules/{id}/exceptions", add_permission_exception),
+    _post("/permissions/saved", create_saved_action),
+    Route("/v1/permissions/saved/{id}", _endpoint(update_saved_action), methods=["PUT"]),
+    Route("/v1/permissions/saved/{id}", _endpoint(delete_saved_action), methods=["DELETE"]),
+    _post("/permissions/asks/decide", decide_asks),
+    _post("/permissions/asks/allow-all", allow_all_asks),
+    _post("/permissions/asks/unblock", unblock_asks),
     _post("/account/login", account_login),
     _post("/account/logout", account_logout),
     _post("/account/switch-org", account_switch_org),

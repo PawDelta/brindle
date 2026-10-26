@@ -7,11 +7,18 @@
 import type {
   AccountDTO,
   AgentDTO,
+  AllowAllPlanDTO,
+  AskDecisionDTO,
+  AskGroupDTO,
   DecisionDTO,
   GoalDTO,
   InboxItemDTO,
+  PermissionLimitsDTO,
+  PermissionPolicyDTO,
+  PermissionRuleDTO,
   ProfileDTO,
   RoutingDTO,
+  SavedActionDTO,
   SessionDTO,
   WorkspaceDTO,
 } from "./schema";
@@ -477,6 +484,77 @@ export type PermissionChange =
   | { op: "reset" };
 
 export type PermissionChanged = { rule: string; describe: string } | { reset: true };
+
+/* The permission policy (engine: brindle/permissions.py, brindle/permission_grants.py;
+   routes in daemon/routes_read.py and routes_actions.py). Nothing is built in:
+   every rule, the chosen preset's included, can be edited or removed. */
+export type PermissionPreset = "autonomous" | "permissive" | "standard" | "secure";
+/* What a request no rule covers does. */
+export type PermissionUnmatched = "ask" | "allow" | "deny";
+export type PermissionDecision = "allow" | "deny" | "ask";
+export type PermissionKind = "read" | "write" | "edit" | "bash" | "fetch" | "mcp" | "other";
+/* A saved action's kind: a request kind, or a git push. */
+export type SavedActionKind = PermissionKind | "push";
+/* exact | prefix | glob, or a named matcher: tracked, check, git-readonly, git-push, git-force,
+   push ("<source> → <destination>", @default for the repo's default branch), worktree, readonly-pipeline. */
+export type PermissionMatchType = "exact" | "prefix" | "glob" | "tracked" | "check" | "git-readonly" | "git-push"
+  | "git-force" | "push" | "worktree" | "readonly-pipeline";
+export type PermissionLife = "session" | "time" | "forever";
+/* How far a saved push approval may reach, narrowest first. */
+export type PermissionLevel = "branch" | "destination" | "remote" | "repository" | "all";
+
+/* POST /permissions/rules and PUT /permissions/rules/{id}: a PUT changes only the fields given
+   (a preset's rule becomes the person's). `minutes` makes a timed rule, expiring that long from
+   now; `expires: null` clears one. `limits` belongs to an ask rule. */
+export interface PermissionRulePut {
+  kind?: PermissionKind;
+  match?: string;
+  match_type?: PermissionMatchType;
+  decision?: PermissionDecision;
+  label?: string;
+  limits?: PermissionLimitsDTO | null;
+  minutes?: number | null;
+  expires?: number | null;
+}
+
+/* POST /permissions/rules/{id}/exceptions: requests the rule stops applying to (a deny's exception). */
+export interface PermissionExceptionPut {
+  kind: PermissionKind;
+  match: string;
+  match_type?: "exact" | "prefix" | "glob";
+}
+
+/* POST /permissions/saved and PUT /permissions/saved/{id}: a saved allow or deny with its
+   structured scope. A timed one (`life` "time") takes `minutes` and restarts its expiry on
+   every PUT; one for a session takes `session` (the root agent); `repo` null means every repo. */
+export interface SavedActionPut {
+  kind?: SavedActionKind;
+  pattern?: string;
+  decision?: "allow" | "deny";
+  scope?: string;
+  level?: PermissionLevel | null;
+  request?: Record<string, unknown>;
+  life?: PermissionLife;
+  minutes?: number | null;
+  session?: string | null;
+  repo?: string | null;
+  note?: string;
+}
+
+/* POST /permissions/asks/decide: one decision on an Inbox item (AskGroupDTO.key). `scope` is one
+   of the item's scope values; `mode` once | session | timed (with `minutes`) | forever | deny |
+   always-deny, from the item's `modes`. */
+export interface AskDecide {
+  key: string;
+  scope: string;
+  mode: "once" | "session" | "timed" | "forever" | "deny" | "always-deny";
+  minutes?: number;
+}
+
+export interface PermissionDeleted {
+  deleted: string;
+  describe?: string;
+}
 
 /* What an account action said (the CLI's own lines). */
 export interface AccountSaid {
@@ -964,6 +1042,72 @@ export class DaemonClient {
 
   changePermissions(body: PermissionChange) {
     return this.post<PermissionChanged>("/permissions", body);
+  }
+
+  /* The permission policy: the chosen preset, the unmatched setting, every rule
+     with its 24-hour prompt count, and the saved actions. */
+  permissions() {
+    return this.get<PermissionPolicyDTO>("/permissions");
+  }
+
+  /* Start over from a preset; the person's own and learned rules stay. Answers the whole policy. */
+  setPermissionPreset(preset: PermissionPreset) {
+    return this.put<PermissionPolicyDTO>("/permissions/preset", { preset });
+  }
+
+  setPermissionUnmatched(unmatched: PermissionUnmatched) {
+    return this.patch<PermissionPolicyDTO>("/permissions", { unmatched });
+  }
+
+  createPermissionRule(body: PermissionRulePut & { kind: PermissionKind; match: string; decision: PermissionDecision }) {
+    return this.post<PermissionRuleDTO>("/permissions/rules", body);
+  }
+
+  updatePermissionRule(id: string, body: PermissionRulePut) {
+    return this.put<PermissionRuleDTO>(`/permissions/rules/${encodeURIComponent(id)}`, body);
+  }
+
+  deletePermissionRule(id: string) {
+    return this.delete<PermissionDeleted>(`/permissions/rules/${encodeURIComponent(id)}`, {});
+  }
+
+  addPermissionException(id: string, body: PermissionExceptionPut) {
+    return this.post<PermissionRuleDTO>(`/permissions/rules/${encodeURIComponent(id)}/exceptions`, body);
+  }
+
+  createSavedAction(body: SavedActionPut & { kind: SavedActionKind; pattern: string; decision: "allow" | "deny" }) {
+    return this.post<SavedActionDTO>("/permissions/saved", body);
+  }
+
+  updateSavedAction(id: string, body: SavedActionPut) {
+    return this.put<SavedActionDTO>(`/permissions/saved/${encodeURIComponent(id)}`, body);
+  }
+
+  deleteSavedAction(id: string) {
+    return this.delete<PermissionDeleted>(`/permissions/saved/${encodeURIComponent(id)}`, {});
+  }
+
+  /* The requests waiting on the person, one item per kind and general form (`repo` narrows). */
+  permissionAsks(repo?: string) {
+    return this.get<AskGroupDTO[]>("/permissions/asks", { repo });
+  }
+
+  decidePermissionAsks(body: AskDecide) {
+    return this.post<AskDecisionDTO>("/permissions/asks/decide", body);
+  }
+
+  /* What allowing everything waiting would grant, within each request's own policy. */
+  permissionAllowAllPlan(repo?: string, forever = false) {
+    return this.get<AllowAllPlanDTO>("/permissions/asks/plan", { repo, forever: forever ? "1" : undefined });
+  }
+
+  permissionAllowAll(repo?: string, forever = false) {
+    return this.post<AllowAllPlanDTO>("/permissions/asks/allow-all", { repo, forever });
+  }
+
+  /* Except the blocked requests from the deny rules that block them, then allow them. */
+  permissionUnblock(repo?: string, forever = false) {
+    return this.post<AllowAllPlanDTO>("/permissions/asks/unblock", { repo, forever });
   }
 
   /* Starts a sign-in as a job: a job.progress event carries the URL to open

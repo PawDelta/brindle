@@ -429,7 +429,11 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
             escalate = bool(agent.parent_id) and profile.permission_mode != "dontAsk"
         except KeyError:
             pass
-    decision = permissions.decide(req, checks=cfg.checks, rules=rules)
+    from brindle.agents import _session_of
+
+    decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
+    if decision.decision == "ask":
+        permissions.note_prompt(decision)
     if strict and decision.decision == "ask":
         # A part a rule denies is a deny, never escalated; else a compound or
         # quoted command whose every part is allowed, read as Claude Code's
@@ -784,7 +788,7 @@ def sync_permissions(repo_root: str | None = None, on: bool | None = None,
                 store.agy_repos.pop(repo_root, None)
         if store.agy_repos:
             all_checks = list(dict.fromkeys(c for cs in store.agy_repos.values() for c in cs))
-            desired = permissions.mirror_agy([*permissions.DEFAULT_RULES, *store.rules], all_checks)
+            desired = permissions.mirror_agy(store.rules, all_checks)
         else:
             desired = {"allow": [], "deny": []}
         return _apply(store, desired)

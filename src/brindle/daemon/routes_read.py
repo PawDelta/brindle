@@ -313,6 +313,31 @@ def get_user_settings(db: DB, request: Request) -> Any:
 
 
 @_json
+def get_permissions(db: DB, request: Request) -> Any:
+    """The permission policy: preset, unmatched setting, rules, saved actions, prompt counts."""
+    from brindle.service import permissions as svc_permissions
+
+    return svc_permissions.policy_dto().to_json()
+
+
+@_json
+def get_permission_asks(db: DB, request: Request) -> Any:
+    """The requests waiting on the person, grouped by kind and general form (``repo`` narrows)."""
+    from brindle.service import permissions as svc_permissions
+
+    return [g.to_json() for g in svc_permissions.asks(db, _repo(request))]
+
+
+@_json
+def get_permission_plan(db: DB, request: Request) -> Any:
+    """What allowing everything waiting would grant (``forever=1`` for lasting grants)."""
+    from brindle.service import permissions as svc_permissions
+
+    forever = request.query_params.get("forever") in ("1", "true", "yes")
+    return svc_permissions.plan(db, _repo(request), forever).to_json()
+
+
+@_json
 def get_debug(db: DB, request: Request) -> Any:
     """``{enabled, staff}`` for debug logs (only a brindle staff account may turn them on)."""
     from brindle import debuglog
@@ -557,6 +582,9 @@ ROUTES = [
     Route("/v1/rules", list_rules),
     Route("/v1/config", get_config),
     Route("/v1/user-settings", get_user_settings),
+    Route("/v1/permissions", get_permissions),
+    Route("/v1/permissions/asks", get_permission_asks),
+    Route("/v1/permissions/asks/plan", get_permission_plan),
     Route("/v1/routing", get_routing),
     Route("/v1/debug", get_debug),
     Route("/v1/doctor", get_doctor),

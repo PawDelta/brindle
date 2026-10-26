@@ -347,3 +347,177 @@ class PreflightItemDTO(_DTO):
     detail: str
     action: PreflightActionDTO | None = None
     link: str | None = None
+
+
+# -- permissions (brindle.permissions, brindle.permission_grants) ------------------------------
+
+
+class PermissionLimitsDTO(_DTO):
+    """An ask rule's limits on saved approvals: how far (``max_scope``, a
+    LEVELS entry for pushes or a pattern) and how long (``life`` session |
+    time | forever, with ``minutes`` for time)."""
+    max_scope: str | None = None
+    life: str | None = None
+    minutes: float | None = None
+
+
+class PermissionExceptionDTO(_DTO):
+    """Requests a rule doesn't apply to (a deny's exception): matched like a rule."""
+    kind: str
+    match: str
+    match_type: str
+    describe: str
+
+
+class PermissionRuleDTO(_DTO):
+    """One rule of the person's store (GET /permissions). ``decision`` allow |
+    deny | ask; ``source`` preset | user | learned; ``match_type`` exact |
+    prefix | glob or a named matcher (permissions.BUILTIN_MATCHERS; a
+    ``push`` rule's match is "<source> → <destination>"). ``prompts``: asks
+    it caused in the last day."""
+    id: str
+    kind: str
+    match: str
+    match_type: str
+    decision: str
+    source: str
+    describe: str
+    created: float = 0.0
+    label: str = ""
+    limits: PermissionLimitsDTO | None = None
+    expires: float | None = None
+    expired: bool = False
+    exclusions: list[PermissionExceptionDTO] = []
+    prompts: int = 0
+
+
+class PermissionPresetDTO(_DTO):
+    name: str                # autonomous | permissive | standard | secure
+    description: str
+    unmatched: str           # what the preset does with a request no rule covers
+    current: bool
+
+
+class SavedActionDTO(_DTO):
+    """A decision saved from the Inbox (permissions.SavedAction). ``kind``: a
+    permissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,
+    general, repository, ...) and ``pattern`` what it covers; ``request`` the
+    exact request it was saved from; ``life`` session | time | forever."""
+    id: str
+    kind: str
+    pattern: str
+    decision: str            # allow | deny
+    scope: str
+    level: str | None = None
+    request: dict[str, Any] = {}
+    life: str = "forever"
+    minutes: float | None = None
+    expires: float | None = None
+    expired: bool = False
+    session: str | None = None
+    repo: str | None = None
+    created: float = 0.0
+    note: str = ""
+
+
+class PermissionPolicyDTO(_DTO):
+    """GET /permissions: the chosen preset, the unmatched setting, every rule
+    (editable, the preset's included), the saved actions and per-rule prompt
+    counts ("unmatched" for asks no rule caused)."""
+    preset: str | None
+    unmatched: str
+    presets: list[PermissionPresetDTO]
+    rules: list[PermissionRuleDTO]
+    saved: list[SavedActionDTO]
+    prompt_counts: dict[str, int] = {}
+
+
+class AskScopeDTO(_DTO):
+    """One rung of an ask's scope ladder: ``value`` exact | general |
+    repository | remote | server | all, ``pattern`` what a grant of it covers."""
+    value: str
+    pattern: str
+    label: str
+    level: str | None = None
+
+
+class AskResultDTO(_DTO):
+    agent_id: str
+    request_id: str
+    exact: str
+    why: str | None = None
+
+
+class AskDTO(_DTO):
+    """One pending request, generalized. ``blocked``: a deny rule covers it
+    (its ``rule``); else ``rule`` is the ask rule that asked, with its
+    ``limits`` (None: no rule covers it, and unmatched actions ask)."""
+    agent_id: str
+    root_id: str
+    request_id: str
+    digest: str
+    repo: str
+    kind: str
+    tool: str
+    exact: str
+    summary: str
+    waiting_since: float
+    worker: str = ""
+    blocked: bool = False
+    rule: str | None = None
+    limits: PermissionLimitsDTO | None = None
+    reason: str = ""
+
+
+class AskGroupDTO(_DTO):
+    """GET /permissions/asks: one Inbox item per repo, kind and general form,
+    generalized from its oldest request. ``policy``: the tightest limits
+    among its requests (a deny blocks the whole item). ``modes``: what
+    POST /permissions/asks/decide accepts for it."""
+    key: str
+    repo: str
+    kind: str
+    title: str
+    general: AskScopeDTO
+    scopes: list[AskScopeDTO]
+    items: list[AskDTO]
+    blocked: bool = False
+    rule: str | None = None
+    limits: PermissionLimitsDTO | None = None
+    modes: list[str] = []
+
+
+class AskDecisionDTO(_DTO):
+    """POST /permissions/asks/decide: what one decision did."""
+    mode: str
+    scope: AskScopeDTO
+    grant: SavedActionDTO | None = None
+    resumed: list[AskResultDTO] = []
+    stopped: list[AskResultDTO] = []
+    skipped: list[AskResultDTO] = []
+    failed: list[AskResultDTO] = []
+
+
+class AllowAllGrantDTO(_DTO):
+    group: str
+    kind: str
+    scope: AskScopeDTO
+    mode: str
+    minutes: float | None = None
+    requests: list[str] = []
+
+
+class AllowAllPlanDTO(_DTO):
+    """GET /permissions/asks/plan (what allowing everything waiting would
+    grant) and the result of POST /permissions/asks/allow-all and
+    /unblock (``saved``, ``resumed``, ``failed`` filled in; ``excepted``,
+    ``added``, ``locked`` for unblock)."""
+    grants: list[AllowAllGrantDTO]
+    resumes: int
+    skipped: list[AskResultDTO] = []
+    saved: list[SavedActionDTO] = []
+    resumed: list[AskResultDTO] = []
+    failed: list[AskResultDTO] = []
+    excepted: int | None = None
+    added: int | None = None
+    locked: list[AskResultDTO] = []

@@ -144,9 +144,16 @@ def test_secret_locations_are_denied(ws):
     assert decide(read(ws, os.path.join(ws.repo_root, ".env"))).decision == "deny"
 
 
-def test_git_push_and_force_flags_are_denied(ws):
+def test_pushes_into_the_default_branch_ask_and_force_flags_are_denied(ws):
+    # Pushes are no longer denied outright: the preset's push rule asks for the
+    # default branch (and for a push whose destination the command leaves to git).
     for cmd in ("git push", "git push origin main", "cd x && git push", "git -C x push",
-                "git checkout -f main", "git clean -fd", "git reset --force"):
+                "git push origin HEAD:refs/heads/main"):
+        got = decide(bash(ws, cmd))
+        assert got.decision == "ask" and got.rule is not None and got.rule.id == "d-push-default", cmd
+    assert decide(bash(ws, "git push origin feature")).decision == "ask"   # Standard: unmatched asks, limitless
+    assert decide(bash(ws, "git push origin feature")).rule is None
+    for cmd in ("git checkout -f main", "git clean -fd", "git reset --force", "git push --force origin x"):
         assert decide(bash(ws, cmd)).decision == "deny", cmd
 
 
@@ -164,9 +171,13 @@ def test_repo_rules_can_only_add_denies(ws):
 # -- user rules and learning ------------------------------------------------------------------
 
 
-def test_a_user_allow_never_overrides_a_default_deny(ws):
-    permissions.add_rule("bash", "git push", "allow")
-    assert decide(bash(ws, "git push")).decision == "deny"
+def test_a_user_allow_never_overrides_a_deny_or_an_ask_rule(ws):
+    permissions.add_rule("bash", "git clean -fd", "allow")
+    assert decide(bash(ws, "git clean -fd")).decision == "deny"
+    permissions.add_rule("bash", "git push origin main", "allow")
+    assert decide(bash(ws, "git push origin main")).decision == "ask"   # the ask rule stands until it is changed
+    permissions.update_rule("d-push-default", decision="allow")
+    assert decide(bash(ws, "git push origin main")).decision == "allow"
 
 
 def test_compound_commands_are_never_learned(ws):
@@ -260,8 +271,8 @@ def test_cli_rules_and_suggestions(ws, monkeypatch):
     rule_id = res.output.split(":")[0]
     assert r.invoke(app, ["permissions", "deny", "fetch", "https://evil.", "--prefix"]).exit_code == 0
     out = r.invoke(app, ["permissions", "list"]).output
-    assert "permission_policy: off" in out
-    assert "d-git-push" in out and "default" in out and f"{rule_id}" in out and "user" in out
+    assert "permission_policy: off" in out and "preset: standard" in out
+    assert "d-push-default" in out and "preset" in out and f"{rule_id}" in out and "user" in out
     assert r.invoke(app, ["permissions", "allow", "nonsense", "x"]).exit_code == 2
 
     assert r.invoke(app, ["permissions", "suggestions"]).output.strip() == "no suggestions"
@@ -273,9 +284,11 @@ def test_cli_rules_and_suggestions(ws, monkeypatch):
     assert r.invoke(app, ["permissions", "accept", "nope"]).exit_code == 1
 
     assert r.invoke(app, ["permissions", "forget", rule_id]).exit_code == 0
-    assert r.invoke(app, ["permissions", "forget", "d-git-push"]).exit_code == 1
+    assert r.invoke(app, ["permissions", "forget", "d-push-default"]).exit_code == 0   # nothing is built in
+    assert r.invoke(app, ["permissions", "forget", "d-push-default"]).exit_code == 1
 
     res = r.invoke(app, ["permissions", "reset"], input="n\n")
-    assert res.exit_code != 0 and permissions.load_store().rules
+    assert res.exit_code != 0 and any(r.source == "learned" for r in permissions.load_store().rules)
     assert r.invoke(app, ["permissions", "reset", "--yes"]).exit_code == 0
-    assert permissions.load_store().rules == [] and permissions.load_store().approvals == {}
+    store = permissions.load_store()
+    assert {r.source for r in store.rules} == {"preset"} and store.rule("d-push-default") and store.approvals == {}

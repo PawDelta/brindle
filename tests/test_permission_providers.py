@@ -162,7 +162,7 @@ def test_codex_reviewer_reads_github_but_cannot_write(db, ws, policy, command, e
     assert (json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] if out else None) == expected
 
 
-@pytest.mark.parametrize("command,expected", [("git push", "deny")])
+@pytest.mark.parametrize("command,expected", [("git push --force", "deny")])
 def test_codex_session_bookkeeping_failure_preserves_decision(db, ws, monkeypatch, command, expected):
     a = worker(db, ws)
     turn_on(ws)
@@ -246,7 +246,7 @@ def test_codex_hook_cli_finds_its_agent_in_the_environment(db, ws, monkeypatch):
     turn_on(ws)
     monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
     res = CliRunner().invoke(app, ["_hook", "codex-permission-request"],
-                             input=json.dumps(codex_payload("Bash", {"command": "git push"}, ws.path)))
+                             input=json.dumps(codex_payload("Bash", {"command": "git push --force"}, ws.path)))
     assert res.exit_code == 0
     assert json.loads(res.output)["hookSpecificOutput"]["decision"]["behavior"] == "deny"
     res = CliRunner().invoke(app, ["_hook", "codex-permission-request"], input="garbage")
@@ -681,7 +681,7 @@ def test_agy_cli_always_prints_json(monkeypatch, strict, expected, hook_name):
     monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
     if strict:
         monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: True)
-    for stdin in ("", "garbage", json.dumps(agy_payload("run_command", {"CommandLine": "git push"}))):
+    for stdin in ("", "garbage", json.dumps(agy_payload("run_command", {"CommandLine": "git push --force"}))):
         res = CliRunner().invoke(app, ["_hook", hook_name], input=stdin)
         assert res.exit_code == 0
         assert json.loads(res.stdout)["decision"] == expected
@@ -754,7 +754,7 @@ def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, mo
     assert decision("call_mcp_tool", {"ServerName": "brindle", "ToolName": "send_message"}) == "allow"
     assert decision("invoke_subagent", {}) == "allow"  # its own calls reach this hook
 
-    assert decision("run_command", {"CommandLine": "git push"}) == "deny"
+    assert decision("run_command", {"CommandLine": "git push --force"}) == "deny"
     assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}) == "deny"
     assert decision("run_command", {"CommandLine": "curl https://example.com"}) == "deny"
     assert decision("view_file", {"AbsolutePath": str(outside)}) == "deny"
@@ -934,7 +934,7 @@ def test_agy_sync_adds_and_removes_only_its_own_entries(agy_settings, monkeypatc
     assert "command(regex:^git diff$)" in allow
     assert not any("pytest" in e for e in allow)  # a repo's checks stay out of agy's global settings
     assert allow.count("command(regex:^git status$)") == 1  # theirs already; not brindle's
-    assert "command(git push)" in deny and f"read_file({os.path.expanduser('~/.ssh')})" in deny
+    assert f"read_file({os.path.expanduser('~/.ssh')})" in deny
     assert data["colorScheme"] == "tokyo night" and data["permissions"]["ask"] == ["command(*)"]
     assert agy_settings.read_text().startswith('{\n    "colorScheme"')  # same indentation
     backup = agy_settings.with_name("settings.json.brindle-backup")
@@ -1089,7 +1089,7 @@ def test_agy_mirror_never_widens_an_allow():
              Rule("bash", "npm test", "exact", "allow")]
     out = permissions.mirror_agy(rules, ["make check", "a && b"])
     assert out["allow"] == ["read_file(docs/)", "mcp(gh/*)", "command(regex:^npm test$)"]
-    out = permissions.mirror_agy([*permissions.DEFAULT_RULES], ["make check", "a && b"])
+    out = permissions.mirror_agy(permissions.preset_rules("standard"), ["make check", "a && b"])
     # agy's settings apply to every project, and a repo's check runs what
     # that repo defines: allowed for brindle workers in that repo, never
     # everywhere agy runs.

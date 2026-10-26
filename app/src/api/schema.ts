@@ -10,6 +10,13 @@ export interface ApiSchema {
   AccountOrgDTO: AccountOrgDTO;
   ActionTerminalDTO: ActionTerminalDTO;
   AgentDTO: AgentDTO;
+  AllowAllGrantDTO: AllowAllGrantDTO;
+  AllowAllPlanDTO: AllowAllPlanDTO;
+  AskDTO: AskDTO;
+  AskDecisionDTO: AskDecisionDTO;
+  AskGroupDTO: AskGroupDTO;
+  AskResultDTO: AskResultDTO;
+  AskScopeDTO: AskScopeDTO;
   DecisionDTO: DecisionDTO;
   GoalDTO: GoalDTO;
   InboxActionDTO: InboxActionDTO;
@@ -18,6 +25,11 @@ export interface ApiSchema {
   NativeSubagentDTO: NativeSubagentDTO;
   PermissionChoiceDTO: PermissionChoiceDTO;
   PermissionDTO: PermissionDTO;
+  PermissionExceptionDTO: PermissionExceptionDTO;
+  PermissionLimitsDTO: PermissionLimitsDTO;
+  PermissionPolicyDTO: PermissionPolicyDTO;
+  PermissionPresetDTO: PermissionPresetDTO;
+  PermissionRuleDTO: PermissionRuleDTO;
   PreflightActionDTO: PreflightActionDTO;
   PreflightItemDTO: PreflightItemDTO;
   ProfileDTO: ProfileDTO;
@@ -30,6 +42,7 @@ export interface ApiSchema {
   RoutingTierDTO: RoutingTierDTO;
   RoutingTierModelDTO: RoutingTierModelDTO;
   RuleDTO: RuleDTO;
+  SavedActionDTO: SavedActionDTO;
   SessionDTO: SessionDTO;
   WorkspaceDTO: WorkspaceDTO;
 }
@@ -103,6 +116,164 @@ export interface NativeSubagentDTO {
   ended_at?: number | null;
   id: string;
   started_at: number;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AllowAllGrantDTO".
+ */
+export interface AllowAllGrantDTO {
+  group: string;
+  kind: string;
+  minutes?: number | null;
+  mode: string;
+  requests?: string[];
+  scope: AskScopeDTO;
+}
+/**
+ * One rung of an ask's scope ladder: ``value`` exact | general |
+ * repository | remote | server | all, ``pattern`` what a grant of it covers.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AskScopeDTO".
+ */
+export interface AskScopeDTO {
+  label: string;
+  level?: string | null;
+  pattern: string;
+  value: string;
+}
+/**
+ * GET /permissions/asks/plan (what allowing everything waiting would
+ * grant) and the result of POST /permissions/asks/allow-all and
+ * /unblock (``saved``, ``resumed``, ``failed`` filled in; ``excepted``,
+ * ``added``, ``locked`` for unblock).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AllowAllPlanDTO".
+ */
+export interface AllowAllPlanDTO {
+  added?: number | null;
+  excepted?: number | null;
+  failed?: AskResultDTO[];
+  grants: AllowAllGrantDTO[];
+  locked?: AskResultDTO[];
+  resumed?: AskResultDTO[];
+  resumes: number;
+  saved?: SavedActionDTO[];
+  skipped?: AskResultDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AskResultDTO".
+ */
+export interface AskResultDTO {
+  agent_id: string;
+  exact: string;
+  request_id: string;
+  why?: string | null;
+}
+/**
+ * A decision saved from the Inbox (permissions.SavedAction). ``kind``: a
+ * permissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,
+ * general, repository, ...) and ``pattern`` what it covers; ``request`` the
+ * exact request it was saved from; ``life`` session | time | forever.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "SavedActionDTO".
+ */
+export interface SavedActionDTO {
+  created?: number;
+  decision: string;
+  expired?: boolean;
+  expires?: number | null;
+  id: string;
+  kind: string;
+  level?: string | null;
+  life?: string;
+  minutes?: number | null;
+  note?: string;
+  pattern: string;
+  repo?: string | null;
+  request?: {
+    [k: string]: unknown;
+  };
+  scope: string;
+  session?: string | null;
+}
+/**
+ * One pending request, generalized. ``blocked``: a deny rule covers it
+ * (its ``rule``); else ``rule`` is the ask rule that asked, with its
+ * ``limits`` (None: no rule covers it, and unmatched actions ask).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AskDTO".
+ */
+export interface AskDTO {
+  agent_id: string;
+  blocked?: boolean;
+  digest: string;
+  exact: string;
+  kind: string;
+  limits?: PermissionLimitsDTO | null;
+  reason?: string;
+  repo: string;
+  request_id: string;
+  root_id: string;
+  rule?: string | null;
+  summary: string;
+  tool: string;
+  waiting_since: number;
+  worker?: string;
+}
+/**
+ * An ask rule's limits on saved approvals: how far (``max_scope``, a
+ * LEVELS entry for pushes or a pattern) and how long (``life`` session |
+ * time | forever, with ``minutes`` for time).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionLimitsDTO".
+ */
+export interface PermissionLimitsDTO {
+  life?: string | null;
+  max_scope?: string | null;
+  minutes?: number | null;
+}
+/**
+ * POST /permissions/asks/decide: what one decision did.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AskDecisionDTO".
+ */
+export interface AskDecisionDTO {
+  failed?: AskResultDTO[];
+  grant?: SavedActionDTO | null;
+  mode: string;
+  resumed?: AskResultDTO[];
+  scope: AskScopeDTO;
+  skipped?: AskResultDTO[];
+  stopped?: AskResultDTO[];
+}
+/**
+ * GET /permissions/asks: one Inbox item per repo, kind and general form,
+ * generalized from its oldest request. ``policy``: the tightest limits
+ * among its requests (a deny blocks the whole item). ``modes``: what
+ * POST /permissions/asks/decide accepts for it.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AskGroupDTO".
+ */
+export interface AskGroupDTO {
+  blocked?: boolean;
+  general: AskScopeDTO;
+  items: AskDTO[];
+  key: string;
+  kind: string;
+  limits?: PermissionLimitsDTO | null;
+  modes?: string[];
+  repo: string;
+  rule?: string | null;
+  scopes: AskScopeDTO[];
+  title: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -216,6 +387,72 @@ export interface PermissionChoiceDTO {
   choice: string;
   label: string;
   rule?: string | null;
+}
+/**
+ * Requests a rule doesn't apply to (a deny's exception): matched like a rule.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionExceptionDTO".
+ */
+export interface PermissionExceptionDTO {
+  describe: string;
+  kind: string;
+  match: string;
+  match_type: string;
+}
+/**
+ * GET /permissions: the chosen preset, the unmatched setting, every rule
+ * (editable, the preset's included), the saved actions and per-rule prompt
+ * counts ("unmatched" for asks no rule caused).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionPolicyDTO".
+ */
+export interface PermissionPolicyDTO {
+  preset: string | null;
+  presets: PermissionPresetDTO[];
+  prompt_counts?: {
+    [k: string]: number;
+  };
+  rules: PermissionRuleDTO[];
+  saved: SavedActionDTO[];
+  unmatched: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionPresetDTO".
+ */
+export interface PermissionPresetDTO {
+  current: boolean;
+  description: string;
+  name: string;
+  unmatched: string;
+}
+/**
+ * One rule of the person's store (GET /permissions). ``decision`` allow |
+ * deny | ask; ``source`` preset | user | learned; ``match_type`` exact |
+ * prefix | glob or a named matcher (permissions.BUILTIN_MATCHERS; a
+ * ``push`` rule's match is "<source> → <destination>"). ``prompts``: asks
+ * it caused in the last day.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionRuleDTO".
+ */
+export interface PermissionRuleDTO {
+  created?: number;
+  decision: string;
+  describe: string;
+  exclusions?: PermissionExceptionDTO[];
+  expired?: boolean;
+  expires?: number | null;
+  id: string;
+  kind: string;
+  label?: string;
+  limits?: PermissionLimitsDTO | null;
+  match: string;
+  match_type: string;
+  prompts?: number;
+  source: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
