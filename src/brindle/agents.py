@@ -3838,7 +3838,15 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # 'waiting' before the session even started was its trust dialog
         # (see screen_status), which has now been answered.
         db.set_status(agent_id, "idle", only_if="waiting")
-        if db.pending_count(agent_id) and not agent.headless:
+        if db.pending_count(agent_id) and not agent.headless and not get_provider(agent.provider).announces_start:
+            # No start hook ran: this is `ready`, called once after_launch saw
+            # the CLI's input box, so it takes input now (agy's warm-up, then
+            # its task, would otherwise wait out ready_delay first).
+            try:
+                flush(db, agent_id)
+            except tmux.TmuxError:
+                pass  # stays queued for the next flush
+        elif db.pending_count(agent_id) and not agent.headless:
             # Claude Code hasn't drawn its input box yet; deliver shortly after,
             # from a detached process so this hook returns immediately.
             import subprocess
