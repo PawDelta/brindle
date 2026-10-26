@@ -208,12 +208,15 @@ def launch_flags(cwd: str | None, review: bool = False) -> list[str]:
     """The flags a Codex agent in ``cwd`` launches with: brindle's hook when the
     repo's policy is on and the person trusted the hook; else none. A reviewer
     gets it with the policy off too (nobody watches its prompts; the hook only
-    allows what its allowed_tools cover, #241), but only a hook trusted
-    already: with the policy off brindle never trusts a NEW one itself, and a
-    REMOVED trust stays removed."""
+    allows what its allowed_tools cover, #241), and so does any worker while
+    permission_essentials is on (the hook then only allows those commands),
+    but only a hook trusted already: with the policy off brindle never trusts
+    a NEW one itself, and a REMOVED trust stays removed."""
+    from brindle import permissions
+
     try:
         if not policy_on(cwd):
-            if not review:
+            if not review and not (cwd and permissions.essentials_on(cwd)):
                 return []
             command = hook_command()
             if status(command) not in (TRUSTED, MOVED):

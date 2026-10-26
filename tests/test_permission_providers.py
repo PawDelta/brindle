@@ -102,6 +102,10 @@ def test_codex_hook_off_or_broken_is_no_output(db, ws, monkeypatch):
     payload = json.dumps(codex_payload("Bash", {"command": "git push"}, ws.path))
     assert agents.hook_main(db, a.id, "codex-permission-request", payload) == ""  # policy off
     covered = json.dumps(codex_payload("Bash", {"command": "git status"}, ws.path))
+    # ...but permission_essentials (on by default) answers read-only inspection.
+    out = agents.hook_main(db, a.id, "codex-permission-request", covered)
+    assert json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    set_local(ws.repo_root, "permission_essentials", False)
     assert agents.hook_main(db, a.id, "codex-permission-request", covered) == ""  # ...even in allowed_tools
     turn_on(ws)
     assert agents.hook_main(db, a.id, "codex-permission-request", "{not json") == ""
@@ -592,7 +596,9 @@ def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monke
     assert codex_hook.status() == codex_hook.TRUSTED
     set_local(ws.repo_root, "permission_policy", "off")
     assert flag in launch_argv(ws, mode="review")  # off, but trusted: a reviewer has it
-    assert flag not in launch_argv(ws)  # workers unchanged
+    assert flag in launch_argv(ws)  # ...and a worker, for permission_essentials
+    set_local(ws.repo_root, "permission_essentials", False)
+    assert flag not in launch_argv(ws)  # workers unchanged without it
 
 
 @pytest.mark.variant("live incident #239: upgrading 0.4.1 to 0.4.2 left the old trust, and a Codex reviewer stopped at Hooks need review")

@@ -87,6 +87,16 @@ class LaunchContext:
     mcp_recovery: bool = False  # a fresh reviewer after a failed MCP connection
 
 
+def _uv_cache_env(ctx: LaunchContext) -> dict[str, str]:
+    """uv's cache inside the worktree, so a sandboxed worker's `uv run`
+    needs no write access outside it. uv writes a `*` .gitignore into its
+    cache, so it never shows as uncommitted work. A profile's own
+    ``env.UV_CACHE_DIR`` wins."""
+    if not ctx.cwd or "UV_CACHE_DIR" in (ctx.profile.env or {}):
+        return {}
+    return {"UV_CACHE_DIR": os.path.join(ctx.cwd, ".uv-cache")}
+
+
 class Provider:
     name = "base"
     uses_hooks = False
@@ -696,7 +706,7 @@ class ClaudeCode(Provider):
             # report_result/submit_review. --settings env is applied before MCP
             # servers connect. Not agents.agent_env: that feeds the launch
             # fingerprint and would reset stored refusals.
-            "env": {"MCP_TIMEOUT": self._mcp_timeout(ctx)},
+            "env": {"MCP_TIMEOUT": self._mcp_timeout(ctx), **_uv_cache_env(ctx)},
             # Claude Code runs the person's gcpAuthRefresh (often `gcloud auth
             # application-default login`) whenever its own ADC probe fails, once
             # per process: across a session's many panes that opens a Google
@@ -1591,6 +1601,9 @@ class Codex(Provider):
             # machine; without it a worker can start without brindle's tools (#159).
             "-c", "mcp_servers.brindle.startup_timeout_sec=120",
             "-c", f"notify={json.dumps(notify)}",
+            # Only this launch's shell commands; the person's config.toml is untouched.
+            *(a for k, v in _uv_cache_env(ctx).items()
+              for a in ("-c", f"shell_environment_policy.set.{k}={json.dumps(v)}")),
         ]
         # brindle's permission policy, when it's on and the person has trusted
         # brindle's hook once (`brindle permissions install-codex-hook`; see
