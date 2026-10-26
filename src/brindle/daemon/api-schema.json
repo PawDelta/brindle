@@ -2718,6 +2718,11 @@
         },
         "PermissionPresetDTO": {
           "properties": {
+            "description": {
+              "default": "",
+              "title": "Description",
+              "type": "string"
+            },
             "id": {
               "title": "Id",
               "type": "string"
@@ -2727,13 +2732,28 @@
               "type": "string"
             },
             "rule": {
-              "$ref": "#/$defs/PermissionRuleDTO"
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PermissionRuleDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "rules": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionRuleDTO"
+              },
+              "title": "Rules",
+              "type": "array"
             }
           },
           "required": [
             "id",
-            "name",
-            "rule"
+            "name"
           ],
           "title": "PermissionPresetDTO",
           "type": "object"
@@ -3070,6 +3090,11 @@
         }
       },
       "properties": {
+        "description": {
+          "default": "",
+          "title": "Description",
+          "type": "string"
+        },
         "id": {
           "title": "Id",
           "type": "string"
@@ -3079,13 +3104,28 @@
           "type": "string"
         },
         "rule": {
-          "$ref": "#/$defs/PermissionRuleDTO"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionRuleDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "rules": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionRuleDTO"
+          },
+          "title": "Rules",
+          "type": "array"
         }
       },
       "required": [
         "id",
-        "name",
-        "rule"
+        "name"
       ],
       "title": "PermissionPresetDTO",
       "type": "object"

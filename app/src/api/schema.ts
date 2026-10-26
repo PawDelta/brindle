@@ -434,9 +434,11 @@ export interface PermissionEditorDTO {
  * via the `definition` "PermissionPresetDTO".
  */
 export interface PermissionPresetDTO {
+  description?: string;
   id: string;
   name: string;
-  rule: PermissionRuleDTO;
+  rule?: PermissionRuleDTO | null;
+  rules?: PermissionRuleDTO[];
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

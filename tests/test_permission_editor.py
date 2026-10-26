@@ -12,6 +12,53 @@ def spec(match="deploy", decision="allow", **kw):
     return {"kind": "bash", "match": match, "match_type": "prefix", "decision": decision, **kw}
 
 
+@pytest.mark.parametrize("preset,read,edit,bash", [
+    ("lenient", "allow", "allow", "allow"),
+    ("balanced", "allow", "allow", "ask"),
+    ("strict", "ask", "ask", "ask"),
+])
+def test_permission_presets(tmp_path, preset, read, edit, bash):
+    import json
+    from brindle import permission_editor as e
+
+    repo = str(tmp_path)
+    p.reset()
+    old = p.Rule("bash", "deploy", "exact", "allow", repo_root=repo)
+    elsewhere = p.Rule("bash", "elsewhere", "exact", "ask", repo_root="/elsewhere")
+    with p.editing() as store:
+        store.rules = [*p.PRESET_RULES, old, elsewhere]
+    path = p.repo_rules_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"rules": [{"kind": "read", "match": "private.txt",
+                                          "match_type": "exact", "decision": "deny"}]}))
+    before = e.snapshot(repo)
+    body = {"repo": repo, "revision": before["revision"], "operation": "preset",
+            "preset": preset, "resolution": "manual"}
+    review = e.review(body)
+    assert review["can_save"]
+    assert old in p.load_store().rules
+    saved = e.save({**body, "proposal": review["proposal"]})
+    assert old not in p.load_store().rules and elsewhere in p.load_store().rules
+    rules = p.all_rules(repo)
+    request = p.Request("codex", "read", "Read", repo_root=repo, path=f"{repo}/notes.txt")
+    for req, expected in ((request, read), (replace(request, kind="edit"), edit),
+                          (replace(request, kind="write"), edit),
+                          (replace(request, kind="bash", command="deploy"), bash),
+                          (replace(request, kind="bash", command="npm install"), bash),
+                          (replace(request, kind="fetch", url="https://example.test"), bash),
+                          (replace(request, kind="mcp", tool="mcp__brindle__status"), "ask")):
+        assert p.decide(req, rules=rules).decision == expected
+    assert p.decide(replace(request, kind="bash", command="npm install", repo_root="/elsewhere"), rules=rules).decision == "allow"
+    for command in ("git push", "git push --force", "cat .brindle/daemon.json"):
+        assert p.decide(replace(request, kind="bash", command=command), rules=rules).decision == "deny"
+    assert p.decide(replace(request, path=f"{repo}/.env"), rules=rules).decision == "deny"
+    assert p.decide(replace(request, path=f"{repo}/private.txt"), rules=rules).decision == "deny"
+    protected = [r for r in before["rules"] if r["protected"]]
+    assert all(r in saved["rules"] for r in protected)
+    with pytest.raises(ServiceError):
+        e.review({**body, "revision": saved["revision"], "preset": "unknown"})
+
+
 def test_scoped_exclusions_and_ask_reach_every_matching_path(monkeypatch):
     monkeypatch.setattr(p.time, "time", lambda: 100)
     rule = p.Rule.from_dict(spec(repo_root="/repo", expires_at=200,
@@ -308,7 +355,7 @@ def test_routes_inventory_verification_edit_remove_and_restrictions(db, tmp_path
     p.forget(legacy.id)
     # A real preset is directly reviewable, including its display metadata.
     body.update(revision=e.snapshot(repo)["revision"], operation="upsert", id=None,
-                rule=next(r["rule"] for r in state["presets"] if r["rule"]["match_type"] == "exact"))
+                rule=next(r["rule"] for r in state["presets"] if r.get("rule") and r["rule"]["match_type"] == "exact"))
     assert e.review(body)["can_save"]
     body["rule"] = {"kind": "mcp", "match": tool, "match_type": "exact", "decision": "ask"}
     reviewed = e.review(body)

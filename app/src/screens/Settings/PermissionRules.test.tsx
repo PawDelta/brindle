@@ -5,6 +5,7 @@ import { DaemonClient, type PermissionEditorReview, type PermissionEditorRule } 
 import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO } from "../../test/fixtures";
 import { PermissionRules } from "./PermissionRules";
+import presets from "../../../../src/brindle/permission_presets.json";
 
 beforeAll(() => {
   Object.defineProperties(HTMLDialogElement.prototype, {
@@ -166,6 +167,29 @@ function setup(daemon = new FakeDaemon()) {
 const click = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
 const change = (name: string, value: string) => fireEvent.change(screen.getByLabelText(name), { target: { value } });
 const apply = async () => { click("Save resolved rules"); await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull()); };
+
+it("permission_presets fills rules and permits editing after picking a preset", async () => {
+  const daemon = new FakeDaemon();
+  daemon.permissionEditor.presets = presets.map((preset) => ({ ...preset,
+    rules: preset.rules.map((draft) => rule(draft as Partial<PermissionEditorRule>)),
+  }));
+  setup(daemon);
+  await screen.findByRole("button", { name: "Presets" });
+  click("Presets"); click("Use Balanced");
+  await screen.findByRole("button", { name: "Save resolved rules" });
+  expect(daemon.permissionEditor.rules).toEqual([]);
+  await apply();
+  const saved = daemon.permissionEditor.rules.find((item) => item.kind === "bash")!;
+  expect(saved).toMatchObject({ decision: "ask", repo_root: REPO });
+  click(`Edit rule ${saved.id}`);
+  change("Decision", "deny"); change("Target", "deploy"); change("Match type", "exact");
+  click("Save rule");
+  await screen.findByRole("button", { name: "Save resolved rules" }); await apply();
+  expect(daemon.permissionEditor.rules.find((item) => item.id === saved.id)).toMatchObject({ decision: "deny", match: "deploy", match_type: "exact" });
+  expect(daemon.permissionEditor.rules.filter((item) => item.id !== saved.id)).toEqual(
+    presets.find((preset) => preset.id === "balanced")!.rules.filter((item) => item.kind !== "bash").map((item) => expect.objectContaining(item)),
+  );
+});
 
 it("persists reviewed scoped CRUD, searches the live list and action inventory, and closes native controls outside", async () => {
   const daemon = new FakeDaemon();

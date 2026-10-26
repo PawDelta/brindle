@@ -394,7 +394,9 @@ class PermissionActionDTO(_DTO):
 class PermissionPresetDTO(_DTO):
     id: str
     name: str
-    rule: PermissionRuleDTO
+    description: str = ""
+    rule: PermissionRuleDTO | None = None
+    rules: list[PermissionRuleDTO] = []
 
 
 class PermissionRestrictionsDTO(_DTO):

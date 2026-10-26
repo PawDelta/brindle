@@ -14,10 +14,16 @@ import json
 import os
 import time
 from dataclasses import asdict, replace
+from importlib.resources import files
 
 from brindle import permissions as p
 from brindle.policy import Decision
 from brindle.service.errors import ServiceError
+
+
+def presets() -> list[dict]:
+    """The settings UI and its tests share this backend-owned inventory."""
+    return json.loads(files("brindle").joinpath("permission_presets.json").read_text())
 
 
 def policy(repo: str):
@@ -116,7 +122,9 @@ def _state(repo: str, store: p.Store) -> tuple[dict, list[p.Rule]]:
 def snapshot(repo: str) -> dict:
     state, _ = _state(_repo(repo), p.load_store())
     return {**state, "catalog": catalog(),
-            "presets": [{"id": r.id, "name": r.describe(), "rule": _row(r)} for r in p.PRESET_RULES]}
+            "presets": [{**preset, "rules": [_row(p.Rule.from_dict(raw)) for raw in preset["rules"]]}
+                        for preset in presets()] +
+                       [{"id": r.id, "name": r.describe(), "rule": _row(r)} for r in p.PRESET_RULES]}
 
 
 def _pattern_covers(a: p.Rule, b: p.Rule) -> bool:
@@ -265,7 +273,7 @@ def _propose(body: dict, store: p.Store) -> tuple[dict, list[p.Rule]]:
     if not state["restrictions"]["editable"]:
         raise ServiceError("forbidden", state["restrictions"]["reason"], 403)
     operation, resolution, id_ = body.get("operation"), body.get("resolution", "manual"), body.get("id")
-    if operation not in ("upsert", "remove") or resolution not in ("manual", "auto", "existing", "new"):
+    if operation not in ("upsert", "remove", "preset") or resolution not in ("manual", "auto", "existing", "new"):
         raise ServiceError("invalid", "unsupported operation or resolution")
     if id_ is not None and not any(r.id == id_ for r in store.rules):
         raise ServiceError("forbidden", "only your editable rules can be changed", 403)
@@ -273,6 +281,14 @@ def _propose(body: dict, store: p.Store) -> tuple[dict, list[p.Rule]]:
         raise ServiceError("invalid", "removing a rule requires id")
     before = list(store.rules)
     after = [r for r in before if r.id != id_]
+    if operation == "preset":
+        preset = next((item for item in presets() if item["id"] == body.get("preset")), None)
+        if preset is None or id_ is not None:
+            raise ServiceError("invalid", "choose an available permission preset")
+        # Presets replace only this repository's editable rules. Global rules,
+        # other repositories and all external protections retain their ownership.
+        after = [r for r in before if r.repo_root != repo]
+        after.extend(p.Rule.from_dict({**raw, "repo_root": repo}) for raw in preset["rules"])
     existing = next((r for r in before if r.id == id_), None)
     draft = _draft(body.get("rule"), repo, existing) if operation == "upsert" else None
     if draft:
@@ -291,13 +307,19 @@ def _propose(body: dict, store: p.Store) -> tuple[dict, list[p.Rule]]:
             raise ServiceError("conflict", "cannot replace protected or unproven overlapping scopes", 409)
         removed = {c["right"] if c["left"] == draft.id else c["left"] for c in relevant}
         after = [r for r in after if r.id not in removed]
-    elif resolution == "auto" and not any(c["overlap"] == "unknown" for c in found):
+    elif (resolution == "auto" or operation == "preset") and not any(
+            c["overlap"] == "unknown" for c in found
+            if operation != "preset" or not c["protected"]):
         rank = {"allow": 0, "ask": 1, "deny": 2}
         # Take all intersections from the original rules, then apply their
         # exclusions together. This keeps a chain of conflicts deterministic.
         additions: dict[str, list[p.Rule]] = {}
         all_by_id = {r.id: r for r in [*protected, *after]}
         for conflict in found:
+            # Preset reviews resolve editable overlaps conservatively. Fixed
+            # denies already win and need no exclusions or ownership changes.
+            if operation == "preset" and conflict["protected"]:
+                continue
             a, b = (all_by_id[conflict[k]] for k in ("left", "right"))
             weak, strong = sorted((a, b), key=lambda r: rank[r.decision])
             if weak.source in ("user", "learned"):
