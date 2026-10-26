@@ -167,8 +167,10 @@ def test_permission_essentials_allow_read_only_commands_and_keep_restrictions(db
     # before the default developer profile's allowed_tools could pass it.
     with p.editing() as store:
         store.rules = [p.Rule("bash", "cat app.py | head -5", "exact", "deny"),
-                       p.Rule("bash", "grep -n hi app.py | head -1", "exact", "ask")]
-    for command in ("cat app.py | head -5", "grep -n hi app.py | head -1"):
+                       p.Rule("bash", "grep -n hi app.py | head -1", "exact", "ask"),
+                       p.Rule("bash", "grep -r hi *.py | head -5", "exact", "ask")]
+    # The last also can't be checked (a pattern read recursively): its ask wins over that.
+    for command in ("cat app.py | head -5", "grep -n hi app.py | head -1", "grep -r hi *.py | head -5"):
         decision = agents.handle_hook(db, a.id, "pre-tool", bash(command))
         assert decision["hookSpecificOutput"]["permissionDecision"] == "ask"
     bare = replace(load_profile("developer"), allowed_tools=["Edit", "Read"])

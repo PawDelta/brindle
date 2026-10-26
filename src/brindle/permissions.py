@@ -1147,13 +1147,15 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     # assignments must not hide explicit asks from provider/profile fallback.
     restricted = _restriction_in_parts(req, checks=checks, rules=rules)
     for wanted in ("deny", "ask", "allow"):
-        if restricted is not None and restricted.decision == wanted:
-            return restricted
+        # A rule matching the whole command first: its own decision is never
+        # hidden behind the synthetic d-shell-syntax ask of the same kind.
         for rule in rules:
             if rule.decision == wanted and (essential(req, rules, checks) if rule.match_type == "essential"
                                             else rule_matches(rule, req, checks)):
                 verb = {"deny": "denied", "ask": "approval required", "allow": "allowed"}[wanted]
                 return Decision(wanted, f"{verb} by {rule.source} rule {rule.id} ({rule.describe()})", rule)
+        if restricted is not None and restricted.decision == wanted:
+            return restricted
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
         parts = compound_parts(req.command)
         if parts:
