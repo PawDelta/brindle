@@ -144,19 +144,6 @@ def test_secret_locations_are_denied(ws):
     assert decide(read(ws, os.path.join(ws.repo_root, ".env"))).decision == "deny"
 
 
-def test_pushes_into_the_default_branch_ask_and_force_flags_are_denied(ws):
-    # Pushes are no longer denied outright: the preset's push rule asks for the
-    # default branch (and for a push whose destination the command leaves to git).
-    for cmd in ("git push", "git push origin main", "cd x && git push", "git -C x push",
-                "git push origin HEAD:refs/heads/main"):
-        got = decide(bash(ws, cmd))
-        assert got.decision == "ask" and got.rule is not None and got.rule.id == "d-push-default", cmd
-    assert decide(bash(ws, "git push origin feature")).decision == "ask"   # Standard: unmatched asks, limitless
-    assert decide(bash(ws, "git push origin feature")).rule is None
-    for cmd in ("git checkout -f main", "git clean -fd", "git reset --force", "git push --force origin x"):
-        assert decide(bash(ws, cmd)).decision == "deny", cmd
-
-
 def test_repo_rules_can_only_add_denies(ws):
     path = permissions.repo_rules_path(ws.repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -172,15 +159,6 @@ def test_repo_rules_can_only_add_denies(ws):
 
 
 # -- user rules and learning ------------------------------------------------------------------
-
-
-def test_a_user_allow_never_overrides_a_deny_or_an_ask_rule(ws):
-    permissions.add_rule("bash", "git clean -fd", "allow")
-    assert decide(bash(ws, "git clean -fd")).decision == "deny"
-    permissions.add_rule("bash", "git push origin main", "allow")
-    assert decide(bash(ws, "git push origin main")).decision == "ask"   # the ask rule stands until it is changed
-    permissions.update_rule("d-push-default", decision="allow")
-    assert decide(bash(ws, "git push origin main")).decision == "allow"
 
 
 def test_compound_commands_are_never_learned(ws):

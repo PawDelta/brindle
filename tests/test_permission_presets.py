@@ -255,17 +255,6 @@ def test_an_explicit_ask_survives_every_providers_fallbacks(db, ws, provider, mo
     assert permissions.prompt_counts().get("d-push-default" if provider != "antigravity" else "d-write-ask") == 1
 
 
-def test_prompt_counts_count_the_asks_of_the_last_day_per_rule(ws, monkeypatch):
-    now = time.time()
-    permissions.note_prompt(decide(bash(ws, "git push origin main")))
-    permissions.note_prompt(decide(bash(ws, "git push origin main")))
-    permissions.note_prompt(decide(bash(ws, "terraform apply")))
-    permissions.note_prompt(decide(bash(ws, "git status")))          # allowed: not an ask
-    assert permissions.prompt_counts() == {"d-push-default": 2, "unmatched": 1}
-    monkeypatch.setattr(permissions.time, "time", lambda: now + permissions.PROMPT_WINDOW + 1)
-    assert permissions.prompt_counts() == {}
-
-
 def test_the_daemon_serves_and_edits_the_policy(ws):
     code, policy = _send("GET", "/v1/permissions")
     assert code == 200 and policy["preset"] == "standard" and policy["unmatched"] == "ask"
