@@ -3353,9 +3353,13 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root),
                      *permission_grants.limits(ws.repo_root).deny]
             restrictions = [r for r in rules if r.decision in ("ask", "deny")]
-        if cfg.permission_policy == "on":
+            # A deny or ask in force reaches the person before any allow below
+            # (essentials, the profile's allowed_tools) could pass the command.
+            # With the policy off, only a rule's own: syntax brindle can't
+            # check (d-shell-syntax) stays the profile's and Claude Code's call,
+            # as it was before permission_essentials.
             decision = permissions.decide(req, checks=cfg.checks, rules=restrictions)
-            if decision.rule is not None:
+            if decision.rule is not None and (cfg.permission_policy == "on" or decision.rule.id != "d-shell-syntax"):
                 return {"hookSpecificOutput": {
                     "hookEventName": "PreToolUse", "permissionDecision": "ask",
                     "permissionDecisionReason": f"brindle: {decision.reason}",

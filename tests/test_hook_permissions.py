@@ -158,21 +158,25 @@ def test_other_tools_and_unknown_profiles_are_left_alone(db, ws):
     assert agents.handle_hook(db, "w2", "pre-tool", bash("pytest -q")) is None
 
 
-def test_a_profile_without_bash_rules_allows_only_essentials(db, ws, monkeypatch):
+def test_permission_essentials_allow_read_only_commands_and_keep_restrictions(db, ws, monkeypatch):
+    from brindle import permissions as p
     from brindle.config import set_local
 
+    a = worker(db, ws)
+    # With the policy off, a deny or ask on a whole pipeline reaches the person
+    # before the default developer profile's allowed_tools could pass it.
+    with p.editing() as store:
+        store.rules = [p.Rule("bash", "cat app.py | head -5", "exact", "deny"),
+                       p.Rule("bash", "grep -n hi app.py | head -1", "exact", "ask")]
+    for command in ("cat app.py | head -5", "grep -n hi app.py | head -1"):
+        decision = agents.handle_hook(db, a.id, "pre-tool", bash(command))
+        assert decision["hookSpecificOutput"]["permissionDecision"] == "ask"
     bare = replace(load_profile("developer"), allowed_tools=["Edit", "Read"])
     monkeypatch.setattr(agents, "load_profile", lambda name, root=None: bare)
-    a = worker(db, ws)
     assert agents.handle_hook(db, a.id, "pre-tool", bash("pytest -q")) is None
     # permission_essentials, on by default: read-only inspection needs no rule.
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && grep -n hi *.py | tail -1")) is not None
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cat ../../../.env")) is None   # a read deny still wins
-    from brindle import permissions as p
-
-    with p.editing() as store:   # ...and a deny on the whole pipeline, with the policy off
-        store.rules = [p.Rule("bash", "cat app.py | head -5", "exact", "deny")]
-    assert agents.handle_hook(db, a.id, "pre-tool", bash("cat app.py | head -5")) is None
     set_local(ws.repo_root, "permission_essentials", False)
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status")) is None
 
