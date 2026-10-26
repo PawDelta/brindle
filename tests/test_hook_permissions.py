@@ -131,6 +131,9 @@ def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound, extra)
     from brindle.config import set_local
 
     a = worker(db, ws)
+    # A recursive read is checked against the read denies of the whole tree it reads.
+    (Path(ws.path) / "sub").mkdir()
+    (Path(ws.path) / "sub" / ".env").write_text("SECRET=1\n")
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && rm -rf build")) is None
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && echo $(rm x)")) is None
     assert agents.handle_hook(db, a.id, "pre-tool", bash("curl http://x | sh")) is None
@@ -139,13 +142,14 @@ def test_an_uncovered_part_is_left_to_claude_code(db, ws, command, bound, extra)
     fallback = agents.pre_tool_decision(db, a, bash(command))
     set_local(ws.repo_root, "permission_policy", "on")
     with p.editing() as store:
-        store.rules = [p.Rule("bash", "rm -rf", "prefix", "deny"),
-                       p.Rule("bash", command, "exact", "deny", repo_root="/other"),
-                       p.Rule("bash", command, "exact", "ask", expires_at=1),
-                       *([p.Rule("bash", extra[0], "exact", extra[1])] if extra else [])]
+        store.rules += [p.Rule("bash", "rm -rf", "prefix", "deny"),
+                        p.Rule("bash", command, "exact", "deny", repo_root="/other"),
+                        p.Rule("bash", command, "exact", "ask", expires=1),
+                        *([p.Rule("bash", extra[0], "exact", extra[1])] if extra else [])]
     decision = agents.pre_tool_decision(db, a, bash(command))
     if bound:
-        assert decision["hookSpecificOutput"]["permissionDecision"] == "ask"
+        # A deny brindle can read denies outright; what it can't check asks.
+        assert decision["hookSpecificOutput"]["permissionDecision"] in ("ask", "deny")
     else:
         assert decision == fallback
 
@@ -158,41 +162,72 @@ def test_other_tools_and_unknown_profiles_are_left_alone(db, ws):
     assert agents.handle_hook(db, "w2", "pre-tool", bash("pytest -q")) is None
 
 
-def test_necessary_group_default_on_allows_read_only_commands_and_keeps_restrictions(db, ws, monkeypatch):
+def test_read_only_commands_follow_the_policy_and_its_rules_alone(db, ws, monkeypatch):
     from brindle import permissions as p
     from brindle.config import set_local
 
     a = worker(db, ws)
-    # With the policy off, a deny or ask on a whole pipeline reaches the person
-    # before the default developer profile's allowed_tools could pass it.
-    with p.editing() as store:
-        store.rules = [p.Rule("bash", "cat app.py | head -5", "exact", "deny"),
-                       p.Rule("bash", "grep -n hi app.py | head -1", "exact", "ask"),
-                       p.Rule("bash", "grep -r hi *.py | head -5", "exact", "ask")]
-    # The last also can't be checked (a pattern read recursively): its ask wins over that.
-    for command in ("cat app.py | head -5", "grep -n hi app.py | head -1", "grep -r hi *.py | head -5"):
-        decision = agents.handle_hook(db, a.id, "pre-tool", bash(command))
-        assert decision["hookSpecificOutput"]["permissionDecision"] == "ask"
     bare = replace(load_profile("developer"), allowed_tools=["Edit", "Read"])
     monkeypatch.setattr(agents, "load_profile", lambda name, root=None: bare)
-    assert agents.handle_hook(db, a.id, "pre-tool", bash("pytest -q")) is None
-    # permission_essentials, on by default: read-only inspection needs no rule.
-    assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && grep -n hi *.py | tail -1")) is not None
-    assert agents.handle_hook(db, a.id, "pre-tool", bash("cat ../../../.env")) is None   # a read deny still wins
+
+    def answer(command):
+        got = agents.permission_request_decision(db, a, {**bash(command), "cwd": ws.path}) or {}
+        return got.get("hookSpecificOutput", {}).get("decision", {}).get("behavior")
+
+    # Policy off: brindle answers no shell command, read-only or not.
+    assert agents.handle_hook(db, a.id, "pre-tool", bash("git status && grep -n hi app.py | tail -1")) is None
+    assert answer("git status && grep -n hi app.py | tail -1") is None
+    # permission_policy is the only switch: a config still naming the removed
+    # permission_essentials loads, and the key changes nothing.
+    set_local(ws.repo_root, "permission_policy", "on")
+    set_local(ws.repo_root, "permission_essentials", False)
+    with p.editing() as store:
+        store.rules += [p.Rule("bash", "cat app.py | head -5", "exact", "deny"),
+                        p.Rule("bash", "grep -n hi app.py | head -1", "exact", "ask")]
+    assert answer("git status && grep -n hi app.py | tail -1") == "allow"
+    # Quoting brindle reads as the shell does is no reason to ask (the escaped regex).
+    assert answer('git show --stat abc def | grep -v "^ \\|^$"') == "allow"
+    pre = agents.handle_hook(db, a.id, "pre-tool", bash("cat app.py | head -5"))
+    assert pre["hookSpecificOutput"]["permissionDecision"] == "deny"     # a kept deny still applies
+    pre = agents.handle_hook(db, a.id, "pre-tool", bash("grep -n hi app.py | head -1"))
+    assert pre["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert answer("cat ../../../.env") is None     # a read deny keeps it from the read-only allowance
     # Writes, the network, push, rm and nested shells still ask.
     for command in ("sed -i s/a/b/ app.py", "cat app.py > ../out", "curl https://example.com", "git push",
                     "rm app.py", "bash -c 'ls'", "sh -c ls"):
-        decision = agents.handle_hook(db, a.id, "pre-tool", bash(command)) or {"hookSpecificOutput": {}}
-        assert decision["hookSpecificOutput"].get("permissionDecision") != "allow", command
-    set_local(ws.repo_root, "permission_essentials", False)
-    assert agents.handle_hook(db, a.id, "pre-tool", bash("git status")) is None
+        assert answer(command) != "allow", command
+
+
+def launch_matcher(**ctx):
+    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "go", **ctx))
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    (entry,) = settings["hooks"]["PreToolUse"]
+    return entry["matcher"]
 
 
 def test_plan_first_agents_hook_edit_tools_too():
-    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "go", plan_first=True))
-    settings = json.loads(argv[argv.index("--settings") + 1])
-    (entry,) = settings["hooks"]["PreToolUse"]
-    assert entry["matcher"] == "Bash|Edit|Write|NotebookEdit"
+    assert launch_matcher(plan_first=True) == "Bash|Edit|Write|NotebookEdit"
+
+
+def test_with_the_policy_on_the_hook_sees_every_tool_it_rules_on(db, ws):
+    """The policy's deny or ask on a file, fetch or MCP tool reaches Claude
+    Code only through the PreToolUse hook, so a launch with the policy on
+    registers it for all of them, dynamic MCP names included."""
+    import re
+
+    from brindle import permissions
+    from brindle.config import set_local
+
+    set_local(ws.repo_root, "permission_policy", "on")
+    matcher = launch_matcher(cwd=ws.path)
+    assert matcher.startswith("Bash|")
+    assert all(re.fullmatch(matcher, t) for t in ("Read", "Write", "WebFetch", "mcp__slack__send_message"))
+    a = worker(db, ws)
+    permissions.add_rule("mcp", "mcp__slack__*", "deny", "glob")
+    for payload in ({"tool_name": "Read", "tool_input": {"file_path": f"{ws.path}/.env"}},
+                    {"tool_name": "mcp__slack__send_message", "tool_input": {"text": "hi"}}):
+        got = agents.handle_hook(db, a.id, "pre-tool", payload)["hookSpecificOutput"]
+        assert (got["hookEventName"], got["permissionDecision"]) == ("PreToolUse", "deny")
 
 
 @pytest.mark.variant("incident #159: MCP CONNECT_TIMEOUT under load")

@@ -1,650 +1,265 @@
-"""Permission grants (brindle.permission_grants): what may be offered, the
-push adapter's checks, the daemon's grants, the org's block, and the whole
-way through the real hook, daemon and inbox."""
+"""Saved actions and generalized asks (brindle.permission_grants): the scope
+ladder each ask carries, saved allows and denies settling asks within policy
+limits, pending asks grouped by general form and decided as one, the allow-all
+plan and deny exceptions, all through the daemon's holds."""
 
 import json
-import os
-import subprocess
 import threading
-from dataclasses import replace
-from types import SimpleNamespace
+import time
+import uuid
 
 import pytest
-from conftest import sh
-from test_daemon_actions import _HookConnection, _send, _verdict, answering, world  # noqa: F401 - fixtures
 
-from brindle import agents, airgap, bus, config, permission_grants, permissions
-from brindle.daemon import grants, holds
-from brindle.db import DB, Agent, Workspace
-from brindle.permissions import Request, Rule
-from brindle.pro import team_policy
+from brindle import permission_grants as grants
+from brindle import permissions, workspaces
+from brindle.daemon.holds import HOLDS
+from brindle.db import Agent
+from brindle.permissions import Request, decide
 from brindle.service import inbox
-
-LOCAL = permission_grants.Limits(True, permissions.KINDS, ("git-push", "env"), 60, 20)
-ORG_DENY = Rule("bash", "git push", "prefix", "deny", "org")
-
-
-@pytest.fixture(autouse=True)
-def fresh_grants(monkeypatch):
-    store = grants.Grants()
-    monkeypatch.setattr(grants, "GRANTS", store)
-    monkeypatch.setattr(inbox, "GRANTS", store)
+from brindle.service import permissions as svc
 
 
 @pytest.fixture
-def pushable(repo, monkeypatch):
-    """``repo`` pushing to one https URL, read with no global git config; its HEAD."""
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    sh("git remote set-url --push origin https://example.com/o/r.git", repo)
-    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+def ws(db, repo, monkeypatch):
+    monkeypatch.setattr("brindle.permissions.PRESET_RULES", ())
+    monkeypatch.setattr(inbox, "STEP_SECONDS", 0.01)
+    monkeypatch.setattr(inbox, "CONFIRM_SECONDS", 0.5)
+    return workspaces.create(db, str(repo), "feature").workspace
 
 
-def request(repo, kind, target):
-    target = os.path.expanduser(target.format(repo=repo))
-    return Request("claude", kind, "Bash" if kind == "bash" else "Read", cwd=str(repo), worktree=str(repo),
-                   repo_root=str(repo), **({"command": target} if kind == "bash" else {"path": target}))
+def bash(ws, command):
+    return Request("claude", "bash", "Bash", ws.path, ws.path, ws.repo_root, command=command)
 
 
-PUSH = "git push origin {sha}:refs/heads/feat"
+def write(ws, path):
+    return Request("claude", "write", "Write", ws.path, ws.path, ws.repo_root, path=f"{ws.path}/{path}")
 
 
-@pytest.mark.parametrize("kind,target,extra,lim,offered,setup", [
-    ("bash", PUSH, [], LOCAL, None, "git config --add remote.origin.pushurl https://example.com/o/other.git"),
-    ("bash", PUSH, [], LOCAL, None, "git config url.ext::sh.insteadOf https://"),
-    ("bash", PUSH, [], LOCAL, None, "git config push.followTags true"),
-    ("bash", PUSH, [], LOCAL, None, "printf '#!/bin/sh\\n' > .git/hooks/pre-push"),
-    pytest.param("bash", PUSH, [], LOCAL, None, "git config protocol.ext.allow always",
-                 id="push_config_denylist-protocol.ext.allow"),
-    *[pytest.param("bash", PUSH, [], LOCAL, None, f"git config {key} {val}", id=f"push_config_denylist-{key}",
-                   marks=pytest.mark.variant(why))
-      for key, val, why in [
-          ("credential.helper", "store", "a helper could capture or supply the push's credentials"),
-          ("http.proxy", "http://p.example:3128", "a proxy could redirect the https push"),
-          ("remote.origin.proxy", "http://p.example:3128", "a per-remote proxy could redirect the push"),
-          ("core.gitProxy", "/bin/true", "a git:// proxy command runs outside brindle"),
-          ("core.askPass", "/bin/true", "an askpass program could supply credentials"),
-          ("remote.origin.push", "refs/heads/*:refs/heads/*", "a configured refspec could push more refs"),
-          ("credential.https://example.com.helper", "store", "a URL-scoped helper key, not the plain name")]],
-    pytest.param("bash", "git push origin {sha}:refs/heads/release/desktop", [], LOCAL, None, "true",
-                 id="protected_release_ref-refs_heads_release_desktop"),
-    *[pytest.param("bash", f"git push origin {{sha}}:{ref}", [], LOCAL, None, "true",
-                   id=f"protected_release_ref-{ref.replace('/', '_')}", marks=pytest.mark.variant(why))
-      for ref, why in [("refs/heads/release/1.2", "every release/* ref is protected, not only the desktop trigger"),
-                       ("refs/heads/Release/desktop", "a case-insensitive filesystem aliases the protected ref")]],
-    ("bash", "git push origin abc123:refs/heads/feat", [], LOCAL, None, "true"),
-    ("bash", "npm test", [], LOCAL, "allow_for", ""),
-    ("bash", "npm test && npm run lint", [], LOCAL, None, ""),
-    ("bash", PUSH, [], LOCAL, "override", ""),
-    ("bash", PUSH, [ORG_DENY], LOCAL, None, ""),
-    pytest.param("bash", "git push --force origin {sha}:refs/heads/feat", [], LOCAL, None, "",
-                 marks=pytest.mark.variant("d-git-push answers first, but d-git-force still holds")),
-    ("bash", PUSH, [], replace(LOCAL, protected=True), None, ""),
-    ("bash", PUSH, [], replace(LOCAL, overridable=("env",)), None, ""),
-    ("bash", PUSH, [], replace(LOCAL, allow=False), None, ""),
-    ("read", "{repo}/.env", [], LOCAL, "override", ""),
-    ("read", "~/.ssh/id_ed25519", [], LOCAL, None, ""),
+def mcp(ws, tool):
+    return Request("claude", "mcp", tool, ws.path, ws.path, ws.repo_root)
+
+
+@pytest.mark.parametrize("request_of, kind, exact, general, widest", [
+    (lambda ws: bash(ws, "git push origin fix/login:main"), "push", "fix/login → main @ origin", "* → main @ origin",
+     "* → * @ *"),
+    (lambda ws: write(ws, "src/auth/login.ts"), "write", "src/auth/login.ts", "src/**", "**"),
+    (lambda ws: write(ws, "README.md"), "write", "README.md", "README.md", "**"),
+    (lambda ws: bash(ws, "npm test -- --watch=false auth"), "bash", "npm test -- --watch=false auth", "npm test *", "*"),
+    (lambda ws: bash(ws, "cat a | grep b"), "bash", "cat a | grep b", "cat a | grep b", "*"),
+    (lambda ws: mcp(ws, "mcp__github__create_issue"), "mcp", "mcp__github__create_issue",
+     "mcp__github__create_issue", "mcp__*"),
+    (lambda ws: Request("claude", "fetch", "WebFetch", ws.path, ws.path, ws.repo_root, url="https://t.example.com/a/b"),
+     "fetch", "https://t.example.com/a/b", "https://t.example.com/*", "*"),
 ])
-def test_only_asks_and_adapted_built_in_denies_are_offered(repo, pushable, kind, target, extra, lim, offered, setup):
-    if setup:
-        sh(setup, repo)
-    req = request(repo, kind, target.replace("{sha}", pushable))
-    if setup:
-        scope, why = permission_grants.push_scope(req, lim)
-        assert scope is None and why
-    rules = [*permissions.DEFAULT_RULES, *extra]
-    decision = permissions.decide(req, rules=rules)
-    lifted, why = permission_grants.override(req, decision, rules, [], lim)
-    assert (permission_grants.offer(req, decision, lim) or lifted or {}).get("type") == offered
-    # A deny an adapter knows says why it can't be lifted here; any other deny just stands.
-    assert bool(why) == (offered is None and decision.decision == "deny"
-                         and decision.rule.id in permission_grants.OVERRIDABLE)
+def test_each_ask_carries_its_exact_and_general_form(ws, request_of, kind, exact, general, widest):
+    ask = grants.generalize(request_of(ws))
+    assert (ask.kind, ask.exact, ask.general["pattern"], ask.scopes[-1]["pattern"]) == (kind, exact, general, widest)
+    if kind == "mcp":
+        assert ask.scope("server")["pattern"] == "mcp__github__*"
+    if kind == "push":
+        assert ask.scope("remote")["pattern"] == "* → * @ origin"
+    assert all(grants.scope_matches(kind, s["pattern"], exact) for s in ask.scopes)
 
 
-def test_grants_expire_run_out_are_revoked_and_race_for_the_last_use(monkeypatch, db, repo, world, answering):
-    config.set_local(world.repo_root, "permission_policy", "on")
-    monkeypatch.setattr(permission_grants, "LOCAL_USES", 3)
-    monkeypatch.setattr(permission_grants, "LOCAL_MINUTES", 7)
-    codex_worker(db)
-    for provider, agent_id, payload in (
-        ("claude", "wk", {"tool_name": "WebFetch", "tool_input": {"url": "https://example.com/docs", "prompt": "read"}}),
-        ("codex", "co", {"tool_name": "Bash", "tool_input": {"command": "terraform plan"}}),
-    ):
-        payload = {**payload, "cwd": str(repo)}
-        hook = Hook(db, monkeypatch, agent_id, payload, provider)
-        assert "allow_for" in [c.choice for c in hook.shown.choices]
-        assert hook.answer("allow_for", minutes=3, scope="remote")[0] == 409
-        code, reply = hook.answer("allow_for", minutes=3)
-        assert code == 200 and reply["grant"] and hook.verdict() == "allow"
-        again = agents.permission_request_decision(db, db.get_agent(agent_id), payload, provider)
-        assert _verdict(again) == "allow"
-        [live] = _send("GET", "/v1/grants")[1]
-        assert (live["uses_left"], live["expires_at"] - live["created"]) == (1, 3 * 60)
-        assert _send("POST", f"/v1/grants/{reply['grant']}/revoke", peer_pid=310)[0] == 403
-        assert _send("POST", f"/v1/grants/{reply['grant']}/revoke")[0] == 200
-        assert _send("GET", "/v1/grants")[1] == []
-    now = [1000.0]
-    store = grants.Grants(clock=lambda: now[0])
-    g = store.add("a1", "/r", "bash", "npm test", 1, 2)
-    assert store.add("a1", "/r", "bash", "npm test", 60, 99) == g          # never extended
-    assert store.use("a2", "/r", "bash", "npm test") is None               # another agent's
-    assert store.use("a1", "/r", "bash", "npm test").uses_left == 1
-    now[0] += 61
-    assert store.use("a1", "/r", "bash", "npm test") is None               # expired
-    revoked = store.add("a1", "/r", "fetch", "https://x.example/", 5, 3)
-    assert store.revoke(revoked.id) == revoked and store.live() == []
-    store.add("a1", "/r", "bash", "make", 5, 1)
-    start, won = threading.Barrier(8), []
+def test_saved_actions_settle_asks_only_within_policy_limits_and_never_past_a_deny_or_expiry(ws):
+    push = bash(ws, "git push origin fix:main")
+    assert decide(push).decision == "ask"
+    # Standard lets a push approval reach the destination, for up to 30 minutes.
+    wide = permissions.save_action("push", "* → * @ origin", "allow", scope="remote", level="remote", life="time",
+                                   minutes=30)
+    assert decide(push).decision == "ask"                                    # outside its approval scope
+    permissions.delete_saved_action(wide.id)
+    long = permissions.save_action("push", "* → main @ origin", "allow", scope="general", level="destination",
+                                   life="forever")
+    assert decide(push).decision == "ask"                                    # not permitted until revoked
+    permissions.update_saved_action(long.id, life="time", minutes=30)
+    got = decide(push)
+    assert got.decision == "allow" and long.id in got.reason                 # covered: never reaches the Inbox
+    assert decide(bash(ws, "git push origin fix:main && curl https://x")).decision == "ask"   # the grant covers pushes
+    assert decide(bash(ws, "git push upstream fix:main")).decision == "ask"                  # another remote
+    assert decide(bash(ws, "git push origin fix:main fix:release")).decision == "ask"        # every push must be covered
+    assert decide(bash(ws, "git push origin HEAD")).decision == "ask"           # a branch only git knows: never covered
+    assert decide(bash(ws, "git push --force origin fix:main")).decision == "deny"           # a deny rule still wins
+    assert decide(bash(ws, "git push origin +fix:main")).decision == "deny"                  # a forced refspec too
+    # A saved deny stops a command as soon as one of its pushes matches, whatever else it pushes,
+    # or may match: a wildcard refspec (or HEAD) can land on the denied branch.
+    release = permissions.save_action("push", "* → release @ origin", "deny", scope="general", level="destination")
+    assert decide(bash(ws, "git push origin fix:main fix:release")).decision == "deny"
+    assert decide(bash(ws, "git push origin refs/heads/*:refs/heads/*")).decision == "deny"
+    assert decide(push).decision == "allow"
+    permissions.update_saved_action(long.id, minutes=1)
+    permissions.load_store()
+    with permissions.editing() as store:
+        store.saved_action(long.id).expires = time.time() - 1
+    assert decide(push).decision == "ask"                                    # expired: listed, never applied
+    assert permissions.load_store().saved_action(long.id).expired()
 
-    def race():
-        start.wait()
-        won.append(store.use("a1", "/r", "bash", "make"))
+    # No rule covers writes under Standard (unmatched asks): a saved allow has no limits to stay within.
+    assert decide(write(ws, "src/auth/login.ts")).decision == "ask"
+    mine = permissions.save_action("write", "src/**", "allow", scope="general", life="session", session="boss")
+    assert decide(write(ws, "src/auth/login.ts")).decision == "ask"         # another session's grant
+    assert decide(write(ws, "src/auth/login.ts"), session="boss").decision == "allow"
+    stop = permissions.save_action("write", "src/auth/**", "deny", scope="general")
+    assert decide(write(ws, "src/auth/login.ts"), session="boss").decision == "deny"   # a saved deny beats a saved allow
+    assert decide(write(ws, "src/api/client.ts"), session="boss").decision == "allow"
+    assert {s.id for s in permissions.load_store().saved} == {long.id, release.id, mine.id, stop.id}
 
-    threads = [threading.Thread(target=race) for _ in range(8)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    assert sum(w is not None for w in won) == 1
-    monkeypatch.setattr(grants, "MAX_GRANTS", 1)
-    occupying = store.add("a1", "/r", "fetch", "https://x.example/", 5, 1)
-    asked = store.ask("a1", "/r", "bash", "git push", "scope", "git-push", "push the selected commit")
-    assert store.answer("a1", asked.id, asked.digest, True) is None
-    assert store.asked("a1", asked.id) is asked
-    store.revoke(occupying.id)
-    approved = store.answer("a1", asked.id, asked.digest, True)
-    assert approved.uses_left == 1
-    assert store.asked("a1", asked.id) is None
-    store.revoke(approved.id)
-    store.add("a1", "/r", "bash", "make", 5, 3, uses_spent=1)
-    assert store.use("a1", "/r", "bash", "make", max_uses=1) is None
-    assert store.live() == []
-
-
-GOOD = {"allow": True, "kinds": ["bash"], "overridable": ["git-push"], "max_minutes": 5, "max_uses": 2,
-        "deny": ["bash prefix terraform apply"]}
+    # A saved deny also beats an automatic allow rule, so it keeps working when the ask goes away.
+    permissions.add_rule("bash", "npm ", "allow", "prefix")
+    assert decide(bash(ws, "npm test -- api")).decision == "allow"
+    permissions.save_action("bash", "npm test *", "deny", scope="general")
+    assert decide(bash(ws, "npm test -- api")).decision == "deny"
+    assert decide(bash(ws, "npm run build")).decision == "allow"
+    # A saved allow applies only within the current policy: tightened to Secure, where nothing
+    # covers MCP tools and unmatched actions are denied, it no longer does.
+    tool = Request("claude", "mcp", "mcp__slack__send_message", ws.path, ws.path, ws.repo_root)
+    permissions.save_action("mcp", "mcp__slack__*", "allow", scope="server")
+    assert decide(tool).decision == "allow"
+    permissions.apply_preset("secure")
+    assert decide(tool).decision == "deny"
+    # Autonomous lets a push approval reach every push, for good; a push into a release
+    # branch still asks every time, even beside one into main whose rule matched first.
+    permissions.apply_preset("autonomous")
+    permissions.save_action("push", "* → * @ *", "allow", scope="all", level="all")
+    assert decide(bash(ws, "git push origin HEAD:main")).decision == "allow"
+    got = decide(bash(ws, "git push origin HEAD:main HEAD:release/desktop"))
+    assert got.decision == "ask" and got.rule.id == "d-push-release-sub"
 
 
 class Hook:
-    """One hook call on its own thread, held for the app's answer."""
+    """A hook holding a request in the daemon, taking the answer when it comes."""
 
-    def __init__(self, db, monkeypatch, agent_id, payload, provider="claude"):
-        self.db, self.agent_id, self.out, self.asked = db, agent_id, [], threading.Event()
-        publish = bus.publish_agent
-        monkeypatch.setattr(bus, "publish_agent", lambda d, kind, *a, **k: (
-            kind == "permission.pending" and self.asked.set(), publish(d, kind, *a, **k))[1])
-        agent = db.get_agent(agent_id)
-        self.thread = threading.Thread(target=lambda: self.out.append(
-            agents.permission_request_decision(DB(), agent, payload, provider)))
-        self.thread.start()
-        assert self.asked.wait(5)
-        [self.shown] = [p.dto for p in inbox.pending_permissions(db, agent)]
+    def __init__(self, db, agent_id, req, suggestions=None):
+        self.agent_id, self.request_id, self.answer = agent_id, f"r-{agent_id}-{uuid.uuid4().hex[:6]}", None
+        recorded = json.dumps(req.to_dict()), json.dumps(suggestions) if suggestions else None
+        self.digest = permissions.request_digest(*recorded)
+        self.nonce = "n-" + self.request_id
+        assert HOLDS.register(agent_id, self.request_id, self.digest, self.nonce, time.time() + 600)
+        db.add_permission_request(agent_id, self.request_id, recorded[0], "asking", recorded[1], "hook",
+                                  hold_until=time.time() + 600)
+        self.done = threading.Event()
+        threading.Thread(target=self._wait, daemon=True).start()
 
-    def answer(self, choice, **extra):
-        return _send("POST", f"/v1/inbox/{self.agent_id}/permission",
-                     {"request": self.shown.request_id, "digest": self.shown.digest, "choice": choice, **extra})
-
-    def verdict(self):
-        self.thread.join(5)
-        return _verdict(self.out[0])
-
-
-class _Unreachable(_HookConnection):
-    def request(self, method, url, body, headers):
-        raise OSError("no daemon")
+    def _wait(self):
+        pause = threading.Event()
+        while True:
+            held, answer = HOLDS.take(self.request_id, self.nonce)
+            if not held or answer is not None:
+                self.answer = answer
+                self.done.set()
+                return
+            pause.wait(0.01)
 
 
-def codex_worker(db):
-    db.add_agent(Agent("co", "w-1", "developer", "codex", "sup", "assign", "processing", "%3", None, 1.0))
+def worker(db, ws, agent_id, parent="boss"):
+    a = Agent(agent_id, ws.id, "developer", "claude", parent, "assign", "waiting", f"%{agent_id}", None, time.time())
+    db.add_agent(a)
+    return a
 
 
-def pusher(db, agent_id, provider, sha):
-    agent = db.get_agent(agent_id)
+def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(db, ws):
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
+    worker(db, ws, "w1"), worker(db, ws, "w2"), worker(db, ws, "w3")
+    hooks = [Hook(db, "w1", write(ws, "src/auth/login.ts")), Hook(db, "w2", write(ws, "src/auth/session.ts")),
+             Hook(db, "w3", bash(ws, "git push origin fix:main")), Hook(db, "w1", bash(ws, "npm test -- auth")),
+             Hook(db, "w2", mcp(ws, "mcp__github__create_issue")), Hook(db, "w3", mcp(ws, "mcp__github__create_issue")),
+             Hook(db, "w1", bash(ws, "git push origin fix:main fix:staging")),
+             Hook(db, "w2", bash(ws, "git push origin HEAD")),
+             Hook(db, "w3", bash(ws, "git push origin fix:main fix:release/desktop"))]
+    items = grants.groups(grants.pending_asks(db, ws.repo_root))
+    # A command pushing to two destinations is its own item, generalized to both destinations.
+    assert [(g.kind, g.rep.ask.general["pattern"], len(g.items)) for g in items] == [
+        ("write", "src/**", 2), ("push", "* → main @ origin", 1), ("bash", "npm test *", 1),
+        ("mcp", "mcp__github__create_issue", 2), ("push", "* → main @ origin, * → staging @ origin", 1),
+        ("push", "* → ? @ origin", 1), ("push", "* → main @ origin, * → release/desktop @ origin", 1)]
+    assert items[4].rep.ask.exact == "fix → main @ origin, fix → staging @ origin"
+    # A push into a release branch asks under its own rule, whichever rule matched first,
+    # and offers nothing that would save an approval.
+    release = items[6]
+    assert release.policy.rule.id == "d-push-release-sub"
+    assert svc.group_dto(release).modes == ["once", "deny", "always-deny"]
+    with pytest.raises(Exception, match="approvable only once"):
+        grants.decide_group(db, release.key, "general", "timed", 5)
+    assert grants.decide_group(db, release.key, "general", "once")["grant"] is None
+    assert hooks[8].done.wait(5) and hooks[8].answer == "allow_once"
+    assert items[4].rep.ask.scope("exact")["pattern"] == items[4].rep.ask.exact
+    assert items[1].policy.rule.id == "d-push-default" and items[0].policy.rule is None
+    # An MCP tool's general form is the tool itself: "once" at that scope still resolves the whole item.
+    out = grants.decide_group(db, items[3].key, "general", "once")
+    assert len(out["resumed"]) == 2 and all(h.done.wait(5) and h.answer == "allow_once" for h in hooks[4:6])
+    assert svc.decision_dto(out).grant is None
 
-    def push(command=PUSH.format(sha=sha), cwd=None, d=None):
-        payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(cwd or agent_cwd(d or db))}
-        return _verdict(agents.permission_request_decision(d or db, agent, payload, provider))
+    writes = items[0]
+    assert grants.decide_group(db, writes.key, "general", "timed", 5)["resumed"] == [
+        {"agent_id": "w1", "request_id": hooks[0].request_id, "exact": "src/auth/login.ts"},
+        {"agent_id": "w2", "request_id": hooks[1].request_id, "exact": "src/auth/session.ts"}]
+    assert all(h.done.wait(5) and h.answer == "allow_once" for h in hooks[:2])
+    [grant] = permissions.load_store().saved
+    assert (grant.kind, grant.pattern, grant.life, grant.minutes, grant.repo) == ("write", "src/**", "time", 5, ws.repo_root)
+    assert grant.request["path"].endswith("src/auth/login.ts") and grant.expires > time.time()
+    # The next such ask never reaches the Inbox: the grant covers it.
+    assert decide(write(ws, "src/auth/token.ts")).decision == "allow"
+    assert {g.kind for g in grants.groups(grants.pending_asks(db, ws.repo_root))} == {"push", "bash"}
 
-    def agent_cwd(d):
-        return d.get_workspace(agent.workspace_id).path
-
-    def answer(asked, choice, digest=None):
-        return _send("POST", f"/v1/inbox/{agent_id}/permission",
-                     {"request": asked.id, "digest": digest or asked.digest, "choice": choice})
-
-    return push, answer
-
-
-def _remembered_override_case(db, repo, pushable, world, monkeypatch, push, answer, provider, agent_id):
-    assert push() == "deny"
-    [asked] = grants.GRANTS.asked_of(agent_id)
-    assert _send("POST", f"/v1/inbox/{agent_id}/permission",
-                 {"request": asked.id, "digest": asked.digest, "choice": "allow_always"}, peer_pid=310)[0] == 403
-    changed = permissions.add_rule("bash", "git push", "deny", "prefix")
-    assert answer(asked, "allow_always")[0] == 409
-    assert permissions.load_store().remembered == []
-    permissions.forget(changed.id)
-    assert answer(asked, "allow_always")[0] == 200
-    [saved] = [g for g in _send("GET", "/v1/grants")[1] if g.get("persistent")]
-    with permissions.editing() as store:
-        store.remembered[0].pop("scope_level", None)  # replay the durable baseline's branch-bound records
-    fresh = grants.Grants()
-    monkeypatch.setattr(grants, "GRANTS", fresh)
-    monkeypatch.setattr(inbox, "GRANTS", fresh)
-    other, _ = pusher(db, "co" if provider == "claude" else "wk",
-                      "codex" if provider == "claude" else "claude", "1" * 40)
-    assert other() == "allow" and push() == "allow"
-    assert other(f"git push origin {pushable}:refs/heads/elsewhere") == "deny"
-    current = permission_grants.limits
-    with monkeypatch.context() as policy:
-        policy.setattr(permission_grants, "limits", lambda root: replace(current(root), allow_persistent=False))
-        assert push() == "deny"
-    permissions.add_rule("bash", "git push", "deny", "prefix")
-    assert push() == "deny"
-    deny = next(r for r in permissions.load_store().rules if r.source == "user" and r.decision == "deny")
-    permissions.forget(deny.id)
-    assert push() == "allow"
-    assert _send("POST", f"/v1/grants/{saved['id']}/revoke", peer_pid=310)[0] == 403
-    assert _send("POST", f"/v1/grants/{saved['id']}/revoke")[0] == 200
-    assert push() == "deny"
-
-
-@pytest.mark.parametrize("provider,agent_id,persistent", [
-    ("claude", "wk", False), ("codex", "co", False),
-    ("claude", "wk", True), ("codex", "co", True),
-])
-def test_a_push_is_denied_at_once_then_allowed_once_for_exactly_its_scope(db, repo, pushable, world, answering,
-                                                                            monkeypatch, tmp_path, provider, agent_id, persistent):
-    config.set_local(world.repo_root, "permission_policy", "on")
-    codex_worker(db)
-    push, answer = pusher(db, agent_id, provider, pushable)
-    if persistent:
-        _remembered_override_case(db, repo, pushable, world, monkeypatch, push, answer, provider, agent_id)
-        return
-    other = tmp_path / "other"      # another clone, pushing to the same URL
-    sh(f"git clone -q {repo} {other} && git -C {other} remote set-url --push origin https://example.com/o/r.git",
-       tmp_path)
-    sh("git remote add mirror https://example.com/o/mirror.git", repo)
-    monkeypatch.setattr(holds, "_UnixConnection", _Unreachable)
-    assert push() == "deny" and grants.GRANTS.asked_of(agent_id) == []     # no daemon: nothing asked
-    monkeypatch.setattr(holds, "_UnixConnection", _HookConnection)
-    forged = {"agent_id": agent_id, "describe": "a trusted push", "scope": json.dumps({"url": "https://evil.example/r"}),
-              "request": {"provider": provider, "kind": "bash", "tool": "Bash", "cwd": str(repo),
-                          "command": PUSH.format(sha=pushable)}}
-    assert _send("POST", "/v1/holds/grants/ask", forged, peer_pid=310, token=None)[0] == 200
-    assert push() == "deny"                                                 # never held: answered at once
-    [asked] = grants.GRANTS.asked_of(agent_id)                              # the same one, asked once
-    assert "evil" not in asked.scope and "trusted" not in asked.describe   # worked out by the daemon
-    assert json.loads(asked.scope)["git_dir"] == os.path.realpath(repo / ".git")
-    shown = next(i.permission for i in inbox.items(db, None) if i.permission and i.permission.request_id == asked.id)
-    assert {c.choice for c in shown.choices} == {"allow_once", "allow_session", "allow_for", "allow_always", "deny"}
-    assert answer(asked, "allow_once", "0" * 64)[0] == 409
-    with monkeypatch.context() as capacity:
-        capacity.setattr(grants, "MAX_GRANTS", 0)
-        assert answer(asked, "allow_once")[0] == 409
-        assert grants.GRANTS.asked_of(agent_id) == [asked]
-    assert answer(asked, "allow_once")[0] == 200 and answer(asked, "allow_once")[0] == 409
-    for command, cwd in [(PUSH.format(sha="0" * 40), None), (f"git push origin {pushable}:refs/heads/main", None),
-                         (f"git push mirror {pushable}:refs/heads/feat", None), (PUSH.format(sha=pushable), other)]:
-        assert push(command, cwd) == "deny"             # another commit, branch, remote or repo: not this grant
-    assert grants.GRANTS.live()[0].uses_left == 1
-    start, verdicts = threading.Barrier(2), []
-
-    def race():
-        start.wait()
-        verdicts.append(push(d=DB()))
-
-    racers = [threading.Thread(target=race) for _ in range(2)]
-    for t in racers:
-        t.start()
-    for t in racers:
-        t.join(10)
-    assert sorted(verdicts) == ["allow", "deny"] and push() == "deny"      # one use between the two, then none
+    # Forever is outside the push rule's 30-minute limit; "once" at the exact scope saves nothing.
+    pushes = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.kind == "push")
+    with pytest.raises(Exception, match="nothing in this scope can be approved: not permitted until revoked"):
+        grants.decide_group(db, pushes.key, "general", "forever")
+    out = grants.decide_group(db, pushes.key, "general", "once")
+    assert out["grant"] is None and len(out["resumed"]) == 1 and hooks[2].done.wait(5) and hooks[2].answer == "allow_once"
+    assert not hooks[6].done.is_set()                                   # the two-destination push waits on its own
+    both = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.rep.agent_id == "w1" and g.kind == "push")
+    with pytest.raises(Exception, match="outside its approval scope"):  # the remote is past the push rule's limit
+        grants.decide_group(db, both.key, "remote", "timed", 5)
+    # Its general form covers both destinations, each push checked against them.
+    out = grants.decide_group(db, both.key, "general", "timed", 5)
+    assert out["grant"]["pattern"] == "* → main @ origin, * → staging @ origin" and len(out["resumed"]) == 1
+    assert hooks[6].done.wait(5) and hooks[6].answer == "allow_once"
+    assert decide(bash(ws, "git push origin fix:main fix:staging")).decision == "allow"
+    assert decide(bash(ws, "git push origin fix:main fix:dev")).decision == "ask"
+    # A push whose branch only git knows is approved once by its own identity; nothing saved covers it.
+    head = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.rep.agent_id == "w2" and g.kind == "push")
+    with pytest.raises(Exception, match="approve it once"):
+        grants.decide_group(db, head.key, "exact", "session")
+    out = grants.decide_group(db, head.key, "exact", "once")
+    assert out["grant"] is None and len(out["resumed"]) == 1 and hooks[7].done.wait(5) and hooks[7].answer == "allow_once"
+    assert decide(bash(ws, "git push origin HEAD")).decision == "ask"
+    # Always deny stops the group and saves the deny.
+    tests = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.kind == "bash")
+    out = grants.decide_group(db, tests.key, "general", "always-deny")
+    assert len(out["stopped"]) == 1 and hooks[3].done.wait(5) and hooks[3].answer == "deny"
+    assert decide(bash(ws, "npm test -- api")).decision == "deny"
+    assert grants.pending_asks(db) == []
 
 
-def test_org_policy_denies_and_bounds_grants_on_the_real_path(db, repo, pushable, world, answering, monkeypatch):
-    config.set_local(world.repo_root, "permission_policy", "on")
-    monkeypatch.setenv(airgap.ENV, "1")
-    ent = SimpleNamespace(org_id="org_g1", features=["team"], role="member", policy_role=None, policy_version=0)
-    monkeypatch.setattr(permission_grants, "_plugin",
-                        lambda root: team_policy.ProPolicy(root, entitlement=lambda: ent))
-    path = airgap.policy_path(world.repo_root)
-    path.parent.mkdir(exist_ok=True)
+def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_blocks(db, ws):
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
+    worker(db, ws, "w1"), worker(db, ws, "w2")
+    hooks = [Hook(db, "w1", bash(ws, "git push origin fix:main")), Hook(db, "w2", bash(ws, "terraform apply prod")),
+             Hook(db, "w2", bash(ws, "terraform apply dev")), Hook(db, "w1", bash(ws, "git push origin fix:main fix:staging"))]
+    permissions.add_rule("bash", "terraform apply prod", "deny")      # added while it waited: now blocked
+    planned = grants.plan_to_json(grants.plan_allow_all(grants.pending_asks(db, ws.repo_root)))
+    assert [(g["kind"], g["scope"]["pattern"], g["mode"], g["minutes"]) for g in planned["grants"]] == [
+        ("push", "* → main @ origin", "timed", 30), ("bash", "terraform apply *", "session", None),
+        ("push", "* → main @ origin, * → staging @ origin", "timed", 30)]
+    assert planned["resumes"] == 3 and planned["skipped"][0]["why"] == "blocked by a deny rule"
+    assert svc.plan_dto(planned).skipped[0].agent_id == "w2"           # the API's shape, blocked requests included
+    lasting = grants.plan_to_json(grants.plan_allow_all(grants.pending_asks(db, ws.repo_root), forever=True))
+    assert [g["kind"] for g in lasting["grants"]] == ["bash"]           # the push rule permits no lasting grant
 
-    def org(**over):
-        path.write_text(json.dumps({"version": 1, "policy": {"permission_grants": {
-            **GOOD, "deny": ["bash exact terraform plan"], **over}}}))
+    out = grants.unblock_denied(db, ws.repo_root)
+    assert out["excepted"] == 1 and out["added"] == 0 and out["locked"] == [] and svc.plan_dto(out).excepted == 1
+    assert [r["exact"] for r in out["resumed"]] == ["terraform apply prod"]
+    assert hooks[1].done.wait(5) and hooks[1].answer == "allow_once"
+    rule = next(r for r in permissions.load_store().rules if r.match == "terraform apply prod" and r.decision == "deny")
+    assert [x.match for x in rule.exclusions] == ["terraform apply prod"]
+    # The exception, then the saved allow (for this session: that is all an unlimited policy grants here).
+    assert decide(bash(ws, "terraform apply prod"), session="boss").decision == "allow"
+    assert decide(bash(ws, "terraform apply prod")).decision == "ask"
 
-    def ask(command):
-        return {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(repo)}
-
-    org()
-    wk = db.get_agent("wk")
-    assert _verdict(agents.permission_request_decision(db, wk, ask("terraform plan"))) == "deny"
-    hook = Hook(db, monkeypatch, "wk", ask("terraform validate"))
-    assert "allow_for" in [c.choice for c in hook.shown.choices]
-    assert "allow_always" not in [c.choice for c in hook.shown.choices]
-    org(scopes=[])
-    assert "allow_for" not in [c.choice for c in inbox.pending_permissions(db, wk)[0].dto.choices]
-    assert hook.answer("allow_for")[0] == 409
-    org(allow=False)                                     # the org withdraws grants while it is held
-    code, reply = hook.answer("allow_for")
-    assert code == 409
-    assert hook.answer("deny")[0] == 200 and hook.verdict() == "deny"
-    g = grants.GRANTS.add("wk", os.path.realpath(world.repo_root), "bash", "terraform validate", 5, 2)
-    hook = Hook(db, monkeypatch, "wk", ask("terraform validate"))   # the grant is no use now: held again
-    assert hook.answer("deny")[0] == 200 and hook.verdict() == "deny"
-    assert grants.GRANTS.live()[0].uses_left == g.uses_left == 2   # and never spent
-    grants.GRANTS.revoke(g.id)
-    org(max_uses=1)
-    grants.GRANTS.add("wk", os.path.realpath(world.repo_root), "bash", "terraform validate", 5, 2)
-    assert _verdict(agents.permission_request_decision(db, wk, ask("terraform validate"))) == "allow"
-    assert grants.GRANTS.live() == []
-    org()                                                # a one-time push lasts only as long as the org allows
-    push, answer = pusher(db, "wk", "claude", pushable)
-    assert push() == "deny"
-    [asked] = grants.GRANTS.asked_of("wk")
-    assert "allow_for" not in [c.choice for c in inbox._asked_dto(asked).choices]
-    assert answer(asked, "allow_once")[0] == 200
-    [g] = grants.GRANTS.live()
-    assert g.expires_at - g.created == GOOD["max_minutes"] * 60
-    org(max_minutes=1)                                   # and not past a limit the org has shortened since
-    monkeypatch.setattr(grants.GRANTS, "clock", lambda: g.created + 90)
-    assert push() == "deny" and grants.GRANTS.live() == []
-    [asked] = grants.GRANTS.asked_of("wk")               # asked again: a new answer is a new grant
-    assert answer(asked, "allow_once")[0] == 200
-    assert grants.GRANTS.live()[0].id != g.id and push() == "allow" and push() == "deny"
-    from brindle.pro import license
-    ent.sub = "member-1"
-    monkeypatch.setattr(license, "current", lambda **kw: ent)
-    org(allow_persistent=True)
-    [asked] = grants.GRANTS.asked_of("wk")
-    assert answer(asked, "allow_always")[0] == 409
-    org(allow_persistent=True, lifetimes=["forever"])
-    assert answer(asked, "allow_always")[0] == 200 and push() == "allow"
-    org(allow_persistent=False)
-    assert push() == "deny"
-    [asked] = grants.GRANTS.asked_of("wk")
-    assert answer(asked, "allow_always")[0] == 409
-    org(allow_persistent=True, kinds=["read"])
-    assert push() == "deny" and answer(asked, "allow_once")[0] == 409
-    assert all(c.choice == "deny" for c in inbox._asked_dto(asked).choices)
-
-
-@pytest.mark.parametrize("action", ["git-push", pytest.param("env", marks=pytest.mark.variant(
-    "a moved .env file must invalidate a pending approval just as a changed push destination does"))])
-def test_timed_adapter_approval_is_durable_bounded_and_revalidated(db, repo, pushable, world, answering,
-                                                                  monkeypatch, action):
-    from brindle.pro import license
-
-    config.set_local(world.repo_root, "permission_policy", "on")
-    now = [1000.0]
-    monkeypatch.setattr(permission_grants.time, "time", lambda: now[0])
-    monkeypatch.setenv(airgap.ENV, "1")
-    ent = SimpleNamespace(org_id="org_g1", features=["team"], role="member", policy_role=None,
-                          policy_version=0, sub="member-1")
-    monkeypatch.setattr(license, "current", lambda **kw: ent)
-    monkeypatch.setattr(permission_grants, "_plugin",
-                        lambda root: team_policy.ProPolicy(root, entitlement=lambda: ent))
-    path = airgap.policy_path(world.repo_root)
-    path.parent.mkdir(exist_ok=True)
-
-    def org(**over):
-        path.write_text(json.dumps({"version": 1, "policy": {"permission_grants": {
-            **GOOD, "kinds": ["bash", "read"], "overridable": ["git-push", "env"],
-            "max_minutes": 120, "max_uses": 3, "allow_persistent": True, **over}}}))
-
-    org()
-    payload = ({"tool_name": "Bash", "tool_input": {"command": PUSH.format(sha=pushable)}} if action == "git-push"
-               else {"tool_name": "Read", "tool_input": {"file_path": str(repo / ".env")}})
-    def call(d=None):
-        d = d or db
-        return _verdict(agents.permission_request_decision(d, d.get_agent("wk"), {**payload, "cwd": str(repo)}))
-    assert call() == "deny"
-    [asked] = grants.GRANTS.asked_of("wk")
-    panes = inbox.view.tmux.PaneSnapshot()
-    panes.update({"%1": True, "%2": True})
-    monkeypatch.setattr(inbox.view.tmux, "list_panes", lambda: panes)
-    db.update_autopilot("sup", proposal=json.dumps({"checks": []}))
-    def shown():
-        code, items = _send("GET", "/v1/inbox")
-        assert code == 200
-        return next(i["permission"] for i in items if (i.get("permission") or {}).get("request_id") == asked.id)
-    assert {c["choice"] for c in shown()["choices"]} >= {"allow_session", "allow_for"}
-    assert _send("POST", "/v1/inbox/wk/permission", {"request": asked.id, "digest": asked.digest,
-                 "choice": "allow_for", "minutes": 60}, peer_pid=310)[0] == 403
-    def answer(minutes, **extra):
-        return _send("POST", "/v1/inbox/wk/permission", {"request": asked.id, "digest": asked.digest,
-                     "choice": "allow_for", "minutes": minutes, **extra})[0]
-    org(allow_persistent=False)
-    assert {c["choice"] for c in shown()["choices"]} == {"allow_once", "deny"}
-    assert answer(60) == 409
-    assert _send("POST", "/v1/inbox/wk/permission", {"request": asked.id, "digest": asked.digest,
-                 "choice": "allow_session"})[0] == 409
-    assert permissions.load_store().remembered == []
-    org()
-    assert _send("POST", "/v1/inbox/wk/permission", {"request": asked.id, "digest": asked.digest,
-                 "choice": "allow_once"})[0] == 200
-    org(scopes=[])
-    assert call() == "deny"
-    org(lifetimes=[])
-    assert call() == "deny"
-    org()
-    assert call() == "allow" and call() == "deny"
-    [asked] = grants.GRANTS.asked_of("wk")
-    org(scopes=[])
-    assert [c["choice"] for c in shown()["choices"]] == ["deny"]
-    assert _send("POST", "/v1/inbox/wk/permission", {"request": asked.id, "digest": asked.digest,
-                 "choice": "allow_once"})[0] == 409
-    assert answer(60) == 409
-    org(lifetimes=[])
-    assert [c["choice"] for c in shown()["choices"]] == ["deny"]
-    assert answer(60) == 409
-    org()
-    assert answer(121) == 409 and answer(True) == 400
-    assert answer(60, scope="all") == 409
-    if action == "env":
-        assert answer(60, scope="remote") == 409
-    if action == "git-push":
-        sh("git remote set-url --push origin https://example.com/o/changed.git", repo)
-    else:
-        (repo / ".env").rename(repo / ".env.moved")
-    assert answer(60) == 409 and permissions.load_store().remembered == []
-    if action == "git-push":
-        sh("git remote set-url --push origin https://example.com/o/r.git", repo)
-    else:
-        (repo / ".env.moved").rename(repo / ".env")
-    assert answer(60) == 200 and answer(60) == 409
-    [saved] = permissions.load_store().remembered
-    assert saved["expires_at"] == now[0] + 3600
-    [listed] = _send("GET", "/v1/grants")[1]
-    assert listed["expires_at"] == saved["expires_at"] and listed["uses_left"] == 3
-    assert listed["persistent"] is False
-    fresh = grants.Grants()
-    monkeypatch.setattr(grants, "GRANTS", fresh)
-    monkeypatch.setattr(inbox, "GRANTS", fresh)
-    org(allow_persistent=False)
-    assert call() == "deny"
-    org(scopes=[])
-    assert call() == "deny"
-    org(lifetimes=[])
-    assert call() == "deny"
-    org()
-    assert call() == "allow"
-    org(max_uses=1)
-    assert call() == "deny"
-    org()
-    now[0] += 3601
-    assert call() == "deny"
-    assert _send("GET", "/v1/grants")[1] == []
-    [asked] = fresh.asked_of("wk")
-    assert answer(60) == 200 and call() == "allow"
-    org(max_minutes=1)
-    now[0] += 61
-    assert call() == "deny"
-    [asked] = fresh.asked_of("wk")
-    org(max_uses=1)
-    assert answer(2) == 200
-    start, verdicts = threading.Barrier(2), []
-
-    def race():
-        start.wait()
-        d = DB()
-        try:
-            verdicts.append(call(d))
-        finally:
-            d.conn.close()
-
-    racers = [threading.Thread(target=race) for _ in range(2)]
-    for t in racers:
-        t.start()
-    for t in racers:
-        t.join()
-    assert sorted(verdicts) == ["allow", "deny"]
-
-
-@pytest.mark.parametrize("scope", ["remote", "repo", "all"])
-def test_remembered_push_scope_is_durable_and_obeys_current_enterprise_bounds(
-        db, repo, pushable, world, answering, monkeypatch, scope, tmp_path):
-    from brindle.pro import license
-
-    config.set_local(world.repo_root, "permission_policy", "on")
-    monkeypatch.setenv(airgap.ENV, "1")
-    ent = SimpleNamespace(org_id="org_g1", features=["team"], role="member", policy_role=None,
-                          policy_version=0, sub="member-1")
-    monkeypatch.setattr(license, "current", lambda **kw: ent)
-    monkeypatch.setattr(permission_grants, "_plugin",
-                        lambda root: team_policy.ProPolicy(root, entitlement=lambda: ent))
-    path = airgap.policy_path(world.repo_root)
-    path.parent.mkdir(exist_ok=True)
-    url, other_url = "https://example.com/o/r.git", "https://example.com/o/mirror.git"
-
-    def org(**over):
-        path.write_text(json.dumps({"version": 1, "policy": {"permission_grants": {
-            **GOOD, "allow_persistent": True, "lifetimes": ["forever"], **over}}}))
-
-    org()
-    codex_worker(db)
-    push, _ = pusher(db, "wk", "claude", pushable)
-    assert push() == "deny"
-    [asked] = grants.GRANTS.asked_of("wk")
-
-    def answer(peer_pid=None):
-        return _send("POST", "/v1/inbox/wk/permission", {"request": asked.id, "digest": asked.digest,
-                     "choice": "allow_always", "scope": scope}, peer_pid=peer_pid)[0]
-
-    assert answer() == 409 and permissions.load_store().remembered == []
-    org(scopes=[scope])
-    assert scope in inbox._asked_dto(asked).approval_scopes
-    assert answer(310) == 403
-    assert answer() == 200 and answer() == 409
-    [saved] = permissions.load_store().remembered
-    assert saved["scope_level"] == scope
-    fresh = grants.Grants()
-    monkeypatch.setattr(grants, "GRANTS", fresh)
-    monkeypatch.setattr(inbox, "GRANTS", fresh)
-    push, _ = pusher(db, "co", "codex", "1" * 40)
-    other_branch = "git push origin " + "1" * 40 + ":refs/heads/another"
-    assert push(other_branch) == "allow"
-    org(scopes=["branch"])
-    assert push(other_branch) == "deny"
-    org(scopes=[scope], allow_persistent=False)
-    assert push(other_branch) == "deny"
-    org(scopes=[scope], lifetimes=[])
-    assert push(other_branch) == "deny"
-    org(scopes=[scope])
-    sh(f"git remote add alias {url}", repo)
-    sh(f"git remote add mirror {other_url}", repo)
-    assert push("git push alias " + "1" * 40 + ":refs/heads/another") == (
-        "deny" if scope == "remote" else "allow")
-    mirror = "git push mirror " + "1" * 40 + ":refs/heads/another"
-    assert push(mirror) == ("deny" if scope == "remote" else "allow")
-    other_repo = tmp_path / "another-repo"
-    other_repo.mkdir()
-    sh("git init", other_repo)
-    sh(f"git remote add origin {url}", other_repo)
-    config.set_local(str(other_repo), "permission_policy", "on")
-    other_policy = airgap.policy_path(str(other_repo))
-    other_policy.parent.mkdir(exist_ok=True)
-    other_policy.write_text(path.read_text())
-    db.add_workspace(Workspace("other", str(other_repo), "other", "worktree", "other", "main",
-                               str(other_repo), None, "brindle-other", 1.0))
-    db.update_agent("co", workspace_id="other")
-    other_push, _ = pusher(db, "co", "codex", "1" * 40)
-    assert other_push() == ("allow" if scope == "all" else "deny")
-    other_policy.write_text(json.dumps({"version": 1, "policy": {"permission_grants": {
-        **GOOD, "allow_persistent": True, "lifetimes": [], "scopes": []}}}))
-    assert other_push() == "deny"
-    other_policy.write_text(path.read_text())
-    ent.sub = "another-member"
-    assert other_push() == "deny"
-    ent.sub = "member-1"
-    assert other_push() == ("allow" if scope == "all" else "deny")
-    db.update_agent("co", workspace_id="w-1")
-    assert push(other_branch.replace("git push", "git push --force")) == "deny"
-    deny = permissions.add_rule("bash", "git push", "deny", "prefix")
-    assert push(other_branch) == "deny"
-    permissions.forget(deny.id)
-    assert push(other_branch) == "allow"
-    assert _send("POST", f"/v1/grants/{saved['id']}/revoke", peer_pid=310)[0] == 403
-    assert _send("POST", f"/v1/grants/{saved['id']}/revoke")[0] == 200
-    assert push(other_branch) == "deny"
-
-
-def test_session_push_approval_tracks_the_supervisor_session_not_worker_or_clock(
-        db, repo, pushable, world, answering, monkeypatch):
-    from brindle.pro import license
-
-    config.set_local(world.repo_root, "permission_policy", "on")
-    monkeypatch.setenv(airgap.ENV, "1")
-    ent = SimpleNamespace(org_id="org_g1", features=["team"], role="member", policy_role=None,
-                          policy_version=0, sub="member-1")
-    monkeypatch.setattr(license, "current", lambda **kw: ent)
-    monkeypatch.setattr(permission_grants, "_plugin",
-                        lambda root: team_policy.ProPolicy(root, entitlement=lambda: ent))
-    path = airgap.policy_path(world.repo_root)
-    path.parent.mkdir(exist_ok=True)
-
-    def org(lifetimes, allow_persistent=True):
-        path.write_text(json.dumps({"version": 1, "policy": {"permission_grants": {
-            **GOOD, "max_uses": 10, "max_minutes": 1, "allow_persistent": allow_persistent,
-            "scopes": ["remote"], "lifetimes": lifetimes}}}))
-
-    org(["session"])
-    push, _ = pusher(db, "wk", "claude", pushable)
-    assert push() == "deny"
-    [asked] = grants.GRANTS.asked_of("wk")
-    choices = {c.choice for c in inbox._asked_dto(asked).choices}
-    assert "allow_session" in choices and "allow_for" not in choices and "allow_always" not in choices
-    body = {"request": asked.id, "digest": asked.digest, "choice": "allow_session", "scope": "remote"}
-    assert _send("POST", "/v1/inbox/wk/permission", body, peer_pid=310)[0] == 403
-    assert _send("POST", "/v1/inbox/wk/permission", {**body, "choice": "allow_always"})[0] == 409
-    assert _send("POST", "/v1/inbox/wk/permission", body)[0] == 200
-    [listed] = _send("GET", "/v1/grants")[1]
-    assert listed["expires_at"] is None and not listed["persistent"] and listed["agent_id"] == "sup"
-    fresh = grants.Grants()
-    monkeypatch.setattr(grants, "GRANTS", fresh)
-    monkeypatch.setattr(inbox, "GRANTS", fresh)
-    org(["session"], allow_persistent=False)
-    assert push() == "deny"
-    org(["session"])
-    codex_worker(db)
-    db.update_agent("wk", status="done")
-    push, _ = pusher(db, "co", "codex", "1" * 40)
-    assert push() == "allow"
-    now = [permission_grants.time.time() + 3600]
-    monkeypatch.setattr(permission_grants.time, "time", lambda: now[0])
-    assert push() == "allow"
-    db.add_agent(Agent("other", "w-1", "supervisor", "claude", None, "interactive", "idle", "%9", None, now[0]))
-    db.update_agent("co", parent_id="other")
-    assert push() == "deny"
-    db.update_agent("co", parent_id="sup")
-    org(["time"])
-    assert push() == "deny"
-    org(["session"])
-    assert push() == "allow"
-    db.update_agent("sup", dismissed_at=now[0])
-    assert push() == "deny" and _send("GET", "/v1/grants")[1] == []
-    with permissions.editing() as store:
-        store.remembered[0].pop("session")
-    assert push() == "deny"  # a missing saved identity must not match a missing live session
+    out = grants.allow_all(db, ws.repo_root)
+    assert sorted(r["exact"] for r in out["resumed"]) == [
+        "fix → main @ origin", "fix → main @ origin, fix → staging @ origin", "terraform apply dev"]
+    assert all(h.done.wait(5) and h.answer == "allow_once" for h in hooks)
+    lives = {(s.kind, s.life, s.minutes) for s in permissions.load_store().saved}
+    assert lives == {("bash", "session", None), ("push", "time", 30.0)}

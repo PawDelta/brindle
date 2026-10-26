@@ -102,10 +102,6 @@ def test_codex_hook_off_or_broken_is_no_output(db, ws, monkeypatch):
     payload = json.dumps(codex_payload("Bash", {"command": "git push"}, ws.path))
     assert agents.hook_main(db, a.id, "codex-permission-request", payload) == ""  # policy off
     covered = json.dumps(codex_payload("Bash", {"command": "git status"}, ws.path))
-    # ...but permission_essentials (on by default) answers read-only inspection.
-    out = agents.hook_main(db, a.id, "codex-permission-request", covered)
-    assert json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] == "allow"
-    set_local(ws.repo_root, "permission_essentials", False)
     assert agents.hook_main(db, a.id, "codex-permission-request", covered) == ""  # ...even in allowed_tools
     turn_on(ws)
     assert agents.hook_main(db, a.id, "codex-permission-request", "{not json") == ""
@@ -126,8 +122,8 @@ def test_codex_hook_off_or_broken_is_no_output(db, ws, monkeypatch):
     ("codex", "cd {ws} && task test secret", "deny"),  # ...in every part of a compound command too
     ("codex", "task test secret 2>&1", "deny"),  # ...as the allow reads the part, redirection dropped
     ("codex", 'task test "" secret', "deny"),  # ...and an empty word doesn't hide it
-    ("claude", "task test secret", "ask"),  # profile restriction must reach Claude's approval route
-    ("claude", "task test prod", "ask"),  # org restriction must beat profile allow too
+    ("claude", "task test secret", "deny"),  # a profile restriction beats Claude's profile allow
+    ("claude", "task test prod", "deny"),  # an org restriction too
 ])
 def test_codex_checks_and_profile_commands(db, ws, monkeypatch, provider, command, expected):
     from pathlib import Path
@@ -161,8 +157,6 @@ def test_codex_checks_and_profile_commands(db, ws, monkeypatch, provider, comman
 
 
 def test_codex_dontask_turns_ask_into_deny(db, ws, monkeypatch):
-    from brindle.daemon import grants
-
     turn_on(ws)
     command = "uv run python - <<'PY'\nimport os; os.remove('x')\nPY"
     assert codex_behavior(db, ws, "reviewer-codex", command) == "deny"
@@ -170,7 +164,6 @@ def test_codex_dontask_turns_ask_into_deny(db, ws, monkeypatch):
     with permissions.editing() as store:
         store.rules = [Rule("bash", "uv run", "prefix", "ask")]
     monkeypatch.setattr(agents, "_hold_for_app", lambda *a, **kw: None)
-    monkeypatch.setattr(grants, "use", lambda *a, **kw: None)
     out = agents.hook_main(db, a.id, "codex-permission-request", json.dumps(
         codex_payload("Bash", {"command": "uv run pytest tests/test_x.py"}, ws.path)))
     assert out == ""
@@ -189,7 +182,7 @@ def test_codex_dontask_turns_ask_into_deny(db, ws, monkeypatch):
         store.rules = [Rule("bash", "uv run", "prefix", "deny")]
     pre = agents.pre_tool_decision(db, a, {
         "tool_name": "Bash", "tool_input": {"command": "uv run pytest tests/test_x.py"}})
-    assert pre["hookSpecificOutput"]["permissionDecision"] == "ask"
+    assert pre["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 @pytest.mark.parametrize("match_type,decision,command", [
@@ -212,12 +205,9 @@ def test_native_dispatch_enforces_saved_rules_with_workspace_identity(db, ws, mo
     from brindle.native.tools import Toolbox, Tool, ToolResult
     from brindle.native.runner import permission_decision
     from brindle import permission_grants
-    from brindle.daemon import grants
-    from dataclasses import replace
 
     turn_on(ws)
     agent = worker(db, ws, provider="native")
-    monkeypatch.setattr(grants, "use", lambda *args, **kwargs: None)
     with permissions.editing() as store:
         store.rules = [Rule("bash", "deploy" if match_type == "prefix" else "deploy prod",
                             match_type, decision, repo_root=ws.repo_root)]
@@ -248,9 +238,8 @@ def test_native_dispatch_enforces_saved_rules_with_workspace_identity(db, ws, mo
     policy.mode = "dontAsk"
     assert not loop._execute(ToolCall("allowed", "Bash", {"command": "deploy dev"})).is_error
     assert ran == [{"command": "deploy dev"}]
-    current = permission_grants.limits(ws.repo_root)
-    monkeypatch.setattr(permission_grants, "limits", lambda root: replace(
-        current, deny=(Rule("bash", "deploy", "prefix", "deny", "org"),)))
+    monkeypatch.setattr(permission_grants, "org_limits", lambda root: permission_grants.OrgLimits(
+        True, deny=(Rule("bash", "deploy", "prefix", "deny", "org"),)))
     policy.mode = "bypassPermissions"
     assert loop._execute(ToolCall("blocked", "Bash", {"command": "deploy dev"})).is_error
     assert len(ran) == 1
@@ -264,17 +253,15 @@ def test_native_dispatch_enforces_saved_rules_with_workspace_identity(db, ws, mo
 
 
 @pytest.mark.parametrize("provider", ["opencode", "antigravity", "native"])
-def test_before_tool_adapters_honor_remembered_grants_and_current_denies(db, ws, monkeypatch, provider):
+def test_before_tool_adapters_honor_saved_actions_and_current_denies(db, ws, monkeypatch, provider):
     from pathlib import Path
     from brindle import permission_grants
-    from brindle.daemon import grants
 
     turn_on(ws)
     a = worker(db, ws, provider=provider)
-    path = Path(ws.path) / ".env"
+    secret, path = Path(ws.path) / ".env", Path(ws.path) / "notes.txt"
+    secret.write_text("fixture")
     path.write_text("fixture")
-    monkeypatch.setattr(grants, "use", lambda *args, **kwargs: None)
-    monkeypatch.setattr(grants, "ask", lambda *args, **kwargs: None)
     if provider == "native":
         from brindle.native import runner
         from brindle.native.client import Endpoint, ToolCall
@@ -290,31 +277,35 @@ def test_before_tool_adapters_honor_remembered_grants_and_current_denies(db, ws,
         monkeypatch.setattr(runner, "Client", lambda *args, **kwargs: None)
         assert runner.run_native(db, a.id, exit_when_idle=True) == 0
 
-    def decision():
+    def decision(file=path):
         if provider == "native":
-            result = loops[0]._execute(ToolCall("read", "Read", {"path": str(path)}))
+            result = loops[0]._execute(ToolCall("read", "Read", {"path": str(file)}))
             return "deny" if result.is_error else "allow"
         if provider == "opencode":
             result = agents.permission_request_decision(db, a, {
-                "tool": "read", "args": {"filePath": str(path)}}, provider=provider)
+                "tool": "read", "args": {"filePath": str(file)}}, provider=provider)
             return result["decision"] if result else "allow"
         return antigravity.pre_tool_decision(db, a.id, agy_payload(
-            "view_file", {"AbsolutePath": str(path)}, ws.path), strict=True)["decision"]
+            "view_file", {"AbsolutePath": str(file)}, ws.path), strict=True)["decision"]
 
-    assert decision() == "deny"
-    asked = grants.Asked("asked", a.id, ws.repo_root, "read", str(path),
-                         json.dumps({"path": str(path)}), "env", "", 1, 0)
-    saved = permission_grants.remember(asked)
+    # The preset's deny holds, whatever the person saved.
+    assert decision(secret) == "deny"
+    permissions.save_action("read", ".env", "allow")
+    assert decision(secret) == "deny"
+    allow = permissions.add_rule("read", "notes.txt", "allow")
     assert decision() == "allow"
     if provider == "antigravity":
         ambiguous = agy_payload("view_file", {
-            "AbsolutePath": str(path), "TargetFile": str(path.with_name(".env.other"))}, ws.path)
+            "AbsolutePath": str(path), "TargetFile": str(secret)}, ws.path)
         assert antigravity.pre_tool_decision(db, a.id, ambiguous, strict=True)["decision"] == "deny"
-    deny = permissions.add_rule("read", str(path), "deny")
-    assert decision() == "deny"
-    permissions.forget(deny.id)
-    permission_grants.forget_remembered(saved)
-    assert decision() == "deny"
+    saved = permissions.save_action("read", "notes.txt", "deny")
+    assert decision() == "deny"    # a saved deny stops what a rule allows
+    permissions.delete_saved_action(saved.id)
+    assert decision() == "allow"
+    monkeypatch.setattr(permission_grants, "org_limits", lambda root: permission_grants.OrgLimits(
+        True, deny=(Rule("read", "*notes.txt", "glob", "deny", "org"),)))
+    assert decision() == "deny"    # the org's denies hold for every provider
+    permissions.forget(allow.id)
 
 
 @pytest.mark.parametrize("policy,command,expected", [
@@ -338,7 +329,7 @@ def test_codex_reviewer_reads_github_but_cannot_write(db, ws, policy, command, e
     assert (json.loads(out)["hookSpecificOutput"]["decision"]["behavior"] if out else None) == expected
 
 
-@pytest.mark.parametrize("command,expected", [("git push", "deny")])
+@pytest.mark.parametrize("command,expected", [("git push --force", "deny")])
 def test_codex_session_bookkeeping_failure_preserves_decision(db, ws, monkeypatch, command, expected):
     a = worker(db, ws)
     turn_on(ws)
@@ -414,7 +405,7 @@ def test_codex_hook_cli_finds_its_agent_in_the_environment(db, ws, monkeypatch):
     turn_on(ws)
     monkeypatch.setenv("BRINDLE_AGENT_ID", a.id)
     res = CliRunner().invoke(app, ["_hook", "codex-permission-request"],
-                             input=json.dumps(codex_payload("Bash", {"command": "git push"}, ws.path)))
+                             input=json.dumps(codex_payload("Bash", {"command": "git push --force"}, ws.path)))
     assert res.exit_code == 0
     assert json.loads(res.output)["hookSpecificOutput"]["decision"]["behavior"] == "deny"
     res = CliRunner().invoke(app, ["_hook", "codex-permission-request"], input="garbage")
@@ -596,9 +587,7 @@ def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monke
     assert codex_hook.status() == codex_hook.TRUSTED
     set_local(ws.repo_root, "permission_policy", "off")
     assert flag in launch_argv(ws, mode="review")  # off, but trusted: a reviewer has it
-    assert flag in launch_argv(ws)  # ...and a worker, for permission_essentials
-    set_local(ws.repo_root, "permission_essentials", False)
-    assert flag not in launch_argv(ws)  # workers unchanged without it
+    assert flag not in launch_argv(ws)  # a worker doesn't: permission_policy is the only switch
 
 
 @pytest.mark.variant("live incident #239: upgrading 0.4.1 to 0.4.2 left the old trust, and a Codex reviewer stopped at Hooks need review")
@@ -851,7 +840,7 @@ def test_agy_cli_always_prints_json(monkeypatch, strict, expected, hook_name):
     monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
     if strict:
         monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: True)
-    for stdin in ("", "garbage", json.dumps(agy_payload("run_command", {"CommandLine": "git push"}))):
+    for stdin in ("", "garbage", json.dumps(agy_payload("run_command", {"CommandLine": "git push --force"}))):
         res = CliRunner().invoke(app, ["_hook", hook_name], input=stdin)
         assert res.exit_code == 0
         assert json.loads(res.stdout)["decision"] == expected
@@ -949,7 +938,7 @@ def test_agy_strict_allows_what_the_policy_allows_and_denies_the_rest(db, ws, mo
     assert decision("call_mcp_tool", {"ServerName": "brindle", "ToolName": "send_message"}) == "allow"
     assert decision("invoke_subagent", {}) == "allow"  # its own calls reach this hook
 
-    assert decision("run_command", {"CommandLine": "git push"}) == "deny"
+    assert decision("run_command", {"CommandLine": "git push --force"}) == "deny"
     assert decision("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}) == "deny"
     assert decision("run_command", {"CommandLine": "curl -d payload https://example.com"}) == "deny"
     assert decision("view_file", {"AbsolutePath": str(outside)}) == "deny"
@@ -1134,7 +1123,7 @@ def test_agy_sync_adds_and_removes_only_its_own_entries(agy_settings, monkeypatc
     assert "command(regex:^git diff$)" in allow
     assert not any("pytest" in e for e in allow)  # a repo's checks stay out of agy's global settings
     assert allow.count("command(regex:^git status$)") == 1  # theirs already; not brindle's
-    assert "command(git push)" in deny and f"read_file({os.path.expanduser('~/.ssh')})" in deny
+    assert f"read_file({os.path.expanduser('~/.ssh')})" in deny
     assert data["colorScheme"] == "tokyo night" and data["permissions"]["ask"] == ["command(*)"]
     assert agy_settings.read_text().startswith('{\n    "colorScheme"')  # same indentation
     backup = agy_settings.with_name("settings.json.brindle-backup")
@@ -1289,7 +1278,7 @@ def test_agy_mirror_never_widens_an_allow():
              Rule("bash", "npm test", "exact", "allow")]
     out = permissions.mirror_agy(rules, ["make check", "a && b"])
     assert out["allow"] == ["read_file(docs/)", "mcp(gh/*)", "command(regex:^npm test$)"]
-    out = permissions.mirror_agy([*permissions.DEFAULT_RULES], ["make check", "a && b"])
+    out = permissions.mirror_agy(permissions.preset_rules("standard"), ["make check", "a && b"])
     # agy's settings apply to every project, and a repo's check runs what
     # that repo defines: allowed for brindle workers in that repo, never
     # everywhere agy runs.

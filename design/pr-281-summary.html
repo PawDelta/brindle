@@ -1,0 +1,188 @@
+<title>PR #281 Autonomous Permissions</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a single review column; summary numbers, then what users see, then what changed underneath, then the file map. Brindle's tokens: pass = added, sap = removed, branch = brindle accent. */
+:root{
+  --bg:#f6f3ef;--bg-2:#efeae4;--surface:#ffffff;--line:rgba(120,104,88,.22);--line-strong:rgba(120,104,88,.38);
+  --ink:#211a14;--ink-2:#5a4d41;--ink-3:#75685b;
+  --branch:#6350b3;--branch-soft:rgba(99,80,179,.1);
+  --pass:#046e50;--pass-soft:rgba(4,110,80,.1);
+  --fawn:#86572a;--fawn-soft:rgba(134,87,42,.1);
+  --sap:#9b4724;--sap-soft:rgba(155,71,36,.1);
+  --sans:"Geist",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
+  --bg:#0c0c0e;--bg-2:#141416;--surface:#18171b;--line:rgba(82,82,91,.45);--line-strong:rgba(110,110,120,.6);
+  --ink:#eee6dc;--ink-2:#b9ab9b;--ink-3:#948677;
+  --branch:#a99be0;--branch-soft:rgba(169,155,224,.13);
+  --pass:#34d399;--pass-soft:rgba(52,211,153,.12);
+  --fawn:#d7af87;--fawn-soft:rgba(215,175,135,.12);
+  --sap:#e8875a;--sap-soft:rgba(232,135,90,.13);color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0c0c0e;--bg-2:#141416;--surface:#18171b;--line:rgba(82,82,91,.45);--line-strong:rgba(110,110,120,.6);
+  --ink:#eee6dc;--ink-2:#b9ab9b;--ink-3:#948677;
+  --branch:#a99be0;--branch-soft:rgba(169,155,224,.13);
+  --pass:#34d399;--pass-soft:rgba(52,211,153,.12);
+  --fawn:#d7af87;--fawn-soft:rgba(215,175,135,.12);
+  --sap:#e8875a;--sap-soft:rgba(232,135,90,.13);color-scheme:dark}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font:15px/1.6 var(--sans);-webkit-font-smoothing:antialiased;
+  padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:40px 64px}
+.wrap{max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:52px}
+h1,h2,h3{margin:0;text-wrap:balance}
+h1{font-size:clamp(26px,4.6vw,38px);font-weight:700;letter-spacing:-.02em;line-height:1.12}
+h2{font-size:21px;font-weight:600;letter-spacing:-.01em}
+h3{font-size:15px;font-weight:600}
+p{margin:0;color:var(--ink-2);max-width:68ch}
+code{font-family:var(--mono);font-size:.86em;background:var(--bg-2);border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:var(--ink)}
+.eyebrow{font-size:11px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;color:var(--branch)}
+section{display:flex;flex-direction:column;gap:16px}
+.meta{display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:13px;color:var(--ink-3)}
+.badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;border-radius:99px;padding:3px 10px}
+.b-br{color:var(--branch);background:var(--branch-soft)}.b-pass{color:var(--pass);background:var(--pass-soft)}.b-sap{color:var(--sap);background:var(--sap-soft)}.b-fawn{color:var(--fawn);background:var(--fawn-soft)}
+
+/* stats */
+.stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}
+.stat{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:14px 16px;display:flex;flex-direction:column;gap:2px}
+.stat b{font-size:26px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.stat span{font-size:12px;color:var(--ink-3)}
+.plus{color:var(--pass)}.minus{color:var(--sap)}
+
+/* feature grid */
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.feat{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:16px 18px;display:flex;flex-direction:column;gap:8px;min-width:0}
+.feat .where{font-family:var(--mono);font-size:12px;color:var(--branch)}
+.feat ul{margin:0;padding-left:18px;color:var(--ink-2);font-size:13.5px;display:flex;flex-direction:column;gap:4px}
+
+/* change list */
+.changes{border:1px solid var(--line);border-radius:12px;background:var(--surface);overflow:hidden}
+.change{display:grid;grid-template-columns:96px minmax(0,1fr);gap:14px;padding:13px 16px;border-top:1px solid var(--line);align-items:start}
+.change:first-child{border-top:0}
+.change p{font-size:13.5px}
+.change .badge{justify-content:center;font-size:11px}
+
+/* file bars */
+.files{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:16px;display:flex;flex-direction:column;gap:9px}
+.frow{display:grid;grid-template-columns:minmax(0,260px) minmax(0,1fr) 54px;gap:12px;align-items:center;font-size:12.5px}
+.frow .name{font-family:var(--mono);color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.frow .track{height:8px;background:var(--bg-2);border-radius:4px;overflow:hidden}
+.frow .fill{height:100%;border-radius:4px;background:var(--branch)}
+.frow .fill.del{background:var(--sap)}
+.frow .n{font-family:var(--mono);color:var(--ink-3);text-align:right;font-variant-numeric:tabular-nums}
+.fgroup{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);margin-top:6px}
+.fgroup:first-child{margin-top:0}
+
+/* tests */
+.tests{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.test{border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:14px 16px;display:flex;flex-direction:column;gap:4px}
+.test b{font-variant-numeric:tabular-nums}
+.test .ok{color:var(--pass);font-weight:600;font-size:12px}
+.test .pending{color:var(--fawn);font-weight:600;font-size:12px}
+.note{border-radius:10px;background:var(--bg-2);border:1px solid var(--line);padding:14px 16px;font-size:13.5px;color:var(--ink-2)}
+.note b{color:var(--ink)}
+.foot{font-size:12px;color:var(--ink-3)}
+
+@media (max-width:720px){
+  .stats{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .grid,.tests{grid-template-columns:minmax(0,1fr)}
+  .change{grid-template-columns:minmax(0,1fr);gap:6px}
+  .frow{grid-template-columns:minmax(0,1fr) 54px}.frow .track{grid-column:1/-1;order:3}
+}
+</style>
+
+<div class="wrap">
+
+<header style="display:flex;flex-direction:column;gap:14px">
+  <span class="eyebrow">PawDelta/brindle · PR #281</span>
+  <h1>Autonomous permissions: presets, removable defaults, saved actions, grouped asks</h1>
+  <div class="meta"><span class="badge b-br">feat/autonomous-permissions → main</span><span class="badge b-fawn">Merge with main in final review</span></div>
+  <p>Agents stop waiting on you for routine work. Every rule becomes editable, similar requests collapse into one question, and setup lets each person choose how much agents do on their own, with Autonomous as the default. The PR also replaces the overlapping permission system that shipped in 0.4.7.</p>
+</header>
+
+<div class="stats">
+  <div class="stat"><b>61</b><span>files changed</span></div>
+  <div class="stat"><b class="plus">+9,850</b><span>lines added</span></div>
+  <div class="stat"><b class="minus">−7,566</b><span>lines removed</span></div>
+  <div class="stat"><b>1</b><span>on/off switch left in config</span></div>
+</div>
+
+<section>
+  <span class="eyebrow">What people see</span>
+  <h2>Three new or rebuilt screens</h2>
+  <div class="grid">
+    <div class="feat"><span class="where">Setup · new step</span><h3>Choose a preset</h3><ul><li>Autonomous (default), Permissive, Standard, Secure</li><li>Each explains what runs, what asks, what's blocked</li><li>Skipping keeps Autonomous</li></ul></div>
+    <div class="feat"><span class="where">Settings → Permissions · rebuilt</span><h3>Rules you own</h3><ul><li>Edit or remove any rule, with undo</li><li>"What interrupts your agents" with one-click allow</li><li>Saved actions tab: allows and denies, slide-out editor</li><li>Activity log; org approval limits for enterprise</li></ul></div>
+    <div class="feat"><span class="where">Inbox · rebuilt</span><h3>Grouped requests</h3><ul><li>One item per kind of request, offered in its general form</li><li>"Narrow to this request" before granting</li><li>Allow once / for N / always, deny, always deny</li></ul></div>
+    <div class="feat"><span class="where">Inbox · new</span><h3>Stall notice</h3><ul><li>Names every paused worker and what it waits on</li><li>Allow all / Always allow within policy limits</li><li>One-click exception for deny-blocked requests</li></ul></div>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">What changed underneath</span>
+  <h2>Behavior changes</h2>
+  <div class="changes">
+    <div class="change"><span class="badge b-pass">New</span><p><b>Presets as ordinary rules.</b> Choosing a preset seeds editable rules. Nothing is built in, so the old <code>git push</code> and <code>.env</code> denies become removable preset rules.</p></div>
+    <div class="change"><span class="badge b-pass">New</span><p><b>Saved actions.</b> Allows and denies saved from the Inbox keep their scope, the original request and an expiry. A saved allow applies only within the current rule's limits; deny rules beat saved allows; expired ones never apply.</p></div>
+    <div class="change"><span class="badge b-pass">New</span><p><b>Generalized, grouped requests.</b> Pushes are keyed on where they land ("into main from any branch"), file writes on their folder, commands on their family, tools on tool or server. A request something you already allowed covers never reaches the Inbox.</p></div>
+    <div class="change"><span class="badge b-pass">New</span><p><b>Read-only commands always run.</b> <code>grep</code>, <code>cat</code>, <code>ls</code>, <code>git log</code> and similar pass even with pipes or escapes brindle can't fully parse. Redirects to files and <code>$(…)</code> still go through the rules.</p></div>
+    <div class="change"><span class="badge b-br">Changed</span><p><b>Every tool is checked.</b> Claude's pre-tool check now covers file, web and MCP tools, not only shell commands, for every provider.</p></div>
+    <div class="change"><span class="badge b-br">Changed</span><p><b>Pushes into <code>release/*</code> always ask.</b> Ported from main as a removable preset rule.</p></div>
+    <div class="change"><span class="badge b-br">Migrated</span><p><b>0.4.7 settings convert on first launch.</b> Lenient → Permissive, Balanced → Standard, Strict → Secure (none → Autonomous); custom rules become rules; remembered pushes and grants become saved actions with their scope, remote, owner and remaining uses. Old files are left in place.</p></div>
+    <div class="change"><span class="badge b-sap">Removed</span><p><b>The parallel 0.4.7 system:</b> its rule editor (<code>PermissionRules.tsx</code>, <code>permission_editor.py</code>), Lenient/Balanced/Strict presets, daemon-held grants (<code>daemon/grants.py</code>) and their routes.</p></div>
+    <div class="change"><span class="badge b-sap">Removed</span><p><b><code>permission_essentials</code>.</b> Its read-only allowance moved into the main rules. An old config that still sets it loads fine and the key is ignored. <code>permission_policy</code> is the only switch.</p></div>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Fixed during review</span>
+  <h2>Holes closed before merge</h2>
+  <div class="changes">
+    <div class="change"><span class="badge b-sap">Security</span><p>File, web and MCP tools skipped the new checks in a launched CLI.</p></div>
+    <div class="change"><span class="badge b-sap">Security</span><p>A saved deny on pushes into main could be bypassed with a wildcard refspec.</p></div>
+    <div class="change"><span class="badge b-sap">Security</span><p>A push naming several branches could slip into <code>release/*</code> without asking.</p></div>
+    <div class="change"><span class="badge b-sap">Security</span><p><code>sort --out=</code> and <code>--compress-prog=</code> were treated as read-only.</p></div>
+    <div class="change"><span class="badge b-fawn">Usability</span><p><code>git push origin HEAD</code>, bare <code>git push</code> and multi-branch pushes can now be approved once for exactly that request.</p></div>
+  </div>
+</section>
+
+<section>
+  <span class="eyebrow">Where the lines went</span>
+  <h2>Largest changes by area</h2>
+  <div class="files">
+    <div class="fgroup">Policy engine</div>
+    <div class="frow"><span class="name">src/brindle/permissions.py</span><span class="track"><span class="fill" style="width:100%;display:block"></span></span><span class="n">1,979</span></div>
+    <div class="frow"><span class="name">src/brindle/permission_grants.py</span><span class="track"><span class="fill" style="width:64.5%;display:block"></span></span><span class="n">1,277</span></div>
+    <div class="frow"><span class="name">src/brindle/service/dto.py</span><span class="track"><span class="fill" style="width:15%;display:block"></span></span><span class="n">296</span></div>
+    <div class="frow"><span class="name">src/brindle/daemon/routes_actions.py</span><span class="track"><span class="fill" style="width:12.2%;display:block"></span></span><span class="n">242</span></div>
+    <div class="frow"><span class="name">src/brindle/agents.py</span><span class="track"><span class="fill" style="width:9.3%;display:block"></span></span><span class="n">184</span></div>
+    <div class="fgroup">App</div>
+    <div class="frow"><span class="name">Settings/Permissions.tsx (new)</span><span class="track"><span class="fill" style="width:50.5%;display:block"></span></span><span class="n">1,000</span></div>
+    <div class="frow"><span class="name">Inbox/PermissionAsks.tsx (new)</span><span class="track"><span class="fill" style="width:17.7%;display:block"></span></span><span class="n">351</span></div>
+    <div class="frow"><span class="name">api/permissions.ts (new)</span><span class="track"><span class="fill" style="width:12%;display:block"></span></span><span class="n">237</span></div>
+    <div class="frow"><span class="name">Settings/OrgApprovals.tsx (new)</span><span class="track"><span class="fill" style="width:10.6%;display:block"></span></span><span class="n">210</span></div>
+    <div class="frow"><span class="name">Onboarding/Onboarding.tsx</span><span class="track"><span class="fill" style="width:9.5%;display:block"></span></span><span class="n">189</span></div>
+    <div class="fgroup">Removed from 0.4.7</div>
+    <div class="frow"><span class="name">Settings/PermissionRules.tsx + test</span><span class="track"><span class="fill del" style="width:50.4%;display:block"></span></span><span class="n">997</span></div>
+    <div class="frow"><span class="name">permission_editor.py + test</span><span class="track"><span class="fill del" style="width:40%;display:block"></span></span><span class="n">791</span></div>
+    <div class="frow"><span class="name">daemon/grants.py</span><span class="track"><span class="fill del" style="width:16.2%;display:block"></span></span><span class="n">320</span></div>
+  </div>
+  <p style="font-size:13px">The generated API schema (<code>api-schema.json</code>, about 5,200 lines) is left out of the chart: it is rebuilt from the code, not written by hand.</p>
+</section>
+
+<section>
+  <span class="eyebrow">Tests</span>
+  <h2>Verification</h2>
+  <div class="tests">
+    <div class="test"><b>Python</b><span style="font-size:13px;color:var(--ink-2)">2,772 parallel + 23 serial on the branch before the main merge</span><span class="ok">Passed</span></div>
+    <div class="test"><b>App</b><span style="font-size:13px;color:var(--ink-2)">344 tests and the TypeScript check</span><span class="ok">Passed</span></div>
+    <div class="test"><b>After merging main</b><span style="font-size:13px;color:var(--ink-2)">Both suites plus review on the merged commit</span><span class="pending">Running now</span></div>
+  </div>
+  <div class="note"><b>Also in this PR:</b> merge checks now run the app tests and type check whenever a branch changes <code>app/</code>, and a new learned rule asks workers to include every test case a reviewer requested.</div>
+</section>
+
+<p class="foot">Line counts compare the branch after merging main (commit e5f233c4) with origin/main. Design references: design/permissions-preview.html, design/setup-presets.html, design/permissions-guide.html.</p>
+</div>

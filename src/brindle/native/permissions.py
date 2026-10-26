@@ -290,7 +290,8 @@ def _tokens(command: str, word_pattern: re.Pattern[str] | None = None) -> list[t
         elif c == '"':
             j = i + 1
             while j < n and command[j] != '"':
-                if _expands(command, j):
+                # Inside double quotes $' and $" start nothing: "^$" ends in a literal $.
+                if _expands(command, j) and command[j + 1:j + 2] not in ("'", '"'):
                     return None
                 if command[j] == "\\" and j + 1 < n and command[j + 1] in '"\\$`\n':
                     word.append(command[j + 1] if command[j + 1] != "\n" else "")

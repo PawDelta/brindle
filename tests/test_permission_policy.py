@@ -144,12 +144,6 @@ def test_secret_locations_are_denied(ws):
     assert decide(read(ws, os.path.join(ws.repo_root, ".env"))).decision == "deny"
 
 
-def test_git_push_and_force_flags_are_denied(ws):
-    for cmd in ("git push", "git push origin main", "cd x && git push", "git -C x push",
-                "git checkout -f main", "git clean -fd", "git reset --force"):
-        assert decide(bash(ws, cmd)).decision == "deny", cmd
-
-
 def test_repo_rules_can_only_add_denies(ws):
     path = permissions.repo_rules_path(ws.repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,11 +159,6 @@ def test_repo_rules_can_only_add_denies(ws):
 
 
 # -- user rules and learning ------------------------------------------------------------------
-
-
-def test_a_user_allow_never_overrides_a_default_deny(ws):
-    permissions.add_rule("bash", "git push", "allow")
-    assert decide(bash(ws, "git push")).decision == "deny"
 
 
 def test_compound_commands_are_never_learned(ws):
@@ -264,7 +253,7 @@ def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch, mode, age):
                  marks=pytest.mark.variant("unknown future scope previously broadened instead of being dropped")),
     pytest.param({"version": 2, "rules": [{"kind": "bash", "match": "deploy", "decision": "allow", "roles": ["dev"]}]},
                  "allow", id="store_version-unknown_allow_scope"),
-    pytest.param({"version": 3, "rules": []}, "deny", id="store_version-future"),
+    pytest.param({"version": 4, "rules": []}, "deny", id="store_version-future"),
 ])
 def test_cli_rules_and_suggestions(ws, monkeypatch, stored, expected):
     monkeypatch.chdir(ws.repo_root)
@@ -274,8 +263,8 @@ def test_cli_rules_and_suggestions(ws, monkeypatch, stored, expected):
     rule_id = res.output.split(":")[0]
     assert r.invoke(app, ["permissions", "deny", "fetch", "https://evil.", "--prefix"]).exit_code == 0
     out = r.invoke(app, ["permissions", "list"]).output
-    assert "permission_policy: off" in out
-    assert "d-git-push" in out and "default" in out and f"{rule_id}" in out and "user" in out
+    assert "permission_policy: off" in out and "preset: standard" in out
+    assert "d-push-default" in out and "preset" in out and f"{rule_id}" in out and "user" in out
     assert r.invoke(app, ["permissions", "allow", "nonsense", "x"]).exit_code == 2
 
     assert r.invoke(app, ["permissions", "suggestions"]).output.strip() == "no suggestions"
@@ -287,30 +276,33 @@ def test_cli_rules_and_suggestions(ws, monkeypatch, stored, expected):
     assert r.invoke(app, ["permissions", "accept", "nope"]).exit_code == 1
 
     assert r.invoke(app, ["permissions", "forget", rule_id]).exit_code == 0
-    assert r.invoke(app, ["permissions", "forget", "d-git-push"]).exit_code == 1
+    assert r.invoke(app, ["permissions", "forget", "d-push-default"]).exit_code == 0   # nothing is built in
+    assert r.invoke(app, ["permissions", "forget", "d-push-default"]).exit_code == 1
 
     res = r.invoke(app, ["permissions", "reset"], input="n\n")
-    assert res.exit_code != 0 and permissions.load_store().rules
+    assert res.exit_code != 0 and any(r.source == "learned" for r in permissions.load_store().rules)
     assert r.invoke(app, ["permissions", "reset", "--yes"]).exit_code == 0
-    assert permissions.load_store().rules == [] and permissions.load_store().approvals == {}
+    store = permissions.load_store()
+    assert {r.source for r in store.rules} == {"preset"} and store.rule("d-push-default") and store.approvals == {}
     path = permissions.store_path()
     stored["remembered"] = [{"id": "preference", "uses_spent": 0}]
     path.write_text(json.dumps(stored))
     before = path.read_text()
-    if stored["version"] > 2:
+    if stored["version"] > permissions.STORE_VERSION:
         with pytest.raises(ValueError):
             with permissions.editing() as store:
                 store.rules.clear()
         assert path.read_text() == before
     else:
         with permissions.editing() as store:
-            store.remembered[0]["uses_spent"] += 1
+            store.rules.clear()
         saved = json.loads(path.read_text())
-        assert all(saved[key] == value for key, value in stored.items() if key not in ("version", "remembered"))
-        assert saved["remembered"][0]["uses_spent"] == 1
+        # Rows it can't read and keys it doesn't know survive a rewrite as they were.
+        assert all(row in saved["rules"] for row in stored["rules"])
+        assert all(saved[key] == value for key, value in stored.items() if key not in ("version", "rules"))
     # An unrecognized restriction cannot disappear behind a known allow; an
     # unrecognized allow just doesn't apply.
     rules = [*permissions.all_rules(), Rule("bash", "deploy", "exact", "allow")]
     assert decide(bash(ws, "deploy"), rules=rules).decision == expected
-    bare = "ask" if expected == "allow" else expected
-    assert decide(Request("claude", "bash", "Bash"), rules=rules).decision == bare
+    # A request with no target is blocked too; else (a 0.4.7 store, now Autonomous) unmatched runs.
+    assert decide(Request("claude", "bash", "Bash"), rules=rules).decision == expected

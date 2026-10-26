@@ -19,8 +19,8 @@
    itself up to date: nothing here offers an update. Every step is a
    button: nothing to type but a URL to clone, no popup. */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DaemonClient, ProviderInstalled } from "../../api/client";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import type { DaemonClient, PermissionPreset, ProviderInstalled } from "../../api/client";
 import type { OpenUrl, PickFolder } from "../../api/open";
 import { plain } from "../../api/wording";
 import { ProgressCard } from "../../components/ProgressCard";
@@ -47,7 +47,7 @@ export interface OnboardingProps {
   onDone(route?: Route): void;
 }
 
-type Step = "loading" | "signin" | "connect" | "install" | "provider-signin" | "ready" | "project";
+type Step = "loading" | "signin" | "connect" | "install" | "provider-signin" | "ready" | "permissions" | "project";
 
 const big = `${primary} px-s2 py-s1 text-[15px]`;
 const link = "text-branch underline-offset-2 hover:underline";
@@ -408,13 +408,190 @@ function Ready({ rows, installed, onSignIn, onNext }: { rows: ProviderInstalled[
       </div>
       <div>
         <button type="button" className={big} onClick={onNext}>
-          Pick a project
+          Continue
         </button>
       </div>
       <p className={fine}>
         From now on your providers live in Settings › Providers: where each one is and its sign-in
         {others > 0 ? `, and the other ${count} whenever you want ${others === 1 ? "it" : "them"}` : ""}.
       </p>
+    </Frame>
+  );
+}
+
+/* ---- Permissions: how much the agents do on their own (design/setup-presets.html). ---- */
+
+interface PresetCopy {
+  preset: PermissionPreset;
+  name: string;
+  who: string;
+  runs: string;
+  asks: string;
+  blocked: string;
+  /* Of 4: how many bars of the interruptions meter are lit. */
+  bars: number;
+  often: string;
+  note: string;
+}
+
+const PRESETS: PresetCopy[] = [
+  {
+    preset: "autonomous",
+    name: "Autonomous",
+    who: "Agents work start to finish without stopping. Best for most people: you review the result, not every step.",
+    runs: "Reading, writing and editing files, running commands, fetching docs, pushing to work branches",
+    asks: "Pushing into your default branch (e.g. main)",
+    blocked: "Deleting repositories, reading credential files (~/.ssh, ~/.aws, .env)",
+    bars: 1,
+    often: "rarely",
+    note: "With Autonomous, brindle also groups similar requests (for example every push into main) so one answer covers them all.",
+  },
+  {
+    preset: "permissive",
+    name: "Permissive",
+    who: "Local work runs freely; anything that leaves your machine asks once, and you can remember the answer.",
+    runs: "Reading, writing and editing files, running commands",
+    asks: "Pushing, fetching web content, using connected tools (GitHub, Slack)",
+    blocked: "Deleting repositories, reading credential files",
+    bars: 2,
+    often: "sometimes",
+    note: "Permissive asks before anything leaves your machine. Remembered answers stop repeat questions.",
+  },
+  {
+    preset: "standard",
+    name: "Standard",
+    who: "Agents read freely but check with you before changing things. Good while you're getting to know brindle.",
+    runs: "Reading files, your project's test and check commands",
+    asks: "Writing and editing files, other commands, pushing, web and tool access",
+    blocked: "Deleting repositories, reading credential files",
+    bars: 3,
+    often: "often",
+    note: "Standard pauses agents often. If they stall, switch to Autonomous in Settings → Permissions, or allow the noisiest rules there.",
+  },
+  {
+    preset: "secure",
+    name: "Secure",
+    who: "For sensitive code: almost everything asks, approvals expire after 15 minutes, and only owners and admins can push.",
+    runs: "Reading tracked files",
+    asks: "Every change, command, push and tool, remembered for at most 15 minutes",
+    blocked: "Deleting repositories, credential and .env files, anything no rule covers",
+    bars: 4,
+    often: "constantly",
+    note: "Secure pauses agents on almost every step and denies anything no rule covers. Expect to approve requests often.",
+  },
+];
+
+function PresetCard({ copy, on, disabled, buttonRef, onPick, onKey }: { copy: PresetCopy; on: boolean; disabled: boolean; buttonRef(el: HTMLButtonElement | null): void; onPick(): void; onKey(e: KeyboardEvent<HTMLButtonElement>): void }) {
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      role="radio"
+      aria-checked={on}
+      disabled={disabled}
+      tabIndex={on ? 0 : -1}
+      data-testid={`onb-preset-${copy.preset}`}
+      className={`${card} flex flex-col items-stretch gap-s1 p-s2 text-left aria-checked:border-branch aria-checked:bg-branch-soft`}
+      onClick={onPick}
+      onKeyDown={onKey}
+    >
+      <span className="flex items-center gap-s1">
+        <span aria-hidden className={`size-[18px] shrink-0 rounded-full border-2 ${on ? "border-branch bg-branch shadow-[inset_0_0_0_4px_var(--surface)]" : "border-line-strong"}`} />
+        <span className="text-base font-semibold">{copy.name}</span>
+        {copy.preset === "autonomous" && <span className="ml-auto rounded-sm bg-branch-soft px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-branch">RECOMMENDED</span>}
+      </span>
+      <span className="text-[13px] text-ink-2">{copy.who}</span>
+      <span className="grid gap-1 border-t border-line pt-s1 text-[13px]">
+        {(
+          [
+            ["Runs on its own", copy.runs, "text-pass"],
+            ["Asks you", copy.asks, "text-fawn"],
+            ["Blocked", copy.blocked, "text-sap"],
+          ] as const
+        ).map(([k, v, tone]) => (
+          <span key={k} className="grid grid-cols-[96px_1fr] gap-s1">
+            <span className={`pt-0.5 text-[11px] font-semibold uppercase tracking-wide ${tone}`}>{k}</span>
+            <span className="text-ink-2">{v}</span>
+          </span>
+        ))}
+      </span>
+      <span className="flex items-center gap-s1 text-xs text-ink-3">
+        Interruptions
+        <span aria-hidden className="flex gap-[3px]">
+          {[1, 2, 3, 4].map((n) => (
+            <i key={n} className={`h-1.5 w-3.5 rounded-sm ${n <= copy.bars ? "bg-sap" : "bg-line-strong"}`} />
+          ))}
+        </span>
+        {copy.often}
+      </span>
+    </button>
+  );
+}
+
+/* Continue applies the choice (PUT /permissions/preset); Skip for now leaves the engine's
+   own default, Autonomous. */
+function Permissions({ client, onNext }: { client: DaemonClient; onNext(): void }) {
+  const [choice, setChoice] = useState<PermissionPreset>("autonomous");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const copy = PRESETS.find((p) => p.preset === choice) ?? PRESETS[0];
+
+  const move = (from: number, step: number) => {
+    const next = PRESETS[(from + step + PRESETS.length) % PRESETS.length];
+    setChoice(next.preset);
+    refs.current[next.preset]?.focus();
+  };
+  const apply = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await client.setPermissionPreset(choice);
+      onNext();
+    } catch (e) {
+      setError(plain(e instanceof Error ? e.message : String(e)));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Frame step="permissions" kicker="Permissions" title="How much should your agents do on their own?" lede="Agents stop and wait whenever they need your permission. Pick how often that happens. You can change this, and edit or remove any rule it adds, in Settings → Permissions.">
+      <div className="mt-s1 grid gap-s2 sm:grid-cols-2" role="radiogroup" aria-label="Permission preset">
+        {PRESETS.map((p, i) => (
+          <PresetCard
+            key={p.preset}
+            copy={p}
+            on={p.preset === choice}
+            disabled={busy}
+            buttonRef={(el) => void (refs.current[p.preset] = el)}
+            onPick={() => setChoice(p.preset)}
+            onKey={(e) => {
+              const d = ({ ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 } as Record<string, number>)[e.key];
+              if (!d) return;
+              e.preventDefault();
+              move(i, d);
+            }}
+          />
+        ))}
+      </div>
+      <p className="flex items-start gap-s1 rounded-md border border-line bg-canvas-2 px-s2 py-s1 text-[13px] text-ink-2" data-testid="onb-preset-note">
+        <span aria-hidden className="text-branch">◇</span>
+        {copy.note}
+      </p>
+      {error && (
+        <p className={alert} role="alert">
+          Couldn't apply {copy.name}: {error}
+        </p>
+      )}
+      <div className="flex flex-wrap items-center gap-s2">
+        <span className={`${fine} min-w-0 flex-1`}>Nothing is locked in. Every rule a preset adds can be edited or removed later.</span>
+        <button type="button" className={quiet} disabled={busy} onClick={onNext}>
+          Skip for now
+        </button>
+        <button type="button" className={big} disabled={busy} onClick={() => void apply()}>
+          Continue with {copy.name}
+        </button>
+      </div>
     </Frame>
   );
 }
@@ -650,9 +827,11 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
             setLater((l) => l.filter((x) => x !== p));
             setStep("provider-signin");
           }}
-          onNext={() => setStep("project")}
+          onNext={() => setStep("permissions")}
         />
       );
+    case "permissions":
+      return <Permissions client={client} onNext={() => setStep("project")} />;
     case "project":
       return (
         <Frame step="project" kicker="Ready" title="Pick a project" lede="The folder brindle works in: one on this Mac, or a repository to clone. Your first session starts there.">

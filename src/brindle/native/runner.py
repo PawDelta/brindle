@@ -261,8 +261,11 @@ def conversation_path(agent_id: str) -> Path:
 
 
 def permission_decision(db: DB, agent_id: str, ws: Workspace, tool: str, args: dict) -> str | None:
-    """Current shared rules and the person's grants, before profile allowances."""
-    from brindle import permission_grants, permissions
+    """With permission_policy on, the shared rules' word on a native tool call
+    before the profile's own permissions: a deny, an ask a rule makes, or an
+    allow by the person's own rules or saved actions. None leaves it to the
+    profile (an allow a preset makes, or an ask no rule made)."""
+    from brindle import permissions
     from brindle.antigravity import tool_names
     from brindle.config import load_repo_config
     from brindle.profiles import profile_rules_for
@@ -279,13 +282,12 @@ def permission_decision(db: DB, agent_id: str, ws: Workspace, tool: str, args: d
     if req is None:
         return "deny"
     req = dataclasses.replace(req, provider="native")
-    lim = permission_grants.limits(ws.repo_root)
-    rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root), *lim.deny]
-    original = permission_grants.decision_now(req, cfg.checks, rules)
-    decision = permission_grants.use_grant(agent_id, req, original, lim)
-    decision = permission_grants.lift(agent_id, req, decision, rules, cfg.checks, lim)
-    if decision is not original or (decision.rule is not None and (
-            decision.decision in ("deny", "ask") or decision.rule.source in ("user", "learned"))):
+    rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+    decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=agents._session_of(db, agent),
+                                  spend=True)
+    rule = decision.rule
+    if decision.decision == "deny" or rule is not None and (
+            decision.decision == "ask" or rule.decision == "ask" or rule.source in ("user", "learned")):
         return decision.decision
     return None
 

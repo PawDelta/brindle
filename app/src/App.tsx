@@ -106,7 +106,7 @@ export function landing(repos: { repo_root: string }[], sessions: Record<string,
   return pick ? { screen: "session", root: pick.session.id, repo: pick.repo, agent: pick.session.id } : HOME;
 }
 
-/* Agents' "Connect …" links: each press asks Settings to scroll to Providers again. */
+/* Agents' "Connect …" links and the Inbox's rule links: each press asks Settings to scroll (and open the rule) again. */
 let providerAsks = 0;
 
 function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, releaseBuildUpdater, readAbout }: {
@@ -130,13 +130,13 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     case "settings":
-      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} section={route.section} ask={route.ask} />;
+      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} section={route.section} ask={route.ask} rule={route.rule} />;
     case "account":
       return <AccountScreen client={client} openUrl={openUrl} onNavigate={(screen) => navigate({ screen })} section={route.section} ask={route.ask} />;
     case "new":
       return <NewSession key={route.repo} client={client} onOpen={openSession} initialRepo={route.repo} pickFolder={pickFolder} refresh={refresh} />;
     case "inbox":
-      return <InboxScreen client={client} refresh={refresh} onOpen={openSession} session={route.session ?? null} onShowAll={() => navigate({ screen: "inbox" })} />;
+      return <InboxScreen client={client} refresh={refresh} onOpen={openSession} session={route.session ?? null} onShowAll={() => navigate({ screen: "inbox" })} onOpenRule={(rule) => navigate({ screen: "settings", section: "permissions", rule, ask: ++providerAsks })} />;
     case "session":
       return (
         <SessionScreen

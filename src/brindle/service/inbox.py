@@ -16,9 +16,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import agents, autopilot, bus, identity_lock, permission_grants, permissions, prompt_answer, tmux, view
+from brindle import agents, autopilot, bus, identity_lock, permissions, prompt_answer, tmux, view
 from brindle.config import load_repo_config
-from brindle.daemon.grants import GRANTS
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent
 from brindle.providers import get_provider
@@ -26,7 +25,7 @@ from brindle.service.dto import InboxActionDTO, InboxItemDTO, PermissionChoiceDT
 from brindle.service.errors import ServiceError
 
 WORKERS = ("assign", "handoff")
-CHOICES = ("allow_once", "allow_session", "allow_for", "allow_always", "deny")
+CHOICES = ("allow_once", "allow_always", "deny")
 RELEASE = "terminal"     # the person's "answer in the terminal instead": the hold ends now
 # Whether a CLI draws its own permission prompt while brindle's hook holds
 # the request (PermissionDTO.terminal_prompt_visible). Claude Code 2.1.304, in
@@ -159,9 +158,6 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             out += [InboxItemDTO(kind="permission", reason="asks permission",
                                  detail=p.request.summary() if p.request else None, permission=p.dto, **link)
                     for p in asking]
-            out += [InboxItemDTO(kind="permission", reason="asks to be allowed once", detail=f"{g.kind}: {g.match}",
-                                 permission=_asked_dto(g), **link)
-                    for g in ([] if _closed(row) else GRANTS.asked_of(row.id))]
             if reason and not asking:
                 kind = _kind(a, ws, reason)
                 out.append(InboxItemDTO(kind=kind, reason=reason, **link,
@@ -262,7 +258,6 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
     the CLI's own prompt's from then on."""
     if _closed(agent):
         HOLDS.drop_agent(agent.id)      # closed: nothing of its can be answered any more
-        GRANTS.drop_agent(agent.id)     # nor used
     live = {h.request_id: h for h in HOLDS.of_agent(agent.id)}
     out = []
     for row in db.permission_requests_of(agent.id):
@@ -281,29 +276,13 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
         ws = db.get_workspace(agent.workspace_id)
         # A native worker's loop reads its profile's permissions, not brindle's rules.
         rule = None if agent.provider == "native" else _always_rule(req, suggestions, ws.repo_root if ws else None)
-        offered = permission_grants.parse(req)     # allow_for (permission_grants.offer)
-        lim = permission_grants.limits(ws.repo_root if ws else req.repo_root)
-        # Provider suggestions and global exact rules cannot enforce an enterprise
-        # repository boundary. Only adapter-backed preferences can do that.
-        if not lim.allow_persistent or "forever" not in lim.lifetimes or lim.owner != "local":
-            rule = None
-        if offered and (not lim.allow or req.kind not in lim.kinds
-                        or "time" not in lim.lifetimes or "branch" not in lim.scopes):
-            offered = None
         choices = [PermissionChoiceDTO(choice="allow_once", label="Allow once"),
-                   *([PermissionChoiceDTO(choice="allow_for", label=f"Allow for {offered['minutes']} min",
-                                          rule=permission_grants.describe(offered))] if offered else []),
                    *([PermissionChoiceDTO(choice="allow_always", label="Allow always", rule=rule)] if rule else []),
                    PermissionChoiceDTO(choice="deny", label="Deny")]
         out.append(Pending("hook", row, req, suggestions, PermissionDTO(
             via="hook", request_id=row["tool_use_id"], tool=req.tool, kind=req.kind, target=req.target(),
-            grant=permission_grants.describe(offered) if offered else None,
             digest=permissions.request_digest(row["request"], row["suggestions"]), choices=choices,
             hold_until=hold.hold_until, hold_note=_hold_note(agent.provider, hold.hold_until),
-            max_minutes=min(offered["minutes"], lim.max_minutes) if offered else None,
-            max_uses=min(offered["uses"], lim.max_uses) if offered else None,
-            approval_scope="This agent, this repository, this exact request; ends when the agent closes or the app restarts"
-                           if offered else None,
             terminal_prompt_visible=TERMINAL_PROMPT_VISIBLE.get(agent.provider))))
     if out or not agent.tmux_window or _closed(agent):
         return out
@@ -315,85 +294,6 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
         return []
     return [Pending("prompt", None, None, None,
                     PermissionDTO(via="prompt", wording=_prompt_wording(screen), terminal=TERMINAL))]
-
-
-def _asked_dto(asked) -> PermissionDTO:
-    """A one-time grant an agent's hook asked for (daemon.grants.Asked): its
-    deny was answered already; allowing it lets exactly that request, with
-    exactly that scope, through once."""
-    why, cap = permission_grants.approve(asked)
-    lim = permission_grants.limits(asked.repo_root)
-    return PermissionDTO(via="grant", request_id=asked.id, digest=asked.digest, kind=asked.kind,
-                         target=asked.match, grant=asked.describe, hold_until=asked.expires_at,
-                         max_minutes=cap if not why else None, max_uses=lim.max_uses if not why else None,
-                         approval_scope=permission_grants.remember_description(asked).removesuffix(", until revoked"),
-                         approval_scopes=permission_grants.approval_scopes(asked),
-                         choices=[*([PermissionChoiceDTO(choice="allow_once", label="Allow once")] if not why else []),
-                                  *([PermissionChoiceDTO(choice="allow_session", label="Allow for this session")]
-                                    if not why and permission_grants.session_allowed(asked) else []),
-                                  *([PermissionChoiceDTO(choice="allow_for", label="Approve for…")]
-                                    if not why and permission_grants.timed_allowed(asked) else []),
-                                  *([PermissionChoiceDTO(choice="allow_always", label="Always allow in this repository",
-                                                         rule=permission_grants.remember_description(asked))]
-                                    if permission_grants.persistent_allowed(asked) else []),
-                                  PermissionChoiceDTO(choice="deny", label="Deny")])
-
-
-def _answer_asked(db: DB, agent: Agent, asked, digest: str | None, choice: str,
-                  minutes: int | None = None, scope: str | None = None) -> dict:
-    """The person's answer to a one-time grant, exactly as shown."""
-    if choice != "deny" and not permission_grants.validate_asked(asked, db):
-        raise ServiceError("conflict", "the request, rules or adapter scope changed; fetch the inbox again", 409)
-    if choice in ("allow_always", "allow_for", "allow_session"):
-        if choice == "allow_for":
-            why, cap = permission_grants.approve(asked)
-            minutes = cap if minutes is None else minutes
-            if why or not 0 < minutes <= cap:
-                raise ServiceError("conflict", why or "duration exceeds current policy", 409)
-        try:
-            saved = GRANTS.remember(agent.id, asked.id, digest or "",
-                                    lambda current: permission_grants.remember(current, minutes, scope or "branch",
-                                        lifetime="session" if choice == "allow_session" else None))
-        except ValueError as e:
-            raise ServiceError("conflict", str(e), 409) from e
-        if saved is None:
-            raise ServiceError("conflict", "that permission request is no longer pending", 409)
-        from brindle import history
-        ws = db.get_workspace(agent.workspace_id)
-        if ws is not None:
-            history.record_safely(db, ws.repo_root, "permission", agent=agent, branch=ws.branch,
-                                  task=permission_grants.remember_description(asked, scope or "branch"),
-                                  result=f"permission preference {saved} saved by the person "
-                                         + ("for this supervisor session" if choice == "allow_session" else
-                                            f"for {minutes} minutes" if minutes is not None else "until revoked"))
-        bus.publish_agent(db, "permission.answered", agent.id, request_id=asked.id, choice=choice,
-                          via="grant", cleared=True)
-        return {"choice": choice, "via": "grant", "cleared": True, "rule": None, "grant": saved}
-    if choice not in ("allow_once", "deny"):
-        raise ServiceError("conflict", f"a one-time grant offers no {choice}", 409)
-    minutes = 0
-    if choice == "allow_once":
-        why, minutes = permission_grants.approve(asked)
-        if why:
-            raise ServiceError("conflict", f"it can't be allowed now: {why}", 409)
-    got = GRANTS.answer(agent.id, asked.id, digest or "", choice == "allow_once", max_minutes=minutes)
-    if got is None:
-        if digest == asked.digest and GRANTS.asked(agent.id, asked.id) is not None:
-            raise ServiceError("conflict", "The active grant limit was reached; revoke a grant and answer again", 409)
-        raise ServiceError("conflict", f"{agent.id} isn't asking for that, as shown, any more: "
-                                       "fetch the inbox again", 409)
-    grant = getattr(got, "id", None)     # True: denied
-    ws = db.get_workspace(agent.workspace_id)
-    if ws is not None:
-        from brindle import history
-
-        history.record_safely(db, ws.repo_root, "permission", agent=agent, branch=ws.branch,
-                              task=f"{asked.kind}: {asked.match}",
-                              result=f"one-time grant {grant} by the person: {asked.describe}" if grant
-                              else "one-time grant denied by the person")
-    bus.publish_agent(db, "permission.answered", agent.id, request_id=asked.id, choice=choice,
-                      via="grant", cleared=True)
-    return {"choice": choice, "via": "grant", "cleared": True, "rule": None, "grant": grant}
 
 
 def _until(done: Callable[[], bool], seconds: float | None = None) -> bool:
@@ -417,8 +317,7 @@ def _write_rule(req: permissions.Request) -> None:
     antigravity.resync_permissions()
 
 
-def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str | None, choice: str,
-                      minutes: int | None = None, scope: str | None = None) -> dict:
+def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str | None, choice: str) -> dict:
     """Answer the permission request ``request_id`` brindle's hook holds for
     ``agent_id``, exactly as the app showed it (``digest``: an answer to any
     other request, or to one that differs from what the hook registered with
@@ -436,20 +335,10 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
     and whether the hook took the answer."""
     if choice not in (*CHOICES, RELEASE):
         raise ServiceError("invalid", f"choice must be one of {', '.join((*CHOICES, RELEASE))}")
-    if minutes is not None and (type(minutes) is not int or minutes <= 0 or choice != "allow_for"):
-        raise ServiceError("invalid", "minutes must be a positive integer for a timed approval")
-    if scope is not None and (scope not in (*permission_grants.PUSH_SCOPES, "repository")
-                              or choice not in ("allow_for", "allow_always", "allow_session")):
-        raise ServiceError("invalid", "scope must select a supported saved approval scope")
     agent = db.get_agent(agent_id)
     if agent is None:
         raise ServiceError("not_found", f"no agent {agent_id}", 404)
     identity_lock.ensure(agent)
-    asked = GRANTS.asked(agent.id, request_id or "")
-    if asked is not None and not _closed(agent):
-        return _answer_asked(db, agent, asked, digest, choice, minutes, scope)
-    if scope is not None:
-        raise ServiceError("conflict", "this request does not offer a saved adapter approval scope", 409)
     asking = pending_permissions(db, agent)
     if any(p.via == "prompt" for p in asking):
         raise ServiceError("conflict", f"{agent_id}'s request {TERMINAL}", 409)
@@ -461,11 +350,6 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
     offered = next((c for c in pending.dto.choices if c.choice == choice), None)
     if offered is None and choice != RELEASE:
         raise ServiceError("conflict", f"{agent_id}'s request offers no {choice}", 409)
-    if choice == "allow_for":
-        grant_offer = permission_grants.parse(pending.request)
-        cap = min(grant_offer["minutes"], permission_grants.limits(pending.request.repo_root).max_minutes)
-        if minutes is not None and minutes > cap:
-            raise ServiceError("conflict", "duration exceeds current policy", 409)
     if not HOLDS.claim(agent.id, request_id, digest, choice):
         raise ServiceError("conflict", f"{agent_id}'s request was answered, went to its own prompt, or isn't "
                                        "the one its hook holds: fetch the inbox again", 409)
@@ -485,18 +369,7 @@ def answer_permission(db: DB, agent_id: str, request_id: str | None, digest: str
         raise
     if choice == "allow_always" and not pending.suggestions:
         _write_rule(pending.request)    # only now: the hook allowed it this time
-    grant = permission_grants.make(agent.id, pending.request, minutes) if choice == "allow_for" else None
-    if grant is not None:
-        from brindle import history
-
-        ws = db.get_workspace(agent.workspace_id)
-        if ws is not None:
-            history.record_safely(db, ws.repo_root, "permission", agent=agent, branch=ws.branch,
-                                  task=pending.request.summary(),
-                                  result=f"grant {grant['id']}: {grant['kind']} {grant['match']!r}, "
-                                         f"{grant['uses_left']} more uses until {grant['expires_at']:.0f}")
     bus.publish_agent(db, "permission.answered", agent.id, request_id=request_id, choice=choice,
                       via="hook", cleared=True)
     return {"choice": choice, "via": "hook", "cleared": True,
-            "rule": offered.rule if choice == "allow_always" else None,
-            "grant": grant["id"] if grant else None}
+            "rule": offered.rule if choice == "allow_always" else None}

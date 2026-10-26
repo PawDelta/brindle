@@ -1,117 +1,382 @@
-"""Permission grants: the person allows a worker more than brindle's rules
-do, for one call or for a while, by answering its held request in the app.
+"""Saved actions and generalized asks, over brindle.permissions.
 
-The lifecycle is the same for every kind of request (read, write, edit,
-bash, fetch, mcp, other):
+An **ask** is a request the policy left to a person. Each one carries its
+exact form and a ladder of scopes a decision may cover (``generalize``): a
+push's destination ("into main from any branch"), a file's top directory, a
+command's family (its first two words), an MCP tool (or its whole server).
+The second rung, the general form, is what brindle proposes as the default
+grant; pending asks of the same kind and general form make one Inbox item
+(``groups``), one decision resolves the item, and the person may narrow to
+the exact request.
 
-1. Offer. A worker's tool call reaches brindle's hook (Claude Code's or
-   Codex's PermissionRequest). If the rules leave it to the person (ask),
-   the hold the app answers (agents._hold_for_app) also offers ``allow_for``:
-   this agent, this repo, this exact request (``key``), for at most
-   ``max_minutes`` and ``max_uses``. The offer is recorded with the request
-   (Request.grant), so the digest the app answers covers it. If one of the
-   built-in denies an adapter knows (``OVERRIDABLE``) refused it, and
-   nothing else denies it, the deny is answered at once as always, and the
-   hook asks the person for a one-time grant of exactly that request and
-   the scope the adapter worked out (``lift``): it is never held, since a
-   held request shows the CLI's own prompt, where an answer would run it.
-2. Answer. Only the person, on the daemon's person-only inbox route
-   (service.inbox.answer_permission): deny, allow once, a bounded duration,
-   or a remembered adapter permission when policy permits. No answer, the
-   hold running out, or no daemon: the rules' answer stands.
-3. Check again. After an ``allow_for`` answer the hook reads the policy and
-   every rule again (``recheck``); the answer to a one-time grant is checked
-   against the policy then (``approve``), and its use reads everything,
-   the adapter's scope included, once more. Anything changed refuses it.
-4. Use. The daemon keeps the grants (brindle.daemon.grants). The hook
-   spends a use for a later identical request that the rules, read again
-   then, still leave to the person (``use_grant``), or that the same
-   built-in deny refuses with the very scope the person allowed (``lift``).
-   Grants end when they expire, when their uses are spent, when the person
-   revokes them, when the agent is closed, or when the daemon restarts.
-   A use counts when the call is allowed, not when the tool succeeds: a
-   hook can't see the result.
-   Saved adapter permissions require the policy's persistence gate for
-   every lifetime, at creation and on every use. Timed permissions survive a daemon restart and
-   agent closure. They retain their original expiry and use budget, bounded
-   by current policy on every call. Forever permissions last until revoked
-   and require current policy to allow persistent permissions on every call.
-   A saved push may cover one destination ref, all branches at its verified
-   remote, all permitted remotes in that repository, or across repositories.
-   Current policy and the adapter's safety checks still govern every use.
+A **saved action** (permissions.SavedAction) is such a decision kept: a deny
+stops every ask its pattern covers; an allow resolves an ask only within the
+limits of the ask rule that asked (its scope level or pattern, its lifetime),
+never past a deny rule (permissions.decide checks those first), and never
+once expired. ``settle`` is what decide() calls; an ask a saved action covers
+never reaches the Inbox.
 
-Never lifted: an org's, the repo's, a profile's or the person's own deny,
-a force flag, and the credential and daemon-token reads. Nothing an agent
-or a repo writes makes a grant.
-
-Who decides what may be granted (``limits``): for a member of a Team org,
-the org policy's ``permission_grants`` block (brindle.pro.team_policy) and
-nothing else, read again on every request. Its ``deny`` rules are enforced
-for every provider. No block, a policy that can't be read, or a member
-paused or shut down by the org: no grants. Without a Team org, the local
-defaults below. The org backend that serves the block isn't part of this
-repo: until it serves one, a Team org offers no grants, and the block is
-enforced from the cached copy or, in air-gap mode, ``.brindle/policy.json``.
-
-Adapters: ``git-push`` lifts d-git-push for exactly ``git push <remote>
-<full sha>:refs/heads/<branch>`` whose remote resolves to one https, ssh or
-user@host:path URL with nothing configured that could send the push
-elsewhere or push more, and only while no protected paths are set (a push
-skips the merge check that enforces them). ``env`` lifts d-env for one
-``.env`` file inside the worktree. What is checked is the state when the
-hook answers: the command runs right after, outside brindle."""
+Deciding from the Inbox (``decide_group``, ``allow_all``, ``unblock_denied``)
+checks every candidate ask against its own policy, saves the grant, and
+answers each hook through the daemon's hold (service.inbox.answer_permission),
+so a broad grant never resolves a request its policy forbids."""
 
 from __future__ import annotations
 
-import json
+import fnmatch
 import hashlib
-import time
 import os
-import re
 import subprocess
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from brindle import permissions
-from brindle.permissions import Decision, Request, Rule
+from brindle.permissions import (
+    LEVELS,
+    PUSH_ARROW,
+    PUSH_AT,
+    UNKNOWN_REF,
+    Decision,
+    Request,
+    Rule,
+    SavedAction,
+    simple_argv,
+)
+MODES = ("once", "session", "timed", "forever", "deny", "always-deny")
 
-# Built-in denies a person may lift for one call, by the action org policy
-# names them with (team_policy.GRANT_ACTIONS). Every other deny is hard.
-OVERRIDABLE = {"d-git-push": "git-push", "d-env": "env", "d-env-rel": "env"}
-LOCAL_MINUTES = 60          # without a Team org: what allow_for may cover at most
-LOCAL_USES = 20
+
+def _error(code: str, message: str, status: int = 400) -> Exception:
+    from brindle.service.errors import ServiceError    # lazily: the service layer imports widely
+
+    return ServiceError(code, message, status)
+GENERAL = "general"
+EXACT = "exact"
+
+
+# -- generalizing one request ------------------------------------------------------------------
+
+
+def grant_kind(req: Request) -> str:
+    """The kind a saved action for ``req`` has: ``push`` for a git push, else the request's."""
+    if req.kind == "bash" and req.command and permissions.push_calls(req.command):
+        return "push"
+    return req.kind
+
+
+def ask_keys(req: Request) -> list[str]:
+    """Every key a saved action must cover for ``req``: one per push the
+    command makes (``"source → destination @ remote"``), else the one ask_key."""
+    if grant_kind(req) == "push":
+        return [p.key() for p in permissions.push_calls(req.command or "")]
+    return [ask_key(req)]
+
+
+def ask_key(req: Request) -> str:
+    """What a saved action's pattern is matched against: a push's "source →
+    destination @ remote" (the first, when a command pushes several), a
+    file's path relative to the worktree, the command, the URL or the tool name."""
+    kind = grant_kind(req)
+    if kind == "push":
+        return permissions.push_calls(req.command or "")[0].key()
+    if req.kind in permissions.PATH_KINDS:
+        pattern = permissions.learnable_pattern(req)
+        return pattern[1] if pattern else (req.path or "")
+    if req.kind == "bash":
+        return " ".join((req.command or "").split())
+    if req.kind == "fetch":
+        return req.url or ""
+    return req.tool
+
+
+def _scope(value: str, pattern: str, label: str, level: str | None = None) -> dict:
+    return {"value": value, "pattern": pattern, "label": label, "level": level}
+
+
+# Between the pushes of a scope that covers several ("fix → main @ origin,
+# fix → release @ origin"): a ref name never holds a space, so it can't be
+# mistaken for part of one.
+PUSH_LIST = ", "
+
+
+def _join(parts) -> str:
+    return PUSH_LIST.join(dict.fromkeys(parts))
+
+
+def push_scopes(keys: list[str]) -> list[dict]:
+    """The scope ladder of a command whose pushes have ask keys ``keys``: the
+    exact form lists every push, the general form every destination (a
+    grant covers a push when it fits one of them), the remote form every
+    remote."""
+    pushes = [permissions.push_pattern(k) or ("*", "*", "*") for k in keys]
+    remotes = _join(remote for _, _, remote in pushes)
+    if PUSH_LIST in remotes:
+        dests = _join(f"{dst} on {remote}" for _, dst, remote in pushes)
+    else:
+        dests = _join(dst for _, dst, _ in pushes)
+    exact_label = "This push only · " + _join(f"{src} into {dst} on {remote}" for src, dst, remote in pushes)
+    return [_scope(EXACT, _join(keys), exact_label, "branch"),
+            _scope(GENERAL, _join(f"*{PUSH_ARROW}{dst}{PUSH_AT}{remote}" for _, dst, remote in pushes),
+                   f"Into {dests} from any branch on {remotes}", "destination"),
+            _scope("remote", _join(f"*{PUSH_ARROW}*{PUSH_AT}{remote}" for _, _, remote in pushes),
+                   f"All branches on {remotes}", "remote"),
+            _scope("repository", f"*{PUSH_ARROW}*{PUSH_AT}*", "All pushes in this repository", "repository"),
+            _scope("all", f"*{PUSH_ARROW}*{PUSH_AT}*", "All pushes in every repository", "all")]
+
+
+def scopes_for(kind: str, key: str, name: str = "") -> list[dict]:
+    """The scope ladder for a request of ``kind`` with ask key ``key``,
+    narrowest first; the general form is the one valued GENERAL."""
+    if kind == "push":
+        return push_scopes(key.split(PUSH_LIST))
+    if kind in permissions.PATH_KINDS:
+        verb = {"read": "reads", "write": "writes", "edit": "edits"}[kind]
+        top = key.split("/")[0] if "/" in key else ""
+        out = [_scope(EXACT, key, f"This file only · {key}")]
+        if top and not any(c in top for c in "*?["):
+            out.append(_scope(GENERAL, f"{top}/**", f"Everything under {top}/**"))
+        else:
+            out.append(_scope(GENERAL, key, f"This file only · {key}"))
+        out.append(_scope("repository", "**", f"Any file ({verb} anywhere in the repository)"))
+        return out
+    if kind == "bash":
+        out = [_scope(EXACT, key, f"This command only · {key}")]
+        if simple_argv(key) is not None:
+            family = " ".join(key.split()[:2])
+            out.append(_scope(GENERAL, f"{family} *", f"Commands starting with {family}"))
+        else:
+            out.append(_scope(GENERAL, key, f"This command only · {key}"))
+        out.append(_scope("repository", "*", "Any command in the repository"))
+        return out
+    if kind == "mcp":
+        parts = key.split("__")
+        server = parts[1] if key.startswith("mcp__") and len(parts) >= 3 and parts[1] else None
+        out = [_scope(GENERAL, key, f"This tool · {name or key}")]
+        if server:
+            out.append(_scope("server", f"mcp__{server}__*", f"Every {server} tool"))
+        out.append(_scope("all", "mcp__*", "Every MCP tool"))
+        return out
+    if kind == "fetch":
+        parts = urlsplit(key)
+        host = f"{parts.scheme}://{parts.netloc}" if parts.scheme and parts.netloc else ""
+        out = [_scope(EXACT, key, f"This URL only · {key}")]
+        out.append(_scope(GENERAL, f"{host}/*", f"Everything on {host}") if host
+                   else _scope(GENERAL, key, f"This URL only · {key}"))
+        out.append(_scope("all", "*", "Any URL"))
+        return out
+    return [_scope(EXACT, key, f"This only · {key}"), _scope(GENERAL, key, f"This only · {key}"),
+            _scope("all", "*", f"Every {kind} request")]
+
+
+@dataclass
+class Ask:
+    """One request, generalized."""
+    kind: str
+    exact: str
+    scopes: list[dict]
+
+    def scope(self, value: str) -> dict | None:
+        return next((s for s in self.scopes if s["value"] == value), None)
+
+    @property
+    def general(self) -> dict:
+        return self.scope(GENERAL) or self.scopes[0]
+
+
+def generalize(req: Request) -> Ask:
+    """``req`` generalized. A command that pushes to several destinations
+    keeps one exact form, listing every push, and a general form listing
+    every destination (push_scopes)."""
+    kind = grant_kind(req)
+    if kind == "push":
+        keys = list(dict.fromkeys(ask_keys(req)))
+        return Ask(kind, _join(keys), push_scopes(keys))
+    return Ask(kind, ask_key(req), scopes_for(kind, ask_key(req), req.tool))
+
+
+# -- matching saved actions ----------------------------------------------------------------------
+
+
+def _push_fits(pattern: str, key: str, loose: bool) -> bool:
+    """Whether push key ``key`` fits one push pattern. A ref only git can
+    name (UNKNOWN_REF: HEAD, no refspec, a wildcard) fits only ``*``, unless
+    ``loose`` (a deny, which errs toward matching: it may well be that branch)."""
+    pats, refs = permissions.push_pattern(pattern), permissions.push_pattern(key)
+    if pats is None or refs is None:
+        return False
+    for pat, ref in zip(pats, refs):
+        if ref == UNKNOWN_REF:
+            if not (loose or pat == "*"):
+                return False
+        elif not fnmatch.fnmatchcase(ref, pat):
+            return False
+    return True
+
+
+def scope_matches(kind: str, pattern: str, key: str, loose: bool = False) -> bool:
+    """Whether a saved action's ``pattern`` covers ask key ``key``. A push
+    pattern may list several pushes (push_scopes): the key fits any one.
+    ``loose``: for a deny, a push whose branch only git knows counts as
+    covered whenever it may be the one the pattern names."""
+    if pattern in ("*", "**"):
+        return True
+    if kind == "push":
+        return any(_push_fits(p, key, loose) for p in pattern.split(PUSH_LIST))
+    if kind == "bash":
+        if simple_argv(key) is None:
+            return pattern == key   # a compound or quoted command: only the exact grant
+        if pattern.endswith(" *"):
+            head = pattern[:-2].split()
+            return key.split()[:len(head)] == head
+        return pattern == key or fnmatch.fnmatchcase(key, pattern)
+    return key == pattern or fnmatch.fnmatchcase(key, pattern)
+
+
+def _other_parts_allowed(req: Request, rules: list[Rule] | None) -> bool:
+    """A push grant covers a compound command only when every part that isn't
+    the push is itself allowed by a rule (``cd x && git push`` is fine, ``git
+    push && curl ...`` is not)."""
+    if simple_argv(req.command) is not None:
+        return True
+    from dataclasses import replace
+
+    from brindle.native.permissions import split_commands
+
+    rules = rules if rules is not None else permissions.all_rules(req.repo_root or None)
+    for part in split_commands(req.command or ""):
+        words = part.split()
+        if words and words[0] == "git" and "push" in words:
+            continue
+        if words and words[0] == "cd":
+            continue
+        got = permissions._rule_decision(replace(req, command=part), rules, None)
+        if got is None or got.decision != "allow":
+            return False
+    return True
+
+
+def covers(action: SavedAction, req: Request, rules: list[Rule] | None = None) -> bool:
+    """Whether ``action``'s pattern covers ``req``. A deny covers it as soon as
+    any push the command makes matches, or may (a branch only git can name,
+    see scope_matches); an allow only when every push does, strictly, and
+    nothing else runs alongside them."""
+    if action.kind != grant_kind(req):
+        return False
+    if action.repo is not None and req.repo_root and action.repo != req.repo_root:
+        return False
+    deny = action.decision == "deny"
+    hits = [scope_matches(action.kind, action.pattern, key, loose=deny) for key in ask_keys(req)]
+    if deny:
+        return any(hits)
+    if not all(hits) or action.binding and not _binding_holds(action.binding, req):
+        return False
+    return action.kind != "push" or _other_parts_allowed(req, rules)
+
+
 GIT_SECONDS = 5
 
-SHA = re.compile(r"[0-9a-f]{40}")
-REMOTE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
-BRANCH_REF = re.compile(r"refs/heads/[A-Za-z0-9._/-]+")
-PUSH_URL = re.compile(r"(?:https|ssh)://[^\s:]+(?::[0-9]+)?/\S+|[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s:]\S*")
-# Set, any of these could send an approved push somewhere else or push more than one ref.
-PUSH_CONFIG = ("core.sshCommand", "core.hooksPath", "remote.{r}.receivepack", "remote.{r}.vcs",
-               "remote.{r}.mirror", "push.followTags", "push.recurseSubmodules", "remote.{r}.push",
-               "remote.{r}.proxy", "credential.helper", "http.proxy", "core.gitProxy", "core.askPass")
-# Families of keys (matched on the lower-cased name `git config --get-regexp` reports) with the same effect.
-PUSH_CONFIG_PATTERNS = (r"^protocol\.", r"^credential\.(.*\.)?helper$", r"^http\.(.*\.)?proxy$")
-# Release trigger refs: a push there starts a signed build, so it always asks, whatever was remembered.
-PROTECTED_REF = re.compile(r"refs/heads/release(/|$)", re.IGNORECASE)
-PUSH_HOOKS = ("pre-push", "reference-transaction")
-PUSH_FORM = "only `git push <remote> <full commit sha>:refs/heads/<branch>` can be allowed once"
+
+def _git(repo: str, *args: str) -> str | None:
+    try:
+        res = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=GIT_SECONDS)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return res.stdout.strip() if res.returncode == 0 else None
+
+
+def _owner_now(repo_root: str | None) -> str | None:
+    """Who approves now, as brindle 0.4.7 bound its remembered approvals: the
+    licensed account (within its org), or "local" without a licence; None when
+    an org's member can't be verified."""
+    from brindle.pro import license
+
+    lim = org_limits(repo_root)
+    owner = lim.owner if lim else "local"
+    try:
+        subject = license.current(refresh=False).sub
+    except license.LicenseError:
+        return "local" if owner == "local" else None
+    return hashlib.sha256(f"{owner}:{subject}".encode()).hexdigest()
+
+
+def _binding_holds(binding: dict, req: Request) -> bool:
+    """Whether what a saved allow was bound to still holds for ``req``: the
+    approving identity (``owner``), the repository's git directory
+    (``git_dir``) and, for a push, the URL every pushed-to remote resolves to
+    (``url``). Anything that can't be read doesn't hold."""
+    repo = req.repo_root or req.worktree or req.cwd
+    if "owner" in binding and binding["owner"] != _owner_now(req.repo_root or None):
+        return False
+    if "git_dir" in binding:
+        found = _git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir") if repo else None
+        if found is None or os.path.realpath(found) != os.path.realpath(binding["git_dir"]):
+            return False
+    if "url" in binding:
+        remotes = {p.remote for p in permissions.push_calls(req.command or "")}
+        if not remotes or any(r == UNKNOWN_REF or _git(repo, "remote", "get-url", "--push", r) != binding["url"]
+                              for r in remotes):
+            return False
+    return True
+
+
+def limits_allow(action_level: str | None, action_pattern: str, action_life: str, action_minutes: float | None,
+                 rule: Rule | None) -> str | None:
+    """Why a saved allow with this scope and lifetime falls outside ``rule``'s
+    limits (the ask rule that asked; None for an unmatched ask, which has no
+    limits), or None when it is within them."""
+    limits = (rule.limits if rule is not None else None) or {}
+    if limits.get("life") == "once":
+        return "approvable only once at a time"
+    scope = limits.get("max_scope")
+    if scope:
+        if action_level is not None:
+            if scope in LEVELS and LEVELS.index(action_level) > LEVELS.index(scope):
+                return "outside its approval scope"
+        elif scope not in ("*", "**") and not action_pattern.startswith(scope.rstrip("*")):
+            return "outside its approval scope"
+    life = limits.get("life")
+    if life in ("session", "time") and action_life == "forever":
+        return "not permitted until revoked"
+    if life == "time":
+        cap = limits.get("minutes")
+        if action_life != "time" or action_minutes is None or (cap is not None and action_minutes > cap):
+            return f"over its {cap:g} minute limit" if cap is not None else "over its time limit"
+    return None
+
+
+# -- the org's limits ----------------------------------------------------------------------------
+#
+# For a member of a Team org, the org policy's ``permission_grants`` block
+# (brindle.pro.team_policy.GrantPolicy) bounds what a saved allow may do, read
+# again on every use: the kinds it may cover, its lifetimes (forever only
+# with allow_persistent), at most max_minutes for a timed one, and its
+# scope (branch/remote/repo/all). Its deny rules are in force for every
+# provider (permissions.all_rules). No block, a policy that can't be read,
+# or a member the org paused: no saved allow applies. Without a Team org,
+# nothing here limits the person's own.
+
+# A saved action's level or scope value -> the org scope it needs.
+ORG_SCOPES = {"branch": "branch", "destination": "branch", "exact": "branch", "general": "branch",
+              "remote": "remote", "repository": "repo", "server": "repo", "all": "all"}
 
 
 @dataclass(frozen=True)
-class Limits:
-    """What may be granted in a repo now, and the org's own denies."""
+class OrgLimits:
     allow: bool
     kinds: tuple[str, ...] = ()
-    overridable: tuple[str, ...] = ()
     max_minutes: int = 0
-    max_uses: int = 0
-    deny: tuple[Rule, ...] = ()
-    protected: bool = False       # the org or repo protects paths
-    why: str = ""                 # why nothing may be granted
+    lifetimes: tuple[str, ...] = ()
+    scopes: tuple[str, ...] = ()
     allow_persistent: bool = False
-    owner: str = "local"
-    lifetimes: tuple[str, ...] = ("session", "time")
-    scopes: tuple[str, ...] = ("branch",)
+    deny: tuple[Rule, ...] = ()
+    why: str = ""                 # why no saved allow applies
+    owner: str = "local"          # "org:<id>": whose approvals these are (_owner_now)
+
+
+def org_rule(spec: str) -> Rule:
+    """An org policy deny ("<kind> <match_type> <match>", as a profile's permission_denies) as a rule."""
+    kind, match_type, match = spec.split(None, 2)
+    return Rule(kind, match, match_type, "deny", "org")
 
 
 def _plugin(repo_root: str):
@@ -120,527 +385,415 @@ def _plugin(repo_root: str):
     return ProPolicy(repo_root)
 
 
-def org_rule(spec: str) -> Rule:
-    kind, match_type, match = spec.split(None, 2)
-    return Rule(kind, match, match_type, "deny", "org")
-
-
-def limits(repo_root: str) -> Limits:
-    """The grants a person may give in ``repo_root`` now (see the module).
-    Any failure to read the org's policy offers none."""
-    from brindle.config import load_repo_config
+def org_limits(repo_root: str | None) -> OrgLimits | None:
+    """The Team org's limits in ``repo_root`` now, or None without a Team org."""
     from brindle.policy import Decision as PolicyDecision
     from brindle.pro import status
-    from brindle.pro.team_policy import GRANT_ACTIONS
 
+    if not repo_root:
+        return None
     try:
-        protected = bool(load_repo_config(repo_root).protected_paths)
         p = _plugin(repo_root).policy()
     except Exception as e:  # noqa: BLE001 - fail closed
-        return Limits(False, why=f"the org policy can't be read ({e})")
+        return OrgLimits(False, why=f"the org policy can't be read ({e})")
     if isinstance(p, PolicyDecision):
-        if not p.allowed:
-            return Limits(False, why=p.reason)
-        return Limits(True, permissions.KINDS, GRANT_ACTIONS, LOCAL_MINUTES, LOCAL_USES,
-                      protected=protected, allow_persistent=True,
-                      lifetimes=("session", "time", "forever"), scopes=("branch", "remote", "repo"))
+        return None if p.allowed else OrgLimits(False, why=p.reason)
     g = p.permission_grants
     deny = tuple(org_rule(s) for s in g.deny) if g else ()
+    owner = f"org:{p.org_id}"
     blocked = status.block_reason(p)
     if blocked:
-        return Limits(False, deny=deny, why=f"org {p.org_id}: {blocked}")
+        return OrgLimits(False, deny=deny, why=f"org {p.org_id}: {blocked}", owner=owner)
     if g is None:
-        return Limits(False, why=f"org {p.org_id}'s policy sets no permission_grants")
-    return Limits(g.allow, g.kinds, g.overridable, g.max_minutes, g.max_uses, deny,
-                  protected or bool(p.protected_paths), "" if g.allow else f"org {p.org_id} allows no grants",
-                  allow_persistent=g.allow_persistent, owner=f"org:{p.org_id}",
-                  lifetimes=g.lifetimes, scopes=g.scopes)
+        return OrgLimits(False, why=f"org {p.org_id}'s policy sets no permission_grants", owner=owner)
+    return OrgLimits(g.allow, tuple(g.kinds), g.max_minutes, tuple(g.lifetimes), tuple(g.scopes),
+                     g.allow_persistent, deny, "" if g.allow else f"org {p.org_id} allows no saved approvals", owner)
 
 
-def key(req: Request) -> tuple[str, str] | None:
-    """The exact (kind, match) a grant for ``req`` covers: the whole simple
-    command, the resolved path, the https URL or the tool; None when no
-    grant could cover it (a compound or quoted command, say)."""
-    if req.kind == "bash":
-        argv = permissions.simple_argv(req.command or "")
-        return ("bash", " ".join(argv)) if argv and req.command.strip() == " ".join(argv) else None
-    if req.kind in permissions.PATH_KINDS:
-        return (req.kind, os.path.realpath(req.path)) if req.path else None
-    if req.kind == "fetch":
-        return ("fetch", req.url) if req.url and req.url.startswith("https://") else None
-    return (req.kind, req.tool) if req.tool else None
+def org_denies(repo_root: str | None) -> list[Rule]:
+    lim = org_limits(repo_root)
+    return list(lim.deny) if lim else []
 
 
-def repo_key(req: Request) -> str:
-    return os.path.realpath(req.repo_root or req.worktree or req.cwd)
-
-
-def _hard_deny(req: Request, rules: list[Rule], checks: list[str], action: str) -> Rule | None:
-    """A deny the action can't lift that matches ``req``, each rule on its own."""
-    lifted = {rid for rid, a in OVERRIDABLE.items() if a == action}
-    return next((r for r in rules if r.decision == "deny" and not (r.source == "default" and r.id in lifted)
-                 and permissions.rule_matches(r, req, checks)), None)
-
-
-def offer(req: Request, decision: Decision, lim: Limits) -> dict | None:
-    """The ``allow_for`` grant the person may give for a request the rules
-    leave to them, held for their answer."""
-    k = key(req)
-    if (decision.decision != "ask" or not lim.allow or k is None or req.kind not in lim.kinds
-            or "time" not in lim.lifetimes or "branch" not in lim.scopes):
+def org_refuses(lim: OrgLimits | None, kind: str, life: str, minutes: float | None, level: str | None,
+                scope: str) -> str | None:
+    """Why the org's limits ``lim`` don't let a saved allow of ``kind`` with this
+    lifetime and reach apply, or None (always None without a Team org)."""
+    if lim is None:
         return None
-    return {"type": "allow_for", "kind": k[0], "match": k[1], "minutes": lim.max_minutes, "uses": lim.max_uses}
-
-
-def override(req: Request, decision: Decision, rules: list[Rule], checks: list[str],
-             lim: Limits) -> tuple[dict | None, str]:
-    """(the one-time lift of the built-in deny that refused ``req``; else
-    None and why not, "" when ``decision`` isn't such a deny at all)."""
-    rule = decision.rule
-    action = OVERRIDABLE.get(rule.id) if decision.decision == "deny" and rule and rule.source == "default" else None
-    if action is None:
-        return None, ""
     if not lim.allow:
-        return None, f"no one-time grant: {lim.why}"
-    if not lim.lifetimes or not any(_scope_allowed(action, s, lim) for s in PUSH_SCOPES):
-        return None, "no one-time grant: the policy permits no supported lifetime or scope"
-    if req.kind not in lim.kinds:
-        return None, f"no one-time grant: the policy does not allow {req.kind} grants"
-    if action not in lim.overridable:
-        return None, f"no one-time grant: the policy doesn't let a person lift {rule.id}"
-    hard = _hard_deny(req, rules, checks, action)
-    if hard is not None:
-        return None, f"no one-time grant: {hard.source} rule {hard.id} ({hard.describe()}) denies it too"
-    scope, why = ADAPTERS[action](req, lim)
-    if scope is None:
-        return None, f"no one-time grant: {why}"
-    return {"type": "override", "rule": rule.id, "action": action, "scope": scope}, ""
-
-
-def lift(agent_id: str, req: Request, decision: Decision, rules: list[Rule], checks: list[str],
-         lim: Limits) -> Decision:
-    """For a deny an adapter knows: an allow by spending the person's
-    one-time grant for exactly this request and the scope it has now, else
-    the deny, having asked the person for that grant in the app. The deny
-    is answered at once, never held: a held request shows the CLI's own
-    prompt meanwhile (Claude Code's does), and an answer typed there would
-    run it without the person's grant."""
-    from dataclasses import replace
-
-    from brindle.daemon import grants
-
-    lifted, why = override(req, decision, rules, checks, lim)
-    k = key(req)
-    if lifted is None or k is None:
-        return replace(decision, reason=f"{decision.reason}; {why}") if why else decision
-    scope = json.dumps(lifted["scope"], sort_keys=True)
-    remembered = remembered_match(req, lifted, lim, agent_id=agent_id)
-    if remembered is not None:
-        return Decision("allow", f"allowed by the person's saved permission preference {remembered}")
-    g = grants.use(agent_id, repo_key(req), *k, scope=scope, max_minutes=lim.max_minutes, max_uses=lim.max_uses)
-    if g is not None:
-        return Decision("allow", f"allowed once by the person's grant {g.get('id')} ({describe(lifted)}); "
-                                 "whether the command succeeds isn't known")
-    # Only the request: the daemon works out what the person is shown and allows (ask_for).
-    asked = grants.ask(agent_id, {**req.to_dict(), "grant": None})
-    if asked is None:
-        return replace(decision, reason=f"{decision.reason}; no one-time grant could be asked for "
-                                        "(brindle's app isn't running, or too many are waiting)")
-    return replace(decision, reason=f"{decision.reason}; asked the person to allow it once in brindle's "
-                                    f"Inbox ({asked}): once they have, run exactly the same command again")
-
-
-def decision_now(req: Request, checks: list[str], rules: list[Rule]) -> Decision:
-    """The rules' answer for one request, a deny in any part of it first."""
-    return permissions.deny_in_parts(req, checks=checks, rules=rules) or permissions.decide(
-        req, checks=checks, rules=rules)
-
-
-def recheck(req: Request, offered: dict, checks: list[str], extra_rules: list[Rule]) -> str | None:
-    """Why the ``allow_for`` grant the person just offered or gave no longer
-    holds, read again now (the policy, every rule), else None."""
-    bare = Request.from_dict({**req.to_dict(), "grant": None})
-    lim = limits(bare.repo_root)
-    rules = [*permissions.all_rules(bare.repo_root or None), *extra_rules, *lim.deny]
-    decision = decision_now(bare, checks, rules)
-    if offer(bare, decision, lim) == offered:
-        return None
-    return lim.why or decision.reason or "the request or the policy changed while it was held"
-
-
-def use_grant(agent_id: str, req: Request, decision: Decision, lim: Limits) -> Decision:
-    """``decision``, or an allow by spending a use of the agent's grant for
-    exactly this request when the rules, read just now, leave it to the
-    person and the policy still lets this kind be granted."""
-    from brindle.daemon import grants
-
-    k = key(req)
-    if (decision.decision != "ask" or not lim.allow or k is None or req.kind not in lim.kinds
-            or "time" not in lim.lifetimes or "branch" not in lim.scopes):
-        return decision
-    g = grants.use(agent_id, repo_key(req), *k, max_minutes=lim.max_minutes, max_uses=lim.max_uses)
-    if g is None:
-        return decision
-    left = max(0, round((float(g.get("expires_at", 0)) - time.time()) / 60))
-    return Decision("allow", f"allowed by the person's grant {g.get('id')} ({g.get('uses_left')} uses and "
-                             f"{left} min left); whether the call succeeds isn't known")
-
-
-def make(agent_id: str, req: Request, minutes: int | None = None) -> dict | None:
-    """The person answered ``allow_for``: the grant it leaves for later
-    calls (this one is allowed already), within the policy as it is now.
-    This held-request grant also ends with the agent or daemon."""
-    from brindle.daemon.grants import GRANTS
-
-    offered = parse(req)
-    if not offered or offered.get("type") != "allow_for":
-        return None
-    lim = limits(req.repo_root)
-    if (not lim.allow or offered["kind"] not in lim.kinds
-            or "time" not in lim.lifetimes or "branch" not in lim.scopes):
-        return None
-    g = GRANTS.add(agent_id, repo_key(req), offered["kind"], offered["match"],
-                   min(minutes if minutes is not None else int(offered["minutes"]), lim.max_minutes),
-                   min(int(offered["uses"]), lim.max_uses) - 1,
-                   uses_spent=1)
-    return g.to_json() if g else None
-
-
-def approve(asked) -> tuple[str | None, int]:
-    """(why the person can't give the one-time grant ``asked``
-    (daemon.grants.Asked) under the policy as it is now, else None; the
-    longest the policy lets it last, in minutes)."""
-    lim = limits(asked.repo_root)
-    if not lim.allow:
-        return lim.why, 0
-    if not lim.lifetimes or not any(_scope_allowed(asked.action, s, lim) for s in PUSH_SCOPES):
-        return "the policy permits no supported lifetime or scope", 0
-    if asked.kind not in lim.kinds:
-        return f"the policy does not allow {asked.kind} grants", 0
-    if asked.action not in lim.overridable:
-        return f"the policy doesn't let a person lift a {asked.action} deny", 0
-    return None, lim.max_minutes
-
-
-def validate_asked(asked, db) -> bool:
-    """Rebuild the adapter offer from current workspace, rules and destination."""
-    agent = db.get_agent(asked.agent_id)
-    ws = db.get_workspace(agent.workspace_id) if agent else None
-    if ws is None:
-        return False
-    scope = json.loads(asked.scope)
-    raw = {"kind": asked.kind, "tool": "Bash" if asked.kind == "bash" else "Read",
-           "cwd": ws.path, "command": asked.match if asked.kind == "bash" else None,
-           "path": scope.get("path")}
-    return ask_for(asked.agent_id, raw) == (asked.repo_root, asked.kind, asked.match, asked.scope,
-                                           asked.action, asked.describe)
-
-
-PUSH_SCOPES = ("branch", "remote", "repo", "all")
-
-
-def _scope_allowed(action: str, level: str, lim: Limits) -> bool:
-    level = "repo" if level == "repository" else level
-    if action != "git-push":
-        return level == "branch" and "branch" in lim.scopes
-    return level in PUSH_SCOPES and level in lim.scopes
-
-
-def _preference_scope(action: str, scope: dict, level: str = "branch") -> dict:
-    level = "repo" if level == "repository" else level
-    names = ("path",)
-    if action == "git-push":
-        names = {"branch": ("repo", "git_dir", "remote", "url", "ref"),
-                 "remote": ("repo", "git_dir", "remote", "url"),
-                 "repo": ("repo", "git_dir"), "all": ()}[level]
-    return {name: scope[name] for name in names}
-
-
-def _preference_owner(lim: Limits) -> str | None:
-    from brindle.pro import license
-
-    try:
-        subject = license.current(refresh=False).sub
-    except license.LicenseError:
-        return "local" if lim.owner == "local" else None
-    return hashlib.sha256(f"{lim.owner}:{subject}".encode()).hexdigest()
-
-
-def persistent_allowed(asked) -> bool:
-    return _saved_allowed(asked, "forever")
-
-
-def timed_allowed(asked) -> bool:
-    return _saved_allowed(asked, "time")
-
-
-def session_allowed(asked) -> bool:
-    return _saved_allowed(asked, "session") and _session_binding(asked.agent_id) is not None
-
-
-def _saved_allowed(asked, lifetime: str) -> bool:
-    lim = limits(asked.repo_root)
-    return (lim.allow and lim.allow_persistent and asked.kind in lim.kinds and asked.action in lim.overridable
-            and lifetime in lim.lifetimes
-            and _preference_owner(lim) is not None
-            and any(_scope_allowed(asked.action, s, lim) for s in PUSH_SCOPES))
-
-
-def _session_binding(agent_id: str) -> dict | None:
-    from brindle.autopilot import root_of
-    from brindle.db import DB
-
-    db = DB()
-    try:
-        root = db.get_agent(root_of(db, agent_id))
-        if (root is None or root.parent_id is not None or root.mode != "interactive"
-                or root.status in ("done", "paused") or root.dismissed_at is not None):
-            return None
-        return {"id": root.id, "created": root.created_at}
-    finally:
-        db.conn.close()
-
-
-def approval_scopes(asked) -> dict[str, str]:
-    lim = limits(asked.repo_root)
-    if asked.action != "git-push" or not (timed_allowed(asked) or persistent_allowed(asked) or session_allowed(asked)):
-        return {}
-    return {level: remember_description(asked, level).removesuffix(", until revoked")
-            for level in PUSH_SCOPES if _scope_allowed(asked.action, level, lim)}
-
-
-def remember_description(asked, level: str = "branch") -> str:
-    scope = json.loads(asked.scope)
-    if asked.action == "git-push":
-        if level == "all":
-            return "Allow future non-force pushes to all policy-permitted remotes and branches across repositories, until revoked"
-        if level in ("repo", "repository"):
-            return f"Allow future non-force pushes to all policy-permitted remotes and branches in {asked.repo_root}, until revoked"
-        if level == "remote":
-            return f"Allow future non-force pushes to all branches on {scope['remote']} at {scope['url']} in this repository, until revoked"
-        return f"Allow future non-force pushes to {scope['ref']} at {scope['url']} in this repository, until revoked"
-    return f"Allow reading {scope['path']} in this repository, until revoked"
-
-
-def remember(asked, minutes: int | None = None, scope_level: str = "branch", *,
-             lifetime: str | None = None) -> str:
-    """Persist the person's scoped decision; callers hold the ask's lock."""
-    lifetime = lifetime or ("time" if minutes is not None else "forever")
-    if not _saved_allowed(asked, lifetime):
-        raise ValueError("current policy does not allow this approval lifetime")
-    session = _session_binding(asked.agent_id) if lifetime == "session" else None
-    if lifetime == "session" and session is None:
-        raise ValueError("the supervisor session is no longer open")
-    lim = limits(asked.repo_root)
-    if not _scope_allowed(asked.action, scope_level, lim):
-        raise ValueError("approval scope exceeds current policy")
-    if minutes is not None and (not lim.allow or asked.kind not in lim.kinds
-                                or asked.action not in lim.overridable or not 0 < minutes <= lim.max_minutes):
-        raise ValueError("duration exceeds current policy")
-    owner = _preference_owner(lim)
-    if owner is None:
-        raise ValueError("the approving identity cannot be verified")
-    scope = _preference_scope(asked.action, json.loads(asked.scope), scope_level)
-    binding = [owner, None if scope_level == "all" else asked.repo_root, asked.kind, asked.action, scope]
-    if lifetime != "forever":
-        binding.extend([lifetime, *([session] if session else [])])
-    id_ = "remembered-" + hashlib.sha256(json.dumps(binding, sort_keys=True).encode()).hexdigest()[:24]
-    record = {"id": id_, "owner": owner, "repo_root": asked.repo_root, "kind": asked.kind,
-              "action": asked.action, "scope": scope, "scope_level": scope_level, "lifetime": lifetime,
-              "match": remember_description(asked, scope_level), "created": time.time()}
-    if minutes is not None:
-        record.update(expires_at=record["created"] + minutes * 60, uses_spent=0, max_uses=lim.max_uses)
-        record["match"] = record["match"].replace("until revoked", f"for {minutes} minutes")
-    if session is not None:
-        record.update(session=session, uses_spent=0, max_uses=lim.max_uses)
-        record["match"] = record["match"].replace("until revoked", f"until supervisor session {session['id']} ends")
-    with permissions.editing() as store:
-        store.remembered = [r for r in store.remembered if r.get("id") != id_] + [record]
-    return id_
-
-
-def remembered_match(req: Request, lifted: dict, lim: Limits, *, agent_id: str = "") -> str | None:
-    if not lim.allow or not lim.allow_persistent or req.kind not in lim.kinds or lifted["action"] not in lim.overridable:
-        return None
-    owner = _preference_owner(lim)
-    if owner is None:
-        return None
-    with permissions.editing() as store:
-        for record in store.remembered:
-            level = record.get("scope_level", "branch")
-            lifetime = record.get("lifetime", "time" if "expires_at" in record else "forever")
-            if (record.get("owner") != owner or (level != "all" and record.get("repo_root") != repo_key(req))
-                    or record.get("kind") != req.kind or record.get("action") != lifted["action"]
-                    or not _scope_allowed(lifted["action"], level, lim)
-                    or lifetime not in lim.lifetimes
-                    or record.get("scope") != _preference_scope(lifted["action"], lifted["scope"], level)
-                    or not isinstance(record.get("id"), str)):
-                continue
-            if lifetime in ("session", "time"):
-                if lifetime == "session":
-                    session = _session_binding(agent_id) if agent_id else None
-                    if session is None or record.get("session") != session:
-                        continue
-                if lifetime == "time" and time.time() >= min(record["expires_at"], record["created"] + lim.max_minutes * 60):
-                    continue
-                if record.get("uses_spent", 0) >= min(record.get("max_uses", lim.max_uses), lim.max_uses):
-                    continue
-                record["uses_spent"] = record.get("uses_spent", 0) + 1
-            return record["id"]
+        return lim.why or "the org allows no saved approvals"
+    if ("bash" if kind == "push" else kind) not in lim.kinds:
+        return f"the org allows no saved approvals of {kind}"
+    if life not in lim.lifetimes or life == "forever" and not lim.allow_persistent:
+        return f"the org doesn't allow approvals that last {'until revoked' if life == 'forever' else 'a ' + life}"
+    if life == "time" and (minutes is None or minutes > lim.max_minutes):
+        return f"over the org's {lim.max_minutes} minute limit"
+    if ORG_SCOPES.get(level or scope, "all") not in lim.scopes:
+        return "wider than the org allows"
     return None
 
 
-def remembered_grants() -> list[dict]:
-    fields = ("id", "repo_root", "kind", "match", "created")
-    out = []
-    for r in permissions.load_store().remembered:
-        if not all(k in r for k in fields):
-            continue
-        session = r.get("session") if r.get("lifetime") == "session" else None
-        if r.get("lifetime") == "session" and (
-                not isinstance(session, dict) or _session_binding(session.get("id", "")) != session):
-            continue
-        if ("expires_at" in r and r["expires_at"] <= time.time()
-                or "max_uses" in r and r.get("uses_spent", 0) >= r["max_uses"]):
-            continue
-        out.append({**{k: r[k] for k in fields}, "agent_id": session["id"] if session else "",
-                    "expires_at": r.get("expires_at"),
-                    "uses_left": max(0, r["max_uses"] - r.get("uses_spent", 0)) if "max_uses" in r else None,
-                    "persistent": "expires_at" not in r and session is None})
-    return out
+def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session: str | None = None,
+           rules: list[Rule] | None = None, now: float | None = None, denies_only: bool = False,
+           asks: tuple = (), spend: bool = False) -> Decision | None:
+    """The saved action that settles an ask for ``req`` (``rule``: the ask
+    rule that asked, None for an unmatched ask; ``asks``: every ask rule that
+    matches it, when several do), as a Decision, or None. A saved deny always
+    stops it; a saved allow only within the limits of every one of those
+    rules and the org's, while it has uses left (``spend``: the call runs on
+    it, so one is spent). ``denies_only``: look for a deny alone, before the
+    policy's own allows. ``session``: the asking agent's session, for saved
+    actions that last one."""
+    now = time.time() if now is None else now
+    hits = [s for s in saved if not s.expired(now) and (s.life != "session" or (session and s.session == session))
+            and (s.decision == "deny" or not denies_only) and covers(s, req, rules)]
+    for s in hits:
+        if s.decision == "deny":
+            return Decision("deny", f"stopped by your saved deny {s.id} ({s.kind} {s.pattern})")
+    if denies_only:
+        return None
+    lim = org_limits(req.repo_root or None) if hits else None
+    for s in hits:
+        if (all(limits_allow(s.level, s.pattern, s.life, s.minutes, r) is None for r in asks or [rule])
+                and org_refuses(lim, s.kind, s.life, s.minutes, s.level, s.scope) is None
+                and (s.uses_left is None or s.uses_left > 0 and (not spend or permissions.spend_saved_use(s.id)))):
+            return Decision("allow", f"covered by your saved action {s.id} ({s.kind} {s.pattern})", rule)
+    return None
 
 
-def forget_remembered(id_: str) -> dict | None:
-    with permissions.editing() as store:
-        found = next((r for r in store.remembered if r.get("id") == id_), None)
-        store.remembered = [r for r in store.remembered if r.get("id") != id_]
-        return found
+# -- pending asks, grouped -----------------------------------------------------------------------
 
 
-def ask_for(agent_id: str, raw: dict) -> tuple[str, str, str, str, str, str] | None:
-    """What a one-time grant of ``raw`` (the request the agent's hook was
-    refused) would cover and what the person is shown: (repo, kind, match,
-    scope, action, description), worked out in the daemon from the agent's
-    own workspace, its rules and the repository as it is now; nothing the
-    hook says about it is taken. None when no one-time grant applies."""
+@dataclass
+class PendingAsk:
+    agent_id: str
+    root_id: str
+    request_id: str
+    digest: str
+    repo_root: str
+    request: Request
+    ask: Ask
+    created_at: float
+    policy: Decision              # what the rules say, saved actions aside: deny (blocked) or ask
+    worker: str = ""
+
+    @property
+    def blocked(self) -> bool:
+        return self.policy.decision == "deny"
+
+    @property
+    def rule(self) -> Rule | None:
+        return self.policy.rule
+
+
+@dataclass
+class Group:
+    key: str
+    repo_root: str
+    kind: str
+    items: list[PendingAsk]       # oldest first
+    policy: Decision = field(default_factory=lambda: Decision("ask", ""))
+
+    @property
+    def rep(self) -> PendingAsk:
+        return self.items[0]
+
+
+def _policy(req: Request, repo_root: str) -> Decision:
+    """The rules' answer for ``req`` with saved actions set aside (an ask's rule, for its limits)."""
     from brindle.config import load_repo_config
-    from brindle.db import DB
-    from brindle.profiles import profile_rules_for
 
-    fields = ("provider", "kind", "tool", "cwd", "command", "path", "url")
-    if not all(raw.get(f) is None or isinstance(raw.get(f), str) for f in fields):
-        return None
-    db = DB()
-    try:
+    checks = list(load_repo_config(repo_root).checks or []) if repo_root else None
+    return permissions.decide(req, checks=checks, rules=permissions.all_rules(repo_root or None), saved=[])
+
+
+def pending_asks(db, repo_root: str | None = None) -> list[PendingAsk]:
+    """Every request a hook holds for a person now (across ``repo_root``'s
+    sessions, or every repo's), oldest first."""
+    from brindle import autopilot
+    from brindle.daemon.holds import HOLDS
+    from brindle.service import inbox
+
+    out = []
+    for agent_id in HOLDS.agents():
         agent = db.get_agent(agent_id)
-        ws = db.get_workspace(agent.workspace_id) if agent else None
-    finally:
-        db.conn.close()
-    if ws is None:
+        if agent is None:
+            continue
+        ws = db.get_workspace(agent.workspace_id)
+        if ws is None or (repo_root and ws.repo_root != repo_root):
+            continue
+        root = autopilot.root_of(db, agent.id)
+        for p in inbox.pending_permissions(db, agent):
+            if p.via != "hook" or p.request is None or p.row is None:
+                continue
+            out.append(PendingAsk(agent.id, root, p.dto.request_id, p.dto.digest, ws.repo_root, p.request,
+                                  generalize(p.request), float(p.row["created_at"]), _policy(p.request, ws.repo_root),
+                                  worker=agent.profile))
+    return sorted(out, key=lambda a: a.created_at)
+
+
+def group_key(repo_root: str, kind: str, pattern: str) -> str:
+    return f"{repo_root}|{kind}|{pattern}"
+
+
+def _restrictive(policies: list[Decision]) -> Decision:
+    """The policy a group is shown under: a deny, else the tightest lifetime."""
+    for p in policies:
+        if p.decision == "deny":
+            return p
+
+    def rank(p: Decision) -> tuple:
+        limits = (p.rule.limits if p.rule else None) or {}
+        life = limits.get("life")
+        return ({"once": -1, "time": 0, "session": 1}.get(life, 2), limits.get("minutes") or 0)
+
+    return sorted(policies, key=rank)[0]
+
+
+def groups(asks: list[PendingAsk]) -> list[Group]:
+    """One group per repo, kind and general form, each generalized from its oldest ask."""
+    by_key: dict[str, Group] = {}
+    for a in asks:
+        key = group_key(a.repo_root, a.ask.kind, a.ask.general["pattern"])
+        g = by_key.get(key)
+        if g is None:
+            g = by_key[key] = Group(key, a.repo_root, a.ask.kind, [])
+        g.items.append(a)
+    for g in by_key.values():
+        g.policy = _restrictive([a.policy for a in g.items])
+    return list(by_key.values())
+
+
+def eligible(ask: PendingAsk, scope: dict, mode: str, minutes: float | None) -> str | None:
+    """Why ``ask`` can't be resolved by a grant of ``scope`` in ``mode``, or None."""
+    if ask.blocked:
+        return "blocked by a deny rule"
+    if mode in ("deny", "always-deny"):
         return None
+    if not all(scope_matches(ask.ask.kind, scope["pattern"], key) for key in ask_keys(ask.request)):
+        if not _is_exact(ask, scope):
+            return "pushes outside this scope"     # a command pushing to more than the scope covers
+        if mode != "once":
+            # Its own exact form, which no pattern fits: a push whose branch
+            # only git knows (git push origin HEAD). The held request itself
+            # can be let through, but a saved grant could cover any branch.
+            return "only git knows which branch it pushes: approve it once, or at a wider scope"
+    if mode == "once":
+        return None
+    life = {"session": "session", "timed": "time", "forever": "forever"}[mode]
+    return (next((why for r in ask.policy.asks or [ask.rule]
+                  if (why := limits_allow(scope.get("level"), scope["pattern"], life, minutes, r))), None)
+            or org_refuses(org_limits(ask.repo_root or None), ask.ask.kind, life, minutes, scope.get("level"),
+                           scope["value"]))
+
+
+def _is_exact(ask: PendingAsk, scope: dict) -> bool:
+    """Whether ``scope`` is ``ask``'s own exact form (the held request's
+    identity, which fits it even where no pattern does: an unknown ref)."""
+    return scope["value"] == EXACT and scope["pattern"] == ask.ask.exact
+
+
+def candidates(asks: list[PendingAsk], g: Group, scope: dict, loose: bool = False) -> list[PendingAsk]:
+    """Every pending ask of the group's kind and repo the scope covers (every
+    push of a command that makes several, or the ask whose exact form the
+    scope is). ``loose``: for a deny, as scope_matches reads it."""
+    return [a for a in asks if a.repo_root == g.repo_root and a.ask.kind == g.kind
+            and (_is_exact(a, scope)
+                 or all(scope_matches(g.kind, scope["pattern"], key, loose) for key in ask_keys(a.request)))]
+
+
+def _result(a: PendingAsk, why: str | None = None) -> dict:
+    row = {"agent_id": a.agent_id, "request_id": a.request_id, "exact": a.ask.exact}
+    return {**row, "why": why} if why else row
+
+
+def _answer(db, ask: PendingAsk, choice: str) -> str | None:
+    """Answer one held ask; why it couldn't be, if it couldn't."""
+    from brindle.service import inbox
+    from brindle.service.errors import ServiceError
+
     try:
-        req = Request(**{f: raw.get(f) or "" for f in ("provider", "kind", "tool", "cwd")},
-                      worktree=ws.path, repo_root=ws.repo_root,
-                      command=raw.get("command"), path=raw.get("path"), url=raw.get("url"))
-        lim = limits(ws.repo_root)
-        rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root), *lim.deny]
-        checks = load_repo_config(ws.repo_root).checks
-        lifted, _ = override(req, decision_now(req, checks, rules), rules, checks, lim)
-    except Exception:  # noqa: BLE001 - anything unexpected grants nothing
-        return None
-    k = key(req)
-    if lifted is None or k is None:
-        return None
-    return repo_key(req), k[0], k[1], json.dumps(lifted["scope"], sort_keys=True), lifted["action"], describe(lifted)
+        inbox.answer_permission(db, ask.agent_id, ask.request_id, ask.digest, choice)
+    except ServiceError as e:
+        return e.message
+    return None
 
 
-def parse(req: Request | None) -> dict | None:
-    try:
-        got = json.loads(req.grant) if req is not None and req.grant else None
-    except ValueError:
-        return None
-    return got if isinstance(got, dict) else None
+def _grant(g: Group, scope: dict, decision: str, life: str, minutes: float | None, rep: PendingAsk) -> SavedAction:
+    return permissions.save_action(
+        g.kind, scope["pattern"], decision, scope=scope["value"], level=scope.get("level"),
+        request=rep.request.to_dict(), life=life, minutes=minutes if life == "time" else None,
+        session=rep.root_id if life == "session" else None,
+        repo=None if scope["value"] == "all" else g.repo_root, note=scope["label"])
 
 
-def describe(offered: dict) -> str:
-    """The offer in a line, for the person."""
-    if offered.get("type") == "allow_for":
-        return (f"allow {offered['kind']} {offered['match']!r} for this agent, for {offered['minutes']} min "
-                f"or {offered['uses']} uses")
-    scope = offered.get("scope") or {}
-    if offered.get("action") == "git-push":
-        return (f"lift {offered.get('rule')} once: push {scope.get('commit')} from {scope.get('git_dir')} "
-                f"to {scope.get('ref')} at {scope.get('url')} ({scope.get('remote')})")
-    return f"lift {offered.get('rule')} once: read {scope.get('path')}"
+def _resolve(db, hits: list[PendingAsk], choice: str) -> tuple[list[dict], list[dict]]:
+    done, failed = [], []
+    for a in hits:
+        why = _answer(db, a, choice)
+        (failed if why else done).append(_result(a, why))
+    return done, failed
 
 
-# -- adapters -----------------------------------------------------------------------------------
+def decide_group(db, key: str, scope_value: str, mode: str, minutes: float | None = None,
+                 asks: list[PendingAsk] | None = None) -> dict:
+    """The person's decision on Inbox item ``key``: ``mode`` once (allow
+    these, save nothing), session, timed (``minutes``) or forever (save an
+    allow of ``scope_value``), deny (stop these, save nothing) or always-deny
+    (save a deny). Every candidate the scope covers is checked against its
+    own policy; the grant is saved first, then each eligible ask is answered
+    through its hold. What was resumed, stopped, skipped (and why) or failed."""
+    if mode not in MODES:
+        raise _error("invalid", f"mode must be one of {', '.join(MODES)}")
+    asks = pending_asks(db) if asks is None else asks
+    g = next((g for g in groups(asks) if g.key == key), None)
+    if g is None:
+        raise _error("not_found", "no such Inbox item any more: fetch the asks again", 404)
+    scope = g.rep.ask.scope(scope_value)
+    if scope is None:
+        raise _error("invalid", f"scope must be one of {', '.join(s['value'] for s in g.rep.ask.scopes)}")
+    if mode == "timed" and (minutes is None or minutes <= 0):
+        raise _error("invalid", "a timed grant needs positive minutes")
+    # Narrowed to the exact request, "once" and "deny" resolve the oldest ask
+    # alone; at any wider scope the whole item (a grant: every ask it covers).
+    exact = scope["value"] == EXACT
+    wanted = (([g.rep] if exact else list(g.items)) if mode in ("once", "deny")
+              else candidates(asks, g, scope, loose=mode == "always-deny"))
+    reasons: dict[str, str] = {}
+    hits = []
+    for a in wanted:
+        # A deny needs no coverage: it stops what the person points at.
+        why = eligible(a, scope, mode, minutes) if mode not in ("deny", "always-deny") else None
+        if why:
+            reasons[a.request_id] = why
+        else:
+            hits.append(a)
+    if not hits:
+        raise _error("conflict", "nothing in this scope can be approved: "
+                     + "; ".join(sorted(set(reasons.values()))), 409)
+    # What is saved is the decision on this item: it must be one its own ask permits.
+    own = eligible(g.rep, scope, mode, minutes) if mode in ("session", "timed", "forever") else None
+    if own:
+        raise _error("conflict", f"this can't be saved: {own}", 409)
+    grant = None
+    if mode in ("session", "timed", "forever"):
+        grant = _grant(g, scope, "allow", {"session": "session", "timed": "time", "forever": "forever"}[mode],
+                       minutes, g.rep)
+    elif mode == "always-deny":
+        grant = _grant(g, scope, "deny", "forever", None, g.rep)
+    done, failed = _resolve(db, hits, "deny" if mode in ("deny", "always-deny") else "allow_once")
+    return {"mode": mode, "scope": scope, "grant": grant.to_dict() if grant else None,
+            "resumed": done if mode not in ("deny", "always-deny") else [],
+            "stopped": done if mode in ("deny", "always-deny") else [],
+            "skipped": [_result(a, reasons[a.request_id]) for a in wanted if a.request_id in reasons],
+            "failed": failed}
 
 
-def _git(cwd: str, *args: str) -> tuple[int, list[str]]:
-    try:
-        res = subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True, timeout=GIT_SECONDS)
-    except (OSError, subprocess.SubprocessError):
-        return -1, []
-    return res.returncode, [ln for ln in res.stdout.splitlines() if ln.strip()]
+# -- the stall notice's automated fixes ----------------------------------------------------------
 
 
-def push_scope(req: Request, lim: Limits) -> tuple[dict | None, str]:
-    """The exact push ``req`` makes, when it is one a person may allow once."""
-    if lim.protected:
-        return None, "protected paths are set, and a push skips the merge check that enforces them"
-    command = (req.command or "").strip()
-    argv = permissions.simple_argv(command)
-    if not argv or command != " ".join(argv) or len(argv) != 4 or argv[:2] != ["git", "push"]:
-        return None, PUSH_FORM
-    remote, (commit, _, ref) = argv[2], argv[3].partition(":")
-    # The repository the push runs in must be the agent's own worktree, not
-    # another clone or a repository nested inside it: that is what is bound.
-    root = os.path.realpath(req.worktree) if req.worktree else ""
-    code, top = _git(req.cwd or req.worktree, "rev-parse", "--show-toplevel")
-    if not root or code != 0 or not top or os.path.realpath(top[0]) != root:
-        return None, "the push doesn't run in the agent's own worktree"
-    code, common = _git(root, "rev-parse", "--git-common-dir")
-    if code != 0 or not common:
-        return None, "the worktree's repository can't be read"
-    git_dir = os.path.realpath(os.path.join(root, common[0]))
-    cwd = root
-    if (not REMOTE.fullmatch(remote) or not SHA.fullmatch(commit) or not BRANCH_REF.fullmatch(ref)
-            or _git(cwd, "check-ref-format", ref)[0] != 0):
-        return None, PUSH_FORM
-    if PROTECTED_REF.match(ref):
-        return None, f"{ref} is a release ref, and a push there always needs the person's own approval"
-    code, urls = _git(cwd, "remote", "get-url", "--push", "--all", remote)
-    if code != 0 or len(urls) != 1:
-        return None, f"remote {remote} has no single push URL"
-    url = urls[0].strip()
-    if not PUSH_URL.fullmatch(url) or "::" in url:
-        return None, f"{remote}'s push URL {url!r} isn't https, ssh or user@host:path"
-    for name in PUSH_CONFIG:
-        name = name.format(r=remote)
-        code, _ = _git(cwd, "config", "--get-all", name)
-        if code != 1:
-            return None, f"{name} is set (or can't be read), and could change where or what it pushes"
-    for pattern in PUSH_CONFIG_PATTERNS:
-        code, _ = _git(cwd, "config", "--get-regexp", pattern)
-        if code != 1:
-            return None, f"a setting matching {pattern} is set (or can't be read), and could change where or what it pushes"
-    for hook in PUSH_HOOKS:
-        code, out = _git(cwd, "rev-parse", "--git-path", f"hooks/{hook}")
-        if code != 0 or not out or os.path.exists(os.path.join(cwd, out[0])):
-            return None, f"a {hook} hook runs on push"
-    return {"repo": repo_key(req), "git_dir": git_dir, "remote": remote, "url": url, "ref": ref,
-            "commit": commit}, ""
+def _mode_for(policy: Decision, forever: bool) -> tuple[str, float | None]:
+    """The widest grant ``policy`` permits: forever when asked for, else its
+    lifetime (a timed one at its cap), else for the session."""
+    if forever:
+        return "forever", None
+    limits = (policy.rule.limits if policy.rule else None) or {}
+    if limits.get("life") == "time":
+        return "timed", limits.get("minutes")
+    if limits.get("life") == "forever":
+        return "forever", None
+    return "session", None
 
 
-def env_scope(req: Request, lim: Limits) -> tuple[dict | None, str]:
-    """The one ``.env`` file inside the worktree ``req`` reads."""
-    root = os.path.realpath(req.worktree) if req.worktree else ""
-    real = os.path.realpath(req.path) if req.path else ""
-    if (req.kind != "read" or not root or not real.startswith(root + os.sep)
-            or not os.path.basename(real).startswith(".env") or not os.path.isfile(real)):
-        return None, "only one .env file inside the worktree can be read once"
-    return {"path": real}, ""
+def plan_allow_all(asks: list[PendingAsk], forever: bool = False, only: list[PendingAsk] | None = None) -> dict:
+    """What "allow everything waiting" would grant: one grant per Inbox item
+    at the general scope where every ask's policy permits it, an exact grant
+    for each ask whose policy permits only that, and what stays waiting."""
+    wanted = asks if only is None else only
+    plan, done, skipped = [], [], []
+    for g in groups(asks):
+        mine = [a for a in g.items if a in wanted]
+        if not mine:
+            continue
+        mode, minutes = _mode_for(g.policy, forever)
+        general = g.rep.ask.general
+        ok = [a for a in mine if eligible(a, general, mode, minutes) is None]
+        if ok:
+            plan.append({"group": g, "scope": general, "hits": ok, "mode": mode, "minutes": minutes})
+            done += ok
+        for a in mine:
+            if a in ok:
+                continue
+            own_mode, own_minutes = _mode_for(a.policy, forever)
+            exact = a.ask.scopes[0]
+            if eligible(a, exact, own_mode, own_minutes) is None:
+                plan.append({"group": g, "scope": exact, "hits": [a], "mode": own_mode, "minutes": own_minutes})
+                done.append(a)
+            else:
+                skipped.append(a)
+    return {"plan": plan, "done": done, "skipped": skipped}
 
 
-ADAPTERS = {"git-push": push_scope, "env": env_scope}
+def plan_to_json(planned: dict) -> dict:
+    return {"grants": [{"group": e["group"].key, "kind": e["group"].kind, "scope": e["scope"],
+                        "mode": e["mode"], "minutes": e["minutes"],
+                        "requests": [a.request_id for a in e["hits"]]} for e in planned["plan"]],
+            "resumes": len(planned["done"]),
+            "skipped": [_result(a, "blocked by a deny rule" if a.blocked else "outside its own limits")
+                        for a in planned["skipped"]]}
+
+
+def allow_all(db, repo_root: str | None = None, forever: bool = False, asks: list[PendingAsk] | None = None,
+              only: list[PendingAsk] | None = None) -> dict:
+    """Carry out plan_allow_all: save each grant, answer each ask through its hold."""
+    asks = pending_asks(db, repo_root) if asks is None else asks
+    planned = plan_allow_all(asks, forever, only)
+    grants, resumed, failed = [], [], []
+    for e in planned["plan"]:
+        life = {"session": "session", "timed": "time", "forever": "forever"}[e["mode"]]
+        grants.append(_grant(e["group"], e["scope"], "allow", life, e["minutes"], e["hits"][0]).to_dict())
+        done, lost = _resolve(db, e["hits"], "allow_once")
+        resumed += done
+        failed += lost
+    return {**plan_to_json(planned), "saved": grants, "resumed": resumed, "failed": failed}
+
+
+def deny_rules_for(ask: PendingAsk, rules: list[Rule]) -> list[Rule]:
+    return [r for r in rules if r.decision == "deny" and permissions.rule_matches(r, ask.request)]
+
+
+def unblock_denied(db, repo_root: str | None = None, forever: bool = False) -> dict:
+    """Narrow the deny rules that block waiting asks with an exception for
+    exactly each blocked request (a repo's own deny can't be changed here:
+    the ask stays blocked), add an ask rule where unmatched actions are
+    denied, then allow what was blocked (allow_all over those asks)."""
+    asks = pending_asks(db, repo_root)
+    denied = [a for a in asks if a.blocked]
+    if not denied:
+        return {"excepted": 0, "added": 0, "locked": [], **plan_to_json(plan_allow_all([], forever)),
+                "saved": [], "resumed": [], "failed": []}
+    excepted, added, locked = 0, 0, []
+    store_ids = {r.id for r in permissions.load_store().rules}
+    for a in denied:
+        req = a.request
+        key = ask_key(req) if req.kind != "bash" else " ".join((req.command or "").split())
+        kind = req.kind
+        for r in deny_rules_for(a, permissions.all_rules(a.repo_root)):
+            if r.id not in store_ids:
+                locked.append(a)     # the repo's own deny, or a profile's: not the person's to narrow
+                continue
+            if permissions.add_exclusion(r.id, kind, key, "exact") is not None:
+                excepted += 1
+        if a in locked:
+            continue
+        a.policy = _policy(req, a.repo_root)
+        if a.blocked:    # unmatched actions are denied: a rule for its general form, that asks
+            general = a.ask.general
+            match_type = "push" if a.ask.kind == "push" else ("exact" if general["pattern"] == key else "glob")
+            permissions.add_rule(kind, general["pattern"], "ask", match_type)
+            added += 1
+            a.policy = _policy(req, a.repo_root)
+    free = [a for a in denied if a not in locked and not a.blocked]
+    out = allow_all(db, repo_root, forever, asks=asks, only=free)
+    return {**out, "excepted": excepted, "added": added, "locked": [_result(a) for a in locked]}

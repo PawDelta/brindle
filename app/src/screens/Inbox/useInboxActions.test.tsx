@@ -19,7 +19,7 @@ function Harness({ daemon, inbox, out }: { daemon: FakeDaemon; inbox: InboxItemD
 
 describe("inbox actions", () => {
   it("rejects changed permission digests and keeps a repeated action attached to its in-flight request", async () => {
-    const item: InboxItemDTO = { ...plan, kind: "permission", permission: { via: "grant", request_id: "r", digest: "old" } };
+    const item: InboxItemDTO = { ...plan, kind: "permission", permission: { via: "hook", request_id: "r", digest: "old" } };
     const daemon = new FakeDaemon({ workspaces: [root], inbox: [item] });
     const out: { actions?: InboxActions } = {};
     const { rerender } = render(<Harness daemon={daemon} inbox={[item]} out={out} />);

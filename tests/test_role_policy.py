@@ -47,8 +47,8 @@ def test_a_copy_cached_for_another_role_is_never_a_fallback(team, monkeypatch):
               "scopes": ["remote"], "lifetimes": ["session"]}
     role_policy(team, effective={**MEMBER, "permission_grants": narrow}, permission_grants=broad)
     monkeypatch.setattr(permission_grants, "_plugin", lambda repo: plugin(team))
-    limits = permission_grants.limits(assign().repo_root)
-    assert limits.max_minutes == 5 and limits.max_uses == 1 and not limits.allow_persistent
+    limits = permission_grants.org_limits(assign().repo_root)
+    assert limits.max_minutes == 5 and not limits.allow_persistent
     assert limits.scopes == ("remote",) and limits.lifetimes == ("session",)
     cached = team_policy.load_cached(ORG)
     assert cached.enforced.permission_grants.max_uses == 1

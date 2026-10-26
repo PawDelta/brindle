@@ -2,7 +2,8 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../../api/client";
 import { DaemonContext } from "../../api/context";
-import type { InboxItemDTO, SessionDTO } from "../../api/schema";
+import { scopesFor } from "../../api/permissions";
+import type { AskDTO, AskGroupDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
 import { SessionsProvider } from "../../store/sessions";
 import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
@@ -20,80 +21,43 @@ function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client()) {
   const store = createAppStore();
   const sync = startSync({ client, store, connect: daemon.connect });
   const onOpen = vi.fn();
+  const onOpenRule = vi.fn();
   render(
     <DaemonContext.Provider value={client}>
       <StoreContext.Provider value={store}>
         <SessionsProvider client={client}>
-          <InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} />
+          <InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} onOpenRule={onOpenRule} />
         </SessionsProvider>
       </StoreContext.Provider>
     </DaemonContext.Provider>,
   );
-  return { store, sync, onOpen };
+  return { store, sync, onOpen, onOpenRule };
 }
+
+/* Held requests as GET /permissions/asks groups them: two pushes into main (w1's is the `permission` fixture's
+   hold) under the push rule's 30-minute limit, and a read the credential deny blocks. */
+const now = Date.now() / 1000;
+const limits = { max_scope: "destination", life: "time", minutes: 30 };
+const ask = (agent_id: string, request_id: string, kind: string, exact: string, since: number, rule: string, blocked = false): AskDTO => ({
+  agent_id, root_id: "sup1", request_id, digest: `d-${request_id}`, repo: REPO, kind, tool: kind === "read" ? "Read" : "Bash", exact,
+  summary: exact, waiting_since: now - since, worker: agent_id === "w1" ? "developer" : "supervisor", rule, blocked, limits: blocked ? null : limits,
+});
+const pushes: AskGroupDTO = {
+  key: `${REPO}|push|* → main @ origin`, repo: REPO, kind: "push", title: "Allow pushes into main?", general: scopesFor("push", "fix/login → main @ origin")[1],
+  scopes: scopesFor("push", "fix/login → main @ origin"), blocked: false, rule: "d-push-default", limits, modes: ["once", "deny", "always-deny", "timed"],
+  items: [ask("w1", "req-1", "push", "fix/login → main @ origin", 600, "d-push-default"), ask("sup1", "req-2", "push", "chore/ci → main @ origin", 120, "d-push-default")],
+};
+const secret: AskGroupDTO = {
+  key: `${REPO}|read|~/**`, repo: REPO, kind: "read", title: "Allow reads under ~/**?", general: scopesFor("read", "~/.ssh/id_rsa")[1],
+  scopes: scopesFor("read", "~/.ssh/id_rsa"), blocked: true, rule: "d-ssh", limits: null, modes: [], items: [ask("w1", "req-3", "read", "~/.ssh/id_rsa", 300, "d-ssh", true)],
+};
+const asking = () => new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [pushes, secret] });
 
 const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "POST");
 /* The one card an item gets, whatever its kind. */
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
-  it.each(["allow_always", "allow_session"])("sends the selected engine-authorized scope with %s", async (choice) => {
-    const label = choice === "allow_session" ? "Allow for this session" : "Always allow";
-    const item: InboxItemDTO = { ...permission, permission: { ...permission.permission!, via: "grant",
-      approval_scopes: { branch: "This ref on origin", remote: "Every branch at origin's verified URL",
-        repo: "Every policy-permitted remote and branch in this repository" },
-      choices: [{ choice: "deny", label: "Deny" }, { choice: "allow_once", label: "Allow once" },
-        { choice, label, rule: "This ref on origin" }] } };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session],
-      workspaces: [root, worker], inbox: [item] });
-    const { sync } = mount(daemon);
-    const select = await screen.findByRole("combobox", { name: "Saved approval scope" });
-    fireEvent.change(select, { target: { value: "remote" } });
-    expect(select).toHaveProperty("value", "remote");
-    fireEvent.change(select, { target: { value: "repo" } });
-    fireEvent.click(screen.getByRole("button", { name: label }));
-    await waitFor(() => expect(posts(daemon)[0]?.body).toEqual({ request: item.permission!.request_id,
-      digest: item.permission!.digest, choice, scope: "repo" }));
-    sync.stop();
-  });
-
-  it.each(["grant", "hook"] as const)("converts timed approvals and preserves each %s choice's scope", async (via) => {
-    const permanent = permission.permission!.choices!.find((c) => c.choice === "allow_always")!;
-    const timed: InboxItemDTO = { ...permission, permission: { ...permission.permission!, via,
-      max_minutes: 2880, max_uses: 4, approval_scope: "refs/heads/feat at https://example.com/o/r.git",
-      grant: "Push the selected commit to refs/heads/feat at https://example.com/o/r.git once",
-      choices: [{ choice: "deny", label: "Deny" }, { choice: "allow_once", label: "Allow once" },
-        { choice: "allow_for", label: "Approve for…" }, ...(via === "hook" ? [permanent] : [])] } };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session],
-      workspaces: [root, worker], inbox: [timed] });
-    const { sync } = mount(daemon);
-    const duration = await screen.findByRole("spinbutton", { name: "Approval duration" });
-    expect(screen.queryByTestId("permission-grant")).toBeNull();
-    fireEvent.click(screen.getByTestId("permission-line"));
-    expect(screen.getByTestId("permission-grant")).toBeTruthy();
-    const unit = screen.getByRole("combobox", { name: "Duration unit" });
-    fireEvent.change(unit, { target: { value: "hours" } });
-    fireEvent.change(duration, { target: { value: "49" } });
-    expect(screen.getByRole("button", { name: /Approve for/ })).toHaveProperty("disabled", true);
-    fireEvent.change(unit, { target: { value: "days" } });
-    fireEvent.change(duration, { target: { value: "3" } });
-    expect(screen.getByRole("button", { name: /Approve for/ })).toHaveProperty("disabled", true);
-    fireEvent.change(duration, { target: { value: "1" } });
-    expect(screen.getByRole("button", { name: /Approve for/ })).toHaveProperty("disabled", false);
-    if (via === "hook") {
-      expect(screen.getByRole("button", { name: permanent.label })).toHaveProperty("title", permanent.rule);
-      expect(screen.getByText(permanent.rule!)).toBeTruthy();
-      expect(screen.getByRole("button", { name: /Approve for/ })).toHaveProperty("title", timed.permission!.approval_scope);
-    } else {
-      expect(screen.queryByRole("button", { name: /Always allow/ })).toBeNull();
-    }
-    expect(screen.queryByRole("combobox", { name: /Scope/ })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: /Approve for/ }));
-    await waitFor(() => expect(posts(daemon)[0]?.body).toEqual({ request: timed.permission!.request_id,
-      digest: timed.permission!.digest, choice: "allow_for", minutes: 1440 }));
-    sync.stop();
-  });
-
   it("groups the queue by session as banner cards, each going to its session and agent; an org notice is a card to read", async () => {
     const daemon = new FakeDaemon({
       repos: [{ repo_root: REPO, name: "proj" }],
@@ -152,7 +116,7 @@ describe("inbox", () => {
     expect(within(held).getByTestId("permission-line").querySelector("code")!.textContent).toBe("npx playwright install chromium");
     fireEvent.click(within(held).getByTestId("permission-line"));
     expect(within(held).getByTestId("permission-line").getAttribute("aria-expanded")).toBe("true");
-    expect(within(held).getAllByRole("button", { name: /Allow|Deny/ }).map((b) => b.textContent)).toEqual(["Deny", "Allow once", "Allow always"]);
+    expect(within(held).getAllByRole("button", { name: /Allow|Deny/ }).map((b) => b.textContent)).toEqual(["Allow once", "Allow always", "Deny"]);
     expect(within(held).getByRole("button", { name: "Allow always" }).title).toContain("brindle's permission rule");
     expect(within(held).queryByText(/terminal instead/)).toBeNull();
     fireEvent.click(within(held).getByRole("button", { name: "Deny" }));
@@ -253,6 +217,58 @@ describe("inbox", () => {
     // The question's card is untouched by any of it.
     expect(card("question")).toBeTruthy();
     expect(posts(daemon).map((r) => r.path)).toEqual(["/setup/codex-hook", "/setup/codex-hook"]);
+    sync.stop();
+  });
+
+  it("permission items: a held request joins its generalized group, scoped to the general form or narrowed, and one decision resolves the group", async () => {
+    const daemon = asking();
+    const { sync } = mount(daemon);
+    const item = await screen.findByRole("article", { name: "Allow pushes into main?" });
+    // The hold's own card is left to the group it belongs to.
+    expect(document.querySelector('[data-testid="inbox-card"][data-kind="permission"]')).toBeNull();
+    expect(item.textContent).toContain("Generalized from: fix/login → main @ origin");
+    expect(within(item).getAllByRole("listitem").map((li) => li.textContent)).toEqual([expect.stringContaining("fix/login → main @ origin · developer"), expect.stringContaining("chore/ci → main @ origin · supervisor")]);
+    const scope = within(item).getByRole("combobox", { name: "Approval scope" });
+    expect(scope).toHaveProperty("value", "general");
+    // Wider than the rule's limit can't be picked.
+    expect(within(scope).getByRole("option", { name: "All branches on origin" })).toHaveProperty("disabled", true);
+    expect(within(item).getByTestId("ask-resume").textContent).toBe("This grant resumes 2 requests of 3 (2 workers).");
+    fireEvent.click(within(item).getByRole("button", { name: "Narrow to this request" }));
+    expect(scope).toHaveProperty("value", "exact");
+    expect(within(item).getByTestId("ask-resume").textContent).toContain("1 request of 3 (1 worker). Choose “Into main from any branch on origin” to resume the other 1");
+    fireEvent.change(scope, { target: { value: "general" } });
+    // No Always allow: the rule keeps approvals to 30 minutes, and a longer one is refused here.
+    expect(within(item).queryByRole("button", { name: /Always allow/ })).toBeNull();
+    fireEvent.change(within(item).getByRole("spinbutton", { name: "Approval duration" }), { target: { value: "45" } });
+    fireEvent.click(within(item).getByRole("button", { name: "Allow for 45 minutes" }));
+    expect(within(item).getByRole("alert").textContent).toBe("Your rule lets an approval last up to 30 minutes.");
+    fireEvent.change(within(item).getByRole("spinbutton", { name: "Approval duration" }), { target: { value: "20" } });
+    fireEvent.click(within(item).getByRole("button", { name: "Allow for 20 minutes" }));
+    await waitFor(() => expect(screen.getByTestId("permission-resolution").textContent).toBe("Allowed for 20 minutes: Into main from any branch on origin. 2 requests resumed (2 workers)."));
+    expect(posts(daemon).find((r) => r.path === "/permissions/asks/decide")?.body).toEqual({ key: pushes.key, scope: "general", mode: "timed", minutes: 20 });
+    expect(daemon.data.policy.saved).toMatchObject([{ kind: "push", pattern: "* → main @ origin", life: "time", minutes: 20 }]);
+    await waitFor(() => expect(screen.queryByRole("article", { name: "Allow pushes into main?" })).toBeNull());
+    sync.stop();
+  });
+
+  it("stall notice: names what blocks the workers, allows what the rules permit, and unblocks a denied request with an exception or opens its deny rule", async () => {
+    const daemon = asking();
+    const { sync, onOpenRule } = mount(daemon);
+    const stall = await screen.findByTestId("stall-notice");
+    expect(stall.textContent).toContain("2 workers paused waiting for you · 3 requests in 2 items");
+    expect(within(stall).getByRole("button", { name: /^reads under ~\/\*\* · 1 · .* · blocked by rule$/ })).toBeTruthy();
+    // The push rule's time limit rules out an approval until revoked; the deny's request isn't the rules' to allow.
+    await waitFor(() => expect(within(stall).getByRole("button", { name: "Allow the 2 requests your rules permit" })).toBeTruthy());
+    expect(stall.textContent).toContain("Always allow unavailable");
+    await waitFor(() => expect(within(stall).getByRole("button", { name: "Allow these 1: add an exception to the deny on ~/.ssh*" })).toBeTruthy());
+    fireEvent.click(within(stall).getByRole("button", { name: "Open the deny rule" }));
+    expect(onOpenRule).toHaveBeenLastCalledWith("d-ssh");
+    fireEvent.click(within(stall).getByRole("button", { name: /^Allow these 1/ }));
+    await waitFor(() => expect(daemon.data.policy.rules.find((r) => r.id === "d-ssh")?.exclusions).toMatchObject([{ kind: "read", match: "~/.ssh/id_rsa" }]));
+    await waitFor(() => expect(screen.getByTestId("permission-resolution").textContent).toContain("1 request resumed"));
+    fireEvent.click(within(screen.getByTestId("stall-notice")).getByRole("button", { name: "Allow all 2 requests" }));
+    await waitFor(() => expect(screen.queryByTestId("stall-notice")).toBeNull());
+    expect(screen.getByTestId("permission-resolution").textContent).toContain("2 requests resumed (2 workers) with 1 grant");
     sync.stop();
   });
 

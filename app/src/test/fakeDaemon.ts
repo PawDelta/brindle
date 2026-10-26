@@ -9,16 +9,20 @@
    has exited. */
 
 import { DaemonClient } from "../api/client";
-import type { PermissionEditorRequest, PermissionEditorReview, PermissionEditorRule, PermissionEditorState } from "../api/client";
 import type { BusEvent, StreamMessage, WebSocketLike } from "../api/events";
 import { WS_UNAUTHORIZED } from "../api/events";
 import type { PtyStatus, PtyViewHandlers, PtyViewOpener, PtyViews, PtyViewTarget } from "../api/ptyView";
 import type {
   AccountDTO,
   AgentDTO,
+  AskDTO,
+  AskGroupDTO,
+  AskResultDTO,
   DecisionDTO,
+  PermissionPolicyDTO,
+  PermissionRuleDTO,
+  SavedActionDTO,
   GoalDTO,
-  GrantDTO,
   InboxItemDTO,
   ProfileDTO,
   RoutingDTO,
@@ -44,8 +48,6 @@ export interface DaemonData {
   sessions: SessionDTO[];
   workspaces: WorkspaceDTO[];
   inbox: InboxItemDTO[];
-  /* GET /grants: the live permission grants (brindle.daemon.grants); POST /grants/{id}/revoke ends one. */
-  grants: GrantDTO[];
   goal: GoalDTO | null;
   decisions: DecisionDTO[];
   profiles: ProfileDTO[];
@@ -163,7 +165,33 @@ export interface DaemonData {
      shows in the next read; a new file joins the list, a deleted one
      leaves it); without one, sessionReview's fixed patch is served. */
   sessionBase: Record<string, Record<string, string>>;
+  /* The person's permission store (permissions.Store, GET /permissions):
+     the preset, the unmatched setting, every rule and saved action, and
+     per-rule prompt counts over the last day. */
+  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number> };
+  /* GET /permissions/asks: the requests hooks hold, grouped
+     (permission_grants.groups). A decision takes its requests out of these
+     and out of `inbox` (the hold's answer). */
+  asks: AskGroupDTO[];
 }
+
+/* permissions.PRESETS, a few rules each (the engine's are longer): the
+   routine allows, a credential deny, the destructive deny and the push
+   into the default branch, which asks within each preset's limits. */
+const presetRule = (id: string, kind: string, match: string, match_type: string, decision: string, limits?: PermissionRuleDTO["limits"]): PermissionRuleDTO =>
+  ({ id, kind, match, match_type, decision, source: "preset", created: 0, describe: match_type === "exact" || match_type === "prefix" || match_type === "glob" || match_type === "push" ? `${kind} ${match_type} '${match}'` : match, limits: limits ?? null, exclusions: [] });
+const pushDefault = (limits: PermissionRuleDTO["limits"]) => presetRule("d-push-default", "bash", "* → @default", "push", "ask", limits);
+const ROUTINE = () => [
+  presetRule("d-tracked", "read", "a file git tracks in the worktree or repo root", "tracked", "allow"),
+  presetRule("d-ssh", "read", "~/.ssh*", "glob", "deny"),
+  presetRule("d-git-force", "bash", "a git command with a force flag, or a push that forces or deletes a branch", "git-force", "deny"),
+];
+export const FAKE_PRESETS: Record<string, { rules: () => PermissionRuleDTO[]; unmatched: string; description: string }> = {
+  autonomous: { rules: () => [...ROUTINE(), pushDefault({ max_scope: "all", life: "forever" })], unmatched: "allow", description: "Agents work without stopping. Everything runs automatically except pushes into the default branch and destructive actions." },
+  permissive: { rules: () => [...ROUTINE(), pushDefault({ max_scope: "remote", life: "forever" })], unmatched: "ask", description: "Fewer interruptions for trusted teams." },
+  standard: { rules: () => [...ROUTINE(), pushDefault({ max_scope: "destination", life: "time", minutes: 30 })], unmatched: "ask", description: "Routine reads and everyday commands run freely. Changes and sensitive actions ask within a defined scope." },
+  secure: { rules: () => [...ROUTINE(), pushDefault({ max_scope: "branch", life: "time", minutes: 15 })], unmatched: "deny", description: "Narrow scopes, 15-minute approvals and a deny for anything no rule covers." },
+};
 
 /* A unified diff of two texts, as git prints it for one file: an LCS of
    their lines, the changes in hunks with three lines of context. */
@@ -591,27 +619,14 @@ export class FakeDaemon {
   /* The engine is dead (`die()`): every request is refused and every socket
      closes at once, until `revive()` brings it back as a new process. */
   dead = false;
+  /* Hold PUT /permissions/preset until pendingPreset() is called. */
+  holdPreset = false;
+  pendingPreset: (() => void) | null = null;
   /* Hold a sign-in after its URL went out, until completeLogin(): the browser hasn't come back yet. */
   deferLogin = false;
   private pendingLogins: Array<{ job: string; finish(): void }> = [];
   /* The rules POST /permissions added (allow, deny, accept), by id. */
   readonly permissionRules: PermissionRule[] = [];
-  permissionEditor: PermissionEditorState = {
-    revision: "editor-1", rules: [],
-    catalog: [
-      { id: "bash", kind: "bash", name: "Run commands", tool: null, source: "builtin" },
-      { id: "read", kind: "read", name: "Read files", tool: null, source: "builtin" },
-      { id: "edit", kind: "edit", name: "Edit files", tool: null, source: "builtin" },
-    ],
-    presets: [], limitations: [],
-    restrictions: { editable: true, managed: false, reason: "", org_id: null, policy_version: null, permission_grants: null,
-      protected_paths: [], permission_policy: "strict", roles_supported: false, repo_supported: true, expiry_supported: true, checks: [] },
-  };
-  /* Engine review fixtures can describe scope relationships which belong to
-     the Python engine. The fake persists exactly the reviewed proposal. */
-  readonly permissionReviews: PermissionEditorReview[] = [];
-  private permissionProposal: { request: PermissionEditorRequest; review: PermissionEditorReview } | null = null;
-  private permissionSequence = 1;
   /* The orgs POST /account/switch-org was asked for, in order. */
   readonly orgSwitches: string[] = [];
   /* The views the app's tmux client opened on panes (ptyViews()), in order, and what tmux copied onto the app's clipboard. */
@@ -681,7 +696,6 @@ export class FakeDaemon {
       routingByRepo: {},
       routingPolicy: null,
       learned: {},
-      grants: [],
       rulePacks: [],
       actionScreens: {},
       kbSources: [],
@@ -701,6 +715,8 @@ export class FakeDaemon {
       sessionReview: {},
       sessionFiles: {},
       sessionBase: {},
+      policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} },
+      asks: [],
       ...data,
     };
   }
@@ -1417,48 +1433,220 @@ export class FakeDaemon {
     return error("invalid", "op must be allow, deny, forget, accept or reset", 400);
   }
 
-  private editPermissionRules(body: PermissionEditorRequest & { proposal?: string }, save: boolean): Response {
-    const state = this.permissionEditor;
-    if (!state.restrictions.editable) return error("forbidden", state.restrictions.reason, 403);
-    if (body.revision !== state.revision) return error("stale", "Permission rules changed; review again.", 409);
-    if (save) {
-      const proposal = this.permissionProposal;
-      const { proposal: digest, ...request } = body;
-      if (!proposal || digest !== proposal.review.proposal || JSON.stringify(request) !== JSON.stringify(proposal.request)) return error("stale", "Proposal changed; review again.", 409);
-      if (!proposal.review.can_save) return error("conflict", "Unresolved permission conflict.", 409);
-      this.permissionEditor = { ...state, rules: structuredClone(proposal.review.rules), revision: `editor-${++this.permissionSequence}` };
-      this.permissionProposal = null;
-      return json({ revision: this.permissionEditor.revision, rules: this.permissionEditor.rules, changes: proposal.review.changes, restrictions: state.restrictions, limitations: state.limitations });
+  /* GET /permissions (service/permissions.policy_dto). */
+  private policyDTO(): PermissionPolicyDTO {
+    const p = this.data.policy;
+    const now = Date.now() / 1000;
+    return {
+      preset: p.preset,
+      unmatched: p.unmatched,
+      presets: Object.entries(FAKE_PRESETS).map(([name, x]) => ({ name, description: x.description, unmatched: x.unmatched, current: name === p.preset })),
+      rules: p.rules.map((r) => ({ ...r, prompts: p.prompts[r.id] ?? 0, expired: r.expires != null && r.expires <= now })),
+      saved: p.saved.map((s) => ({ ...s, expired: s.expires != null && s.expires <= now })),
+      prompt_counts: { ...p.prompts },
+    };
+  }
+
+  /* permissions.make_rule over `base`, with the fields a body gives (routes_actions._rule_fields). */
+  private ruleWith(base: PermissionRuleDTO, body: Record<string, unknown>): PermissionRuleDTO | string {
+    const r: PermissionRuleDTO = { ...base };
+    const fields = r as unknown as Record<string, unknown>;
+    for (const key of ["kind", "match", "match_type", "decision", "label"]) if (typeof body[key] === "string") fields[key] = body[key];
+    if ("limits" in body) r.limits = (body.limits as PermissionRuleDTO["limits"]) ?? null;
+    if ("expires" in body) r.expires = (body.expires as number | null) ?? null;
+    if ("minutes" in body) r.expires = typeof body.minutes === "number" && body.minutes ? Date.now() / 1000 + body.minutes * 60 : null;
+    if (!PERMISSION_KINDS.includes(r.kind)) return `unknown kind '${r.kind}': one of ${PERMISSION_KINDS.join(", ")}`;
+    if (!["allow", "deny", "ask"].includes(r.decision)) return "decision must be allow, deny or ask";
+    if (!r.match) return "empty match";
+    if (r.decision !== "ask") r.limits = null;
+    if (r.limits?.life === "time" && !(Number(r.limits.minutes) > 0)) return "limits need a positive 'minutes' for life 'time'";
+    r.describe = [...MATCH_TYPES, "push"].includes(r.match_type) ? `${r.kind} ${r.match_type} '${r.match}'` : r.match;
+    return r;
+  }
+
+  /* permissions.update_saved_action's checks and _stamp over `base`. */
+  private savedWith(base: SavedActionDTO, body: Record<string, unknown>): SavedActionDTO | string {
+    const s: SavedActionDTO = { ...base };
+    const fields = s as unknown as Record<string, unknown>;
+    for (const key of ["kind", "pattern", "decision", "scope", "level", "life", "session", "repo", "note", "minutes", "request"]) if (key in body) fields[key] = body[key];
+    if (!["allow", "deny"].includes(s.decision)) return "decision must be allow or deny";
+    if (!s.pattern) return "empty pattern";
+    if (s.life === "time") {
+      if (!(Number(s.minutes) > 0)) return "a timed saved action needs positive minutes";
+      s.expires = Date.now() / 1000 + Number(s.minutes) * 60;
+    } else {
+      s.minutes = null;
+      s.expires = null;
     }
-    const existing = state.rules.find((rule) => rule.id === body.id);
-    const sameTarget = existing && existing.kind === body.rule?.kind && existing.match === body.rule.match && existing.match_type === body.rule.match_type;
-    if (body.operation === "upsert" && body.rule?.kind === "mcp" && !sameTarget && (body.rule.match_type !== "exact" || !state.catalog.some((action) => action.tool === body.rule?.match))) return error("invalid", "Choose an exact tool from the available MCP inventory.", 400);
-    let review = this.permissionReviews.shift();
-    if (!review) {
-      const before = state.rules.find((rule) => rule.id === body.id) ?? null;
-      if (body.id && (!before || !before.editable || before.protected)) return error("forbidden", "This rule cannot be edited.", 403);
-      const after: PermissionEditorRule | null = body.operation === "remove" ? null : {
-        id: before?.id ?? `rule-${++this.permissionSequence}`, kind: "bash", match: "", match_type: "exact", decision: "ask", repo_root: null,
-        expires_at: null, exclusions: [], source: "user", created: 1, editable: true, protected: false, ...body.rule,
-      };
-      const rules = state.rules.filter((rule) => rule.id !== before?.id);
-      if (after) rules.push(after);
-      review = { revision: state.revision, proposal: `proposal-${++this.permissionSequence}`, rules, conflicts: [], unresolved: [], can_save: true,
-        changes: [{ type: after ? before ? "updated" : "added" : "removed", id: (after ?? before)!.id, before, after }] };
-      if (body.operation === "preset") {
-        const preset = state.presets.find((item) => item.id === body.preset);
-        if (!preset) return error("invalid", "Unknown permission preset.", 400);
-        const removed = state.rules.filter((item) => item.repo_root === body.repo && item.editable && !item.protected);
-        const added = (preset.rules ?? []).map((item) => ({ ...item, id: `rule-${++this.permissionSequence}`, repo_root: body.repo }));
-        review.rules = [...state.rules.filter((item) => !removed.includes(item)), ...added];
-        review.changes = [
-          ...removed.map((item) => ({ type: "removed" as const, id: item.id, before: item, after: null })),
-          ...added.map((item) => ({ type: "added" as const, id: item.id, before: null, after: item })),
-        ];
+    if (s.life !== "session") s.session = null;
+    else if (!s.session) return "a saved action for this session needs the session";
+    return s;
+  }
+
+  private nextSaved = 1;
+
+  private saveGrant(g: AskGroupDTO, scope: AskGroupDTO["general"], decision: string, life: string, minutes: number | null): SavedActionDTO {
+    const rep = g.items[0];
+    const s: SavedActionDTO = {
+      id: `s${this.nextSaved++}`, kind: g.kind, pattern: scope.pattern, decision, scope: scope.value, level: scope.level ?? null,
+      request: { tool: rep.tool, command: rep.exact }, life, minutes: life === "time" ? minutes : null,
+      expires: life === "time" && minutes ? Date.now() / 1000 + minutes * 60 : null, session: life === "session" ? rep.root_id : null,
+      repo: scope.value === "all" ? null : g.repo, created: Date.now() / 1000, note: scope.label,
+    };
+    this.data.policy.saved.push(s);
+    return s;
+  }
+
+  /* The holds answered (service/inbox.answer_permission): out of the asks and the inbox, and the bus says so. */
+  private settleAsks(hits: AskDTO[]): AskResultDTO[] {
+    const gone = (a: AskDTO) => hits.some((h) => h.agent_id === a.agent_id && h.request_id === a.request_id);
+    this.data.asks = this.data.asks.map((g) => ({ ...g, items: g.items.filter((a) => !gone(a)) })).filter((g) => g.items.length > 0);
+    this.data.inbox = this.data.inbox.filter((i) => !(i.kind === "permission" && hits.some((h) => h.agent_id === i.agent_id && h.request_id === i.permission?.request_id)));
+    for (const a of hits) this.publish("permission.answered", { agent_id: a.agent_id, payload: { request_id: a.request_id, cleared: true } });
+    return hits.map((a) => ({ agent_id: a.agent_id, request_id: a.request_id, exact: a.exact }));
+  }
+
+  /* permission_grants.plan_allow_all, a grant per item at its general scope within its rule's lifetime. */
+  private planAllowAll(repo: string | undefined, forever: boolean) {
+    const result = (a: AskDTO, why: string) => ({ agent_id: a.agent_id, request_id: a.request_id, exact: a.exact, why });
+    const grants: { group: AskGroupDTO; mode: string; minutes: number | null }[] = [];
+    const skipped: AskResultDTO[] = [];
+    for (const g of this.data.asks.filter((x) => !repo || x.repo === repo)) {
+      const life = g.limits?.life;
+      if (g.blocked) skipped.push(...g.items.map((a) => result(a, "blocked by a deny rule")));
+      else if (forever && (life === "time" || life === "session")) skipped.push(...g.items.map((a) => result(a, "outside its own limits")));
+      else grants.push({ group: g, mode: forever || life === "forever" ? "forever" : life === "time" ? "timed" : "session", minutes: life === "time" && !forever ? (g.limits?.minutes ?? null) : null });
+    }
+    const dto = {
+      grants: grants.map((e) => ({ group: e.group.key, kind: e.group.kind, scope: e.group.general, mode: e.mode, minutes: e.minutes, requests: e.group.items.map((a) => a.request_id) })),
+      resumes: grants.reduce((n, e) => n + e.group.items.length, 0),
+      skipped,
+    };
+    return { grants, dto };
+  }
+
+  /* The permission policy's routes (routes_read get_permissions,
+     get_permission_asks, get_permission_plan; routes_actions' preset,
+     unmatched, rules, exceptions, saved actions and asks), or null for any
+     other path. POST /permissions itself is changePermissions'. */
+  private permissionRoute(method: string, path: string, body: Record<string, unknown>, query: Record<string, string>): Response | null {
+    if (!path.startsWith("/permissions") || (path === "/permissions" && method === "POST")) return null;
+    const p = this.data.policy;
+    let m: RegExpMatchArray | null;
+    if (path === "/permissions" && method === "GET") return json(this.policyDTO());
+    if (path === "/permissions" && method === "PATCH") {
+      if (!["ask", "allow", "deny"].includes(String(body.unmatched))) return error("invalid", "unmatched must be one of ask, allow, deny", 400);
+      p.unmatched = String(body.unmatched);
+      return json(this.policyDTO());
+    }
+    if (path === "/permissions/preset" && method === "PUT") {
+      const preset = FAKE_PRESETS[String(body.preset)];
+      if (!preset) return error("invalid", `unknown preset '${String(body.preset)}': one of ${Object.keys(FAKE_PRESETS).join(", ")}`, 400);
+      p.preset = String(body.preset);
+      p.unmatched = preset.unmatched;
+      p.rules = [...preset.rules(), ...p.rules.filter((r) => r.source !== "preset")];
+      return json(this.policyDTO());
+    }
+    if (path === "/permissions/rules" && method === "POST") {
+      for (const key of ["kind", "match", "decision"]) if (typeof body[key] !== "string" || !body[key]) return error("invalid", `${key} is required`, 400);
+      const matchType = typeof body.match_type === "string" ? body.match_type : "exact";
+      const base: PermissionRuleDTO = { id: ruleId(String(body.kind), matchType, String(body.match), String(body.decision)), kind: "", match: "", match_type: matchType, decision: "", source: "user", created: Date.now() / 1000, describe: "", exclusions: [] };
+      const rule = this.ruleWith(base, body);
+      if (typeof rule === "string") return error("invalid", rule, 400);
+      p.rules = [...p.rules.filter((r) => r.id !== rule.id), rule];
+      return json({ ...rule, prompts: 0, expired: false });
+    }
+    if ((m = path.match(/^\/permissions\/rules\/([^/]+)\/exceptions$/)) && method === "POST") {
+      const id = m[1];
+      const old = p.rules.find((r) => r.id === id);
+      if (!old) return error("not_found", `no rule ${id}`, 404);
+      const matchType = typeof body.match_type === "string" ? body.match_type : "exact";
+      const rule = { ...old, exclusions: [...(old.exclusions ?? []), { kind: String(body.kind), match: String(body.match), match_type: matchType, describe: `${String(body.kind)} ${matchType} '${String(body.match)}'` }] };
+      p.rules = p.rules.map((r) => (r.id === id ? rule : r));
+      return json(rule);
+    }
+    if ((m = path.match(/^\/permissions\/rules\/([^/]+)$/))) {
+      const id = m[1];
+      const old = p.rules.find((r) => r.id === id);
+      if (!old) return error("not_found", `no rule ${id}`, 404);
+      if (method === "DELETE") {
+        p.rules = p.rules.filter((r) => r.id !== id);
+        return json({ deleted: id, describe: `${old.decision} ${old.describe} (${old.source})` });
       }
+      const rule = this.ruleWith({ ...old, source: old.source === "preset" ? "user" : old.source }, body);
+      if (typeof rule === "string") return error("invalid", rule, 400);
+      p.rules = p.rules.map((r) => (r.id === id ? rule : r));
+      return json({ ...rule, prompts: p.prompts[id] ?? 0 });
     }
-    this.permissionProposal = { request: structuredClone(body), review: structuredClone(review) };
-    return json(review);
+    if (path === "/permissions/saved" && method === "POST") {
+      for (const key of ["kind", "pattern", "decision"]) if (!body[key]) return error("invalid", `${key} is required`, 400);
+      const s = this.savedWith({ id: `s${this.nextSaved++}`, kind: "", pattern: "", decision: "", scope: "exact", life: "forever", created: Date.now() / 1000 }, body);
+      if (typeof s === "string") return error("invalid", s, 400);
+      p.saved.push(s);
+      return json({ ...s, expired: false });
+    }
+    if ((m = path.match(/^\/permissions\/saved\/([^/]+)$/))) {
+      const id = m[1];
+      const old = p.saved.find((s) => s.id === id);
+      if (!old) return error("not_found", `no saved action ${id}`, 404);
+      if (method === "DELETE") {
+        p.saved = p.saved.filter((s) => s.id !== id);
+        return json({ deleted: id });
+      }
+      const s = this.savedWith(old, body);
+      if (typeof s === "string") return error("invalid", s, 400);
+      p.saved = p.saved.map((x) => (x.id === id ? s : x));
+      return json({ ...s, expired: false });
+    }
+    const repo = (typeof body.repo === "string" ? body.repo : undefined) ?? query.repo;
+    if (path === "/permissions/asks" && method === "GET") return json(this.data.asks.filter((g) => !repo || g.repo === repo));
+    if (path === "/permissions/asks/plan" && method === "GET") return json(this.planAllowAll(repo, query.forever === "1").dto);
+    if (path === "/permissions/asks/decide" && method === "POST") {
+      const g = this.data.asks.find((x) => x.key === body.key);
+      if (!g) return error("not_found", "no such Inbox item any more: fetch the asks again", 404);
+      const scope = g.scopes.find((s) => s.value === body.scope);
+      if (!scope) return error("invalid", `scope must be one of ${g.scopes.map((s) => s.value).join(", ")}`, 400);
+      const mode = String(body.mode);
+      if (!["once", "session", "timed", "forever", "deny", "always-deny"].includes(mode)) return error("invalid", "mode must be one of once, session, timed, forever, deny, always-deny", 400);
+      const minutes = typeof body.minutes === "number" ? body.minutes : null;
+      if (mode === "timed" && !(Number(minutes) > 0)) return error("invalid", "a timed grant needs positive minutes", 400);
+      const stopping = mode === "deny" || mode === "always-deny";
+      if (g.blocked && !stopping) return error("conflict", "nothing in this scope can be approved: blocked by a deny rule", 409);
+      const cap = g.limits?.life === "time" ? g.limits.minutes : null;
+      if (mode === "timed" && cap != null && minutes! > cap) return error("conflict", `nothing in this scope can be approved: over its ${cap} minute limit`, 409);
+      const hits = (mode === "once" || mode === "deny") && scope.value === "exact" ? [g.items[0]] : g.items;
+      const life = { session: "session", timed: "time", forever: "forever", "always-deny": "forever" }[mode as "session"];
+      const grant = life ? this.saveGrant(g, scope, mode === "always-deny" ? "deny" : "allow", life, minutes) : null;
+      const done = this.settleAsks(hits);
+      return json({ mode, scope, grant, resumed: stopping ? [] : done, stopped: stopping ? done : [], skipped: [], failed: [] });
+    }
+    if (path === "/permissions/asks/allow-all" && method === "POST") {
+      const { grants, dto } = this.planAllowAll(repo, body.forever === true);
+      const saved = grants.map((e) => this.saveGrant(e.group, e.group.general, "allow", { session: "session", timed: "time", forever: "forever" }[e.mode as "session"], e.minutes));
+      const resumed = this.settleAsks(grants.flatMap((e) => e.group.items));
+      return json({ ...dto, saved, resumed, failed: [] });
+    }
+    if (path === "/permissions/asks/unblock" && method === "POST") {
+      const blocked = this.data.asks.filter((g) => g.blocked && (!repo || g.repo === repo));
+      let excepted = 0;
+      let added = 0;
+      for (const g of blocked) {
+        const rule = p.rules.find((r) => r.id === g.rule);
+        for (const a of g.items) {
+          const kind = g.kind === "push" ? "bash" : g.kind;
+          if (rule) {
+            rule.exclusions = [...(rule.exclusions ?? []), { kind, match: a.exact, match_type: "exact", describe: `${kind} exact '${a.exact}'` }];
+            excepted++;
+          } else {
+            p.rules.push({ id: ruleId(kind, "exact", a.exact, "ask"), kind, match: a.exact, match_type: "exact", decision: "ask", source: "user", created: Date.now() / 1000, describe: `${kind} exact '${a.exact}'`, exclusions: [] });
+            added++;
+          }
+        }
+      }
+      const resumed = this.settleAsks(blocked.flatMap((g) => g.items));
+      return json({ grants: [], resumes: resumed.length, skipped: [], saved: [], resumed, failed: [], excepted, added, locked: [] });
+    }
+    return error("not_found", `no route ${method} ${path}`, 404);
   }
 
   /* routes_actions.account_login: a job; its progress carries the authorize
@@ -1886,13 +2074,15 @@ export class FakeDaemon {
     if (auth !== `Bearer ${this.token}`) {
       return error("unauthorized", "missing or wrong token (see ~/.brindle/daemon.json)", 401);
     }
-    if (method === "GET" && path === "/permission-editor") return json(this.permissionEditor);
-    if (method === "POST" && path === "/permission-editor/verify") {
-      const tool = (body as { tool?: string }).tool;
-      const action = this.permissionEditor.catalog.find((item) => item.tool === tool) ?? null;
-      return json({ verified: action !== null, action });
+    const policy = this.permissionRoute(method, path, (body ?? {}) as Record<string, unknown>, query);
+    if (policy) {
+      if (method === "PUT" && path === "/permissions/preset" && this.holdPreset) {
+        return new Promise<Response>((resolve) => {
+          this.pendingPreset = () => resolve(policy);
+        });
+      }
+      return policy;
     }
-    if (method === "POST" && (path === "/permission-editor/review" || path === "/permission-editor/save")) return this.editPermissionRules(body as PermissionEditorRequest, path.endsWith("/save"));
     if (method === "POST" && /^\/sessions(\/|$)/.test(path)) return this.write(path, (body ?? {}) as Record<string, unknown>);
     if (method === "PUT" || method === "DELETE") {
       const sessionFile = path.match(/^\/sessions\/([^/]+)\/file$/);
@@ -1931,12 +2121,6 @@ export class FakeDaemon {
       if (path === "/kb/sources") return this.addKbSource(repo, fields);
       if ((m = path.match(/^\/kb\/sources\/([^/]+)\/sync$/))) return this.syncKbSource(repo, m[1]);
       if (path === "/permissions") return this.changePermissions(fields);
-      if ((m = path.match(/^\/grants\/([^/]+)\/revoke$/))) {
-        const id = decodeURIComponent(m[1]);
-        if (!d.grants.some((g) => g.id === id)) return error("not_found", `no live grant ${id}`, 404);
-        d.grants = d.grants.filter((g) => g.id !== id);
-        return json({ revoked: id });
-      }
       if (path === "/debug/log") {
         // Dropped, as the engine drops them, while logging is off.
         if (d.debug.staff && d.debug.enabled) d.debugLog.push(fields as unknown as DebugEntry);
@@ -2079,7 +2263,6 @@ export class FakeDaemon {
       // routes_read.read_file: {path, content, base}, base being the blob sha the PUT takes.
       return json({ path: query.path, content, base: fakeBlob(content) });
     }
-    if (path === "/grants") return json(d.grants);
     if (path === "/providers/installed") {
       if (this.failNextDetects > 0) {
         this.failNextDetects--;

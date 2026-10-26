@@ -7,7 +7,7 @@ import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
 import { StoreContext } from "../../store/useStore";
 import { DaemonClient } from "../../api/client";
-import { BASE_URL, FakeDaemon, TOKEN, flush, freshProviders, type DaemonData } from "../../test/fakeDaemon";
+import { BASE_URL, FAKE_PRESETS, FakeDaemon, TOKEN, flush, freshProviders, type DaemonData } from "../../test/fakeDaemon";
 import { PtyViewsProvider } from "../../api/ptyView";
 import { REPO } from "../../test/fixtures";
 import { releaseBuildUpdater } from "../../api/tauri";
@@ -38,7 +38,7 @@ afterEach(() => {
   ipc.answers.length = 0;
 });
 
-function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps["installCli"], appUpdater?: SettingsScreenProps["appUpdater"], releaseUpdater?: SettingsScreenProps["releaseBuildUpdater"]) {
+function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps["installCli"], appUpdater?: SettingsScreenProps["appUpdater"], releaseUpdater?: SettingsScreenProps["releaseBuildUpdater"], rule?: string) {
   const daemon = new FakeDaemon({
     repos: [{ repo_root: REPO, name: "proj" }],
     config: {
@@ -78,7 +78,7 @@ function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps[
           <ProvidersProvider client={client}>
             {/* A sign-in's CLI read through the fake daemon's pty views, as the shell's show it. */}
             <PtyViewsProvider value={daemon.ptyViews()}>
-              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} />
+              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} rule={rule} />
             </PtyViewsProvider>
           </ProvidersProvider>
         </SessionsProvider>
@@ -142,12 +142,6 @@ describe("settings screen", () => {
     fireEvent.click(within(repoSettings).getByRole("button", { name: /^More/ }));
     expect(screen.getByRole("combobox", { name: "Overlapping tasks" })).toBeTruthy();
     expect(screen.getByRole("switch", { name: "Coordinator" })).toBeTruthy();
-    // Necessary to function: on by default; switched off, the row warns what it costs.
-    const essentials = screen.getByRole("switch", { name: "Necessary to function" });
-    expect(essentials.getAttribute("aria-checked")).toBe("true");
-    expect(screen.queryByTestId("setting-warning")).toBeNull();
-    fireEvent.click(essentials);
-    expect(repoSettings.querySelector('[data-setting="permission_essentials"] [data-testid="setting-warning"]')).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Everything else/ }));
     expect(screen.getByTestId("config-rest").textContent).toContain("default_agent");
     fireEvent.click(screen.getByRole("button", { name: /Your defaults for every repo/ }));
@@ -177,20 +171,81 @@ describe("settings screen", () => {
     stop();
   });
 
-  it("lists the live permission grants and revokes one through the engine", async () => {
-    const grant = { id: "g1", agent_id: "wk", repo_root: REPO, kind: "fetch", match: "https://example.com/docs", expires_at: 2e9, uses_left: 2, created: 1e9 };
-    const { daemon, stop } = setup({ grants: [grant, { ...grant, id: "g2", kind: "bash", match: "terraform plan", persistent: true, expires_at: null, uses_left: null }, { ...grant, id: "g3", agent_id: "supervisor-root", persistent: false, expires_at: null }] });
-    const rows = await within(await screen.findByTestId("grants")).findAllByTestId("grant");
-    expect(rows.map((r) => r.querySelector("code")?.textContent)).toEqual(["fetch https://example.com/docs", "bash terraform plan", "fetch https://example.com/docs"]);
-    expect(within(rows[2]).getByTestId("grant-session")).toBeDefined();
-    fireEvent.click(within(rows[2]).getByRole("button", { name: "Revoke" }));
-    await waitFor(() => expect(daemon.data.grants.map((g) => g.id)).toEqual(["g1", "g2"]));
-    fireEvent.click(within(rows[0]).getByRole("button", { name: "Revoke" }));
-    await waitFor(() => expect(screen.getAllByTestId("grant")).toHaveLength(1));
-    expect(daemon.requests.some((r) => r.method === "POST" && r.path === "/grants/g1/revoke")).toBe(true);
-    expect(daemon.data.grants.map((g) => g.id)).toEqual(["g2"]);
-    fireEvent.click(within(screen.getByTestId("grant")).getByRole("button", { name: "Revoke" }));
-    await waitFor(() => expect(daemon.data.grants).toEqual([]));
+  it("permissions: changes the preset, allows a noisy ask rule automatically, removes a former default with undo, and sets unmatched actions", async () => {
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: { "d-push-default": 7 } } });
+    const perms = await screen.findByTestId("permissions-settings");
+    await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Autonomous"));
+    // Change preset: the four presets, Autonomous recommended; one click seeds it.
+    fireEvent.click(within(perms).getByRole("button", { name: "Change preset" }));
+    expect(within(perms).getByTestId("presets").querySelector('[data-preset="autonomous"]')!.textContent).toContain("RECOMMENDED");
+    fireEvent.click(within(perms).getByRole("button", { name: "Use Standard" }));
+    await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Standard"));
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/preset")?.body).toEqual({ preset: "standard" });
+    expect(within(perms).getByRole("combobox", { name: "Unmatched actions" })).toHaveProperty("value", "ask");
+    // What interrupts your agents: the push rule asked 7 times; Allow automatically turns it into an allow.
+    const noisy = within(perms).getByTestId("interrupts");
+    expect(noisy.textContent).toContain("7 approval prompts in the last 24 hours across 1 rule");
+    fireEvent.click(within(noisy).getByRole("button", { name: "Allow automatically" }));
+    await waitFor(() => expect(daemon.data.policy.rules.find((r) => r.id === "d-push-default")?.decision).toBe("allow"));
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/rules/d-push-default")?.body).toEqual({ decision: "allow", limits: null });
+    // A preset's deny is removable like any rule, and Undo adds it back.
+    const row = () => within(perms).getByTestId("rules").querySelector<HTMLElement>('[data-rule="d-ssh"]');
+    fireEvent.click(within(row()!).getByRole("button", { name: "Remove Read files rule" }));
+    await waitFor(() => expect(row()).toBeNull());
+    fireEvent.click(within(perms).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(daemon.data.policy.rules.some((r) => r.match === "~/.ssh*" && r.decision === "deny")).toBe(true));
+    expect(posts(daemon).find((r) => r.path === "/permissions/rules")?.body).toEqual({ kind: "read", match: "~/.ssh*", match_type: "glob", decision: "deny" });
+    fireEvent.change(within(perms).getByRole("combobox", { name: "Unmatched actions" }), { target: { value: "deny" } });
+    await waitFor(() => expect(daemon.data.policy.unmatched).toBe("deny"));
+    stop();
+  });
+
+  it("permissions: a rule opens in a three-step editor, saves its limits, and a new rule that disagrees with one is checked and auto-resolved", async () => {
+    const npm = { id: "u-npm", kind: "bash", match: "npm ", match_type: "prefix", decision: "allow", source: "user", created: 1, describe: "bash prefix 'npm '", exclusions: [] };
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), npm], saved: [], prompts: {} } }, undefined, undefined, undefined, "d-push-default");
+    // Opened for a rule (the Inbox's "Open the deny rule"): its editor, at once.
+    const editor = await screen.findByTestId("rule-editor");
+    expect(within(editor).getByRole("combobox", { name: "Action" })).toHaveProperty("value", "push");
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Remember approvals for" }), { target: { value: "time" } });
+    fireEvent.change(within(editor).getByRole("spinbutton", { name: "Longest approval" }), { target: { value: "15" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save rule" }));
+    await waitFor(() => expect(daemon.data.policy.rules.find((r) => r.id === "d-push-default")?.limits).toEqual({ life: "time", minutes: 15, max_scope: "all" }));
+    expect(screen.queryByTestId("rule-editor")).toBeNull();
+    // A new deny on a command an allow rule covers: the save stops at the conflict; auto-resolve keeps the deny and
+    // excepts the command from the allow.
+    fireEvent.click(screen.getByRole("button", { name: "+ Add rule" }));
+    const add = screen.getByTestId("rule-editor");
+    fireEvent.change(within(add).getByRole("textbox", { name: "Target" }), { target: { value: "npm publish" } });
+    fireEvent.change(within(add).getByRole("combobox", { name: "Decision" }), { target: { value: "deny" } });
+    fireEvent.click(within(add).getByRole("button", { name: "Save rule" }));
+    const review = within(add).getByTestId("conflict-review");
+    expect(review.textContent).toContain("Until resolved: Deny wins on the shared requests.");
+    expect(daemon.data.policy.rules.some((r) => r.match === "npm publish")).toBe(false);
+    fireEvent.click(within(review).getByRole("button", { name: "Auto-resolve" }));
+    await waitFor(() => expect(daemon.data.policy.rules.find((r) => r.id === "u-npm")?.exclusions).toEqual([{ kind: "bash", match: "npm publish", match_type: "exact", describe: "bash exact 'npm publish'" }]));
+    expect(daemon.data.policy.rules.find((r) => r.match === "npm publish")?.decision).toBe("deny");
+    stop();
+  });
+
+  it("permissions: a saved action moves along its scope ladder with a duration, is deleted with undo, and shows in Activity", async () => {
+    const saved = { id: "s9", kind: "write", pattern: "src/auth/login.ts", decision: "allow", scope: "exact", life: "forever", created: 1_700_000_000, note: "This file only · src/auth/login.ts" };
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [saved], prompts: {} } });
+    fireEvent.click(await screen.findByRole("tab", { name: "Saved actions (1)" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit Write files saved action" }));
+    const editor = screen.getByTestId("saved-editor");
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Scope" }), { target: { value: "general" } });
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Lasts" }), { target: { value: "time" } });
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Saved action duration unit" }), { target: { value: "hours" } });
+    fireEvent.change(within(editor).getByRole("spinbutton", { name: "Saved action duration" }), { target: { value: "2" } });
+    expect(within(editor).getByTestId("saved-summary").textContent).toBe("Allow without asking · Write files · Everything under src/** · 2 hours");
+    fireEvent.click(within(editor).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(daemon.data.policy.saved[0]).toMatchObject({ pattern: "src/**", scope: "general", life: "time", minutes: 120 }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete Write files saved action" }));
+    await waitFor(() => expect(daemon.data.policy.saved).toHaveLength(0));
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(daemon.data.policy.saved).toMatchObject([{ kind: "write", pattern: "src/**", life: "time", minutes: 120 }]));
+    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    expect(screen.getByTestId("activity").textContent).toContain("Saved action deleted");
     stop();
   });
 

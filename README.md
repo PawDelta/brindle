@@ -847,26 +847,43 @@ command, path or URL; brindle never reads the screen) and brindle answers
 **allow**, **deny**, or **ask**, which leaves the prompt to you as usual. Any
 error is ask.
 
-The starting rules:
+Nothing is built in. Every rule lives in `~/.brindle/permissions.json`, and
+you can edit or remove any of them, including the ones a **preset** seeded.
+Pick a preset in Settings → Permissions or at setup:
 
-- **allow** reading a file git tracks in the worktree or repo root (exact
-  path, symlinks resolved and kept inside the root; never `.git/`, ignored or
-  untracked files);
-- **allow** a Bash command that is exactly one of the repo's `checks`, and
-  `git status` / `git diff` / `git log` / `git show`, but only as a single
-  simple command: anything with `;`, `|`, `&`, `$`, backticks, quotes,
-  redirections or globs is never auto-allowed;
-- **deny** `git push`, git force flags, and reading `~/.ssh`, `~/.aws`,
-  `~/.gnupg` or `.env*`;
-- **ask** for everything else.
+- **Autonomous** (the default): everything runs, except pushes into the
+  repo's default branch (ask) and destructive actions (deny: git force flags,
+  deleting a branch by push, a recursive `rm` of `/`, a top-level folder or
+  home);
+- **Permissive**: edits in the worktree and everyday commands run, the rest asks;
+- **Standard**: routine reads and everyday commands run, changes ask;
+- **Secure**: short approvals, and a deny for anything no rule covers.
 
-A deny beats any allow; nothing else is ranked. Add your own with
-`brindle permissions allow|deny KIND MATCH` (kinds: `read`, `write`, `edit`,
-`bash`, `fetch`, `mcp`, `other`; the match is exact unless `--prefix` or
-`--glob`); they're kept in `~/.brindle/permissions.json`. A repo's
+Every preset also denies reading `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env*` and
+the daemon's token, and asks before every push into a `release` or
+`release/*` branch, which starts a signed build (an approval there is never
+saved). It allows reading files git tracks, the repo's `checks`, read-only
+git commands and read-only pipelines (grep, rg, ls, cat, head, `sed -n` ...
+joined by pipes or `&&`, quoting read as the shell reads it). A pipeline
+stops being read-only when it writes a file, substitutes a command, sets a
+variable, recurses into a tree with a file a read deny covers, or reads such a
+file. Precedence: a deny wins, then an ask, then an allow, then the preset's
+setting for what no rule covers (ask, allow or deny). A deny or ask also
+catches a part of a compound command however it's spelled (spacing, quotes,
+assignments, redirects, `$(...)`, patterns the shell expands); when brindle
+can't read the syntax and a deny or ask could match it, it asks.
+
+Add your own with `brindle permissions allow|deny KIND MATCH` (kinds: `read`,
+`write`, `edit`, `bash`, `fetch`, `mcp`, `other`; the match is exact unless
+`--prefix` or `--glob`) or in the app, which can also make ask rules with
+limits on saved approvals, timed rules and exceptions. A repo's
 `.brindle/permissions.json` (`{"rules": [...]}`, same format) can only add
 denies. `brindle permissions list` shows every rule and where it came from,
-`forget ID` removes one of yours, `reset` goes back to the starting rules.
+`forget ID` removes one, `reset` goes back to the preset's rules. A store
+written by brindle 0.4.7 is migrated on first load: its permission editor's
+preset becomes Permissive, Standard or Secure (Autonomous when it chose
+none), its own rules stay, and its remembered approvals become saved actions;
+its old rows stay in the file.
 Profiles can add narrower, profile-local denies with a JSON array in frontmatter,
 for example `permission_denies: ["read glob ~/.private*", "bash prefix deploy"]`.
 Built-in profiles ship with no profile-specific denies by default. These denies
@@ -887,63 +904,29 @@ on without the tool running counts for nothing. Every decision is in
 `brindle history --kind permission`, and when a worker sits on a prompt, its
 supervisor is told exactly which request is pending (only you can answer it).
 
-**Grants.** When the app holds a Claude Code or Codex worker's request in the
-Inbox, you can answer **Allow for N min**. That lets this agent repeat exactly
-this request (the whole command, the resolved path, the https URL or the tool)
-in this repo until the time or the uses run out, or until you revoke it under
-Settings → Permission grants. A grant is spent when the hook allows the call,
-not when the tool succeeds (a hook can't see the result). Grants live in the
-daemon's memory, so a restart ends them all.
+**Saved actions.** The app's Inbox groups pending asks by kind and general
+form (a push by its destination, a file by its top folder, a command by its
+first two words, an MCP tool or its server). One decision answers the group:
+once, for the session, for a time, until revoked, deny, or always deny. Anything
+kept is a saved action, listed and editable under Settings → Permissions. A
+saved deny stops every ask it covers. A saved allow settles an ask only within
+the limits of the ask rule that asked (its scope and how long approvals may
+last), never past a deny rule, and never once it has expired. Every use reads
+the current rules again.
 
-Two built-in denies can also be lifted by an explicit approval. When nothing else
-denies the request, it is still denied at once, never held. A held request
-shows the CLI's own prompt, and an answer typed there would run it. The worker
-is told it was refused and that it asked you, and the Inbox shows the exact
-request with **Allow once**, **Deny**, and, when policy permits, **Always allow in this repository**. Allow it once, and the worker's next
-try of exactly that command uses your one-time grant. What it covers and what
-the Inbox shows are worked out by the daemon from the agent's own workspace,
-never taken from the agent. The grant expires after 15 minutes, or sooner if
-your org's `max_minutes` is shorter, even when the org shortens it later. It is
-used up even if the push then fails. If nobody answers, or the
-daemon isn't running, it stays denied.
-
-**Remembered approvals** are saved in your user permission preferences, across
-sessions and daemon restarts, until you revoke them in Settings → Permission
-grants. A remembered push covers the same repository, remote URL and destination
-branch across future commits; a file approval covers that specific file.
-Every use still checks the current policy, explicit denies and adapter protections.
-Temporary time/use limits apply to temporary grants; persistent approvals require
-their own policy permission. Turning that permission off prevents their use.
-- `git push` qualifies only as `git push <remote> <full commit sha>:refs/heads/<branch>`, run in the agent's own worktree (not another clone or a nested repository), and only when:
-  - the remote resolves (insteadOf applied) to exactly one https, ssh or `user@host:path` URL;
-  - none of `core.sshCommand`, `core.hooksPath`, the remote's receivepack/vcs/mirror, `push.followTags` or `push.recurseSubmodules` is set;
-  - there is no pre-push or reference-transaction hook;
-  - neither the repo nor your org sets protected paths (a push skips the merge check that enforces them).
-- `.env*` qualifies for one file inside the worktree.
-
-After your answer, brindle checks the policy, every rule and that scope again
-before allowing. Anything that changed meanwhile refuses it. The command then
-runs outside brindle.
-
-Never lifted: your own, the repo's, a profile's or your org's denies, git force
-flags, and reads of `~/.ssh`, `~/.aws`, `~/.gnupg` or the daemon's token.
-Antigravity and OpenCode workers get no grants: agy ignores a hook's allow, and
-OpenCode's plugin has no hold.
-
-In a Team org, only the org policy's `permission_grants` block decides what may
-be granted. It is read again on every request:
+In a Team org, the org policy's `permission_grants` block bounds what a saved
+allow may do. It is read again on every request:
 
 ```json
-"permission_grants": {"allow": true, "kinds": ["bash", "fetch"], "overridable": ["git-push"],
-                      "max_minutes": 30, "max_uses": 5, "allow_persistent": true,
-                      "deny": ["bash prefix terraform apply"]}
+"permission_grants": {"allow": true, "kinds": ["bash", "fetch"], "max_minutes": 30,
+                      "allow_persistent": true, "lifetimes": ["session", "time", "forever"],
+                      "scopes": ["branch", "remote"], "deny": ["bash prefix terraform apply"]}
 ```
 
 - `deny` entries are enforced for every provider and can't be lifted.
-- `allow_persistent` permits remembered overrides of these two built-in denies; omitted or false allows only temporary overrides. This setting does not control ordinary saved allow rules. The admin policy editor is not delivered by this local engine change.
-- A policy without the block, an unknown or malformed field (which makes the whole policy unusable), a policy that can't be read, or a paused or shut-down member: no grants.
-- Without a Team org, any kind can be granted, for up to 60 min and 20 uses. Both built-in denies support one-time or remembered approvals.
-- The org backend that serves this block isn't part of this repository. Until it serves one, Team orgs get no grants. It is enforced from the cached policy, or in air-gap mode from `.brindle/policy.json`.
+- A saved allow applies only for the listed `kinds`, `lifetimes` and `scopes`, with timed ones capped at `max_minutes`; one that lasts until revoked also needs `allow_persistent`.
+- A policy without the block, one that can't be read, or a paused or shut-down member: no saved allow applies.
+- Org admins edit the block in Settings → Organization approvals. It is enforced from the cached policy, or in air-gap mode from `.brindle/policy.json`.
 
 **Codex.** Codex runs a hook only once it's trusted, so with
 `permission_policy` on, brindle trusts its own hook the first time a Codex worker

@@ -41,7 +41,6 @@ from brindle.service.dto import (
     AgentDTO,
     DecisionDTO,
     GoalDTO,
-    GrantDTO,
     PreflightItemDTO,
     ProfileDTO,
     RoutingDTO,
@@ -256,16 +255,6 @@ def list_rules(db: DB, request: Request) -> Any:
 
 
 @_json
-def list_grants(db: DB, request: Request) -> Any:
-    """The live permission grants the person gave (brindle.daemon.grants), oldest first."""
-    from brindle.daemon.grants import GRANTS
-
-    from brindle import permission_grants
-    return [GrantDTO(**g).to_json() for g in
-            [*(g.to_json() for g in GRANTS.live()), *permission_grants.remembered_grants()]]
-
-
-@_json
 def get_profile(db: DB, request: Request) -> Any:
     """One profile as ``brindle profile show`` resolves it (its fields, where
     it is read from, the extends chain, its rule packs and the full prompt;
@@ -321,6 +310,31 @@ def get_config(db: DB, request: Request) -> Any:
 @_json
 def get_user_settings(db: DB, request: Request) -> Any:
     return {"claude_permission_mode": config.claude_permission_mode()}
+
+
+@_json
+def get_permissions(db: DB, request: Request) -> Any:
+    """The permission policy: preset, unmatched setting, rules, saved actions, prompt counts."""
+    from brindle.service import permissions as svc_permissions
+
+    return svc_permissions.policy_dto().to_json()
+
+
+@_json
+def get_permission_asks(db: DB, request: Request) -> Any:
+    """The requests waiting on the person, grouped by kind and general form (``repo`` narrows)."""
+    from brindle.service import permissions as svc_permissions
+
+    return [g.to_json() for g in svc_permissions.asks(db, _repo(request))]
+
+
+@_json
+def get_permission_plan(db: DB, request: Request) -> Any:
+    """What allowing everything waiting would grant (``forever=1`` for lasting grants)."""
+    from brindle.service import permissions as svc_permissions
+
+    forever = request.query_params.get("forever") in ("1", "true", "yes")
+    return svc_permissions.plan(db, _repo(request), forever).to_json()
 
 
 @_json
@@ -569,9 +583,11 @@ ROUTES = [
     Route("/v1/profiles", list_profiles),
     Route("/v1/profiles/{name}", get_profile),
     Route("/v1/rules", list_rules),
-    Route("/v1/grants", list_grants),
     Route("/v1/config", get_config),
     Route("/v1/user-settings", get_user_settings),
+    Route("/v1/permissions", get_permissions),
+    Route("/v1/permissions/asks", get_permission_asks),
+    Route("/v1/permissions/asks/plan", get_permission_plan),
     Route("/v1/routing", get_routing),
     Route("/v1/debug", get_debug),
     Route("/v1/doctor", get_doctor),

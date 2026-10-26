@@ -92,8 +92,14 @@ describe("Onboarding", () => {
     await step("ready");
     expect(screen.getByTestId("onb-ready-claude").textContent).toContain("signed in");
     expect(sidebar()).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Pick a project" }));
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+
+    // Permissions: Autonomous is preselected and recommended; continuing applies it.
+    await step("permissions");
+    expect(screen.getByTestId("onb-preset-autonomous").getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByRole("button", { name: "Continue with Autonomous" }));
     await step("project");
+    expect(daemon.requests.filter((r) => r.method === "PUT" && r.path === "/permissions/preset").map((r) => r.body)).toEqual([{ preset: "autonomous" }]);
     fireEvent.click(screen.getByRole("button", { name: "Open a folder…" }));
     await waitFor(() => expect(sidebar()).toBeTruthy());
     expect(daemon.opened).toEqual([PROJECT]);
@@ -132,6 +138,20 @@ describe("Onboarding", () => {
     expect(screen.getByTestId("onb-ready-codex").textContent).toContain("signed in · your own copy");
     expect(daemon.installs).toEqual([]);
     expect(posts(daemon).some((p) => p.endsWith("/install"))).toBe(false);
+
+    // A different choice is the one applied, and the cards are locked while the request is pending.
+    daemon.holdPreset = true;
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await step("permissions");
+    fireEvent.click(screen.getByTestId("onb-preset-secure"));
+    fireEvent.click(screen.getByRole("button", { name: "Continue with Secure" }));
+    await waitFor(() => expect(daemon.pendingPreset).not.toBeNull());
+    fireEvent.click(screen.getByTestId("onb-preset-autonomous"));
+    expect(screen.getByTestId("onb-preset-secure").getAttribute("aria-checked")).toBe("true");
+    daemon.pendingPreset?.();
+    await step("project");
+    expect(daemon.requests.filter((r) => r.path === "/permissions/preset").map((r) => r.body)).toEqual([{ preset: "secure" }]);
+    expect(daemon.data.policy.preset).toBe("secure");
   });
 
   it("onboarding: an install that fails says what the installer said on its card, and Retry runs it again inline", async () => {

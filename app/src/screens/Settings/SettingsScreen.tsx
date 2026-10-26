@@ -1,7 +1,7 @@
-/* Settings: this machine's brindle, in five sections (About last) with a small nav at
+/* Settings: this machine's brindle, in six sections (About last) with a small nav at
    the top: This repo (the handful of settings people change most, the rest
    behind More), You (how Claude's permission requests are handled, your
-   permission rules, your defaults for every repo), Providers (one row per
+   defaults for every repo), Permissions (the permission policy: Permissions.tsx), Providers (one row per
    provider CLI and per key, each with its state and its buttons) and
    Engine & health (the engine's version and update, the command-line tool,
    and the doctor as a short health list with a fix where the app has one).
@@ -35,8 +35,8 @@
    pane. The doctor (GET /v1/doctor) is read once per repo and on demand;
    its update line feeds the engine row (its sign-in lines stay out of the
    health list: the provider rows say that).
-   Permission rules are read, reviewed and saved through /v1/permission-editor;
-   fixed rules remain read-only. The command-line
+   Organization (OrgApprovals.tsx, read only when opened): the organization's
+   members, roles and approval limits (/v1/org-permissions). The command-line
    tool's install is the shell's (install_cli, api/tauri.ts): App passes it
    in the app, where the row then says where the link went; in a browser
    tab there is none and the button stays disabled. Staff alone (GET
@@ -52,7 +52,6 @@
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, Meta, ProviderInstalled, UserSettings } from "../../api/client";
-import type { GrantDTO } from "../../api/schema";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
 import type { Install } from "../../api/providersInstall";
@@ -63,7 +62,8 @@ import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { About } from "./About";
-import { PermissionRules } from "./PermissionRules";
+import { OrgApprovals } from "./OrgApprovals";
+import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
 import { alert, button, card, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
@@ -107,10 +107,12 @@ export interface SettingsScreenProps {
   /* About's license files (the shell's about_read, api/tauri.ts). Without
      one (a browser tab) About only names them. */
   readAbout?: () => Promise<AboutInfo>;
-  /* The section to scroll to on opening: "providers" from the sidebar's problem line. */
-  section?: "providers";
+  /* The section to scroll to on opening: "providers" from the sidebar's problem line, "permissions" from the Inbox. */
+  section?: "providers" | "permissions";
   /* A new value asks to scroll to `section` again, the page already open. */
   ask?: number;
+  /* A permission rule to open in its editor (the Inbox's "Open the deny rule"). */
+  rule?: string;
 }
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -118,6 +120,7 @@ const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e)
 const SECTIONS = [
   { id: "this-repo", label: "This repo" },
   { id: "you", label: "You" },
+  { id: "permissions", label: "Permissions" },
   { id: "providers", label: "Providers" },
   { id: "engine", label: "Engine & health" },
   { id: "about", label: "About" },
@@ -273,18 +276,7 @@ function SettingRow({ s, value, dirty, disabled, onChange }: { s: Setting; value
   return (
     <Row
       label={s.label}
-      help={
-        s.offWarning && value === false ? (
-          <>
-            {s.blurb}
-            <span role="alert" className="block text-fawn" data-testid="setting-warning">
-              {s.offWarning}
-            </span>
-          </>
-        ) : (
-          s.blurb
-        )
-      }
+      help={s.blurb}
       htmlFor={`setting-${s.key}`}
       wide={s.kind === "list"}
       badges={
@@ -520,65 +512,6 @@ function AppUpdate({ client, updater, release }: { client: DaemonClient; updater
   );
 }
 
-/* The grants the person gave from the Inbox ("Allow for …"): one agent may
-   repeat one exact request until a grant expires or its uses run out.
-   GET /v1/grants lists the live ones; Revoke (POST /v1/grants/{id}/revoke)
-   ends one now. The daemon keeps them in memory: a restart ends them all. */
-function PermissionGrants({ client }: { client: DaemonClient }) {
-  const [grants, setGrants] = useState<GrantDTO[] | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const load = useCallback(async () => {
-    try {
-      setGrants(await client.grants());
-    } catch (e) {
-      setError(message(e));
-    }
-  }, [client]);
-  useEffect(() => {
-    void load();
-  }, [load]);
-  const revoke = async (id: string) => {
-    setBusy(id);
-    setError(null);
-    try {
-      await client.revokeGrant(id);
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setBusy(null);
-      await load();
-    }
-  };
-  return (
-    <Row label="Permission grants" help="Your remembered approvals and temporary grants. Revoke either here; enterprise policy still applies." wide testId="grants">
-      {grants?.length === 0 && <span className="text-sm text-ink-3">None live.</span>}
-      <ul className="flex w-full flex-col gap-1">
-        {(grants ?? []).map((g) => (
-          <li key={g.id} className="flex flex-wrap items-center gap-s1" data-testid="grant">
-            <code className="min-w-0 flex-1 truncate font-mono text-xs" title={g.match}>
-              {g.kind} {g.match}
-            </code>
-            <span className="text-[11px] text-ink-3">
-              {g.persistent ? "Remembered until revoked"
-                : g.expires_at == null && g.agent_id ? <span data-testid="grant-session">Until supervisor session ends · {g.agent_id}{g.uses_left != null && ` · ${g.uses_left} uses`}</span>
-                  : <>{g.agent_id} · {g.uses_left} uses · until {g.expires_at == null ? "unknown" : new Date(g.expires_at * 1000).toLocaleTimeString()}</>}
-            </span>
-            <button type="button" className={quiet} disabled={busy !== null} onClick={() => void revoke(g.id)}>
-              Revoke
-            </button>
-          </li>
-        ))}
-      </ul>
-      {error && (
-        <p role="alert" className={`${alert} w-full`}>
-          {error}
-        </p>
-      )}
-    </Row>
-  );
-}
-
 /* One key's value, typed into a password field and sent to PUT /keys/{name}
    (write-only: the engine stores it as `brindle keys set` does and answers
    the last four). The value lives in this field until Save and nowhere
@@ -791,7 +724,7 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
   );
 }
 
-export function SettingsScreen({ client, installCli, appUpdater, releaseBuildUpdater, readAbout, section, ask }: SettingsScreenProps) {
+export function SettingsScreen({ client, installCli, appUpdater, releaseBuildUpdater, readAbout, section, ask, rule }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const pick = useRepo();
@@ -935,7 +868,7 @@ export function SettingsScreen({ client, installCli, appUpdater, releaseBuildUpd
   // Opened from the sidebar's problem line: scrolled to Providers, again once the sections above it have loaded.
   const placed = config !== null;
   useEffect(() => {
-    if (section === "providers") document.getElementById("providers")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+    if (section) document.getElementById(section)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   }, [section, ask, placed]);
   const install = async () => {
     if (!installCli) return;
@@ -998,12 +931,8 @@ export function SettingsScreen({ client, installCli, appUpdater, releaseBuildUpd
       )}
 
       {config && (
-        <Section id="you" title="You" blurb="How Claude's requests reach you, your permission rules, and your defaults for every repo." testId="user-settings">
+        <Section id="you" title="You" blurb="How Claude's requests reach you, and your defaults for every repo." testId="user-settings">
           <PermissionMode client={client} />
-          <Row label="Permission rules" help="Choose which actions run automatically, ask for approval, or are blocked." wide testId="permissions">
-            <PermissionRules key={repo} client={client} repo={repo} />
-          </Row>
-          <PermissionGrants client={client} />
           {yourLines.length > 0 && (
             <div className="flex flex-col gap-1 px-s2 py-1">
               <More open={yours} onToggle={() => setYours((y) => !y)} label="Your defaults for every repo" count={yourLines.length} />
@@ -1012,6 +941,14 @@ export function SettingsScreen({ client, installCli, appUpdater, releaseBuildUpd
           )}
         </Section>
       )}
+
+      <Permissions client={client} rule={rule} ask={ask} />
+
+      <Section id="organization" title="Organization" blurb="Your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
+        <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
+          <OrgApprovals client={client} />
+        </Row>
+      </Section>
 
       <Section
         id="providers"

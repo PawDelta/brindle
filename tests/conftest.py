@@ -323,6 +323,10 @@ def provider_http(monkeypatch):
 def brindle_home(tmp_path, monkeypatch):
     home = tmp_path / "brindle-home"
     monkeypatch.setenv("BRINDLE_HOME", str(home))
+    # A fresh store is a new person's: the Autonomous preset, which runs what no
+    # rule covers. The tests' policy is Standard (asks), so a test that wants the
+    # default behaviour says so (tests/test_permission_presets.py).
+    monkeypatch.setattr("brindle.permissions.DEFAULT_PRESET", "standard")
     # Never touch the real ~/.claude.json (providers.trust_folder writes there).
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))

@@ -1232,12 +1232,6 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     assert (shown.via, shown.choices, bool(shown.terminal)) == ("prompt", [], True)    # "Go to it"
     code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": "allow_once"})
     assert code == 409 and pressed == [], reply
-    for fields in ({"lifetime": "session"}, {"minutes": True}, {"minutes": 0}, {"minutes": None},
-                   {"choice": "deny", "minutes": 5}):
-        code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": "allow_for", **fields})
-        assert code == 400 and pressed == [], reply
-    code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": "allow_for", "scope": "repo"})
-    assert code == 409 and pressed == [], reply
 
 
 @pytest.mark.parametrize("screen", [CLAUDE_IDLE, pytest.param(CLAUDE_BUSY, marks=pytest.mark.variant(

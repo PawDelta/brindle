@@ -157,24 +157,9 @@ class SessionDTO(_DTO):
 
 
 class PermissionChoiceDTO(_DTO):
-    choice: str                  # allow_once | allow_for | allow_always | deny
+    choice: str                  # allow_once | allow_always | deny
     label: str
-    rule: str | None = None      # allow_always: the rule it writes, and whose; allow_for: the grant
-
-
-class GrantDTO(_DTO):
-    """A live permission grant (brindle.daemon.grants): what the person let
-    one agent do again, until ``expires_at`` and for ``uses_left`` more calls.
-    GET /grants lists them; POST /grants/{id}/revoke ends one."""
-    id: str
-    agent_id: str
-    repo_root: str
-    kind: str
-    match: str
-    expires_at: float | None
-    uses_left: int | None
-    created: float
-    persistent: bool = False
+    rule: str | None = None      # allow_always: the rule it writes, and whose
 
 
 class PermissionDTO(_DTO):
@@ -185,9 +170,7 @@ class PermissionDTO(_DTO):
     "terminal" ends the hold so the CLI's own prompt asks instead) or
     "prompt" (it is at the CLI's own prompt: ``terminal`` says so, and the
     app's "Go to it", with the item's root_id and agent_id, is the way to
-    answer it; no ``choices``) or "grant" (a one-time grant the agent asked
-    for after a built-in deny refused it: the same route answers it, with
-    allow_once or deny, until ``hold_until``; ``grant`` says what it allows)."""
+    answer it; no ``choices``)."""
     via: str
     request_id: str | None = None
     digest: str | None = None         # of the exact request and suggested rule shown
@@ -199,11 +182,6 @@ class PermissionDTO(_DTO):
     tool: str | None = None
     kind: str | None = None      # brindle.permissions.KINDS
     target: str | None = None    # the command, path or URL, complete
-    grant: str | None = None     # the grant it offers (allow_for, or a one-time grant), in a line
-    max_minutes: int | None = None
-    max_uses: int | None = None
-    approval_scope: str | None = None  # scope verified by the daemon for this approval
-    approval_scopes: dict[str, str] = {}  # allowed saved scope ids and their verified descriptions
     wording: str | None = None   # the prompt as the provider words it
     choices: list[PermissionChoiceDTO] = []
 
@@ -368,98 +346,6 @@ class RuleDTO(_DTO):
     source: str
 
 
-class PermissionRuleDTO(_DTO):
-    id: str
-    kind: str
-    match: str
-    match_type: str
-    decision: Literal["allow", "ask", "deny"]
-    source: str
-    created: float
-    repo_root: str | None = None
-    expires_at: float | None = None
-    exclusions: list[PermissionRuleDTO] = []
-    editable: bool = False
-    protected: bool = False
-
-
-class PermissionActionDTO(_DTO):
-    id: str
-    kind: str
-    name: str
-    tool: str | None
-    source: str
-
-
-class PermissionPresetDTO(_DTO):
-    id: str
-    name: str
-    description: str = ""
-    rule: PermissionRuleDTO | None = None
-    rules: list[PermissionRuleDTO] = []
-
-
-class PermissionRestrictionsDTO(_DTO):
-    editable: bool
-    managed: bool
-    reason: str
-    org_id: str | None
-    policy_version: int | str | None
-    permission_grants: dict[str, Any] | None
-    protected_paths: list[str]
-    permission_policy: str
-    roles_supported: bool
-    repo_supported: bool
-    expiry_supported: bool
-    checks: list[str]
-
-
-class PermissionEditorDTO(_DTO):
-    revision: str
-    rules: list[PermissionRuleDTO]
-    catalog: list[PermissionActionDTO]
-    presets: list[PermissionPresetDTO]
-    restrictions: PermissionRestrictionsDTO
-    limitations: list[str]
-
-
-class PermissionConflictDTO(_DTO):
-    left: str
-    right: str
-    overlap: Literal["yes", "unknown"]
-    protected: bool
-
-
-class PermissionChangeDTO(_DTO):
-    type: Literal["added", "updated", "removed"]
-    id: str
-    before: PermissionRuleDTO | None
-    after: PermissionRuleDTO | None
-
-
-class PermissionReviewDTO(_DTO):
-    revision: str
-    proposal: str
-    rules: list[PermissionRuleDTO]
-    changes: list[PermissionChangeDTO]
-    conflicts: list[PermissionConflictDTO]
-    unresolved: list[PermissionConflictDTO]
-    can_save: bool
-
-
-class PermissionSaveDTO(_DTO):
-    revision: str
-    rules: list[PermissionRuleDTO]
-    restrictions: PermissionRestrictionsDTO
-    limitations: list[str]
-    changes: list[PermissionChangeDTO]
-
-
-class PermissionVerifyDTO(_DTO):
-    verified: bool
-    action: PermissionActionDTO | None
-
-
 class RoutingLockDTO(_DTO):
     kind: str                # "provider" (not allowed), "route" (managed by the org) or "keys"
     name: str
@@ -537,3 +423,179 @@ class PreflightItemDTO(_DTO):
     detail: str
     action: PreflightActionDTO | None = None
     link: str | None = None
+
+
+# -- permissions (brindle.permissions, brindle.permission_grants) ------------------------------
+
+
+class PermissionLimitsDTO(_DTO):
+    """An ask rule's limits on saved approvals: how far (``max_scope``, a
+    LEVELS entry for pushes or a pattern) and how long (``life`` session |
+    time | forever, with ``minutes`` for time)."""
+    max_scope: str | None = None
+    life: str | None = None
+    minutes: float | None = None
+
+
+class PermissionExceptionDTO(_DTO):
+    """Requests a rule doesn't apply to (a deny's exception): matched like a rule."""
+    kind: str
+    match: str
+    match_type: str
+    describe: str
+
+
+class PermissionRuleDTO(_DTO):
+    """One rule of the person's store (GET /permissions). ``decision`` allow |
+    deny | ask; ``source`` preset | user | learned; ``match_type`` exact |
+    prefix | glob or a named matcher (permissions.BUILTIN_MATCHERS; a
+    ``push`` rule's match is "<source> → <destination>"). ``repo_root``: the
+    one repo it applies in (None: every repo). ``prompts``: asks it caused
+    in the last day."""
+    id: str
+    kind: str
+    match: str
+    match_type: str
+    decision: str
+    source: str
+    describe: str
+    created: float = 0.0
+    label: str = ""
+    limits: PermissionLimitsDTO | None = None
+    expires: float | None = None
+    expired: bool = False
+    exclusions: list[PermissionExceptionDTO] = []
+    repo_root: str | None = None
+    prompts: int = 0
+
+
+class PermissionPresetDTO(_DTO):
+    name: str                # autonomous | permissive | standard | secure
+    description: str
+    unmatched: str           # what the preset does with a request no rule covers
+    current: bool
+
+
+class SavedActionDTO(_DTO):
+    """A decision saved from the Inbox (permissions.SavedAction). ``kind``: a
+    permissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,
+    general, repository, ...) and ``pattern`` what it covers; ``request`` the
+    exact request it was saved from; ``life`` session | time | forever."""
+    id: str
+    kind: str
+    pattern: str
+    decision: str            # allow | deny
+    scope: str
+    level: str | None = None
+    request: dict[str, Any] = {}
+    life: str = "forever"
+    minutes: float | None = None
+    expires: float | None = None
+    expired: bool = False
+    session: str | None = None
+    repo: str | None = None
+    created: float = 0.0
+    note: str = ""
+
+
+class PermissionPolicyDTO(_DTO):
+    """GET /permissions: the chosen preset, the unmatched setting, every rule
+    (editable, the preset's included), the saved actions and per-rule prompt
+    counts ("unmatched" for asks no rule caused)."""
+    preset: str | None
+    unmatched: str
+    presets: list[PermissionPresetDTO]
+    rules: list[PermissionRuleDTO]
+    saved: list[SavedActionDTO]
+    prompt_counts: dict[str, int] = {}
+
+
+class AskScopeDTO(_DTO):
+    """One rung of an ask's scope ladder: ``value`` exact | general |
+    repository | remote | server | all, ``pattern`` what a grant of it covers."""
+    value: str
+    pattern: str
+    label: str
+    level: str | None = None
+
+
+class AskResultDTO(_DTO):
+    agent_id: str
+    request_id: str
+    exact: str
+    why: str | None = None
+
+
+class AskDTO(_DTO):
+    """One pending request, generalized. ``blocked``: a deny rule covers it
+    (its ``rule``); else ``rule`` is the ask rule that asked, with its
+    ``limits`` (None: no rule covers it, and unmatched actions ask)."""
+    agent_id: str
+    root_id: str
+    request_id: str
+    digest: str
+    repo: str
+    kind: str
+    tool: str
+    exact: str
+    summary: str
+    waiting_since: float
+    worker: str = ""
+    blocked: bool = False
+    rule: str | None = None
+    limits: PermissionLimitsDTO | None = None
+    reason: str = ""
+
+
+class AskGroupDTO(_DTO):
+    """GET /permissions/asks: one Inbox item per repo, kind and general form,
+    generalized from its oldest request. ``policy``: the tightest limits
+    among its requests (a deny blocks the whole item). ``modes``: what
+    POST /permissions/asks/decide accepts for it."""
+    key: str
+    repo: str
+    kind: str
+    title: str
+    general: AskScopeDTO
+    scopes: list[AskScopeDTO]
+    items: list[AskDTO]
+    blocked: bool = False
+    rule: str | None = None
+    limits: PermissionLimitsDTO | None = None
+    modes: list[str] = []
+
+
+class AskDecisionDTO(_DTO):
+    """POST /permissions/asks/decide: what one decision did."""
+    mode: str
+    scope: AskScopeDTO
+    grant: SavedActionDTO | None = None
+    resumed: list[AskResultDTO] = []
+    stopped: list[AskResultDTO] = []
+    skipped: list[AskResultDTO] = []
+    failed: list[AskResultDTO] = []
+
+
+class AllowAllGrantDTO(_DTO):
+    group: str
+    kind: str
+    scope: AskScopeDTO
+    mode: str
+    minutes: float | None = None
+    requests: list[str] = []
+
+
+class AllowAllPlanDTO(_DTO):
+    """GET /permissions/asks/plan (what allowing everything waiting would
+    grant) and the result of POST /permissions/asks/allow-all and
+    /unblock (``saved``, ``resumed``, ``failed`` filled in; ``excepted``,
+    ``added``, ``locked`` for unblock)."""
+    grants: list[AllowAllGrantDTO]
+    resumes: int
+    skipped: list[AskResultDTO] = []
+    saved: list[SavedActionDTO] = []
+    resumed: list[AskResultDTO] = []
+    failed: list[AskResultDTO] = []
+    excepted: int | None = None
+    added: int | None = None
+    locked: list[AskResultDTO] = []
