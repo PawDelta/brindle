@@ -255,14 +255,18 @@ def test_midturn_delivery_types_into_busy_codex_and_agy(db, ws, monkeypatch, pro
     assert db.get_agent("a1").status == "processing"
 
 
-def test_midturn_delivery_waits_for_a_paste_in_flight(db, ws, monkeypatch):
+@pytest.mark.parametrize("paused_meanwhile", [False, True])
+def test_midturn_delivery_waits_for_a_paste_in_flight(db, ws, monkeypatch, paused_meanwhile):
     # The first flush wins the idle claim and is still pasting; the second
-    # finds the agent busy and would type mid-turn over it. It must wait.
+    # finds the agent busy and would type mid-turn over it. It must wait, and
+    # then still respect a session hold that began while it waited.
     import threading
     from contextlib import contextmanager
 
-    from brindle import pipeline
+    from brindle import login_pause, pipeline
 
+    held = {"on": False}
+    monkeypatch.setattr(login_pause, "holding", lambda db_, agent_id: held["on"])
     db.add_agent(Agent("a1", ws.id, "developer", "codex", None, "interactive", "idle", "@0",
                        None, time.time()))
     db.enqueue("a1", "first", None)
@@ -303,12 +307,14 @@ def test_midturn_delivery_waits_for_a_paste_in_flight(db, ws, monkeypatch):
     second.start()
     second_moved.wait()
     while_first_in_flight = list(pasted)
+    held["on"] = paused_meanwhile
     release.set()
     first.join()
     second.join()
     assert while_first_in_flight == ["first"]  # the second was held at the lock, not typing
-    assert pasted == ["first", "second"] and results == {"first": True, "second": True}
-    assert db.pending_count("a1") == 0
+    assert pasted == (["first"] if paused_meanwhile else ["first", "second"])
+    assert results == {"first": True, "second": not paused_meanwhile}
+    assert db.pending_count("a1") == (1 if paused_meanwhile else 0)
 
 
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):

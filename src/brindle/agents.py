@@ -2038,18 +2038,12 @@ def flush(db: DB, agent_id: str) -> bool:
     uses the inbox. Returns True if something was delivered."""
     from brindle import inbox
     from brindle import launch_health
-    from brindle import login_pause
     from brindle import wake
 
     agent = db.get_agent(agent_id)
-    if agent is None or agent.headless:
-        return False  # its runner takes messages from the inbox itself
-    if login_pause.holding(db, agent_id):
-        return False  # its session waits on an expired cloud login; resuming flushes it
-    waits = wake.enabled(agent)
-    if waits and wake.live(agent):
-        return False  # its waiter hands the queue over (brindle.wake)
-    if not waits and inbox.usable(agent):
+    if _delivery_held(db, agent):
+        return False
+    if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
             baseline = launch_health.before_delivery(db, agent)
@@ -2079,12 +2073,25 @@ def delivery_lock(agent_id: str):
     return pipeline._reentrant_lock("deliver-" + hashlib.sha1(agent_id.encode()).hexdigest()[:16])
 
 
+def _delivery_held(db: DB, agent: Agent | None) -> bool:
+    """Whether ``flush`` must leave the queue alone: the agent is gone or
+    headless (its runner takes messages from the inbox itself), its session
+    waits on an expired cloud login (resuming flushes it), or a live waiter
+    hands the queue over (brindle.wake)."""
+    from brindle import login_pause
+    from brindle import wake
+
+    return (agent is None or agent.headless or login_pause.holding(db, agent.id)
+            or (wake.enabled(agent) and wake.live(agent)))
+
+
 def _flush_pane(db: DB, agent_id: str) -> bool:
     """``flush``'s typed delivery, under its delivery_lock. The queue and the
-    agent are read afresh: another sender may have delivered while it waited."""
+    agent are read afresh: while it waited, another sender may have delivered,
+    or the session been paused."""
     from brindle import launch_health
 
-    if db.pending_count(agent_id) == 0:
+    if _delivery_held(db, db.get_agent(agent_id)) or db.pending_count(agent_id) == 0:
         return False
     claimed_at = db.claim_idle(agent_id)
     if claimed_at is None:
