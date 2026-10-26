@@ -34,8 +34,9 @@ export type Route =
   | { screen: "agents" }
   /* `section`: scrolled to on opening (the sidebar's usage reading opens Account › Usage,
      a provider's problem Settings › Providers); `ask` counts the requests, so asking
-     again while the page is open scrolls again. */
-  | { screen: "settings"; section?: "providers"; ask?: number }
+     again while the page is open scrolls again; `rule`: a permission rule to open in its
+     editor, from the Inbox's permission items. */
+  | { screen: "settings"; section?: "providers" | "permissions"; ask?: number; rule?: string }
   | { screen: "account"; section?: "usage"; ask?: number }
   | ({ screen: "session"; agent?: string; sheet?: SheetRef } & SessionRef);
 
