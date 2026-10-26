@@ -437,6 +437,8 @@ CLAUDE_KINDS = {
     "Bash": "bash",
     "WebFetch": "fetch", "WebSearch": "fetch",
 }
+# An MCP tool's name (mcp__<server>__<tool>), as a Claude Code hook matcher regex.
+MCP_TOOL_PATTERN = "mcp__.*"
 
 
 def from_claude(payload: dict, worktree: str = "", repo_root: str = "") -> Request | None:
@@ -1322,11 +1324,13 @@ ONE_OPERAND = frozenset({"uniq"})
 
 def _has_option(args: list[str], short: str, long: tuple[str, ...]) -> bool:
     """Whether any of ``args`` carries one of the short letters (in any
-    cluster, ``-ro``) or long options (``--output`` or ``--output=x``)."""
+    cluster, ``-ro``) or long options (``--output`` or ``--output=x``). GNU
+    getopt takes any unambiguous prefix of a long option (``--out``,
+    ``--compress-prog``), so a prefix of a listed one counts too."""
     for a in args:
         if a.startswith("--"):
             name = a.split("=", 1)[0]
-            if name in long:
+            if len(name) > 2 and any(opt.startswith(name) for opt in long):
                 return True
         elif a.startswith("-") and len(a) > 1 and any(c in short for c in a[1:]):
             return True

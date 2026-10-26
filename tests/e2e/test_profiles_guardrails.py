@@ -340,7 +340,9 @@ def test_a_launched_worker_gets_the_composed_prompt_flags_and_env(repo, agents_d
     allowed = flag(inner, "--allowedTools").split(",")
     assert "mcp__brindle" in allowed and any(t.startswith("Bash(git") for t in allowed)
     settings = json.loads(flag(inner, "--settings"))
-    assert settings["hooks"]["PreToolUse"][0]["matcher"] == "Bash|Edit|Write|NotebookEdit|MultiEdit|Read|Glob|Grep"
+    # The hook sees Bash and the tools the write and read scopes guard (plus whatever the permission policy adds).
+    hooked = set(settings["hooks"]["PreToolUse"][0]["matcher"].split("|"))
+    assert {"Bash", "Edit", "Write", "NotebookEdit", "MultiEdit", "Read", "Glob", "Grep"} <= hooked
     # The task, with its finish line, is the last argument.
     assert inner[-1].count("Do the thing") == 1 and "pytest passes" in inner[-1]
     # Environment: the profile's env lines, brindle's own variables; env_allow handed to the pane.

@@ -490,16 +490,31 @@ def _replace_text(config: str, text: str, mode: int) -> None:
             pass
 
 
+def _policy_on(cwd: str | None) -> bool:
+    """Whether the repo ``cwd`` belongs to runs brindle's permission policy."""
+    from brindle.config import load_repo_config
+
+    try:
+        return bool(cwd) and load_repo_config(cwd).permission_policy == "on"
+    except Exception:  # noqa: BLE001 - never stop a launch over this
+        return False
+
+
 def _pre_tool_matcher(ctx: "LaunchContext") -> str:
     """Which tools Claude Code's PreToolUse hook sees: Bash always, the edit
-    tools for a plan_first worker, and the file tools a profile's write or
-    read scope covers (brindle.guardrails; already cleared without the Pro
-    feature, see agents._profile_for)."""
-    from brindle import guardrails
+    tools for a plan_first worker, every tool the permission policy rules on
+    (the file, fetch and MCP tools, by name pattern: agents._pre_tool_policy
+    denies or forces the prompt there) when the policy is on, and the file
+    tools a profile's write or read scope covers (brindle.guardrails;
+    already cleared without the Pro feature, see agents._profile_for)."""
+    from brindle import guardrails, permissions
 
     tools = ["Bash"]
     if ctx.plan_first:
         tools += ["Edit", "Write", "NotebookEdit"]
+    if _policy_on(ctx.cwd):
+        tools += [t for t in permissions.CLAUDE_KINDS if t not in tools]
+        tools.append(permissions.MCP_TOOL_PATTERN)
     for t in guardrails.hook_matcher(ctx.profile).split("|"):
         if t and t not in tools:
             tools.append(t)

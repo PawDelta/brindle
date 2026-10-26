@@ -90,19 +90,42 @@ def _scope(value: str, pattern: str, label: str, level: str | None = None) -> di
     return {"value": value, "pattern": pattern, "label": label, "level": level}
 
 
+# Between the pushes of a scope that covers several ("fix → main @ origin,
+# fix → release @ origin"): a ref name never holds a space, so it can't be
+# mistaken for part of one.
+PUSH_LIST = ", "
+
+
+def _join(parts) -> str:
+    return PUSH_LIST.join(dict.fromkeys(parts))
+
+
+def push_scopes(keys: list[str]) -> list[dict]:
+    """The scope ladder of a command whose pushes have ask keys ``keys``: the
+    exact form lists every push, the general form every destination (a
+    grant covers a push when it fits one of them), the remote form every
+    remote."""
+    pushes = [permissions.push_pattern(k) or ("*", "*", "*") for k in keys]
+    remotes = _join(remote for _, _, remote in pushes)
+    if PUSH_LIST in remotes:
+        dests = _join(f"{dst} on {remote}" for _, dst, remote in pushes)
+    else:
+        dests = _join(dst for _, dst, _ in pushes)
+    exact_label = "This push only · " + _join(f"{src} into {dst} on {remote}" for src, dst, remote in pushes)
+    return [_scope(EXACT, _join(keys), exact_label, "branch"),
+            _scope(GENERAL, _join(f"*{PUSH_ARROW}{dst}{PUSH_AT}{remote}" for _, dst, remote in pushes),
+                   f"Into {dests} from any branch on {remotes}", "destination"),
+            _scope("remote", _join(f"*{PUSH_ARROW}*{PUSH_AT}{remote}" for _, _, remote in pushes),
+                   f"All branches on {remotes}", "remote"),
+            _scope("repository", f"*{PUSH_ARROW}*{PUSH_AT}*", "All pushes in this repository", "repository"),
+            _scope("all", f"*{PUSH_ARROW}*{PUSH_AT}*", "All pushes in every repository", "all")]
+
+
 def scopes_for(kind: str, key: str, name: str = "") -> list[dict]:
     """The scope ladder for a request of ``kind`` with ask key ``key``,
     narrowest first; the general form is the one valued GENERAL."""
     if kind == "push":
-        refs, _, remote = key.partition(PUSH_AT)
-        src, _, dst = refs.partition(PUSH_ARROW)
-        remote = remote or "*"
-        return [_scope(EXACT, key, f"This push only · {src} into {dst} on {remote}", "branch"),
-                _scope(GENERAL, f"*{PUSH_ARROW}{dst}{PUSH_AT}{remote}", f"Into {dst} from any branch on {remote}",
-                       "destination"),
-                _scope("remote", f"*{PUSH_ARROW}*{PUSH_AT}{remote}", f"All branches on {remote}", "remote"),
-                _scope("repository", f"*{PUSH_ARROW}*{PUSH_AT}*", "All pushes in this repository", "repository"),
-                _scope("all", f"*{PUSH_ARROW}*{PUSH_AT}*", "All pushes in every repository", "all")]
+        return push_scopes(key.split(PUSH_LIST))
     if kind in permissions.PATH_KINDS:
         verb = {"read": "reads", "write": "writes", "edit": "edits"}[kind]
         top = key.split("/")[0] if "/" in key else ""
@@ -158,32 +181,44 @@ class Ask:
 
 
 def generalize(req: Request) -> Ask:
-    """``req`` generalized. A command that pushes to several destinations has
-    no single exact or destination form: its ladder starts at the remote
-    (every branch on it), and its exact form lists every push."""
+    """``req`` generalized. A command that pushes to several destinations
+    keeps one exact form, listing every push, and a general form listing
+    every destination (push_scopes)."""
     kind = grant_kind(req)
-    keys = ask_keys(req)
-    if kind == "push" and len(set(keys)) > 1:
-        scopes = [s for s in scopes_for(kind, keys[0]) if s["value"] not in (EXACT, GENERAL)]
-        return Ask(kind, ", ".join(dict.fromkeys(keys)), scopes)
+    if kind == "push":
+        keys = list(dict.fromkeys(ask_keys(req)))
+        return Ask(kind, _join(keys), push_scopes(keys))
     return Ask(kind, ask_key(req), scopes_for(kind, ask_key(req), req.tool))
 
 
 # -- matching saved actions ----------------------------------------------------------------------
 
 
-def scope_matches(kind: str, pattern: str, key: str) -> bool:
-    """Whether a saved action's ``pattern`` covers ask key ``key``."""
+def _push_fits(pattern: str, key: str, loose: bool) -> bool:
+    """Whether push key ``key`` fits one push pattern. A ref only git can
+    name (UNKNOWN_REF: HEAD, no refspec, a wildcard) fits only ``*``, unless
+    ``loose`` (a deny, which errs toward matching: it may well be that branch)."""
+    pats, refs = permissions.push_pattern(pattern), permissions.push_pattern(key)
+    if pats is None or refs is None:
+        return False
+    for pat, ref in zip(pats, refs):
+        if ref == UNKNOWN_REF:
+            if not (loose or pat == "*"):
+                return False
+        elif not fnmatch.fnmatchcase(ref, pat):
+            return False
+    return True
+
+
+def scope_matches(kind: str, pattern: str, key: str, loose: bool = False) -> bool:
+    """Whether a saved action's ``pattern`` covers ask key ``key``. A push
+    pattern may list several pushes (push_scopes): the key fits any one.
+    ``loose``: for a deny, a push whose branch only git knows counts as
+    covered whenever it may be the one the pattern names."""
     if pattern in ("*", "**"):
         return True
     if kind == "push":
-        if PUSH_ARROW not in pattern or PUSH_ARROW not in key:
-            return False
-        pats, refs = permissions.push_pattern(pattern), permissions.push_pattern(key)
-        for pat, ref in zip(pats, refs):
-            if ref == UNKNOWN_REF and pat != "*" or not fnmatch.fnmatchcase(ref, pat):
-                return False
-        return True
+        return any(_push_fits(p, key, loose) for p in pattern.split(PUSH_LIST))
     if kind == "bash":
         if simple_argv(key) is None:
             return pattern == key   # a compound or quoted command: only the exact grant
@@ -219,14 +254,16 @@ def _other_parts_allowed(req: Request, rules: list[Rule] | None) -> bool:
 
 def covers(action: SavedAction, req: Request, rules: list[Rule] | None = None) -> bool:
     """Whether ``action``'s pattern covers ``req``. A deny covers it as soon as
-    any push the command makes matches; an allow only when every push does
-    and nothing else runs alongside them."""
+    any push the command makes matches, or may (a branch only git can name,
+    see scope_matches); an allow only when every push does, strictly, and
+    nothing else runs alongside them."""
     if action.kind != grant_kind(req):
         return False
     if action.repo is not None and req.repo_root and action.repo != req.repo_root:
         return False
-    hits = [scope_matches(action.kind, action.pattern, key) for key in ask_keys(req)]
-    if action.decision == "deny":
+    deny = action.decision == "deny"
+    hits = [scope_matches(action.kind, action.pattern, key, loose=deny) for key in ask_keys(req)]
+    if deny:
         return any(hits)
     if not all(hits):
         return False
@@ -387,18 +424,32 @@ def eligible(ask: PendingAsk, scope: dict, mode: str, minutes: float | None) -> 
     if mode in ("deny", "always-deny"):
         return None
     if not all(scope_matches(ask.ask.kind, scope["pattern"], key) for key in ask_keys(ask.request)):
-        return "pushes outside this scope"     # a command pushing to more than the scope covers
+        if not _is_exact(ask, scope):
+            return "pushes outside this scope"     # a command pushing to more than the scope covers
+        if mode != "once":
+            # Its own exact form, which no pattern fits: a push whose branch
+            # only git knows (git push origin HEAD). The held request itself
+            # can be let through, but a saved grant could cover any branch.
+            return "only git knows which branch it pushes: approve it once, or at a wider scope"
     if mode == "once":
         return None
     life = {"session": "session", "timed": "time", "forever": "forever"}[mode]
     return limits_allow(scope.get("level"), scope["pattern"], life, minutes, ask.rule)
 
 
-def candidates(asks: list[PendingAsk], g: Group, scope: dict) -> list[PendingAsk]:
+def _is_exact(ask: PendingAsk, scope: dict) -> bool:
+    """Whether ``scope`` is ``ask``'s own exact form (the held request's
+    identity, which fits it even where no pattern does: an unknown ref)."""
+    return scope["value"] == EXACT and scope["pattern"] == ask.ask.exact
+
+
+def candidates(asks: list[PendingAsk], g: Group, scope: dict, loose: bool = False) -> list[PendingAsk]:
     """Every pending ask of the group's kind and repo the scope covers (every
-    push of a command that makes several)."""
+    push of a command that makes several, or the ask whose exact form the
+    scope is). ``loose``: for a deny, as scope_matches reads it."""
     return [a for a in asks if a.repo_root == g.repo_root and a.ask.kind == g.kind
-            and all(scope_matches(g.kind, scope["pattern"], key) for key in ask_keys(a.request))]
+            and (_is_exact(a, scope)
+                 or all(scope_matches(g.kind, scope["pattern"], key, loose) for key in ask_keys(a.request)))]
 
 
 def _result(a: PendingAsk, why: str | None = None) -> dict:
@@ -456,7 +507,8 @@ def decide_group(db, key: str, scope_value: str, mode: str, minutes: float | Non
     # Narrowed to the exact request, "once" and "deny" resolve the oldest ask
     # alone; at any wider scope the whole item (a grant: every ask it covers).
     exact = scope["value"] == EXACT
-    wanted = ([g.rep] if exact else list(g.items)) if mode in ("once", "deny") else candidates(asks, g, scope)
+    wanted = (([g.rep] if exact else list(g.items)) if mode in ("once", "deny")
+              else candidates(asks, g, scope, loose=mode == "always-deny"))
     reasons: dict[str, str] = {}
     hits = []
     for a in wanted:

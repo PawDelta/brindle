@@ -66,11 +66,36 @@ def test_a_profile_without_bash_rules_never_allows(db, ws, monkeypatch):
     assert agents.handle_hook(db, a.id, "pre-tool", bash("git status")) is None
 
 
-def test_plan_first_agents_hook_edit_tools_too():
-    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "go", plan_first=True))
+def launch_matcher(**ctx):
+    argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "go", **ctx))
     settings = json.loads(argv[argv.index("--settings") + 1])
     (entry,) = settings["hooks"]["PreToolUse"]
-    assert entry["matcher"] == "Bash|Edit|Write|NotebookEdit"
+    return entry["matcher"]
+
+
+def test_plan_first_agents_hook_edit_tools_too():
+    assert launch_matcher(plan_first=True) == "Bash|Edit|Write|NotebookEdit"
+
+
+def test_with_the_policy_on_the_hook_sees_every_tool_it_rules_on(db, ws):
+    """The policy's deny or ask on a file, fetch or MCP tool reaches Claude
+    Code only through the PreToolUse hook, so a launch with the policy on
+    registers it for all of them, dynamic MCP names included."""
+    import re
+
+    from brindle import permissions
+    from brindle.config import set_local
+
+    set_local(ws.repo_root, "permission_policy", "on")
+    matcher = launch_matcher(cwd=ws.path)
+    assert matcher.startswith("Bash|")
+    assert all(re.fullmatch(matcher, t) for t in ("Read", "Write", "WebFetch", "mcp__slack__send_message"))
+    a = worker(db, ws)
+    permissions.add_rule("mcp", "mcp__slack__*", "deny", "glob")
+    for payload in ({"tool_name": "Read", "tool_input": {"file_path": f"{ws.path}/.env"}},
+                    {"tool_name": "mcp__slack__send_message", "tool_input": {"text": "hi"}}):
+        got = agents.handle_hook(db, a.id, "pre-tool", payload)["hookSpecificOutput"]
+        assert (got["hookEventName"], got["permissionDecision"]) == ("PreToolUse", "deny")
 
 
 @pytest.mark.variant("incident #159: MCP CONNECT_TIMEOUT under load")
