@@ -288,7 +288,17 @@ def _propose(body: dict, store: p.Store) -> tuple[dict, list[p.Rule]]:
         # Presets replace only this repository's editable rules. Global rules,
         # other repositories and all external protections retain their ownership.
         after = [r for r in before if r.repo_root != repo]
-        after.extend(p.Rule.from_dict({**raw, "repo_root": repo}) for raw in preset["rules"])
+        # Edits retain IDs even when their scope becomes global. Use the
+        # reviewed revision for new IDs, reserving every existing identity so
+        # reapplying a preset cannot alias an edited or removed rule.
+        used_ids = {r.id for r in [*before, *protected]}
+        for index, raw in enumerate(preset["rules"]):
+            rule = p.Rule.from_dict({**raw, "repo_root": repo})
+            identity = _digest([state["revision"], preset["id"], index, rule.to_dict()])[:16]
+            while identity in used_ids:
+                identity = _digest([state["revision"], identity])[:16]
+            used_ids.add(identity)
+            after.append(replace(rule, id=identity))
     existing = next((r for r in before if r.id == id_), None)
     draft = _draft(body.get("rule"), repo, existing) if operation == "upsert" else None
     if draft:

@@ -57,6 +57,24 @@ def test_permission_presets(tmp_path, preset, read, edit, bash):
     assert all(r in saved["rules"] for r in protected)
     with pytest.raises(ServiceError):
         e.review({**body, "revision": saved["revision"], "preset": "unknown"})
+    local = next(r for r in p.load_store().rules if r.repo_root == repo and r.kind == "read")
+    edit_body = {"repo": repo, "revision": saved["revision"], "operation": "upsert",
+                 "id": local.id, "rule": {**local.to_dict(), "repo_root": None}, "resolution": "manual"}
+    edited = e.review(edit_body)
+    global_state = e.save({**edit_body, "proposal": edited["proposal"]})
+    global_rule = next(r for r in p.load_store().rules if r.id == local.id)
+    body["revision"] = global_state["revision"]
+    reapplied = e.review(body)
+    assert reapplied["can_save"]
+    assert len({r["id"] for r in reapplied["rules"]}) == len(reapplied["rules"])
+    saved = e.save({**body, "proposal": reapplied["proposal"]})
+    local = next(r for r in p.load_store().rules if r.repo_root == repo and r.kind == "read")
+    remove = {"repo": repo, "revision": saved["revision"], "operation": "remove",
+              "id": local.id, "resolution": "manual"}
+    reviewed = e.review(remove)
+    e.save({**remove, "proposal": reviewed["proposal"]})
+    assert global_rule in p.load_store().rules
+    assert not any(r.id == local.id for r in p.load_store().rules)
 
 
 def test_scoped_exclusions_and_ask_reach_every_matching_path(monkeypatch):
