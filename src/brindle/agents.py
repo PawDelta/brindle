@@ -3347,17 +3347,30 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
         from brindle.profiles import profile_rules_for
 
         cfg = load_repo_config(ws.repo_root)
-        if cfg.permission_policy == "on":
+        essentials = tool == "Bash" and cfg.permission_essentials is not False
+        if cfg.permission_policy == "on" or essentials:
             req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root),
                      *permission_grants.limits(ws.repo_root).deny]
             restrictions = [r for r in rules if r.decision in ("ask", "deny")]
+            # A deny or ask in force reaches the person before any allow below
+            # (essentials, the profile's allowed_tools) could pass the command.
+            # With the policy off, only a rule's own: syntax brindle can't
+            # check (d-shell-syntax) stays the profile's and Claude Code's call,
+            # as it was before permission_essentials.
             decision = permissions.decide(req, checks=cfg.checks, rules=restrictions)
-            if decision.rule is not None:
+            if decision.rule is not None and (cfg.permission_policy == "on" or decision.rule.id != "d-shell-syntax"):
                 return {"hookSpecificOutput": {
                     "hookEventName": "PreToolUse", "permissionDecision": "ask",
                     "permissionDecisionReason": f"brindle: {decision.reason}",
                 }}
+        # The permission_essentials group, whatever permission_policy says:
+        # read-only inspection no deny or ask covers runs without a prompt.
+        if essentials and req is not None and permissions.essential(req, restrictions, cfg.checks):
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse", "permissionDecision": "allow",
+                "permissionDecisionReason": "brindle: a read-only command workers need (permission_essentials)",
+            }}
     if tool != "Bash":
         return None
     command = str((payload.get("tool_input") or {}).get("command", ""))
@@ -3440,7 +3453,10 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         # allowed_tools cover and nothing else of brindle's: every other
         # answer is Codex's own.
         review_only = not policy and provider == "codex"
-        if not policy and provider != "claude" and not (review_only and agent.mode == "review"):
+        # And any Codex worker while permission_essentials is on: its hook
+        # answers those commands alone.
+        essentials = review_only and cfg.permission_essentials is not False
+        if not policy and provider != "claude" and not (review_only and (agent.mode == "review" or essentials)):
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         if provider == "codex":
@@ -3451,6 +3467,13 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 return None
             lim = permission_grants.limits(ws.repo_root)
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules, *lim.deny]
+            if essentials and len(reqs) == 1 and permissions.essential(
+                    reqs[0], [r for r in rules if r.decision in ("ask", "deny")], cfg.checks):
+                decision = permissions.Decision("allow", "a read-only command workers need (permission_essentials)")
+                _record_permission(db, agent, ws, reqs[0].summary(), f"allow: {decision.reason}")
+                return permissions.codex_output(decision)
+            if review_only and agent.mode != "review":
+                return None  # as Codex would without brindle: its own prompt or refusal
             from dataclasses import replace
 
             from brindle.native.permissions import Permissions, split_commands, uncovered_part
