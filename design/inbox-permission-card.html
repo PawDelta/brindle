@@ -1,0 +1,243 @@
+<!doctype html><html lang="en" data-theme="dark"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Brindle · Inbox permission card</title><style>:root {
+  --canvas: #09090b; --canvas-2: #121214; --surface: #16161a; --surface-2: #1c1b1f;
+  --line: rgba(63, 63, 70, 0.42); --line-strong: rgba(82, 82, 91, 0.6);
+  --ink: #eee6dc; --ink-2: #b9ab9b; --ink-3: #948677;
+  --fawn: #d7af87; --fawn-soft: rgba(215, 175, 135, 0.1);
+  --sap: #e8875a; --sap-soft: rgba(232, 135, 90, 0.12);
+  --pass: #34d399; --pass-soft: rgba(52, 211, 153, 0.12);
+  --branch: #a99be0; --branch-soft: rgba(169, 155, 224, 0.12);
+  --fail: #f08c88; --fail-soft: rgba(240, 140, 136, 0.12);
+  --on-fawn: #1a130c; --on-branch: #15102a; --on-sap: #1a0f08;
+  --shadow: #0006;
+  --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --canvas: #f6f3ef; --canvas-2: #efeae4; --surface: #ffffff; --surface-2: #f8f5f1;
+    --line: rgba(120, 104, 88, 0.2); --line-strong: rgba(120, 104, 88, 0.34);
+    --ink: #211a14; --ink-2: #5a4d41; --ink-3: #75685b;
+    --fawn: #86572a; --fawn-soft: rgba(134, 87, 42, 0.09);
+    --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
+    --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
+    --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
+    --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
+    --on-fawn: #fffaf4; --on-branch: #ffffff; --on-sap: #ffffff;
+    --shadow: #0002;
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --canvas: #f6f3ef; --canvas-2: #efeae4; --surface: #ffffff; --surface-2: #f8f5f1;
+  --line: rgba(120, 104, 88, 0.2); --line-strong: rgba(120, 104, 88, 0.34);
+  --ink: #211a14; --ink-2: #5a4d41; --ink-3: #75685b;
+  --fawn: #86572a; --fawn-soft: rgba(134, 87, 42, 0.09);
+  --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
+  --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
+  --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
+  --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
+  --on-fawn: #fffaf4; --on-branch: #ffffff; --on-sap: #ffffff;
+  --shadow: #0002;
+  color-scheme: light;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.5 var(--sans);-webkit-font-smoothing:antialiased}
+button,input,select{font:inherit}button,summary,select{cursor:pointer}
+button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:32px;border:1px solid var(--line-strong);border-radius:8px;padding:4px 16px;background:var(--surface);color:var(--ink);font-weight:500}
+button:hover{background:var(--surface-2)}
+button:focus-visible,input:focus-visible,summary:focus-visible,[role=menuitem]:focus-visible{outline:2px solid var(--branch);outline-offset:2px}
+.link-button{border-color:transparent;background:transparent;color:var(--branch);padding:4px 8px;font-weight:400}.link-button:hover{background:var(--surface-2)}
+input{min-width:0;min-height:32px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);padding:4px 8px;font-size:14px}
+input:focus{border-color:var(--branch)}
+.hidden{display:none!important}
+p{margin:0;color:var(--ink-2)}h1{font-size:20px;font-weight:600;letter-spacing:-.5px;margin:0 0 4px}h2{font-size:16px;font-weight:600;margin:0 0 4px}
+code{font-family:var(--mono);font-size:12px;overflow-wrap:anywhere}
+.app{display:grid;grid-template-columns:224px minmax(0,1fr);min-height:100vh}
+.sidebar{background:var(--canvas-2);border-right:1px solid var(--line);padding:24px 16px}
+.brand{display:flex;align-items:center;gap:8px;margin:0 8px 32px;font-size:20px;font-weight:600}.logo-mark{width:32px;height:24px}
+.sidebar nav>div{padding:8px;border-radius:8px;margin:4px 0;color:var(--ink-2);display:flex;justify-content:space-between}
+.sidebar nav>.active{color:var(--branch);background:var(--branch-soft)}
+.sidebar nav>.nav-label{margin-top:24px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3)}
+.count{font-size:11px;border-radius:99px;padding:0 7px;background:var(--sap-soft);color:var(--sap)}
+main{width:100%;max-width:760px;padding:24px 32px 56px;margin:0 auto;min-width:0}
+.top{display:flex;align-items:center;justify-content:space-between;gap:16px;color:var(--ink-3);font-size:12px}
+.preview{font-size:11px;color:var(--ink-3)}.role{display:flex;align-items:center;gap:8px}
+.header{margin:32px 0 16px}
+
+/* stall banner: one line */
+.stall{display:flex;align-items:center;gap:8px;padding:6px 8px 6px 12px;margin-bottom:16px;border:1px solid var(--sap);border-radius:8px;background:var(--sap-soft);font-size:13px}
+.stall .dot{color:var(--sap)}.stall strong{font-weight:500}.stall .link-button{margin-left:auto;min-height:28px;padding:2px 8px}
+
+/* permission card */
+.cards{display:flex;flex-direction:column;gap:12px}
+.ask{position:relative;border:1px solid var(--line);border-radius:12px;background:var(--surface);padding:16px 16px 12px 20px;scroll-margin-top:16px;outline:none}
+.ask::before{content:"";position:absolute;left:0;top:12px;bottom:12px;width:3px;border-radius:2px;background:var(--sap)}
+.ask.window::before{background:var(--branch)}
+.ask:focus{box-shadow:0 0 0 2px var(--branch)}
+.ask.leaving{opacity:0;transform:translateY(-4px);transition:opacity .18s,transform .18s}
+.ask-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.ask h3{font-size:15px;font-weight:600;line-height:1.4;margin:0}
+.ask h3 .who{color:var(--ink)}.ask h3 .what{font-weight:400;color:var(--ink-2)}
+.ask h3 code{font-size:13px;background:var(--surface-2);border:1px solid var(--line);border-radius:4px;padding:1px 6px;color:var(--ink);font-weight:500}
+.chips{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap}
+.tag{display:inline-flex;align-items:center;gap:4px;border:1px solid var(--line);border-radius:4px;padding:2px 6px;font-size:12px;color:var(--ink-2);white-space:nowrap}
+.tag.window{color:var(--branch);border-color:var(--branch);background:var(--branch-soft)}
+.age{font-size:12px;color:var(--ink-3);white-space:nowrap;padding-top:2px}
+.why{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:13px;color:var(--ink-2)}
+.why::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--sap);flex:none}
+.ask.window .why::before{background:var(--branch)}
+.actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-top:12px;flex-wrap:wrap}
+.btn-deny{border-color:transparent;background:transparent;color:var(--ink-2)}
+.btn-deny:hover{color:var(--fail);background:var(--fail-soft)}
+.split{position:relative;display:inline-flex}
+.split>button:first-child{border-radius:8px 0 0 8px;border-color:var(--sap);background:var(--sap);color:var(--on-sap)}
+.split>button:first-child:hover{opacity:.9;background:var(--sap)}
+.split>.caret{border-radius:0 8px 8px 0;border-color:var(--sap);border-left:1px solid color-mix(in srgb,var(--on-sap) 35%,transparent);background:var(--sap);color:var(--on-sap);padding:4px 10px;min-width:32px}
+.split>.caret:hover{opacity:.9;background:var(--sap)}
+.menu{position:absolute;right:0;top:calc(100% + 6px);z-index:20;min-width:280px;border:1px solid var(--line-strong);border-radius:10px;background:var(--surface);box-shadow:0 8px 24px var(--shadow);padding:4px}
+.menu [role=menuitem]{display:flex;flex-direction:column;align-items:flex-start;gap:0;width:100%;border:0;border-radius:6px;background:transparent;padding:8px 10px;text-align:left;font-weight:500;min-height:0}
+.menu [role=menuitem]:hover{background:var(--surface-2)}
+.menu small{font-size:12px;color:var(--ink-3);font-weight:400}
+.menu hr{border:0;border-top:1px solid var(--line);margin:4px 0}
+.dur{display:flex;align-items:center;gap:8px;padding:8px 10px}.dur input{width:64px}.dur span{font-size:13px;color:var(--ink-2)}.dur button{margin-left:auto;min-height:28px;padding:2px 12px}
+.dur-help{padding:0 10px 6px;font-size:12px;color:var(--sap)}
+details{margin-top:8px;border-top:1px solid var(--line);padding-top:8px}
+summary{list-style:none;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-3);border-radius:4px}
+summary::-webkit-details-marker{display:none}
+summary::before{content:"";width:6px;height:6px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform .15s}
+details[open]>summary::before{transform:rotate(45deg)}
+summary:hover{color:var(--ink)}
+.detail-body{margin-top:8px;display:flex;flex-direction:column;gap:8px}
+.dl{display:grid;grid-template-columns:72px minmax(0,1fr);gap:4px 12px;font-size:12px;color:var(--ink-2)}
+.dl dt{color:var(--ink-3)}.dl dd{margin:0}
+pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font-family:var(--mono);font-size:12px;background:var(--canvas-2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;color:var(--ink-2)}
+.similar{font-size:12px;color:var(--ink-2);padding-left:12px;border-left:2px solid var(--branch)}
+.similar ul{margin:4px 0 0;padding-left:16px;color:var(--ink-3)}
+.window-note{display:flex;align-items:center;gap:8px;margin-top:12px;padding:8px 12px;border-radius:8px;background:var(--branch-soft);color:var(--branch);font-size:13px;font-weight:500}
+.window-note span{flex:1}
+.window-note button{min-height:28px;padding:2px 12px;font-weight:500;color:var(--branch)}
+
+.empty{border:1px dashed var(--line-strong);border-radius:12px;padding:32px 16px;text-align:center;color:var(--ink-3)}
+.empty p{margin-bottom:12px}
+
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:12px;max-width:calc(100vw - 32px);background:var(--surface-2);border:1px solid var(--line-strong);border-radius:8px;padding:8px 8px 8px 16px;font-size:13px;box-shadow:0 8px 24px var(--shadow);z-index:50}
+.toast .ok{color:var(--pass)}.toast .no{color:var(--fail)}
+.toast .link-button{min-height:28px;padding:2px 8px}
+.demo-foot{font-size:12px;color:var(--ink-3);margin-top:24px}
+@media(max-width:760px){.sidebar{display:none}.app{display:block}main{padding:16px}.preview{display:none}.age{display:none}.actions{justify-content:stretch}.menu{min-width:min(280px,calc(100vw - 64px))}}
+</style></head><body>
+<div class="app"><aside class="sidebar"><div class="brand"><svg class="logo-mark" xmlns="http://www.w3.org/2000/svg" viewBox="1.2 5.6 29.6 20.8" width="32" height="22" aria-hidden="true"><g fill="none" stroke-width="3" stroke-linecap="round"><path stroke="#a99be0" d="M9 16 H23"/><path stroke="#e8875a" d="M8 16 C11 16 11.5 7.5 16 7.5 C20.5 7.5 21 16 24 16"/><path stroke="#34d399" d="M8 16 C11 16 11.5 24.5 16 24.5 C20.5 24.5 21 16 24 16"/><path stroke="#d7af87" stroke-width="4.8" d="M3.8 16 H9"/><path stroke="#34d399" stroke-width="4.8" d="M23 16 H28.2"/></g></svg><span>brindle</span></div><nav><div>Sessions</div><div class="active">Inbox <span class="count" id="nav-count"></span></div><div>Knowledge</div><div class="nav-label">Settings</div><div>Personal preferences</div><div>Providers &amp; models</div><div>Permissions</div><div>About</div></nav></aside>
+<main>
+<div class="top"><span>Inbox</span><div class="role"><button id="theme-toggle" type="button" aria-label="Switch theme">Light theme</button><span class="preview">INTERACTIVE DESIGN PREVIEW</span></div></div>
+<div class="header"><h1>Inbox</h1><p>Requests your agents can't continue without you.</p></div>
+
+<div class="stall hidden" id="stall" role="status"><span class="dot" aria-hidden="true">●</span><span id="stall-text"></span><button class="link-button" id="review-all" type="button">Review all</button></div>
+<div class="cards" id="cards" aria-label="Permissions waiting"></div>
+<div class="empty hidden" id="empty"><p>Nothing is waiting on you.</p><button id="reset" type="button">Reset the demo</button></div>
+<p class="demo-foot">Interactive design preview with example data. Nothing here changes live access.</p>
+</main></div>
+<div class="toast hidden" id="toast" role="status"></div>
+
+<script>
+const $=s=>document.querySelector(s),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+// kind 'hook': brindle's hook holds the request; 'window': only the agent's own window can answer
+const EXAMPLES=[
+ {id:'push',kind:'hook',agent:'dev-sonnet',verb:'push',what:'<code>session-14 → main</code>',group:'Git',item:'Push to the default branch',
+  why:'Pushes to main always ask you',since:'4 min',command:'git push origin session-14:main',
+  rule:'Git › Push to the default or a release branch: Ask (Autonomous preset)',similar:[]},
+ {id:'esc',kind:'hook',agent:'dev-gemini',verb:'write',what:'<code>~/.config/gh/hosts.yml</code>',group:'Files',item:'Write outside the worktree',
+  why:'Supervisor escalated: it edits a file outside this task’s worktree',since:'2 min',command:'write: ~/.config/gh/hosts.yml\n  + oauth_token: ••••••••',
+  rule:'Files › Write and edit outside the worktree: Ask',similar:[]},
+ {id:'npm',kind:'hook',agent:'dev-sonnet',verb:'run',what:'<code>npm install left-pad</code>',group:'Shell',item:'Package installs',
+  why:'Supervisor didn’t answer in 2 min',since:'3 min',command:'cd app && npm install left-pad',
+  rule:'Shell › Package installs: Ask',similar:['npm install is-odd','npm install --save-dev vitest','npm install zod']},
+ {id:'win',kind:'window',agent:'dev-codex',verb:'ask',what:'<strong>“Trust the files in this folder?”</strong>',group:'Agent prompt',item:'Folder trust',
+  why:'Brindle can’t answer this one: it is a question for the agent itself',since:'1 min',command:'Do you trust the files in /Users/hannahlerner/Projects/brindle/.brindle/worktrees/fix/codex-trust?\n  1. Yes, continue\n  2. No, exit',
+  rule:'Not covered by a permission rule: the agent shows this prompt itself',similar:[]}];
+let cards=[],undo=null;
+const noun=n=>n+' worker'+(n===1?'':'s');
+function chipText(c){return c.group+' › '+c.item}
+function card(c){
+ const win=c.kind==='window',n=c.similar.length;
+ const head='<div class="ask-head"><div><h3><span class="who">'+esc(c.agent)+'</span> <span class="what">wants to '+esc(c.verb)+'</span> '+c.what+'</h3>'+
+  '<div class="chips"><span class="tag'+(win?' window':'')+'">'+esc(chipText(c))+'</span></div></div><span class="age">waiting '+esc(c.since)+'</span></div>';
+ const why='<div class="why">'+esc(c.why)+'</div>';
+ const acts=win?
+  '<div class="window-note"><span>Answer in the agent’s window</span><button type="button" data-act="focus" data-id="'+c.id+'">Open '+esc(c.agent)+'</button></div>':
+  '<div class="actions" role="group" aria-label="Decision"><button type="button" class="btn-deny" data-act="deny" data-id="'+c.id+'">Deny</button><button type="button" data-act="once" data-id="'+c.id+'">Allow once</button>'+
+  '<div class="split"><button type="button" data-act="session" data-id="'+c.id+'">Allow</button><button type="button" class="caret" data-act="menu" data-id="'+c.id+'" aria-haspopup="menu" aria-expanded="false" aria-label="More ways to allow">▾</button>'+
+  '<div class="menu hidden" role="menu" aria-label="Allow">'+
+   '<button type="button" role="menuitem" data-act="session" data-id="'+c.id+'">For this session<small>Until the session ends</small></button>'+
+   '<button type="button" role="menuitem" data-act="dur" data-id="'+c.id+'">For 30 min…<small>Choose how long</small></button>'+
+   '<div class="dur hidden"><input type="number" min="1" value="30" aria-label="Minutes"><span>minutes</span><button type="button" data-act="timed" data-id="'+c.id+'">Allow</button></div><div class="dur-help hidden" role="alert">Enter a positive number of minutes.</div>'+
+   '<hr><button type="button" role="menuitem" data-act="always" data-id="'+c.id+'">Always for '+esc(chipText(c))+'<small>Saved as an override in Settings</small></button>'+
+  '</div></div></div>';
+ const sim=n?'<div class="similar">+'+n+' similar request'+(n===1?'':'s')+' covered by this answer<ul>'+c.similar.map(s=>'<li><code>'+esc(s)+'</code></li>').join('')+'</ul></div>':'';
+ const det='<details><summary>Details</summary><div class="detail-body"><pre>'+esc(c.command)+'</pre>'+sim+'<dl class="dl"><dt>Rule</dt><dd>'+esc(c.rule)+'</dd></dl></div></details>';
+ return '<article class="ask'+(win?' window':'')+'" id="ask-'+c.id+'" tabindex="-1" aria-label="'+esc(c.agent)+' wants to '+esc(c.verb)+'" data-testid="ask-card">'+head+why+acts+det+'</article>';
+}
+function render(){
+ $('#cards').innerHTML=cards.map(card).join('');
+ const waiting=new Set(cards.map(c=>c.agent)).size;
+ $('#stall').classList.toggle('hidden',!cards.length);
+ $('#stall-text').innerHTML='<strong>'+noun(waiting)+' waiting</strong> · ';
+ $('#empty').classList.toggle('hidden',!!cards.length);
+ $('#nav-count').textContent=cards.length||'';
+}
+function toast(html,undoLink){
+ const t=$('#toast');t.innerHTML='<span>'+html+'</span>'+(undoLink?'<button type="button" class="link-button" id="undo">Undo in Settings</button>':'');
+ t.classList.remove('hidden');clearTimeout(toast.h);toast.h=setTimeout(()=>t.classList.add('hidden'),undoLink?6000:2800);
+}
+function resolve(id,msg,ok,undoLink){
+ const c=cards.find(x=>x.id===id),el=$('#ask-'+id);if(!c)return;
+ const extra=c.similar.length?' '+(c.similar.length+1)+' requests resumed.':'';
+ undo=undoLink?c:null;
+ toast('<span class="'+(ok?'ok':'no')+'" aria-hidden="true">'+(ok?'✓':'✕')+'</span> '+esc(msg)+(ok?extra:''),undoLink);
+ el.classList.add('leaving');
+ setTimeout(()=>{cards=cards.filter(x=>x.id!==id);render()},180);
+}
+function closeMenus(){
+ document.querySelectorAll('.menu').forEach(m=>{m.classList.add('hidden');m.querySelector('.dur').classList.add('hidden');m.querySelector('.dur-help').classList.add('hidden')});
+ document.querySelectorAll('.caret').forEach(b=>b.setAttribute('aria-expanded','false'));
+}
+function openMenu(btn){
+ const m=btn.parentElement.querySelector('.menu'),was=!m.classList.contains('hidden');closeMenus();
+ if(was)return;
+ m.classList.remove('hidden');btn.setAttribute('aria-expanded','true');m.querySelector('[role=menuitem]').focus();
+}
+document.addEventListener('click',e=>{
+ if(e.target.id==='undo'){toast('Opening Settings › Permissions, Saved actions…');return}
+ const t=e.target.closest('button');
+ if(!t){closeMenus();return}
+ const id=t.dataset.id,a=t.dataset.act,c=cards.find(x=>x.id===id);
+ if(t.id==='theme-toggle')setTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');
+ else if(t.id==='reset'){cards=EXAMPLES.map(x=>({...x}));render()}
+ else if(t.id==='review-all'){const el=document.querySelector('.ask');if(el){el.scrollIntoView({behavior:'smooth',block:'start'});el.focus()}}
+ else if(!a)closeMenus();
+ else if(a==='menu')openMenu(t);
+ else if(a==='dur'){const d=t.parentElement.querySelector('.dur');d.classList.remove('hidden');d.querySelector('input').focus()}
+ else if(a==='timed'){
+  const m=Number(t.parentElement.querySelector('input').value);
+  if(!(m>0)){t.closest('.menu').querySelector('.dur-help').classList.remove('hidden');return}
+  closeMenus();resolve(id,'Allowed for '+m+' min: '+chipText(c)+'.',true)}
+ else{
+  closeMenus();
+  if(a==='deny')resolve(id,'Denied: '+c.agent+' stopped. No decision saved.',false);
+  else if(a==='once')resolve(id,'Allowed once. The next request like it asks again.',true);
+  else if(a==='session')resolve(id,'Allowed for this session: '+chipText(c)+'.',true);
+  else if(a==='always')resolve(id,'Always allowed: '+chipText(c)+'. Saved as an override in Settings.',true,true);
+  else if(a==='focus')toast('Switched to '+esc(c.agent)+'’s window.');
+ }
+});
+document.addEventListener('keydown',e=>{
+ if(e.key==='Escape'){const open=document.querySelector('.caret[aria-expanded=true]');closeMenus();if(open)open.focus();return}
+ const m=e.target.closest&&e.target.closest('.menu');
+ if(m&&(e.key==='ArrowDown'||e.key==='ArrowUp')){
+  e.preventDefault();const items=[...m.querySelectorAll('[role=menuitem]')],i=items.indexOf(document.activeElement);
+  items[(i+(e.key==='ArrowDown'?1:-1)+items.length)%items.length].focus();
+ }
+});
+function setTheme(t){document.documentElement.dataset.theme=t;$('#theme-toggle').textContent=t==='dark'?'Light theme':'Dark theme'}
+cards=EXAMPLES.map(x=>({...x}));render();
+</script></body></html>
