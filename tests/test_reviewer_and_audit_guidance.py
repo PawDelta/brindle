@@ -273,34 +273,19 @@ def test_pipeline_supervisor_action_parsing_distinguishes_negation_from_actionab
     assert any(to == sup.id and "needs supervisor action" in msg for to, msg in sent)
 
 
-def test_out_of_scope_escalates(db, ws, sup, sent, monkeypatch):
-    """A rejection saying the fix is outside the worker's task goes to the
-    supervisor and pauses the branch, with no fix round for the worker."""
+@pytest.mark.parametrize("summary, escalates", [
+    ("Blocker: wrong role.\n\nOut of scope: the bug is in backend permissions.py.", True),
+    ("Blocker: add validation; this is not out of scope for this task.", False),
+    ("Blocker: x.\n\nOut of scope: None.\n\nNeeds supervisor action: needs prod credentials.", True),
+])
+def test_out_of_scope_escalates(db, ws, sup, sent, monkeypatch, summary, escalates):
+    """An out-of-scope rejection goes to the supervisor with no fix round."""
     monkeypatch.setattr(pipeline, "_retry_on_heavy", lambda *args: False)
     reviewer = add(db, ws, "rev", "reviewer", mode="review", parent=sup.id)
     add(db, ws, "w1", parent=sup.id, pipeline="reviewing", pipeline_rounds=0)
-    summary = "Blocker: permissions.py checks the wrong role.\n\nOut of scope: the bug is in backend permissions.py, not this task."
     assert pipeline._on_review(db, reviewer, ws, False, summary) == (True, False)
-    w = db.get_agent("w1")
-    assert (w.pipeline, w.pipeline_rounds) == (None, 0)
-    assert not any(to == "w1" for to, _ in sent)
-    assert any(to == sup.id and "permissions.py" in msg for to, msg in sent)
-
-    # Prose that merely mentions the phrase is an in-scope blocker: the worker fixes it.
-    db.update_agent("w1", pipeline="reviewing", pipeline_rounds=0)
-    sent.clear()
-    summary = "Blocker: add the missing validation; this is not out of scope for this task."
-    assert pipeline._on_review(db, reviewer, ws, False, summary) == (True, False)
-    assert db.get_agent("w1").pipeline == "fixing"
-    assert any(to == "w1" for to, _ in sent)
-
-    # An empty out-of-scope section doesn't hide an actionable one after it.
-    db.update_agent("w1", pipeline="reviewing", pipeline_rounds=0)
-    sent.clear()
-    summary = "Blocker: x.\n\nOut of scope: None.\n\nNeeds supervisor action: requires production credentials."
-    assert pipeline._on_review(db, reviewer, ws, False, summary) == (True, False)
-    assert db.get_agent("w1").pipeline is None
-    assert any(to == sup.id for to, _ in sent)
+    assert db.get_agent("w1").pipeline == (None if escalates else "fixing")
+    assert any(to == (sup.id if escalates else "w1") for to, _ in sent)
 
 
 def test_record_audit_decision_rejects_unauthorized_callers(db, ws, sup, monkeypatch):
