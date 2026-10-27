@@ -20,6 +20,7 @@ workers'.
 from __future__ import annotations
 
 import logging
+import re
 
 from brindle.db import DB, Agent
 
@@ -63,28 +64,29 @@ def supervisor_for(db: DB, agent: Agent, decision) -> Agent | None:
     return supervisor
 
 
-def in_flight(db: DB, agent_id: str, digest: str) -> bool:
-    """Whether the same request of the agent's already waits on its
-    supervisor: one answer settles both, so it isn't asked about again."""
-    from brindle import permissions
-
-    return any(r["channel"] == "supervisor" and permissions.request_digest(r["request"], r["suggestions"]) == digest
-               for r in db.permission_requests_of(agent_id))
+def _fenced(text: str) -> str:
+    """``text`` verbatim (newlines kept) in a code fence no line of it can close."""
+    longest = max((len(run) for run in re.findall(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{fence}\n{text}\n{fence}"
 
 
 def ask_supervisor(db: DB, agent: Agent, supervisor: Agent, request_id: str, req, reason: str,
                    seconds: float) -> bool:
-    """Send ``supervisor`` the request now, mid-turn where its CLI takes that
-    (its own inbox), whole rather than as a "new messages" notice. False when
-    it couldn't be sent: the person has the request from then on."""
+    """Send ``supervisor`` the complete request (the whole command, path or
+    URL, and where it runs: what an allow allows) now, mid-turn where its CLI
+    takes that (its own inbox), whole rather than as a "new messages"
+    notice. False when it couldn't be sent: the person has the request from
+    then on."""
     from brindle import agents, tmux
 
     why = reason.removesuffix("; asking the user") or "no rule allows it"
-    body = (f"[brindle] Worker {agent.id} ({agent.profile}) asks to use {req.summary()} ({why}). "
+    body = (f"[brindle] Worker {agent.id} ({agent.profile}) asks to use {req.tool} ({req.kind}; {why}), "
+            f"in {req.cwd or req.worktree or '?'}:\n{_fenced(req.target())}\n"
             f"It's yours to answer before the person: answer_permission(agent_id=\"{agent.id}\", "
             f"request_id=\"{request_id}\", answer=\"allow\" | \"deny\" | \"escalate\", reason=\"...\") "
-            f"within {round(seconds)}s. Escalate what the person should decide; after {round(seconds)}s "
-            "the person is asked.")
+            f"within {round(seconds)}s. An allow allows exactly the request above, once. Escalate what "
+            f"the person should decide; after {round(seconds)}s the person is asked.")
     try:
         agents._send_message(db, supervisor, body, None)
     except (agents.AgentError, tmux.TmuxError, OSError):
@@ -112,27 +114,14 @@ def answer(db: DB, callers: set[str], worker_id: str, request_id: str, choice: s
         raise RoutingError("forbidden", "a worker can't answer its own permission request", 403)
     if not worker.parent_id or worker.parent_id not in callers:
         raise RoutingError("forbidden", f"only {worker.id}'s own supervisor answers its permission requests", 403)
-    hold = HOLDS.held(worker.id, request_id)
-    if hold is None or not hold.supervised(HOLDS.clock()):
+    done = HOLDS.settle(worker.id, request_id, SUPERVISOR_ANSWERS.get(choice), " ".join(reason.split())[:REASON_CHARS])
+    if not done:
         raise RoutingError("conflict", f"{worker.id}'s request {request_id} isn't waiting on you: it is the "
-                                       "person's (person-only, escalated, or your time ran out), or no longer held")
-    same = [request_id, *(h.request_id for h in HOLDS.of_agent(worker.id)
-                          if h.request_id != request_id and h.digest == hold.digest)]
+                                       "person's (person-only, escalated, or your time ran out), answered "
+                                       "already, or no longer held")
     if choice == "escalate":
-        note = " ".join(reason.split())[:REASON_CHARS]
-        done = [r for r in same if HOLDS.escalate(worker.id, r, note)]
         for r in done:
             db.update_permission_request(worker.id, r, channel="hook")
-    else:
-        done = []
-        for r in same:
-            if HOLDS.claim(worker.id, r, hold.digest, SUPERVISOR_ANSWERS[choice], by_supervisor=True):
-                if HOLDS.release(worker.id, r):
-                    done.append(r)
-                else:
-                    HOLDS.unclaim(worker.id, r)
-    if request_id not in done:
-        raise RoutingError("conflict", f"{worker.id}'s request {request_id} was answered or left you meanwhile")
     return {"answer": choice, "requests": done}
 
 

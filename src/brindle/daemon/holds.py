@@ -75,6 +75,9 @@ class Hold:
     supervise_until: float | None = None
     supervised_for: float = 0.0    # how long that was, for the person's note once it ran out
     escalation: str | None = None  # the supervisor's reason for handing it to the person
+    # Registered while the same request of the agent's waited on its supervisor,
+    # unanswered: the supervisor's answer to that one settles this one too (``settle``).
+    joined: bool = False
 
     def supervised(self, now: float) -> bool:
         return self.supervise_until is not None and now < self.supervise_until
@@ -130,7 +133,8 @@ class Holds:
                  supervise_until: float | None = None) -> bool:
         """False when the id is held already, the hold would already be over,
         or the agent (or everyone) holds too many live ones. ``supervise_until``:
-        its supervisor may answer it until then (claim's ``by_supervisor``)."""
+        its supervisor may answer it until then (``settle``); it joins the same
+        request already waiting there unanswered, if one is (``joined``)."""
         with self._changed:
             self._purge()
             now = self.clock()
@@ -140,9 +144,10 @@ class Holds:
                 return False
             if supervise_until is not None:
                 supervise_until = min(supervise_until, hold_until)
-            self._holds[request_id] = Hold(agent_id, request_id, digest, _hash(nonce), hold_until,
-                                           now + LEASE_SECONDS, supervise_until=supervise_until,
-                                           supervised_for=max(0.0, (supervise_until or now) - now))
+            self._holds[request_id] = Hold(
+                agent_id, request_id, digest, _hash(nonce), hold_until, now + LEASE_SECONDS,
+                supervise_until=supervise_until, supervised_for=max(0.0, (supervise_until or now) - now),
+                joined=supervise_until is not None and bool(self._waiting_on_supervisor(agent_id, digest, now)))
             self._outcomes.pop(request_id, None)
             return True
 
@@ -171,33 +176,45 @@ class Holds:
             for request_id in [r for r, h in self._holds.items() if h.agent_id == agent_id]:
                 self._leave(request_id, "dropped")
 
-    def claim(self, agent_id: str, request_id: str, digest: str, answer: str,
-              by_supervisor: bool = False) -> bool:
-        """Claim the hold for ``answer``, the person's (or, ``by_supervisor``,
-        the worker's supervisor's): False when it isn't held (or no longer
-        live), is another agent's, answers a request that differs from the one
-        the hook recorded, or another answer won; for a supervisor, also when
-        its time with the supervisor is over or it never had one."""
+    def claim(self, agent_id: str, request_id: str, digest: str, answer: str) -> bool:
+        """Claim the hold for ``answer``, the person's: False when it isn't
+        held (or no longer live), is another agent's, answers a request that
+        differs from the one the hook recorded, or another answer won."""
         with self._changed:
             self._purge()
             hold = self._holds.get(request_id)
             if (hold is None or hold.agent_id != agent_id or hold.answer is not None
-                    or not hmac.compare_digest(hold.digest, digest)
-                    or (by_supervisor and not hold.supervised(self.clock()))):
+                    or not hmac.compare_digest(hold.digest, digest)):
                 return False
             hold.answer = answer
             return True
 
-    def escalate(self, agent_id: str, request_id: str, reason: str) -> bool:
-        """The supervisor hands the request to the person: False when it isn't
-        the agent's, live, and with its supervisor now."""
+    def _waiting_on_supervisor(self, agent_id: str, digest: str, now: float) -> list[Hold]:
+        """The agent's holds of this request still with its supervisor, unanswered (lock held)."""
+        return [h for h in self._holds.values()
+                if h.agent_id == agent_id and h.digest == digest and h.supervised(now) and h.answer is None]
+
+    def settle(self, agent_id: str, request_id: str, answer: str | None, reason: str = "") -> list[str]:
+        """The supervisor's ``answer`` to the agent's request ``request_id``,
+        handed to its hook at once, or (None) the request handed to the person
+        with ``reason``; the same for every identical request of the agent's
+        still waiting on the supervisor. In one step with ``register``, so a
+        duplicate either joins before and is settled here, or comes after and
+        is asked about afresh. Empty when ``request_id`` isn't the agent's,
+        live, with its supervisor and unanswered."""
         with self._changed:
             self._purge()
+            now = self.clock()
             hold = self._holds.get(request_id)
-            if hold is None or hold.agent_id != agent_id or not hold.supervised(self.clock()):
-                return False
-            hold.supervise_until, hold.escalation = None, reason
-            return True
+            if hold is None or hold.agent_id != agent_id or hold.answer is not None or not hold.supervised(now):
+                return []
+            same = self._waiting_on_supervisor(agent_id, hold.digest, now)
+            for h in same:
+                if answer is None:
+                    h.supervise_until, h.escalation = None, reason
+                else:
+                    h.answer, h.released = answer, True
+            return [h.request_id for h in same]
 
     def release(self, agent_id: str, request_id: str) -> bool:
         """Hand a claimed answer to the hook: False when the hold ended (or
@@ -288,7 +305,8 @@ async def register(request: Request) -> JSONResponse:
     if not HOLDS.register(*fields, float(hold_until),
                           float(supervise_until) if supervise_until is not None else None):
         return JSONResponse({"error": {"code": "conflict", "message": "already held, or too many holds"}}, 409)
-    return JSONResponse({"held": True})
+    hold = HOLDS.held(fields[0], fields[1])
+    return JSONResponse({"held": True, "joined": bool(hold and hold.joined)})
 
 
 async def wait(request: Request) -> JSONResponse:
@@ -316,10 +334,16 @@ async def supervise(request: Request) -> JSONResponse:
     pid = request.scope.get(peer.PEER_PID)
     callers = await asyncio.to_thread(peer.caller_agents, pid) if pid is not None else set()
     reason = body.get("reason")
+
+    def run() -> dict:
+        db = DB()       # on the thread that uses it: a connection stays on its own thread
+        try:
+            return permission_routing.answer(db, callers, _str(body, "agent_id") or "", request.path_params["id"],
+                                             _str(body, "answer") or "", reason if isinstance(reason, str) else "")
+        finally:
+            db.conn.close()
     try:
-        out = await asyncio.to_thread(permission_routing.answer, DB(), callers, _str(body, "agent_id") or "",
-                                      request.path_params["id"], _str(body, "answer") or "",
-                                      reason if isinstance(reason, str) else "")
+        out = await asyncio.to_thread(run)
     except permission_routing.RoutingError as e:
         return JSONResponse({"error": {"code": e.code, "message": str(e)}}, e.status)
     return JSONResponse(out)
@@ -374,6 +398,8 @@ def call(path: str, body: dict, timeout: float) -> dict | None:
 class Holder:
     """A hook's hold on one request: its nonce stays here, in memory."""
 
+    joined = False      # the daemon joined it to the same request waiting on the supervisor (Holds.register)
+
     def __init__(self, agent_id: str, request_id: str, digest: str) -> None:
         self.agent_id, self.request_id, self.digest = agent_id, request_id, digest
         self.nonce = secrets.token_urlsafe(32)
@@ -386,7 +412,9 @@ class Holder:
                 "nonce": self.nonce, "hold_until": hold_until}
         if supervise_until is not None:
             body["supervise_until"] = supervise_until
-        return call(PREFIX, body, CALL_SECONDS) is not None
+        got = call(PREFIX, body, CALL_SECONDS)
+        self.joined = bool(got and got.get("joined"))
+        return got is not None
 
     def wait(self, seconds: float) -> tuple[bool, str | None]:
         """(still held, the person's answer if one came within ``seconds``)."""

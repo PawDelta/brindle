@@ -3724,9 +3724,10 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     held = holder.register(hold_until, supervise_until) if supervise_until else holder.register(hold_until)
     if not held:
         supervise_until = None      # no daemon to answer through: the CLI's own prompt asks
-    # The same request already waiting on the supervisor: its answer settles this one too
-    # (permission_routing.answer), so the supervisor isn't asked twice, nor the first replaced.
-    asked_already = supervise_until is not None and permission_routing.in_flight(db, agent.id, digest)
+    # The daemon joined it to the same request already waiting on the supervisor, unanswered:
+    # that one's answer settles this one too (Holds.settle), so the supervisor isn't asked twice,
+    # nor the first replaced.
+    asked_already = supervise_until is not None and holder.joined
     # The history row first: once the pairing row is visible a PostToolUse may pop it
     # and resolve the ask, which needs the row to exist (permission_asks.resolve_at_prompt).
     ws = db.get_workspace(agent.workspace_id)
