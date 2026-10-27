@@ -82,14 +82,64 @@ def test_merges_refresh_the_graph(mapped, monkeypatch):
     real_popen = codemap.subprocess.Popen
 
     def fake_popen(argv, **kw):
-        if argv and argv[0] == "graphify":
+        if "graphify" in argv:
             started.append(argv)
             return None
         return real_popen(argv, **kw)
 
     monkeypatch.setattr(codemap.subprocess, "Popen", fake_popen)
     codemap.refresh_later(str(mapped))
-    assert started == [["graphify", "update", str(mapped), "--force"]]
+    assert started == [["nice", "-n", "10", "graphify", "update", str(mapped), "--force"]]
+
+
+def test_graphify_single_flight(mapped, monkeypatch):
+    monkeypatch.setattr("brindle.git.paths", lambda *a, **kw: [])
+    codemap.copy_to_store(mapped / codemap.GRAPH, str(mapped))
+    checkout = mapped.parent / "session"
+    checkout.mkdir()
+    completions, started = [], []
+
+    class Thread:
+        def __init__(self, target, **kw):
+            self.target = target
+
+        def start(self):
+            completions.append(self.target)
+
+    class Process:
+        def wait(self):
+            if len(started) == 1:
+                for _ in range(30):
+                    codemap.refresh_later(str(checkout) + "/.", str(mapped))
+                codemap.refresh(str(checkout), str(mapped))
+                assert len(started) == 1
+
+    def launch(argv, **kw):
+        started.append(argv)
+        return Process()
+
+    monkeypatch.setattr(codemap.threading, "Thread", Thread)
+    monkeypatch.setattr(codemap.subprocess, "Popen", launch)
+    assert codemap.seed_session(checkout, str(mapped)) is True
+    assert codemap.seed_session(checkout, str(mapped)) is False
+    codemap.refresh_later(str(checkout), str(mapped))
+    assert len(started) == 1
+    completions.pop(0)()
+    assert len(started) == 2
+    assert all(argv[:4] == ["nice", "-n", "10", "graphify"] for argv in started)
+    assert not completions
+    codemap.refresh(str(checkout), str(mapped))
+    assert len(started) == 3
+
+
+def test_seed_session_without_graph(repo, monkeypatch):
+    monkeypatch.setattr("brindle.git.paths", lambda *a, **kw: [])
+    monkeypatch.setattr(codemap.shutil, "which", lambda cmd: f"/bin/{cmd}")
+    started = []
+    monkeypatch.setattr(codemap.subprocess, "Popen", lambda *a, **kw: started.append(a))
+    assert codemap.seed_session(repo, str(repo)) is False
+    assert not started
+    assert not (repo / codemap.GRAPH.parent).exists()
 
 
 @pytest.mark.parametrize("tracked", [True, False])
@@ -151,12 +201,17 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     store = brindle_home() / "graphs" / mapped.name / "graph.json"
     store.parent.mkdir(parents=True, exist_ok=True)
     store.write_text('{"nodes": [{"id": "seed-node"}]}')
+    cache = mapped / "graphify-out" / "cache" / "ast" / "v1"
+    cache.mkdir(parents=True)
+    (cache / "entry.json").write_text('{"nodes": []}')
 
     started = []
     real_popen = codemap.subprocess.Popen
 
     def fake_popen(argv, **kw):
-        if argv and argv[0] == "graphify":
+        if "graphify" in argv:
+            seeded_cache = Path(kw["cwd"]) / "graphify-out" / "cache" / "ast" / "v1" / "entry.json"
+            assert seeded_cache.read_bytes() == (cache / "entry.json").read_bytes()
             started.append(argv)
             return None
         return real_popen(argv, **kw)
@@ -171,19 +226,14 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     assert "Code map:" in prompt and str(session_graph) in prompt
     assert session_graph.is_file()
     assert json.loads(session_graph.read_text()) == {"nodes": [{"id": "seed-node"}]}
-    assert started == [["graphify", "update", session_ws.path, "--force"]]
-
-    # Fallback to repo_root when session checkout has no graph and store has none
-    other_ws = workspaces.create(db, str(mapped), "empty-session").workspace
-    store.unlink()
-    fallback_worker = workspaces.create(db, str(mapped), "task-fb", base="empty-session").workspace
-    fb_prompt = agents.decorate_worker_prompt("do task", "w2", fallback_worker, None, get_provider("claude"), headless=False)
-    assert str(mapped / "graphify-out" / "graph.json") in fb_prompt
+    assert started == [["nice", "-n", "10", "graphify", "update", session_ws.path, "--force"]]
+    (mapped / codemap.GRAPH).unlink()
+    assert codemap.seed_session(mapped, str(mapped)) is True
 
     # Config switch disables graph
     monkeypatch.setattr("brindle.config.load_repo_config", lambda root: type("Cfg", (), {"graphify": False})())
     assert codemap.graph_path(worker_ws) is None
-    assert codemap.seed_session(other_ws.path) is False
+    assert codemap.seed_session(session_ws.path) is False
 
 
 def test_session_graph_refresh_and_community_carryover(mapped, monkeypatch):
@@ -208,7 +258,7 @@ def test_session_graph_refresh_and_community_carryover(mapped, monkeypatch):
     real_popen = codemap.subprocess.Popen
 
     def fake_popen(argv, **kw):
-        if argv and argv[0] == "graphify":
+        if "graphify" in argv:
             graph_file.write_text(json.dumps(new_data))
             return None
         return real_popen(argv, **kw)

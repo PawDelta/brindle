@@ -32,7 +32,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 if TYPE_CHECKING:
     from brindle.db import Workspace
@@ -45,6 +45,8 @@ MAP_TOP = 10
 STORE_RETENTION_DAYS = 30
 _QUERY_RE = re.compile(r"^\s*graphify\s+(?:query|explain|path|affected)\b")
 _map_cache: dict[str, tuple[float, str]] = {}   # graph path -> (mtime, rendered map)
+_refresh_lock = threading.RLock()
+_refresh_pending: dict[str, bool] = {}  # checkout -> one follow-up requested
 
 
 def store_path(repo_root: str | Path) -> Path:
@@ -206,9 +208,12 @@ def _automatic_rebuild_allowed(checkout: str | Path) -> bool:
 
 
 def seed_session(checkout: str | Path, repo_root: str | None = None) -> bool:
-    """When a session checkout has no graph, seed it from the store if present
-    and run graphify update in the background. Returns True if update was started."""
-    from brindle.config import brindle_home, load_repo_config
+    """Seed a missing graph and the source checkout's cache, then refresh.
+
+    Without a stored graph the repo has not opted in, so leave it alone.
+    Returns True if a background update was requested.
+    """
+    from brindle.config import load_repo_config
 
     checkout_str = str(checkout)
     if not _automatic_rebuild_allowed(checkout_str):
@@ -232,21 +237,17 @@ def seed_session(checkout: str | Path, repo_root: str | None = None) -> bool:
             repo_root = checkout_str
 
     stored = store_path(repo_root)
-    if stored.is_file():
+    if not stored.is_file():
+        return False
+    with _refresh_lock:
+        if path.is_file():
+            return False
         path.parent.mkdir(parents=True, exist_ok=True)
+        cache = Path(repo_root) / GRAPH.parent / "cache"
+        if cache.is_dir() and cache.resolve() != (path.parent / "cache").resolve():
+            shutil.copytree(cache, path.parent / "cache", dirs_exist_ok=True)
         shutil.copy2(stored, path)
-
-    log = brindle_home() / "graphify.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "a", encoding="utf-8") as out:
-        subprocess.Popen(
-            ["graphify", "update", checkout_str, "--force"],
-            cwd=checkout_str,
-            start_new_session=True,
-            stdin=subprocess.DEVNULL,
-            stdout=out,
-            stderr=out,
-        )
+        refresh_later(checkout_str, repo_root)
     return True
 
 
@@ -342,49 +343,61 @@ def copy_to_store(graph_path: Path, repo_root: str) -> None:
 
 
 def refresh(checkout: str, repo_root: str | None = None) -> None:
-    """Synchronous graph refresh: run graphify update --force, carry community names, copy to store."""
-    if not _automatic_rebuild_allowed(checkout):
-        return
-    if graph_path(checkout) is None:
-        return
-    from brindle.config import brindle_home
-
-    if repo_root is None:
-        from brindle import git
-
-        try:
-            repo_root = git.main_repo_root(checkout)
-        except Exception:
-            repo_root = checkout
-
-    target_graph = Path(checkout) / GRAPH
-    old_graph = None
-    if target_graph.is_file():
-        try:
-            old_graph = json.loads(target_graph.read_text(encoding="utf-8"))
-        except Exception:
-            old_graph = None
-
-    log = brindle_home() / "graphify.log"
-    log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "a", encoding="utf-8") as out:
-        proc = subprocess.Popen(
-            ["graphify", "update", checkout, "--force"],
-            cwd=checkout,
-            start_new_session=True,
-            stdin=subprocess.DEVNULL,
-            stdout=out,
-            stderr=out,
-        )
-    if proc is not None and hasattr(proc, "wait"):
-        proc.wait()
-    if target_graph.is_file():
-        carry_community_names(old_graph, target_graph)
-        copy_to_store(target_graph, repo_root)
+    """Refresh synchronously, or queue a follow-up if an update is active."""
+    _request_refresh(checkout, repo_root, background=False)
 
 
 def refresh_later(checkout: str, repo_root: str | None = None) -> None:
     """Rebuild the code part of the graph in the background, after a merge."""
+    _request_refresh(checkout, repo_root, background=True)
+
+
+def _request_refresh(checkout: str, repo_root: str | None, *, background: bool) -> None:
+    """Keep one update active per checkout and coalesce requests made during it.
+
+    Reserve the checkout before launching, including the initial seed update.
+    Keep the reservation through postprocessing so graph/store writes cannot
+    overlap the next update. Different checkouts can still update independently.
+    """
+    checkout = str(Path(checkout).resolve())
+    with _refresh_lock:
+        if checkout in _refresh_pending:
+            _refresh_pending[checkout] = True
+            return
+        _refresh_pending[checkout] = False
+
+    def complete():
+        nonlocal post
+        try:
+            while post is not None:
+                post()
+                with _refresh_lock:
+                    if not _refresh_pending[checkout]:
+                        del _refresh_pending[checkout]
+                        return
+                    _refresh_pending[checkout] = False
+                post = _start_refresh(checkout, repo_root)
+            with _refresh_lock:
+                _refresh_pending.pop(checkout, None)
+        except BaseException:
+            with _refresh_lock:
+                _refresh_pending.pop(checkout, None)
+            raise
+
+    try:
+        post = _start_refresh(checkout, repo_root)
+        if background:
+            threading.Thread(target=complete, daemon=True).start()
+    except BaseException:
+        with _refresh_lock:
+            _refresh_pending.pop(checkout, None)
+        raise
+    if not background:
+        complete()
+
+
+def _start_refresh(checkout: str, repo_root: str | None) -> Callable[[], None] | None:
+    """Start one low-priority update and return its completion work."""
     if not _automatic_rebuild_allowed(checkout):
         return
     if graph_path(checkout) is None:
@@ -411,7 +424,7 @@ def refresh_later(checkout: str, repo_root: str | None = None) -> None:
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "a", encoding="utf-8") as out:
         proc = subprocess.Popen(
-            ["graphify", "update", checkout, "--force"],
+            ["nice", "-n", "10", "graphify", "update", checkout, "--force"],
             cwd=checkout,
             start_new_session=True,
             stdin=subprocess.DEVNULL,
@@ -426,8 +439,7 @@ def refresh_later(checkout: str, repo_root: str | None = None) -> None:
             carry_community_names(old_graph, target_graph)
             copy_to_store(target_graph, repo_root)
 
-    t = threading.Thread(target=_post, daemon=True)
-    t.start()
+    return _post
 
 
 def remove_session_graph(checkout: str | Path) -> None:
