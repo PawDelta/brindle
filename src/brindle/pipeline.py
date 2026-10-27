@@ -949,9 +949,11 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
                 return True, False
             except agents.AgentError:
                 pass
-        elif agents.reopen_worker(db, worker, ws, fix):
-            # It exited once it reported (a worker usually has by the time a
-            # review comes back): its fix round starts it again on its branch.
+        # It exited once it reported (a worker usually has by the time a
+        # review comes back), or just before the message reached it: its fix
+        # round starts it again on its branch.
+        current = db.get_agent(worker.id) or worker
+        if not agents.is_alive(current) and agents.reopen_worker(db, current, ws, fix):
             return True, False
     if not needs_sup and _retry_on_heavy(db, worker, ws, cfg,
                        f"the review still asked for changes after {rounds - 1} fix round(s): "

@@ -323,8 +323,12 @@ def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, rep
     assert db.get_agent("w1").pipeline == "reviewing"
 
 
-@pytest.mark.parametrize("session", ["sess-w1", None])
-def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session):
+@pytest.mark.parametrize("session, exits_mid_delivery", [
+    ("sess-w1", False), (None, False),
+    # Alive when the verdict lands, gone by the time send_message delivers.
+    ("sess-w1", True),
+])
+def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_mid_delivery):
     """Live incident (session-17): a worker that had exited after
     report_result got a blocker review, and the pipeline handed its branch to
     the supervisor "after 0 fix round(s)" instead of starting a fix round.
@@ -336,7 +340,9 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session):
     add(db, ws, "w1", "assign", parent="boss", status="done", result="done", task="Add the None check")
     db.update_agent("w1", session_ref=session)
     add(db, ws, "rev", "review", "reviewer", parent="boss")
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    live = []   # w1 answers alive once per entry, then is gone
+    monkeypatch.setattr(agents, "is_alive",
+                        lambda a, panes=None: a.id == "boss" or (a.id == "w1" and bool(live) and live.pop()))
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
     monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: ref == "sess-w1"))
     launched = []
@@ -345,6 +351,7 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session):
     summary = "- blocker: missing check for None.\nNeeds supervisor action: None."
     for rounds in (1, 2):
         db.update_agent("w1", pipeline="reviewing")
+        live[:] = [True] if exits_mid_delivery else []
         assert pipeline.on_review(db, db.get_agent("rev"), ws, False, summary)
         worker, resume, prompt = launched[-1]
         assert (worker, resume) == ("w1", session) and "missing check for None" in prompt
