@@ -1,9 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../../api/client";
 import { DaemonContext } from "../../api/context";
 import { scopesFor } from "../../api/permissions";
-import type { AskDTO, AskGroupDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
+import type { AskDTO, AskDecisionDTO, AskGroupDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
 import { SessionsProvider } from "../../store/sessions";
 import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
@@ -47,11 +47,6 @@ const pushes: AskGroupDTO = {
   scopes: scopesFor("push", "fix/login → main @ origin"), blocked: false, rule: "d-push-default", limits, modes: ["once", "deny", "always-deny", "timed"],
   items: [ask("w1", "req-1", "push", "fix/login → main @ origin", 600, "d-push-default"), ask("sup1", "req-2", "push", "chore/ci → main @ origin", 120, "d-push-default")],
 };
-const secret: AskGroupDTO = {
-  key: `${REPO}|read|~/**`, repo: REPO, kind: "read", title: "Allow reads under ~/**?", general: scopesFor("read", "~/.ssh/id_rsa")[1],
-  scopes: scopesFor("read", "~/.ssh/id_rsa"), blocked: true, rule: "d-ssh", limits: null, modes: [], items: [ask("w1", "req-3", "read", "~/.ssh/id_rsa", 300, "d-ssh", true)],
-};
-const asking = () => new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [pushes, secret] });
 
 const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "POST");
 /* The one card an item gets, whatever its kind. */
@@ -97,40 +92,15 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it("answers a permission brindle holds in its card with the provider's choices, links one only its prompt can take, and starts a sign-in from its card", async () => {
+  it("starts a sign-in from its card", async () => {
     // As the engine's permission-items branch emits a lapsed sign-in: no detail, the sign-in route named on the
     // item; the worker is on Codex (its record), so the sign-in must be Codex's, never Claude's.
     const codexWorker = { ...worker, agents: [{ ...worker.agents![0], provider: "codex", profile: "developer-codex" }] };
     const credentials: InboxItemDTO = { kind: "credentials", reason: "credentials need attention", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", detail: null, action: { method: "POST", path: "/v1/providers/codex/login" } };
     const login: InboxItemDTO = { kind: "login", reason: "cloud login expired", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "brindle account login" };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, codexWorker], inbox: [permission, permissionInTerminal, credentials, login, notice] });
-    const { sync, onOpen } = mount(daemon);
-    const group = await screen.findByRole("region", { name: "Ship ls --json" });
-    const cards = () => within(group).getAllByTestId("inbox-card").filter((c) => c.dataset.kind === "permission");
-    expect(cards()).toHaveLength(2);
-
-    // Held by brindle's hook: the choices as small buttons, one readable line with the command in mono (the whole
-    // on click), nothing else; a choice answers at once and the card goes.
-    const held = cards().find((c) => within(c).queryByRole("group", { name: "Permission choices" }))!;
-    expect(held.textContent).toContain("held by brindle");
-    expect(within(held).getByTestId("permission-line").querySelector("code")!.textContent).toBe("npx playwright install chromium");
-    fireEvent.click(within(held).getByTestId("permission-line"));
-    expect(within(held).getByTestId("permission-line").getAttribute("aria-expanded")).toBe("true");
-    expect(within(held).getAllByRole("button", { name: /Allow|Deny/ }).map((b) => b.textContent)).toEqual(["Allow once", "Allow always", "Deny"]);
-    expect(within(held).getByRole("button", { name: "Allow always" }).title).toContain("brindle's permission rule");
-    expect(within(held).queryByText(/terminal instead/)).toBeNull();
-    fireEvent.click(within(held).getByRole("button", { name: "Deny" }));
-    await waitFor(() => expect(daemon.permissionAnswers).toEqual([{ agent: "w1", request: "req-1", choice: "deny" }]));
-    expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/w1/permission", query: {}, body: { request: "req-1", digest: "d1", choice: "deny" } }]);
-    await waitFor(() => expect(cards()).toHaveLength(1));
-
-    // One only the CLI's own prompt can take: no choices, a quiet line, and the card only goes to the session.
-    const atPrompt = cards()[0];
-    expect(within(atPrompt).queryByRole("group", { name: "Permission choices" })).toBeNull();
-    expect(within(atPrompt).getByTestId("permission-terminal").textContent).toContain("answered at its own prompt");
-    expect(within(atPrompt).getByTestId("permission-terminal").title).toContain("its prompt doesn't show which option is selected");
-    fireEvent.click(within(atPrompt).getByRole("button", { name: "Go to session ›" }));
-    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, codexWorker], inbox: [credentials, login, notice] });
+    const { sync } = mount(daemon);
+    await screen.findByRole("region", { name: "Ship ls --json" });
 
     // A lapsed sign-in: Sign in starts that provider CLI's own login on the engine (Codex, as the engine's route
     // and the worker's record say).
@@ -220,55 +190,91 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it("permission items: a held request joins its generalized group, scoped to the general form or narrowed, and one decision resolves the group", async () => {
-    const daemon = asking();
-    const { sync } = mount(daemon);
-    const item = await screen.findByRole("article", { name: "Allow pushes into main?" });
-    // The hold's own card is left to the group it belongs to.
-    expect(document.querySelector('[data-testid="inbox-card"][data-kind="permission"]')).toBeNull();
-    expect(item.textContent).toContain("Generalized from: fix/login → main @ origin");
-    expect(within(item).getAllByRole("listitem").map((li) => li.textContent)).toEqual([expect.stringContaining("fix/login → main @ origin · developer"), expect.stringContaining("chore/ci → main @ origin · supervisor")]);
-    const scope = within(item).getByRole("combobox", { name: "Approval scope" });
-    expect(scope).toHaveProperty("value", "general");
-    // Wider than the rule's limit can't be picked.
-    expect(within(scope).getByRole("option", { name: "All branches on origin" })).toHaveProperty("disabled", true);
-    expect(within(item).getByTestId("ask-resume").textContent).toBe("This grant resumes 2 requests of 3 (2 workers).");
-    fireEvent.click(within(item).getByRole("button", { name: "Narrow to this request" }));
-    expect(scope).toHaveProperty("value", "exact");
-    expect(within(item).getByTestId("ask-resume").textContent).toContain("1 request of 3 (1 worker). Choose “Into main from any branch on origin” to resume the other 1");
-    fireEvent.change(scope, { target: { value: "general" } });
-    // No Always allow: the rule keeps approvals to 30 minutes, and a longer one is refused here.
-    expect(within(item).queryByRole("button", { name: /Always allow/ })).toBeNull();
-    fireEvent.change(within(item).getByRole("spinbutton", { name: "Approval duration" }), { target: { value: "45" } });
-    fireEvent.click(within(item).getByRole("button", { name: "Allow for 45 minutes" }));
-    expect(within(item).getByRole("alert").textContent).toBe("Your rule lets an approval last up to 30 minutes.");
-    fireEvent.change(within(item).getByRole("spinbutton", { name: "Approval duration" }), { target: { value: "20" } });
-    fireEvent.click(within(item).getByRole("button", { name: "Allow for 20 minutes" }));
-    await waitFor(() => expect(screen.getByTestId("permission-resolution").textContent).toBe("Allowed for 20 minutes: Into main from any branch on origin. 2 requests resumed (2 workers)."));
-    expect(posts(daemon).find((r) => r.path === "/permissions/asks/decide")?.body).toEqual({ key: pushes.key, scope: "general", mode: "timed", minutes: 20 });
-    expect(daemon.data.policy.saved).toMatchObject([{ kind: "push", pattern: "* → main @ origin", life: "time", minutes: 20 }]);
-    await waitFor(() => expect(screen.queryByRole("article", { name: "Allow pushes into main?" })).toBeNull());
+  it("one permission card per source: a held request (Deny, Allow once, Allow ▾, details collapsed) and an agent-window prompt (a way to the window), under a one-line stall banner", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, permissionInTerminal], asks: [pushes] });
+    const { sync, onOpen } = mount(daemon);
+    const held = await screen.findByRole("article", { name: "Allow pushes into main?" });
+    const cards = screen.getAllByTestId("permission-card");
+    expect(cards.map((c) => c.dataset.source)).toEqual(["hook", "window"]);
+
+    // The banner is one line with no actions of its own but the way to the first card.
+    const stall = screen.getByTestId("stall-notice");
+    expect(within(stall).getAllByRole("button").map((b) => b.textContent)).toEqual(["Review all"]);
+    // The held card: why it reached the person, the three actions, and the requests under collapsed details.
+    expect(within(held).getAllByRole("button").filter((b) => ["Deny", "Allow once", "Allow"].includes(b.textContent ?? "")).map((b) => b.textContent)).toEqual(["Deny", "Allow once", "Allow"]);
+    expect(held.querySelector("details")!.open).toBe(false);
+
+    // The prompt only the agent's window can take: no decision, the way to that window instead.
+    const prompt = cards[1];
+    expect(within(prompt).queryByRole("group", { name: "Decision" })).toBeNull();
+    fireEvent.click(within(prompt).getByRole("button", { name: /^Open / }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
+
+    fireEvent.click(within(held).getByRole("button", { name: "Allow once" }));
+    await waitFor(() => expect(posts(daemon).find((r) => r.path === "/permissions/asks/decide")?.body).toEqual({ key: pushes.key, scope: "general", mode: "once" }));
     sync.stop();
   });
 
-  it("stall notice: names what blocks the workers, allows what the rules permit, and unblocks a denied request with an exception or opens its deny rule", async () => {
-    const daemon = asking();
-    const { sync, onOpenRule } = mount(daemon);
-    const stall = await screen.findByTestId("stall-notice");
-    expect(stall.textContent).toContain("2 workers paused waiting for you · 3 requests in 2 items");
-    expect(within(stall).getByRole("button", { name: /^reads under ~\/\*\* · 1 · .* · blocked by rule$/ })).toBeTruthy();
-    // The push rule's time limit rules out an approval until revoked; the deny's request isn't the rules' to allow.
-    await waitFor(() => expect(within(stall).getByRole("button", { name: "Allow the 2 requests your rules permit" })).toBeTruthy());
-    expect(stall.textContent).toContain("Always allow unavailable");
-    await waitFor(() => expect(within(stall).getByRole("button", { name: "Allow these 1: add an exception to the deny on ~/.ssh*" })).toBeTruthy());
-    fireEvent.click(within(stall).getByRole("button", { name: "Open the deny rule" }));
-    expect(onOpenRule).toHaveBeenLastCalledWith("d-ssh");
-    fireEvent.click(within(stall).getByRole("button", { name: /^Allow these 1/ }));
-    await waitFor(() => expect(daemon.data.policy.rules.find((r) => r.id === "d-ssh")?.exclusions).toMatchObject([{ kind: "read", match: "~/.ssh/id_rsa" }]));
-    await waitFor(() => expect(screen.getByTestId("permission-resolution").textContent).toContain("1 request resumed"));
-    fireEvent.click(within(screen.getByTestId("stall-notice")).getByRole("button", { name: "Allow all 2 requests" }));
-    await waitFor(() => expect(screen.queryByTestId("stall-notice")).toBeNull());
-    expect(screen.getByTestId("permission-resolution").textContent).toContain("2 requests resumed (2 workers) with 1 grant");
+  it("a hold with no group: the request is in the headline, Allow never saves a grant by itself, and a refusal shows on the card", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, permissionInTerminal] });
+    const { sync } = mount(daemon);
+    const cards = await screen.findAllByTestId("permission-card");
+    expect(cards.map((c) => c.dataset.source)).toEqual(["hook", "window"]);
+    // Both requests are named with Details closed.
+    expect(cards[0].querySelector("h3")!.textContent).toContain("npx playwright install chromium");
+    expect(cards[1].querySelector("h3")!.textContent).toContain("uv run alembic upgrade head");
+    // Allow only opens the menu: no choice is sent, least of all Allow always.
+    fireEvent.click(within(cards[0]).getByRole("button", { name: "Allow" }));
+    expect(within(cards[0]).getByRole("menuitem", { name: /Allow always/ })).toBeTruthy();
+    expect(posts(daemon)).toEqual([]);
+    // The engine refuses (the request is gone): its reason is on the card.
+    daemon.data.inbox = [];
+    fireEvent.click(within(cards[0]).getByRole("button", { name: "Deny" }));
+    await waitFor(() => expect(within(cards[0]).getByRole("alert")).toBeTruthy());
+    sync.stop();
+  });
+
+  it("a decision out blocks a second one from the menu's duration button", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [pushes] });
+    const client = daemon.client();
+    let settle!: (got: AskDecisionDTO) => void;
+    const decide = vi.spyOn(client, "decidePermissionAsks").mockImplementation(() => new Promise<AskDecisionDTO>((resolve) => (settle = resolve)));
+    const { sync } = mount(daemon, client);
+    const item = await screen.findByRole("article", { name: "Allow pushes into main?" });
+    fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
+    fireEvent.click(within(item).getByRole("menuitem", { name: /^For 30 minutes/ }));
+    const submit = within(item).getByRole("button", { name: /^Allow for 30 minutes/ });
+    // Both clicks land before React commits anything: only the guard can stop the second.
+    act(() => {
+      fireEvent.click(submit);
+      fireEvent.click(submit);
+    });
+    expect(decide).toHaveBeenCalledTimes(1);
+    // Once the first is answered, the next decision goes out.
+    await act(async () => settle({ mode: "timed", scope: pushes.general, resumed: [] }));
+    await waitFor(() => expect(within(item).getByRole("button", { name: "Allow once" })).toHaveProperty("disabled", false));
+    fireEvent.click(within(item).getByRole("button", { name: "Allow once" }));
+    expect(decide).toHaveBeenCalledTimes(2);
+    sync.stop();
+  });
+
+  it("Always for <group item> sets that subcategory's override through the group baselines, then resumes the request", async () => {
+    const install: AskGroupDTO = {
+      key: `${REPO}|bash|npm install`, repo: REPO, kind: "bash", title: "Allow npm install?", general: scopesFor("bash", "npm install left-pad")[0],
+      scopes: scopesFor("bash", "npm install left-pad"), blocked: false, rule: null, limits: null, modes: ["once", "deny", "session"],
+      items: [{ ...ask("w1", "req-1", "bash", "npm install left-pad", 60, "d-none"), rule: null, limits: null, reason: "the shell/install baseline is ask" }],
+    };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [install] });
+    const { sync } = mount(daemon);
+    const item = await screen.findByRole("article", { name: "Allow npm install?" });
+    expect(within(item).getByTestId("permission-chip")).toBeTruthy();
+    fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
+    fireEvent.click(within(item).getByRole("menuitem", { name: /^Always for / }));
+    await waitFor(() => expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/groups")?.body).toEqual({ groups: { shell: { subcategories: { install: "allow" } } } }));
+    await waitFor(() => expect(daemon.data.asks).toEqual([]));
+    // An override, not a saved action.
+    expect(daemon.data.policy.saved).toEqual([]);
+    expect(daemon.data.policy.groups?.shell.subcategories).toEqual({ install: "allow" });
     sync.stop();
   });
 
