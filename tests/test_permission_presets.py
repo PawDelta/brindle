@@ -142,6 +142,17 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "rm -rf build/"), "allow", None),
     (lambda ws: read(ws, os.path.expanduser("~/.aws/credentials")), "deny", "d-aws"),
     (lambda ws: read(ws, os.path.join(ws.repo_root, ".env")), "deny", "d-env"),
+    # Ordinary scripts (issue #282): each command inside is decided, none falls to a syntax ask.
+    (lambda ws: bash(ws, "for a in 5daa87ea 988d175e; do brindle close $a 2>&1 | tail -1; done"), "allow", None),
+    (lambda ws: bash(ws, "id=$(gh run list --repo X --workflow y.yml --limit 1 --json databaseId"
+                         " -q '.[0].databaseId')"), "allow", None),
+    (lambda ws: bash(ws, "d=/tmp/x; git -C $d status --short | head"), "allow", None),
+    (lambda ws: bash(ws, "for f in *.md; do head -3 $f; done"), "allow", None),
+    (lambda ws: bash(ws, "F=path; python3 - \"$F\" <<'EOF'\nimport sys\nprint(sys.argv[1])\nEOF"), "allow", None),
+    (lambda ws: bash(ws, "for b in x; do git push --force origin $b; done"), "deny", "d-git-force"),
+    pytest.param(lambda ws: bash(ws, "for b in x main; do git push origin $b; done"), "ask", "d-push-default",
+                 marks=pytest.mark.variant("an ask on one pass of a loop")),
+    (lambda ws: bash(ws, "b=$(git branch --show-current); git push origin $b"), "ask", "d-shell-syntax"),   # unknown
 ])
 def test_autonomous_runs_everything_but_default_branch_pushes_and_destructive_actions(ws, request_of, decision, rule):
     permissions.apply_preset("autonomous")
