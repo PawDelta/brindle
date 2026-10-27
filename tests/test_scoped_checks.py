@@ -12,7 +12,7 @@ from brindle.config import load_repo_config
 from brindle.db import Agent
 
 PYTEST = "uv run pytest -q"
-OPTS = "python -m pytest -n auto -m serial"
+OPTS = "uv run pytest -q -n auto -m 'not serial'"
 SELECTS = "uv run pytest -q tests/"
 APP = "cd app && npx vitest run"
 CONFIG = {"checks": [

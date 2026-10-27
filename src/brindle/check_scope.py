@@ -96,7 +96,8 @@ def parse_checks(entries: list, layers: list[dict] | None = None) -> tuple[list[
     return commands, scopes
 
 
-_PYTEST = re.compile(r"^(?:uv run (?:python3? -m )?|python3? -m )?pytest((?:\s+[^\s;&|<>$`()'\"\\]+)*)$")
+_PYTEST_PREFIX = ("pytest",), ("python", "-m", "pytest"), ("python3", "-m", "pytest"), ("uv", "run", "pytest"), \
+    ("uv", "run", "python", "-m", "pytest"), ("uv", "run", "python3", "-m", "pytest")
 _VALUE_OPTIONS = {"-n", "-m", "-k", "-p", "-o", "-c", "--maxfail", "--tb", "--durations", "--rootdir", "--ignore",
                   "--deselect", "--dist", "--cov", "--timeout", "--junitxml", "-W", "--basetemp"}
 INFER_FULL_WHEN = ["**/conftest.py", "**/pyproject.toml", "**/setup.cfg", "**/pytest.ini", "**/tox.ini",
@@ -111,11 +112,21 @@ def pytest_selectors(cmd: str) -> bool | None:
     """None when ``cmd`` is not a plain pytest command (no shell composition);
     else whether it names tests itself (a positional argument, not an option
     or an option's value)."""
-    m = _PYTEST.match(cmd.strip())
-    if not m:
+    if "$" in cmd or "`" in cmd:
+        return None
+    try:
+        lex = shlex.shlex(cmd, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        toks = list(lex)
+    except ValueError:
+        return None
+    if any(set(t) <= set("();<>|&") for t in toks):   # an unquoted shell operator
+        return None
+    head = next((h for h in _PYTEST_PREFIX if tuple(toks[:len(h)]) == h), None)
+    if head is None:
         return None
     selects, value = False, False
-    for tok in m.group(1).split():
+    for tok in toks[len(head):]:
         if value:
             value = False
         elif tok.startswith("-"):
