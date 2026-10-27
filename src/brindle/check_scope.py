@@ -170,7 +170,7 @@ def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | No
         return None
     for node_id in sorted(must_reach | optional):
         reached = affected_tests(graph, node_id, ws.path)
-        if not reached and node_id in must_reach:
+        if reached is None or (not reached and node_id in must_reach):
             return None
         tests |= reached
     return sorted(t for t in tests if (Path(ws.path) / t).is_file()) or None
@@ -243,13 +243,14 @@ def _changed_lines(diff: str) -> tuple[list[int], list[int]]:
     return old, new
 
 
-def affected_tests(graph: Path, node_id: str, cwd: str) -> set[str]:
-    """The test files ``graphify affected`` lists for ``node_id``."""
+def affected_tests(graph: Path, node_id: str, cwd: str) -> set[str] | None:
+    """The test files ``graphify affected`` lists for ``node_id``; None when
+    the lookup itself failed (not the same as reaching no test)."""
     try:
         proc = subprocess.run(["graphify", "affected", node_id, "--graph", str(graph)], cwd=cwd,
                               capture_output=True, text=True, timeout=GRAPHIFY_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
-        return set()
+        return None
     if proc.returncode != 0:
-        return set()
+        return None
     return {f for f in _AFFECTED_FILE.findall(proc.stdout) if is_test_file(f)}
