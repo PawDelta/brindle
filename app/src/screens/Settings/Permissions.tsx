@@ -73,7 +73,8 @@ const BASELINE_LEVELS = ["allow", "ask", "deny"] as const;
 const LEVEL_NAME: Record<string, string> = { allow: "Allow", ask: "Ask", deny: "Deny", inherit: "Inherit" };
 const BY_DEFAULT: Record<string, string> = { allow: "Allowed by default", ask: "Asks by default", deny: "Denied by default" };
 /* Which group a rule belongs to, from its kind (a push is a bash rule with the push matcher). */
-const ruleGroup = (r: PermissionRuleDTO) => (r.match_type === "push" ? "git" : r.kind === "bash" ? "shell" : r.kind === "fetch" ? "network" : r.kind === "mcp" ? "mcp" : ["read", "write", "edit"].includes(r.kind) ? "files" : "other");
+const isGit = (r: PermissionRuleDTO) => r.match_type === "push" || r.match_type.startsWith("git-") || (r.kind === "bash" && /^git(\s|$)/.test(r.match));
+const ruleGroup = (r: PermissionRuleDTO) => (isGit(r) ? "git" : r.kind === "bash" ? "shell" : r.kind === "fetch" ? "network" : r.kind === "mcp" ? "mcp" : ["read", "write", "edit"].includes(r.kind) ? "files" : "other");
 interface Feedback {
   text: string;
   failed?: boolean;

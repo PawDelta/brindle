@@ -185,9 +185,12 @@ describe("settings screen", () => {
     // Open it: a subcategory overrides the group, marked while it does.
     fireEvent.click(within(perms).getByRole("button", { name: "Show Shell items" }));
     const installs = () => within(perms).getByTestId("group-shell").querySelector<HTMLElement>('[data-sub="install"]')!;
-    expect(installs().textContent).toContain("Inherits Deny");
+    expect(within(installs()).getByRole("button", { name: "Inherit" }).getAttribute("aria-pressed")).toBe("true");
+    expect(within(installs()).queryByTestId("override-marker")).toBeNull();
     fireEvent.click(within(installs()).getByRole("button", { name: "Ask" }));
-    await waitFor(() => expect(installs().textContent).toContain("Overrides Shell: Deny → Ask"));
+    await waitFor(() => expect(within(installs()).getByTestId("override-marker")).toBeTruthy());
+    expect(within(installs()).getByRole("button", { name: "Ask" }).getAttribute("aria-pressed")).toBe("true");
+    expect(daemon.data.policy.groups?.shell.subcategories.install).toBe("ask");
     expect(daemon.requests.filter((r) => r.path === "/permissions/groups").at(-1)?.body).toEqual({ groups: { shell: { subcategories: { install: "ask" } } } });
     stop();
   });
@@ -209,9 +212,16 @@ describe("settings screen", () => {
     expect(found.length).toBeLessThan(total);
     expect(within(perms).getByText(`${found.length} of ${total} rules`)).toBeTruthy();
     fireEvent.change(within(perms).getByRole("combobox", { name: "Decision filter" }), { target: { value: "allow" } });
-    expect(within(perms).getByText("No matching rules. Clear the search or try another action or target.")).toBeTruthy();
+    expect(within(perms).getByTestId("rules").querySelectorAll("[data-rule]").length).toBe(0);
     fireEvent.click(within(perms).getByRole("button", { name: "Clear" }));
     expect(within(perms).getByTestId("rules").querySelectorAll("[data-rule]").length).toBe(total);
+    // Git & push holds the push rules and the force-flag matcher, not the file rules.
+    fireEvent.change(within(perms).getByRole("combobox", { name: "Capability" }), { target: { value: "git" } });
+    const ids = [...within(perms).getByTestId("rules").querySelectorAll("[data-rule]")].map((e) => e.getAttribute("data-rule"));
+    expect(ids).toContain("d-git-force");
+    expect(ids).toContain("d-push-default");
+    expect(ids).not.toContain("d-ssh");
+    fireEvent.click(within(perms).getByRole("button", { name: "Clear" }));
     // A preset's deny is removable like any rule, and Undo adds it back.
     const row = () => within(perms).getByTestId("rules").querySelector<HTMLElement>('[data-rule="d-ssh"]');
     fireEvent.click(within(row()!).getByRole("button", { name: "Remove Read files rule" }));
