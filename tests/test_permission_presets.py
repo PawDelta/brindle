@@ -152,7 +152,8 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "for b in x; do git push --force origin $b; done"), "deny", "d-git-force"),
     pytest.param(lambda ws: bash(ws, "for b in x main; do git push origin $b; done"), "ask", "d-push-default",
                  marks=pytest.mark.variant("an ask on one pass of a loop")),
-    (lambda ws: bash(ws, "b=$(git branch --show-current); git push origin $b"), "ask", "d-shell-syntax"),   # unknown
+    # $b may force (+main): brindle can't verify it, and tells the agent how to run it instead of asking.
+    (lambda ws: bash(ws, "b=$(git branch --show-current); git push origin $b"), "deny", "d-shell-syntax"),
 ])
 def test_autonomous_runs_everything_but_default_branch_pushes_and_destructive_actions(ws, request_of, decision, rule):
     permissions.apply_preset("autonomous")

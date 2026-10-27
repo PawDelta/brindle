@@ -2,6 +2,7 @@
 subcategory, and their place in the policy: deny > explicit rule >
 subcategory > group baseline, as each preset seeds them and the daemon edits them."""
 
+import json
 import os
 
 import pytest
@@ -42,13 +43,28 @@ DESTRUCTIVE_DENIED = {"shell": {"baseline": "allow", "subcategories": {"destruct
     ("permissive", {}, lambda ws: write(ws, "src/new.py"), "allow", [("files", "write-worktree")]),
     ("permissive", {}, lambda ws: write(ws, os.path.expanduser("~/x.py")), "ask", [("files", "write-outside")]),
     ("standard", {}, lambda ws: bash(ws, "echo $(whoami)"), "ask",
+     [("shell", "readonly"), ("shell", "other")]),      # read part by part: echo's word only the run knows
+    # Read part by part: a pattern, a descriptor dup; a file a redirection writes; a fetch.
+    ("permissive", {}, lambda ws: bash(ws, "wc -l *.md 2>&1 | cut -c1-80"), "allow",
+     [("shell", "readonly"), ("shell", "readonly")]),
+    ("permissive", {}, lambda ws: bash(ws, "echo hi > notes.txt"), "allow",
+     [("shell", "readonly"), ("files", "write-worktree")]),
+    ("permissive", {}, lambda ws: bash(ws, "mkdir -p src/x && curl -sS https://example.com"), "ask",
+     [("files", "write-worktree"), ("network", "fetch")]),                # the strictest part
+    # What brindle can't verify: Autonomous and Permissive deny it with guidance, Standard asks.
+    ("autonomous", {}, lambda ws: bash(ws, "echo `whoami`"), "deny",
      [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),   # unreadable: other, and its parts
+    ("permissive", {}, lambda ws: bash(ws, "echo `whoami`"), "deny",
+     [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),
+    ("standard", {}, lambda ws: bash(ws, "echo `whoami`"), "ask",
+     [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),
+    ("autonomous", {}, lambda ws: bash(ws, "rm -rf $DIR"), "deny", [("shell", "destructive")]),   # $DIR may be ~
     # A subcategory over its group's baseline, set through the daemon.
     ("autonomous", {"git": {"subcategories": {"push-feature": "deny"}}},
      lambda ws: bash(ws, "git push origin feature"), "deny", [("git", "push-feature")]),
     ("standard", DESTRUCTIVE_DENIED, lambda ws: bash(ws, "rm notes.txt"), "deny", [("shell", "destructive")]),
     ("standard", DESTRUCTIVE_DENIED, lambda ws: bash(ws, "rm notes.txt > out.log"), "deny",
-     [("shell", "other"), ("shell", "destructive")]),                       # a redirection hides nothing
+     [("shell", "destructive"), ("files", "write-worktree")]),              # a redirection hides nothing
     ("standard", DESTRUCTIVE_DENIED, lambda ws: confirmed(ws, "confirm && rm notes.txt"), "deny",
      [("shell", "other"), ("shell", "destructive")]),                       # nor a part an ask rule covers
     ("standard", {"network": {"subcategories": {"search": "allow"}}},
@@ -75,3 +91,19 @@ def test_a_request_falls_in_a_group_whose_baseline_answers_what_no_rule_does(ws,
     assert permission_groups.classify(req, permissions.all_rules(ws.repo_root)) == where
     got = decide(req)
     assert got.decision == decision, got.reason
+
+
+def test_a_table_stored_before_unverifiable_existed_gets_its_presets_answer_and_never_allows(ws):
+    permissions.apply_preset("autonomous")
+    path = permissions.store_path()
+    data = json.loads(path.read_text())
+    del data["groups"]["shell"]["subcategories"]["unverifiable"]
+    path.write_text(json.dumps(data))
+    unverifiable = bash(ws, "echo `whoami`")
+    got = decide(unverifiable)
+    assert got.decision == "deny" and got.reason == permission_groups.UNVERIFIABLE_GUIDANCE
+    # With no table at all: where unmatched actions run.
+    assert decide(unverifiable, rules=permissions.all_rules(ws.repo_root), unmatched="allow",
+                  saved=[]).decision == "deny"
+    with pytest.raises(ValueError):
+        permissions.set_groups({"shell": {"subcategories": {"unverifiable": "allow"}}})
