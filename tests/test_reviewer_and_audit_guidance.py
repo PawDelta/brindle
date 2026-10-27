@@ -286,6 +286,22 @@ def test_out_of_scope_escalates(db, ws, sup, sent, monkeypatch):
     assert not any(to == "w1" for to, _ in sent)
     assert any(to == sup.id and "permissions.py" in msg for to, msg in sent)
 
+    # Prose that merely mentions the phrase is an in-scope blocker: the worker fixes it.
+    db.update_agent("w1", pipeline="reviewing", pipeline_rounds=0)
+    sent.clear()
+    summary = "Blocker: add the missing validation; this is not out of scope for this task."
+    assert pipeline._on_review(db, reviewer, ws, False, summary) == (True, False)
+    assert db.get_agent("w1").pipeline == "fixing"
+    assert any(to == "w1" for to, _ in sent)
+
+    # An empty out-of-scope section doesn't hide an actionable one after it.
+    db.update_agent("w1", pipeline="reviewing", pipeline_rounds=0)
+    sent.clear()
+    summary = "Blocker: x.\n\nOut of scope: None.\n\nNeeds supervisor action: requires production credentials."
+    assert pipeline._on_review(db, reviewer, ws, False, summary) == (True, False)
+    assert db.get_agent("w1").pipeline is None
+    assert any(to == sup.id for to, _ in sent)
+
 
 def test_record_audit_decision_rejects_unauthorized_callers(db, ws, sup, monkeypatch):
     autopilot.set_goal(db, sup.id, "Goal", [("M1", "true", "")])

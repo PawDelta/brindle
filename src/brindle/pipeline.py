@@ -819,13 +819,20 @@ def has_supervisor_action(summary: str) -> bool:
     from actual items requiring escalation."""
     # A blocker the reviewer calls out of scope for the worker (a bug in code
     # its task doesn't cover) is the same escalation: another fix round
-    # can't settle it.
-    m = re.search(r"(?:^|[^\w])(?:needs[-_ ]*supervisor(?:[-_ ]*action)?|out[-_ ]*of[-_ ]*scope)"
-                  r"\s*[:\n\-*]*\s*(.*)", summary, re.IGNORECASE)
-    if not m:
-        return False
-    # Capture text under this section until the next header/section
-    rest = summary[m.start(1):]
+    # can't settle it. That one only counts as a finding label ("Out of
+    # scope: ..." opening a line), not as a phrase in prose ("not out of
+    # scope"). Each section is judged on its own: an empty one mustn't hide
+    # an actionable one after it.
+    starts = [m.start(1) for m in re.finditer(
+        r"(?:^|[^\w])needs[-_ ]*supervisor(?:[-_ ]*action)?\s*[:\n\-*]*\s*(.*)", summary, re.IGNORECASE)]
+    starts += [m.start(1) for m in re.finditer(
+        r"^[ \t>*#\-]*out[-_ ]*of[-_ ]*scope\*{0,2}[ \t]*(?::|\n)[\s*]*(.*)",
+        summary, re.IGNORECASE | re.MULTILINE)]
+    return any(_actionable_section(summary[start:]) for start in starts)
+
+
+def _actionable_section(rest: str) -> bool:
+    """Whether the section text starting at ``rest`` has something for the supervisor."""
     next_sec = re.search(r"\n\s*(?:#+\s*|[A-Z][a-zA-Z\s]{1,20}:)", rest)
     section_text = rest[:next_sec.start()] if next_sec else rest
     cleaned = re.sub(r"[^\w]+", " ", section_text).strip().lower()
