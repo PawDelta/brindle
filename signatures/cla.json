@@ -1,3 +1,12 @@
 {
-   "signedContributors": []
+  "signedContributors": [
+    {
+      "name": "davidflerner-wq",
+      "id": 276449492,
+      "comment_id": 6456278602,
+      "created_at": "2026-10-27T23:38:03Z",
+      "repoId": 1405843016,
+      "pullRequestNo": 296
+    }
+  ]
 }
