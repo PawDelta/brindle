@@ -518,6 +518,14 @@ CREATE TABLE IF NOT EXISTS stage_timings (
     samples TEXT NOT NULL,
     PRIMARY KEY (day, repo_root, stage)
 );
+-- Stages begun in events already pruned, waiting for their end event.
+CREATE TABLE IF NOT EXISTS stage_open (
+    workspace_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    who TEXT NOT NULL,
+    ts REAL NOT NULL,
+    PRIMARY KEY (workspace_id, stage, who)
+);
 CREATE TABLE IF NOT EXISTS intents (
     session_root TEXT NOT NULL,
     repo_key TEXT NOT NULL,

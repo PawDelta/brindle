@@ -481,3 +481,54 @@ def test_sweep_retries_a_flush_the_pane_blocked(db, ws, monkeypatch):
     assert db.pending_count("boss") == 0
     cull.sweep(db, now=later)
     assert len(pasted) == 1
+
+
+def test_awake_while_workers(db, ws, monkeypatch):
+    from brindle import awake
+    from brindle.daemon import lifecycle
+    from brindle.daemon.session_review import ReadinessWatch
+
+    class Proc:
+        def __init__(self, argv, **_kw):
+            self.argv, self.alive = argv, True
+
+        def poll(self):
+            return None if self.alive else 0
+
+        def terminate(self):
+            self.alive = False
+
+        def wait(self):
+            pass
+
+    started = []
+    monkeypatch.setattr(awake, "subprocess",
+                        SimpleNamespace(Popen=lambda argv, **kw: started.append(Proc(argv, **kw)) or started[-1],
+                                        DEVNULL=-3))
+    monkeypatch.setattr(awake, "_process", awake.Awake())
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes: True)
+    monkeypatch.setattr(sys, "platform", "linux")
+    add(db, ws, "w1", status="processing")
+    cull.sweep(db)
+    assert not started                       # nothing to hold off macOS
+
+    monkeypatch.setattr(sys, "platform", "darwin")
+    cull.sweep(db)
+    cull.sweep(db)
+    assert [p.argv for p in started] == [["caffeinate", "-i", "-w", str(os.getpid())]]   # once, not per sweep
+    db.set_status("w1", "done")
+    cull.sweep(db)
+    assert not started[0].alive              # released when none are active
+
+    # The daemon's watch loop shares the same assertion.
+    server = SimpleNamespace(should_exit=False)
+    def running():
+        server.should_exit = True
+        return True
+
+    monkeypatch.setattr(lifecycle, "_agents_running", running)
+    monkeypatch.setattr(lifecycle, "WATCH_INTERVAL", 0)
+    monkeypatch.setattr(ReadinessWatch, "sweep_safely", lambda self: None)
+    import asyncio
+    asyncio.run(lifecycle._watch(server, lifecycle.Activity(None), False))
+    assert len(started) == 2 and not started[1].alive   # taken on the tick, released on exit

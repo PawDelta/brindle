@@ -1,9 +1,10 @@
-"""Keep the Mac from idle-sleeping while brindle-launched agents run: one
-``caffeinate -i -w <pid>`` assertion, started when the first agent becomes
-active and released when none are. macOS only; a no-op elsewhere. The owner
-is the daemon's watch loop (``daemon.lifecycle._watch``), which lives as long
-as any agent does. ``-w`` ties the assertion to the owner's pid, so it ends
-with it even if the owner dies without releasing."""
+"""Keep the Mac awake while brindle-launched agents run: one
+``caffeinate -i -w <pid>`` assertion per owning process, started when the
+first agent becomes active and released when none are. macOS only; a no-op
+elsewhere. The owners are the processes that already watch the agents: the
+cull sweep (the dashboard and the CLI) and the desktop daemon's watch loop,
+both through :func:`sync`. ``-w`` ties the assertion to the owner's pid, so
+it ends with it even if the owner dies without releasing."""
 
 from __future__ import annotations
 
@@ -38,3 +39,14 @@ class Awake:
         if proc is not None and proc.poll() is None:
             proc.terminate()
             proc.wait()
+
+
+_process = Awake()   # this process's one assertion, however many callers sync it
+
+
+def sync(active: bool) -> None:
+    _process.update(active)
+
+
+def release() -> None:
+    _process.release()
