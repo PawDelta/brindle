@@ -2155,6 +2155,11 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
              and (not r.repo_root or bool(req.repo_root) and os.path.realpath(req.repo_root) == r.repo_root)]
     if not rules:
         return None
+    flat = _flat_script(req.command, req.cwd or req.worktree)
+    if flat is not None:
+        if not flat.strip():
+            return None    # only assignments of literals: nothing runs
+        req = replace(req, command=flat)
     if "$(" in req.command or "`" in req.command:
         substituted = _substituted(req, checks, rules)
         if isinstance(substituted, Decision):
@@ -2399,6 +2404,454 @@ def _unquoted(command: str) -> str:
             out.append(c)
         i += 1
     return "".join(out)
+
+
+# -- scripts --------------------------------------------------------------------------------------
+#
+# An ordinary script (a for/while/if, variables set and used, a $(...)
+# whose output is assigned, a quoted heredoc fed to a program) is read as
+# the simple commands it runs (_flat_script), so a restriction is matched
+# against each of them instead of answering the d-shell-syntax ask for the
+# whole. A variable assigned a literal is substituted where the shell would
+# expand it; one whose value only the run knows stays as written, which
+# _restriction_in_parts reads as unknown, as before.
+
+# The reserved words that open or continue a compound command before a command.
+_SCRIPT_OPENERS = ("if", "then", "elif", "else", "do", "while", "until", "{")
+# Reserved words and syntax _flat_script doesn't read: the script is checked as written.
+_SCRIPT_UNREAD = ("case", "esac", "select", "function", "coproc")
+_SCRIPT_OPERATORS = ("<<<", "<<-", "&>>", ";;", "&&", "||", "|&", ">>", "<<", ">&", "<&", "&>", ">|", "<>",
+                     ";", "&", "|", "<", ">", "(", ")")
+_SCRIPT_SEPARATORS = (";", "\n", "&&", "||", "|", "|&", "&")
+# Builtins that may set a shell variable named among their arguments (read -r line, printf -v x).
+_VARIABLE_SETTERS = frozenset({"read", "mapfile", "readarray", "getopts", "printf", "declare", "typeset", "local",
+                               "export", "readonly", "let", "unset"})
+# Programs that may run what a heredoc feeds them as commands (or wrap one that does):
+# with one in the script, a heredoc body isn't data.
+_STDIN_RUNNERS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish", "xargs", "parallel", "source", ".", "eval",
+                            "env", "sudo", "doas", "su", "exec", "command", "nohup", "nice", "time", "watch", "ssh",
+                            "timeout"})
+# The most simple commands a script may flatten to (loops unrolled).
+_FLAT_LIMIT = 500
+_REFERENCE = re.compile(r"\$(?:\{([A-Za-z_]\w*)\}|([A-Za-z_]\w*))")
+_ASSIGNMENT = re.compile(r"([A-Za-z_]\w*)=")
+
+
+@dataclass
+class _Word:
+    """A word as written, with the ``$NAME``/``${NAME}`` references in it
+    (start, end, name, inside double quotes) and the ``$(...)``/backtick
+    substitutions (their inner commands)."""
+    raw: str
+    spaced: bool
+    refs: list[tuple[int, int, str, bool]]
+    substitutions: list[str]
+
+    def plain(self) -> str | None:
+        """The word when it is literal text with nothing to expand or unquote."""
+        return self.raw if re.fullmatch(r"[A-Za-z0-9_\-./:=@%+,{}!\[\]]+", self.raw) else None
+
+
+def _script_word(command: str, i: int) -> tuple[str, list, list, int] | None:
+    """The word starting at ``i``: (raw text, references, substitutions,
+    end), or None for quoting or an expansion it doesn't read (``$'...'``,
+    ``${x:-y}``) or an unclosed quote or substitution."""
+    start, refs, subs, quoted, n = i, [], [], False, len(command)
+    while i < n:
+        c = command[i]
+        if not quoted and (c in " \t\n" or c in ";&|<>()"):
+            break
+        if c == "\\":
+            i += 2
+        elif c == "'" and not quoted:
+            close = command.find("'", i + 1)
+            if close < 0:
+                return None
+            i = close + 1
+        elif c == '"':
+            quoted, i = not quoted, i + 1
+        elif c == "`" or command.startswith("$(", i):
+            end = _substitution_end(command, i)
+            if end is None:
+                return None
+            subs.append(command[i + (1 if c == "`" else 2):end - 1])
+            i = end
+        elif c == "$":
+            found = _REFERENCE.match(command, i)
+            if found:
+                refs.append((i - start, found.end() - start, found.group(1) or found.group(2), quoted))
+                i = found.end()
+            elif command.startswith("${", i) or not quoted and command.startswith("$'", i):
+                return None
+            else:
+                i += 1    # $1, $@, $?: left as written, unknown
+        else:
+            i += 1
+    if quoted:
+        return None
+    return command[start:i], refs, subs, i
+
+
+def _script_tokens(command: str) -> list[tuple] | None:
+    """``("word", _Word)``, ``("op", text, spaced)`` and ``("heredoc", body,
+    expands, spaced)`` for each word, operator and heredoc of ``command``,
+    or None for what _flat_script doesn't read: a comment, a subshell,
+    process substitution, ``;;`` or an unclosed heredoc."""
+    from brindle.native.permissions import _tokens
+
+    out: list[tuple] = []
+    pending: list[tuple[str, bool, list]] = []   # heredocs whose body starts after the next newline
+    i, n, spaced = 0, len(command), True
+    while i < n:
+        c = command[i]
+        if c in " \t" or command.startswith("\\\n", i):
+            i += 1 if c in " \t" else 2
+            spaced = True
+            continue
+        if c == "\n":
+            out.append(("op", "\n", spaced))
+            i, spaced = i + 1, True
+            for delimiter, dash, body in pending:
+                while True:
+                    if i >= n:
+                        return None
+                    end = command.find("\n", i)
+                    end = n if end < 0 else end
+                    line, i = command[i:end], end + 1
+                    if (line.lstrip("\t") if dash else line) == delimiter:
+                        break
+                    body.append(line)
+            pending = []
+            continue
+        if c == "#":
+            return None
+        if c in ";&|<>()":
+            op = next(o for o in _SCRIPT_OPERATORS if command.startswith(o, i))
+            if op in ("(", ")", ";;") or op in ("<", ">") and command.startswith("(", i + 1):
+                return None
+            i += len(op)
+            if op in ("<<", "<<-"):
+                while i < n and command[i] in " \t":
+                    i += 1
+                word = _script_word(command, i)
+                delimiter = _tokens(word[0]) if word is not None and not word[1] and not word[2] else None
+                if not delimiter or len(delimiter) != 1 or delimiter[0][0]:
+                    return None
+                raw, _, _, i = word
+                body: list[str] = []
+                pending.append((delimiter[0][1], op == "<<-", body))
+                out.append(("heredoc", body, not any(q in raw for q in "'\"\\"), spaced))
+            else:
+                out.append(("op", op, spaced))
+            spaced = False
+            continue
+        word = _script_word(command, i)
+        if word is None:
+            return None
+        raw, refs, subs, i = word
+        out.append(("word", _Word(raw, spaced, refs, subs)))
+        spaced = False
+    if pending:
+        return None
+    return out
+
+
+def _script_items(tokens: list[tuple]) -> list[tuple]:
+    """The script as ``("kw", word)``, ``("for", name, values or None)`` and
+    ``("cmd", tokens, separator before, separator after)`` items. Raises
+    ValueError for what _flat_script doesn't read."""
+    commands: list[tuple[list, str, str]] = []
+    current: list[tuple] = []
+    before = ""
+    for token in [*tokens, ("op", "", False)]:
+        if token[0] != "op" or token[1] not in (*_SCRIPT_SEPARATORS, ""):
+            current.append(token)
+        elif current:
+            commands.append((current, before, token[1]))
+            current, before = [], token[1]
+        elif token[1] not in ("\n", ""):
+            raise ValueError("an empty command")
+    items: list[tuple] = []
+    for toks, before, after in commands:
+        while toks and toks[0][0] == "word" and toks[0][1].plain() in (*_SCRIPT_OPENERS, "!"):
+            if toks[0][1].raw != "!":
+                items.append(("kw", toks[0][1].raw))
+            toks = toks[1:]
+        first = toks[0][1].plain() if toks and toks[0][0] == "word" else None
+        if first == "for":
+            words = [t[1] for t in toks]
+            if len(words) < 2 or any(t[0] != "word" for t in toks) or not re.fullmatch(r"[A-Za-z_]\w*", words[1].raw):
+                raise ValueError("a for loop it can't read")
+            if len(words) > 2 and words[2].raw != "in":
+                raise ValueError("a for loop it can't read")
+            items.append(("for", words[1].raw, words[3:] if len(words) > 2 else None))
+            continue
+        if first in ("done", "fi", "}"):
+            items.append(("kw", first))
+            toks = toks[1:]
+            if not toks:
+                continue
+            # The redirects of the whole loop (done < input): checked on a no-op command.
+            if toks[0][0] == "word" and not (toks[0][1].raw.isdigit() and len(toks) > 1 and toks[1][0] != "word"):
+                raise ValueError("words after " + first)
+            toks = [("word", _Word(":", True, [], [])), *toks]
+        elif first in _SCRIPT_UNREAD:
+            raise ValueError(f"{first} isn't read")
+        if toks:
+            items.append(("cmd", toks, before, after))
+    return items
+
+
+def _script_tree(items: list[tuple], i: int = 0, stops: tuple[str, ...] = ()) -> tuple[list[tuple], int]:
+    """Nodes from ``items[i:]`` up to a reserved word in ``stops``:
+    ``("cmd", ...)``, ``("for", name, values, body)``, ``("maybe", body)``
+    for what may run any number of times (if, while, until) and
+    ``("group", body)``. Raises ValueError for a structure left open."""
+    def expect(i: int, word: str) -> int:
+        if i >= len(items) or items[i] != ("kw", word):
+            raise ValueError(f"no {word}")
+        return i + 1
+
+    nodes: list[tuple] = []
+    while i < len(items):
+        item = items[i]
+        if item[0] == "kw" and item[1] in stops:
+            return nodes, i
+        if item[0] == "cmd":
+            nodes.append(item)
+            i += 1
+        elif item[0] == "for":
+            body, i = _script_tree(items, expect(i + 1, "do"), ("done",))
+            nodes.append(("for", item[1], item[2], body))
+            i = expect(i, "done")
+        elif item[1] in ("while", "until"):
+            cond, i = _script_tree(items, i + 1, ("do",))
+            body, i = _script_tree(items, expect(i, "do"), ("done",))
+            nodes.append(("maybe", cond + body))
+            i = expect(i, "done")
+        elif item[1] == "if":
+            body: list[tuple] = []
+            while True:
+                cond, i = _script_tree(items, i + 1, ("then",))
+                branch, i = _script_tree(items, expect(i, "then"), ("elif", "else", "fi"))
+                body += cond + branch
+                if items[i] != ("kw", "elif"):
+                    break
+            if items[i] == ("kw", "else"):
+                branch, i = _script_tree(items, i + 1, ("fi",))
+                body += branch
+            nodes.append(("maybe", body))
+            i = expect(i, "fi")
+        elif item[1] == "{":
+            body, i = _script_tree(items, i + 1, ("}",))
+            nodes.append(("group", body))
+            i = expect(i, "}")
+        else:
+            raise ValueError(f"a stray {item[1]}")
+    if stops:
+        raise ValueError(f"no {stops[-1]}")
+    return nodes, i
+
+
+def _assigned_in(nodes: list[tuple]) -> set[str] | None:
+    """The variables ``nodes`` may set, or None when any may be (eval, source)."""
+    names: set[str] = set()
+    for node in nodes:
+        if node[0] == "for":
+            inner = _assigned_in(node[3])
+            if inner is None:
+                return None
+            names |= inner | {node[1]}
+        elif node[0] in ("maybe", "group"):
+            inner = _assigned_in(node[1])
+            if inner is None:
+                return None
+            names |= inner
+        else:
+            words = [t[1] for t in node[1] if t[0] == "word"]
+            program = next((w.raw for w in words if not _ASSIGNMENT.match(w.raw)), None)
+            if program in ("eval", "source", "."):
+                return None
+            names |= {m.group(1) for w in words if (m := _ASSIGNMENT.match(w.raw))}
+            if program in _VARIABLE_SETTERS:
+                names |= {m.group(0) for w in words if (m := re.match(r"[A-Za-z_]\w*", w.raw))}
+    return names
+
+
+def _dq_escaped(text: str) -> str:
+    return re.sub(r'([\\"$`])', r"\\\1", text)
+
+
+class _Flattener:
+    """Walks a script's nodes (_script_tree) in order, keeping the literal
+    value each variable surely has (``("lit", text)``, or ``("glob",
+    pattern)`` for a for loop's pattern word), and collects the simple
+    commands it runs."""
+
+    def __init__(self, cwd: str):
+        self.cwd = cwd
+        self.out: list[str] = []
+        self.changed = False
+
+    def emit(self, command: str) -> None:
+        self.out.append(command)
+        if len(self.out) > _FLAT_LIMIT:
+            raise ValueError("too many commands")
+
+    def script(self, command: str, env: dict) -> None:
+        tokens = _script_tokens(command)
+        if tokens is None:
+            raise ValueError("unreadable syntax")
+        if any(t[0] == "heredoc" for t in tokens) and any(
+                t[0] == "word" and os.path.basename(t[1].raw) in _STDIN_RUNNERS for t in tokens):
+            raise ValueError("a heredoc may be run as commands")
+        nodes, _ = _script_tree(_script_items(tokens))
+        self.walk(nodes, env, True)
+
+    def walk(self, nodes: list[tuple], env: dict, definite: bool) -> None:
+        for node in nodes:
+            if node[0] == "cmd":
+                self.command(node[1], env, definite and node[2] in ("", ";", "\n")
+                             and node[3] in ("", ";", "\n", "&&", "||"))
+                continue
+            self.changed = True
+            if node[0] == "group":
+                self.walk(node[1], env, definite)
+                continue
+            body = node[3] if node[0] == "for" else node[1]
+            values = self.loop_values(node[2], env) if node[0] == "for" else []
+            assigned = _assigned_in(body)
+            if assigned is None:
+                env.clear()
+            for name in assigned or ():
+                env.pop(name, None)    # a later pass sees what an earlier one set
+            if node[0] == "maybe":
+                self.walk(body, env, False)
+                continue
+            for value in dict.fromkeys(values):
+                if value is None:
+                    env.pop(node[1], None)
+                else:
+                    env[node[1]] = value
+                self.walk(body, env, False)
+            env.pop(node[1], None)
+
+    def loop_values(self, words: list[_Word] | None, env: dict) -> list[tuple | None]:
+        """What a for loop's variable takes, in order (None: unknown)."""
+        from brindle.native.permissions import _tokens
+
+        if words is None:
+            return [None]    # for x; do: the positional parameters
+        values: list[tuple | None] = []
+        for word in words:
+            for inner in word.substitutions:
+                self.substitution(inner, env)
+            text = self.text(word, env)
+            if word.substitutions:
+                return [None]
+            found = _tokens(text, word_pattern=SIMPLE_COMMAND)
+            if found is not None and not any(is_op for is_op, _ in found):
+                values += [("lit", value) for _, value in found]
+            elif RESTRICTION_WORD.fullmatch(text) and " " not in text:
+                values.append(("glob", text))
+            else:
+                return [None]
+        return values
+
+    def substitution(self, inner: str, env: dict) -> None:
+        sub = _Flattener(self.cwd)
+        sub.script(inner, dict(env))
+        for command in sub.out:
+            self.emit(command)
+
+    def text(self, word: _Word, env: dict, assignment: bool = False) -> str:
+        """``word`` as written with each reference to a known variable
+        replaced by text the shell reads as the same words; any other stays."""
+        out, last = [], 0
+        for start, end, name, quoted in word.refs:
+            value = env.get(name)
+            replacement = None
+            if value is not None and value[0] == "glob":
+                # A loop over a pattern: each name it matches, as one word ("$f") or split again ($f).
+                whole = word.raw == word.raw[start:end] or quoted and word.raw == f'"{word.raw[start:end]}"'
+                if whole and not assignment and (quoted or not any(
+                        re.search(r"[\s*?\[]", match) for match in glob.glob(
+                            value[1], root_dir=self.cwd or None, include_hidden=True))):
+                    self.changed = True
+                    return value[1]
+            elif value is not None:
+                text = value[1]
+                fields = [f for f in re.split(r"[ \t\n]+", text) if f]
+                if quoted:
+                    replacement = _dq_escaped(text)
+                elif assignment:
+                    replacement = f'"{_dq_escaped(text)}"'
+                elif not any(c in text for c in "*?["):
+                    replacement = " ".join(shlex.quote(f) for f in fields)
+                elif all(RESTRICTION_WORD.fullmatch(f) for f in fields):
+                    replacement = " ".join(fields)    # it expands to the names the pattern matches
+            if replacement is not None:
+                out += [word.raw[last:start], replacement]
+                last = end
+                self.changed = True
+        return "".join(out) + word.raw[last:]
+
+    def command(self, tokens: list[tuple], env: dict, definite: bool) -> None:
+        from brindle.native.permissions import _tokens
+
+        words = [t[1] for t in tokens if t[0] == "word"]
+        if len(words) == len(tokens) and all(_ASSIGNMENT.match(w.raw) for w in words):
+            self.changed = True
+            for word in words:
+                name = _ASSIGNMENT.match(word.raw).group(1)
+                if name == "IFS":
+                    raise ValueError("IFS changes how words split")
+                for inner in word.substitutions:
+                    self.substitution(inner, env)
+                text = self.text(word, env, assignment=True)[len(name) + 1:]
+                found = _tokens(text) if text else [(False, "")]
+                known = (definite and not word.substitutions and "~" not in text and found is not None
+                         and len(found) == 1 and not found[0][0])
+                if known:
+                    env[name] = ("lit", found[0][1])
+                else:
+                    env.pop(name, None)
+            return
+        program = next((w.raw for w in words if not _ASSIGNMENT.match(w.raw)), None)
+        if program in ("eval", "source", "."):
+            env.clear()
+        elif program in _VARIABLE_SETTERS:
+            for word in words:
+                if found := re.match(r"[A-Za-z_]\w*", word.raw):
+                    env.pop(found.group(0), None)
+        pieces: list[str] = []
+        for index, token in enumerate(tokens):
+            if token[0] == "heredoc":
+                _, body, expands, spaced = token
+                if expands and any(c in line for line in body for c in "$`\\"):
+                    raise ValueError("a heredoc that expands")
+                if index and tokens[index - 1][0] == "word" and tokens[index - 1][1].raw.isdigit() and not spaced:
+                    raise ValueError("a heredoc on another descriptor")
+                self.changed = True    # its body is only the program's input
+                continue
+            spaced, text = (token[1].spaced, self.text(token[1], env)) if token[0] == "word" else (token[2], token[1])
+            pieces.append((" " if spaced and pieces else "") + text)
+        if pieces:
+            self.emit("".join(pieces))
+
+
+def _flat_script(command: str, cwd: str) -> str | None:
+    """The simple commands ``command`` runs, one per line, with loops
+    unrolled, known variables substituted, the inner commands of an
+    assigned ``$(...)`` in place of the assignment, and quoted heredoc
+    bodies dropped (they are a program's input, unless a shell may read
+    them). None when there's nothing to flatten or its syntax isn't read."""
+    flattener = _Flattener(cwd)
+    try:
+        flattener.script(command, {})
+    except ValueError:
+        return None
+    return "\n".join(flattener.out) if flattener.changed else None
 
 
 # -- storage ----------------------------------------------------------------------------------
