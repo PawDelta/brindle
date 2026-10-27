@@ -3455,6 +3455,33 @@
       "title": "PermissionExceptionDTO",
       "type": "object"
     },
+    "PermissionGroupDTO": {
+      "description": "A capability group (brindle.permission_groups): what it answers for a\nrequest no rule covers, unless one of its subcategories says otherwise.",
+      "properties": {
+        "baseline": {
+          "title": "Baseline",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "subcategories": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Subcategories",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "baseline"
+      ],
+      "title": "PermissionGroupDTO",
+      "type": "object"
+    },
     "PermissionLimitsDTO": {
       "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
       "properties": {
@@ -3527,6 +3554,33 @@
             "describe"
           ],
           "title": "PermissionExceptionDTO",
+          "type": "object"
+        },
+        "PermissionGroupDTO": {
+          "description": "A capability group (brindle.permission_groups): what it answers for a\nrequest no rule covers, unless one of its subcategories says otherwise.",
+          "properties": {
+            "baseline": {
+              "title": "Baseline",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "subcategories": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "title": "Subcategories",
+              "type": "object"
+            }
+          },
+          "required": [
+            "name",
+            "baseline"
+          ],
+          "title": "PermissionGroupDTO",
           "type": "object"
         },
         "PermissionLimitsDTO": {
@@ -3828,8 +3882,16 @@
           "type": "object"
         }
       },
-      "description": "GET /permissions: the chosen preset, the unmatched setting, every rule\n(editable, the preset's included), the saved actions and per-rule prompt\ncounts (\"unmatched\" for asks no rule caused).",
+      "description": "GET /permissions: the chosen preset, the unmatched setting, every rule\n(editable, the preset's included), the saved actions, per-rule prompt\ncounts (\"unmatched\" for asks no rule caused) and the capability groups.",
       "properties": {
+        "groups": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionGroupDTO"
+          },
+          "title": "Groups",
+          "type": "array"
+        },
         "preset": {
           "anyOf": [
             {
@@ -5987,6 +6049,10 @@
     {
       "method": "POST",
       "path": "/v1/permissions/asks/unblock"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/permissions/groups"
     },
     {
       "method": "PUT",
