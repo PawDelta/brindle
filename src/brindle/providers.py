@@ -97,6 +97,16 @@ def _uv_cache_env(ctx: LaunchContext) -> dict[str, str]:
     return {"UV_CACHE_DIR": os.path.join(ctx.cwd, ".uv-cache")}
 
 
+def _venv_path_env(ctx: LaunchContext) -> dict[str, str]:
+    """The worktree's .venv/bin first on PATH, so `python -m pytest` and
+    `pytest` run the project's venv without `uv run`: under Codex's macOS
+    sandbox uv panics reading the system configuration (proxy lookup)."""
+    venv_bin = os.path.join(ctx.cwd or "", ".venv", "bin")
+    if not ctx.cwd or not os.path.isdir(venv_bin):
+        return {}
+    return {"PATH": os.pathsep.join(p for p in (venv_bin, os.environ.get("PATH")) if p)}
+
+
 class Provider:
     name = "base"
     uses_hooks = False
@@ -1617,9 +1627,13 @@ class Codex(Provider):
             "-c", "mcp_servers.brindle.startup_timeout_sec=120",
             "-c", f"notify={json.dumps(notify)}",
             # Only this launch's shell commands; the person's config.toml is untouched.
-            *(a for k, v in _uv_cache_env(ctx).items()
+            *(a for k, v in {**_uv_cache_env(ctx), **_venv_path_env(ctx)}.items()
               for a in ("-c", f"shell_environment_policy.set.{k}={json.dumps(v)}")),
         ]
+        if ctx.mode == "review":
+            # Nobody watches a reviewer: a command the sandbox refuses fails
+            # instead of waiting for a person. Hooks are separate from approvals.
+            argv += ["--ask-for-approval", "never"]
         # brindle's permission policy, when it's on and the person has trusted
         # brindle's hook once (`brindle permissions install-codex-hook`; see
         # brindle.codex_hook). Otherwise Codex prompts as usual. A reviewer gets
