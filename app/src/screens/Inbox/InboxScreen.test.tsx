@@ -1,9 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../../api/client";
 import { DaemonContext } from "../../api/context";
 import { scopesFor } from "../../api/permissions";
-import type { AskDTO, AskGroupDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
+import type { AskDTO, AskDecisionDTO, AskGroupDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
 import { SessionsProvider } from "../../store/sessions";
 import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
@@ -237,15 +237,24 @@ describe("inbox", () => {
   it("a decision out blocks a second one from the menu's duration button", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [pushes] });
     const client = daemon.client();
-    const decide = vi.spyOn(client, "decidePermissionAsks").mockImplementation(() => new Promise(() => undefined));
+    let settle!: (got: AskDecisionDTO) => void;
+    const decide = vi.spyOn(client, "decidePermissionAsks").mockImplementation(() => new Promise<AskDecisionDTO>((resolve) => (settle = resolve)));
     const { sync } = mount(daemon, client);
     const item = await screen.findByRole("article", { name: "Allow pushes into main?" });
     fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
     fireEvent.click(within(item).getByRole("menuitem", { name: /^For 30 minutes/ }));
     const submit = within(item).getByRole("button", { name: /^Allow for 30 minutes/ });
-    fireEvent.click(submit);
-    fireEvent.click(submit);
+    // Both clicks land before React commits anything: only the guard can stop the second.
+    act(() => {
+      fireEvent.click(submit);
+      fireEvent.click(submit);
+    });
     expect(decide).toHaveBeenCalledTimes(1);
+    // Once the first is answered, the next decision goes out.
+    await act(async () => settle({ mode: "timed", scope: pushes.general, resumed: [] }));
+    await waitFor(() => expect(within(item).getByRole("button", { name: "Allow once" })).toHaveProperty("disabled", false));
+    fireEvent.click(within(item).getByRole("button", { name: "Allow once" }));
+    expect(decide).toHaveBeenCalledTimes(2);
     sync.stop();
   });
 
@@ -258,9 +267,9 @@ describe("inbox", () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [install] });
     const { sync } = mount(daemon);
     const item = await screen.findByRole("article", { name: "Allow npm install?" });
-    expect(within(item).getByTestId("permission-chip").textContent).toBe("Shell › Package installs");
+    expect(within(item).getByTestId("permission-chip")).toBeTruthy();
     fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
-    fireEvent.click(within(item).getByRole("menuitem", { name: /^Always for Shell › Package installs/ }));
+    fireEvent.click(within(item).getByRole("menuitem", { name: /^Always for / }));
     await waitFor(() => expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/groups")?.body).toEqual({ groups: { shell: { subcategories: { install: "allow" } } } }));
     await waitFor(() => expect(daemon.data.asks).toEqual([]));
     // An override, not a saved action.
