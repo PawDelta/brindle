@@ -25,15 +25,17 @@ TOP_CAUSES = 10
 
 
 def _insert(db: DB, *, agent_id: str, repo_root: str, request_id: str | None, kind: str, summary: str,
-            reason: str, asked: bool, resolved_by: str, outcome: str, wait: float) -> None:
+            reason: str, asked: bool, resolved_by: str, outcome: str, wait: float) -> int | None:
     try:
         with db.tx() as c:
-            c.execute("INSERT INTO permission_asks (ts, repo_root, agent_id, request_id, kind, summary, "
-                      "reason, asked, resolved_by, outcome, wait_seconds) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                      (time.time(), repo_root, agent_id, request_id, kind, summary[:300], reason,
-                       int(asked), resolved_by, outcome, wait))
+            return c.execute(
+                "INSERT INTO permission_asks (ts, repo_root, agent_id, request_id, kind, summary, "
+                "reason, asked, resolved_by, outcome, wait_seconds) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (time.time(), repo_root, agent_id, request_id, kind, summary[:300], reason,
+                 int(asked), resolved_by, outcome, wait)).lastrowid
     except Exception:  # noqa: BLE001 - measuring must never break the hook
         log.exception("brindle: couldn't record a permission ask")
+        return None
 
 
 def record_decision(db: DB, agent_id: str, repo_root: str, kind: str, summary: str,
@@ -46,25 +48,44 @@ def record_decision(db: DB, agent_id: str, repo_root: str, kind: str, summary: s
             outcome=decision, wait=0.0)
 
 
-def record_ask(db: DB, agent_id: str, repo_root: str, request_id: str, kind: str, summary: str,
-               reason: str, answer: str | None, wait: float) -> None:
-    """A request left to the person, once the hold for the app's answer ended.
-    ``answer`` is the app's (allow_once, allow_always, deny), or None when it
-    timed out or went to the CLI's own prompt (a terminal approval is recorded
-    later by ``resolve_at_prompt``)."""
+def start_ask(db: DB, agent_id: str, repo_root: str, request_id: str, kind: str, summary: str,
+              reason: str) -> int | None:
+    """A request left to the person, recorded before the wait so an approval at
+    the CLI's own prompt during the hold can find it (``resolve_at_prompt``).
+    ``ts`` is when the ask began."""
+    return _insert(db, agent_id=agent_id, repo_root=repo_root, request_id=request_id, kind=kind,
+                   summary=summary, reason=reason, asked=True, resolved_by="timeout", outcome="pending",
+                   wait=0.0)
+
+
+def finish_ask(db: DB, ask_id: int | None, answer: str | None) -> None:
+    """The hold for the app's answer ended. ``answer`` is the app's (allow_once,
+    allow_always, deny), or None when it timed out or went to the CLI's own
+    prompt. An ask the terminal already resolved is left as it is."""
+    if ask_id is None:
+        return
     outcome = "prompt" if answer is None else "deny" if answer == "deny" else "allow"
-    _insert(db, agent_id=agent_id, repo_root=repo_root, request_id=request_id, kind=kind, summary=summary,
-            reason=reason, asked=True, resolved_by="timeout" if answer is None else "person",
-            outcome=outcome, wait=wait)
+    try:
+        with db.tx() as c:
+            c.execute("UPDATE permission_asks SET resolved_by=?, outcome=?, wait_seconds=?-ts "
+                      "WHERE id=? AND outcome='pending'",
+                      ("timeout" if answer is None else "person", outcome, time.time(), ask_id))
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't finish a permission ask")
+
+
+def record_unheld_ask(db: DB, agent_id: str, repo_root: str, kind: str, summary: str, reason: str) -> None:
+    """An ask that was not held for the app (left straight to the CLI's prompt)."""
+    finish_ask(db, start_ask(db, agent_id, repo_root, "", kind, summary, reason), None)
 
 
 def resolve_at_prompt(db: DB, agent_id: str, request_id: str) -> None:
-    """The person approved at the CLI's own prompt a request whose hold ended
-    unanswered: its outcome is allow, answered by the person, after the whole wait."""
+    """The person approved the request at the CLI's own prompt (its PostToolUse
+    came): allow, answered by the person, after the wait so far."""
     try:
         with db.tx() as c:
-            c.execute("UPDATE permission_asks SET resolved_by='person', outcome='allow', "
-                      "wait_seconds=? - ts WHERE agent_id=? AND request_id=? AND outcome='prompt'",
+            c.execute("UPDATE permission_asks SET resolved_by='person', outcome='allow', wait_seconds=?-ts "
+                      "WHERE agent_id=? AND request_id=? AND outcome IN ('pending', 'prompt')",
                       (time.time(), agent_id, request_id))
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't resolve a permission ask")
