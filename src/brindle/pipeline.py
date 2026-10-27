@@ -817,11 +817,22 @@ def has_supervisor_action(summary: str) -> bool:
     """Parse review summary for actionable supervisor findings.
     Distinguishes empty or negated sections (e.g. 'Needs supervisor action: None.')
     from actual items requiring escalation."""
-    m = re.search(r"(?:^|[^\w])needs[-_ ]*supervisor(?:[-_ ]*action)?\s*[:\n\-*]*\s*(.*)", summary, re.IGNORECASE)
-    if not m:
-        return False
-    # Capture text under this section until the next header/section
-    rest = summary[m.start(1):]
+    # A blocker the reviewer calls out of scope for the worker (a bug in code
+    # its task doesn't cover) is the same escalation: another fix round
+    # can't settle it. That one only counts as a finding label ("Out of
+    # scope: ..." opening a line), not as a phrase in prose ("not out of
+    # scope"). Each section is judged on its own: an empty one mustn't hide
+    # an actionable one after it.
+    starts = [m.start(1) for m in re.finditer(
+        r"(?:^|[^\w])needs[-_ ]*supervisor(?:[-_ ]*action)?\s*[:\n\-*]*\s*(.*)", summary, re.IGNORECASE)]
+    starts += [m.start(1) for m in re.finditer(
+        r"^[ \t>*#\-]*out[-_ ]*of[-_ ]*scope\*{0,2}[ \t]*(?::|\n)[\s*]*(.*)",
+        summary, re.IGNORECASE | re.MULTILINE)]
+    return any(_actionable_section(summary[start:]) for start in starts)
+
+
+def _actionable_section(rest: str) -> bool:
+    """Whether the section text starting at ``rest`` has something for the supervisor."""
     next_sec = re.search(r"\n\s*(?:#+\s*|[A-Z][a-zA-Z\s]{1,20}:)", rest)
     section_text = rest[:next_sec.start()] if next_sec else rest
     cleaned = re.sub(r"[^\w]+", " ", section_text).strip().lower()
@@ -938,19 +949,23 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
         return True, True
     needs_sup = has_supervisor_action(summary)
     rounds = (worker.pipeline_rounds or 0) + 1
-    if not needs_sup and rounds <= cfg.review_rounds and agents.is_alive(worker):
+    if not needs_sup and rounds <= cfg.review_rounds:
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
-        try:
-            agents.send_message(
-                db, worker.id,
-                f"Review of your branch (round {rounds} of {cfg.review_rounds}) requested "
-                f"changes:\n\n{summary}\n\nFix what's valid, commit, and call report_result "
-                "again; brindle will have it reviewed again.",
-                sender_id=reviewer.id,
-            )
+        fix = (f"Review of your branch (round {rounds} of {cfg.review_rounds}) requested "
+               f"changes:\n\n{summary}\n\nFix what's valid, commit, and call report_result "
+               "again; brindle will have it reviewed again.")
+        if agents.is_alive(worker):
+            try:
+                agents.send_message(db, worker.id, fix, sender_id=reviewer.id)
+                return True, False
+            except agents.AgentError:
+                pass
+        # It exited once it reported (a worker usually has by the time a
+        # review comes back), or just before the message reached it: its fix
+        # round starts it again on its branch.
+        current = db.get_agent(worker.id) or worker
+        if not agents.is_alive(current) and agents.reopen_worker(db, current, ws, fix):
             return True, False
-        except agents.AgentError:
-            pass
     if not needs_sup and _retry_on_heavy(db, worker, ws, cfg,
                        f"the review still asked for changes after {rounds - 1} fix round(s): "
                        f"{summary}", report):
