@@ -309,7 +309,10 @@ def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         except tmux.TmuxError:
             continue
         if provider.tool_permission(screen):
-            continue  # the permission policy's, never a startup prompt
+            # The permission policy's, never a startup prompt to answer: its supervisor is told.
+            if prompt_answer.tell(db, a, "\n".join(prompt_answer._tail(screen))):
+                done.append(f"told {a.parent_id} that worker {a.id} is waiting on input")
+            continue
         brief = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()
         partial = brief and prompt_answer.brief_draft(screen, brief["submitted_prompt"])
         if not partial and not provider.input_ready(screen) and (not prompt_answer.looks_like_prompt(screen)
@@ -321,17 +324,20 @@ def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
 
 
 def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
-    """Forward live menus immediately, including questions left by idle
-    workers. Hook-only reviewer requests are immediate too; other waiting
-    states retain their grace period. Report once per spell of waiting."""
+    """Forward the live menus of waiting workers immediately. Hook-only
+    reviewer requests are immediate too; other waiting states retain their
+    grace period. Report once per spell of waiting.
+
+    Only a waiting worker's pane is read: hooks mark a wait (a permission
+    request), a question a turn ended on is forwarded by the turn-end hook
+    (prompt_answer.at_turn_end), and startup prompts are settle_startups'."""
     from brindle import prompt_answer
 
     done = []
     owners = agents.pane_owners(db, panes)
     for a in db.list_agents():
         if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
-                or a.dismissed_at is not None or a.status not in ("starting", "processing", "waiting", "idle")
-                or (a.status == "processing" and a.mode != "review")   # busy; its hooks mark a wait
+                or a.dismissed_at is not None or a.status != "waiting"
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
@@ -348,12 +354,8 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             if prompt_answer.tell(db, a, "\n".join(prompt_answer._tail(screen))):
                 done.append(f"told {a.parent_id} that worker {a.id} is waiting on input")
             continue
-        if a.status != "waiting":
-            agents.screen_status(db, a, samples=1)
-            a = db.get_agent(a.id) or a
         since = a.status_since or a.created_at
-        if (a.status != "waiting" or a.stuck_noted == since
-                or (a.mode != "review" and now - since < STUCK_AFTER)):
+        if a.stuck_noted == since or (a.mode != "review" and now - since < STUCK_AFTER):
             continue
         ws = db.get_workspace(a.workspace_id)
         tail = "\n".join([ln for ln in screen.rstrip().splitlines() if ln.strip()][-12:])

@@ -3837,7 +3837,10 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
         }
     if needs_report:
         db.set_status(agent.id, "idle")
-        tell_parent_unreported(db, agent)
+        from brindle import prompt_answer
+
+        if not prompt_answer.at_turn_end(db, agent):   # a question it ended on says more
+            tell_parent_unreported(db, agent)
         return None
     if agent.mode == "interactive":
         from brindle import autopilot as pilot
@@ -4040,7 +4043,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 # its supervisor hears about.
                 if unreported_note_expired(agent):
                     db.update_agent(agent_id, unreported_noted=None)
-                tell_parent_unreported(db, db.get_agent(agent_id) or agent)
+                from brindle import prompt_answer
+
+                if not prompt_answer.at_turn_end(db, agent):   # a question it ended on says more
+                    tell_parent_unreported(db, db.get_agent(agent_id) or agent)
             if db.pending_count(agent_id) and not agent.headless:
                 flush(db, agent_id)
     elif event == "stop-failure":
