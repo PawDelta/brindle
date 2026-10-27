@@ -340,7 +340,7 @@ def test_without_the_exclusive_key_provider_config_stays_the_managed_source(db, 
     monkeypatch.setattr(company_login, "stored_env", lambda: {})
     a = Agent("w1", ws.id, "developer", "claude", None, "assign", "idle", "@0", None, time.time())
     db.add_agent(a)
-    env = {k: v for k, v in agents.agent_env(ws, "w1", a, m).items() if not k.startswith(("BRINDLE_", "ENABLE_"))}
+    env = {k: v for k, v in agents.agent_env(ws, "w1", a, m).items() if not k.startswith(("BRINDLE_", "ENABLE_", "PYTEST_"))}
     assert env == {**managed_models.provider_env(cfg(VERTEX), "claude"), **company_login.claude_env(ORG, setup.claude)}
     assert from_policy(monkeypatch, agent_setup=OLD_SERVER) is None      # and alone it manages nothing, as today
 
