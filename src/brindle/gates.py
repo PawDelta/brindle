@@ -28,7 +28,7 @@ from contextlib import contextmanager
 import shutil
 from dataclasses import dataclass, field
 
-from brindle import autopilot, git, workspaces
+from brindle import autopilot, check_scope, git, workspaces
 from brindle.config import RepoConfig
 from brindle.db import DB, Workspace
 
@@ -72,33 +72,53 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     ``Abandoned`` raised, so a run nobody wants any more frees its slot.
 
     A process that waited on the lock while the holder failed or timed out
-    reuses that outcome instead of re-running the whole command."""
+    reuses that outcome instead of re-running the whole command.
+
+    On a worker's branch a scoped check (``brindle.check_scope``) runs only
+    what the branch's changes reach, or nothing; the result is recorded for
+    ``cmd`` all the same, and cached by tree for the command that actually ran."""
     # Taken before the git calls below, which can be slow on a loaded
     # machine: a holder that finished after we arrived still counts.
     waiting_since = time.time()
     sha = head(ws)
+    run = _scoped(db, ws, cmd)
+    if run is None:
+        out = f"{check_scope.SKIPPED}{ws.branch} changes nothing this check covers"
+        db.set_check(ws.id, sha, cmd, True, out)
+        return True, out
     dirty = bool(git.dirty_files(ws.path))
     if dirty:
-        return _run_queued(db, ws, cmd, env, timeout, cancel)
+        return _run_queued(db, ws, run, env, timeout, cancel)
     # One run at a time per (workspace, commit, command): a check warmed when
     # the worker reported, a reviewer's summary and the merge gate can all
     # want the same result at once; the later ones wait, then reuse it.
     tree = git.out(["rev-parse", "HEAD^{tree}"], ws.path)
-    with _check_lock(ws.repo_root, tree, cmd, cancel) as result_file:
-        cached = db.get_tree_check(ws.repo_root, tree, cmd)
+    with _check_lock(ws.repo_root, tree, run, cancel) as result_file:
+        cached = db.get_tree_check(ws.repo_root, tree, run)
         if cached is not None and cached["ok"]:
             db.set_check(ws.id, sha, cmd, True, cached["output"] or "")
             return True, cached["output"] or ""
         if (shared := _read_outcome(result_file, waiting_since)) is not None:
             return shared
-        ok, out = _run_queued(db, ws, cmd, env, timeout, cancel)
+        ok, out = _run_queued(db, ws, run, env, timeout, cancel)
         if head(ws) == sha and not git.dirty_files(ws.path):
             if ok:
-                db.set_tree_check(ws.repo_root, tree, cmd, ok, out)
+                db.set_tree_check(ws.repo_root, tree, run, ok, out)
                 db.set_check(ws.id, sha, cmd, ok, out)
             else:
                 _write_outcome(result_file, ok, out)
         return ok, out
+
+
+def _scoped(db: DB, ws: Workspace, cmd: str) -> str | None:
+    """The command to run for check ``cmd`` in ``ws`` (None: skip it)."""
+    from brindle.config import load_repo_config
+
+    try:
+        scope = load_repo_config(ws.repo_root).check_scopes.get(cmd)
+    except ValueError:
+        return cmd
+    return check_scope.command(db, ws, cmd, scope)
 
 
 def _read_outcome(path, since: float) -> tuple[bool, str] | None:
@@ -446,7 +466,7 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
             else:
                 ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, cancel=cancel)
             if ok:
-                lines.append(f"PASS `{cmd}`")
+                lines.append(f"PASS `{cmd}` ({out})" if out.startswith(check_scope.SKIPPED) else f"PASS `{cmd}`")
                 continue
             if budget <= 0:
                 lines.append(f"FAIL `{cmd}` (output omitted; failure budget spent)")
