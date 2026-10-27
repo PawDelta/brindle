@@ -16,7 +16,10 @@ Answers come in only through the person-only inbox route
 (service.inbox.answer_permission), which the guard refuses to agent callers:
 ``claim`` binds the answer to the agent, the request and its digest (an
 answer to a request that differs from the one the hook recorded is
-refused), ``release`` hands it to the hook. Nothing in the database is ever
+refused), ``release`` hands it to the hook. The one other is a worker's
+supervisor's, while the hold is still with it (``supervise_until``): the
+supervise route, which tells the supervisor by the calling process's
+ancestry (brindle.permission_routing.answer). Nothing in the database is ever
 taken as an answer, and the hook finds the daemon by its fixed socket path,
 not by anything in daemon.json.
 
@@ -50,6 +53,7 @@ MAX_HOLDS = 256
 # without ending it (killed, crashed) stops renewing, and its hold lapses.
 LEASE_SECONDS = 60.0
 OUTCOMES_KEPT = 1024     # how many ended holds' outcomes are remembered
+CALL_SECONDS = 5.0       # longest a hook's register, end or a supervisor's answer waits on the daemon
 
 
 def _hash(nonce: str) -> str:
@@ -66,6 +70,24 @@ class Hold:
     lease_until: float             # when it lapses unless its holder waits again
     answer: str | None = None      # claimed by a person's answer
     released: bool = False         # handed to the hook
+    # Until when the worker's supervisor may answer it, before the person sees it
+    # (brindle.permission_routing); None: the person's alone (person-only, or escalated).
+    supervise_until: float | None = None
+    supervised_for: float = 0.0    # how long that was, for the person's note once it ran out
+    escalation: str | None = None  # the supervisor's reason for handing it to the person
+
+    def supervised(self, now: float) -> bool:
+        return self.supervise_until is not None and now < self.supervise_until
+
+    def routed_note(self, now: float) -> str | None:
+        """Why the person sees a request its supervisor had first, if it had."""
+        if self.escalation is not None:
+            return f"Supervisor escalated: {self.escalation}" if self.escalation else "Supervisor escalated this"
+        if self.supervise_until is not None and now >= self.supervise_until:
+            span = self.supervised_for
+            return f"Supervisor didn't answer in {round(span / 60)} min" if span >= 60 else \
+                f"Supervisor didn't answer in {round(span)}s"
+        return None
 
 
 class Holds:
@@ -104,9 +126,11 @@ class Holds:
             self._purge()
             return self._outcomes.get(request_id)
 
-    def register(self, agent_id: str, request_id: str, digest: str, nonce: str, hold_until: float) -> bool:
+    def register(self, agent_id: str, request_id: str, digest: str, nonce: str, hold_until: float,
+                 supervise_until: float | None = None) -> bool:
         """False when the id is held already, the hold would already be over,
-        or the agent (or everyone) holds too many live ones."""
+        or the agent (or everyone) holds too many live ones. ``supervise_until``:
+        its supervisor may answer it until then (claim's ``by_supervisor``)."""
         with self._changed:
             self._purge()
             now = self.clock()
@@ -114,8 +138,11 @@ class Holds:
             if (request_id in self._holds or hold_until <= now or mine >= MAX_PER_AGENT
                     or len(self._holds) >= MAX_HOLDS):
                 return False
+            if supervise_until is not None:
+                supervise_until = min(supervise_until, hold_until)
             self._holds[request_id] = Hold(agent_id, request_id, digest, _hash(nonce), hold_until,
-                                           now + LEASE_SECONDS)
+                                           now + LEASE_SECONDS, supervise_until=supervise_until,
+                                           supervised_for=max(0.0, (supervise_until or now) - now))
             self._outcomes.pop(request_id, None)
             return True
 
@@ -144,17 +171,32 @@ class Holds:
             for request_id in [r for r, h in self._holds.items() if h.agent_id == agent_id]:
                 self._leave(request_id, "dropped")
 
-    def claim(self, agent_id: str, request_id: str, digest: str, answer: str) -> bool:
-        """Claim the hold for ``answer``, the person's: False when it isn't
-        held (or no longer live), is another agent's, answers a request that
-        differs from the one the hook recorded, or another answer won."""
+    def claim(self, agent_id: str, request_id: str, digest: str, answer: str,
+              by_supervisor: bool = False) -> bool:
+        """Claim the hold for ``answer``, the person's (or, ``by_supervisor``,
+        the worker's supervisor's): False when it isn't held (or no longer
+        live), is another agent's, answers a request that differs from the one
+        the hook recorded, or another answer won; for a supervisor, also when
+        its time with the supervisor is over or it never had one."""
         with self._changed:
             self._purge()
             hold = self._holds.get(request_id)
             if (hold is None or hold.agent_id != agent_id or hold.answer is not None
-                    or not hmac.compare_digest(hold.digest, digest)):
+                    or not hmac.compare_digest(hold.digest, digest)
+                    or (by_supervisor and not hold.supervised(self.clock()))):
                 return False
             hold.answer = answer
+            return True
+
+    def escalate(self, agent_id: str, request_id: str, reason: str) -> bool:
+        """The supervisor hands the request to the person: False when it isn't
+        the agent's, live, and with its supervisor now."""
+        with self._changed:
+            self._purge()
+            hold = self._holds.get(request_id)
+            if hold is None or hold.agent_id != agent_id or not hold.supervised(self.clock()):
+                return False
+            hold.supervise_until, hold.escalation = None, reason
             return True
 
     def release(self, agent_id: str, request_id: str) -> bool:
@@ -237,10 +279,14 @@ async def register(request: Request) -> JSONResponse:
     if not all(fields) or not isinstance(hold_until, (int, float)) or isinstance(hold_until, bool):
         return JSONResponse({"error": {"code": "invalid",
                                        "message": "agent_id, request_id, digest, nonce and hold_until"}}, 400)
+    supervise_until = body.get("supervise_until")
+    if supervise_until is not None and (not isinstance(supervise_until, (int, float)) or isinstance(supervise_until, bool)):
+        return JSONResponse({"error": {"code": "invalid", "message": "supervise_until is a number"}}, 400)
     pid = request.scope.get(peer.PEER_PID)
     if pid is None or fields[0] not in await asyncio.to_thread(peer.caller_agents, pid):
         return JSONResponse({"error": {"code": "forbidden", "message": "a hook holds only its own agent's requests"}}, 403)
-    if not HOLDS.register(*fields, float(hold_until)):
+    if not HOLDS.register(*fields, float(hold_until),
+                          float(supervise_until) if supervise_until is not None else None):
         return JSONResponse({"error": {"code": "conflict", "message": "already held, or too many holds"}}, 409)
     return JSONResponse({"held": True})
 
@@ -259,10 +305,31 @@ async def end(request: Request) -> JSONResponse:
     return JSONResponse({"held": False})
 
 
+async def supervise(request: Request) -> JSONResponse:
+    """A supervisor's answer to its worker's request (brindle.permission_routing.answer):
+    who is calling is read from the calling process's ancestry, never from the body."""
+    from brindle import permission_routing
+    from brindle.daemon import peer
+    from brindle.db import DB
+
+    body = await _body(request)
+    pid = request.scope.get(peer.PEER_PID)
+    callers = await asyncio.to_thread(peer.caller_agents, pid) if pid is not None else set()
+    reason = body.get("reason")
+    try:
+        out = await asyncio.to_thread(permission_routing.answer, DB(), callers, _str(body, "agent_id") or "",
+                                      request.path_params["id"], _str(body, "answer") or "",
+                                      reason if isinstance(reason, str) else "")
+    except permission_routing.RoutingError as e:
+        return JSONResponse({"error": {"code": e.code, "message": str(e)}}, e.status)
+    return JSONResponse(out)
+
+
 ROUTES = [
     Route(PREFIX, register, methods=["POST"]),
     Route(PREFIX + "/{id}/wait", wait, methods=["POST"]),
     Route(PREFIX + "/{id}/end", end, methods=["POST"]),
+    Route(PREFIX + "/{id}/supervise", supervise, methods=["POST"]),
 ]
 
 
@@ -280,10 +347,10 @@ class _UnixConnection(http.client.HTTPConnection):
         self.sock.connect(self._path)
 
 
-def call(path: str, body: dict, timeout: float) -> dict | None:
+def post(path: str, body: dict, timeout: float) -> tuple[int, dict] | None:
     """POST ``body`` to the daemon's hold route ``path`` over its Unix socket
-    (its fixed path: nothing read from daemon.json); None when it can't be
-    reached or answers with an error."""
+    (its fixed path: nothing read from daemon.json): its status and JSON
+    body, or None when it can't be reached or answers with no JSON object."""
     from brindle.daemon import lifecycle
 
     conn = _UnixConnection(str(lifecycle.socket_path()), timeout)
@@ -291,11 +358,17 @@ def call(path: str, body: dict, timeout: float) -> dict | None:
         conn.request("POST", path, json.dumps(body), {"Content-Type": "application/json"})
         resp = conn.getresponse()
         data = json.loads(resp.read() or b"{}")
-        return data if resp.status == 200 and isinstance(data, dict) else None
+        return (resp.status, data) if isinstance(data, dict) else None
     except (OSError, ValueError, http.client.HTTPException):
         return None
     finally:
         conn.close()
+
+
+def call(path: str, body: dict, timeout: float) -> dict | None:
+    """``post``, None also when the daemon answers with an error."""
+    got = post(path, body, timeout)
+    return got[1] if got is not None and got[0] == 200 else None
 
 
 class Holder:
@@ -305,11 +378,15 @@ class Holder:
         self.agent_id, self.request_id, self.digest = agent_id, request_id, digest
         self.nonce = secrets.token_urlsafe(32)
 
-    def register(self, hold_until: float) -> bool:
+    def register(self, hold_until: float, supervise_until: float | None = None) -> bool:
         """Whether the daemon holds it now, until ``hold_until`` at most
-        (False: no daemon to answer through)."""
-        return call(PREFIX, {"agent_id": self.agent_id, "request_id": self.request_id, "digest": self.digest,
-                             "nonce": self.nonce, "hold_until": hold_until}, timeout=5.0) is not None
+        (False: no daemon to answer through), with the worker's supervisor
+        until ``supervise_until`` when given."""
+        body = {"agent_id": self.agent_id, "request_id": self.request_id, "digest": self.digest,
+                "nonce": self.nonce, "hold_until": hold_until}
+        if supervise_until is not None:
+            body["supervise_until"] = supervise_until
+        return call(PREFIX, body, CALL_SECONDS) is not None
 
     def wait(self, seconds: float) -> tuple[bool, str | None]:
         """(still held, the person's answer if one came within ``seconds``)."""

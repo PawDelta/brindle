@@ -3592,12 +3592,15 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 permissions.note_prompt(decision)
                 # Within the timeout Codex's hook definition carries (codex_hook.TIMEOUT).
                 hold = min(cfg.permission_hold_seconds, codex_hook.TIMEOUT - HOOK_SLACK)
-                answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold)
+                answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold,
+                                       **_supervising(db, agent, cfg, decision))
                 if answer:
                     decision = permissions.Decision(
-                        "deny" if answer == "deny" else "allow",
-                        "the person denied this in the brindle app" if answer == "deny"
-                        else "the person answered in the brindle app")
+                        "deny" if answer in ("deny", "supervisor_deny") else "allow",
+                        {"deny": "the person denied this in the brindle app",
+                         "supervisor_deny": "your supervisor denied this",
+                         "supervisor_allow": "your supervisor allowed this"}.get(
+                            answer, "the person answered in the brindle app"))
             elif decision.decision == "ask":
                 from brindle import permission_asks
 
@@ -3646,13 +3649,25 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             suggestions = permissions.persistent_suggestions(suggestions)
             # Recorded either way: its PostToolUse counts as the person's approval.
             answer = _hold_for_app(db, agent, req, decision.reason, suggestions, keep=True,
-                                   hold=cfg.permission_hold_seconds)
+                                   hold=cfg.permission_hold_seconds,
+                                   **(_supervising(db, agent, cfg, decision) if policy else {}))
             if answer:
                 return permissions.claude_answer(answer, suggestions)
         return permissions.claude_output(decision)
     except Exception:  # noqa: BLE001 - a broken policy must fall through to the prompt
         log.exception("brindle: permission policy failed; leaving it to the user")
         return None
+
+
+def _supervising(db: DB, agent: Agent, cfg, decision) -> dict:
+    """_hold_for_app's supervisor arguments for an ask of brindle's policy:
+    none when the person alone answers it (brindle.permission_routing)."""
+    from brindle import permission_routing
+
+    supervisor = permission_routing.supervisor_for(db, agent, decision)
+    if supervisor is None:
+        return {}
+    return {"supervisor": supervisor, "supervise": cfg.permission_supervisor_hold_seconds}
 
 
 def _session_of(db: DB, agent: Agent) -> str | None:
@@ -3668,6 +3683,7 @@ def _session_of(db: DB, agent: Agent) -> str | None:
 # Seconds a hold waits on the daemon at a time between looks at whether the
 # agent was closed or its request answered at the CLI's own prompt.
 HOLD_LOOK_SECONDS = 5.0
+HOLD_MIN_LOOK = 0.1     # the shortest such wait (the daemon reads 0 as its longest)
 # Looks in a row (HOLD_LOOK_SECONDS apart) a pane must read past its CLI's own
 # permission prompt, busy or idle, before the hold ends: longer than one look,
 # so a read while the prompt is redrawn doesn't take it for answered. Any
@@ -3680,7 +3696,7 @@ ANSWERS = ("allow_once", "allow_always", "deny")
 
 
 def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
-                  hold: float) -> str | None:
+                  hold: float, supervisor: Agent | None = None, supervise: float = 0) -> str | None:
     """Record a request the policy left to the person and, while the app's
     daemon runs, hold it there for the person's answer for ``hold`` seconds
     (_await_app_answer; the row's ``hold_until`` says till when, for the
@@ -3690,30 +3706,45 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     PermissionRequest carries a tool_use_id: the request gets an id of its
     own (Claude Code's PostToolUse is paired with it by tool and input, see
     note_permission_outcome). ``keep``: record it even when nothing is held,
-    and keep it once the hold ends (for that pairing)."""
-    from brindle import permission_asks, permissions
+    and keep it once the hold ends (for that pairing). ``supervisor``: the
+    worker's supervisor answers it first, for ``supervise`` seconds of the
+    hold (brindle.permission_routing), and the person after."""
+    from brindle import permission_asks, permission_routing, permissions
     from brindle.daemon.holds import Holder
 
     request_id = uuid.uuid4().hex[:16]
     recorded = json.dumps(req.to_dict()), json.dumps(suggestions) if suggestions else None
     # Only an answer to exactly this request and these suggestions counts.
-    holder = Holder(agent.id, request_id, permissions.request_digest(*recorded))
+    digest = permissions.request_digest(*recorded)
+    holder = Holder(agent.id, request_id, digest)
     # Held before it is recorded anywhere, so nothing watching the rows can take its id first.
-    hold_until = time.time() + hold
-    held = holder.register(hold_until)
+    now = time.time()
+    hold_until = now + hold
+    supervise_until = min(hold_until, now + supervise) if supervisor is not None and supervise > 0 else None
+    held = holder.register(hold_until, supervise_until) if supervise_until else holder.register(hold_until)
+    if not held:
+        supervise_until = None      # no daemon to answer through: the CLI's own prompt asks
+    # The same request already waiting on the supervisor: its answer settles this one too
+    # (permission_routing.answer), so the supervisor isn't asked twice, nor the first replaced.
+    asked_already = supervise_until is not None and permission_routing.in_flight(db, agent.id, digest)
     # The history row first: once the pairing row is visible a PostToolUse may pop it
     # and resolve the ask, which needs the row to exist (permission_asks.resolve_at_prompt).
     ws = db.get_workspace(agent.workspace_id)
     ask_id = permission_asks.start_ask(db, agent.id, ws.repo_root if ws else "", request_id, req.kind,
                                        req.summary(), reason)
+    channel = ("supervisor" if supervise_until else "hook") if held else None
     db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1],
-                              "hook" if held else None, hold_until=hold_until if held else None)
+                              channel, hold_until=hold_until if held else None)
+    if supervise_until and not asked_already and not permission_routing.ask_supervisor(
+            db, agent, supervisor, request_id, req, reason, supervise_until - now):
+        db.update_permission_request(agent.id, request_id, channel="hook")   # the person's from now on
     answer = ended = ended_at = None
     if held:
         try:
-            ended = _await_app_answer(db, agent, holder, req, hold_until)
+            ended = _await_app_answer(db, agent, holder, req, hold_until,
+                                      *([supervise_until] if supervise_until else []))
             ended_at = time.time()     # the wait's end, before the cleanup below
-            answer = ended if ended in ANSWERS else None
+            answer = ended if ended in ANSWERS or ended in permission_routing.AS_ANSWER else None
         finally:
             holder.end()
             db.update_permission_request(agent.id, request_id, channel="answered" if answer else "prompt",
@@ -3721,7 +3752,7 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     permission_asks.finish_ask(db, ask_id, ended, ended_at)
     # A denied request runs no tool, so no PostToolUse will pair with it: kept, it would
     # take the pairing meant for the same command asked again (note_permission_outcome).
-    if not keep or answer == "deny":
+    if not keep or answer in ("deny", "supervisor_deny"):
         db.pop_permission_request(agent.id, lambda r: r["tool_use_id"] == request_id)
     return answer
 
@@ -3730,9 +3761,12 @@ def _closed(agent: Agent | None) -> bool:
     return agent is None or agent.status in ("done", "paused") or agent.dismissed_at is not None
 
 
-def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float) -> str:
-    """The person's answer from the app's inbox (one of ANSWERS), as the
-    daemon hands it to ``holder`` (brindle.daemon.holds), or else how the
+def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float,
+                      supervise_until: float | None = None) -> str:
+    """The person's answer from the app's inbox (one of ANSWERS), or the
+    supervisor's (permission_routing.AS_ANSWER) while the request is its,
+    until ``supervise_until``, as the daemon hands it to ``holder``
+    (brindle.daemon.holds), or else how the
     hold ended: "timeout" at ``hold_until``, "terminal" when the person
     asks to answer in the terminal, "agent_exit" once the agent is closed or
     killed, "prompt" once its CLI's own prompt took the request (its
@@ -3740,12 +3774,15 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float) -> s
     ANSWERED_LOOKS), "daemon_lost" if the daemon goes away. Without an answer
     the request goes to the CLI's own prompt (or, where there is none, is
     refused). The agent shows waiting meanwhile, as at that prompt."""
+    from brindle.permission_routing import AS_ANSWER
+
     db.set_status(agent.id, "waiting")
-    bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
+    if supervise_until is None:
+        bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
     deadline, past = time.monotonic() + hold_until - time.time(), 0
     while True:
         now = db.get_agent(agent.id)
-        recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
+        recorded = db.conn.execute("SELECT channel FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
                                    (agent.id, holder.request_id)).fetchone()
         left = deadline - time.monotonic()
         if _closed(now):
@@ -3757,6 +3794,11 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float) -> s
         if left <= 0:
             ended = "timeout"
             break
+        if supervise_until is not None and (time.time() >= supervise_until or recorded["channel"] != "supervisor"):
+            # The supervisor didn't answer in time, escalated it, or couldn't be told: the person's now.
+            supervise_until = None
+            db.update_permission_request(agent.id, holder.request_id, channel="hook")
+            bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
         # Its CLI shows its own prompt for as long as this hook holds the request: a pane
         # past it was answered there, whether or not a look caught the prompt. An allow
         # runs the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
@@ -3765,9 +3807,13 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float) -> s
         if past >= ANSWERED_LOOKS:
             ended = "prompt"
             break
-        held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
+        look = min(left, HOLD_LOOK_SECONDS)
+        if supervise_until is not None:     # back in time to hand it to the person
+            look = max(min(look, supervise_until - time.time()), HOLD_MIN_LOOK)
+        held, answer = holder.wait(look)
         if answer is not None:
-            ended = answer if answer in ANSWERS else "terminal"   # the person sent it to the prompt
+            # Else the person sent it to the prompt.
+            ended = answer if answer in ANSWERS or answer in AS_ANSWER else "terminal"
             break
         if not held:
             # The daemon lets go of a closed agent's hold, and of every hold at its
@@ -3775,7 +3821,7 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float) -> s
             ended = ("agent_exit" if _closed(db.get_agent(agent.id))
                      else "timeout" if time.time() >= hold_until else "daemon_lost")
             break
-    if ended in ANSWERS:
+    if ended in ANSWERS or ended in AS_ANSWER:
         db.set_status(agent.id, "processing", only_if="waiting")
     return ended
 

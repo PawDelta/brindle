@@ -66,7 +66,7 @@ def ask_dto(a: grants.PendingAsk) -> AskDTO:
                   repo=a.repo_root, kind=a.ask.kind, tool=a.request.tool, exact=a.ask.exact,
                   summary=a.request.summary(), waiting_since=a.created_at, worker=a.worker, blocked=a.blocked,
                   rule=a.rule.id if a.rule else None, limits=limits_dto(a.rule.limits if a.rule else None),
-                  reason=a.policy.reason)
+                  reason=a.policy.reason, escalation=a.escalation)
 
 
 def _title(g: grants.Group) -> str:
