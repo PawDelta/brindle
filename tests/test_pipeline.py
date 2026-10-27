@@ -323,6 +323,40 @@ def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, rep
     assert db.get_agent("w1").pipeline == "reviewing"
 
 
+@pytest.mark.parametrize("session", ["sess-w1", None])
+def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session):
+    """Live incident (session-17): a worker that had exited after
+    report_result got a blocker review, and the pipeline handed its branch to
+    the supervisor "after 0 fix round(s)" instead of starting a fix round.
+    The worker is reopened (its own session, else a fresh start on its task)
+    with the findings, and only a branch out of rounds goes to the supervisor."""
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    add(db, ws, "w1", "assign", parent="boss", status="done", result="done", task="Add the None check")
+    db.update_agent("w1", session_ref=session)
+    add(db, ws, "rev", "review", "reviewer", parent="boss")
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
+    monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: ref == "sess-w1"))
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, *, prompt, resume, **kw:
+                        launched.append((a.id, resume, prompt)))
+    summary = "- blocker: missing check for None.\nNeeds supervisor action: None."
+    for rounds in (1, 2):
+        db.update_agent("w1", pipeline="reviewing")
+        assert pipeline.on_review(db, db.get_agent("rev"), ws, False, summary)
+        worker, resume, prompt = launched[-1]
+        assert (worker, resume) == ("w1", session) and "missing check for None" in prompt
+        assert session or "Add the None check" in prompt
+        assert (db.get_agent("w1").pipeline, db.get_agent("w1").pipeline_rounds) == ("fixing", rounds)
+        assert drain(db) == []
+    db.update_agent("w1", pipeline="reviewing")
+    assert pipeline.on_review(db, db.get_agent("rev"), ws, False, summary)
+    assert len(launched) == 2 and db.get_agent("w1").pipeline is None
+    assert [e["agent_id"] for e in bus.tail(db, kinds=("pipeline.escalated",))] == ["w1"]
+
+
 def test_no_duplicate_reviewer_while_the_first_is_still_starting(db, repo, monkeypatch):
     """Live incident: three reviewers on one branch. Check runs for a branch
     don't wait on each other (pipeline.review_run), so a second one reached
