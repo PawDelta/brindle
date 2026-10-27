@@ -1,6 +1,7 @@
 """Check runs share the machine (a queue with a few slots), a run far past
 its last duration is reported, and stale or redundant runs give up."""
 import json
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -151,6 +152,44 @@ def test_an_unset_check_concurrency_follows_the_host_size(repo, brindle_home, mo
 
     assert host(2, 4) == 2
     assert host(16, 64) > host(2, 4)
+
+
+def test_check_xdist_workers(db, repo, monkeypatch):
+    from brindle import config
+
+    configure(repo, check_concurrency=4, pre_commit=False)
+    monkeypatch.setattr(config.os, "cpu_count", lambda: 10)
+    seen = []
+    monkeypatch.setattr(autopilot, "run_check", lambda cmd, cwd, env, timeout: (seen.append(env), (True, ""))[1])
+    gates.run_checked(db, branch(db, repo, "one"), "suite", {}, 30)
+    assert seen[0]["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"
+    monkeypatch.setattr(config.os, "cpu_count", lambda: 2)
+    gates.run_checked(db, branch(db, repo, "two"), "suite", {}, 30)
+    assert seen[1]["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "1"
+
+
+def test_check_timeout_kills_group(monkeypatch):
+    killed, popen_kw = [], {}
+
+    class Hung:
+        calls = 0
+
+        def communicate(self, timeout=None):
+            Hung.calls += 1
+            if Hung.calls == 1:
+                raise subprocess.TimeoutExpired("suite", timeout)
+            return "", ""
+
+    def popen(cmd, **kw):
+        popen_kw.update(kw)
+        return Hung()
+
+    monkeypatch.setattr(autopilot.subprocess, "Popen", popen)
+    monkeypatch.setattr(autopilot, "_kill_group", killed.append)
+    ok, out = autopilot.run_check("suite", ".", {}, 5)
+    assert not ok and "timed out" in out
+    assert popen_kw["start_new_session"] is True
+    assert len(killed) == 1
 
 
 def test_check_summary_and_the_merge_gate_share_the_queue(db, repo, monkeypatch):

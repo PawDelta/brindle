@@ -289,7 +289,11 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     """Run ``cmd`` once a slot is free (``timeout`` covers the run, not the
     wait). A run that goes far past the command's last passing duration in
     this repo is reported to the supervisor while it is still running."""
-    with _check_slot(_concurrency(ws), cancel), marker("checks-running", ws.id):
+    from brindle.config import check_xdist_workers
+
+    slots = _concurrency(ws)
+    env = {"PYTEST_XDIST_AUTO_NUM_WORKERS": str(check_xdist_workers(slots)), **env}
+    with _check_slot(slots, cancel), marker("checks-running", ws.id):
         last = db.check_duration(ws.repo_root, cmd)
         watch = _watch_slow(db, ws, cmd, last, timeout) if last is not None else None
         started = time.monotonic()
