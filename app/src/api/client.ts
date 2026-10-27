@@ -1092,6 +1092,12 @@ export class DaemonClient {
     return this.put<PermissionPolicyDTO>("/permissions/preset", { preset });
   }
 
+  /* PUT /permissions/groups: change capability group baselines and subcategory answers
+     (allow | ask | deny | inherit); the rest stay. Answers the whole policy. */
+  setPermissionGroups(groups: Record<string, { baseline?: string; subcategories?: Record<string, string> }>) {
+    return this.put<PermissionPolicyDTO>("/permissions/groups", { groups });
+  }
+
   setPermissionUnmatched(unmatched: PermissionUnmatched) {
     return this.patch<PermissionPolicyDTO>("/permissions", { unmatched });
   }

@@ -168,7 +168,7 @@ export interface DaemonData {
   /* The person's permission store (permissions.Store, GET /permissions):
      the preset, the unmatched setting, every rule and saved action, and
      per-rule prompt counts over the last day. */
-  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number> };
+  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }> };
   /* GET /permissions/asks: the requests hooks hold, grouped
      (permission_grants.groups). A decision takes its requests out of these
      and out of `inbox` (the hold's answer). */
@@ -1444,6 +1444,7 @@ export class FakeDaemon {
       rules: p.rules.map((r) => ({ ...r, prompts: p.prompts[r.id] ?? 0, expired: r.expires != null && r.expires <= now })),
       saved: p.saved.map((s) => ({ ...s, expired: s.expires != null && s.expires <= now })),
       prompt_counts: { ...p.prompts },
+      groups: Object.entries(p.groups ?? {}).map(([name, g]) => ({ name, ...g })),
     };
   }
 
@@ -1537,6 +1538,18 @@ export class FakeDaemon {
     if (path === "/permissions" && method === "PATCH") {
       if (!["ask", "allow", "deny"].includes(String(body.unmatched))) return error("invalid", "unmatched must be one of ask, allow, deny", 400);
       p.unmatched = String(body.unmatched);
+      return json(this.policyDTO());
+    }
+    if (path === "/permissions/groups" && method === "PUT") {
+      // routes_actions.set_permission_groups: the named groups' baselines and subcategory answers change, the rest stay.
+      const changes = body.groups as Record<string, { baseline?: string; subcategories?: Record<string, string> }> | undefined;
+      if (!changes || typeof changes !== "object") return error("invalid", "groups is required", 400);
+      const groups = { ...p.groups };
+      for (const [name, c] of Object.entries(changes)) {
+        const was = groups[name] ?? { baseline: p.unmatched, subcategories: {} };
+        groups[name] = { baseline: c.baseline ?? was.baseline, subcategories: { ...was.subcategories, ...c.subcategories } };
+      }
+      p.groups = groups;
       return json(this.policyDTO());
     }
     if (path === "/permissions/preset" && method === "PUT") {
