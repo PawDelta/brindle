@@ -229,10 +229,10 @@ async def _body(request: Request) -> dict:
 
 async def register(request: Request) -> JSONResponse:
     """A hook's hold, for an agent it runs under (by its processes' ancestry)."""
-    from brindle.daemon import peer
+    from brindle.daemon import events, peer
 
     body = await _body(request)
-    fields = [_str(body, k) for k in ("agent_id", "request_id", "digest", "nonce")]
+    fields =[_str(body, k) for k in ("agent_id", "request_id", "digest", "nonce")]
     hold_until = body.get("hold_until")
     if not all(fields) or not isinstance(hold_until, (int, float)) or isinstance(hold_until, bool):
         return JSONResponse({"error": {"code": "invalid",
@@ -240,6 +240,9 @@ async def register(request: Request) -> JSONResponse:
     pid = request.scope.get(peer.PEER_PID)
     if pid is None or fields[0] not in await asyncio.to_thread(peer.caller_agents, pid):
         return JSONResponse({"error": {"code": "forbidden", "message": "a hook holds only its own agent's requests"}}, 403)
+    # Checked last: the awaits above are where the app may have just gone.
+    if not events.connected:
+        return JSONResponse({"error": {"code": "no_app", "message": "no app is connected to answer"}}, 503)
     if not HOLDS.register(*fields, float(hold_until)):
         return JSONResponse({"error": {"code": "conflict", "message": "already held, or too many holds"}}, 409)
     return JSONResponse({"held": True})

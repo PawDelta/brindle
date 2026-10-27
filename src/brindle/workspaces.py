@@ -728,10 +728,11 @@ class SyncResult:
 def sync_with_base(ws: Workspace) -> SyncResult:
     """Merge the branch's local base into it before merge gates run, so a
     passing check reflects the code as it will actually be merged. Only acts
-    on a clean worktree; a dirty one is left for the gates to report as
-    usual ("skipped"). Compares against the local base branch (what
-    merge_back targets), never origin."""
-    if git.dirty_files(ws.path):
+    when tracked files are clean; tracked changes are left for the gates
+    to report as usual ("skipped"). Untracked scratch files are allowed;
+    git itself refuses the merge if it would overwrite one. Compares
+    against the local base branch (what merge_back targets), never origin."""
+    if git.dirty_files(ws.path, tracked_only=True):
         return SyncResult("skipped")
     base = require_base(ws)
     behind, _ahead = git.ahead_behind(ws.path, base)
@@ -856,7 +857,10 @@ def merge_back(db: DB, ws: Workspace, squash: bool = False) -> str:
         raise WorkspaceError(
             f"{base!r} isn't checked out anywhere; check it out in {ws.repo_root} first"
         )
-    if git.dirty_files(ws.path):
+    # Tracked changes only, as in the gates: untracked files (check output,
+    # the reviewer's scratch) don't travel with the branch, and the gates
+    # already approved this tree.
+    if git.dirty_files(ws.path, tracked_only=True):
         raise WorkspaceError(f"{ws.name} has uncommitted changes; commit them first")
     git.merge_into(ws.repo_root, target, ws.branch, squash)
     return target

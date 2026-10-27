@@ -196,6 +196,51 @@ def test_features_fail_closed_without_credentials():
         license.require("learning")
 
 
+def test_license_cached(backend, token, monkeypatch):
+    """A second process reuses the entitlement without a keystore read, until
+    brindle's own commands clear it. A read in flight across a logout can't
+    put the old login back."""
+    store = logged_in(backend, token())
+    first = license.current()
+    license._cache = None   # as in a new process
+    monkeypatch.setattr(credentials, "default_store", lambda: pytest.fail("keystore read"))
+    assert license.current() == first
+    assert oct(license._disk_cache_path().stat().st_mode & 0o777) == "0o600"
+    license.clear_cache()
+    with pytest.raises(pytest.fail.Exception):
+        license.current()
+
+    class LogoutDuringRead:   # reads the old login, then the user logs out before it's cached
+        def load(self):
+            old = store.load()
+            auth.logout(None, store)
+            return old
+
+    monkeypatch.setattr(credentials, "default_store", LogoutDuringRead)
+    with pytest.raises(LicenseError, match="not logged in"):
+        license.current()
+    monkeypatch.setattr(credentials, "default_store", lambda: store)
+    with pytest.raises(LicenseError, match="not logged in"):
+        license.current()
+
+    # The same across a read of the disk cache.
+    store = logged_in(backend, token())
+    license.clear_cache()   # as login does
+    license.current()
+    license._cache = None
+    read = license._disk_cache_read
+
+    def read_then_logout(*a):
+        hit = read(*a)
+        auth.logout(None, store)
+        return hit
+
+    monkeypatch.setattr(license, "_disk_cache_read", read_then_logout)
+    for _ in range(2):
+        with pytest.raises(LicenseError, match="not logged in"):
+            license.current()
+
+
 def test_features_fail_closed_on_a_loose_credentials_file(backend, token):
     store = logged_in(backend, token())
     os.chmod(store.path, 0o644)

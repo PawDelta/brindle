@@ -32,8 +32,11 @@ RELEASE = "terminal"     # the person's "answer in the terminal instead": the ho
 # a real pane: yes, the prompt shows while its PermissionRequest hook runs, and
 # answering there runs the tool at once (its PostToolUse then ends the hold).
 # Native workers and agy under agy_approvals "brindle" have no prompt at all.
-# Codex: not seen yet (absent: not known).
-TERMINAL_PROMPT_VISIBLE: dict[str, bool] = {"claude": True, "native": False, "antigravity": False}
+# Codex 0.162.1: no. It awaits its PermissionRequest hooks before it asks
+# (codex-rs core/src/tools/approvals.rs, "Approval precedence is: 1. Hooks"),
+# so its pane reads "Running hook" while held and its prompt comes only once
+# the hold ends (app/docs/permission-e2e.md); an interrupted turn kills the hook.
+TERMINAL_PROMPT_VISIBLE: dict[str, bool] = {"claude": True, "codex": False, "native": False, "antigravity": False}
 # Providers whose own prompt takes a request once the hold ends; for the rest
 # (no prompt of their own) it is refused then.
 PROMPT_AFTER_HOLD = ("claude", "codex")

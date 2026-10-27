@@ -290,3 +290,19 @@ def test_sidebar_leaves_starting_and_says_so_when_claude_runs_no_hooks(db, root,
         assert "hooks_off" not in view.agent_entry(db, db.get_agent("w1"))
 
 
+
+
+def test_milestone_check_cached(db, root, repo, monkeypatch):
+    from conftest import sh
+    from brindle import gates
+
+    _, ws = root
+    with_goal(db, checks=("one", "two", "pending"))   # the third stays outstanding, so the goal isn't done
+    calls = []
+    monkeypatch.setattr(autopilot, "run_check", lambda cmd, cwd, env, timeout, **kw: calls.append(cmd) or (True, "ok"))
+    monkeypatch.setattr(gates, "_concurrency", lambda ws: 0)
+    autopilot.check_milestones(db, "boss", ws, position=1, cfg=RepoConfig(goal_audit=False))
+    autopilot.check_milestones(db, "boss", ws, position=2, cfg=RepoConfig(goal_audit=False))
+    sh("git commit -q --allow-empty -m same-tree", repo)   # HEAD moves, the tree doesn't
+    autopilot.check_milestones(db, "boss", ws, position=1, cfg=RepoConfig(goal_audit=False))
+    assert calls == ["one", "two"]

@@ -640,7 +640,7 @@ Autopilot, merge gates and cleanup:
 | `autopilot` | `true` | start the supervisor with autopilot on |
 | `claude_permission_mode` | `"default"` | the `--permission-mode` for Claude Code sessions whose profile sets no `permission_mode`; the default holds permission requests for the brindle app, set `"auto"` to opt into auto mode. Only read from `~/.brindle/config.json` |
 | `auto_update` | `false` | run `uv tool upgrade brindle` in the background at session start when PyPI has a newer version; restart to use it. Can also be set in `~/.brindle/config.json` for every repo |
-| `checks` | `[]` | commands that must pass in a worker's branch before it merges |
+| `checks` | `[]` | commands that must pass in a worker's branch before it merges. An entry may be an object, `{"run": "<command>", "paths": [...], "affected": "pytest" \| "files", "scoped": "... {files}", "relative_to": "app", "full_when": [...]}`: a worker's branch then skips it when it changes nothing in `paths`, runs only the touched tests and those `graphify affected` reaches (`"pytest"`) or `scoped` on the changed files (`"files"`), and runs it in full when a file matches `full_when` or `.brindle/`, or the scope can't be worked out. The supervisor's checkout always runs every check in full (see `brindle/check_scope.py`) |
 | `review` | only under autopilot | require a reviewer's approval before merging |
 | `reviewer` | `"reviewer"` | the agent profile that reviews (a Codex profile gives a second model's view) |
 | `review_profile` | none | force `request_review`'s profile, skipping its automatic cross-model pick (see below) |
