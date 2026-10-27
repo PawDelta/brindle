@@ -25,10 +25,14 @@ update can discard semantic nodes and rewrite the report, HTML and manifest.
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+import fcntl
+import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -46,7 +50,6 @@ STORE_RETENTION_DAYS = 30
 _QUERY_RE = re.compile(r"^\s*graphify\s+(?:query|explain|path|affected)\b")
 _map_cache: dict[str, tuple[float, str]] = {}   # graph path -> (mtime, rendered map)
 _refresh_lock = threading.RLock()
-_refresh_pending: dict[str, bool] = {}  # checkout -> one follow-up requested
 
 
 def store_path(repo_root: str | Path) -> Path:
@@ -353,50 +356,75 @@ def refresh_later(checkout: str, repo_root: str | None = None) -> None:
 
 
 def _request_refresh(checkout: str, repo_root: str | None, *, background: bool) -> None:
-    """Keep one update active per checkout and coalesce requests made during it.
-
-    Reserve the checkout before launching, including the initial seed update.
-    Keep the reservation through postprocessing so graph/store writes cannot
-    overlap the next update. Different checkouts can still update independently.
-    """
+    """Reserve a checkout and transfer ownership to a detached runner."""
     checkout = str(Path(checkout).resolve())
-    with _refresh_lock:
-        if checkout in _refresh_pending:
-            _refresh_pending[checkout] = True
-            return
-        _refresh_pending[checkout] = False
-
-    def complete():
-        nonlocal post
+    if not _automatic_rebuild_allowed(checkout) or graph_path(checkout) is None:
+        return
+    lock_path, pending, guard_path = _refresh_files(checkout)
+    with guard_path.open("a") as guard:
+        fcntl.flock(guard, fcntl.LOCK_EX)
+        lock = lock_path.open("a")
         try:
-            while post is not None:
-                post()
-                with _refresh_lock:
-                    if not _refresh_pending[checkout]:
-                        del _refresh_pending[checkout]
-                        return
-                    _refresh_pending[checkout] = False
-                post = _start_refresh(checkout, repo_root)
-            with _refresh_lock:
-                _refresh_pending.pop(checkout, None)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock.close()
+            pending.touch()
+            return
+        pending.unlink(missing_ok=True)
+        try:
+            if background:
+                from brindle.config import brindle_home
+
+                log = brindle_home() / "graphify.log"
+                with log.open("a", encoding="utf-8") as out:
+                    subprocess.Popen(
+                        [sys.executable, "-c",
+                         "import sys; from brindle.codemap import _run_refresh; "
+                         "_run_refresh(sys.argv[1], sys.argv[2] or None, int(sys.argv[3]))",
+                         checkout, repo_root or "", str(lock.fileno())],
+                        cwd=checkout, start_new_session=True,
+                        pass_fds=(lock.fileno(),), stdin=subprocess.DEVNULL,
+                        stdout=out, stderr=out,
+                    )
         except BaseException:
-            with _refresh_lock:
-                _refresh_pending.pop(checkout, None)
+            lock.close()
             raise
-
-    try:
-        post = _start_refresh(checkout, repo_root)
         if background:
-            threading.Thread(target=complete, daemon=True).start()
-    except BaseException:
-        with _refresh_lock:
-            _refresh_pending.pop(checkout, None)
-        raise
-    if not background:
-        complete()
+            # Closing our copy leaves the inherited open description locked.
+            lock.close()
+            return
+    fd = os.dup(lock.fileno())
+    lock.close()
+    _run_refresh(checkout, repo_root, fd)
 
 
-def _start_refresh(checkout: str, repo_root: str | None) -> Callable[[], None] | None:
+def _refresh_files(checkout: str) -> tuple[Path, Path, Path]:
+    from brindle.config import brindle_home
+
+    root = brindle_home() / "graphify-locks"
+    root.mkdir(parents=True, exist_ok=True)
+    key = hashlib.sha256(checkout.encode()).hexdigest()
+    return root / (key + ".lock"), root / (key + ".pending"), root / (key + ".guard")
+
+
+def _run_refresh(checkout: str, repo_root: str | None, fd: int) -> None:
+    """Hold the inherited lock through graphify, postprocessing and follow-ups."""
+    _, pending, guard_path = _refresh_files(checkout)
+    with os.fdopen(fd, "a") as lock:
+        while True:
+            post = _start_refresh(checkout, repo_root, lock.fileno())
+            if post is not None:
+                post()
+            with guard_path.open("a") as guard:
+                fcntl.flock(guard, fcntl.LOCK_EX)
+                if not pending.exists():
+                    # Serialize release with callers' lock check and marker write.
+                    lock.close()
+                    return
+                pending.unlink()
+
+
+def _start_refresh(checkout: str, repo_root: str | None, lock_fd: int) -> Callable[[], None] | None:
     """Start one low-priority update and return its completion work."""
     if not _automatic_rebuild_allowed(checkout):
         return
@@ -427,6 +455,7 @@ def _start_refresh(checkout: str, repo_root: str | None) -> Callable[[], None] |
             ["nice", "-n", "10", "graphify", "update", checkout, "--force"],
             cwd=checkout,
             start_new_session=True,
+            pass_fds=(lock_fd,),
             stdin=subprocess.DEVNULL,
             stdout=out,
             stderr=out,

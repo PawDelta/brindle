@@ -79,9 +79,13 @@ def test_supervisor_repo_map_is_in_the_supervisor_prompt_and_cached_per_graph_mt
 
 def test_merges_refresh_the_graph(mapped, monkeypatch):
     started = []
+    runners = []
     real_popen = codemap.subprocess.Popen
 
     def fake_popen(argv, **kw):
+        if "-c" in argv:
+            runners.append((argv[-3], argv[-2] or None, os.dup(kw["pass_fds"][0])))
+            return None
         if "graphify" in argv:
             started.append(argv)
             return None
@@ -89,41 +93,49 @@ def test_merges_refresh_the_graph(mapped, monkeypatch):
 
     monkeypatch.setattr(codemap.subprocess, "Popen", fake_popen)
     codemap.refresh_later(str(mapped))
+    codemap._run_refresh(*runners.pop())
     assert started == [["nice", "-n", "10", "graphify", "update", str(mapped), "--force"]]
 
 
 def test_graphify_single_flight(mapped, monkeypatch):
+    import importlib.util
+
     monkeypatch.setattr("brindle.git.paths", lambda *a, **kw: [])
     codemap.copy_to_store(mapped / codemap.GRAPH, str(mapped))
     checkout = mapped.parent / "session"
     checkout.mkdir()
     completions, started = [], []
-
-    class Thread:
-        def __init__(self, target, **kw):
-            self.target = target
-
-        def start(self):
-            completions.append(self.target)
+    spec = importlib.util.spec_from_file_location("independent_codemap", codemap.__file__)
+    caller = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(caller)
 
     class Process:
         def wait(self):
             if len(started) == 1:
                 for _ in range(30):
-                    codemap.refresh_later(str(checkout) + "/.", str(mapped))
-                codemap.refresh(str(checkout), str(mapped))
+                    caller.refresh_later(str(checkout) + "/.", str(mapped))
+                caller.refresh(str(checkout), str(mapped))
                 assert len(started) == 1
 
     def launch(argv, **kw):
+        if "graphify" not in argv:
+            # Model inherited descriptors surviving the launching caller's exit.
+            fd = os.dup(kw["pass_fds"][0])
+            completions.append(lambda: codemap._run_refresh(argv[-3], argv[-2], fd))
+            return Process()
         started.append(argv)
         return Process()
 
-    monkeypatch.setattr(codemap.threading, "Thread", Thread)
     monkeypatch.setattr(codemap.subprocess, "Popen", launch)
-    assert codemap.seed_session(checkout, str(mapped)) is True
+    assert caller.seed_session(checkout, str(mapped)) is True
     assert codemap.seed_session(checkout, str(mapped)) is False
     codemap.refresh_later(str(checkout), str(mapped))
-    assert len(started) == 1
+    assert len(completions) == 1
+    assert not started
+    del caller  # Its detached runner and lock must remain alive.
+    spec.loader.exec_module(caller := importlib.util.module_from_spec(spec))
+    caller.refresh_later(str(checkout), str(mapped))
+    assert len(completions) == 1
     completions.pop(0)()
     assert len(started) == 2
     assert all(argv[:4] == ["nice", "-n", "10", "graphify"] for argv in started)
@@ -205,10 +217,13 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     cache.mkdir(parents=True)
     (cache / "entry.json").write_text('{"nodes": []}')
 
-    started = []
+    started, runners = [], []
     real_popen = codemap.subprocess.Popen
 
     def fake_popen(argv, **kw):
+        if "-c" in argv:
+            runners.append((argv[-3], argv[-2] or None, os.dup(kw["pass_fds"][0])))
+            return None
         if "graphify" in argv:
             seeded_cache = Path(kw["cwd"]) / "graphify-out" / "cache" / "ast" / "v1" / "entry.json"
             assert seeded_cache.read_bytes() == (cache / "entry.json").read_bytes()
@@ -222,6 +237,7 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     worker_ws = workspaces.create(db, str(mapped), "worker-task", base="session-branch").workspace
 
     prompt = agents.decorate_worker_prompt("do task", "w1", worker_ws, None, get_provider("claude"), headless=False)
+    codemap._run_refresh(*runners.pop())
     session_graph = Path(session_ws.path) / "graphify-out" / "graph.json"
     assert "Code map:" in prompt and str(session_graph) in prompt
     assert session_graph.is_file()
@@ -229,6 +245,7 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     assert started == [["nice", "-n", "10", "graphify", "update", session_ws.path, "--force"]]
     (mapped / codemap.GRAPH).unlink()
     assert codemap.seed_session(mapped, str(mapped)) is True
+    codemap._run_refresh(*runners.pop())
 
     # Config switch disables graph
     monkeypatch.setattr("brindle.config.load_repo_config", lambda root: type("Cfg", (), {"graphify": False})())
