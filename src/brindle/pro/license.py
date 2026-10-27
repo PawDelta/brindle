@@ -476,12 +476,16 @@ def clear_cache() -> None:
 
 
 def current(*, refresh: bool = True, now: float | None = None, store=None, client=None,
-            max_age: float | None = None) -> Entitlement:
+            max_age: float | None = None, _first_read: bool = True) -> Entitlement:
     """The entitlement from the stored credentials, fetching a new one (and
     rotating the refresh token if needed) when it is expired or near expiry
     (``refresh``), or was issued more than ``max_age`` seconds ago. Offline,
     a stored entitlement is used within its grace. Raises
-    :class:`LicenseError` when there is none."""
+    :class:`LicenseError` when there is none.
+
+    What was read while the cache was invalidated (a logout, login or account
+    switch meanwhile) is never cached or returned: the credentials are read
+    once more, and a second such change fails closed."""
     global _cache
     now = time.time() if now is None else now
     default = store is None and client is None
@@ -518,6 +522,8 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
         ent = installed(now=now)
         if ent is not None:
             if default:
+                if _disk_cache_generation() != gen:
+                    return _read_again(refresh, now, max_age, _first_read)
                 _cache = (min(now + CACHE_SECONDS, ent.grace_until or ent.exp), ent)
             return ent
         msg = "not logged in to brindle Pro (run `brindle account login`)"
@@ -551,8 +557,17 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
                 raise LicenseError(_lapsed(creds)) from e   # couldn't renew it
             raise
     if default:
+        if _disk_cache_generation() != gen:   # also after this call's own renewal (it clears the cache)
+            return _read_again(refresh, now, max_age, _first_read)
         _cache = (min(now + CACHE_SECONDS, ent.grace_until or ent.exp), ent)
     return ent
+
+
+def _read_again(refresh: bool, now: float, max_age: float | None, first: bool) -> Entitlement:
+    """:func:`current` once more, for a read the cache's invalidation made stale."""
+    if not first:
+        raise LicenseError("the brindle Pro login changed while it was being read; run the command again")
+    return current(refresh=refresh, now=now, max_age=max_age, _first_read=False)
 
 
 def _lapsed(creds: dict) -> str:

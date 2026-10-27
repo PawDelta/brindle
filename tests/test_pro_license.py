@@ -217,8 +217,8 @@ def test_license_cached(backend, token, monkeypatch):
             return old
 
     monkeypatch.setattr(credentials, "default_store", LogoutDuringRead)
-    assert license.current() == first
-    license._cache = None
+    with pytest.raises(LicenseError, match="not logged in"):
+        license.current()
     monkeypatch.setattr(credentials, "default_store", lambda: store)
     with pytest.raises(LicenseError, match="not logged in"):
         license.current()
