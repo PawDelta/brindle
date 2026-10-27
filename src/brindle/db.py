@@ -174,6 +174,18 @@ CREATE TABLE IF NOT EXISTS merges (
     sha TEXT NOT NULL,
     merged_at REAL NOT NULL
 );
+-- A check command's PASSING result for one git tree in one repo, whichever
+-- workspace (or the supervisor's checkout after a merge) it ran in: the same
+-- tree is the same code. Written next to check_cache (see gates.run_checked).
+CREATE TABLE IF NOT EXISTS check_tree_cache (
+    repo_root TEXT NOT NULL,
+    tree TEXT NOT NULL,
+    command TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    output TEXT,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, tree, command)
+);
 -- A check command's PASSING result at one commit, so gates.run and
 -- request_review don't re-run the same command against the same tree. Only
 -- written when the tree was clean before and after the run (see
@@ -1868,6 +1880,21 @@ class DB:
                 "VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id, sha, command) DO UPDATE SET "
                 "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
                 (workspace_id, sha, command, int(ok), output, time.time()),
+            )
+
+    def get_tree_check(self, repo_root: str, tree: str, command: str):
+        return self.conn.execute(
+            "SELECT ok, output FROM check_tree_cache WHERE repo_root=? AND tree=? AND command=?",
+            (repo_root, tree, command),
+        ).fetchone()
+
+    def set_tree_check(self, repo_root: str, tree: str, command: str, ok: bool, output: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO check_tree_cache (repo_root, tree, command, ok, output, created_at) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(repo_root, tree, command) DO UPDATE SET "
+                "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
+                (repo_root, tree, command, int(ok), output, time.time()),
             )
 
     def check_duration(self, repo_root: str, command: str) -> float | None:
