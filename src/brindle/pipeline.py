@@ -949,19 +949,23 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
         return True, True
     needs_sup = has_supervisor_action(summary)
     rounds = (worker.pipeline_rounds or 0) + 1
-    if not needs_sup and rounds <= cfg.review_rounds and agents.is_alive(worker):
+    if not needs_sup and rounds <= cfg.review_rounds:
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
-        try:
-            agents.send_message(
-                db, worker.id,
-                f"Review of your branch (round {rounds} of {cfg.review_rounds}) requested "
-                f"changes:\n\n{summary}\n\nFix what's valid, commit, and call report_result "
-                "again; brindle will have it reviewed again.",
-                sender_id=reviewer.id,
-            )
+        fix = (f"Review of your branch (round {rounds} of {cfg.review_rounds}) requested "
+               f"changes:\n\n{summary}\n\nFix what's valid, commit, and call report_result "
+               "again; brindle will have it reviewed again.")
+        if agents.is_alive(worker):
+            try:
+                agents.send_message(db, worker.id, fix, sender_id=reviewer.id)
+                return True, False
+            except agents.AgentError:
+                pass
+        # It exited once it reported (a worker usually has by the time a
+        # review comes back), or just before the message reached it: its fix
+        # round starts it again on its branch.
+        current = db.get_agent(worker.id) or worker
+        if not agents.is_alive(current) and agents.reopen_worker(db, current, ws, fix):
             return True, False
-        except agents.AgentError:
-            pass
     if not needs_sup and _retry_on_heavy(db, worker, ws, cfg,
                        f"the review still asked for changes after {rounds - 1} fix round(s): "
                        f"{summary}", report):
