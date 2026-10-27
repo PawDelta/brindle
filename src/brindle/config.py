@@ -106,7 +106,7 @@ class RepoConfig:
     # Autopilot and merge gates.
     autopilot: bool = True             # `brindle` starts the supervisor with autopilot on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
-    check_scopes: dict = field(default_factory=dict)  # command -> brindle.check_scope.CheckScope, from "check_scopes" (or "checks" objects)
+    scoped_checks: str | None = None   # "off" or "infer"; None: not chosen (acts as "off" this release, see brindle.check_scope.inferred)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
@@ -235,7 +235,7 @@ class RepoConfig:
 
 def _merge_commands(shared: list[str], local: object) -> list[str]:
     if isinstance(local, list):
-        return [c if isinstance(c, dict) else str(c) for c in local]   # a "checks" entry may be an object
+        return [str(c) for c in local]
     if isinstance(local, dict):
         return [*local.get("before", []), *shared, *local.get("after", [])]
     return shared
@@ -349,18 +349,6 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
     for key in ("setup", "teardown", "copy", "checks", "add_dirs", "worker_extra_read_dirs", "protected_paths"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
-    from brindle import check_scope
-
-    # Scopes by precedence: config.json's inline objects, its "check_scopes", then the same from config.local.json.
-    def scope_layers(raw: dict) -> list[dict]:
-        checks = raw.get("checks")
-        lists = [checks] if isinstance(checks, list) else [checks.get("before"), checks.get("after")] if isinstance(checks, dict) else []
-        inline: dict = {}
-        for entries in lists:
-            inline.update(check_scope.inline_scopes(entries))
-        return [inline, raw["check_scopes"] if isinstance(raw.get("check_scopes"), dict) else {}]
-
-    cfg.checks, cfg.check_scopes = check_scope.parse_checks(cfg.checks, scope_layers(shared) + scope_layers(local))
     for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "autopilot", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
@@ -370,7 +358,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
-                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks"):
+                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks", "scoped_checks"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])

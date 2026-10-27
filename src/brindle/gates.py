@@ -81,11 +81,16 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     # machine: a holder that finished after we arrived still counts.
     waiting_since = time.time()
     sha = head(ws)
-    run = _scoped(db, ws, cmd)
+    diff = check_scope.changed_files(db, ws)
+    if diff is not None:   # a script can narrow itself; the gate never trusts that for the cache
+        env = {**env, "BRINDLE_CHANGED_FILES": "\n".join(diff[1])}
+    run = _scoped(ws, cmd, diff)
     if run is None:
         out = f"{check_scope.SKIPPED}{ws.branch} changes nothing this check covers"
         db.set_check(ws.id, sha, cmd, True, out)
         return True, out
+    # A narrowed run is cached by the files that narrowed it, so its pass never satisfies a full run.
+    ident = run if run == cmd or diff is None else run + "\n" + "\n".join(diff[1])
     dirty = bool(git.dirty_files(ws.path))
     if dirty:
         return _run_queued(db, ws, run, env, timeout, cancel)
@@ -93,8 +98,8 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     # the worker reported, a reviewer's summary and the merge gate can all
     # want the same result at once; the later ones wait, then reuse it.
     tree = git.out(["rev-parse", "HEAD^{tree}"], ws.path)
-    with _check_lock(ws.repo_root, tree, run, cancel) as result_file:
-        cached = db.get_tree_check(ws.repo_root, tree, run)
+    with _check_lock(ws.repo_root, tree, ident, cancel) as result_file:
+        cached = db.get_tree_check(ws.repo_root, tree, ident)
         if cached is not None and cached["ok"]:
             db.set_check(ws.id, sha, cmd, True, cached["output"] or "")
             return True, cached["output"] or ""
@@ -103,22 +108,22 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
         ok, out = _run_queued(db, ws, run, env, timeout, cancel)
         if head(ws) == sha and not git.dirty_files(ws.path):
             if ok:
-                db.set_tree_check(ws.repo_root, tree, run, ok, out)
+                db.set_tree_check(ws.repo_root, tree, ident, ok, out)
                 db.set_check(ws.id, sha, cmd, ok, out)
             else:
                 _write_outcome(result_file, ok, out)
         return ok, out
 
 
-def _scoped(db: DB, ws: Workspace, cmd: str) -> str | None:
+def _scoped(ws: Workspace, cmd: str, diff) -> str | None:
     """The command to run for check ``cmd`` in ``ws`` (None: skip it)."""
     from brindle.config import load_repo_config
 
     try:
-        scope = load_repo_config(ws.repo_root).check_scopes.get(cmd)
+        mode = load_repo_config(ws.repo_root).scoped_checks
     except ValueError:
         return cmd
-    return check_scope.command(db, ws, cmd, scope)
+    return check_scope.command(ws, cmd, check_scope.inferred(cmd, mode), diff)
 
 
 def _read_outcome(path, since: float) -> tuple[bool, str] | None:
