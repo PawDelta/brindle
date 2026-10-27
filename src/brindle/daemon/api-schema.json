@@ -842,6 +842,11 @@
           "title": "Digest",
           "type": "string"
         },
+        "escalation": {
+          "default": "",
+          "title": "Escalation",
+          "type": "string"
+        },
         "exact": {
           "title": "Exact",
           "type": "string"
@@ -1193,6 +1198,11 @@
             },
             "digest": {
               "title": "Digest",
+              "type": "string"
+            },
+            "escalation": {
+              "default": "",
+              "title": "Escalation",
               "type": "string"
             },
             "exact": {
@@ -5964,6 +5974,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/holds/{id}/supervise"
+    },
+    {
+      "method": "POST",
       "path": "/v1/holds/{id}/wait"
     },
     {
@@ -6057,6 +6071,10 @@
     {
       "method": "PUT",
       "path": "/v1/permissions/preset"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/permissions/report"
     },
     {
       "method": "POST",

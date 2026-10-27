@@ -513,6 +513,15 @@ export type PermissionChanged = { rule: string; describe: string } | { reset: tr
 export type PermissionPreset = "autonomous" | "permissive" | "standard" | "secure";
 /* What a request no rule covers does. */
 export type PermissionUnmatched = "ask" | "allow" | "deny";
+/* GET /permissions/report (permission_asks.report): how often requests asked over the last `days`, and why. */
+export interface PermissionReport {
+  days: number;
+  decisions: number;
+  asks: number;
+  ask_rate: number;
+  avg_wait_seconds: number | null;
+  causes: { reason: string; count: number; kinds: string[]; avg_wait_seconds: number | null; example: string }[];
+}
 export type PermissionDecision = "allow" | "deny" | "ask";
 export type PermissionKind = "read" | "write" | "edit" | "bash" | "fetch" | "mcp" | "other";
 /* A saved action's kind: a request kind, or a git push. */
@@ -1087,9 +1096,20 @@ export class DaemonClient {
     return this.get<PermissionPolicyDTO>("/permissions");
   }
 
+  /* The ask rate and top causes of permission asks over the last `days` (default 7). */
+  permissionReport(days?: number) {
+    return this.get<PermissionReport>(`/permissions/report${days ? `?days=${days}` : ""}`);
+  }
+
   /* Start over from a preset; the person's own and learned rules stay. Answers the whole policy. */
   setPermissionPreset(preset: PermissionPreset) {
     return this.put<PermissionPolicyDTO>("/permissions/preset", { preset });
+  }
+
+  /* PUT /permissions/groups: change capability group baselines and subcategory answers
+     (allow | ask | deny | inherit); the rest stay. Answers the whole policy. */
+  setPermissionGroups(groups: Record<string, { baseline?: string; subcategories?: Record<string, string> }>) {
+    return this.put<PermissionPolicyDTO>("/permissions/groups", { groups });
   }
 
   setPermissionUnmatched(unmatched: PermissionUnmatched) {

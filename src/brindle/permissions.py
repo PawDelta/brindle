@@ -102,7 +102,7 @@ SOURCES = ("preset", "repo", "user", "learned", "profile", "org")
 STORE_SOURCES = ("preset", "user", "learned")    # what the person's store holds
 # Every field a stored rule may have (Rule.to_dict, and the 0.4.7 editor's rows).
 RULE_FIELDS = frozenset({"id", "kind", "match", "match_type", "decision", "source", "created", "limits", "expires",
-                         "exclusions", "label", "repo_root", "expires_at", "editable", "protected"})
+                         "exclusions", "label", "repo_root", "expires_at", "editable", "protected", "person_only"})
 UNMATCHED = ("ask", "allow", "deny")             # Store.unmatched: what no rule covers
 # How far a saved approval of a push may reach (an ask rule's limits.max_scope), narrowest first.
 LEVELS = ("branch", "destination", "remote", "repository", "all")
@@ -207,6 +207,9 @@ class Rule:
     exclusions: tuple = ()              # Rules: a request any of them matches is not this rule's
     label: str = ""                     # a person's name for it (the app's)
     repo_root: str | None = None        # the one repo (resolved) it applies in; None: every repo
+    # An ask only the person answers: never routed to the worker's supervisor first
+    # (brindle.permission_routing).
+    person_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -235,6 +238,8 @@ class Rule:
             out["label"] = self.label
         if self.repo_root:
             out["repo_root"] = self.repo_root
+        if self.person_only:
+            out["person_only"] = True
         return out
 
     @classmethod
@@ -279,7 +284,7 @@ class Rule:
         label = data.get("label") if isinstance(data.get("label"), str) else ""
         return cls(kind, match, match_type, decision, src, created, id_,
                    clean_limits(data.get("limits")) if decision == "ask" else None, expires, exclusions, label,
-                   os.path.realpath(repo) if repo else None)
+                   os.path.realpath(repo) if repo else None, data.get("person_only") is True)
 
 
 @dataclass
@@ -347,6 +352,8 @@ class Decision:
     # An ask's: every ask rule that matches it (its parts and each push included).
     # ``rule`` is the strictest of them; a saved allow must fit all of their limits.
     asks: tuple = ()
+    # The id of the saved action that settled it (permission_grants.settle), if one did.
+    saved: str | None = None
 
 
 def rule_id(kind: str, match_type: str, match: str, decision: str) -> str:
@@ -407,10 +414,13 @@ DESTRUCTIVE_DENIES: tuple[Rule, ...] = (
           "rm-destructive", "deny"),
 )
 # A push into a release branch starts a signed build (app-release.yml): every
-# preset asks for it each time, and no saved approval settles it (life "once").
+# preset asks the person for it each time (never a supervisor), and no saved
+# approval settles it (life "once").
 RELEASE_ASKS: tuple[Rule, ...] = (
-    _seed("d-push-release", "bash", f"*{PUSH_ARROW}release", "push", "ask", limits={"life": "once"}),
-    _seed("d-push-release-sub", "bash", f"*{PUSH_ARROW}release/*", "push", "ask", limits={"life": "once"}),
+    _seed("d-push-release", "bash", f"*{PUSH_ARROW}release", "push", "ask", limits={"life": "once"},
+          person_only=True),
+    _seed("d-push-release-sub", "bash", f"*{PUSH_ARROW}release/*", "push", "ask", limits={"life": "once"},
+          person_only=True),
 )
 # The rules of before presets, kept for stores written then (load_store migrates them).
 LEGACY_DEFAULT_IDS = ("d-tracked", "d-checks", "d-git-ro", "d-git-push", "d-git-force", "d-ssh", "d-aws",
@@ -418,11 +428,12 @@ LEGACY_DEFAULT_IDS = ("d-tracked", "d-checks", "d-git-ro", "d-git-push", "d-git-
 
 
 def _push_default(max_scope: str, life: str, minutes: float | None = None) -> Rule:
-    """Pushes into the repo's default branch ask, with limits on saved approvals."""
+    """Pushes into the repo's default branch ask the person, with limits on saved approvals."""
     limits = {"max_scope": max_scope, "life": life}
     if minutes is not None:
         limits["minutes"] = minutes
-    return _seed("d-push-default", "bash", f"*{PUSH_ARROW}{DEFAULT_BRANCH}", "push", "ask", limits=limits)
+    return _seed("d-push-default", "bash", f"*{PUSH_ARROW}{DEFAULT_BRANCH}", "push", "ask", limits=limits,
+                 person_only=True)
 
 
 def _autonomous() -> list[Rule]:
@@ -535,9 +546,13 @@ def claude_output(decision: Decision) -> dict | None:
 def claude_answer(answer: str, suggestions: list | None = None) -> dict:
     """What the PermissionRequest hook prints for the person's answer from
     the app: allow_once, allow_always (with Claude Code's own suggested
-    updates, which it then applies as if picked in its prompt) or deny."""
+    updates, which it then applies as if picked in its prompt) or deny; or
+    the worker's supervisor's, supervisor_allow or supervisor_deny
+    (brindle.permission_routing)."""
     if answer == "deny":
         decision: dict = {"behavior": "deny", "message": "brindle: the person denied this in the brindle app"}
+    elif answer == "supervisor_deny":
+        decision = {"behavior": "deny", "message": "brindle: your supervisor denied this"}
     else:
         decision = {"behavior": "allow"}
         if answer == "allow_always" and suggestions:
@@ -664,20 +679,29 @@ def _patch_requests(patch: str | None, cwd: str, base: dict) -> list[Request]:
 
 
 def decide_all(reqs: list[Request] | None, *, checks: list[str] | None = None,
-               rules: list[Rule] | None = None, **context) -> Decision:
+               rules: list[Rule] | None = None, spend: bool = False, **context) -> Decision:
     """One answer for several requests (an apply_patch touching several
     files): deny if any is denied, allow only if every one is allowed, else
-    ask. ``context``: decide's other keyword arguments (session ...)."""
+    ask. ``spend``: as decide's, but the call runs once however many files it
+    touches, so each saved action that settles any of them spends one use,
+    and only once all are allowed. ``context``: decide's other keyword
+    arguments (session ...)."""
     if not reqs:
         return Decision("ask", "brindle couldn't read the request")
+    if len(reqs) == 1:
+        return decide(reqs[0], checks=checks, rules=rules, spend=spend, **context)
     decisions = [decide(r, checks=checks, rules=rules, **context) for r in reqs]
     for d in decisions:
         if d.decision == "deny":
             return d
     if all(d.decision == "allow" for d in decisions):
-        if len(decisions) == 1:
-            return decisions[0]
-        return Decision("allow", f"every one of {len(decisions)} files is allowed")
+        grants = list(dict.fromkeys(d.saved for d in decisions if d.saved))
+        for id_ in grants if spend else ():
+            if not spend_saved_use(id_):     # its last use went meanwhile
+                return Decision("ask", f"your saved action {id_} has no uses left; asking the user")
+        # A saved action that settled any one of them settled the whole (it would ask without it).
+        return Decision("allow", f"every one of {len(decisions)} files is allowed",
+                        saved=grants[0] if grants else None)
     return next(d for d in decisions if d.decision == "ask")
 
 
