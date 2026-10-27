@@ -211,7 +211,6 @@ def _agents_running() -> bool:
 
 
 async def _watch(server, activity: Activity, idle_exit: bool) -> None:
-    from brindle import awake
     from brindle.daemon.session_review import ReadinessWatch
     from brindle.upgrade import InstallWatch
 
@@ -220,7 +219,6 @@ async def _watch(server, activity: Activity, idle_exit: bool) -> None:
     while not server.should_exit:
         await asyncio.sleep(WATCH_INTERVAL)
         await asyncio.to_thread(ready.sweep_safely)     # session.pr_ready when a session becomes ready
-        awake.sync(await asyncio.to_thread(_agents_running))
         if install.changed():
             server.should_exit = True
         elif (idle_exit and activity.open == 0

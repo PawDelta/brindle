@@ -87,11 +87,6 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     owners = agents.pane_owners(db, panes)
     done: list[str] = []
 
-    from brindle import awake
-
-    awake.sync(any(agents.is_alive(a, panes) for a in db.list_agents()
-                   if a.status not in ("done", "paused")))
-
     from brindle import codemap
 
     removed_graphs = codemap.prune_stores(now)
