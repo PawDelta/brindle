@@ -130,7 +130,7 @@ def test_a_pinned_profile_cannot_be_shadowed(lib, repo, brindle_home, caplog):
     assert profiles.profile_source("developer", str(repo)) == "org profile developer"
 
 
-def test_rule_packs_follow_the_same_order(lib, repo, brindle_home, caplog):
+def test_rule_packs_follow_the_same_order(backend, lib, repo, brindle_home, caplog, monkeypatch):
     lib.packs.append(item("pack", "security/backend", "---\nname: security/backend\n---\nOrg backend.\n"))
     assert load_rule_pack("security/org", str(repo)).source == "org rule pack security/org"
     assert load_rule_pack("security/org", str(repo)).deny_patterns == ["eval\\("]
@@ -147,6 +147,11 @@ def test_rule_packs_follow_the_same_order(lib, repo, brindle_home, caplog):
     write(brindle_home / "rules" / "security" / "backend.md", "---\nname: security/backend\n---\nUser.\n")
     org_profiles.clear_memo()
     assert load_rule_pack("security/backend", str(repo)).prompt == "User."
+    # Without the feature the org library is never entered: the repo's pack is used.
+    login(backend, features=("team",))
+    monkeypatch.setattr(org_profiles, "library", lambda: pytest.fail("entered the org library"))
+    assert load_rule_pack("security/org", str(repo)).prompt == "Loose."
+    assert "security/org" in list_rule_packs(str(repo))
 
 
 # -- the signed library ----------------------------------------------------------------------------

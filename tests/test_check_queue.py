@@ -282,3 +282,16 @@ def test_a_waiter_reuses_the_holders_failure_instead_of_rerunning(db, repo, monk
     in_threads(3, run)
     assert calls == ["suite"]
     assert results == [(False, "boom (timed out)")] * 3
+
+
+def test_check_cache_by_tree(db, repo, monkeypatch):
+    configure(repo, check_concurrency=0)
+    one, two = branch(db, repo, "one"), branch(db, repo, "one2")
+    (Path(two.path) / "one.py").write_text("x = 1\n")
+    (Path(two.path) / "one2.py").unlink()
+    sh("git add -A && git commit -qm same-tree", Path(two.path))
+    calls = []
+    monkeypatch.setattr(autopilot, "run_check", lambda cmd, cwd, env, timeout, **kw: calls.append(cwd) or (True, "ok"))
+    assert gates.run_checked(db, one, "suite", {}, 30) == (True, "ok")
+    assert gates.run_checked(db, two, "suite", {}, 30) == (True, "ok")
+    assert gates.head(one) != gates.head(two) and calls == [one.path]
