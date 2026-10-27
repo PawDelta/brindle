@@ -856,7 +856,10 @@ def merge_back(db: DB, ws: Workspace, squash: bool = False) -> str:
         raise WorkspaceError(
             f"{base!r} isn't checked out anywhere; check it out in {ws.repo_root} first"
         )
-    if git.dirty_files(ws.path):
+    # Tracked changes only, as in the gates: untracked files (check output,
+    # the reviewer's scratch) don't travel with the branch, and the gates
+    # already approved this tree.
+    if git.dirty_files(ws.path, tracked_only=True):
         raise WorkspaceError(f"{ws.name} has uncommitted changes; commit them first")
     git.merge_into(ws.repo_root, target, ws.branch, squash)
     return target

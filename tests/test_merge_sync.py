@@ -143,3 +143,18 @@ def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkey
     out = asyncio.run(mcp_server.merge_workspace(ws.id))
 
     assert out == "Not merged: boom"
+
+
+def test_merge_after_approval_dirty(db, repo, boss):
+    """An untracked file left in the worktree after approval (check output,
+    the reviewer's scratch) isn't a change to the branch: the gates ignore it
+    and merge_back must too, instead of failing "uncommitted changes"."""
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    open(os.path.join(ws.path, "f.txt"), "w").write("f")
+    git.commit_all(ws.path, "feature work")
+    open(os.path.join(ws.path, "check-output.log"), "w").write("scratch")  # untracked
+
+    out = asyncio.run(mcp_server.merge_workspace(ws.id))
+
+    assert out.startswith("Merged feature"), out
+    assert (repo / "f.txt").exists()
