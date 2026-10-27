@@ -46,7 +46,7 @@ MODES = ("pytest", "files")
 MAX_SYMBOLS = 30          # more changed symbols than this: run everything
 GRAPHIFY_SECONDS = 60
 SKIPPED = "skipped: "     # run_checked's output for a skipped check starts with this
-_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", re.M)
+_HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.M)
 _AFFECTED_FILE = re.compile(r"\s(\S+\.py):L\d+\s*$", re.M)
 
 
@@ -103,7 +103,7 @@ def command(db: DB, ws: Workspace, cmd: str, scope: CheckScope | None) -> str | 
         return cmd
     try:
         base = git.out(["merge-base", ws.base_branch, "HEAD"], ws.path)
-        changed = git.out(["diff", "--name-only", "--no-renames", base], ws.path).splitlines()
+        changed = git.paths(["diff", "--name-only", "--no-renames", base], ws.path)
     except git.GitError:
         return cmd
     if any(matches(f, ALWAYS_FULL) or matches(f, scope.full_when) for f in changed):
@@ -134,37 +134,45 @@ def is_test_file(path: str) -> bool:
 
 def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | None:
     """The test files to run for a branch that changed ``files``: the test
-    files among them that still exist, and those the code graph reaches from
-    every changed symbol; None when any changed file can't be mapped."""
+    files among them, and those the code graph reaches from every changed
+    symbol; None when any changed file can't be mapped.
+
+    A change inside a test function is covered by running its own file. Any
+    other change to a test file (a helper, a fixture, an import) may reach the
+    modules that import from it, so it is mapped like a source change, plus
+    the test file's importers; reaching no other test is fine there."""
     from brindle import codemap
 
+    if any(not f.endswith(".py") for f in files):
+        return None
+    graph = codemap.graph_path(ws)
+    if graph is None:
+        return None
+    nodes = _nodes_by_file(graph)
     tests: set[str] = set()
-    sources = []
+    must_reach: set[str] = set()    # source symbols: one that reaches no test is unresolved
+    optional: set[str] = set()
     for f in files:
-        if not f.endswith(".py"):
+        test = is_test_file(f)
+        found = _changed_nodes(ws, base, f, nodes.get(f, []), skip_tests=test)
+        if found is None or (not test and not found):
             return None
-        if is_test_file(f):
-            tests.update([f] if (Path(ws.path) / f).is_file() else [])
-        else:
-            sources.append(f)
-    if sources:
-        graph = codemap.graph_path(ws)
-        if graph is None:
-            return None
-        nodes = _nodes_by_file(graph)
-        ids: set[str] = set()
-        for f in sources:
-            found = _changed_nodes(ws, base, f, nodes.get(f, []))
-            if not found:
+        if not test:
+            must_reach |= found
+            continue
+        tests.add(f)
+        if found:
+            module = [n["id"] for n in nodes.get(f, []) if n.get("label") == PurePosixPath(f).name]
+            if not module:
                 return None
-            ids |= found
-        if len(ids) > MAX_SYMBOLS:
+            optional |= found | set(module)
+    if len(must_reach | optional) > MAX_SYMBOLS:
+        return None
+    for node_id in sorted(must_reach | optional):
+        reached = affected_tests(graph, node_id, ws.path)
+        if not reached and node_id in must_reach:
             return None
-        for node_id in sorted(ids):
-            reached = affected_tests(graph, node_id, ws.path)
-            if not reached:
-                return None
-            tests |= reached
+        tests |= reached
     return sorted(t for t in tests if (Path(ws.path) / t).is_file()) or None
 
 
@@ -180,38 +188,59 @@ def _nodes_by_file(graph: Path) -> dict[str, list[dict]]:
     return out
 
 
-def _changed_nodes(ws: Workspace, base: str, path: str, nodes: list[dict]) -> set[str] | None:
+def _changed_nodes(ws: Workspace, base: str, path: str, nodes: list[dict],
+                   skip_tests: bool = False) -> set[str] | None:
     """The graph nodes of the symbols ``path`` changes (its module node for a
-    change outside any function or class); None when one has no node."""
-    file = Path(ws.path) / path
+    change outside any function or class): added and changed lines found in
+    the file as it is now, removed ones in the file as it was at ``base``.
+    None when one has no node, or the file is gone or can't be parsed.
+    ``skip_tests``: leave out changes inside test functions and classes."""
     try:
-        tree = ast.parse(file.read_text(encoding="utf-8"))
         diff = git.out(["diff", "-U0", "--no-renames", base, "--", path], ws.path)
+        old_lines, new_lines = _changed_lines(diff)
+        new_text = (Path(ws.path) / path).read_text(encoding="utf-8")
+        old_text = git.run(["show", f"{base}:{path}"], ws.path).stdout if old_lines else ""
+        new, old = _defs(new_text), _defs(old_text)
     except (OSError, SyntaxError, ValueError, git.GitError):
         return None
-    defs = [(min([d.lineno for d in n.decorator_list] + [n.lineno]), n.end_lineno or n.lineno, n.name)
-            for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
     labels: dict[str, list[str]] = {}
     for n in nodes:
         labels.setdefault(str(n.get("label")), []).append(n["id"])
     ids: set[str] = set()
-    for line in _changed_lines(diff):
-        # Innermost first; the first enclosing symbol the graph knows stands for the change.
-        chain = sorted((d for d in defs if d[0] <= line <= d[1]), key=lambda d: d[0], reverse=True)
-        names = [[f"{name}()", f".{name}()", name] for _, _, name in chain] or [[file.name]]
-        hit = next((labels[label] for options in names for label in options if label in labels), None)
-        if hit is None:
-            return None
-        ids.update(hit)
+    for defs, text, lines in ((new, new_text, new_lines), (old, old_text, old_lines)):
+        source = text.splitlines()
+        for line in lines:
+            if line > len(source) or not source[line - 1].strip():
+                continue   # a blank line changes nothing
+
+            # Innermost first; the first enclosing symbol the graph knows stands for the change.
+            chain = [name for start, end, name in sorted(defs, key=lambda d: d[0], reverse=True)
+                     if start <= line <= end]
+            if skip_tests and any(name.startswith(("test", "Test")) for name in chain):
+                continue
+            names = [[f"{name}()", f".{name}()", name] for name in chain] or [[PurePosixPath(path).name]]
+            hit = next((labels[label] for options in names for label in options if label in labels), None)
+            if hit is None:
+                return None
+            ids.update(hit)
     return ids
 
 
-def _changed_lines(diff: str) -> list[int]:
-    lines = []
+def _defs(source: str) -> list[tuple[int, int, str]]:
+    """(first line, last line, name) of each function and class in ``source``."""
+    return [(min([d.lineno for d in n.decorator_list] + [n.lineno]), n.end_lineno or n.lineno, n.name)
+            for n in ast.walk(ast.parse(source))
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+
+
+def _changed_lines(diff: str) -> tuple[list[int], list[int]]:
+    """The removed lines (numbered as at the base) and the added ones (as now)."""
+    old, new = [], []
     for m in _HUNK.finditer(diff):
-        start, count = int(m.group(1)), int(m.group(2) or 1)
-        lines.extend(range(start, start + count) if count else [max(start, 1)])
-    return lines
+        o_start, o_count, n_start, n_count = (int(g) if g else 1 for g in m.groups())
+        old.extend(range(o_start, o_start + o_count) if o_count else [])
+        new.extend(range(n_start, n_start + n_count) if n_count else [])
+    return old, new
 
 
 def affected_tests(graph: Path, node_id: str, cwd: str) -> set[str]:
