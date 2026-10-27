@@ -75,9 +75,7 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     reuses that outcome instead of re-running the whole command."""
     # Taken before the git calls below, which can be slow on a loaded
     # machine: a holder that finished after we arrived still counts.
-    # A review waiting on the report's warm run counts from that report (its
-    # queue place), so the warm run's failure is handed to it, not re-run.
-    waiting_since = min(time.time(), getattr(_place, "since", None) or float("inf"))
+    waiting_since = time.time()
     sha = head(ws)
     dirty = bool(git.dirty_files(ws.path))
     if dirty:
@@ -256,21 +254,6 @@ def _waiting_ahead(queue, mine: str) -> list[int]:
         except (FileNotFoundError, ValueError, IndexError):
             continue
     return ahead
-
-
-def note_warm(ws_id: str) -> None:
-    """Record that a report's warm check run is about to start on ``ws_id``,
-    before the helper launches, so the review for that report can take over
-    its outcome (a failure included) whatever the pipeline's claim says."""
-    _marker_file("warm-since", ws_id).write_text(repr(time.time()))
-
-
-def warm_since(ws_id: str) -> float | None:
-    """When the last warm run was noted for ``ws_id`` (see ``note_warm``)."""
-    try:
-        return float(_marker_file("warm-since", ws_id).read_text())
-    except (OSError, ValueError):
-        return None
 
 
 def _marker_file(kind: str, ws_id: str):

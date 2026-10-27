@@ -162,27 +162,3 @@ def test_a_review_that_cannot_start_after_the_checks_reaches_the_supervisor(db, 
     [msg] = inbox(db, "boss")
     assert "No reviewer could start" in msg and "codex is not installed" in msg
     assert db.get_agent("w1").pipeline is None
-
-
-def test_review_uses_warm_checks(db, ws, boss, spawned, monkeypatch):
-    calls = []
-    monkeypatch.setattr(gates.autopilot, "run_check",
-                        lambda cmd, cwd, env, timeout, **kw: calls.append(cmd) or (True, "ok"))
-    cfg = RepoConfig(checks=["true"], check_concurrency=0)
-    gates.check_summary(db, ws, cfg)                       # the warm run at report
-    sh("git commit -q --allow-empty -m same-tree", Path(ws.path))   # head moves, tree doesn't
-    agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg)
-    assert calls == ["true"] and "PASS `true`" in spawned[0]
-
-    # A failing warm run is handed over too, though it is never cached.
-    (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
-    (Path(ws.repo_root) / ".brindle" / "config.json").write_text(
-        json.dumps({"checks": ["bad"], "check_concurrency": 0}))
-    commit(ws, "more.py")
-    monkeypatch.setattr(gates.autopilot, "run_check",
-                        lambda cmd, cwd, env, timeout, **kw: calls.append(cmd) or (False, "boom"))
-    monkeypatch.setattr(cli, "_helper_db", lambda: db)
-    monkeypatch.setattr(agents, "_detach", lambda argv: cli.warm_checks_cmd(ws.id))   # finishes before the review
-    agents.warm_checks(ws)
-    agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["bad"]))
-    assert calls == ["true", "bad"] and "FAIL `bad`" in spawned[1]
