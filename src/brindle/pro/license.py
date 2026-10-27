@@ -289,10 +289,11 @@ LICENSE_FILE = "license.jwt"
 MAX_LICENSE_FILE = 64 * 1024
 
 
-def license_path():
+def license_path(create: bool = True):
     from brindle.pro._files import private_dir
 
-    return private_dir() / LICENSE_FILE
+    d = private_dir(create)
+    return None if d is None else d / LICENSE_FILE
 
 
 def parse_license_file(data: bytes | str) -> str:
@@ -350,7 +351,8 @@ def installed(*, now: float | None = None, grace: float = DEFAULT_GRACE) -> Enti
     from brindle.pro.credentials import CredentialError
 
     try:
-        raw = read_private(license_path(), MAX_LICENSE_FILE)
+        path = license_path(create=False)
+        raw = read_private(path, MAX_LICENSE_FILE) if path is not None else None
     except CredentialError as e:
         raise LicenseError(str(e)) from e
     if raw is None:
@@ -372,10 +374,11 @@ DISK_CACHE_SECONDS = 120   # how long another process may reuse a keystore read
 DISK_CACHE_GEN = "entitlement-cache.gen"   # bumped by every clear_cache, under the lock
 
 
-def _disk_cache_path():
+def _disk_cache_path(create: bool = True):
     from brindle.pro._files import private_dir
 
-    return private_dir() / DISK_CACHE_FILE
+    d = private_dir(create)
+    return None if d is None else d / DISK_CACHE_FILE
 
 
 @contextmanager
@@ -401,7 +404,8 @@ def _disk_cache_generation(d=None) -> int | None:
     from brindle.pro._files import private_dir, read_private
 
     try:
-        raw = read_private((d or private_dir()) / DISK_CACHE_GEN, 32)
+        d = d or private_dir(create=False)
+        raw = read_private(d / DISK_CACHE_GEN, 32) if d is not None else None
         return int(raw) if raw else 0
     except Exception:  # noqa: BLE001
         return None
@@ -414,7 +418,8 @@ def _disk_cache_read(now: float, max_age: float | None) -> Entitlement | str | N
     from brindle.pro._files import read_private
 
     try:
-        raw = read_private(_disk_cache_path(), MAX_LICENSE_FILE)
+        path = _disk_cache_path(create=False)
+        raw = read_private(path, MAX_LICENSE_FILE) if path is not None else None
         data = json.loads(raw) if raw else None
         if not isinstance(data, dict) or not isinstance(data.get("until"), (int, float)) \
                 or data["until"] <= now or data["until"] - DISK_CACHE_SECONDS > now:
@@ -437,7 +442,11 @@ def _disk_cache_write(now: float, gen: int | None, *, token: str | None = None,
     switch meanwhile must not be undone by old credentials."""
     import tempfile
 
+    from brindle.pro._files import private_dir
+
     try:
+        if private_dir(create=False) is None:
+            return   # no home yet: a lookup that caches a result mustn't create it
         with _disk_cache_lock() as d:
             if gen is None or _disk_cache_generation(d) != gen:
                 return   # invalidated while this process read the credentials
@@ -463,12 +472,13 @@ def clear_cache() -> None:
     generation so a read already in flight can't store what it saw."""
     global _cache
     _cache = None
-    from brindle.pro._files import write_private
+    from brindle.pro._files import private_dir, write_private
 
     try:
-        with _disk_cache_lock() as d:
-            write_private(d / DISK_CACHE_GEN, str((_disk_cache_generation(d) or 0) + 1).encode())
-            (d / DISK_CACHE_FILE).unlink(missing_ok=True)
+        if private_dir(create=False) is not None:   # no home, so nothing on disk to invalidate
+            with _disk_cache_lock() as d:
+                write_private(d / DISK_CACHE_GEN, str((_disk_cache_generation(d) or 0) + 1).encode())
+                (d / DISK_CACHE_FILE).unlink(missing_ok=True)
     except Exception:  # noqa: BLE001 - no usable private directory: nothing is cached there
         log.debug("couldn't invalidate the entitlement cache", exc_info=True)
     for hook in _clear_hooks:
