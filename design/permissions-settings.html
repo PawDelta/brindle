@@ -44,7 +44,6 @@ button,input,select{font:inherit}button,summary,select{cursor:pointer}
 button{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:32px;border:1px solid var(--line-strong);border-radius:8px;padding:4px 16px;background:var(--surface);color:var(--ink);font-weight:500}
 button:hover{background:var(--surface-2)}
 button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid var(--branch);outline-offset:2px}
-.primary{border-color:transparent;background:var(--branch);color:var(--on-branch)}.primary:hover{background:var(--branch);opacity:.9}
 .link-button{border-color:transparent;background:transparent;color:var(--branch);padding:4px 8px}.link-button:hover{background:var(--surface-2)}
 input,select{min-width:0;min-height:32px;border:1px solid var(--line);border-radius:8px;background:var(--surface);color:var(--ink);padding:4px 8px;font-size:14px}
 input::placeholder{color:var(--ink-3)}input:focus,select:focus{border-color:var(--branch)}
@@ -85,12 +84,19 @@ main{width:100%;max-width:960px;padding:24px 32px 40px;margin:0 auto;min-width:0
 .seg button[aria-pressed=true][data-level=allow]{background:var(--pass-soft);color:var(--pass)}
 .seg button[aria-pressed=true][data-level=ask]{background:var(--fawn-soft);color:var(--fawn)}
 .seg button[aria-pressed=true][data-level=deny]{background:var(--sap-soft);color:var(--sap)}
-.seg.mixed::after{content:"Mixed";display:inline-flex;align-items:center;padding:0 10px;font-size:12px;color:var(--ink-3);border-left:1px solid var(--line)}
+.seg button[aria-pressed=true][data-level=inherit]{background:var(--surface-2);color:var(--ink)}
 .expander{width:32px;padding:0;border-color:transparent;background:transparent;color:var(--ink-3)}
 .expander svg{transition:transform .18s ease}.expander[aria-expanded=true] svg{transform:rotate(90deg)}
-.cap-rules{padding:0 16px 12px;background:var(--canvas-2);border-top:1px solid var(--line)}
-.rule-row{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:12px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
-.rule-row:last-of-type{border-bottom:0}.rule-row small{display:block;font-size:12px;color:var(--ink-3)}
+.cap-rules{padding:4px 16px 12px;background:var(--canvas-2);border-top:1px solid var(--line)}
+.item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 16px;align-items:center;padding:10px 0 10px 12px;border-bottom:1px solid var(--line);border-left:2px solid transparent;font-size:13px}
+.item.ov{border-left-color:var(--branch);background:var(--branch-soft)}
+.item small{display:block;font-size:12px;color:var(--ink-3)}
+.item-name{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ovtag{font-size:11px;border-radius:4px;padding:1px 6px;color:var(--branch);background:var(--surface);border:1px solid var(--branch)}
+.inh{font-size:11px;color:var(--ink-3)}
+.item .seg button{padding:2px 10px;font-size:12px;min-height:28px}
+.note{display:flex;gap:8px;align-items:flex-start;padding:8px 12px;margin:12px 0 4px;border-radius:8px;background:var(--canvas);border:1px solid var(--line);font-size:12px;color:var(--ink-2)}
+.note code{background:var(--surface-2);padding:0 4px;border-radius:4px}
 .pill{display:inline-flex;border-radius:99px;padding:2px 8px;font-size:12px;white-space:nowrap;background:var(--pass-soft);color:var(--pass)}
 .pill.ask{background:var(--fawn-soft);color:var(--fawn)}.pill.deny{background:var(--sap-soft);color:var(--sap)}
 .cap-foot{display:flex;justify-content:space-between;align-items:center;padding-top:8px}
@@ -108,7 +114,7 @@ dialog{padding:0;border:1px solid var(--line-strong);border-radius:12px;backgrou
 dialog::backdrop{background:#0007}.dlg{padding:16px 24px 24px}
 .saved-line{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}
 .demo-foot{font-size:12px;color:var(--ink-3);margin-top:24px}
-@media(max-width:760px){.sidebar{display:none}.app{display:block}main{padding:16px}.preview{display:none}.cap-row{grid-template-columns:minmax(0,1fr) 32px}.cap-row .seg{grid-column:1/-1;grid-row:2;justify-self:start}.rule-row{grid-template-columns:minmax(0,1fr) auto}.rule-row .tag{display:none}.askline .subtle{margin-left:0}}
+@media(max-width:760px){.sidebar{display:none}.app{display:block}main{padding:16px}.preview{display:none}.cap-row{grid-template-columns:minmax(0,1fr) 32px}.cap-row .seg{grid-column:1/-1;grid-row:2;justify-self:start}.item{grid-template-columns:minmax(0,1fr)}.askline .subtle{margin-left:0}}
 </style></head><body>
 <div class="app"><aside class="sidebar"><div class="brand"><svg class="logo-mark" xmlns="http://www.w3.org/2000/svg" viewBox="1.2 5.6 29.6 20.8" width="32" height="22" aria-hidden="true"><g fill="none" stroke-width="3" stroke-linecap="round"><path stroke="#a99be0" d="M9 16 H23"/><path stroke="#e8875a" d="M8 16 C11 16 11.5 7.5 16 7.5 C20.5 7.5 21 16 24 16"/><path stroke="#34d399" d="M8 16 C11 16 11.5 24.5 16 24.5 C20.5 24.5 21 16 24 16"/><path stroke="#d7af87" stroke-width="4.8" d="M3.8 16 H9"/><path stroke="#34d399" stroke-width="4.8" d="M23 16 H28.2"/></g></svg><span>brindle</span></div><nav><div>Sessions</div><div>Inbox</div><div>Knowledge</div><div class="nav-label">Settings</div><div>Personal preferences</div><div>Providers &amp; models</div><div class="active">Permissions</div><div>About</div></nav></aside>
 <main>
@@ -123,18 +129,18 @@ dialog::backdrop{background:#0007}.dlg{padding:16px 24px 24px}
 <div class="askline" id="askline" role="status" aria-live="polite"></div>
 </div>
 
-<div class="section-title" style="margin-bottom:8px"><div><h2>Capabilities</h2><p>One setting per kind of action. Specific rules below still apply.</p></div></div>
+<div class="section-title" style="margin-bottom:8px"><div><h2>Capabilities</h2><p>Set a baseline for each group, then open it to override finer items. Combined commands (<code>a &amp;&amp; b | c</code>) are checked part by part.</p></div></div>
 <div class="cap-list" id="cap-list"><div class="cap" data-capability="files"></div><div class="cap" data-capability="shell"></div><div class="cap" data-capability="git"></div><div class="cap" data-capability="network"></div><div class="cap" data-capability="mcp"></div></div>
 
 <div class="card row-line" id="saved-card"><div><strong id="saved-count"></strong><p class="subtle">Allows and denials you saved from the Inbox.</p></div><button class="link-button" id="open-saved" type="button">Manage saved actions</button></div>
 
-<div class="card row-line"><div><strong>Advanced</strong><p class="subtle"><span id="rule-total"></span> rules in total. Search, filter and edit every rule.</p></div><button id="open-advanced" type="button">Open advanced view</button></div>
+<div class="card row-line"><div><strong>Advanced</strong><p class="subtle"><span id="rule-total"></span> rules in total. Search, filter and inspect every rule.</p></div><button id="open-advanced" type="button">Open advanced view</button></div>
 </section>
 
 <section id="advanced" class="hidden">
-<div class="header"><button class="link-button" id="back" type="button" style="padding-left:0">← Back to permissions</button><h1 style="margin-top:8px">Advanced: all rules</h1><p>Every rule behind the capability settings, including preset, personal and learned ones.</p></div>
+<div class="header"><button class="link-button" id="back" type="button" style="padding-left:0">← Back to permissions</button><h1 style="margin-top:8px">Advanced: all rules</h1><p>The flat list behind the capability settings: each group's baseline and every item's rules.</p></div>
 <div class="card">
-<div class="toolbar"><input type="search" id="q" aria-label="Search rules" placeholder="Search by action, match or source"><select id="f-cap" aria-label="Capability"></select><select id="f-dec" aria-label="Decision"><option value="">Any decision</option><option value="allow">Allow</option><option value="ask">Ask</option><option value="deny">Deny</option></select><select id="f-src" aria-label="Source"><option value="">Any source</option><option value="preset">Preset</option><option value="user">You</option><option value="learned">Learned</option></select><button id="reset-f" type="button" class="link-button">Clear</button></div>
+<div class="toolbar"><input type="search" id="q" aria-label="Search rules" placeholder="Search by item, match or source"><select id="f-cap" aria-label="Capability"></select><select id="f-dec" aria-label="Decision"><option value="">Any decision</option><option value="allow">Allow</option><option value="ask">Ask</option><option value="deny">Deny</option></select><select id="f-src" aria-label="Source"><option value="">Any source</option><option value="preset">Preset</option><option value="user">You</option></select><button id="reset-f" type="button" class="link-button">Clear</button></div>
 <div class="summary-bar" id="adv-count" aria-live="polite"></div>
 <div class="table-wrap"><table class="table"><thead><tr><th>Rule</th><th>Capability</th><th>Decision</th><th>Source</th></tr></thead><tbody id="adv-body"></tbody></table></div>
 </div>
@@ -147,7 +153,7 @@ dialog::backdrop{background:#0007}.dlg{padding:16px 24px 24px}
 <div class="toast hidden" id="toast" role="status"></div>
 
 <script>
-const $=s=>document.querySelector(s),all=s=>[...document.querySelectorAll(s)],esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $=s=>document.querySelector(s),esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const CAPS=[
  {id:'files',name:'Files',noun:'file changes'},
  {id:'shell',name:'Shell commands',noun:'commands'},
@@ -159,104 +165,105 @@ const PRESETS=[
  {id:'permissive',name:'Permissive',text:'Edits in the worktree and everyday commands run; the rest asks, and approvals can be saved.'},
  {id:'standard',name:'Standard',text:'Routine reads and everyday commands run freely. Changes and sensitive actions ask.'},
  {id:'secure',name:'Secure',text:'Narrow scopes, 15-minute approvals, and a deny for anything no rule covers.'}];
-const COMMANDS=['aws','uv','pytest','python','npm','pnpm','yarn','docker','cargo','go','make','gh'];
-let nextId=1;
-// f: the rule follows its capability's level selector; w: sample weekly hits (counted as asks when the rule asks)
-function R(cap,label,match,type,decision,src,o){return Object.assign({id:nextId++,cap,label,match,type,decision,src:src||'preset',f:false,w:0},o||{})}
-function build(p){
- nextId=1;
- const i=PRESETS.findIndex(x=>x.id===p),pick=a=>a[i],secure=p==='secure',rules=[];
- rules.push(
-  R('files','Read files in the worktree','a file in the worktree','worktree',pick(['allow','allow','allow','ask']),'preset',{f:true,k:'reading',w:120}),
-  R('files','Write files in the worktree','a file in the worktree','worktree',pick(['allow','allow','ask','ask']),'preset',{f:true,k:'writing',w:9}),
-  R('files','Edit files in the worktree','a file in the worktree','worktree',pick(['allow','allow','ask','ask']),'preset',{f:true,k:'editing',w:6}),
-  R('files','Read tracked files','a file git tracks','tracked','allow'));
- ['~/.ssh*','~/.aws*','~/.gnupg*','*/.brindle/daemon.json*','*/.env*','.env*'].forEach(m=>rules.push(R('files','Read credential files',m,'glob','deny')));
- rules.push(R('shell','Run the repo checks','one of the repo\'s checks','check','allow'));
- if(!secure)rules.push(R('shell','Read-only pipelines','grep, ls, cat, head, sed -n','readonly-pipeline','allow'));
- if(!secure)COMMANDS.forEach(c=>{rules.push(R('shell','Run '+c,c,'exact','allow','preset',{cmd:true}),R('shell','Run '+c+' …',c+' ','prefix','allow','preset',{cmd:true}))});
- rules.push(
-  R('shell','Other commands','any other command','glob',pick(['allow','ask','ask','ask']),'preset',{f:true,k:'other commands',w:7}),
-  R('shell','Read the daemon token','*daemon.json*','glob','deny'),
-  R('shell','Recursive rm of root or home','top-level folders, ~','rm-destructive','deny'),
-  R('git','Read-only git','status, diff, log, show','git-readonly','allow'),
-  R('git','Force push or branch delete','any force flag','git-force','deny'),
-  R('git','Push to the default branch','* → @default','push','ask','preset',{w:pick([3,4,5,5])}),
-  R('git','Push to a release branch','* → release','push','ask'),
-  R('git','Push to a release sub-branch','* → release/*','push','ask'),
-  R('git','Push to other branches','* → *','push',pick(['allow','ask','ask','ask']),'preset',{f:true,k:'other pushes',w:4}),
-  R('git','Other git commands','commit, branch, merge …','glob',pick(['allow','ask','ask','ask']),'preset',{f:true,k:'other git commands',w:3}),
-  R('network','Fetch web content','any URL','glob',pick(['allow','ask','ask','ask']),'preset',{f:true,k:'web fetches',w:5}),
-  R('network','Fetch docs.example.com','https://docs.example.com/**','glob','allow','user'),
-  R('mcp','Other MCP tools','mcp__.*','glob',pick(['allow','ask','ask','deny']),'preset',{f:true,k:'other tools',w:6}),
-  R('mcp','GitHub → Search issues','mcp__github__search_issues','exact','allow','user'),
-  R('mcp','GitHub → Create issue','mcp__github__create_issue','exact','ask','learned'),
-  R('mcp','GitHub → Delete repository','mcp__github__delete_repository','exact','deny','user'),
-  R('mcp','Slack → Send message','mcp__slack__send_message','exact','ask','user'));
- return rules;
-}
-let preset='autonomous',customized=false,rules=build(preset),open=new Set(),view='compact';
+const TOOLS=['aws','uv','pytest','python','npm','pnpm','yarn','docker','cargo','go','make','gh'];
+// w: sample weekly hits, counted as asks while the item's effective level is ask
+const ITEMS=[
+ {id:'f-read',cap:'files',label:'Read tracked files',hint:'Files git tracks in the worktree',match:['a file git tracks'],w:120},
+ {id:'f-edit',cap:'files',label:'Write and edit in the worktree',hint:'Inside this checkout',match:['write: a file in the worktree','edit: a file in the worktree'],w:15},
+ {id:'f-out',cap:'files',label:'Write and edit outside the worktree',hint:'Anywhere else on disk',match:['write: outside the worktree','edit: outside the worktree'],w:4},
+ {id:'f-cred',cap:'files',label:'Credential files',hint:'.env, ~/.ssh, ~/.aws, ~/.gnupg, the daemon token',match:['~/.ssh*','~/.aws*','~/.gnupg*','*/.brindle/daemon.json*','*/.env*','.env*'],w:0},
+ {id:'s-ro',cap:'shell',label:'Read-only commands',hint:'grep, ls, cat, head, sed -n',match:['readonly pipeline: grep, ls, cat, head, tail, wc, sed -n'],w:80},
+ {id:'s-test',cap:'shell',label:'Tests & build tools',hint:TOOLS.join(', '),match:TOOLS.flatMap(t=>[t,t+' *']),w:12},
+ {id:'s-pkg',cap:'shell',label:'Package installs',hint:'npm install, pip install, uv add',match:['npm install *','pip install *','uv add *','cargo add *'],w:5},
+ {id:'s-bad',cap:'shell',label:'Destructive commands',hint:'rm -rf of root, home or a top-level folder; the daemon token',match:['rm -rf /','rm -rf ~','rm -rf /*','*daemon.json*'],w:1},
+ {id:'g-ro',cap:'git',label:'Read-only git',hint:'status, diff, log, show',match:['git status','git diff','git log','git show'],w:30},
+ {id:'g-local',cap:'git',label:'Commit and branch locally',hint:'commit, branch, switch, merge',match:['git commit *','git branch *','git switch *','git merge *'],w:6},
+ {id:'g-feat',cap:'git',label:'Push to feature branches',hint:'Any branch that is not the default or a release',match:['* → *'],w:4},
+ {id:'g-def',cap:'git',label:'Push to the default or a release branch',hint:'A release push starts a signed build',match:['* → @default','* → release','* → release/*'],w:3},
+ {id:'g-force',cap:'git',label:'Force push and branch delete',hint:'Any force flag',match:['git push --force*','git push --delete*'],w:0},
+ {id:'n-docs',cap:'network',label:'Docs and trusted hosts',hint:'docs.example.com, tracker.example.com',match:['https://docs.example.com/**','https://tracker.example.com/**'],w:8},
+ {id:'n-any',cap:'network',label:'Any other URL',hint:'Everything not listed above',match:['https://**'],w:5},
+ {id:'m-read',cap:'mcp',label:'Read-only tools',hint:'GitHub search, Slack search',match:['mcp__github__search_issues','mcp__slack__search_messages'],w:6},
+ {id:'m-write',cap:'mcp',label:'Write tools',hint:'GitHub create issue, Slack send message',match:['mcp__github__create_issue','mcp__slack__send_message'],w:4},
+ {id:'m-del',cap:'mcp',label:'Destructive tools',hint:'GitHub delete repository',match:['mcp__github__delete_repository'],w:0}];
+// base: each group's blanket level; ov: items that override it (everything else inherits)
+const PRESET_DATA={
+ autonomous:{base:{files:'allow',shell:'allow',git:'allow',network:'allow',mcp:'allow'},ov:{'f-cred':'deny','s-bad':'deny','g-force':'deny','g-def':'ask','m-del':'deny'}},
+ permissive:{base:{files:'ask',shell:'ask',git:'ask',network:'ask',mcp:'ask'},ov:{'f-read':'allow','f-edit':'allow','f-cred':'deny','s-ro':'allow','s-test':'allow','s-bad':'deny','g-ro':'allow','g-local':'allow','g-force':'deny','n-docs':'allow','m-read':'allow','m-del':'deny'}},
+ standard:{base:{files:'ask',shell:'ask',git:'ask',network:'ask',mcp:'ask'},ov:{'f-read':'allow','f-cred':'deny','s-ro':'allow','s-test':'allow','s-bad':'deny','g-ro':'allow','g-local':'allow','g-force':'deny','n-docs':'allow','m-read':'allow','m-del':'deny'}},
+ secure:{base:{files:'ask',shell:'ask',git:'ask',network:'deny',mcp:'deny'},ov:{'f-read':'allow','f-cred':'deny','s-bad':'deny','g-ro':'allow','g-force':'deny'}}};
+const LEVELS=['allow','ask','deny'],LABEL={allow:'Allow',ask:'Ask',deny:'Deny'};
+let preset='autonomous',customized=false,base={},ov={},edited=new Set(),baseEdited=new Set(),open=new Set(['shell']),view='compact';
 let saved=[
  {id:1,action:'Read files',target:'docs/**',decision:'allow',life:'Forever'},
  {id:2,action:'Edit files',target:'src/**',decision:'allow',life:'This session'},
  {id:3,action:'Fetch web content',target:'https://tracker.example.com/**',decision:'deny',life:'Forever'}];
-const LEVELS=['allow','ask','deny'],LABEL={allow:'Allow',ask:'Ask',deny:'Deny'};
-const followers=cap=>rules.filter(r=>r.cap===cap&&r.f);
-function levelOf(cap){const s=new Set(followers(cap).map(r=>r.decision));return s.size===1?[...s][0]:'mixed'}
+function load(p){const d=PRESET_DATA[p];preset=p;base={...d.base};ov={...d.ov};edited=new Set();baseEdited=new Set();customized=false}
+const capItems=cap=>ITEMS.filter(i=>i.cap===cap);
+const eff=i=>ov[i.id]||base[i.cap];
+const capName=cap=>CAPS.find(c=>c.id===cap).name;
 function summaryOf(cap){
- const fs=followers(cap),parts=[];
- ['allow','ask','deny'].forEach(d=>{const ks=fs.filter(r=>r.decision===d).map(r=>r.k);if(ks.length)parts.push({allow:'Allows ',ask:'Asks before ',deny:'Denies '}[d]+ks.join(', '))});
- const fixed=rules.filter(r=>r.cap===cap&&!r.f&&!r.cmd),denies=fixed.filter(r=>r.decision==='deny').length,asks=fixed.filter(r=>r.decision==='ask').length;
- if(denies)parts.push(denies+' always denied');
- if(asks)parts.push(asks+' always ask');
- return parts.join(' · ');
+ const its=capItems(cap).filter(i=>ov[i.id]),n=its.length,counts=LEVELS.map(l=>[l,its.filter(i=>ov[i.id]===l).length]).filter(x=>x[1]).map(x=>x[1]+' '+{allow:'allowed',ask:'asking',deny:'denied'}[x[0]]);
+ return {allow:'Allowed by default',ask:'Asks by default',deny:'Denied by default'}[base[cap]]+(n?' · '+n+' override'+(n===1?'':'s')+' ('+counts.join(', ')+')':' · no overrides');
 }
 function weeklyAsks(){
  const by={};let n=0;
- rules.forEach(r=>{if(r.decision==='ask'&&r.w){by[r.cap]=(by[r.cap]||0)+r.w;n+=r.w}});
+ ITEMS.forEach(i=>{if(eff(i)==='ask'&&i.w){by[i.cap]=(by[i.cap]||0)+i.w;n+=i.w}});
  return {n,by};
 }
 function askText(){
  const {n,by}=weeklyAsks(),caps=Object.keys(by).sort((a,b)=>by[b]-by[a]);
  if(!n)return '<strong>No asks this week</strong>';
  const noun=id=>CAPS.find(c=>c.id===id).noun;
- let tail;
- if(caps.length===1)tail='all '+noun(caps[0]);
- else tail='mostly '+noun(caps[0])+(by[caps[0]]/n<.5?' and '+noun(caps[1]):'');
+ const tail=caps.length===1?'all '+noun(caps[0]):'mostly '+noun(caps[0])+(by[caps[0]]/n<.5?' and '+noun(caps[1]):'');
  return '<strong>'+n+' ask'+(n===1?'':'s')+' this week; '+esc(tail)+'</strong>';
+}
+// the flat list: per group one baseline rule, then each item's rules at the item's effective level
+function flatRules(){
+ const out=[];
+ CAPS.forEach(c=>{
+  out.push({cap:c.id,label:'Everything else in '+c.name,match:'*',decision:base[c.id],src:baseEdited.has(c.id)?'user':'preset',ovr:false});
+  capItems(c.id).forEach(i=>i.match.forEach(m=>out.push({cap:c.id,label:i.label,match:m,decision:eff(i),src:edited.has(i.id)?'user':'preset',ovr:!!ov[i.id]})));
+ });
+ return out;
 }
 function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.remove('hidden');clearTimeout(toast.h);toast.h=setTimeout(()=>t.classList.add('hidden'),2200)}
 function renderPresets(){
  $('#preset-grid').innerHTML=PRESETS.map(p=>'<button type="button" class="preset'+(p.id===preset?' current':'')+'" data-preset="'+p.id+'" aria-pressed="'+(p.id===preset)+'"><h3>'+p.name+(p.recommend?' <span class="recommend">DEFAULT</span>':'')+'</h3><p>'+esc(p.text)+'</p></button>').join('');
  $('#policy-label').textContent=PRESETS.find(p=>p.id===preset).name+(customized?' · customized':'');
 }
-function ruleRow(r){return '<div class="rule-row"><div>'+esc(r.label)+'<small><code>'+esc(r.match)+'</code></small></div><span class="tag">'+({preset:'Preset',user:'You',learned:'Learned'}[r.src])+'</span><span class="pill '+r.decision+'">'+LABEL[r.decision]+'</span></div>'}
+function itemRow(i){
+ const o=ov[i.id],b=base[i.cap];
+ const tag=!o?'<span class="inh">Inherits '+LABEL[b]+'</span>':o===b?'<span class="ovtag">Pinned to '+LABEL[o]+' (same as group)</span>':'<span class="ovtag">Overrides '+esc(capName(i.cap))+': '+LABEL[b]+' → '+LABEL[o]+'</span>';
+ const seg=['inherit',...LEVELS].map(l=>'<button type="button" data-level="'+l+'" data-ovitem="'+i.id+'" aria-pressed="'+((o||'inherit')===l)+'">'+(l==='inherit'?'Inherit':LABEL[l])+'</button>').join('');
+ return '<div class="item'+(o?' ov':'')+'" data-item="'+i.id+'"><div><div class="item-name">'+esc(i.label)+' '+tag+'</div><small>'+esc(i.hint)+'</small></div><div class="seg" role="group" aria-label="'+esc(i.label)+' level">'+seg+'</div></div>';
+}
 function renderCaps(){
  CAPS.forEach(c=>{
-  const lv=levelOf(c.id),mine=rules.filter(r=>r.cap===c.id),cmds=mine.filter(r=>r.cmd),shown=mine.filter(r=>!r.cmd),isOpen=open.has(c.id);
-  const seg=LEVELS.map(l=>'<button type="button" data-level="'+l+'" data-cap="'+c.id+'" aria-pressed="'+(lv===l)+'">'+LABEL[l]+'</button>').join('');
-  const cmdRow=cmds.length?'<div class="rule-row"><div>Everyday commands<small>'+esc(COMMANDS.join(', '))+'</small></div><span class="tag">Preset</span><span class="pill allow">Allow</span></div>':'';
-  $('[data-capability="'+c.id+'"]').innerHTML='<div class="cap-row"><div><div class="cap-name">'+c.name+' <span class="cap-count">'+mine.length+' rules</span></div><div class="cap-sum">'+esc(summaryOf(c.id))+'</div></div><div class="seg'+(lv==='mixed'?' mixed':'')+'" role="group" aria-label="'+c.name+' level">'+seg+'</div><button type="button" class="expander" data-expand="'+c.id+'" aria-expanded="'+isOpen+'" aria-label="Show '+c.name+' rules"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l4 4-4 4"/></svg></button></div>'+
-  '<div class="cap-rules'+(isOpen?'':' hidden')+'">'+shown.map(ruleRow).join('')+cmdRow+'<div class="cap-foot"><span class="subtle">'+(cmds.length?cmds.length+' command rules are grouped above.':'')+'</span><button type="button" class="link-button" data-adv="'+c.id+'">All '+c.name+' rules in Advanced →</button></div></div>';
+  const isOpen=open.has(c.id),its=capItems(c.id);
+  const seg=LEVELS.map(l=>'<button type="button" data-level="'+l+'" data-cap="'+c.id+'" aria-pressed="'+(base[c.id]===l)+'">'+LABEL[l]+'</button>').join('');
+  const note=c.id==='shell'?'<div class="note"><span aria-hidden="true">⛓</span><span>Combined commands such as <code>cd app &amp;&amp; npm test | tee log</code> are checked part by part. The strictest part decides, so one denied part blocks the whole line.</span></div>':'';
+  $('[data-capability="'+c.id+'"]').innerHTML='<div class="cap-row"><div><div class="cap-name">'+c.name+' <span class="cap-count">'+its.length+' items</span></div><div class="cap-sum">'+esc(summaryOf(c.id))+'</div></div><div class="seg" role="group" aria-label="'+c.name+' baseline">'+seg+'</div><button type="button" class="expander" data-expand="'+c.id+'" aria-expanded="'+isOpen+'" aria-label="Show '+c.name+' items"><svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3l4 4-4 4"/></svg></button></div>'+
+  '<div class="cap-rules'+(isOpen?'':' hidden')+'">'+note+its.map(itemRow).join('')+'<div class="cap-foot"><span class="subtle">Baseline applies to anything not listed here.</span><button type="button" class="link-button" data-adv="'+c.id+'">All '+c.name+' rules in Advanced →</button></div></div>';
  });
  $('#askline').innerHTML=askText()+'<span class="subtle">Sample week of sessions</span>';
- $('#rule-total').textContent=rules.length;
+ $('#rule-total').textContent=flatRules().length;
  $('#saved-count').textContent=saved.length+' saved action'+(saved.length===1?'':'s');
 }
-function setLevel(cap,lv){
- followers(cap).forEach(r=>{r.decision=lv;r.src='user'});
- customized=true;renderPresets();renderCaps();
- toast(CAPS.find(c=>c.id===cap).name+' set to '+LABEL[lv]);
+function refresh(){customized=true;renderPresets();renderCaps();renderAdv()}
+function setBase(cap,lv){base[cap]=lv;baseEdited.add(cap);refresh();toast(capName(cap)+' baseline: '+LABEL[lv])}
+function setOv(id,lv){
+ const it=ITEMS.find(i=>i.id===id);
+ if(lv==='inherit')delete ov[id];else ov[id]=lv;
+ edited.add(id);refresh();
+ toast(it.label+': '+(lv==='inherit'?'inherits '+LABEL[base[it.cap]]:LABEL[lv]));
 }
-function setPreset(id){
- preset=id;customized=false;rules=build(id);renderPresets();renderCaps();renderAdv();
- toast(PRESETS.find(p=>p.id===id).name+' preset applied');
-}
+function setPreset(id){load(id);renderPresets();renderCaps();renderAdv();toast(PRESETS.find(p=>p.id===id).name+' preset applied')}
 function renderAdv(){
- const q=$('#q').value.trim().toLowerCase(),c=$('#f-cap').value,d=$('#f-dec').value,s=$('#f-src').value;
- const list=rules.filter(r=>(!c||r.cap===c)&&(!d||r.decision===d)&&(!s||r.src===s)&&(!q||(r.label+' '+r.match+' '+r.type+' '+r.src).toLowerCase().includes(q)));
- $('#adv-count').textContent='Showing '+list.length+' of '+rules.length+' rules';
- $('#adv-body').innerHTML=list.length?list.map(r=>'<tr><td>'+esc(r.label)+'<small><code>'+esc(r.match)+'</code></small></td><td>'+CAPS.find(x=>x.id===r.cap).name+'</td><td><span class="pill '+r.decision+'">'+LABEL[r.decision]+'</span></td><td>'+({preset:'Preset',user:'You',learned:'Learned'}[r.src])+'</td></tr>').join(''):'<tr><td colspan="4" class="subtle">No rules match these filters.</td></tr>';
+ const q=$('#q').value.trim().toLowerCase(),c=$('#f-cap').value,d=$('#f-dec').value,s=$('#f-src').value,all=flatRules();
+ const list=all.filter(r=>(!c||r.cap===c)&&(!d||r.decision===d)&&(!s||r.src===s)&&(!q||(r.label+' '+r.match+' '+r.src).toLowerCase().includes(q)));
+ $('#adv-count').textContent='Showing '+list.length+' of '+all.length+' rules';
+ $('#adv-body').innerHTML=list.length?list.map(r=>'<tr><td>'+esc(r.label)+'<small><code>'+esc(r.match)+'</code></small></td><td>'+capName(r.cap)+'</td><td><span class="pill '+r.decision+'">'+LABEL[r.decision]+'</span>'+(r.ovr?'<small>overrides group</small>':'')+'</td><td>'+(r.src==='user'?'You':'Preset')+'</td></tr>').join(''):'<tr><td colspan="4" class="subtle">No rules match these filters.</td></tr>';
 }
 function showView(v,cap){
  view=v;$('#compact').classList.toggle('hidden',v!=='compact');$('#advanced').classList.toggle('hidden',v!=='advanced');
@@ -271,7 +278,8 @@ function setTheme(t){document.documentElement.dataset.theme=t;$('#theme-toggle')
 document.addEventListener('click',e=>{
  const t=e.target.closest('button');if(!t)return;
  if(t.dataset.preset)setPreset(t.dataset.preset);
- else if(t.dataset.level)setLevel(t.dataset.cap,t.dataset.level);
+ else if(t.dataset.ovitem)setOv(t.dataset.ovitem,t.dataset.level);
+ else if(t.dataset.cap&&t.dataset.level)setBase(t.dataset.cap,t.dataset.level);
  else if(t.dataset.expand){const id=t.dataset.expand;open.has(id)?open.delete(id):open.add(id);renderCaps()}
  else if(t.dataset.adv)showView('advanced',t.dataset.adv);
  else if(t.dataset.del){saved=saved.filter(a=>String(a.id)!==t.dataset.del);renderSaved();renderCaps()}
@@ -284,5 +292,5 @@ document.addEventListener('click',e=>{
 });
 ['#q','#f-cap','#f-dec','#f-src'].forEach(s=>$(s).addEventListener('input',renderAdv));
 $('#f-cap').innerHTML='<option value="">Any capability</option>'+CAPS.map(c=>'<option value="'+c.id+'">'+c.name+'</option>').join('');
-renderPresets();renderCaps();renderAdv();
+load('autonomous');renderPresets();renderCaps();renderAdv();
 </script></body></html>
