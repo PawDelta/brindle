@@ -158,16 +158,6 @@ def test_graphify_single_flight(mapped, monkeypatch):
     assert len(started) == 3
 
 
-def test_seed_session_without_graph(repo, monkeypatch):
-    monkeypatch.setattr("brindle.git.paths", lambda *a, **kw: [])
-    monkeypatch.setattr(codemap.shutil, "which", lambda cmd: f"/bin/{cmd}")
-    started = []
-    monkeypatch.setattr(codemap.subprocess, "Popen", lambda *a, **kw: started.append(a))
-    assert codemap.seed_session(repo, str(repo)) is False
-    assert not started
-    assert not (repo / codemap.GRAPH.parent).exists()
-
-
 @pytest.mark.parametrize("tracked", [True, False])
 def test_automatic_rebuild_preserves_tracked_graph_or_can_be_disabled(mapped, monkeypatch, tracked):
     from brindle import git
@@ -260,6 +250,13 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     (mapped / codemap.GRAPH).unlink()
     assert codemap.seed_session(mapped, str(mapped)) is True
     codemap._run_refresh(*runners.pop())
+
+    # No stored graph: the repo hasn't opted in, so nothing is seeded or started
+    (mapped / codemap.GRAPH).unlink(missing_ok=True)
+    store.unlink()
+    runs = len(started)
+    assert codemap.seed_session(mapped, str(mapped)) is False
+    assert not runners and len(started) == runs and not (mapped / codemap.GRAPH).exists()
 
     # Config switch disables graph
     monkeypatch.setattr("brindle.config.load_repo_config", lambda root: type("Cfg", (), {"graphify": False})())
