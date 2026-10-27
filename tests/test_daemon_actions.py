@@ -908,6 +908,9 @@ SUGGESTED = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": 
               "behavior": "allow", "destination": "localSettings"}]
 # Claude Code's PermissionRequest input, as documented: no tool_use_id.
 ASK = {"hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": {"command": "npm test"}}
+# Claude Code's own prompt for it, in its pane.
+CLAUDE_PROMPT = "Bash command\n  npm test\nDo you want to proceed?\n" + "\n".join(
+    f"{'❯' if i == 0 else ' '} {i + 1}. {o}" for i, o in enumerate(OPTIONS))
 HOLD = 2    # the repo's permission_hold_seconds in these tests
 
 
@@ -1222,8 +1225,7 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     from brindle.service import inbox
 
     pressed = []
-    monkeypatch.setattr(tmux, "capture", lambda target, **kw: "Bash command\n  npm test\nDo you want to proceed?\n"
-                        + "\n".join(f"{'❯' if i == 0 else ' '} {i + 1}. {o}" for i, o in enumerate(OPTIONS)))
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: CLAUDE_PROMPT)
     monkeypatch.setattr(tmux, "send_keys", lambda target, *keys, **kw: pressed.append(keys))
     monkeypatch.setattr(holds, "_UnixConnection", lambda path, timeout: (_ for _ in ()).throw(OSError()))
     # No daemon to hold it in: the hook records it and the CLI prompts as usual.
@@ -1234,20 +1236,26 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     assert code == 409 and pressed == [], reply
 
 
-@pytest.mark.parametrize("screen", [CLAUDE_IDLE, pytest.param(CLAUDE_BUSY, marks=pytest.mark.variant(
-    "review: allowed in the pane, its tool still running, so no PostToolUse yet"))], ids=["denied", "allowed"])
-def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, world, answering, monkeypatch, screen):
+@pytest.mark.parametrize("screen,seen", [(CLAUDE_IDLE, True), pytest.param(CLAUDE_BUSY, True, marks=pytest.mark.variant(
+    "review: allowed in the pane, its tool still running, so no PostToolUse yet")), (CLAUDE_IDLE, False)],
+    ids=["denied", "allowed", "prompt-unseen"])
+def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, world, answering, monkeypatch, screen,
+                                                                     seen):
     from brindle import tmux
     from brindle.db import DB
     from brindle.service import inbox
 
-    # The hook's looks: past the prompt twice, one it can't tell (the window starts over), then past it for good.
-    looks, paused, go = iter([screen, screen, "", screen, screen]), threading.Event(), threading.Event()
+    # The hook's looks: the prompt, past it twice, one it can't tell (the window starts over), then
+    # past it for good. With no look at the prompt (not drawn yet?), past it ANSWERED_LOOKS times
+    # doesn't end the hold: it takes UNSEEN_ANSWERED_LOOKS.
+    monkeypatch.setattr(agents, "UNSEEN_ANSWERED_LOOKS", agents.ANSWERED_LOOKS + 1)
+    reads = [CLAUDE_PROMPT, screen, screen, "", screen, screen] if seen else [screen, screen, "", screen, screen, screen]
+    looks, paused, go = iter(reads), threading.Event(), threading.Event()
     wk = db.get_agent("wk")
 
     def capture(target, **kw):
         if (read := next(looks, None)) is None and not paused.is_set():
-            paused.set()        # its sixth look waits on the test
+            paused.set()        # its seventh look waits on the test
             go.wait(5)
         return screen if read is None else read
 
