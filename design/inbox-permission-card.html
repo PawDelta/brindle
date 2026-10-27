@@ -209,7 +209,7 @@ function openMenu(btn){
 document.addEventListener('click',e=>{
  if(e.target.id==='undo'){toast('Opening Settings › Permissions › '+esc(undo?chipText(undo):'')+'…');return}
  const t=e.target.closest('button');
- if(!t){closeMenus();return}
+ if(!t){if(!e.target.closest('.split'))closeMenus();return}
  const id=t.dataset.id,a=t.dataset.act,c=cards.find(x=>x.id===id);
  if(t.id==='theme-toggle')setTheme(document.documentElement.dataset.theme==='dark'?'light':'dark');
  else if(t.id==='reset'){cards=EXAMPLES.map(x=>({...x}));render()}
