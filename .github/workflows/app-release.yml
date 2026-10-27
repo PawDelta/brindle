@@ -27,17 +27,22 @@
 # bundle yet (latest.json lists the Macs only).
 #
 # The `windows` job builds the Windows app (the WSL thin client: the engine
-# runs inside WSL, see app/src-tauri/src/wsl.rs) as an unsigned NSIS
-# installer, after running the WSL client's tests on Windows. Windows code
-# signing is an owner purchase, so it is only kept as a workflow artifact,
-# never published.
+# runs inside WSL, see app/src-tauri/src/wsl.rs) as an NSIS installer, after
+# running the WSL client's tests on Windows. When the Azure Artifact Signing
+# secrets are set (AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID,
+# AZURE_SIGNING_ENDPOINT, AZURE_SIGNING_ACCOUNT, AZURE_SIGNING_PROFILE; the
+# login is azure/login through GitHub's OIDC, no client secret), Tauri's
+# signCommand (signtool with the Azure dlib) signs the app exe and the
+# installer, signtool verify /pa must accept both, and a pushed tag publishes
+# the installer to the same downloads (brindle_x64-setup.exe). Without them the
+# installer is unsigned and only kept as a workflow artifact, never published.
 #
 # Nothing here makes a GitHub Release: publish.yml (PyPI) runs on published
 # releases, and app tags stay out of it.
 #
-# Secrets: the jobs that read the Apple, Tauri or AWS secrets (macos,
-# macos-publish, linux) run in the `desktop-release` GitHub environment, which
-# holds the Apple and Tauri secrets and the TAURI_UPDATER_PUBKEY variable,
+# Secrets: the jobs that read the Apple, Tauri, Azure or AWS secrets (macos,
+# macos-publish, linux, windows) run in the `desktop-release` GitHub environment, which
+# holds the Apple, Tauri and Azure secrets and the TAURI_UPDATER_PUBKEY variable,
 # admits only app-v* tags and needs the owner's approval. The release role's
 # OIDC trust accepts that environment's subject.
 # Staff builds use desktop-staff-release and AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN
@@ -986,9 +991,12 @@ jobs:
   windows:
     if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
     runs-on: windows-latest
+    # Only a pushed app-v* tag runs in the environment that holds the secrets.
+    environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
     timeout-minutes: 60
     permissions:
       contents: read
+      id-token: write   # the downloads bucket's role, and Azure signing without a client secret, through GitHub's OIDC
     defaults:
       run:
         shell: bash
@@ -1037,10 +1045,90 @@ jobs:
       - name: Install
         run: bash app/scripts/retry.sh npm --prefix app ci
 
-      # Unsigned: no Windows signing certificate, no updater bundle (latest.json lists the Macs only).
+      # Whether the Azure Artifact Signing secrets are set (AZURE_CLIENT_ID and
+      # AZURE_SIGNING_PROFILE decide). If so, it writes a Windows config overlay
+      # (tauri.windows.conf.json) with a signCommand (signtool with the Azure
+      # dlib, which Tauri runs for the app exe and the installer) and the next
+      # step logs in to Azure through GitHub's OIDC; otherwise the build is
+      # unsigned.
+      - name: Signing setup
+        id: signing
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
+          # The dlib's NuGet package (Microsoft.Trusted.Signing.Client, now
+          # Artifact Signing's client), pinned.
+          DLIB_VERSION: "1.0.95"
+        run: |
+          signed=false
+          if [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_SIGNING_PROFILE" ]; then
+            if [ -z "$AZURE_SIGNING_ENDPOINT" ] || [ -z "$AZURE_SIGNING_ACCOUNT" ]; then
+              echo "::error::AZURE_SIGNING_ENDPOINT and AZURE_SIGNING_ACCOUNT must be set with AZURE_SIGNING_PROFILE"
+              exit 1
+            fi
+            signed=true
+            signtool="$(find "/c/Program Files (x86)/Windows Kits/10/bin" -path '*/x64/signtool.exe' | sort -V | tail -n 1)"
+            zip="$RUNNER_TEMP/signing-client.zip"
+            powershell -NoProfile -Command "\$ErrorActionPreference = 'Stop'; Invoke-WebRequest -Uri 'https://www.nuget.org/api/v2/package/Microsoft.Trusted.Signing.Client/$DLIB_VERSION' -OutFile '$(cygpath -w "$zip")'; Expand-Archive -Force -Path '$(cygpath -w "$zip")' -DestinationPath '$(cygpath -w "$RUNNER_TEMP/signing-client")'"
+            dlib="$(cygpath -w "$RUNNER_TEMP/signing-client/bin/x64/Azure.CodeSigning.Dlib.dll")"
+            metadata="$RUNNER_TEMP/signing-metadata.json"
+            jq -n --arg e "$AZURE_SIGNING_ENDPOINT" --arg a "$AZURE_SIGNING_ACCOUNT" --arg p "$AZURE_SIGNING_PROFILE" \
+              '{Endpoint: $e, CodeSigningAccountName: $a, CertificateProfileName: $p}' > "$metadata"
+            echo "SIGNTOOL=$(cygpath -w "$signtool")" >> "$GITHUB_ENV"
+            # Tauri merges tauri.windows.conf.json over tauri.conf.json, so the
+            # build's own invocation is the same signed or not. The dlib reads
+            # the credential azure/login leaves (az CLI).
+            jq -n --arg tool "$(cygpath -m "$signtool")" --arg dlib "$dlib" --arg meta "$(cygpath -w "$metadata")" \
+              '{bundle: {windows: {signCommand: {cmd: $tool, args: [
+                "sign", "/v", "/fd", "SHA256", "/tr", "http://timestamp.acs.microsoft.com", "/td", "SHA256",
+                "/dlib", $dlib, "/dmdf", $meta, "%1"]}}}}' > app/src-tauri/tauri.windows.conf.json
+          else
+            echo "::warning::AZURE_CLIENT_ID / AZURE_SIGNING_PROFILE not set: building unsigned; nothing will be published"
+          fi
+          echo "signed=$signed" >> "$GITHUB_OUTPUT"
+
+      # GitHub's OIDC token against the app registration's federated
+      # credential: no client secret. The dlib picks up the az CLI session.
+      - name: Azure login
+        if: steps.signing.outputs.signed == 'true'
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2.3.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      # No updater bundle (latest.json lists the Macs only). Signed when the
+      # signing setup wrote tauri.windows.conf.json, else unsigned.
       # Tried twice: Tauri downloads NSIS on a first build.
-      - name: Build (NSIS installer, unsigned)
+      - name: Build (NSIS installer)
         run: bash app/scripts/retry.sh -n 2 npm --prefix app run tauri -- build --ci --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
+
+      # What a downloader's Windows will decide, checked on what is about to be
+      # published: the app exe and the installer must both carry a valid
+      # Authenticode signature (signtool verify /pa). Otherwise the job fails
+      # and nothing is published.
+      - name: Verify signatures
+        id: verify
+        if: steps.signing.outputs.signed == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          bundle=app/src-tauri/target/release
+          exes=("$bundle/brindle.exe")
+          [ -f "${exes[0]}" ] || exes=("$bundle/brindle-desktop.exe")
+          for f in "${exes[0]}" "$bundle/bundle/nsis/brindle_${VERSION}_x64-setup.exe"; do
+            [ -f "$f" ] || { echo "::error::no $f to verify"; exit 1; }
+            # Git Bash would turn /pa and /v into paths: no conversion for signtool's flags.
+            MSYS2_ARG_CONV_EXCL='*' "$SIGNTOOL" verify /pa /v "$(cygpath -w "$f")" || { echo "::error::$f is not validly signed"; exit 1; }
+          done
+          echo "verified=true" >> "$GITHUB_OUTPUT"
+
+      # No later step needs the Azure session.
+      - name: Azure logout
+        if: always() && steps.signing.outputs.signed == 'true'
+        run: az logout || true
 
       # The WSL client's tests, with its Windows-only code compiled in (the
       # build above left the front end's dist/ that the shell embeds).
@@ -1062,9 +1150,82 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: brindle-desktop-windows-unsigned-${{ steps.version.outputs.version }}
+          name: brindle-desktop-windows-${{ steps.verify.outputs.verified == 'true' && 'signed' || 'unsigned' }}-${{ steps.version.outputs.version }}
           path: ${{ steps.collect.outputs.dir }}
           if-no-files-found: error
+
+      # The macOS job's gate for the Windows installer: only a pushed tag, a
+      # signature that verified, and the bucket's role and name set.
+      - name: Publish?
+        id: publish
+        env:
+          PLATFORM: windows
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          SIGNED: ${{ steps.verify.outputs.verified }}
+          ROLE: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          BUCKET: ${{ vars.DESKTOP_DOWNLOADS_BUCKET }}
+        run: bash app/scripts/publish_gate.sh
+
+      - name: AWS credentials
+        if: github.event_name == 'push' && steps.publish.outputs.go == 'true'
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+        # GitHub's OIDC token exchanged for the release role's session (no
+        # third-party credentials action). The token is never printed.
+        run: |
+          set -euo pipefail
+          # node (set up above) fetches the token.
+          token="$(node -e 'fetch(process.env.ACTIONS_ID_TOKEN_REQUEST_URL + "&audience=sts.amazonaws.com", {headers: {Authorization: "bearer " + process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}}).then((r) => r.json()).then((j) => console.log(j.value || ""))')"
+          if [ -z "$token" ]; then
+            echo "::error::no OIDC token from GitHub (does the job have id-token: write?)"
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          creds="$(AWS_REGION="$REGION" aws sts assume-role-with-web-identity \
+            --role-arn "$ROLE_ARN" \
+            --role-session-name "desktop-release-${GITHUB_RUN_ID}" \
+            --web-identity-token "$token" \
+            --duration-seconds 3600 \
+            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+            --output text)"
+          unset token
+          read -r key secret session <<<"$creds"
+          if [ -z "$key" ] || [ -z "$secret" ] || [ -z "$session" ]; then
+            echo "::error::assume-role-with-web-identity returned no credentials"
+            exit 1
+          fi
+          for v in "$key" "$secret" "$session"; do echo "::add-mask::$v"; done
+          {
+            echo "AWS_ACCESS_KEY_ID=$key"
+            echo "AWS_SECRET_ACCESS_KEY=$secret"
+            echo "AWS_SESSION_TOKEN=$session"
+            echo "AWS_REGION=$REGION"
+            echo "AWS_DEFAULT_REGION=$REGION"
+          } >> "$GITHUB_ENV"
+
+      - name: Publish Windows installer to pawdelta.com/brindle/downloads/desktop/
+        if: github.event_name == 'push' && steps.publish.outputs.go == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          RC: ${{ steps.version.outputs.rc }}
+          DEST_PATH: ${{ steps.version.outputs.path }}
+          DIR: ${{ steps.collect.outputs.dir }}
+          BUCKET: ${{ vars.DESKTOP_DOWNLOADS_BUCKET }}
+        run: |
+          dest="s3://$BUCKET/$S3_PREFIX"
+          # The versioned file first (immutable), then the stable name the site
+          # links to (not for a release candidate: rc/<version>/ only).
+          aws s3 cp --recursive "$DIR/$VERSION" "$dest/$DEST_PATH" \
+            --cache-control "public, max-age=31536000, immutable"
+          if [ "$RC" = true ]; then
+            echo "Published brindle desktop $VERSION (release candidate, Windows) to $SITE_DOWNLOADS/$DEST_PATH/" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          aws s3 cp "$DIR/$VERSION/brindle_${VERSION}_x64-setup.exe" "$dest/brindle_x64-setup.exe" \
+            --cache-control no-cache --content-type application/vnd.microsoft.portable-executable
+          echo "Published brindle desktop $VERSION (Windows) to $SITE_DOWNLOADS/" >> "$GITHUB_STEP_SUMMARY"
 
   nightly:
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.nightly)

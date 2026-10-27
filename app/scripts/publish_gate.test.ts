@@ -87,6 +87,8 @@ describe("app-release publish gate", () => {
     ["release branch: a tag", { CHANNEL: "release", EVENT: "push", REF_TYPE: "tag", REF: "refs/tags/app-v0.2.0", ...ready }, "go=false"],
     ["release branch: another branch", { CHANNEL: "release", ...branch, REF: "refs/heads/main", ...ready }, "go=false"],
     ["release branch: unsigned", { CHANNEL: "release", ...branch, ...ready, SIGNED: "false" }, "go=false"],
+    ["Windows: a pushed tag, signature verified", { PLATFORM: "windows", EVENT: "push", REF_TYPE: "tag", SIGNED: "true", ROLE: "r", BUCKET: "b" }, "go=true"],
+    ["Windows: a pushed tag, unsigned", { PLATFORM: "windows", EVENT: "push", REF_TYPE: "tag", SIGNED: "", ROLE: "r", BUCKET: "b" }, "go=false"],
   ])("%s: %s", (_case, env, expected) => {
     expect(decide(env)).toBe(expected);
   });
@@ -97,7 +99,7 @@ describe("app-release publish gate", () => {
     const aws = text.split(/\n(?= {6}- )/).filter((step) => /\baws (s3|s3api|sts) /.test(step));
     expect(aws.length).toBeGreaterThan(0);
     for (const step of aws) expect(step.split("\n").slice(0, 2).join("\n"), step.split("\n")[0]).toContain(guard);
-    for (const name of ["macos-publish", "linux", "release-publish"]) {
+    for (const name of ["macos-publish", "linux", "release-publish", "windows"]) {
       expect(jobOf(text, name), name).toContain("EVENT: ${{ github.event_name }}");
       expect(jobOf(text, name), name).toContain("run: bash app/scripts/publish_gate.sh");
     }
@@ -127,7 +129,7 @@ describe("app-release publish gate", () => {
       const start = text.indexOf(`\n  ${name}:\n`);
       return text.slice(start + 1, text.indexOf("\n  ", text.indexOf("steps:", start)));
     };
-    for (const name of ["macos-publish", "linux"]) expect(job(name), name).toContain(env);
+    for (const name of ["macos-publish", "linux", "windows"]) expect(job(name), name).toContain(env);
     expect(job("macos")).toContain("(github.ref_type == 'tag' && 'desktop-release' || 'desktop-staff-release')");
     const staff = jobOf(text, "release-publish");
     expect(staff).toContain("environment: desktop-staff-release\n");

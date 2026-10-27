@@ -680,10 +680,16 @@ What a Linux machine needs to run the app:
 
 ### Windows (WSL)
 
-The same tag runs the workflow's `windows` job: it builds an unsigned NSIS
-installer (`brindle_<version>_x64-setup.exe`) and keeps it as a workflow
-artifact only. Windows code signing is an owner purchase; until then nothing
-for Windows is published, and an unsigned build shows a SmartScreen warning.
+The same tag runs the workflow's `windows` job, which builds the NSIS installer
+(`brindle_<version>_x64-setup.exe`). With the Azure Artifact Signing secrets
+set (table below; `azure/login` through GitHub's OIDC, no client secret)
+Tauri's `signCommand` (signtool with the Azure dlib) signs the app exe and the installer, and `signtool verify
+/pa` must accept both or the job fails. Under the same gate as the other
+platforms (a pushed tag, the bucket set) the signed installer is published as
+`<version>/brindle_<version>_x64-setup.exe` and `brindle_x64-setup.exe`
+(a release candidate only under `rc/<version>/`). Without the secrets the
+installer is unsigned and kept as a workflow artifact only, nothing is
+published, and it shows a SmartScreen warning.
 
 The Windows app is a thin client of an engine running inside WSL
 (`src-tauri/src/wsl.rs`): it uses `$BRINDLE_WSL_DISTRO`, else WSL's default
@@ -695,13 +701,13 @@ and installs inside the distribution (no pty there: the install's output comes
 over pipes). A daemon already started in WSL without `--tcp` can't be reached:
 stop it (`brindle daemon stop`) and the app starts one that can.
 
-What the owner sets up, once. The Apple and Tauri secrets and the
+What the owner sets up, once. The Apple, Tauri and Azure secrets and the
 `TAURI_UPDATER_PUBKEY` variable live in each of the two GitHub environments
 (repository settings → Environments). The signing rows below describe the
-production environment; provision the same Apple signing material, and the
+production environment (the Azure rows, for Windows signing, only there); provision the same Apple signing material, and the
 staff updater key instead of the production one, in `desktop-staff-release`
 as described above. `macos` selects the environment
-by ref; `macos-publish` and `linux` use production, and `release-publish`
+by ref; `macos-publish`, `linux` and `windows` use production, and `release-publish`
 uses staff. Both require owner approval and the exact deployment rules above.
 Downloads bucket and region variables may be repository variables (Secrets
 and variables → Actions):
@@ -718,6 +724,12 @@ and variables → Actions):
 | `TAURI_SIGNING_PRIVATE_KEY` | secret (`desktop-release` env) | The production updater minisign private key matching the committed public key. `desktop-staff-release` holds the staff key instead (matching `src-tauri/staff-updater.pub`). |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret (`desktop-release` env) | Its password, if it has one. |
 | `TAURI_UPDATER_PUBKEY` | variable (`desktop-release` env) | Optional. The matching public key is committed in `tauri.conf.json` (`plugins.updater.pubkey`); when this is set, the build fails unless it is that same key. In `desktop-staff-release` it must be `src-tauri/staff-updater.pub`'s key, never the production one. |
+| `AZURE_CLIENT_ID` | secret (`desktop-release` env) | Windows signing: the application (client) ID of a Microsoft Entra app registration that has the **Artifact Signing Certificate Profile Signer** role on the signing account (Entra admin center → App registrations). |
+| `AZURE_TENANT_ID` | secret (`desktop-release` env) | The Entra tenant (directory) ID, from the same app registration's overview. |
+| `AZURE_SUBSCRIPTION_ID` | secret (`desktop-release` env) | The subscription holding the signing account (`azure/login` needs one). There is no client secret: add a federated credential to the app registration (Certificates & secrets → Federated credentials; issuer `https://token.actions.githubusercontent.com`, subject `repo:OWNER/REPO:environment:desktop-release`, audience `api://AzureADTokenExchange`). |
+| `AZURE_SIGNING_ENDPOINT` | secret (`desktop-release` env) | The signing account's regional endpoint, e.g. `https://eus.codesigning.azure.net/` (the account's overview page in the Azure portal). |
+| `AZURE_SIGNING_ACCOUNT` | secret (`desktop-release` env) | The Artifact Signing account's name (Azure portal → Artifact Signing accounts; formerly Trusted Signing). |
+| `AZURE_SIGNING_PROFILE` | secret (`desktop-release` env) | The certificate profile's name, under that account (needs identity validation done first). Signing is on when this and `AZURE_CLIENT_ID` are set. |
 | `AWS_DESKTOP_RELEASE_ROLE_ARN` | secret (`desktop-release` env) | ProductionRoleArn from the publishing stack; tags only. |
 | `AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN` | secret (`desktop-staff-release` env) | StaffRoleArn from the publishing stack; release branch only, no production fallback. |
 | `DESKTOP_DOWNLOADS_BUCKET` | variable | The downloads bucket's name, from the same setup. |
