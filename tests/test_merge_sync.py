@@ -10,7 +10,7 @@ import time
 import pytest
 
 from conftest import sh
-from brindle import agents, git, mcp_server, tmux, workspaces
+from brindle import agents, gates, git, mcp_server, tmux, workspaces
 from brindle.db import Agent
 
 
@@ -42,7 +42,9 @@ def _advance_base(repo, filename="base.txt", content="b"):
 def test_sync_with_base_skips_a_dirty_worktree(db, repo):
     ws = workspaces.create(db, str(repo), "feature").workspace
     _advance_base(repo)
-    open(os.path.join(ws.path, "scratch.txt"), "w").write("wip")  # uncommitted
+    open(os.path.join(ws.path, "scratch.txt"), "w").write("committed")
+    git.commit_all(ws.path, "tracked file")
+    open(os.path.join(ws.path, "scratch.txt"), "w").write("wip")
 
     result = workspaces.sync_with_base(ws)
 
@@ -131,30 +133,54 @@ def test_merge_workspace_up_to_date_branch_merges_as_before(db, repo, boss):
     assert (repo / "new.py").read_text() == "x = 1\n"
 
 
-def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkeypatch):
+@pytest.mark.parametrize("operation", ["merge_back", "sync_with_base"])
+@pytest.mark.parametrize("error", [git.GitError, workspaces.WorkspaceError])
+def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkeypatch, operation, error):
     ws = workspaces.create(db, str(repo), "feature").workspace
     open(os.path.join(ws.path, "new.py"), "w").write("x = 1\n")
     git.commit_all(ws.path, "work")
 
     def boom(*a, **k):
-        raise git.GitError("boom")
+        raise error("boom")
 
-    monkeypatch.setattr(workspaces, "merge_back", boom)
+    monkeypatch.setattr(workspaces, operation, boom)
     out = asyncio.run(mcp_server.merge_workspace(ws.id))
 
     assert out == "Not merged: boom"
 
 
-def test_merge_after_approval_dirty(db, repo, boss):
+@pytest.mark.parametrize("base_state", ["unchanged", "advanced", "overwrites scratch"])
+def test_merge_after_approval_dirty(db, repo, boss, monkeypatch, base_state):
     """An untracked file left in the worktree after approval (check output,
     the reviewer's scratch) isn't a change to the branch: the gates ignore it
     and merge_back must too, instead of failing "uncommitted changes"."""
     ws = workspaces.create(db, str(repo), "feature").workspace
     open(os.path.join(ws.path, "f.txt"), "w").write("f")
     git.commit_all(ws.path, "feature work")
+    write_config(repo, review=True)
+    approved = gates.head(ws)
+    db.add_review(ws.id, approved, "reviewer", True, "lgtm")
+    if base_state != "unchanged":
+        _advance_base(repo, "check-output.log" if base_state == "overwrites scratch" else "base.txt")
     open(os.path.join(ws.path, "check-output.log"), "w").write("scratch")  # untracked
+    checked = []
+    run = gates.run
+
+    def record_gates(*args, **kwargs):
+        checked.append((gates.head(ws), git.ahead_behind(ws.path, "main")[0]))
+        return run(*args, **kwargs)
+
+    monkeypatch.setattr(gates, "run", record_gates)
 
     out = asyncio.run(mcp_server.merge_workspace(ws.id))
 
+    if base_state == "overwrites scratch":
+        assert out.startswith("Not merged: merging main failed"), out
+        assert checked == [] and gates.head(ws) == approved
+        assert not (repo / "f.txt").exists()
+        assert open(os.path.join(ws.path, "check-output.log")).read() == "scratch"
+        return
     assert out.startswith("Merged feature"), out
+    assert checked == [(gates.head(ws), 0)]
+    assert (gates.head(ws) != approved) == (base_state == "advanced")
     assert (repo / "f.txt").exists()
