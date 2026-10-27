@@ -935,11 +935,12 @@ class _HookConnection:
 @pytest.fixture
 def answering(db, world, monkeypatch):
     """A daemon for the hook to hold requests in, a short hold, and the hook quick to look."""
-    from brindle.daemon import holds
+    from brindle.daemon import events, holds
     from brindle.service import inbox
 
     config.set_local(world.repo_root, "permission_hold_seconds", HOLD)
     _HookConnection.paths = []
+    monkeypatch.setattr(events, "connected", 1)      # the app is open
     monkeypatch.setattr(holds, "_UnixConnection", _HookConnection)
     monkeypatch.setattr(agents, "HOLD_LOOK_SECONDS", 0.05)
     monkeypatch.setattr(inbox, "STEP_SECONDS", 0.01)
@@ -1216,6 +1217,16 @@ def test_permission_holds_take_no_token_but_only_a_hooks_own_agents(db, world, a
     now[0] += 2
     assert not offered("r-due") and not holds.HOLDS.claim("wk", "r-due", "d", "allow_once")
     assert register(request_id="r-next") == 200
+
+
+def test_hold_skipped_without_app(db, repo, world, answering, monkeypatch):
+    from brindle.daemon import events, holds
+
+    monkeypatch.setattr(events, "connected", 0)
+    monkeypatch.setattr(holds, "HOLDS", holds.Holds())
+    # No events client: the daemon refuses the hold, so the hook returns at once and the CLI prompts.
+    assert agents.permission_request_decision(db, db.get_agent("wk"), {**ASK, "cwd": str(repo)}) is None
+    assert holds.HOLDS.agents() == []
 
 
 def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, world, answering, monkeypatch):

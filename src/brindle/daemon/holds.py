@@ -229,10 +229,12 @@ async def _body(request: Request) -> dict:
 
 async def register(request: Request) -> JSONResponse:
     """A hook's hold, for an agent it runs under (by its processes' ancestry)."""
-    from brindle.daemon import peer
+    from brindle.daemon import events, peer
 
+    if not events.connected:
+        return JSONResponse({"error": {"code": "no_app", "message": "no app is connected to answer"}}, 503)
     body = await _body(request)
-    fields = [_str(body, k) for k in ("agent_id", "request_id", "digest", "nonce")]
+    fields =[_str(body, k) for k in ("agent_id", "request_id", "digest", "nonce")]
     hold_until = body.get("hold_until")
     if not all(fields) or not isinstance(hold_until, (int, float)) or isinstance(hold_until, bool):
         return JSONResponse({"error": {"code": "invalid",

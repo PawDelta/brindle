@@ -24,6 +24,7 @@ TAIL_SECONDS = 0.25
 LIVENESS_SECONDS = 2.0
 GIT_SECONDS = 5.0
 PAGE = 500
+connected = 0       # open /v1/events clients: with none, nobody is there to answer a held request
 
 
 class Feed:
@@ -154,7 +155,9 @@ async def events(ws: WebSocket) -> None:
         since = max(0, int(ws.query_params.get("since", "0")))
     except ValueError:
         since = 0
+    global connected
     await ws.accept()
+    connected += 1
     loop = asyncio.get_running_loop()
     # SQLite connections stay on their thread: one worker owns this client's.
     pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="brindle-events")
@@ -183,6 +186,7 @@ async def events(ws: WebSocket) -> None:
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
+        connected -= 1
         if disconnected is not None:
             disconnected.cancel()
         try:
