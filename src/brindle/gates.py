@@ -258,6 +258,21 @@ def _waiting_ahead(queue, mine: str) -> list[int]:
     return ahead
 
 
+def note_warm(ws_id: str) -> None:
+    """Record that a report's warm check run is about to start on ``ws_id``,
+    before the helper launches, so the review for that report can take over
+    its outcome (a failure included) whatever the pipeline's claim says."""
+    _marker_file("warm-since", ws_id).write_text(repr(time.time()))
+
+
+def warm_since(ws_id: str) -> float | None:
+    """When the last warm run was noted for ``ws_id`` (see ``note_warm``)."""
+    try:
+        return float(_marker_file("warm-since", ws_id).read_text())
+    except (OSError, ValueError):
+        return None
+
+
 def _marker_file(kind: str, ws_id: str):
     from brindle.config import brindle_home
 

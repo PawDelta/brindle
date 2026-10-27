@@ -175,16 +175,14 @@ def test_review_uses_warm_checks(db, ws, boss, spawned, monkeypatch):
     assert calls == ["true"] and "PASS `true`" in spawned[0]
 
     # A failing warm run is handed over too, though it is never cached.
-    from brindle import pipeline
     (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
     (Path(ws.repo_root) / ".brindle" / "config.json").write_text(
         json.dumps({"checks": ["bad"], "check_concurrency": 0}))
     commit(ws, "more.py")
-    reported = time.time()
     monkeypatch.setattr(gates.autopilot, "run_check",
                         lambda cmd, cwd, env, timeout, **kw: calls.append(cmd) or (False, "boom"))
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
-    monkeypatch.setattr(pipeline, "review_claim", lambda db_, ws_: reported)
-    cli.warm_checks_cmd(ws.id)
+    monkeypatch.setattr(agents, "_detach", lambda argv: cli.warm_checks_cmd(ws.id))   # finishes before the review
+    agents.warm_checks(ws)
     agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["bad"]))
     assert calls == ["true", "bad"] and "FAIL `bad`" in spawned[1]

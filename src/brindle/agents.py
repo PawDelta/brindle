@@ -2319,6 +2319,9 @@ def warm_checks(ws: Workspace) -> None:
             return
     except (ValueError, git.GitError):
         return
+    from brindle import gates
+
+    gates.note_warm(ws.id)
     _detach([*brindle_invocation(), "_warm-checks", ws.id])
 
 
@@ -3037,7 +3040,9 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
             try:
                 # In the check queue as of the report (#186): a run restarted
                 # or requested again later doesn't lose its turn.
-                with gates.queue_place(since or time.time()):
+                # The report's place: the pipeline claim or the warm run's start, whichever is earlier.
+                place = min(t for t in (since, gates.warm_since(ws.id), time.time()) if t is not None)
+                with gates.queue_place(place):
                     summary = gates.check_summary(
                         db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha
                         or not _review_requested(ws.id, profile, request_id))
