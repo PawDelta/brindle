@@ -441,6 +441,7 @@ knowing them helps when you tell the supervisor how to work.
 | `report_result` | worker | finish a task and hand back the result |
 | `submit_plan` | worker | a `plan_first` worker proposes its plan and waits for approval before editing |
 | `approve_plan` | supervisor | approve a worker's plan, or send it back with feedback (`approved=false`) |
+| `answer_permission` | supervisor | allow, deny or escalate (with a reason) a worker's permission ask before the person sees it |
 | `complete_subagent` | supervisor | record the result of a `subagent`-profile task |
 | `set_goal` / `get_progress` / `check_milestone` | supervisor | autopilot's goal, its progress, and running the checks |
 | `record_audit_decision` | supervisor | record acceptance of an audit finding with rationale so subsequent audits respect it |
@@ -661,6 +662,7 @@ Autopilot, merge gates and cleanup:
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
 | `permission_policy` | `"on"` with a Pro license, else `"off"` | `"on"`: brindle answers workers' permission requests from its rules (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. The only permission switch: a leftover `permission_essentials` key is ignored |
+| `permission_supervisor_hold_seconds` | `120` | with `permission_policy` on, how long a Claude Code or Codex worker's ask waits on its supervisor (`answer_permission`) before you see it; asks a person-only rule makes (pushes into the default or a release branch) come straight to you |
 | `agy_approvals` | unset | `"brindle"`: Antigravity agents run without approval prompts and brindle's hook allows or denies every call, applying the profile's `allowed_tools` (see "Antigravity" under "Permission policy"); `"prompt"`: agy asks as usual. Unset, workers get `"brindle"` and interactive agy sessions `"prompt"` |
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
 | `plan_first` | `false` | workers propose a plan (`submit_plan`) and wait for `approve_plan` before editing |

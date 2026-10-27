@@ -157,6 +157,9 @@ class RepoConfig:
     #   Native       brindle's own loop: no timeout but this; no prompt of its
     #                own, so on timeout the call is refused.
     permission_hold_seconds: int = 86400
+    # Seconds of that hold a worker's ask (one no person-only rule makes) waits on
+    # its supervisor's answer before the person sees it (brindle.permission_routing).
+    permission_supervisor_hold_seconds: int = 120
     # "brindle": agy agents run with --dangerously-skip-permissions and
     # brindle's hook allows or denies every call (see brindle.antigravity).
     # "prompt": agy asks as usual. None (unset): "brindle" for agents brindle
@@ -356,7 +359,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "auto_pr", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
-                "permission_hold_seconds", "agy_approvals",
+                "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
                 "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks", "scoped_checks"):
         for source in (local, shared, user):

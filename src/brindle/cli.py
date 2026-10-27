@@ -1456,6 +1456,14 @@ def permissions_list() -> None:
         typer.echo(f"{r.id:<12} {r.decision:<5} {r.kind:<5} {r.source:<7} {r.describe()}")
 
 
+@permissions_app.command("report")
+def permissions_report(days: int = typer.Option(7, "--days", min=1, help="How many days back to look.")) -> None:
+    """How often permission requests were left to the person (vs. decided by the policy), and why."""
+    from brindle import permission_asks
+
+    typer.echo(permission_asks.format_report(permission_asks.report(DB(), days, _here_repo())))
+
+
 @permissions_app.command("check")
 def permissions_check(profile: str | None = typer.Option(None, "--profile", help="Profile name to check.")) -> None:
     """Show the effective rule set for each provider without changing settings."""

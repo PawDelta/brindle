@@ -17,6 +17,7 @@ from brindle.service.dto import (
     AskResultDTO,
     AskScopeDTO,
     PermissionExceptionDTO,
+    PermissionGroupDTO,
     PermissionLimitsDTO,
     PermissionPolicyDTO,
     PermissionPresetDTO,
@@ -51,7 +52,9 @@ def policy_dto(store: permissions.Store | None = None) -> PermissionPolicyDTO:
         presets=[PermissionPresetDTO(name=name, description=desc, unmatched=unmatched, current=name == store.preset)
                  for name, (_, unmatched, desc) in permissions.PRESETS.items()],
         rules=[rule_dto(r, counts) for r in store.rules],
-        saved=[saved_dto(s) for s in store.saved], prompt_counts=counts)
+        saved=[saved_dto(s) for s in store.saved], prompt_counts=counts,
+        groups=[PermissionGroupDTO(name=name, baseline=g["baseline"], subcategories=g["subcategories"])
+                for name, g in permissions.effective_groups(store).items()])
 
 
 def scope_dto(scope: dict) -> AskScopeDTO:
@@ -63,7 +66,7 @@ def ask_dto(a: grants.PendingAsk) -> AskDTO:
                   repo=a.repo_root, kind=a.ask.kind, tool=a.request.tool, exact=a.ask.exact,
                   summary=a.request.summary(), waiting_since=a.created_at, worker=a.worker, blocked=a.blocked,
                   rule=a.rule.id if a.rule else None, limits=limits_dto(a.rule.limits if a.rule else None),
-                  reason=a.policy.reason)
+                  reason=a.policy.reason, escalation=a.escalation)
 
 
 def _title(g: grants.Group) -> str:

@@ -35,6 +35,7 @@ export interface ApiSchema {
   PermissionChoiceDTO: PermissionChoiceDTO;
   PermissionDTO: PermissionDTO;
   PermissionExceptionDTO: PermissionExceptionDTO;
+  PermissionGroupDTO: PermissionGroupDTO;
   PermissionLimitsDTO: PermissionLimitsDTO;
   PermissionPolicyDTO: PermissionPolicyDTO;
   PermissionPresetDTO: PermissionPresetDTO;
@@ -221,6 +222,7 @@ export interface AskDTO {
   agent_id: string;
   blocked?: boolean;
   digest: string;
+  escalation?: string;
   exact: string;
   kind: string;
   limits?: PermissionLimitsDTO | null;
@@ -513,14 +515,29 @@ export interface PermissionExceptionDTO {
   match_type: string;
 }
 /**
+ * A capability group (brindle.permission_groups): what it answers for a
+ * request no rule covers, unless one of its subcategories says otherwise.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionGroupDTO".
+ */
+export interface PermissionGroupDTO {
+  baseline: string;
+  name: string;
+  subcategories?: {
+    [k: string]: string;
+  };
+}
+/**
  * GET /permissions: the chosen preset, the unmatched setting, every rule
- * (editable, the preset's included), the saved actions and per-rule prompt
- * counts ("unmatched" for asks no rule caused).
+ * (editable, the preset's included), the saved actions, per-rule prompt
+ * counts ("unmatched" for asks no rule caused) and the capability groups.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PermissionPolicyDTO".
  */
 export interface PermissionPolicyDTO {
+  groups?: PermissionGroupDTO[];
   preset: string | null;
   presets: PermissionPresetDTO[];
   prompt_counts?: {
