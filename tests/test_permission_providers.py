@@ -566,23 +566,31 @@ def test_install_codex_hook_dry_run_then_yes(monkeypatch):
     assert "already trusted" in r.invoke(app, ["permissions", "install-codex-hook"]).output
 
 
-def launch_argv(ws, mode=None):
+def launch_argv(ws, mode=None, env=None):
     from brindle.profiles import load_profile
     from brindle.providers import Codex, LaunchContext
 
-    return Codex().command(LaunchContext("c1", load_profile("developer"), None, cwd=ws.path, mode=mode))
+    profile = load_profile("developer")
+    if env is not None:
+        profile.env = {**(profile.env or {}), **env}
+    return Codex().command(LaunchContext("c1", profile, None, cwd=ws.path, mode=mode))
 
 
 @pytest.mark.parametrize("mode", [None, "review"])
-def test_codex_launch_venv_path(ws, monkeypatch, mode):
+@pytest.mark.parametrize("profile_path, base", [(None, "/usr/bin"), ("/opt/bin", "/opt/bin"), ("", "")])
+def test_codex_launch_venv_path(ws, monkeypatch, mode, profile_path, base):
     """uv panics under Codex's macOS sandbox, so the worktree's .venv/bin leads
-    PATH for `python -m pytest`."""
+    PATH for `python -m pytest`, on top of the profile's PATH when it sets one
+    (even an empty one)."""
     monkeypatch.setenv("PATH", "/usr/bin")
-    assert not any("shell_environment_policy.set.PATH" in a for a in launch_argv(ws, mode=mode))
+    env = None if profile_path is None else {"PATH": profile_path}
+    assert not any("shell_environment_policy.set.PATH" in a for a in launch_argv(ws, mode, env))
     venv_bin = os.path.join(ws.path, ".venv", "bin")
     os.makedirs(venv_bin)
-    argv = launch_argv(ws, mode=mode)
-    assert f"shell_environment_policy.set.PATH={json.dumps(venv_bin + os.pathsep + '/usr/bin')}" in argv
+    want = os.pathsep.join(p for p in (venv_bin, base) if p)
+    assert f"shell_environment_policy.set.PATH={json.dumps(want)}" in launch_argv(ws, mode, env)
+
+
 
 def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monkeypatch):
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)

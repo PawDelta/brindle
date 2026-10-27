@@ -104,7 +104,8 @@ def _venv_path_env(ctx: LaunchContext) -> dict[str, str]:
     venv_bin = os.path.join(ctx.cwd or "", ".venv", "bin")
     if not ctx.cwd or not os.path.isdir(venv_bin):
         return {}
-    return {"PATH": os.pathsep.join(p for p in (venv_bin, os.environ.get("PATH")) if p)}
+    base = (ctx.profile.env or {}).get("PATH", os.environ.get("PATH", ""))
+    return {"PATH": os.pathsep.join(p for p in (venv_bin, base) if p)}
 
 
 class Provider:
