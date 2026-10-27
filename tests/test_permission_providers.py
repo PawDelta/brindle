@@ -573,18 +573,16 @@ def launch_argv(ws, mode=None):
     return Codex().command(LaunchContext("c1", load_profile("developer"), None, cwd=ws.path, mode=mode))
 
 
-@pytest.mark.parametrize("mode, approvals_never", [(None, False), ("review", True)])
-def test_codex_launch_venv_path(ws, monkeypatch, mode, approvals_never):
+@pytest.mark.parametrize("mode", [None, "review"])
+def test_codex_launch_venv_path(ws, monkeypatch, mode):
     """uv panics under Codex's macOS sandbox, so the worktree's .venv/bin leads
-    PATH for `python -m pytest`; a reviewer's refused command fails, not waits."""
+    PATH for `python -m pytest`."""
     monkeypatch.setenv("PATH", "/usr/bin")
     assert not any("shell_environment_policy.set.PATH" in a for a in launch_argv(ws, mode=mode))
     venv_bin = os.path.join(ws.path, ".venv", "bin")
     os.makedirs(venv_bin)
     argv = launch_argv(ws, mode=mode)
     assert f"shell_environment_policy.set.PATH={json.dumps(venv_bin + os.pathsep + '/usr/bin')}" in argv
-    assert (argv[argv.index("--ask-for-approval") + 1] == "never") if approvals_never else "--ask-for-approval" not in argv
-
 
 def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monkeypatch):
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)

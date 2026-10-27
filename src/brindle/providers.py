@@ -1630,10 +1630,6 @@ class Codex(Provider):
             *(a for k, v in {**_uv_cache_env(ctx), **_venv_path_env(ctx)}.items()
               for a in ("-c", f"shell_environment_policy.set.{k}={json.dumps(v)}")),
         ]
-        if ctx.mode == "review":
-            # Nobody watches a reviewer: a command the sandbox refuses fails
-            # instead of waiting for a person. Hooks are separate from approvals.
-            argv += ["--ask-for-approval", "never"]
         # brindle's permission policy, when it's on and the person has trusted
         # brindle's hook once (`brindle permissions install-codex-hook`; see
         # brindle.codex_hook). Otherwise Codex prompts as usual. A reviewer gets
