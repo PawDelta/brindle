@@ -251,13 +251,18 @@ def _sed_edits_only(script: str) -> bool:
     i, n = 0, len(script)
 
     def delimited(i: int, parts: int) -> int | None:
-        """The index past ``parts`` texts closed by the delimiter at ``i``."""
+        """The index past ``parts`` texts closed by the delimiter at ``i``;
+        None for what sed may read otherwise: a bracket expression (a
+        delimiter in [...] closes nothing), an escaped delimiter, or a
+        delimiter other than / that appears anywhere else in the script."""
         delimiter = script[i] if i < n else ""
-        if not delimiter or delimiter in "\\\n":
+        if not delimiter or delimiter in "\\\n[" or delimiter != "/" and script.count(delimiter) != parts + 1:
             return None
         i += 1
         for _ in range(parts):
             while i < n and script[i] != delimiter:
+                if script[i] == "[" or script[i] == "\\" and script[i + 1:i + 2] == delimiter:
+                    return None
                 i += 2 if script[i] == "\\" else 1
             if i >= n:
                 return None

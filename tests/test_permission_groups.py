@@ -80,6 +80,9 @@ DESTRUCTIVE_DENIED = {"shell": {"baseline": "allow", "subcategories": {"destruct
     ("permissive", {}, lambda ws: bash(ws, "sed -i --expression=s/a/b/ /probe"), "ask", [("files", "write-outside")]),
     ("permissive", {}, lambda ws: bash(ws, "sed -i '' -e 'w /probe' notes.txt"), "ask",
      [("files", "write-outside")]),                                  # the script writes elsewhere
+    ("permissive", {"files": {"subcategories": {"write-outside": "deny"}}},
+     lambda ws: bash(ws, "sed -i '' 's#[#]#;a #w /etc/probe' notes.txt"), "deny",
+     [("files", "write-outside")]),                                  # [#] hides a w flag
     # A subcategory over its group's baseline, set through the daemon.
     ("autonomous", {"git": {"subcategories": {"push-feature": "deny"}}},
      lambda ws: bash(ws, "git push origin feature"), "deny", [("git", "push-feature")]),
