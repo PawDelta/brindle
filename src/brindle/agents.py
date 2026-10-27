@@ -3593,7 +3593,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 # Within the timeout Codex's hook definition carries (codex_hook.TIMEOUT).
                 hold = min(cfg.permission_hold_seconds, codex_hook.TIMEOUT - HOOK_SLACK)
                 answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold,
-                                       **_supervising(db, agent, cfg, decision))
+                                       **_supervising(db, agent, cfg, decision, payload))
                 if answer:
                     decision = permissions.Decision(
                         "deny" if answer in ("deny", "supervisor_deny") else "allow",
@@ -3650,7 +3650,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             # Recorded either way: its PostToolUse counts as the person's approval.
             answer = _hold_for_app(db, agent, req, decision.reason, suggestions, keep=True,
                                    hold=cfg.permission_hold_seconds,
-                                   **(_supervising(db, agent, cfg, decision) if policy else {}))
+                                   **(_supervising(db, agent, cfg, decision, payload) if policy else {}))
             if answer:
                 return permissions.claude_answer(answer, suggestions)
         return permissions.claude_output(decision)
@@ -3659,7 +3659,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         return None
 
 
-def _supervising(db: DB, agent: Agent, cfg, decision) -> dict:
+def _supervising(db: DB, agent: Agent, cfg, decision, payload: dict) -> dict:
     """_hold_for_app's supervisor arguments for an ask of brindle's policy:
     none when the person alone answers it (brindle.permission_routing)."""
     from brindle import permission_routing
@@ -3667,7 +3667,8 @@ def _supervising(db: DB, agent: Agent, cfg, decision) -> dict:
     supervisor = permission_routing.supervisor_for(db, agent, decision)
     if supervisor is None:
         return {}
-    return {"supervisor": supervisor, "supervise": cfg.permission_supervisor_hold_seconds}
+    return {"supervisor": supervisor, "supervise": cfg.permission_supervisor_hold_seconds,
+            "tool_input": payload.get("tool_input")}
 
 
 def _session_of(db: DB, agent: Agent) -> str | None:
@@ -3696,7 +3697,8 @@ ANSWERS = ("allow_once", "allow_always", "deny")
 
 
 def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
-                  hold: float, supervisor: Agent | None = None, supervise: float = 0) -> str | None:
+                  hold: float, supervisor: Agent | None = None, supervise: float = 0,
+                  tool_input: object = None) -> str | None:
     """Record a request the policy left to the person and, while the app's
     daemon runs, hold it there for the person's answer for ``hold`` seconds
     (_await_app_answer; the row's ``hold_until`` says till when, for the
@@ -3708,7 +3710,8 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     note_permission_outcome). ``keep``: record it even when nothing is held,
     and keep it once the hold ends (for that pairing). ``supervisor``: the
     worker's supervisor answers it first, for ``supervise`` seconds of the
-    hold (brindle.permission_routing), and the person after."""
+    hold (brindle.permission_routing), and the person after; it is shown the
+    CLI's complete ``tool_input``, which also tells identical requests apart."""
     from brindle import permission_asks, permission_routing, permissions
     from brindle.daemon.holds import Holder
 
@@ -3721,7 +3724,8 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     now = time.time()
     hold_until = now + hold
     supervise_until = min(hold_until, now + supervise) if supervisor is not None and supervise > 0 else None
-    held = holder.register(hold_until, supervise_until) if supervise_until else holder.register(hold_until)
+    held = (holder.register(hold_until, supervise_until, permission_routing.join_key(digest, tool_input))
+            if supervise_until else holder.register(hold_until))
     if not held:
         supervise_until = None      # no daemon to answer through: the CLI's own prompt asks
     # The daemon joined it to the same request already waiting on the supervisor, unanswered:
@@ -3737,7 +3741,7 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1],
                               channel, hold_until=hold_until if held else None)
     if supervise_until and not asked_already and not permission_routing.ask_supervisor(
-            db, agent, supervisor, request_id, req, reason, supervise_until - now):
+            db, agent, supervisor, request_id, req, reason, supervise_until - now, tool_input):
         db.update_permission_request(agent.id, request_id, channel="hook")   # the person's from now on
     answer = ended = ended_at = None
     if held:

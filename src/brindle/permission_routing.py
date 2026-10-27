@@ -19,6 +19,8 @@ workers'.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import re
 
@@ -71,18 +73,39 @@ def _fenced(text: str) -> str:
     return f"{fence}\n{text}\n{fence}"
 
 
+def _canonical(tool_input: object) -> str:
+    return json.dumps(tool_input, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def join_key(digest: str, tool_input: object) -> str | None:
+    """What two held requests must share for one supervisor answer to settle
+    both: the request as recorded (``digest``) and the CLI's complete tool
+    input, which the recorded request leaves out (an MCP call's arguments,
+    an edit's contents). None when the input isn't known: then it joins
+    nothing."""
+    if tool_input is None:
+        return None
+    return hashlib.sha256(f"{digest}\0{_canonical(tool_input)}".encode()).hexdigest()
+
+
 def ask_supervisor(db: DB, agent: Agent, supervisor: Agent, request_id: str, req, reason: str,
-                   seconds: float) -> bool:
-    """Send ``supervisor`` the complete request (the whole command, path or
-    URL, and where it runs: what an allow allows) now, mid-turn where its CLI
-    takes that (its own inbox), whole rather than as a "new messages"
-    notice. False when it couldn't be sent: the person has the request from
-    then on."""
+                   seconds: float, tool_input: object = None) -> bool:
+    """Send ``supervisor`` the complete request (the command verbatim, the
+    CLI's whole tool input, and where it runs: what an allow allows) now,
+    mid-turn where its CLI takes that (its own inbox), whole rather than as
+    a "new messages" notice. False when it couldn't be sent: the person has
+    the request from then on."""
     from brindle import agents, tmux
 
     why = reason.removesuffix("; asking the user") or "no rule allows it"
+    shown = [_fenced(req.command)] if req.command else []
+    if tool_input is not None:
+        shown.append("Its complete tool input:\n" + _fenced(json.dumps(tool_input, indent=2, ensure_ascii=False,
+                                                                         default=str)))
+    elif not req.command:
+        shown.append(_fenced(req.target()))
     body = (f"[brindle] Worker {agent.id} ({agent.profile}) asks to use {req.tool} ({req.kind}; {why}), "
-            f"in {req.cwd or req.worktree or '?'}:\n{_fenced(req.target())}\n"
+            f"in {req.cwd or req.worktree or '?'}:\n" + "\n".join(shown) + "\n"
             f"It's yours to answer before the person: answer_permission(agent_id=\"{agent.id}\", "
             f"request_id=\"{request_id}\", answer=\"allow\" | \"deny\" | \"escalate\", reason=\"...\") "
             f"within {round(seconds)}s. An allow allows exactly the request above, once. Escalate what "

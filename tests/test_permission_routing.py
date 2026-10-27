@@ -183,26 +183,47 @@ def test_only_the_workers_own_supervisor_answers(db, team, monkeypatch, who):
     assert history(db) == [("supervisor", "deny")]
 
 
-@pytest.mark.parametrize("answered_first", [False, True])
-def test_a_duplicate_ask_joins_the_first_until_the_supervisor_answers_it(db, team, monkeypatch, answered_first):
+def send_mail(to, body):
+    return {"tool_name": "mcp__mail__send", "tool_input": {"to": to, "body": body},
+            "hook_event_name": "PermissionRequest"}
+
+
+MAKE = {"tool_name": "Bash", "tool_input": {"command": "make build"}, "hook_event_name": "PermissionRequest"}
+
+
+@pytest.mark.parametrize("first_ask, again, answered_first", [
+    (MAKE, MAKE, False),                    # joins the first: one message, one answer for both
+    (MAKE, MAKE, True),                     # the first answered already: a request of its own
+    # The same tool with other arguments: another request, shown in full.
+    (send_mail("ops@example.com", "status: green"), send_mail("all@example.com", "wire the funds"), False),
+])
+def test_a_duplicate_ask_joins_the_first_until_the_supervisor_answers_it(db, team, monkeypatch, first_ask, again,
+                                                                         answered_first):
     """The same request asked again while the first waits on the supervisor
-    joins it: one message, one answer for both, neither row replaced. Asked
-    once the supervisor has answered the first (before its hook took the
-    answer), it is a request of its own."""
+    joins it, neither row replaced; anything else is asked about on its own."""
+    with permissions.editing() as store:
+        store.rules = [*store.rules, Rule("mcp", "mcp__mail__send", "exact", "ask")]
+    joins = again is first_ask and not answered_first
     first, second = [], []
 
     def asked_again(holder):
         first.append(holder.request_id)
         if answered_first:
             assert team.says("boss", holder.request_id, "allow")[0] == 200
-        second.append(ask(db, "make build"))
+        second.append(agents.permission_request_decision(db, db.get_agent("w1"), again))
 
     def boss_answers(holder):
         rows = db.permission_requests_of("w1")
         assert [r["tool_use_id"] for r in rows] == [first[0], holder.request_id]
-        assert team.says("boss", holder.request_id if answered_first else first[0], "allow")[0] == 200
+        if not answered_first:
+            assert team.says("boss", first[0], "allow")[0] == 200
+        assert (holds.HOLDS.held("w1", holder.request_id).answer is not None) == joins
+        if not joins:
+            assert team.says("boss", holder.request_id, "allow")[0] == 200
     waiting(monkeypatch, asked_again, boss_answers)
-    assert ask(db, "make build") == "allow"
-    assert second == ["allow"]
-    assert len(team.sent) == (2 if answered_first else 1)
+    out = agents.permission_request_decision(db, db.get_agent("w1"), first_ask)
+    assert [o["hookSpecificOutput"]["decision"]["behavior"] for o in (out, *second)] == ["allow", "allow"]
+    assert len(team.sent) == (1 if joins else 2)
+    for message, asked in zip(team.sent, (first_ask, again)):
+        assert all(value in message for value in asked["tool_input"].values())
     assert history(db) == [("supervisor", "allow"), ("supervisor", "allow")]
