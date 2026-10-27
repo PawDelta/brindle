@@ -122,17 +122,6 @@ def test_merge_workspace_reconciles_a_stale_processing_worker(db, repo, boss, mo
     assert db.get_agent("w1").status == "idle"
 
 
-def test_merge_workspace_up_to_date_branch_merges_as_before(db, repo, boss):
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    open(os.path.join(ws.path, "new.py"), "w").write("x = 1\n")
-    git.commit_all(ws.path, "work")
-
-    out = asyncio.run(mcp_server.merge_workspace(ws.id))
-
-    assert out.startswith("Merged feature into main")
-    assert (repo / "new.py").read_text() == "x = 1\n"
-
-
 @pytest.mark.parametrize("operation", ["merge_back", "sync_with_base"])
 @pytest.mark.parametrize("error", [git.GitError, workspaces.WorkspaceError])
 def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkeypatch, operation, error):
@@ -150,10 +139,12 @@ def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkey
 
 
 @pytest.mark.parametrize("base_state", ["unchanged", "advanced", "overwrites scratch"])
-def test_merge_after_approval_dirty(db, repo, boss, monkeypatch, base_state):
-    """An untracked file left in the worktree after approval (check output,
-    the reviewer's scratch) isn't a change to the branch: the gates ignore it
-    and merge_back must too, instead of failing "uncommitted changes"."""
+def test_merge_workspace_up_to_date_branch_merges_as_before(db, repo, boss, monkeypatch, base_state):
+    """An approved branch merges as before (when behind main it is synced
+    first). An untracked file left in the worktree after approval (check
+    output, the reviewer's scratch) isn't a change to the branch: the gates
+    ignore it and merge_back must too, instead of failing "uncommitted
+    changes"."""
     ws = workspaces.create(db, str(repo), "feature").workspace
     open(os.path.join(ws.path, "f.txt"), "w").write("f")
     git.commit_all(ws.path, "feature work")
@@ -183,4 +174,4 @@ def test_merge_after_approval_dirty(db, repo, boss, monkeypatch, base_state):
     assert out.startswith("Merged feature"), out
     assert checked == [(gates.head(ws), 0)]
     assert (gates.head(ws) != approved) == (base_state == "advanced")
-    assert (repo / "f.txt").exists()
+    assert (repo / "f.txt").read_text() == "f"

@@ -45,14 +45,12 @@ def test_pro_defaults_to_recording_approvals(db, repo, worker, pro):
     assert (entry["kind"], entry["match"], entry["count"]) == ("bash", "terraform apply", 1)
 
 
-def test_permission_outcome_fast_path(db, worker, monkeypatch):
-    monkeypatch.setattr(permissions, "from_claude", lambda *a, **k: pytest.fail("parsed the payload"))
-    agents.note_permission_outcome(db, worker, ASK)   # no permission_requests row: returns early
-
-
 def test_free_records_nothing(db, repo, worker, monkeypatch):
     monkeypatch.setattr(license, "has", lambda feature: False)
     assert load_repo_config(str(repo)).permission_policy == "off"
+    with monkeypatch.context() as m:   # no permission_requests row: the outcome returns before parsing
+        m.setattr(permissions, "from_claude", lambda *a, **k: pytest.fail("parsed the payload"))
+        agents.note_permission_outcome(db, worker, ASK)
     assert approve(db, worker) is None
     assert permissions.load_store().approvals == {}
 

@@ -26,22 +26,18 @@ def add(db, ws, agent_id, mode="interactive", profile="supervisor", **kw):
 # -- 1. tools loaded up front --------------------------------------------------
 
 
-def test_profile_can_force_tool_search(db, repo):
+def test_profile_can_force_tool_search(db, repo, monkeypatch):
     (repo / ".brindle" / "agents").mkdir(parents=True)
     (repo / ".brindle" / "agents" / "developer.md").write_text(
         "---\nname: developer\nprovider: claude\ntool_search: true\n---\nYou develop.\n")
     ws = workspaces.adopt_root(db, str(repo))
     add(db, ws, "w1", mode="assign", profile="developer")
-    assert "ENABLE_TOOL_SEARCH" not in agents.agent_env(ws, "w1", db.get_agent("w1"))
-
-
-def test_agent_env_caps_xdist(db, repo, monkeypatch):
-    ws = workspaces.adopt_root(db, str(repo))
-    add(db, ws, "w1", mode="assign", profile="developer")
     monkeypatch.delenv("PYTEST_XDIST_AUTO_NUM_WORKERS", raising=False)
-    assert agents.agent_env(ws, "w1", db.get_agent("w1"))["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"
+    env = agents.agent_env(ws, "w1", db.get_agent("w1"))
+    assert "ENABLE_TOOL_SEARCH" not in env
+    assert env["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"   # a worker's pytest-xdist is capped...
     monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", "8")
-    assert agents.agent_env(ws, "w1", db.get_agent("w1"))["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "8"
+    assert agents.agent_env(ws, "w1", db.get_agent("w1"))["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "8"   # ...unless set
 
 
 # -- 3. checks run once and are shared -------------------------------------------

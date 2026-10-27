@@ -295,7 +295,7 @@ def screens(monkeypatch):
 @pytest.mark.parametrize("status,mode", [
     ("idle", "assign"), ("starting", "assign"), ("processing", "review"), ("waiting", "assign"),
 ])
-def test_note_stuck_waiting_only(db, root, screens, monkeypatch, status, mode):
+def test_trust_dialog_nobody_answered_is_reported_by_the_sweep(db, root, screens, monkeypatch, status, mode):
     """The sweep reads only a waiting worker's pane, and forwards its live
     menu once; turn-end hooks and settle_startups own the others."""
     _, ws = root

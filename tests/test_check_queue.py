@@ -10,7 +10,7 @@ import pytest
 
 from conftest import full_text, sh
 from brindle import agents, autopilot, cli, gates, workspaces
-from brindle.config import load_repo_config
+from brindle.config import check_xdist_workers, load_repo_config
 from brindle.db import DB, Agent
 
 
@@ -153,16 +153,6 @@ def test_an_unset_check_concurrency_follows_the_host_size(repo, brindle_home, mo
     assert host(16, 64) > host(2, 4)
 
 
-def test_check_xdist_workers(db, monkeypatch):
-    ws = SimpleNamespace(id="w", repo_root="/r", path="/r")
-    monkeypatch.setattr(gates, "_concurrency", lambda ws: 4)
-    monkeypatch.setattr(gates.os, "cpu_count", lambda: 10)
-    seen = []
-    monkeypatch.setattr(autopilot, "run_check", lambda cmd, cwd, env, timeout: (seen.append(env), (True, ""))[1])
-    gates._run_queued(db, ws, "suite", {}, 30)
-    assert seen[0]["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"
-
-
 def test_check_timeout_kills_group(monkeypatch):
     killed, kw = [], {}
 
@@ -265,13 +255,15 @@ def test_warm_checks_gives_up_when_the_head_moves(db, repo, monkeypatch):
 def test_a_waiter_reuses_the_holders_failure_instead_of_rerunning(db, repo, monkeypatch):
     configure(repo, check_concurrency=0)
     ws = branch(db, repo, "one")
-    calls = []
+    calls, envs = [], []
 
     def failing(cmd, cwd, env, timeout, **kw):
         calls.append(cmd)
+        envs.append(env)
         time.sleep(0.3)
-        return False, "boom (timed out)"
+        return passing, "ok" if passing else "boom (timed out)"
 
+    passing = False
     monkeypatch.setattr(autopilot, "run_check", failing)
     results = []
 
@@ -282,16 +274,13 @@ def test_a_waiter_reuses_the_holders_failure_instead_of_rerunning(db, repo, monk
     in_threads(3, run)
     assert calls == ["suite"]
     assert results == [(False, "boom (timed out)")] * 3
-
-
-def test_check_cache_by_tree(db, repo, monkeypatch):
-    configure(repo, check_concurrency=0)
-    one, two = branch(db, repo, "one"), branch(db, repo, "one2")
+    assert envs[0]["PYTEST_XDIST_AUTO_NUM_WORKERS"] == str(check_xdist_workers(0))   # the run is capped
+    # a pass is cached by tree: another branch with the same tree (different head) doesn't rerun
+    passing = True
+    two = branch(db, repo, "one2")
     (Path(two.path) / "one.py").write_text("x = 1\n")
     (Path(two.path) / "one2.py").unlink()
     sh("git add -A && git commit -qm same-tree", Path(two.path))
-    calls = []
-    monkeypatch.setattr(autopilot, "run_check", lambda cmd, cwd, env, timeout, **kw: calls.append(cwd) or (True, "ok"))
-    assert gates.run_checked(db, one, "suite", {}, 30) == (True, "ok")
+    assert gates.run_checked(db, ws, "suite", {}, 30) == (True, "ok")
     assert gates.run_checked(db, two, "suite", {}, 30) == (True, "ok")
-    assert gates.head(one) != gates.head(two) and calls == [one.path]
+    assert gates.head(ws) != gates.head(two) and calls == ["suite", "suite"]
