@@ -230,43 +230,37 @@ def test_with_the_policy_on_the_hook_sees_every_tool_it_rules_on(db, ws):
         assert (got["hookEventName"], got["permissionDecision"]) == ("PreToolUse", "deny")
 
 
-@pytest.mark.parametrize("tool, added", [
-    ("Write", None),                                  # no rule in force: no answer, as before
-    ("Edit", ("edit", "*secret.py", "deny", "glob")),  # a deny added mid-session still denies
-])
-def test_pre_tool_fast_path(db, ws, monkeypatch, capsys, tool, added):
-    """`brindle _hook pre-tool --agent <id>` runs without typer building the
-    CLI, loads the profile once per call, and reads every rule source on each
-    call, so a rule added after the first call applies to the next."""
+@pytest.mark.parametrize("route", ["python -m brindle", "console script"])
+def test_pre_tool_fast_path(db, ws, monkeypatch, capsys, route):
+    """`brindle _hook pre-tool --agent <id>` skips typer from either entry
+    point, loads the profile once per call, and reads every rule source on
+    each call, so a rule added after the first call applies to the next."""
     import io
     import runpy
     import sys
     import types
 
-    from brindle import permissions
+    from brindle import entry, permissions
     from brindle.config import set_local
 
     set_local(ws.repo_root, "permission_policy", "on")
-    a = worker(db, ws)
     loads = []
     monkeypatch.setattr(agents, "load_profile", lambda *args: loads.append(args) or load_profile(*args))
     monkeypatch.setitem(sys.modules, "brindle.cli", types.ModuleType("brindle.cli"))  # no `app`: unreachable
-    monkeypatch.setattr(sys, "argv", ["brindle", "_hook", "pre-tool", "--agent", a.id])
+    monkeypatch.setattr(sys, "argv", ["brindle", "_hook", "pre-tool", "--agent", worker(db, ws).id])
 
     def hook():
-        payload = {"session_id": "s", "tool_name": tool, "tool_input": {"file_path": f"{ws.path}/secret.py"}}
+        payload = {"session_id": "s", "tool_name": "Edit", "tool_input": {"file_path": f"{ws.path}/secret.py"}}
         monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
         with pytest.raises(SystemExit) as done:
-            runpy.run_module("brindle", run_name="__main__")
+            entry.main() if route == "console script" else runpy.run_module("brindle", run_name="__main__")
         assert done.value.code == 0
-        return capsys.readouterr().out.strip()
+        return capsys.readouterr().out
 
     assert hook() == ""
     assert len(loads) == 1
-    if added:
-        permissions.add_rule(*added)
-    out = hook()
-    assert (json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out else None) == (added and "deny")
+    permissions.add_rule("edit", "*secret.py", "deny", "glob")
+    assert json.loads(hook())["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 @pytest.mark.variant("incident #159: MCP CONNECT_TIMEOUT under load")
