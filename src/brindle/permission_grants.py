@@ -450,7 +450,7 @@ def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session
             and (s.decision == "deny" or not denies_only) and covers(s, req, rules)]
     for s in hits:
         if s.decision == "deny":
-            return Decision("deny", f"stopped by your saved deny {s.id} ({s.kind} {s.pattern})")
+            return Decision("deny", f"stopped by your saved deny {s.id} ({s.kind} {s.pattern})", saved=s.id)
     if denies_only:
         return None
     lim = org_limits(req.repo_root or None) if hits else None
@@ -458,7 +458,8 @@ def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session
         if (all(limits_allow(s.level, s.pattern, s.life, s.minutes, r) is None for r in asks or [rule])
                 and org_refuses(lim, s.kind, s.life, s.minutes, s.level, s.scope) is None
                 and (s.uses_left is None or s.uses_left > 0 and (not spend or permissions.spend_saved_use(s.id)))):
-            return Decision("allow", f"covered by your saved action {s.id} ({s.kind} {s.pattern})", rule)
+            return Decision("allow", f"covered by your saved action {s.id} ({s.kind} {s.pattern})", rule,
+                            saved=s.id)
     return None
 
 

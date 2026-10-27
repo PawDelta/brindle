@@ -347,6 +347,8 @@ class Decision:
     # An ask's: every ask rule that matches it (its parts and each push included).
     # ``rule`` is the strictest of them; a saved allow must fit all of their limits.
     asks: tuple = ()
+    # The id of the saved action that settled it (permission_grants.settle), if one did.
+    saved: str | None = None
 
 
 def rule_id(kind: str, match_type: str, match: str, decision: str) -> str:
@@ -664,20 +666,29 @@ def _patch_requests(patch: str | None, cwd: str, base: dict) -> list[Request]:
 
 
 def decide_all(reqs: list[Request] | None, *, checks: list[str] | None = None,
-               rules: list[Rule] | None = None, **context) -> Decision:
+               rules: list[Rule] | None = None, spend: bool = False, **context) -> Decision:
     """One answer for several requests (an apply_patch touching several
     files): deny if any is denied, allow only if every one is allowed, else
-    ask. ``context``: decide's other keyword arguments (session ...)."""
+    ask. ``spend``: as decide's, but the call runs once however many files it
+    touches, so each saved action that settles any of them spends one use,
+    and only once all are allowed. ``context``: decide's other keyword
+    arguments (session ...)."""
     if not reqs:
         return Decision("ask", "brindle couldn't read the request")
+    if len(reqs) == 1:
+        return decide(reqs[0], checks=checks, rules=rules, spend=spend, **context)
     decisions = [decide(r, checks=checks, rules=rules, **context) for r in reqs]
     for d in decisions:
         if d.decision == "deny":
             return d
     if all(d.decision == "allow" for d in decisions):
-        if len(decisions) == 1:
-            return decisions[0]
-        return Decision("allow", f"every one of {len(decisions)} files is allowed")
+        grants = list(dict.fromkeys(d.saved for d in decisions if d.saved))
+        for id_ in grants if spend else ():
+            if not spend_saved_use(id_):     # its last use went meanwhile
+                return Decision("ask", f"your saved action {id_} has no uses left; asking the user")
+        # A saved action that settled any one of them settled the whole (it would ask without it).
+        return Decision("allow", f"every one of {len(decisions)} files is allowed",
+                        saved=grants[0] if grants else None)
     return next(d for d in decisions if d.decision == "ask")
 
 

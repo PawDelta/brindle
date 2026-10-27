@@ -329,6 +329,18 @@ def get_permission_asks(db: DB, request: Request) -> Any:
 
 
 @_json
+def get_permission_report(db: DB, request: Request) -> Any:
+    """The ask rate and top causes of permission asks (``days``, default 7; ``repo`` narrows)."""
+    from brindle import permission_asks
+
+    try:
+        days = max(1, int(request.query_params.get("days", permission_asks.DEFAULT_DAYS)))
+    except ValueError:
+        days = permission_asks.DEFAULT_DAYS
+    return permission_asks.report(db, days, _repo(request))
+
+
+@_json
 def get_permission_plan(db: DB, request: Request) -> Any:
     """What allowing everything waiting would grant (``forever=1`` for lasting grants)."""
     from brindle.service import permissions as svc_permissions
@@ -588,6 +600,7 @@ ROUTES = [
     Route("/v1/permissions", get_permissions),
     Route("/v1/permissions/asks", get_permission_asks),
     Route("/v1/permissions/asks/plan", get_permission_plan),
+    Route("/v1/permissions/report", get_permission_report),
     Route("/v1/routing", get_routing),
     Route("/v1/debug", get_debug),
     Route("/v1/doctor", get_doctor),
