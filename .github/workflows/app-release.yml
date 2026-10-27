@@ -1106,20 +1106,24 @@ jobs:
         run: bash app/scripts/retry.sh -n 2 npm --prefix app run tauri -- build --ci --bundles nsis --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
       # What a downloader's Windows will decide, checked on what is about to be
-      # published: the app exe and the installer must both carry a valid
-      # Authenticode signature (signtool verify /pa). Otherwise the job fails
-      # and nothing is published.
+      # published: the installer and the app exe it installs must both carry a
+      # valid Authenticode signature (signtool verify /pa). Otherwise the job
+      # fails and nothing is published. The app exe is checked as extracted
+      # from the installer: target/release's copy is not what ships (Tauri
+      # patches it per bundle type and restores it afterwards, unsigned).
       - name: Verify signatures
         id: verify
         if: steps.signing.outputs.signed == 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          bundle=app/src-tauri/target/release
-          exes=("$bundle/brindle.exe")
-          [ -f "${exes[0]}" ] || exes=("$bundle/brindle-desktop.exe")
-          for f in "${exes[0]}" "$bundle/bundle/nsis/brindle_${VERSION}_x64-setup.exe"; do
-            [ -f "$f" ] || { echo "::error::no $f to verify"; exit 1; }
+          setup=app/src-tauri/target/release/bundle/nsis/brindle_${VERSION}_x64-setup.exe
+          [ -f "$setup" ] || { echo "::error::no $setup to verify"; exit 1; }
+          inside="$RUNNER_TEMP/setup-contents"
+          7z x -y -o"$(cygpath -w "$inside")" "$(cygpath -w "$setup")" > /dev/null
+          app_exe=$(find "$inside" -maxdepth 1 -iname '*.exe' ! -iname 'uninstall*.exe' | head -n 1)
+          [ -n "$app_exe" ] || { echo "::error::no app exe inside $setup"; exit 1; }
+          for f in "$setup" "$app_exe"; do
             # Git Bash would turn /pa and /v into paths: no conversion for signtool's flags.
             MSYS2_ARG_CONV_EXCL='*' "$SIGNTOOL" verify /pa /v "$(cygpath -w "$f")" || { echo "::error::$f is not validly signed"; exit 1; }
           done
