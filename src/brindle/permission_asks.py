@@ -24,6 +24,8 @@ from brindle.db import DB
 log = logging.getLogger("brindle.permission_asks")
 
 APP_ANSWERS = ("allow_once", "allow_always", "deny")
+# The worker's supervisor's answers, while the ask was its (brindle.permission_routing).
+SUPERVISOR_ANSWERS = ("supervisor_allow", "supervisor_deny")
 # How a hold ended (agents._await_app_answer), besides one of APP_ANSWERS:
 #   prompt       the CLI's own prompt took it while held (the person answered there)
 #   terminal     the person sent it from the app to the CLI's prompt
@@ -73,13 +75,16 @@ def start_ask(db: DB, agent_id: str, repo_root: str, request_id: str, kind: str,
 
 def finish_ask(db: DB, ask_id: int | None, ended: str | None, at: float | None = None) -> None:
     """The hold for the app's answer ended, at ``at`` (now when None), as
-    ``ended`` says (see APP_ANSWERS and the exits under it). The wait is
-    known only when the person's answer ended the hold, in the app or at the
-    CLI's prompt. An ask the terminal already resolved is left as it is."""
+    ``ended`` says (see APP_ANSWERS, SUPERVISOR_ANSWERS and the exits under
+    APP_ANSWERS). The wait is known only when an answer ended the hold: the
+    person's, in the app or at the CLI's prompt, or the supervisor's. An ask
+    the terminal already resolved is left as it is."""
     if ask_id is None:
         return
     if ended in APP_ANSWERS:
         resolved_by, outcome = "person", "deny" if ended == "deny" else "allow"
+    elif ended in SUPERVISOR_ANSWERS:
+        resolved_by, outcome = "supervisor", "deny" if ended == "supervisor_deny" else "allow"
     elif ended == "prompt":
         resolved_by, outcome = "person", "prompt"     # allowed or refused there: a PostToolUse tells which
     else:
@@ -88,7 +93,8 @@ def finish_ask(db: DB, ask_id: int | None, ended: str | None, at: float | None =
         with db.tx() as c:
             c.execute("UPDATE permission_asks SET resolved_by=?, outcome=?, "
                       "wait_seconds=CASE WHEN ? THEN ?-ts END WHERE id=? AND outcome='pending'",
-                      (resolved_by, outcome, resolved_by == "person", time.time() if at is None else at, ask_id))
+                      (resolved_by, outcome, resolved_by in ("person", "supervisor"),
+                       time.time() if at is None else at, ask_id))
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't finish a permission ask")
 

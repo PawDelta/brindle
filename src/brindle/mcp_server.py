@@ -633,6 +633,18 @@ def approve_plan(agent_id: str, feedback: str = "", approved: bool = True) -> st
 
 
 @mcp.tool()
+def answer_permission(agent_id: str, request_id: str, answer: str, reason: str = "") -> str:
+    """Answer a permission request one of your workers is waiting on, which
+    brindle sent you before the person: answer "allow" or "deny", or
+    "escalate" to hand it to the person, with reason (the person sees it).
+    Only the worker's own supervisor may answer, and only until its time with
+    you runs out; then the person is asked."""
+    from brindle import permission_routing
+
+    return permission_routing.answer_via_daemon(agent_id, request_id, answer, reason)
+
+
+@mcp.tool()
 def report_result(result: str) -> str:
     """Workers: call this once when your task is done (after committing), with
     a concise summary of what you did and anything left to check."""

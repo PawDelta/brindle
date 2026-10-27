@@ -842,6 +842,11 @@
           "title": "Digest",
           "type": "string"
         },
+        "escalation": {
+          "default": "",
+          "title": "Escalation",
+          "type": "string"
+        },
         "exact": {
           "title": "Exact",
           "type": "string"
@@ -1193,6 +1198,11 @@
             },
             "digest": {
               "title": "Digest",
+              "type": "string"
+            },
+            "escalation": {
+              "default": "",
+              "title": "Escalation",
               "type": "string"
             },
             "exact": {
@@ -5961,6 +5971,10 @@
     {
       "method": "POST",
       "path": "/v1/holds/{id}/end"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/holds/{id}/supervise"
     },
     {
       "method": "POST",

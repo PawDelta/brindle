@@ -373,6 +373,7 @@ CREATE TABLE IF NOT EXISTS pool_failures (
 -- pending, and so the tool's PostToolUse (the same tool and input) can count
 -- as the person approving it. Cleared when the turn ends. While the daemon
 -- holds it for the person's answer (channel 'hook': for the inbox to show;
+-- 'supervisor' while the worker's supervisor answers it first, see brindle.permission_routing;
 -- the answer itself goes through the daemon, brindle.daemon.holds), then the
 -- CLI's own prompt has it ('prompt') or the hook took an answer ('answered').
 -- ``tool_use_id`` is the request's id: brindle's own, not the CLI's.
@@ -383,8 +384,10 @@ CREATE TABLE IF NOT EXISTS permission_requests (
     reason TEXT NOT NULL,           -- the policy's; '' when the policy is off
     created_at REAL NOT NULL,
     suggestions TEXT,               -- JSON: the CLI's own "always allow" updates
-    channel TEXT,                   -- hook | prompt | answered
-    answer TEXT,                    -- what the person answered (a record only: answers go through the daemon)
+    channel TEXT,                   -- supervisor | hook | prompt | answered
+    -- what the person (or, supervisor_allow | supervisor_deny, the supervisor) answered:
+    -- a record only, answers go through the daemon
+    answer TEXT,
     hold_until REAL,                -- when the hook stops holding it for the app
     PRIMARY KEY (agent_id, tool_use_id)
 );
@@ -403,7 +406,7 @@ CREATE TABLE IF NOT EXISTS permission_asks (
     summary TEXT NOT NULL,
     reason TEXT NOT NULL,
     asked INTEGER NOT NULL,
-    -- policy | person | saved_action, or how the hold ended unanswered (timeout,
+    -- policy | person | supervisor | saved_action, or how the hold ended unanswered (timeout,
     -- terminal, agent_exit, daemon_lost, unheld); NULL while the ask is pending
     resolved_by TEXT,
     outcome TEXT NOT NULL,          -- allow | deny | prompt (left to the CLI's own prompt) | none | pending
@@ -1397,8 +1400,9 @@ class DB:
                                  (agent_id,)).fetchall()
 
     def hook_permission_request(self, agent_id: str) -> sqlite3.Row | None:
-        """The request the agent's hook holds for the app's answer, if any."""
-        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? AND channel='hook' "
+        """The request the agent's hook holds for the app's (or its supervisor's) answer, if any."""
+        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? "
+                                 "AND channel IN ('hook', 'supervisor') "
                                  "ORDER BY created_at DESC LIMIT 1", (agent_id,)).fetchone()
 
     def update_permission_request(self, agent_id: str, tool_use_id: str, **fields) -> None:

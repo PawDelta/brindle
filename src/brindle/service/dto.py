@@ -554,6 +554,9 @@ class AskDTO(_DTO):
     rule: str | None = None
     limits: PermissionLimitsDTO | None = None
     reason: str = ""
+    # Why the worker's supervisor, which had it first, left it to the person
+    # ("Supervisor escalated: ...", "Supervisor didn't answer in 2 min"); "" when it never had it.
+    escalation: str = ""
 
 
 class AskGroupDTO(_DTO):

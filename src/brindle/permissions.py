@@ -102,7 +102,7 @@ SOURCES = ("preset", "repo", "user", "learned", "profile", "org")
 STORE_SOURCES = ("preset", "user", "learned")    # what the person's store holds
 # Every field a stored rule may have (Rule.to_dict, and the 0.4.7 editor's rows).
 RULE_FIELDS = frozenset({"id", "kind", "match", "match_type", "decision", "source", "created", "limits", "expires",
-                         "exclusions", "label", "repo_root", "expires_at", "editable", "protected"})
+                         "exclusions", "label", "repo_root", "expires_at", "editable", "protected", "person_only"})
 UNMATCHED = ("ask", "allow", "deny")             # Store.unmatched: what no rule covers
 # How far a saved approval of a push may reach (an ask rule's limits.max_scope), narrowest first.
 LEVELS = ("branch", "destination", "remote", "repository", "all")
@@ -207,6 +207,9 @@ class Rule:
     exclusions: tuple = ()              # Rules: a request any of them matches is not this rule's
     label: str = ""                     # a person's name for it (the app's)
     repo_root: str | None = None        # the one repo (resolved) it applies in; None: every repo
+    # An ask only the person answers: never routed to the worker's supervisor first
+    # (brindle.permission_routing).
+    person_only: bool = False
 
     def __post_init__(self) -> None:
         if not self.id:
@@ -235,6 +238,8 @@ class Rule:
             out["label"] = self.label
         if self.repo_root:
             out["repo_root"] = self.repo_root
+        if self.person_only:
+            out["person_only"] = True
         return out
 
     @classmethod
@@ -279,7 +284,7 @@ class Rule:
         label = data.get("label") if isinstance(data.get("label"), str) else ""
         return cls(kind, match, match_type, decision, src, created, id_,
                    clean_limits(data.get("limits")) if decision == "ask" else None, expires, exclusions, label,
-                   os.path.realpath(repo) if repo else None)
+                   os.path.realpath(repo) if repo else None, data.get("person_only") is True)
 
 
 @dataclass
@@ -409,10 +414,13 @@ DESTRUCTIVE_DENIES: tuple[Rule, ...] = (
           "rm-destructive", "deny"),
 )
 # A push into a release branch starts a signed build (app-release.yml): every
-# preset asks for it each time, and no saved approval settles it (life "once").
+# preset asks the person for it each time (never a supervisor), and no saved
+# approval settles it (life "once").
 RELEASE_ASKS: tuple[Rule, ...] = (
-    _seed("d-push-release", "bash", f"*{PUSH_ARROW}release", "push", "ask", limits={"life": "once"}),
-    _seed("d-push-release-sub", "bash", f"*{PUSH_ARROW}release/*", "push", "ask", limits={"life": "once"}),
+    _seed("d-push-release", "bash", f"*{PUSH_ARROW}release", "push", "ask", limits={"life": "once"},
+          person_only=True),
+    _seed("d-push-release-sub", "bash", f"*{PUSH_ARROW}release/*", "push", "ask", limits={"life": "once"},
+          person_only=True),
 )
 # The rules of before presets, kept for stores written then (load_store migrates them).
 LEGACY_DEFAULT_IDS = ("d-tracked", "d-checks", "d-git-ro", "d-git-push", "d-git-force", "d-ssh", "d-aws",
@@ -420,11 +428,12 @@ LEGACY_DEFAULT_IDS = ("d-tracked", "d-checks", "d-git-ro", "d-git-push", "d-git-
 
 
 def _push_default(max_scope: str, life: str, minutes: float | None = None) -> Rule:
-    """Pushes into the repo's default branch ask, with limits on saved approvals."""
+    """Pushes into the repo's default branch ask the person, with limits on saved approvals."""
     limits = {"max_scope": max_scope, "life": life}
     if minutes is not None:
         limits["minutes"] = minutes
-    return _seed("d-push-default", "bash", f"*{PUSH_ARROW}{DEFAULT_BRANCH}", "push", "ask", limits=limits)
+    return _seed("d-push-default", "bash", f"*{PUSH_ARROW}{DEFAULT_BRANCH}", "push", "ask", limits=limits,
+                 person_only=True)
 
 
 def _autonomous() -> list[Rule]:
@@ -537,9 +546,13 @@ def claude_output(decision: Decision) -> dict | None:
 def claude_answer(answer: str, suggestions: list | None = None) -> dict:
     """What the PermissionRequest hook prints for the person's answer from
     the app: allow_once, allow_always (with Claude Code's own suggested
-    updates, which it then applies as if picked in its prompt) or deny."""
+    updates, which it then applies as if picked in its prompt) or deny; or
+    the worker's supervisor's, supervisor_allow or supervisor_deny
+    (brindle.permission_routing)."""
     if answer == "deny":
         decision: dict = {"behavior": "deny", "message": "brindle: the person denied this in the brindle app"}
+    elif answer == "supervisor_deny":
+        decision = {"behavior": "deny", "message": "brindle: your supervisor denied this"}
     else:
         decision = {"behavior": "allow"}
         if answer == "allow_always" and suggestions:

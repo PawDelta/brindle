@@ -282,7 +282,7 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
       age={`waiting ${ago(Math.min(...g.items.map((a) => a.waiting_since))).replace(/ ago$/, "")}`}
       why={
         <>
-          {g.blocked ? "A deny rule blocks this." : g.rule ? `Your rule asks: ${limitsText(g.limits).toLowerCase()}.` : slot ? `${slot.label} is set to ask.` : (rep.reason ? plain(rep.reason) : "No rule covers this, and unmatched actions ask you.")}
+          {rep.escalation && !g.blocked ? rep.escalation : g.blocked ? "A deny rule blocks this." : g.rule ?`Your rule asks: ${limitsText(g.limits).toLowerCase()}.` : slot ? `${slot.label} is set to ask.` : (rep.reason ? plain(rep.reason) : "No rule covers this, and unmatched actions ask you.")}
           {onOpenRule && (g.rule || !g.blocked) && (
             <button type="button" className={`${LINK} ml-2`} onClick={() => onOpenRule(g.rule ?? undefined)}>
               {g.blocked ? "Change the rule that blocks this" : g.rule ? "Change the rule" : "Add a rule"}

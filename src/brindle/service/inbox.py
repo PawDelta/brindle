@@ -244,7 +244,7 @@ def drop_orphan_requests(db: DB, agent: Agent) -> None:
     rows = db.permission_requests_of(agent.id)
     live = {h.request_id for h in HOLDS.of_agent(agent.id)}
     for row in rows:
-        if row["channel"] == "hook" and row["tool_use_id"] not in live:
+        if row["channel"] in ("hook", "supervisor") and row["tool_use_id"] not in live:
             db.pop_permission_request(agent.id, lambda r, t=row["tool_use_id"]: r["tool_use_id"] == t)
 
 
@@ -259,17 +259,20 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
     if _closed(agent):
         HOLDS.drop_agent(agent.id)      # closed: nothing of its can be answered any more
     live = {h.request_id: h for h in HOLDS.of_agent(agent.id)}
-    out = []
+    out, supervised = [], False
     for row in db.permission_requests_of(agent.id):
         row = dict(row)
         hold = live.get(row["tool_use_id"])
         if hold is None:
-            if row["channel"] == "hook":
+            if row["channel"] in ("hook", "supervisor"):
                 if agent.provider == "claude":
                     # Kept: its PostToolUse pairs with it (agents.note_permission_outcome).
                     db.update_permission_request(agent.id, row["tool_use_id"], channel="prompt")
                 else:
                     drop_orphan_requests(db, agent)
+            continue
+        if row["channel"] == "supervisor" and hold.supervised(HOLDS.clock()):
+            supervised = True   # its supervisor's to answer first (brindle.permission_routing)
             continue
         req = permissions.Request.from_dict(json.loads(row["request"]))
         suggestions = json.loads(row["suggestions"]) if row["suggestions"] else None
@@ -284,7 +287,8 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
             digest=permissions.request_digest(row["request"], row["suggestions"]), choices=choices,
             hold_until=hold.hold_until, hold_note=_hold_note(agent.provider, hold.hold_until),
             terminal_prompt_visible=TERMINAL_PROMPT_VISIBLE.get(agent.provider))))
-    if out or not agent.tmux_window or _closed(agent):
+    # A request with its supervisor shows at the CLI's own prompt too: not the person's yet.
+    if out or supervised or not agent.tmux_window or _closed(agent):
         return out
     try:
         screen = tmux.capture(agent.tmux_window, lines=60, server=agents.server_of(agent))

@@ -222,6 +222,7 @@ export interface AskDTO {
   agent_id: string;
   blocked?: boolean;
   digest: string;
+  escalation?: string;
   exact: string;
   kind: string;
   limits?: PermissionLimitsDTO | null;

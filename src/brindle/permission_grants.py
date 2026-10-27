@@ -478,6 +478,7 @@ class PendingAsk:
     created_at: float
     policy: Decision              # what the rules say, saved actions aside: deny (blocked) or ask
     worker: str = ""
+    escalation: str = ""          # why its supervisor, which had it first, left it to the person
 
     @property
     def blocked(self) -> bool:
@@ -528,9 +529,11 @@ def pending_asks(db, repo_root: str | None = None) -> list[PendingAsk]:
         for p in inbox.pending_permissions(db, agent):
             if p.via != "hook" or p.request is None or p.row is None:
                 continue
+            hold = HOLDS.held(agent.id, p.dto.request_id)
             out.append(PendingAsk(agent.id, root, p.dto.request_id, p.dto.digest, ws.repo_root, p.request,
                                   generalize(p.request), float(p.row["created_at"]), _policy(p.request, ws.repo_root),
-                                  worker=agent.profile))
+                                  worker=agent.profile,
+                                  escalation=(hold.routed_note(HOLDS.clock()) if hold else None) or ""))
     return sorted(out, key=lambda a: a.created_at)
 
 
