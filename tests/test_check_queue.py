@@ -153,6 +153,31 @@ def test_an_unset_check_concurrency_follows_the_host_size(repo, brindle_home, mo
     assert host(16, 64) > host(2, 4)
 
 
+def test_check_xdist_workers(db, monkeypatch):
+    ws = SimpleNamespace(id="w", repo_root="/r", path="/r")
+    monkeypatch.setattr(gates, "_concurrency", lambda ws: 4)
+    monkeypatch.setattr(gates.os, "cpu_count", lambda: 10)
+    seen = []
+    monkeypatch.setattr(autopilot, "run_check", lambda cmd, cwd, env, timeout: (seen.append(env), (True, ""))[1])
+    gates._run_queued(db, ws, "suite", {}, 30)
+    assert seen[0]["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"
+
+
+def test_check_timeout_kills_group(monkeypatch):
+    killed, kw = [], {}
+
+    class Hung:
+        def communicate(self, timeout=None):
+            if not killed:
+                raise autopilot.subprocess.TimeoutExpired("suite", timeout)
+            return "", ""
+
+    monkeypatch.setattr(autopilot.subprocess, "Popen", lambda cmd, **k: (kw.update(k), Hung())[1])
+    monkeypatch.setattr(autopilot, "_kill_group", killed.append)
+    assert not autopilot.run_check("suite", ".", {}, 5)[0]
+    assert kw["start_new_session"] and len(killed) == 1
+
+
 def test_check_summary_and_the_merge_gate_share_the_queue(db, repo, monkeypatch):
     configure(repo, check_concurrency=1, pre_commit=False)
     monkeypatch.setattr(gates, "SLOT_POLL", 0.01)
