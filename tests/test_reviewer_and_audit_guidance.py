@@ -278,9 +278,8 @@ def test_pipeline_supervisor_action_parsing_distinguishes_negation_from_actionab
     ("Blocker: add validation; this is not out of scope for this task.", False),
     ("Blocker: x.\n\nOut of scope: None.\n\nNeeds supervisor action: needs prod credentials.", True),
 ])
-def test_out_of_scope_escalates(db, ws, sup, sent, monkeypatch, summary, escalates):
+def test_out_of_scope_escalates(db, ws, sup, sent, summary, escalates):
     """An out-of-scope rejection goes to the supervisor with no fix round."""
-    monkeypatch.setattr(pipeline, "_retry_on_heavy", lambda *args: False)
     reviewer = add(db, ws, "rev", "reviewer", mode="review", parent=sup.id)
     add(db, ws, "w1", parent=sup.id, pipeline="reviewing", pipeline_rounds=0)
     assert pipeline._on_review(db, reviewer, ws, False, summary) == (True, False)
