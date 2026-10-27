@@ -1,7 +1,6 @@
 """Check runs share the machine (a queue with a few slots), a run far past
 its last duration is reported, and stale or redundant runs give up."""
 import json
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -170,7 +169,7 @@ def test_check_timeout_kills_group(monkeypatch):
     class Hung:
         def communicate(self, timeout=None):
             if not killed:
-                raise subprocess.TimeoutExpired("suite", timeout)
+                raise autopilot.subprocess.TimeoutExpired("suite", timeout)
             return "", ""
 
     monkeypatch.setattr(autopilot.subprocess, "Popen", lambda cmd, **k: (kw.update(k), Hung())[1])
