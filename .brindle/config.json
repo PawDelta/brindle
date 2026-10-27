@@ -4,30 +4,8 @@
     "uv run python scripts/check_test_quality.py",
     "uv run pytest -q -n auto -m 'not serial'",
     "uv run pytest -q -m serial",
-    "cd app && { test -d node_modules || npm ci --silent; } && npx vitest run && npx tsc --noEmit"
+    "if [ -z \"$BRINDLE_BASE_BRANCH\" ] || ! git diff --quiet \"$BRINDLE_BASE_BRANCH\"...HEAD -- app; then cd app && { test -d node_modules || npm ci --silent; } && npx vitest run && npx tsc --noEmit; fi"
   ],
-  "check_scopes": {
-    "uv run python scripts/check_test_quality.py": {
-      "paths": ["src/**", "tests/**", "scripts/**", "pyproject.toml", "uv.lock"]
-    },
-    "uv run pytest -q -n auto -m 'not serial'": {
-      "paths": ["src/**", "tests/**", "scripts/**", "deploy/**", ".github/**", "*.py", "pyproject.toml", "uv.lock"],
-      "affected": "pytest",
-      "full_when": ["**/conftest.py", "pyproject.toml", "uv.lock"]
-    },
-    "uv run pytest -q -m serial": {
-      "paths": ["src/**", "tests/**", "scripts/**", "deploy/**", ".github/**", "*.py", "pyproject.toml", "uv.lock"],
-      "affected": "pytest",
-      "full_when": ["**/conftest.py", "pyproject.toml", "uv.lock"]
-    },
-    "cd app && { test -d node_modules || npm ci --silent; } && npx vitest run && npx tsc --noEmit": {
-      "paths": ["app/**"],
-      "affected": "files",
-      "relative_to": "app",
-      "scoped": "cd app && { test -d node_modules || npm ci --silent; } && npx vitest related --run --passWithNoTests {files} && npx tsc --noEmit",
-      "full_when": ["app/package.json", "app/package-lock.json", "app/vite*", "app/vitest*", "app/tsconfig*", "app/src/test/**"]
-    }
-  },
   "rules": [
     "Tests must earn their place (see .brindle/rules/learned.md): ask workers for the fewest tests that would fail without the change, and treat padded, duplicate or wording-only tests in a review as blockers."
   ]

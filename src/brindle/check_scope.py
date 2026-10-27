@@ -1,28 +1,25 @@
-"""Scoped checks: a worker's branch runs only the part of a check it can reach.
+"""Scoped checks: with ``scoped_checks: "infer"`` a worker's branch runs only
+the tests its changes reach for a plain pytest check.
 
-``checks`` in ``.brindle/config.json`` is a list of command strings. What a
-command covers goes in the optional ``check_scopes`` key, by the exact command::
-
-    "check_scopes": {"uv run pytest -q": {"paths": ["src/**", "tests/**"],
-     "affected": "pytest", "full_when": ["**/conftest.py", "pyproject.toml"]}}
-
-(A ``checks`` entry may also be an object, ``{"run": ..., "paths": ...}``,
-with the same fields; older engines can't run that form.) A command with no
-scope runs in full.
+``checks`` in ``.brindle/config.json`` is a list of command strings, and stays
+one. A check that is a bare pytest invocation (``pytest ...``, ``python -m
+pytest ...``, ``uv run pytest ...``, options only) is narrowed; a command that
+names tests itself, and every other command, runs in full.
 
 On a worker's branch (never the supervisor's checkout or a session branch,
 which always run every check in full) the files the branch changed since it
 left its base decide what runs:
 
-- none of them match ``paths``: the check is skipped (it passes);
-- one matches ``full_when`` (or is under ``.brindle/``), or the scope can't be
-  worked out: ``run`` in full;
-- ``affected: "pytest"``: ``run`` on the test files the branch touched plus
-  the tests ``graphify affected`` reaches from each changed symbol. A changed
-  file the graph can't map to a test runs the full suite instead;
-- ``affected: "files"``: ``scoped``, a command with ``{files}`` standing for
-  the changed files in ``paths`` (relative to ``relative_to``, when given);
-- no ``affected``: ``run`` in full whenever anything in ``paths`` changed.
+- none changed: the check is skipped (it passes);
+- one matches ``INFER_FULL_WHEN`` (conftest, pytest and project config, a
+  lockfile) or is under ``.brindle/``, or the scope can't be worked out: the
+  command runs in full;
+- otherwise the command runs on the test files the branch touched plus the
+  tests ``graphify affected`` reaches from each changed symbol. A changed file
+  the graph can't map to a test runs the full suite instead.
+
+Every check on a worker's branch also gets ``BRINDLE_CHANGED_FILES`` (see
+``changed_files``), so a script can narrow itself.
 
 Patterns are ``fnmatch`` globs on repo-relative paths, where ``*`` also
 crosses ``/`` and a leading ``**/`` may match nothing.
@@ -46,7 +43,6 @@ if TYPE_CHECKING:
     from brindle.db import DB, Workspace
 
 ALWAYS_FULL = (".brindle/**",)   # the checks themselves (or the rules) changed
-MODES = ("pytest", "files")
 MAX_SYMBOLS = 30          # more changed symbols than this: run everything
 GRAPHIFY_SECONDS = 60
 SKIPPED = "skipped: "     # run_checked's output for a skipped check starts with this
@@ -56,44 +52,7 @@ _AFFECTED_FILE = re.compile(r"\s(\S+\.py):L\d+\s*$", re.M)
 
 @dataclass
 class CheckScope:
-    paths: list[str]
-    affected: str | None = None
-    scoped: str | None = None
-    relative_to: str = ""
     full_when: list[str] = field(default_factory=list)
-
-
-def inline_scopes(entries: object) -> dict[str, dict]:
-    """The object entries of a ``checks`` list as {``run``: fields}."""
-    return {e["run"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("run"), str)} \
-        if isinstance(entries, list) else {}
-
-
-def parse_checks(entries: list, layers: list[dict] | None = None) -> tuple[list[str], dict[str, CheckScope]]:
-    """``checks`` entries as (commands, {command: scope}). ``checks`` stays a
-    list of command strings (older engines run it as is) and the scopes live
-    in ``check_scopes``, keyed by the exact command; an object entry in
-    ``checks`` (``run`` plus the scope fields) is still accepted. ``layers``
-    are {command: fields} maps from lowest to highest precedence (default:
-    the inline scopes of ``entries``); a command's scope is its last layer
-    that names it. An object without a usable ``run`` is dropped; a scope
-    without ``paths`` leaves the command plain."""
-    commands: list[str] = []
-    for entry in entries:
-        if not isinstance(entry, dict):
-            commands.append(str(entry))
-        elif isinstance(entry.get("run"), str) and entry["run"].strip():
-            commands.append(entry["run"])
-    scopes: dict[str, CheckScope] = {}
-    for layer in [inline_scopes(entries)] if layers is None else layers:
-        for cmd, spec in layer.items():
-            if cmd in commands and isinstance(spec, dict):
-                scope = _scope(spec)
-                if scope:
-                    scopes[cmd] = scope
-                else:
-                    scopes.pop(cmd, None)
-    return commands, scopes
 
 
 _PYTEST_PREFIX = ("pytest",), ("python", "-m", "pytest"), ("python3", "-m", "pytest"), ("uv", "run", "pytest"), \
@@ -141,7 +100,7 @@ def inferred(cmd: str, mode: str | None) -> CheckScope | None:
     affected tests when it is a plain pytest command that picks no tests
     itself (appending targets would not narrow it), else None."""
     if mode == "infer" and pytest_selectors(cmd) is False:
-        return CheckScope(["**"], "pytest", full_when=INFER_FULL_WHEN)
+        return CheckScope(INFER_FULL_WHEN)
     return None
 
 
@@ -149,7 +108,7 @@ def notice_command(cfg) -> str | None:
     """The first pytest check of ``cfg`` when ``scoped_checks`` is unset."""
     if cfg.scoped_checks is not None:
         return None
-    return next((c for c in cfg.checks if c not in cfg.check_scopes and pytest_selectors(c) is not None), None)
+    return next((c for c in cfg.checks if pytest_selectors(c) is not None), None)
 
 
 def deliver_notice(db: DB, repo_root: str, to_id: str) -> bool:
@@ -185,20 +144,6 @@ def deliver_notice(db: DB, repo_root: str, to_id: str) -> bool:
     return True
 
 
-def _scope(spec: dict) -> CheckScope | None:
-    paths = _strings(spec.get("paths"))
-    affected = spec.get("affected") if spec.get("affected") in MODES else None
-    scoped = spec.get("scoped") if isinstance(spec.get("scoped"), str) else None
-    if not paths or (affected == "files" and not scoped):
-        return None
-    return CheckScope(paths, affected, scoped, str(spec.get("relative_to") or "").strip("/"),
-                      _strings(spec.get("full_when")))
-
-
-def _strings(value: object) -> list[str]:
-    return [v for v in value if isinstance(v, str) and v] if isinstance(value, list) else []
-
-
 def matches(path: str, patterns) -> bool:
     return any(fnmatch(path, p) or (p.startswith("**/") and fnmatch(path, p[3:])) for p in patterns)
 
@@ -209,31 +154,30 @@ def is_worker_branch(db: DB, ws: Workspace) -> bool:
     return ws.kind == "worktree" and bool(ws.base_branch) and agents.workspace_worker(db, ws) is not None
 
 
-def command(db: DB, ws: Workspace, cmd: str, scope: CheckScope | None) -> str | None:
-    """What to run for check ``cmd`` in ``ws``: ``cmd`` itself, a narrower
-    command, or None when the branch changes nothing the check covers."""
-    if scope is None or not is_worker_branch(db, ws):
-        return cmd
+def changed_files(db: DB, ws: Workspace) -> tuple[str, list[str]] | None:
+    """(merge base, repo-relative files changed since it) on a worker's
+    branch; None anywhere else, or when git can't say."""
+    if not is_worker_branch(db, ws):
+        return None
     try:
         base = git.out(["merge-base", ws.base_branch, "HEAD"], ws.path)
-        changed = git.paths(["diff", "--name-only", "--no-renames", base], ws.path)
+        return base, git.paths(["diff", "--name-only", "--no-renames", base], ws.path)
     except git.GitError:
+        return None
+
+
+def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, list[str]] | None) -> str | None:
+    """What to run for check ``cmd`` in ``ws`` given its ``changed_files``:
+    ``cmd`` itself, a narrower command, or None when nothing changed."""
+    if scope is None or diff is None:
         return cmd
+    base, changed = diff
+    if not changed:
+        return None
     if any(matches(f, ALWAYS_FULL) or matches(f, scope.full_when) for f in changed):
         return cmd
-    relevant = [f for f in changed if matches(f, scope.paths)]
-    if not relevant:
-        return None
-    if scope.affected == "pytest":
-        tests = pytest_targets(ws, base, relevant)
-        return f"{cmd} {_quoted(tests)} || [ $? -eq 5 ]" if tests else cmd   # 5: none of them selected
-    if scope.affected == "files":
-        present = [f for f in relevant if (Path(ws.path) / f).is_file()]
-        if not present:
-            return cmd
-        rel = [str(PurePosixPath(f).relative_to(scope.relative_to)) if scope.relative_to else f for f in present]
-        return scope.scoped.replace("{files}", _quoted(rel))
-    return cmd
+    tests = pytest_targets(ws, base, changed)
+    return f"{cmd} {_quoted(tests)} || [ $? -eq 5 ]" if tests else cmd   # 5: none of them selected
 
 
 def _quoted(files: list[str]) -> str:
