@@ -162,3 +162,14 @@ def test_a_review_that_cannot_start_after_the_checks_reaches_the_supervisor(db, 
     [msg] = inbox(db, "boss")
     assert "No reviewer could start" in msg and "codex is not installed" in msg
     assert db.get_agent("w1").pipeline is None
+
+
+def test_review_uses_warm_checks(db, ws, boss, spawned, monkeypatch):
+    calls = []
+    monkeypatch.setattr(gates.autopilot, "run_check",
+                        lambda cmd, cwd, env, timeout, **kw: calls.append(cmd) or (True, "ok"))
+    cfg = RepoConfig(checks=["true"], check_concurrency=0)
+    gates.check_summary(db, ws, cfg)                       # the warm run at report
+    sh("git commit -q --allow-empty -m same-tree", Path(ws.path))   # head moves, tree doesn't
+    agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg)
+    assert calls == ["true"] and "PASS `true`" in spawned[0]
