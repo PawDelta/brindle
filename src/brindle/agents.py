@@ -3291,6 +3291,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     # replace that verdict in the same role (gates.standing_reviews).
     if reviewer is not None:
         db.update_agent(reviewer.id, review_slot=profile if second else "")
+        bus.publish_agent(db, "review.started", reviewer.id, workspace_id=ws.id,
+                          repo_root=ws.repo_root, sha=sha)   # the stage_timings rollup
     return reviewer
 
 
