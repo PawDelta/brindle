@@ -1,10 +1,14 @@
 """Scoped checks: a worker's branch runs only the part of a check it can reach.
 
-A ``checks`` entry in ``.brindle/config.json`` is a command, or an object
-that also says what the command covers::
+``checks`` in ``.brindle/config.json`` is a list of command strings. What a
+command covers goes in the optional ``check_scopes`` key, by the exact command::
 
-    {"run": "uv run pytest -q", "paths": ["src/**", "tests/**"],
-     "affected": "pytest", "full_when": ["**/conftest.py", "pyproject.toml"]}
+    "check_scopes": {"uv run pytest -q": {"paths": ["src/**", "tests/**"],
+     "affected": "pytest", "full_when": ["**/conftest.py", "pyproject.toml"]}}
+
+(A ``checks`` entry may also be an object, ``{"run": ..., "paths": ...}``,
+with the same fields; older engines can't run that form.) A command with no
+scope runs in full.
 
 On a worker's branch (never the supervisor's checkout or a session branch,
 which always run every check in full) the files the branch changed since it
@@ -59,27 +63,47 @@ class CheckScope:
     full_when: list[str] = field(default_factory=list)
 
 
-def parse_checks(entries: list) -> tuple[list[str], dict[str, CheckScope]]:
-    """``checks`` entries as (commands, {command: scope}); an object without
-    a usable ``run`` is dropped, one without ``paths`` is a plain command."""
+def inline_scopes(entries: object) -> dict[str, dict]:
+    """The object entries of a ``checks`` list as {``run``: fields}."""
+    return {e["run"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("run"), str)} \
+        if isinstance(entries, list) else {}
+
+
+def parse_checks(entries: list, layers: list[dict] | None = None) -> tuple[list[str], dict[str, CheckScope]]:
+    """``checks`` entries as (commands, {command: scope}). ``checks`` stays a
+    list of command strings (older engines run it as is) and the scopes live
+    in ``check_scopes``, keyed by the exact command; an object entry in
+    ``checks`` (``run`` plus the scope fields) is still accepted. ``layers``
+    are {command: fields} maps from lowest to highest precedence (default:
+    the inline scopes of ``entries``); a command's scope is its last layer
+    that names it. An object without a usable ``run`` is dropped; a scope
+    without ``paths`` leaves the command plain."""
     commands: list[str] = []
-    scopes: dict[str, CheckScope] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             commands.append(str(entry))
-            continue
-        cmd = entry.get("run")
-        if not isinstance(cmd, str) or not cmd.strip():
-            continue
-        commands.append(cmd)
-        paths = _strings(entry.get("paths"))
-        affected = entry.get("affected") if entry.get("affected") in MODES else None
-        scoped = entry.get("scoped") if isinstance(entry.get("scoped"), str) else None
-        if not paths or (affected == "files" and not scoped):
-            continue
-        scopes[cmd] = CheckScope(paths, affected, scoped, str(entry.get("relative_to") or "").strip("/"),
-                                 _strings(entry.get("full_when")))
+        elif isinstance(entry.get("run"), str) and entry["run"].strip():
+            commands.append(entry["run"])
+    scopes: dict[str, CheckScope] = {}
+    for layer in [inline_scopes(entries)] if layers is None else layers:
+        for cmd, spec in layer.items():
+            if cmd in commands and isinstance(spec, dict):
+                scope = _scope(spec)
+                if scope:
+                    scopes[cmd] = scope
+                else:
+                    scopes.pop(cmd, None)
     return commands, scopes
+
+
+def _scope(spec: dict) -> CheckScope | None:
+    paths = _strings(spec.get("paths"))
+    affected = spec.get("affected") if spec.get("affected") in MODES else None
+    scoped = spec.get("scoped") if isinstance(spec.get("scoped"), str) else None
+    if not paths or (affected == "files" and not scoped):
+        return None
+    return CheckScope(paths, affected, scoped, str(spec.get("relative_to") or "").strip("/"),
+                      _strings(spec.get("full_when")))
 
 
 def _strings(value: object) -> list[str]:
