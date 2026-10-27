@@ -207,7 +207,7 @@ function openMenu(btn){
  m.classList.remove('hidden');btn.setAttribute('aria-expanded','true');m.querySelector('[role=menuitem]').focus();
 }
 document.addEventListener('click',e=>{
- if(e.target.id==='undo'){toast('Opening Settings › Permissions, Saved actions…');return}
+ if(e.target.id==='undo'){toast('Opening Settings › Permissions › '+esc(undo?chipText(undo):'')+'…');return}
  const t=e.target.closest('button');
  if(!t){closeMenus();return}
  const id=t.dataset.id,a=t.dataset.act,c=cards.find(x=>x.id===id);
