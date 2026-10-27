@@ -388,6 +388,26 @@ CREATE TABLE IF NOT EXISTS permission_requests (
     hold_until REAL,                -- when the hook stops holding it for the app
     PRIMARY KEY (agent_id, tool_use_id)
 );
+-- The history permission_requests lacks (see brindle.permission_asks): one row
+-- per permission hook decision, kept after it is answered. ``asked`` is 1 for
+-- a request that was left to the person (or settled by a saved action), 0 for
+-- one the policy decided itself. Like history it has no foreign keys, so it
+-- survives session pruning.
+CREATE TABLE IF NOT EXISTS permission_asks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    repo_root TEXT NOT NULL DEFAULT '',
+    agent_id TEXT NOT NULL,
+    request_id TEXT,                -- the permission_requests row's tool_use_id (asks only)
+    kind TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    asked INTEGER NOT NULL,
+    resolved_by TEXT NOT NULL,      -- policy | person | saved_action | timeout
+    outcome TEXT NOT NULL,          -- allow | deny | prompt (left to the CLI's own prompt)
+    wait_seconds REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS permission_asks_ts ON permission_asks(ts);
 -- One row per delegation: which profile brindle would have used without
 -- learning, which it used, and how the task went (see brindle.savings). Local
 -- only, and like history it has no foreign keys, so it survives session

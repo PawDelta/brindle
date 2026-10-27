@@ -3372,6 +3372,7 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     whose plan isn't approved yet, and a file tool outside the profile's
     write or read scope (brindle.guardrails)."""
     if payload.get("tool_name") in PLAN_GATED_TOOLS and agent.plan_first and agent.plan_state != "approved":
+        _note_pre_tool(db, agent, payload, "deny", "plan-first: the plan isn't approved yet")
         return {"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
@@ -3391,6 +3392,7 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
         if ws is not None and profile is not None:
             why = guardrails.tool_denial(profile, str(tool), payload.get("tool_input") or {}, ws.path)
             if why:
+                _note_pre_tool(db, agent, payload, "deny", why)
                 return {"hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
@@ -3419,6 +3421,7 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     if not any(spec in (None, "", "*") for spec in specs):
         if uncovered_part(specs, command, cd_root=ws.path if ws else None) is not None:
             return None
+    _note_pre_tool(db, agent, payload, "allow", "every part of the command matches the profile's allowed_tools")
     return {"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "allow",
@@ -3450,6 +3453,8 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict) 
         rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
         decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
         if decision.decision == "deny" or (decision.decision == "ask" and decision.rule is not None):
+            if decision.decision == "deny":   # an ask is counted when the PermissionRequest hook holds it
+                _note_decision(db, agent, ws, req.kind, req.summary(), decision)
             return {"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": decision.decision,
@@ -3467,6 +3472,27 @@ def _record_permission(db: DB, agent: Agent, ws: Workspace | None, summary: str,
     if ws is not None:
         history.record_safely(db, ws.repo_root, "permission", agent=agent, branch=ws.branch,
                               task=summary, result=result)
+
+
+def _note_pre_tool(db: DB, agent: Agent, payload: dict, decision: str, reason: str) -> None:
+    """Keep a PreToolUse allow or deny that brindle itself made (permission_asks)."""
+    try:
+        from brindle import permission_asks, permissions
+
+        ws = db.get_workspace(agent.workspace_id)
+        req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root) if ws else None
+        permission_asks.record_decision(db, agent.id, ws.repo_root if ws else "", req.kind if req else "other",
+                                        req.summary() if req else str(payload.get("tool_name")), decision, reason)
+    except Exception:  # noqa: BLE001 - measuring must never break the hook
+        log.exception("brindle: couldn't record a PreToolUse decision")
+
+
+def _note_decision(db: DB, agent: Agent, ws: Workspace | None, kind: str, summary: str, decision) -> None:
+    """Keep a hook decision the policy made without the person (permission_asks)."""
+    from brindle import permission_asks
+
+    permission_asks.record_decision(db, agent.id, ws.repo_root if ws else "", kind, summary,
+                                    decision.decision, decision.reason)
 
 
 def permission_request_decision(db: DB, agent: Agent, payload: dict,
@@ -3557,6 +3583,8 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
             _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason}")
+            if decision.decision != "ask":
+                _note_decision(db, agent, ws, reqs[0].kind, summary, decision)
             if decision.decision == "ask" and len(reqs) == 1:
                 # The same hold for the app's answer as Claude Code's (no suggested rules here).
                 from brindle import codex_hook
@@ -3570,6 +3598,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                         "deny" if answer == "deny" else "allow",
                         "the person denied this in the brindle app" if answer == "deny"
                         else "the person answered in the brindle app")
+            elif decision.decision == "ask":
+                from brindle import permission_asks
+
+                permission_asks.record_unheld_ask(db, agent.id, ws.repo_root, reqs[0].kind, summary,
+                                                  decision.reason)
             return permissions.codex_output(decision)
         if provider == "opencode":
             # Asked before every tool call, not only those OpenCode would prompt
@@ -3593,6 +3626,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 return None
             req = reqs[0]
             _record_permission(db, agent, ws, req.summary(), f"deny: {decision.reason}")
+            _note_decision(db, agent, ws, req.kind, req.summary(), decision)
             return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
         if req is None:
@@ -3601,6 +3635,8 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
             decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=session, spend=True)
             _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
+            if decision.decision != "ask":
+                _note_decision(db, agent, ws, req.kind, req.summary(), decision)
             permissions.note_prompt(decision)
         else:
             decision = permissions.Decision("ask", "")
@@ -3655,7 +3691,7 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     own (Claude Code's PostToolUse is paired with it by tool and input, see
     note_permission_outcome). ``keep``: record it even when nothing is held,
     and keep it once the hold ends (for that pairing)."""
-    from brindle import permissions
+    from brindle import permission_asks, permissions
     from brindle.daemon.holds import Holder
 
     request_id = uuid.uuid4().hex[:16]
@@ -3665,6 +3701,11 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     # Held before it is recorded anywhere, so nothing watching the rows can take its id first.
     hold_until = time.time() + hold
     held = holder.register(hold_until)
+    # The history row first: once the pairing row is visible a PostToolUse may pop it
+    # and resolve the ask, which needs the row to exist (permission_asks.resolve_at_prompt).
+    ws = db.get_workspace(agent.workspace_id)
+    ask_id = permission_asks.start_ask(db, agent.id, ws.repo_root if ws else "", request_id, req.kind,
+                                       req.summary(), reason)
     db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1],
                               "hook" if held else None, hold_until=hold_until if held else None)
     answer = None
@@ -3675,6 +3716,7 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
             holder.end()
             db.update_permission_request(agent.id, request_id, channel="answered" if answer else "prompt",
                                          answer=answer)
+    permission_asks.finish_ask(db, ask_id, answer)
     # A denied request runs no tool, so no PostToolUse will pair with it: kept, it would
     # take the pairing meant for the same command asked again (note_permission_outcome).
     if not keep or answer == "deny":
@@ -3753,6 +3795,10 @@ def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
             return (r.get("tool"), r.get("kind"), r.get("command"), r.get("path"), r.get("url")) == same
 
         row = db.pop_permission_request(agent.id, matches)
+        if row is not None:
+            from brindle import permission_asks
+
+            permission_asks.resolve_at_prompt(db, agent.id, row["tool_use_id"])
         if row is None or not row["reason"]:
             return   # none, or recorded for the inbox with the policy off: nothing to learn
         req = permissions.Request.from_dict(json.loads(row["request"]))
