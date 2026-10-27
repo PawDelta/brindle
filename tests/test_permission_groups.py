@@ -59,6 +59,20 @@ DESTRUCTIVE_DENIED = {"shell": {"baseline": "allow", "subcategories": {"destruct
     ("standard", {}, lambda ws: bash(ws, "echo `whoami`"), "ask",
      [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),
     ("autonomous", {}, lambda ws: bash(ws, "rm -rf $DIR"), "deny", [("shell", "destructive")]),   # $DIR may be ~
+    ("permissive", {}, lambda ws: bash(ws, "python3 - <<'EOF'\nprint(1)\nEOF"), "deny", [("shell", "other")] * 5),
+    # eval of literal words is the command they make.
+    ("autonomous", {}, lambda ws: bash(ws, "eval 'git push --force origin x'"), "deny", [("git", "push-protected")]),
+    # Where a part runs: a cd that surely runs leads there, one that may not leaves it unknown.
+    ("permissive", {}, lambda ws: bash(ws, "cd / && touch probe"), "ask",
+     [("shell", "readonly"), ("files", "write-outside")]),
+    ("permissive", {}, lambda ws: bash(ws, f"cd /; if false; then cd {ws.path}; fi; echo hi > probe"), "ask",
+     [("shell", "readonly")] * 4 + [("files", "write-outside")]),
+    ("permissive", {}, lambda ws: bash(ws, "cd / && ls"), "allow", [("shell", "readonly")] * 2),   # only reads
+    # A pattern after git's --: names it takes only as paths.
+    ("autonomous", {}, lambda ws: bash(ws, "git log --oneline -- *.md"), "allow", [("git", "readonly")]),
+    # A destination in an option, or no script operand.
+    ("permissive", {}, lambda ws: bash(ws, "cp --target-directory=/ notes.txt"), "ask", [("files", "write-outside")]),
+    ("permissive", {}, lambda ws: bash(ws, "sed -i --expression=s/a/b/ /probe"), "ask", [("files", "write-outside")]),
     # A subcategory over its group's baseline, set through the daemon.
     ("autonomous", {"git": {"subcategories": {"push-feature": "deny"}}},
      lambda ws: bash(ws, "git push origin feature"), "deny", [("git", "push-feature")]),
@@ -100,10 +114,33 @@ def test_a_table_stored_before_unverifiable_existed_gets_its_presets_answer_and_
     del data["groups"]["shell"]["subcategories"]["unverifiable"]
     path.write_text(json.dumps(data))
     unverifiable = bash(ws, "echo `whoami`")
-    got = decide(unverifiable)
-    assert got.decision == "deny" and got.reason == permission_groups.UNVERIFIABLE_GUIDANCE
-    # With no table at all: where unmatched actions run.
-    assert decide(unverifiable, rules=permissions.all_rules(ws.repo_root), unmatched="allow",
-                  saved=[]).decision == "deny"
+    assert decide(unverifiable).decision == "deny"
+    # With no table at all, where unmatched actions run; an eval of what only the run knows
+    # is unverifiable even with no rule that could have asked.
+    assert decide(bash(ws, 'eval "$X"'), rules=[], unmatched="allow", saved=[]).decision == "deny"
     with pytest.raises(ValueError):
         permissions.set_groups({"shell": {"subcategories": {"unverifiable": "allow"}}})
+
+
+def test_a_pattern_whose_listing_runs_past_the_budget_is_unknown(monkeypatch, tmp_path):
+    seen = []
+
+    class Entry:
+        def __init__(self, n):
+            self.name = f"x{n}.txt"    # none of them match
+
+    class Listing:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def __iter__(self):
+            for n in range(3 * permissions._GLOB_BUDGET):
+                seen.append(n)
+                yield Entry(n)
+
+    monkeypatch.setattr("brindle.permissions.os.scandir", lambda path: Listing())
+    assert permissions._bounded_glob("*.md", str(tmp_path)) is None
+    assert len(seen) == permissions._GLOB_BUDGET + 1

@@ -70,8 +70,12 @@ INSTALLERS: dict[str, tuple[str, ...]] = {
     "apt": ("install",), "apt-get": ("install",), "poetry": ("add", "install"), "bundle": ("install", "add"),
 }
 DESTRUCTIVE = frozenset({"rm", "rmdir", "shred", "dd", "truncate", "kill", "killall", "pkill"})
-# Programs that write the files their arguments name (files/write-*), and that fetch from the network.
-FILE_WRITERS = frozenset({"mkdir", "touch", "cp", "mv", "ln", "tee"})
+# Programs that write the files their arguments name (files/write-*), by the short options
+# brindle reads for each (one that takes a value takes the next word, itself counted as a
+# name), and that fetch from the network.
+FILE_WRITERS = {"mkdir": "pvm", "touch": "acfhmdrt", "cp": "RrfipvanlLPHxuTs", "mv": "fivnuT",
+                "ln": "sfnvirFhLPT", "tee": "ai"}
+SED_FLAGS = re.compile(r"-[nErsuz]+|--(quiet|silent|regexp-extended|separate|unbuffered|null-data|posix|debug)")
 FETCHERS = frozenset({"curl", "wget", "http", "https", "xh"})
 _ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=.*")
 
@@ -171,12 +175,58 @@ def _installs(program: str, words: list[str]) -> bool:
     return any(args[:len(verb.split())] == verb.split() for verb in INSTALLERS.get(program, ()))
 
 
-def _written(req: Request, paths: list[str], cwd: str | None) -> tuple[str, str]:
-    """files/write-worktree when every one of ``paths`` (from ``cwd``) is in the worktree."""
-    inside = all(not ("$" in p or any(c in p for c in "*?[{")) and (cwd or os.path.isabs(p))
-                 and permissions._in_worktree(replace(req, path=os.path.join(cwd or "", os.path.expanduser(p))))
-                 for p in paths)
+def _written(req: Request, paths: list[str] | None, cwd: str | None) -> tuple[str, str]:
+    """files/write-worktree when there are ``paths`` (None: unknown) and every
+    one of them (from ``cwd``) is in the worktree."""
+    inside = bool(paths) and all(
+        not ("$" in p or any(c in p for c in "*?[{")) and (cwd or os.path.isabs(p))
+        and permissions._in_worktree(replace(req, path=os.path.join(cwd or "", os.path.expanduser(p))))
+        for p in paths)
     return ("files", "write-worktree" if inside else "write-outside")
+
+
+def _write_targets(program: str, args: list[str]) -> list[str] | None:
+    """Every name a FILE_WRITERS program or ``sed -i`` may write, None for an
+    option brindle doesn't read (where a destination may hide: ``-t/etc``)."""
+    if program == "sed":
+        return _sed_targets(args)
+    names, options = [], True
+    for arg in args:
+        if not options or not arg.startswith("-") or arg == "-":
+            names.append(arg)
+        elif arg == "--":
+            options = False
+        elif arg.startswith("--"):
+            if "=" in arg:
+                names.append(arg.partition("=")[2])    # --target-directory=DIR
+        elif not set(arg[1:]) <= set(FILE_WRITERS[program]):
+            return None
+    return names
+
+
+def _sed_targets(args: list[str]) -> list[str] | None:
+    """The files ``sed -i`` edits: its operands, less the script unless an
+    option gives it (-e, -f, --expression, --file)."""
+    names, scripted, i = [], False, 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("-e", "-f", "--expression", "--file"):
+            scripted, i = True, i + 2
+            continue
+        if arg.startswith(("--expression=", "--file=")) or re.fullmatch(r"-[nErsuz]*[ef].+", arg):
+            scripted = True
+        elif arg == "-i" or arg.startswith("--in-place"):
+            if i + 1 < len(args) and args[i + 1] == "":
+                i += 1    # BSD sed's -i '': no backup suffix
+        elif re.fullmatch(r"-[nErsuz]*i[^-]*", arg):
+            pass    # -i.bak, -ni
+        elif arg.startswith("-"):
+            if not SED_FLAGS.fullmatch(arg):
+                return None
+        else:
+            names.append(arg)
+        i += 1
+    return names if scripted else names[1:]
 
 
 def _shell_part(req: Request, words: list[str], rules: list[Rule], checks: list[str],
@@ -201,10 +251,9 @@ def _shell_part(req: Request, words: list[str], rules: list[Rule], checks: list[
         return ("shell", "install")
     if program == "cd" or not unknown and permissions.readonly_pipeline(replace(req, command=command), rules, checks):
         return ("shell", "readonly")
-    if program in FILE_WRITERS or program == "sed" and any(w.startswith("-i") for w in words[1:]):
-        paths = [w for w in words[1:] if w and not w.startswith("-")]
-        return _written(req, paths[1:] if program == "sed" else paths,
-                        req.cwd or req.worktree if cwd == "" else cwd)
+    if program in FILE_WRITERS or program == "sed" and any(w.startswith(("-i", "--in-place")) or
+                                                           re.fullmatch(r"-[nErsuz]*i.*", w) for w in words[1:]):
+        return _written(req, _write_targets(program, words[1:]), req.cwd or req.worktree if cwd == "" else cwd)
     if program in FETCHERS:
         return ("network", "fetch")
     if program in DEV_TOOLS or command in [c.strip() for c in checks]:
@@ -225,10 +274,10 @@ def part_classes(req: Request, part: permissions.ShellPart, rules: list[Rule],
 def classify(req: Request, rules: list[Rule], checks: list[str] | None = None,
              parts: list[list[str]] | None = None) -> list[tuple[str, str]]:
     """The (group, subcategory) of ``req``: one per simple command of a shell
-    command (``parts``: just those), else one. A command compound_parts
-    can't read is read part by part (permissions.shell_parts: each file a
-    redirection writes too); one brindle can't verify is shell/other and
-    also each command the restriction parsers find in it, so none hides a
+    command (``parts``: just those), else one. A shell command is read part
+    by part where it runs (permissions.shell_parts: each file a redirection
+    writes or reads too); one brindle can't verify is shell/other and also
+    each command the restriction parsers find in it, so none hides a
     restricted subcategory."""
     if req.kind == "read":
         return [("files", "read")]
@@ -243,10 +292,10 @@ def classify(req: Request, rules: list[Rule], checks: list[str] | None = None,
     command = (req.command or "").strip()
     unread = []
     if parts is None and command:
-        parts = permissions.compound_parts(command)
-        read = permissions.shell_parts(req) if parts is None else None
+        read = permissions.shell_parts(req)
         if read is not None:
             return [c for part in read for c in part_classes(req, part, rules, checks or [])]
+        parts = permissions.compound_parts(command)
         if parts is None:
             unread = [("shell", "other")]
             parts = (permissions._restriction_parts(command)

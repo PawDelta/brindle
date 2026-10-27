@@ -1617,15 +1617,54 @@ def _readonly_part(req: Request, words: list[str]) -> bool:
     return True
 
 
-def _expanded(req: Request, word: str) -> list[str]:
+def _expanded(req: Request, word: str) -> list[str] | None:
     """The names ``word`` may stand for as the shell expands it in ``req.cwd``:
     itself (a leading ``~`` expanded), and each file a pathname pattern in it
-    matches, dotfiles included."""
+    matches, dotfiles included. None when listing them would take more than
+    _GLOB_BUDGET directory entries."""
     names = [os.path.expanduser(word)]
     if any(c in word for c in "*?["):
-        names += sorted(glob.glob(os.path.expanduser(word).replace("[^", "[!"),
-                                  root_dir=req.cwd or req.worktree or None, include_hidden=True))
+        found = _bounded_glob(os.path.expanduser(word), req.cwd or req.worktree or None)
+        if found is None:
+            return None
+        names += found
     return names
+
+
+# The most directory entries expanding one pattern may look at: past it, brindle can't know its names.
+_GLOB_BUDGET = 5000
+
+
+def _bounded_glob(pattern: str, root: str | None) -> list[str] | None:
+    """The names ``pattern`` matches from ``root``, dotfiles included (as
+    glob.glob names them, ``[^`` read as ``[!``), or None once that would
+    look at more than _GLOB_BUDGET directory entries."""
+    budget = _GLOB_BUDGET
+    found = ["/" if os.path.isabs(pattern) else ""]
+    pieces = [p for p in pattern.replace("[^", "[!").split("/") if p]
+    for n, piece in enumerate(pieces):
+        last, matched = n == len(pieces) - 1, []
+        for path in found:
+            if not glob.has_magic(piece):
+                budget -= 1
+                if os.path.lexists(os.path.join(root or "", path, piece)):
+                    matched.append(os.path.join(path, piece))
+                continue
+            try:
+                entries = os.scandir(os.path.join(root or "", path) or ".")
+            except OSError:
+                continue
+            with entries:
+                for entry in entries:
+                    budget -= 1
+                    if budget < 0:
+                        return None
+                    if fnmatch.fnmatchcase(entry.name, piece) and (last or entry.is_dir()):
+                        matched.append(os.path.join(path, entry.name))
+        if budget < 0:
+            return None
+        found = matched
+    return sorted(found) if pieces else []
 
 
 def _reads_clear(req: Request, words: list[str], path_denies: list[Rule]) -> bool:
@@ -1642,14 +1681,20 @@ def _reads_clear(req: Request, words: list[str], path_denies: list[Rule]) -> boo
     for word in words[1:]:
         if any(c in word for c in "*?[") and ("[:" in word or "[=" in word or "[." in word):
             return False
-        for name in _expanded(req, word):
+        expanded = _expanded(req, word)
+        if expanded is None:
+            return False
+        for name in expanded:
             names.append(name)
             if name.startswith("--"):
                 names.append(name.partition("=")[2])
             elif name.startswith("-"):
                 names += [name[i:] for i in range(2, len(name))]
     if _recurses(words):
-        paths = [name for word in _search_paths(words) for name in _expanded(req, word)]
+        expanded = [_expanded(req, word) for word in _search_paths(words)]
+        if None in expanded:
+            return False
+        paths = [name for names in expanded for name in names]
         dirs = ([p for p in (os.path.join(cwd, n) for n in paths if n) if os.path.isdir(p)] if paths
                 else [cwd or "."])
         budget = [WALK_LIMIT]
@@ -1929,9 +1974,13 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     open_parts = None
     compound = req.kind == "bash" and req.command and simple_argv(req.command) is None
     syntax = ruled is not None and ruled.rule is not None and ruled.rule.id == SHELL_SYNTAX_RULE
-    # A command compound_parts can't read, read part by part instead (read_parts).
-    read = (read_parts(req, rules, checks)
-            if compound and (syntax or ruled is None and compound_parts(req.command) is None) else None)
+    # A command no rule covers as a whole, read part by part (read_parts), a cd's folder followed.
+    unread: list[ValueError] = []
+    read = read_parts(req, rules, checks, unread) if compound and (syntax or ruled is None) else None
+    # What brindle can't verify, where it would ask anyway or (an eval of what only the run knows) wherever.
+    unverified = compound and (syntax or ruled is None) and read is None
+    if unverified and ruled is None and any(isinstance(e, _Unverifiable) for e in unread):
+        ruled = _syntax_ask(req)
     if read is not None:
         answer = permission_groups.parts_decision(req, *read, groups, unmatched, rules, checks)
         if answer.decision != "ask":
@@ -1995,6 +2044,8 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
         return Decision("deny", permission_groups.UNVERIFIABLE_GUIDANCE, ruled.rule)
     if ruled is not None:
         return Decision("ask", ruled.reason + "; asking the user", ruled.rule, ruled.asks)
+    if unverified and permission_groups.unverifiable(groups, unmatched) == "deny":
+        return Decision("deny", permission_groups.UNVERIFIABLE_GUIDANCE)
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
         why = "the command isn't a single simple command, so no allow rule applies"
     elif req.kind == "read" and req.path:
@@ -2144,7 +2195,10 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
             continue
         if words[0] not in READERS or not _readonly_part(req, words) or not _reads_clear(req, words, path_denies):
             return False
-        argv = [words[0], *(name for word in words[1:] for name in (_expanded(req, word)[1:] or [word]))]
+        expanded = [_expanded(req, word) for word in words[1:]]
+        if None in expanded:
+            return False
+        argv = [words[0], *(name for word, names in zip(words[1:], expanded) for name in (names[1:] or [word]))]
         if _matching_restriction([replace(req, command=" ".join(argv))], None, rules) is not None:
             return False
     return True
@@ -2736,10 +2790,14 @@ class _Flattener:
     def __init__(self, cwd: str):
         self.cwd = cwd
         self.out: list[str] = []
+        # Whether each runs in this shell whenever the script does (not in an if, a loop,
+        # after && or ||, in a pipeline, or a substitution's subshell).
+        self.definite: list[bool] = []
         self.changed = False
 
-    def emit(self, command: str) -> None:
+    def emit(self, command: str, definite: bool = False) -> None:
         self.out.append(command)
+        self.definite.append(definite)
         if len(self.out) > _FLAT_LIMIT:
             raise ValueError("too many commands")
 
@@ -2819,9 +2877,9 @@ class _Flattener:
             if value is not None and value[0] == "glob":
                 # A loop over a pattern: each name it matches, as one word ("$f") or split again ($f).
                 whole = word.raw == word.raw[start:end] or quoted and word.raw == f'"{word.raw[start:end]}"'
-                if whole and not assignment and (quoted or not any(
-                        re.search(r"[\s*?\[]", match) for match in glob.glob(
-                            value[1], root_dir=self.cwd or None, include_hidden=True))):
+                names = _bounded_glob(value[1], self.cwd or None) if whole and not assignment and not quoted else None
+                if whole and not assignment and (quoted or names is not None and not any(
+                        re.search(r"[\s*?\[]", match) for match in names)):
                     self.changed = True
                     return value[1]
             elif value is not None:
@@ -2882,7 +2940,7 @@ class _Flattener:
             spaced, text = (token[1].spaced, self.text(token[1], env)) if token[0] == "word" else (token[2], token[1])
             pieces.append((" " if spaced and pieces else "") + text)
         if pieces:
-            self.emit("".join(pieces))
+            self.emit("".join(pieces), definite)
 
 
 def _flat_script(command: str, cwd: str) -> str | None:
@@ -2943,6 +3001,11 @@ class ShellPart:
     redirect_glob: bool = False
 
 
+class _Unverifiable(ValueError):
+    """What brindle can't verify wherever it is (an eval of what only the run
+    knows): the unverifiable answer even where nothing would have asked."""
+
+
 class _PartReader:
     def __init__(self, req: Request):
         self.req = req
@@ -2959,8 +3022,8 @@ class _PartReader:
             raise ValueError("a heredoc a program may run as code")
         flattener = _Flattener(self.cwd or "")
         flattener.script(command, {})
-        for line in flattener.out:
-            self.part(line)
+        for line, definite in zip(flattener.out, flattener.definite):
+            self.part(line, definite)
 
     def inner(self, command: str) -> None:
         """A substitution's commands: they run in a subshell of their own."""
@@ -2968,7 +3031,7 @@ class _PartReader:
         self.read(command)
         self.cwd, self.expanded, self.tilde = kept
 
-    def part(self, line: str) -> None:
+    def part(self, line: str, definite: bool) -> None:
         tokens = _script_tokens(line)
         if tokens is None or any(t[0] == "heredoc" for t in tokens):
             raise ValueError("unreadable syntax")
@@ -3018,11 +3081,19 @@ class _PartReader:
             if part.writes or part.reads:
                 raise ValueError("a redirection without a command")
             return
-        if program in ("eval", "source", ".") or program in _WRAPPERS and part.unknown:
+        if program == "eval" and not (part.unknown or part.expanded or part.writes or part.reads):
+            self.read(" ".join(part.words[1:]))    # the command its literal words make, read as one
+            return
+        if program == "eval":
+            raise _Unverifiable("eval runs what only the run knows")
+        if program in ("source", ".") or program in _WRAPPERS and part.unknown:
             raise ValueError(f"{program} runs what only the run knows")
         self.parts.append(part)
         if program in ("cd", "pushd"):
-            self.cwd = self.directory(part.words[1:], part.unknown)
+            # A cd that may not run (in an if, after &&, in a pipeline) leaves the folder unknown,
+            # unless it leads where the shell already is.
+            target = self.directory(part.words[1:], part.unknown)
+            self.cwd = target if definite or target == self.cwd else None
         elif part.writes or not _readonly_part(replace(self.req, cwd=self.cwd), part.words):
             self.wrote = True
 
@@ -3099,15 +3170,18 @@ class _PartReader:
         return target if os.path.isdir(target) else None
 
 
-def shell_parts(req: Request) -> list[ShellPart] | None:
+def shell_parts(req: Request, why: list[ValueError] | None = None) -> list[ShellPart] | None:
     """The simple commands ``req``'s shell command runs (ShellPart), or None
-    when brindle can't verify what it runs (see the section above)."""
+    when brindle can't verify what it runs (see the section above; ``why``
+    gets the reason)."""
     if req.kind != "bash" or not req.command:
         return None
     reader = _PartReader(req)
     try:
         reader.read(req.command)
-    except ValueError:
+    except ValueError as e:
+        if why is not None:
+            why.append(e)
         return None
     return reader.parts or None
 
@@ -3158,14 +3232,23 @@ def _wild_match(rule: Rule, part: ShellPart) -> bool:
     return known.startswith(fixed) or fixed.startswith(known)
 
 
-def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None
-               ) -> tuple[list[ShellPart], Decision | None] | None:
+def _pathspecs(part: ShellPart) -> bool:
+    """A git command with every pattern after ``--``: git takes the names
+    they expand to only as paths (the restrictions still see the names)."""
+    if os.path.basename(part.words[0]) != "git" or "--" not in part.written:
+        return False
+    return not any(re.search(r"[*?]|\[.+\]", word) for word in part.written[:part.written.index("--")])
+
+
+def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
+               why: list[ValueError] | None = None) -> tuple[list[ShellPart], Decision | None] | None:
     """``req``'s shell command as ShellParts with the deny (else ask) a rule
     gives any of them, or None when brindle can't verify it: it can't read
-    the command, or a deny rule could match a word only the run knows."""
+    the command (``why`` gets the reason), or a deny rule could match a word
+    only the run knows."""
     from brindle.native.permissions import _joined
 
-    parts = shell_parts(req)
+    parts = shell_parts(req, why)
     if parts is None:
         return None
     restrictions = [r for r in rules if r.kind == "bash" and r.decision in ("deny", "ask") and not r.expired()
@@ -3180,13 +3263,13 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None
             return None    # a file only the run names: a deny may cover it
         if part.data and any(_could_cover(rule, " ".join(part.words[:2])) for rule in restrictions):
             return None    # the message may be one a rule names
-        if restrictions and (part.redirect_glob or part.globs and (part.cwd is None or not _globs_excluded(
-                at, [part.written], restrictions, path_denies, [part.assigned],
-                [("<", path) for path in part.reads]))):
+        if restrictions and (part.redirect_glob or part.globs and not (part.cwd is not None and (
+                _pathspecs(part) or _globs_excluded(at, [part.written], restrictions, path_denies, [part.assigned],
+                                                    [("<", path) for path in part.reads])))):
             return None    # a pattern a program may take as an option or a subcommand, or a protected file
-        if path_denies and os.path.basename(part.words[0]) in READERS and not _reads_clear(at, part.written,
-                                                                                         path_denies):
-            return None    # it may read a file a deny covers
+        if path_denies and os.path.basename(part.words[0]) in READERS and (
+                part.cwd is None or not _reads_clear(at, part.written, path_denies)):
+            return None    # it may read a file a deny covers, or where brindle can't tell
         # With the files it redirects to too: a deny on a name sees them.
         texts = [replace(at, command=_joined(words)) for words in (part.words, [*part.words, *part.writes, *part.reads])]
         matched = _matching_restriction(texts, checks, restrictions)
