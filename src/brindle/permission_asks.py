@@ -71,11 +71,11 @@ def start_ask(db: DB, agent_id: str, repo_root: str, request_id: str, kind: str,
                    wait=None)
 
 
-def finish_ask(db: DB, ask_id: int | None, ended: str | None) -> None:
-    """The hold for the app's answer ended, now, as ``ended`` says (see
-    APP_ANSWERS and the exits under it). The wait is known only when the
-    person's answer ended the hold, in the app or at the CLI's prompt. An ask
-    the terminal already resolved is left as it is."""
+def finish_ask(db: DB, ask_id: int | None, ended: str | None, at: float | None = None) -> None:
+    """The hold for the app's answer ended, at ``at`` (now when None), as
+    ``ended`` says (see APP_ANSWERS and the exits under it). The wait is
+    known only when the person's answer ended the hold, in the app or at the
+    CLI's prompt. An ask the terminal already resolved is left as it is."""
     if ask_id is None:
         return
     if ended in APP_ANSWERS:
@@ -88,7 +88,7 @@ def finish_ask(db: DB, ask_id: int | None, ended: str | None) -> None:
         with db.tx() as c:
             c.execute("UPDATE permission_asks SET resolved_by=?, outcome=?, "
                       "wait_seconds=CASE WHEN ? THEN ?-ts END WHERE id=? AND outcome='pending'",
-                      (resolved_by, outcome, resolved_by == "person", time.time(), ask_id))
+                      (resolved_by, outcome, resolved_by == "person", time.time() if at is None else at, ask_id))
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't finish a permission ask")
 

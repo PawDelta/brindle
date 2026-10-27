@@ -3677,9 +3677,6 @@ ANSWERED_LOOKS = 3
 # so the hook gives the request to the prompt itself before the CLI cancels it.
 HOOK_SLACK = 30
 ANSWERS = ("allow_once", "allow_always", "deny")
-# Seconds before the hold's end within which the daemon letting go of it reads
-# as the hold running out rather than the daemon going away.
-HOLD_EXPIRY_GRACE = 1.0
 
 
 def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
@@ -3711,16 +3708,17 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
                                        req.summary(), reason)
     db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1],
                               "hook" if held else None, hold_until=hold_until if held else None)
-    answer = ended = None
+    answer = ended = ended_at = None
     if held:
         try:
-            ended = _await_app_answer(db, agent, holder, req, hold_until - time.time())
+            ended = _await_app_answer(db, agent, holder, req, hold_until)
+            ended_at = time.time()     # the wait's end, before the cleanup below
             answer = ended if ended in ANSWERS else None
         finally:
             holder.end()
             db.update_permission_request(agent.id, request_id, channel="answered" if answer else "prompt",
                                          answer=answer)
-    permission_asks.finish_ask(db, ask_id, ended)
+    permission_asks.finish_ask(db, ask_id, ended, ended_at)
     # A denied request runs no tool, so no PostToolUse will pair with it: kept, it would
     # take the pairing meant for the same command asked again (note_permission_outcome).
     if not keep or answer == "deny":
@@ -3732,10 +3730,10 @@ def _closed(agent: Agent | None) -> bool:
     return agent is None or agent.status in ("done", "paused") or agent.dismissed_at is not None
 
 
-def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str:
+def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float) -> str:
     """The person's answer from the app's inbox (one of ANSWERS), as the
     daemon hands it to ``holder`` (brindle.daemon.holds), or else how the
-    hold ended: "timeout" after ``hold`` seconds, "terminal" when the person
+    hold ended: "timeout" at ``hold_until``, "terminal" when the person
     asks to answer in the terminal, "agent_exit" once the agent is closed or
     killed, "prompt" once its CLI's own prompt took the request (its
     PostToolUse removed the row, or its pane stayed past the prompt for
@@ -3744,7 +3742,7 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str:
     refused). The agent shows waiting meanwhile, as at that prompt."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline, past = time.monotonic() + hold, 0
+    deadline, past = time.monotonic() + hold_until - time.time(), 0
     while True:
         now = db.get_agent(agent.id)
         recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
@@ -3772,10 +3770,10 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str:
             ended = answer if answer in ANSWERS else "terminal"   # the person sent it to the prompt
             break
         if not held:
-            # The daemon's hold ran out with this one (it ends at the same hold_until),
-            # the agent was closed, or the daemon is gone.
-            ended = ("timeout" if deadline - time.monotonic() <= HOLD_EXPIRY_GRACE
-                     else "agent_exit" if _closed(db.get_agent(agent.id)) else "daemon_lost")
+            # The daemon lets go of a closed agent's hold, and of every hold at its
+            # hold_until (on the same clock); otherwise the daemon is gone.
+            ended = ("agent_exit" if _closed(db.get_agent(agent.id))
+                     else "timeout" if time.time() >= hold_until else "daemon_lost")
             break
     if ended in ANSWERS:
         db.set_status(agent.id, "processing", only_if="waiting")

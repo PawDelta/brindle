@@ -2,7 +2,6 @@
 
 import json
 import time
-from types import SimpleNamespace
 
 import pytest
 from starlette.testclient import TestClient
@@ -27,11 +26,24 @@ def ws(db, tmp_path, monkeypatch):
     return ws
 
 
+class Clock:
+    """The time module, with time() and monotonic() at ``now``."""
+    now = 1000.0
+
+    def time(self):
+        return self.now
+    monotonic = time
+
+    def __getattr__(self, name):
+        return getattr(time, name)
+
+
 @pytest.fixture
 def clock(monkeypatch):
-    now = [1000.0]
-    monkeypatch.setattr(permission_asks, "time", SimpleNamespace(time=lambda: now[0]))
-    return now
+    fake = Clock()
+    monkeypatch.setattr(permission_asks, "time", fake)
+    monkeypatch.setattr(agents, "time", fake)
+    return fake
 
 
 def ask_about(db, ws, agent, command):
@@ -85,48 +97,64 @@ def test_a_multi_file_codex_request_is_credited_to_the_saved_action_that_settles
     patch = "*** Begin Patch\n*** Update File: a.py\n*** Update File: b.py\n*** End Patch\n"
     payload = {"cwd": ws.path, "tool_name": "apply_patch", "tool_input": {"command": patch}}
     assert agents.permission_request_decision(db, a, payload, provider="codex") is None   # Codex's prompt asks
-    permissions.save_action("edit", "*.py", "allow", scope="general")
+    grant = permissions.save_action("edit", "*.py", "allow", scope="general")
+    with permissions.editing() as store:
+        store.saved_action(grant.id).uses_left = 2
     out = agents.permission_request_decision(db, a, payload, provider="codex")
     assert out["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    assert permissions.load_store().saved_action(grant.id).uses_left == 1   # one call, one use
     data = permission_asks.report(db, days=1)
     assert (data["asks"], data["resolved_by"]) == (2, {"saved_action": 1, "unheld": 1})
 
 
-def _closing(db, agent):
+def _just_before_the_end(clock, holder):
+    clock.now = holder.until - 0.5
+
+
+def _closed(db, agent):
     db.set_status(agent.id, "done")
-    return True, None
 
 
-@pytest.mark.parametrize("pane, looked, hold, resolved_by, wait", [
-    ("busy", lambda db, a: (True, None), 3600, "person", 10.0),   # its pane read past the prompt for 3 looks
-    (None, lambda db, a: (True, "terminal"), 3600, "terminal", None),
-    (None, _closing, 3600, "agent_exit", None),
-    (None, lambda db, a: (False, None), 3600, "daemon_lost", None),
-    (None, lambda db, a: (True, None), 0, "timeout", None),
+@pytest.mark.parametrize("pane, looked, resolved_by, wait", [
+    ("busy", lambda c, h, db, a: (True, None), "person", 10.0),   # its pane read past the prompt for 3 looks
+    (None, lambda c, h, db, a: (True, "allow_once"), "person", 5.0),
+    (None, lambda c, h, db, a: (True, "terminal"), "terminal", None),
+    (None, lambda c, h, db, a: (_closed(db, a), (True, None))[1], "agent_exit", None),
+    # The daemon lets go of a hold early only for a closed agent, or when it is gone...
+    (None, lambda c, h, db, a: (_just_before_the_end(c, h), _closed(db, a), (False, None))[2], "agent_exit", None),
+    (None, lambda c, h, db, a: (_just_before_the_end(c, h), (False, None))[1], "daemon_lost", None),
+    # ...and of every hold at its hold_until.
+    (None, lambda c, h, db, a: (setattr(c, "now", h.until), (False, None))[1], "timeout", None),
 ])
-def test_an_ask_ends_with_its_hold_not_with_the_tool(db, ws, clock, monkeypatch, pane, looked, hold, resolved_by,
-                                                     wait):
+def test_an_ask_ends_with_its_hold_not_with_the_tool(db, ws, clock, monkeypatch, pane, looked, resolved_by, wait):
     set_local(ws.repo_root, "permission_policy", "on")
-    set_local(ws.repo_root, "permission_hold_seconds", hold)
+    set_local(ws.repo_root, "permission_hold_seconds", 3600)
     with permissions.editing() as store:
         store.rules = [Rule("bash", "make", "prefix", "ask")]
     a = Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing", "%w1", None, time.time())
     db.add_agent(a)
-    monkeypatch.setattr("brindle.daemon.holds.Holder.register", lambda self, until: True)
-    monkeypatch.setattr("brindle.daemon.holds.Holder.end", lambda self: None)
-    monkeypatch.setattr(agents, "_pane_state", lambda agent: pane)
+
+    def register(self, until):
+        self.until = until
+        return True
 
     def look(self, seconds):
-        clock[0] += agents.HOLD_LOOK_SECONDS
-        return looked(db, a)
+        clock.now += agents.HOLD_LOOK_SECONDS
+        return looked(clock, self, db, a)
+
+    def slow_end(self):       # the daemon takes five seconds to hear the hold is over
+        clock.now += 5
+    monkeypatch.setattr("brindle.daemon.holds.Holder.register", register)
     monkeypatch.setattr("brindle.daemon.holds.Holder.wait", look)
+    monkeypatch.setattr("brindle.daemon.holds.Holder.end", slow_end)
+    monkeypatch.setattr(agents, "_pane_state", lambda agent: pane)
     ask_about(db, ws, a, "make build")
 
     def row():
         return tuple(db.conn.execute("SELECT resolved_by, wait_seconds FROM permission_asks").fetchone())
     assert row() == (resolved_by, wait)
     # The build runs five minutes before its PostToolUse says the person allowed it.
-    clock[0] += 300
+    clock.now += 300
     agents.note_permission_outcome(db, a, {
         "tool_name": "Bash", "tool_input": {"command": "make build"}, "tool_use_id": "t1"})
     assert row()[1] == wait
@@ -137,16 +165,16 @@ def test_report_covers_the_window_and_leaves_pending_asks_unanswered(db, clock):
                                     "covered by your saved action ab12 (bash git push)", saved=True)
     permission_asks.start_ask(db, "w1", "/r", "q1", "bash", "uv run x", "ask rule; asking the user")
     answered = permission_asks.start_ask(db, "w1", "/r", "q2", "bash", "uv run y", "ask rule; asking the user")
-    clock[0] += 30
+    clock.now += 30
     permission_asks.finish_ask(db, answered, "allow_once")
-    clock[0] -= 10 * 86400
+    clock.now -= 10 * 86400
     permission_asks.record_unheld_ask(db, "w1", "/r", "bash", "uv run z", "no rule allows it; asking the user")
-    clock[0] += 10 * 86400
-    data = permission_asks.report(db, days=7, now=clock[0])
+    clock.now += 10 * 86400
+    data = permission_asks.report(db, days=7, now=clock.now)
     assert (data["decisions"], data["asks"]) == (3, 3)
     assert data["resolved_by"] == {"person": 1, "saved_action": 1}
     assert data["avg_wait_seconds"] == 15.0          # the saved action's 0 and the person's 30
-    assert permission_asks.report(db, days=30, now=clock[0])["resolved_by"] == {
+    assert permission_asks.report(db, days=30, now=clock.now)["resolved_by"] == {
         "person": 1, "saved_action": 1, "unheld": 1}
 
 
