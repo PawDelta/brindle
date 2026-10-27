@@ -500,15 +500,15 @@ def _pause_when_done(agent_id: str, argv: list[str]) -> list[str]:
     return ["/bin/sh", "-c", script, "brindle-agent", *argv]
 
 
-def _guarded_profile(agent: Agent, ws: Workspace | None):
+def _guarded_profile(agent: Agent, ws: Workspace | None, load=None):
     """``agent``'s profile with its guardrails as they apply (cleared, with a
     warning, without the Pro feature: see guardrails.effective); None when
-    it can't be loaded."""
+    it can't be loaded. ``load``: what loads it (default load_profile)."""
     from brindle import guardrails
     from brindle.profiles import ProfileError
 
     try:
-        return guardrails.effective(load_profile(agent.profile, ws.repo_root if ws else None))
+        return guardrails.effective(load() if load else load_profile(agent.profile, ws.repo_root if ws else None))
     except (KeyError, ProfileError):
         return None
 
@@ -3391,14 +3391,19 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
                 "(brindle MCP server) with your plan and wait for your supervisor's approval, "
                 "which arrives as a message."),
         }}
+    import functools
+
     from brindle import guardrails
 
     tool = payload.get("tool_name")
+    ws = db.get_workspace(agent.workspace_id)
+    # The guardrails, the policy and the allowlist below all read the profile:
+    # load it once per call (a failed load is retried, as each did on its own).
+    load = functools.cache(lambda: load_profile(agent.profile, ws.repo_root if ws else None))
     if tool in (*guardrails.WRITE_TOOLS, *guardrails.READ_TOOLS):
         # A write or read outside the profile's scope (brindle Pro guardrails).
         # Best effort: Bash can still reach any file; the diff check holds.
-        ws = db.get_workspace(agent.workspace_id)
-        profile = _guarded_profile(agent, ws)
+        profile = _guarded_profile(agent, ws, load)
         if ws is not None and profile is not None:
             why = guardrails.tool_denial(profile, str(tool), payload.get("tool_input") or {}, ws.path)
             if why:
@@ -3407,8 +3412,7 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
                     "permissionDecision": "deny",
                     "permissionDecisionReason": why,
                 }}
-    ws = db.get_workspace(agent.workspace_id)
-    ruled = _pre_tool_policy(db, agent, ws, payload)
+    ruled = _pre_tool_policy(db, agent, ws, payload, load)
     if ruled is not None:
         return ruled
     if tool != "Bash":
@@ -3418,7 +3422,7 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
 
     codemap.record_query(db, agent, ws, command)
     try:
-        profile = load_profile(agent.profile, ws.repo_root if ws else None)
+        profile = load()
     except Exception:
         return None
     from brindle.native.permissions import Permissions, uncovered_part
@@ -3437,20 +3441,20 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     }}
 
 
-def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict) -> dict | None:
+def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, load) -> dict | None:
     """With ``permission_policy`` on, the policy's word on a PreToolUse call
     before any approval of brindle's own: a deny denies it, and an ask a rule
     makes explicitly forces Claude Code's prompt (``permissionDecision``
     "ask"), so the PermissionRequest hook then holds it for the person,
     whatever the profile's allowed_tools or Claude Code's own mode would have
     run without asking. None otherwise (an allow, or an ask no rule made,
-    leaves the rest of the hook to decide). Never raises."""
+    leaves the rest of the hook to decide). ``load`` loads the agent's
+    profile. Never raises."""
     try:
         if ws is None:
             return None
         from brindle import permissions
         from brindle.config import load_repo_config
-        from brindle.profiles import profile_rules_for
 
         cfg = load_repo_config(ws.repo_root)
         if cfg.permission_policy != "on":
@@ -3458,7 +3462,11 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict) 
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
         if req is None:
             return None
-        rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+        try:
+            profile_rules = permissions.profile_rules(load())
+        except KeyError:  # a deleted profile: no override (profiles.profile_rules_for)
+            profile_rules = []
+        rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
         decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
         if decision.decision == "deny" or (decision.decision == "ask" and decision.rule is not None):
             return {"hookSpecificOutput": {

@@ -36,7 +36,7 @@ Changelog = "https://pawdelta.com/brindle/changelog"
 Support = "https://pawdelta.com/brindle/docs/faq"
 
 [project.scripts]
-brindle = "brindle.cli:app"
+brindle = "brindle.entry:main"
 
 # brindle Pro and Team (src/brindle/pro): inert without a verified entitlement.
 [project.entry-points."brindle.account"]
