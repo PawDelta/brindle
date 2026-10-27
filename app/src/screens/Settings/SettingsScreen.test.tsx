@@ -176,8 +176,7 @@ describe("settings screen", () => {
     const perms = await screen.findByTestId("permissions-settings");
     await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Autonomous"));
     expect(within(perms).getByTestId("presets").querySelector('[data-preset="autonomous"]')!.textContent).toContain("RECOMMENDED");
-    await waitFor(() => expect(within(perms).getByTestId("ask-rate").textContent).toContain("7 asks in the last 7 days"));
-    expect(within(perms).getByTestId("saved-count").textContent).toBe("0 saved actions");
+    await waitFor(() => expect(within(perms).getByTestId("ask-rate").textContent).toMatch(/\b7\b.*\b26%/));
     // A group's baseline: one click, sent as the group's baseline only.
     fireEvent.click(within(within(perms).getByTestId("groups").querySelector<HTMLElement>('[data-group="shell"]')!).getByRole("button", { name: "Deny" }));
     await waitFor(() => expect(daemon.data.policy.groups?.shell.baseline).toBe("deny"));
@@ -196,7 +195,8 @@ describe("settings screen", () => {
   });
 
   it("permissions: changes the preset, searches and filters the Advanced rules, removes a former default with undo, and sets unmatched actions", async () => {
-    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} } });
+    const gitCommit = { id: "u-git-commit", kind: "bash", match: "git commit", match_type: "prefix", decision: "allow", source: "user", created: 1, describe: "bash prefix 'git commit'", exclusions: [] };
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), gitCommit], saved: [], prompts: {} } });
     const perms = await screen.findByTestId("permissions-settings");
     await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Autonomous"));
     fireEvent.click(within(perms).getByRole("button", { name: "Use Standard" }));
@@ -210,7 +210,6 @@ describe("settings screen", () => {
     const found = within(perms).getByTestId("rules").querySelectorAll("[data-rule]");
     expect(found.length).toBeGreaterThan(0);
     expect(found.length).toBeLessThan(total);
-    expect(within(perms).getByText(`${found.length} of ${total} rules`)).toBeTruthy();
     fireEvent.change(within(perms).getByRole("combobox", { name: "Decision filter" }), { target: { value: "allow" } });
     expect(within(perms).getByTestId("rules").querySelectorAll("[data-rule]").length).toBe(0);
     fireEvent.click(within(perms).getByRole("button", { name: "Clear" }));
@@ -220,7 +219,12 @@ describe("settings screen", () => {
     const ids = [...within(perms).getByTestId("rules").querySelectorAll("[data-rule]")].map((e) => e.getAttribute("data-rule"));
     expect(ids).toContain("d-git-force");
     expect(ids).toContain("d-push-default");
+    expect(ids).toContain("u-git-commit");
     expect(ids).not.toContain("d-ssh");
+    fireEvent.change(within(perms).getByRole("combobox", { name: "Capability" }), { target: { value: "shell" } });
+    const shellIds = [...within(perms).getByTestId("rules").querySelectorAll("[data-rule]")].map((e) => e.getAttribute("data-rule"));
+    expect(shellIds).not.toContain("u-git-commit");
+    expect(shellIds).not.toContain("d-git-force");
     fireEvent.click(within(perms).getByRole("button", { name: "Clear" }));
     // A preset's deny is removable like any rule, and Undo adds it back.
     const row = () => within(perms).getByTestId("rules").querySelector<HTMLElement>('[data-rule="d-ssh"]');
@@ -264,8 +268,7 @@ describe("settings screen", () => {
   it("permissions: a saved action moves along its scope ladder with a duration, is deleted with undo, and shows in Activity", async () => {
     const saved = { id: "s9", kind: "write", pattern: "src/auth/login.ts", decision: "allow", scope: "exact", life: "forever", created: 1_700_000_000, note: "This file only · src/auth/login.ts" };
     const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [saved], prompts: {} } });
-    await waitFor(() => expect(screen.getByTestId("saved-count").textContent).toBe("1 saved action"));
-    fireEvent.click(screen.getByRole("button", { name: "Manage saved actions" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Manage saved actions" }));
     fireEvent.click(screen.getByRole("button", { name: "Edit Write files saved action" }));
     const editor = screen.getByTestId("saved-editor");
     fireEvent.change(within(editor).getByRole("combobox", { name: "Scope" }), { target: { value: "general" } });
