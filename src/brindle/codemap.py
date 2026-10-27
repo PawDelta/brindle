@@ -378,7 +378,7 @@ def _request_refresh(checkout: str, repo_root: str | None, *, background: bool) 
                 log = brindle_home() / "graphify.log"
                 with log.open("a", encoding="utf-8") as out:
                     subprocess.Popen(
-                        [sys.executable, "-c",
+                        [sys.executable, "-P", "-c",
                          "import sys; from brindle.codemap import _run_refresh; "
                          "_run_refresh(sys.argv[1], sys.argv[2] or None, int(sys.argv[3]))",
                          checkout, repo_root or "", str(lock.fileno())],

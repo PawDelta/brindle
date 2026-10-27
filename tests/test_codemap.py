@@ -104,7 +104,9 @@ def test_graphify_single_flight(mapped, monkeypatch):
     codemap.copy_to_store(mapped / codemap.GRAPH, str(mapped))
     checkout = mapped.parent / "session"
     checkout.mkdir()
+    (checkout / "brindle.py").write_text("raise SystemExit('checkout decoy imported')")
     completions, started = [], []
+    real_popen = codemap.subprocess.Popen
     spec = importlib.util.spec_from_file_location("independent_codemap", codemap.__file__)
     caller = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(caller)
@@ -119,6 +121,18 @@ def test_graphify_single_flight(mapped, monkeypatch):
 
     def launch(argv, **kw):
         if "graphify" not in argv:
+            # Exercise the child bootstrap, replacing only its graph update work.
+            probe = argv.copy()
+            code = probe.index("-c") + 1
+            probe[code] = (
+                "import brindle.codemap as c; "
+                "c._run_refresh = lambda *a: print('runner reached'); " + probe[code]
+            )
+            child = real_popen(probe, cwd=kw["cwd"], stdout=codemap.subprocess.PIPE,
+                               stderr=codemap.subprocess.PIPE, text=True)
+            stdout, stderr = child.communicate()
+            assert child.returncode == 0, stderr
+            assert stdout.strip() == "runner reached"
             # Model inherited descriptors surviving the launching caller's exit.
             fd = os.dup(kw["pass_fds"][0])
             completions.append(lambda: codemap._run_refresh(argv[-3], argv[-2], fd))
