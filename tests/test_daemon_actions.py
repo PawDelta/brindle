@@ -1236,22 +1236,53 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     assert code == 409 and pressed == [], reply
 
 
-@pytest.mark.parametrize("screen,seen", [(CLAUDE_IDLE, True), pytest.param(CLAUDE_BUSY, True, marks=pytest.mark.variant(
-    "review: allowed in the pane, its tool still running, so no PostToolUse yet")), (CLAUDE_IDLE, False)],
-    ids=["denied", "allowed", "prompt-unseen"])
+@pytest.mark.parametrize("screen,late", [(CLAUDE_IDLE, False), pytest.param(CLAUDE_BUSY, False, marks=pytest.mark.variant(
+    "review: allowed in the pane, its tool still running, so no PostToolUse yet")), (CLAUDE_BUSY, True)],
+    ids=["denied", "allowed", "prompt-drawn-late"])
 def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, world, answering, monkeypatch, screen,
-                                                                     seen):
+                                                                     late):
     from brindle import tmux
+    from brindle.daemon import holds
     from brindle.db import DB
     from brindle.service import inbox
 
-    # The hook's looks: the prompt, past it twice, one it can't tell (the window starts over), then
-    # past it for good. With no look at the prompt (not drawn yet?), past it ANSWERED_LOOKS times
-    # doesn't end the hold: it takes UNSEEN_ANSWERED_LOOKS.
-    monkeypatch.setattr(agents, "UNSEEN_ANSWERED_LOOKS", agents.ANSWERED_LOOKS + 1)
-    reads = [CLAUDE_PROMPT, screen, screen, "", screen, screen] if seen else [screen, screen, "", screen, screen, screen]
-    looks, paused, go = iter(reads), threading.Event(), threading.Event()
     wk = db.get_agent("wk")
+    if late:
+        # A pane busy before its prompt is drawn is no answer: unreadable at t=0, busy at t=1..11, the
+        # prompt drawn at t=12 (t: the hook's waits on the daemon, a second each). Looking every 5s
+        # until it catches the prompt, then after every wait, the hook still takes the app's deny at t=16.
+        clock, looks, replies, posts, released = [0], [], [], [], threading.Event()
+        wait, release = holds.Holder.wait, holds.HOLDS.release
+
+        def capture(target, **kw):
+            looks.append(clock[0])
+            if clock[0] == 0:
+                raise tmux.TmuxError("no pane yet")
+            return screen if clock[0] < 12 else CLAUDE_PROMPT
+
+        def app_denies_at_16(holder, seconds):
+            if clock[0] == 16:
+                shown = next(p.dto for p in inbox.pending_permissions(db, wk))
+                posts.append(threading.Thread(target=lambda: replies.append(_send("POST", "/v1/inbox/wk/permission", {
+                    "request": shown.request_id, "digest": shown.digest, "choice": "deny"}))))
+                posts[0].start()
+                assert released.wait(5)     # handed over, for this wait to take
+            clock[0] += 1
+            return wait(holder, seconds)
+
+        monkeypatch.setattr(tmux, "capture", capture)
+        monkeypatch.setattr(holds.Holder, "wait", app_denies_at_16)
+        monkeypatch.setattr(holds.HOLDS, "release", lambda *a: [release(*a), released.set()][0])
+        monkeypatch.setattr(agents, "HOLD_LOOK_SECONDS", 0.001)
+        out = agents.permission_request_decision(DB(), wk, {**ASK, "cwd": str(repo)})
+        for post in posts:
+            post.join(5)
+        assert _verdict(out) == "deny" and looks == [0, 5, 10, 15, 16]
+        assert [code for code, _ in replies] == [200]
+        return
+    # The hook's looks: the prompt, past it twice, one it can't tell (the window starts over), then
+    # past it for good.
+    looks, paused, go = iter([CLAUDE_PROMPT, screen, screen, "", screen, screen]), threading.Event(), threading.Event()
 
     def capture(target, **kw):
         if (read := next(looks, None)) is None and not paused.is_set():
