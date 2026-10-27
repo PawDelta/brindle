@@ -697,6 +697,7 @@ def configure_sinks(home, retention_days=None):
                       "secret_env": "SIEM_SECRET"}]}
     if retention_days:
         cfg["retention_days"] = retention_days
+    home.mkdir(exist_ok=True)   # a refused lookup no longer creates the home
     (home / "config.json").write_text(json.dumps({"audit_export": cfg}))
 
 

@@ -120,7 +120,14 @@ def test_a_menu_after_the_session_started_is_never_answered(db, launch, monkeypa
         monkeypatch.setattr(pane, "render", lambda: screen)
     monkeypatch.setattr(agents, "pane_owners", lambda *a: {})
     monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
-    assert cull.note_stuck(db, launch.clock[0], {})
+    if status == "idle":   # its turn ended on it
+        agents.handle_hook(db, "w1", *{"codex": ("codex-notify", {"type": "agent-turn-complete"}),
+                                       "claude": ("stop", {"stop_hook_active": True})}[provider])
+    elif status == "starting":
+        cull.settle_startups(db, launch.clock[0] + 200, {})
+    else:   # its permission hook marks the wait
+        agents.handle_hook(db, "w1", "codex-permission-request", {"tool_name": "Bash"})
+        assert cull.note_stuck(db, launch.clock[0], {})
     assert db.get_agent("w1").status == "waiting"
     [message] = db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' AND held=1").fetchall()
     assert question in message["body"]

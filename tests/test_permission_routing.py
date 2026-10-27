@@ -66,6 +66,7 @@ class Team:
 @pytest.fixture
 def team(db, tmp_path, monkeypatch):
     monkeypatch.setattr("brindle.permissions.PRESET_RULES", ())
+    monkeypatch.setattr("brindle.daemon.events.connected", 1)      # the app is open to show what reaches the person
     ws = Workspace("ws1", str(tmp_path), "feature", "worktree", "feature", "main", str(tmp_path), None,
                    "brindle-ws1", time.time())
     db.add_workspace(ws)
@@ -191,6 +192,7 @@ def send_mail(to, body):
 MAKE = {"tool_name": "Bash", "tool_input": {"command": "make build"}, "hook_event_name": "PermissionRequest"}
 
 
+@pytest.mark.variant("race: a second ask arriving while the first waits on the supervisor joins it, never replaces it")
 @pytest.mark.parametrize("first_ask, again, answered_first", [
     (MAKE, MAKE, False),                    # joins the first: one message, one answer for both
     (MAKE, MAKE, True),                     # the first answered already: a request of its own

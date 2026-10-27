@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -31,6 +32,8 @@ from dataclasses import dataclass
 
 from brindle import tmux
 from brindle.config import brindle_home
+
+log = logging.getLogger(__name__)
 
 KINDS = ("trust", "acknowledge", "setting_choice", "needs_user", "not_a_prompt")
 ANSWERABLE = ("trust", "acknowledge", "setting_choice")
@@ -563,6 +566,25 @@ def tell(db, agent, prompt: str) -> bool:
         db.enqueue(a.parent_id, body, a.id)
     db.update_agent(a.id, stuck_noted=a.status_since)
     return True
+
+
+def at_turn_end(db, agent) -> bool:
+    """A worker's turn just ended: forward the question it ended on, if its
+    pane shows one. This is the one look at its pane per turn, from the
+    turn-end hook (cull.note_stuck reads only waiting panes)."""
+    from brindle import agents
+
+    if not agent.parent_id or agent.headless or not agent.tmux_window:
+        return False
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=40, server=agents.server_of(agent))
+        row = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?",
+                              (agent.id,)).fetchone()
+        brief = (row["submitted_prompt"] if row else None) or agent.task or ""
+        return blocking_prompt(screen, agent.provider, brief) and tell(db, agent, "\n".join(_tail(screen)))
+    except Exception:  # noqa: BLE001 - must never break the hook
+        log.exception("brindle: couldn't check %s's pane at the end of its turn", agent.id)
+        return False
 
 
 def report_blocked(db, agent) -> bool:

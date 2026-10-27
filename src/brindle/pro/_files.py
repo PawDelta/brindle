@@ -10,15 +10,20 @@ from pathlib import Path
 from brindle.pro.credentials import CredentialError, FileStore
 
 
-def private_dir() -> Path:
+def private_dir(create: bool = True) -> Path | None:
+    """The private directory, made if missing. A read passes ``create=False``
+    and gets None instead, so a lookup never creates brindle's home."""
     from brindle.config import brindle_home
 
     d = brindle_home() / "pro"
-    old = os.umask(0o077)
-    try:
-        d.mkdir(mode=0o700, parents=True, exist_ok=True)
-    finally:
-        os.umask(old)
+    if not create and not os.path.lexists(d):
+        return None
+    if create:
+        old = os.umask(0o077)
+        try:
+            d.mkdir(mode=0o700, parents=True, exist_ok=True)
+        finally:
+            os.umask(old)
     st = os.lstat(d)
     if not stat.S_ISDIR(st.st_mode):
         raise CredentialError(f"{d} is not a directory")

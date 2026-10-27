@@ -115,9 +115,10 @@ def _closed(db, agent):
     db.set_status(agent.id, "done")
 
 
+@pytest.mark.variant("review regression: a wait must end with its hold, not with the tool's PostToolUse")
 @pytest.mark.parametrize("pane, looked, resolved_by, wait", [
     ("busy", lambda c, h, db, a: (True, None), "person", 10.0),   # its pane read past the prompt for 3 looks
-    (None, lambda c, h, db, a: (True, "allow_once"), "person", 5.0),
+    (None, lambda c, h, db, a: (True, "allow_once"), "person", 1.0),   # one look, HOLD_LOOK_SECONDS
     (None, lambda c, h, db, a: (True, "terminal"), "terminal", None),
     (None, lambda c, h, db, a: (_closed(db, a), (True, None))[1], "agent_exit", None),
     # The daemon lets go of a hold early only for a closed agent, or when it is gone...

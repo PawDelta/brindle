@@ -106,6 +106,7 @@ class RepoConfig:
     # Autopilot and merge gates.
     autopilot: bool = True             # `brindle` starts the supervisor with autopilot on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
+    scoped_checks: str | None = None   # "off" or "infer"; None: not chosen (acts as "off" this release, see brindle.check_scope.inferred)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
@@ -303,9 +304,17 @@ def _memory_gb() -> float:
         return 0.0
 
 
+def check_xdist_workers(slots: int) -> int:
+    """pytest-xdist workers each of ``slots`` concurrent checks may start, so
+    that all the slots together stay within the logical cores."""
+    return max(1, (os.cpu_count() or 1) // max(1, slots))
+
+
 def host_check_concurrency() -> int:
     """Check runs at once when the repo doesn't say: half the logical cores and
-    RAM for ``CHECK_RAM_GB`` per run, never below 2 or above the cap (#169)."""
+    RAM for ``CHECK_RAM_GB`` per run, never below 2 or above the cap (#169).
+    Each run's xdist workers are capped by ``check_xdist_workers``, so the
+    slots share the cores instead of each taking all of them."""
     cores = os.cpu_count() or 1
     by_ram = int(_memory_gb() // CHECK_RAM_GB)
     return max(2, min(cores // 2, by_ram, CHECK_CONCURRENCY_CAP))
@@ -352,7 +361,7 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
-                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks"):
+                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks", "scoped_checks"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])

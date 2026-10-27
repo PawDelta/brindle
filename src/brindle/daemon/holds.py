@@ -296,10 +296,10 @@ async def _body(request: Request) -> dict:
 
 async def register(request: Request) -> JSONResponse:
     """A hook's hold, for an agent it runs under (by its processes' ancestry)."""
-    from brindle.daemon import peer
+    from brindle.daemon import events, peer
 
     body = await _body(request)
-    fields = [_str(body, k) for k in ("agent_id", "request_id", "digest", "nonce")]
+    fields =[_str(body, k) for k in ("agent_id", "request_id", "digest", "nonce")]
     hold_until = body.get("hold_until")
     if not all(fields) or not isinstance(hold_until, (int, float)) or isinstance(hold_until, bool):
         return JSONResponse({"error": {"code": "invalid",
@@ -311,6 +311,10 @@ async def register(request: Request) -> JSONResponse:
     pid = request.scope.get(peer.PEER_PID)
     if pid is None or fields[0] not in await asyncio.to_thread(peer.caller_agents, pid):
         return JSONResponse({"error": {"code": "forbidden", "message": "a hook holds only its own agent's requests"}}, 403)
+    # Checked last: the awaits above are where the app may have just gone. A request
+    # the supervisor answers first needs no app until it is the person's (wait).
+    if supervise_until is None and not events.connected:
+        return JSONResponse({"error": {"code": "no_app", "message": "no app is connected to answer"}}, 503)
     if not HOLDS.register(*fields, float(hold_until),
                           float(supervise_until) if supervise_until is not None else None, join_key):
         return JSONResponse({"error": {"code": "conflict", "message": "already held, or too many holds"}}, 409)
@@ -319,10 +323,17 @@ async def register(request: Request) -> JSONResponse:
 
 
 async def wait(request: Request) -> JSONResponse:
+    from brindle.daemon import events
+
     body = await _body(request)
     nonce = _str(body, "nonce") or ""
     seconds = body.get("seconds")
     seconds = min(float(seconds), WAIT_SECONDS) if isinstance(seconds, (int, float)) and seconds > 0 else WAIT_SECONDS
+    hold = HOLDS._holds.get(request.path_params["id"])
+    if hold is not None and not hold.released and not hold.supervised(HOLDS.clock()) and not events.connected:
+        # Past its supervisor and no app to show it in: let go, so the CLI's own prompt asks.
+        HOLDS.end(request.path_params["id"], nonce)
+        return JSONResponse({"held": False, "answer": None})
     held, answer = await HOLDS.wait(request.path_params["id"], nonce, seconds)
     return JSONResponse({"held": held, "answer": answer})
 

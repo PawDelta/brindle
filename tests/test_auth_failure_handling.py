@@ -49,7 +49,7 @@ def test_selected_model_stop_failure_fails_the_worker_and_tells_its_parent(db, r
     assert (db.get_agent(worker.id).status, told) == ("failed", [supervisor.id])
 
 
-def test_fresh_exported_key_included_in_agent_env(db, repo):
+def test_fresh_exported_key_included_in_agent_env(db, repo, monkeypatch):
     from brindle.db import Workspace, Agent
     from brindle import agents, keystore
     import os
@@ -67,6 +67,12 @@ def test_fresh_exported_key_included_in_agent_env(db, repo):
         env = agents.agent_env(ws, "a", a, m=None)
         env = {**keystore.pane_keys({"ANTHROPIC_API_KEY"}, env), **env}
         assert env.get("ANTHROPIC_API_KEY") == "new-rotated-key"
+
+    # a worker's pytest-xdist is capped, unless the person set it
+    monkeypatch.delenv("PYTEST_XDIST_AUTO_NUM_WORKERS", raising=False)
+    assert agents.agent_env(ws, "a", a, m=None)["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"
+    monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", "8")
+    assert agents.agent_env(ws, "a", a, m=None)["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "8"
 
 
 def test_resume_failed_agent_does_not_kill_foreign_server_or_unowned_pane(db, repo, monkeypatch):

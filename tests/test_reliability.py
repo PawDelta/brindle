@@ -160,6 +160,11 @@ def test_passed_milestone_is_not_rerun_while_head_is_unchanged(db, root, repo, m
     ran.clear()
     autopilot.check_milestones(db, "boss", ws, position=2)
     assert ran == ["test -f ui.txt", "test -f api.txt"]   # HEAD moved: recheck
+    ran.clear()
+    import subprocess
+    subprocess.run("git commit -q --allow-empty -m same-tree", shell=True, cwd=repo, check=True)
+    autopilot.check_milestones(db, "boss", ws, position=2)
+    assert ran == []   # HEAD moved but the tree didn't: the passes are cached by tree
 
 
 def test_regression_is_not_progress(db, root, repo):
@@ -288,5 +293,3 @@ def test_sidebar_leaves_starting_and_says_so_when_claude_runs_no_hooks(db, root,
     if cause == "settings":                            # turned back on: the warning goes
         settings.write_text('{"disableAllHooks": false}')
         assert "hooks_off" not in view.agent_entry(db, db.get_agent("w1"))
-
-

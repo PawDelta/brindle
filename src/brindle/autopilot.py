@@ -1209,20 +1209,22 @@ def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,
     """Run one check command. Returns (passed, the tail of its output).
     ``cancel``, if given, is polled while the command runs; when it turns
     true the command is killed and ``CheckCancelled`` is raised."""
+    proc = subprocess.Popen(
+        cmd, shell=True, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True,
+    )
     if cancel is None:
         try:
-            proc = subprocess.run(
-                cmd, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True,
-                text=True, timeout=timeout, stdin=subprocess.DEVNULL,
-            )
+            stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            try:
+                proc.communicate(timeout=KILL_WAIT)
+            except subprocess.TimeoutExpired:
+                pass   # a grandchild still holds the pipes; don't hang on it
             return False, f"$ {cmd}\n(timed out after {timeout}s)"
-        stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
+        returncode = proc.returncode
     else:
-        proc = subprocess.Popen(
-            cmd, shell=True, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True,
-        )
         deadline = time.monotonic() + timeout
         while True:
             try:
