@@ -10,7 +10,7 @@ import pytest
 
 from conftest import full_text, sh
 from brindle import agents, autopilot, cli, gates, workspaces
-from brindle.config import check_xdist_workers, load_repo_config
+from brindle.config import load_repo_config
 from brindle.db import DB, Agent
 
 
@@ -265,6 +265,8 @@ def test_a_waiter_reuses_the_holders_failure_instead_of_rerunning(db, repo, monk
 
     passing = False
     monkeypatch.setattr(autopilot, "run_check", failing)
+    monkeypatch.setattr(gates, "_concurrency", lambda ws: 4)
+    monkeypatch.setattr(gates.os, "cpu_count", lambda: 10)
     results = []
 
     def run(i):
@@ -274,7 +276,7 @@ def test_a_waiter_reuses_the_holders_failure_instead_of_rerunning(db, repo, monk
     in_threads(3, run)
     assert calls == ["suite"]
     assert results == [(False, "boom (timed out)")] * 3
-    assert envs[0]["PYTEST_XDIST_AUTO_NUM_WORKERS"] == str(check_xdist_workers(0))   # the run is capped
+    assert envs[0]["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"   # 10 CPUs shared by 4 slots
     # a pass is cached by tree: another branch with the same tree (different head) doesn't rerun
     passing = True
     two = branch(db, repo, "one2")
