@@ -105,6 +105,19 @@ def test_limited_until_zeroes_headroom_then_expires():
     assert quota.headroom("antigravity", RepoConfig()) == 100
 
 
+def test_failed_save_leaves_no_temp_file(monkeypatch):
+    quota.record("claude", [])
+    from pathlib import Path
+
+    def boom(self, target):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(Path, "replace", boom)
+    with pytest.raises(OSError):
+        quota.record("codex", [])
+    assert [p.name for p in quota.path().parent.glob("quota.json*")] == ["quota.json"]
+
+
 def test_auth_and_token_files_are_never_read(tmp_path, monkeypatch):
     home = tmp_path / "codex-home"
     home.mkdir(exist_ok=True)

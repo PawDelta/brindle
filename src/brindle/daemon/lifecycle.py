@@ -211,20 +211,26 @@ def _agents_running() -> bool:
 
 
 async def _watch(server, activity: Activity, idle_exit: bool) -> None:
+    from brindle.awake import Awake
     from brindle.daemon.session_review import ReadinessWatch
     from brindle.upgrade import InstallWatch
 
     install = InstallWatch()
     ready = ReadinessWatch()
-    while not server.should_exit:
-        await asyncio.sleep(WATCH_INTERVAL)
-        await asyncio.to_thread(ready.sweep_safely)     # session.pr_ready when a session becomes ready
-        if install.changed():
-            server.should_exit = True
-        elif (idle_exit and activity.open == 0
-              and time.monotonic() - activity.last >= IDLE_SECONDS
-              and not await asyncio.to_thread(_agents_running)):
-            server.should_exit = True
+    awake = Awake()
+    try:
+        while not server.should_exit:
+            await asyncio.sleep(WATCH_INTERVAL)
+            await asyncio.to_thread(ready.sweep_safely)     # session.pr_ready when a session becomes ready
+            running = await asyncio.to_thread(_agents_running)
+            awake.update(running)       # no sleep while a worker is mid-task
+            if install.changed():
+                server.should_exit = True
+            elif (idle_exit and activity.open == 0
+                  and time.monotonic() - activity.last >= IDLE_SECONDS and not running):
+                server.should_exit = True
+    finally:
+        awake.release()
 
 
 def _reset_window_sizes() -> None:

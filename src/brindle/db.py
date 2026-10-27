@@ -505,6 +505,19 @@ CREATE TABLE IF NOT EXISTS events (
     payload TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+-- Per-stage pipeline timings rolled up from events as they are pruned
+-- (brindle.bus.rollup_stage_timings): one row per UTC day, repo and stage.
+-- ``samples`` (JSON seconds) lets a later prune of the same day merge exactly.
+CREATE TABLE IF NOT EXISTS stage_timings (
+    day TEXT NOT NULL,
+    repo_root TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    median_s REAL NOT NULL,
+    p90_s REAL NOT NULL,
+    samples TEXT NOT NULL,
+    PRIMARY KEY (day, repo_root, stage)
+);
 CREATE TABLE IF NOT EXISTS intents (
     session_root TEXT NOT NULL,
     repo_key TEXT NOT NULL,

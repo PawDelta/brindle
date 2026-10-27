@@ -6,6 +6,8 @@ one must not break the action that caused it."""
 from __future__ import annotations
 
 import json
+import math
+import statistics
 import time
 from typing import TYPE_CHECKING
 
@@ -69,7 +71,60 @@ def tail(db: DB, since_id: int = 0, *, kinds: tuple[str, ...] | None = None,
     return [{**dict(r), "payload": json.loads(r["payload"])} for r in rows]
 
 
+def _percentile(ordered: list[float], q: float) -> float:
+    return ordered[max(0, math.ceil(q * len(ordered)) - 1)]
+
+
+def rollup_stage_timings(db: DB, cutoff: float) -> None:
+    """Fold the pipeline stage durations of events older than ``cutoff`` into
+    ``stage_timings`` (median and p90 per UTC day and repo), so they outlive
+    :func:`prune`. Stages: report to reviewer start, review duration, fix
+    round (a rejection to the next report) and final report to merge. A
+    stage counts on the day it ended."""
+    kinds = ("pipeline.reported", "review.started", "pipeline.review", "pipeline.merged")
+    rows = db.conn.execute(
+        f"SELECT ts, kind, repo_root, workspace_id, payload FROM events WHERE ts < ? AND kind IN"
+        f" ({','.join('?' * len(kinds))}) AND workspace_id IS NOT NULL ORDER BY id",
+        (cutoff, *kinds)).fetchall()
+    samples: dict[tuple[str, str, str], list[float]] = {}
+    open_at: dict[tuple[str, str], float] = {}   # (workspace, stage it is waiting to end) -> start
+    last_report: dict[str, float] = {}
+
+    def end(r, stage: str, began: float | None) -> None:
+        if began is not None:
+            day = time.strftime("%Y-%m-%d", time.gmtime(r["ts"]))
+            samples.setdefault((day, r["repo_root"] or "", stage), []).append(r["ts"] - began)
+
+    for r in rows:
+        ws, ts, kind = r["workspace_id"], r["ts"], r["kind"]
+        if kind == "pipeline.reported":
+            end(r, "fix_round", open_at.pop((ws, "fix_round"), None))
+            open_at[(ws, "report_to_review")] = last_report[ws] = ts
+        elif kind == "review.started":
+            end(r, "report_to_review", open_at.pop((ws, "report_to_review"), None))
+            open_at[(ws, "review")] = ts
+        elif kind == "pipeline.review":
+            end(r, "review", open_at.pop((ws, "review"), None))
+            if json.loads(r["payload"]).get("approved") is False:
+                open_at[(ws, "fix_round")] = ts
+        else:
+            end(r, "report_to_merge", last_report.pop(ws, None))
+    for (day, repo, stage), new in samples.items():
+        old = db.conn.execute("SELECT samples FROM stage_timings WHERE day=? AND repo_root=? AND stage=?",
+                              (day, repo, stage)).fetchone()
+        values = (json.loads(old["samples"]) if old else []) + new
+        db.conn.execute(
+            "INSERT OR REPLACE INTO stage_timings VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (day, repo, stage, len(values), statistics.median(values),
+             _percentile(sorted(values), 0.9), json.dumps(values)))
+
+
 def prune(db: DB, older_than: float = RETENTION_SECONDS, now: float | None = None) -> int:
-    """Delete events older than ``older_than`` seconds; returns how many."""
+    """Delete events older than ``older_than`` seconds; returns how many.
+    Their pipeline stage timings are rolled up first (``stage_timings``)."""
     now = time.time() if now is None else now
+    try:
+        rollup_stage_timings(db, now - older_than)
+    except Exception:   # noqa: BLE001 - a rollup must never stop the prune
+        pass
     return db.conn.execute("DELETE FROM events WHERE ts < ?", (now - older_than,)).rowcount
