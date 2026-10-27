@@ -68,11 +68,18 @@ DESTRUCTIVE_DENIED = {"shell": {"baseline": "allow", "subcategories": {"destruct
     ("permissive", {}, lambda ws: bash(ws, f"cd /; if false; then cd {ws.path}; fi; echo hi > probe"), "ask",
      [("shell", "readonly")] * 4 + [("files", "write-outside")]),
     ("permissive", {}, lambda ws: bash(ws, "cd / && ls"), "allow", [("shell", "readonly")] * 2),   # only reads
+    # An eval runs where it is: in an if, or in a pipeline's subshell, its cd may not count.
+    ("permissive", {}, lambda ws: bash(ws, f"cd /; if false; then eval 'cd {ws.path}'; fi; echo hi > probe"), "ask",
+     [("shell", "readonly")] * 4 + [("files", "write-outside")]),
+    ("permissive", {}, lambda ws: bash(ws, f"cd /; eval 'cd {ws.path}' | cat; echo hi > probe"), "deny",
+     [("shell", "readonly")] * 4 + [("files", "write-outside")]),     # cat reads somewhere unknown
     # A pattern after git's --: names it takes only as paths.
     ("autonomous", {}, lambda ws: bash(ws, "git log --oneline -- *.md"), "allow", [("git", "readonly")]),
     # A destination in an option, or no script operand.
     ("permissive", {}, lambda ws: bash(ws, "cp --target-directory=/ notes.txt"), "ask", [("files", "write-outside")]),
     ("permissive", {}, lambda ws: bash(ws, "sed -i --expression=s/a/b/ /probe"), "ask", [("files", "write-outside")]),
+    ("permissive", {}, lambda ws: bash(ws, "sed -i '' -e 'w /probe' notes.txt"), "ask",
+     [("files", "write-outside")]),                                  # the script writes elsewhere
     # A subcategory over its group's baseline, set through the daemon.
     ("autonomous", {"git": {"subcategories": {"push-feature": "deny"}}},
      lambda ws: bash(ws, "git push origin feature"), "deny", [("git", "push-feature")]),
@@ -142,5 +149,6 @@ def test_a_pattern_whose_listing_runs_past_the_budget_is_unknown(monkeypatch, tm
                 yield Entry(n)
 
     monkeypatch.setattr("brindle.permissions.os.scandir", lambda path: Listing())
-    assert permissions._bounded_glob("*.md", str(tmp_path)) is None
-    assert len(seen) == permissions._GLOB_BUDGET + 1
+    here = str(tmp_path)
+    part, = permissions.shell_parts(Request("claude", "bash", "Bash", here, here, here, command="ls *.md"))
+    assert part.unknown and len(seen) == permissions._GLOB_BUDGET + 1

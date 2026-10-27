@@ -205,16 +205,22 @@ def _write_targets(program: str, args: list[str]) -> list[str] | None:
 
 
 def _sed_targets(args: list[str]) -> list[str] | None:
-    """The files ``sed -i`` edits: its operands, less the script unless an
-    option gives it (-e, -f, --expression, --file)."""
-    names, scripted, i = [], False, 0
+    """The files ``sed -i`` edits: its operands, less the script unless -e
+    or --expression gives it. None unless every script only edits them
+    (_sed_edits_only), or for a script in a file (-f) brindle doesn't read."""
+    names, scripts, i = [], [], 0
     while i < len(args):
         arg = args[i]
-        if arg in ("-e", "-f", "--expression", "--file"):
-            scripted, i = True, i + 2
+        if arg in ("-f", "--file") or arg.startswith("--file=") or re.fullmatch(r"-[nErsuz]*f.*", arg):
+            return None
+        if arg in ("-e", "--expression"):
+            scripts.append(args[i + 1] if i + 1 < len(args) else "")
+            i += 2
             continue
-        if arg.startswith(("--expression=", "--file=")) or re.fullmatch(r"-[nErsuz]*[ef].+", arg):
-            scripted = True
+        if arg.startswith("--expression="):
+            scripts.append(arg.partition("=")[2])
+        elif re.fullmatch(r"-[nErsuz]*e.+", arg):
+            scripts.append(arg[arg.index("e") + 1:])
         elif arg == "-i" or arg.startswith("--in-place"):
             if i + 1 < len(args) and args[i + 1] == "":
                 i += 1    # BSD sed's -i '': no backup suffix
@@ -226,7 +232,83 @@ def _sed_targets(args: list[str]) -> list[str] | None:
         else:
             names.append(arg)
         i += 1
-    return names if scripted else names[1:]
+    if not scripts:
+        if not names:
+            return None
+        scripts, names = names[:1], names[1:]
+    return names if all(_sed_edits_only(script) for script in scripts) else None
+
+
+# sed commands that take no argument and touch no file.
+SED_PLAIN = frozenset("dDpPnNgGhHxz=lqQ")
+
+
+def _sed_edits_only(script: str) -> bool:
+    """Whether every command of the sed ``script`` only edits the text it
+    reads: s and y (s with no w or e flag), a/i/c, and the commands in
+    SED_PLAIN, each with an optional line or /regex/ address. Anything else
+    (w, W, r, R, e, a block, a label or branch) brindle doesn't vouch for."""
+    i, n = 0, len(script)
+
+    def delimited(i: int, parts: int) -> int | None:
+        """The index past ``parts`` texts closed by the delimiter at ``i``."""
+        delimiter = script[i] if i < n else ""
+        if not delimiter or delimiter in "\\\n":
+            return None
+        i += 1
+        for _ in range(parts):
+            while i < n and script[i] != delimiter:
+                i += 2 if script[i] == "\\" else 1
+            if i >= n:
+                return None
+            i += 1
+        return i
+
+    def address(i: int) -> int | None:
+        if i < n and script[i] == "/":
+            return delimited(i, 1)
+        if i < n and script[i] == "\\":
+            return delimited(i + 1, 1)
+        found = re.match(r"\d+(~\d+)?|\$", script[i:])
+        return i + found.end() if found else i
+
+    while i < n:
+        if script[i] in " \t\n;":
+            i += 1
+            continue
+        for _ in range(2):    # an address, then perhaps ,address
+            i = address(i)
+            if i is None:
+                return False
+            if i < n and script[i] == ",":
+                i += 1
+            else:
+                break
+        while i < n and script[i] in " \t!":
+            i += 1
+        command = script[i] if i < n else ""
+        if command == "s":
+            i = delimited(i + 1, 2)
+            if i is None:
+                return False
+            flags = re.match(r"[gpiIM0-9]*", script[i:])
+            i += flags.end()
+        elif command == "y":
+            i = delimited(i + 1, 2)
+            if i is None:
+                return False
+        elif command in ("a", "i", "c"):
+            end = script.find("\n", i)
+            i = n if end < 0 else end + 1    # its text, to the end of the line
+        elif command and command in SED_PLAIN:
+            i += 1
+            if command in "qQ":
+                i += re.match(r"\s*\d*", script[i:]).end()
+        else:
+            return False
+        if i < n and script[i] not in " \t\n;":
+            return False
+    return True
 
 
 def _shell_part(req: Request, words: list[str], rules: list[Rule], checks: list[str],

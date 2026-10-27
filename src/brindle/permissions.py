@@ -2975,8 +2975,6 @@ _WRAPPERS = _STDIN_RUNNERS | {"builtin", "stdbuf", "caffeinate", "flock", "unbuf
 _PROGRAM_VARIABLES = re.compile(r"(PATH|LD_\w+|DYLD_\w+|BASH_ENV|ENV|IFS)=")
 _OUTPUT_REDIRECTS = (">", ">>", ">|", "&>", "&>>", "<>")
 _REDIRECTS = (*_OUTPUT_REDIRECTS, "<", "<<<", ">&", "<&")
-# The most names a pattern is expanded to; past it, the pattern is a word only the run knows.
-_GLOB_LIMIT = 1000
 
 
 @dataclass
@@ -3014,7 +3012,9 @@ class _PartReader:
         self.wrote = False    # an earlier part may have made files a later pattern would match
         self.expanded = self.tilde = False    # the part being read's ShellPart.expanded and .tilde
 
-    def read(self, command: str) -> None:
+    def read(self, command: str, definite: bool = True) -> None:
+        """``command``'s parts; ``definite``: whether it surely runs in this
+        shell (an eval's words inside an if or a pipeline may not)."""
         if "`" in command:
             raise ValueError("a backtick")
         if "<<" in command and any(os.path.basename(w) in _CODE_RUNNERS
@@ -3022,8 +3022,8 @@ class _PartReader:
             raise ValueError("a heredoc a program may run as code")
         flattener = _Flattener(self.cwd or "")
         flattener.script(command, {})
-        for line, definite in zip(flattener.out, flattener.definite):
-            self.part(line, definite)
+        for line, sure in zip(flattener.out, flattener.definite):
+            self.part(line, definite and sure)
 
     def inner(self, command: str) -> None:
         """A substitution's commands: they run in a subshell of their own."""
@@ -3082,7 +3082,8 @@ class _PartReader:
                 raise ValueError("a redirection without a command")
             return
         if program == "eval" and not (part.unknown or part.expanded or part.writes or part.reads):
-            self.read(" ".join(part.words[1:]))    # the command its literal words make, read as one
+            # The command its literal words make, run where the eval runs (if it surely does).
+            self.read(" ".join(part.words[1:]), definite)
             return
         if program == "eval":
             raise _Unverifiable("eval runs what only the run knows")
@@ -3133,12 +3134,7 @@ class _PartReader:
             return None
         if "[:" in pattern or "[=" in pattern or "[." in pattern:
             return None
-        names: list[str] = []
-        for name in glob.iglob(pattern.replace("[^", "[!"), root_dir=self.cwd, include_hidden=True):
-            names.append(name)
-            if len(names) > _GLOB_LIMIT:
-                return None
-        return sorted(names)
+        return _bounded_glob(pattern, self.cwd)
 
     def redirect(self, part: ShellPart, op: str, target: _Word) -> None:
         names, known, pattern = self.word(target)
