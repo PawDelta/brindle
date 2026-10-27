@@ -63,30 +63,37 @@ class CheckScope:
     full_when: list[str] = field(default_factory=list)
 
 
-def parse_checks(entries: list, check_scopes: object = None) -> tuple[list[str], dict[str, CheckScope]]:
+def inline_scopes(entries: object) -> dict[str, dict]:
+    """The object entries of a ``checks`` list as {``run``: fields}."""
+    return {e["run"]: e for e in entries if isinstance(e, dict) and isinstance(e.get("run"), str)} \
+        if isinstance(entries, list) else {}
+
+
+def parse_checks(entries: list, layers: list[dict] | None = None) -> tuple[list[str], dict[str, CheckScope]]:
     """``checks`` entries as (commands, {command: scope}). ``checks`` stays a
     list of command strings (older engines run it as is) and the scopes live
     in ``check_scopes``, keyed by the exact command; an object entry in
-    ``checks`` (``run`` plus the scope fields) is still accepted and wins over
-    ``check_scopes`` for its command. An object without a usable ``run`` is
-    dropped; a scope without ``paths`` leaves the command plain."""
+    ``checks`` (``run`` plus the scope fields) is still accepted. ``layers``
+    are {command: fields} maps from lowest to highest precedence (default:
+    the inline scopes of ``entries``); a command's scope is its last layer
+    that names it. An object without a usable ``run`` is dropped; a scope
+    without ``paths`` leaves the command plain."""
     commands: list[str] = []
-    scopes: dict[str, CheckScope] = {}
-    if isinstance(check_scopes, dict):
-        for cmd, spec in check_scopes.items():
-            if isinstance(spec, dict) and (scope := _scope(spec)):
-                scopes[cmd] = scope
     for entry in entries:
         if not isinstance(entry, dict):
             commands.append(str(entry))
-            continue
-        cmd = entry.get("run")
-        if not isinstance(cmd, str) or not cmd.strip():
-            continue
-        commands.append(cmd)
-        if scope := _scope(entry):
-            scopes[cmd] = scope
-    return commands, {cmd: s for cmd, s in scopes.items() if cmd in commands}
+        elif isinstance(entry.get("run"), str) and entry["run"].strip():
+            commands.append(entry["run"])
+    scopes: dict[str, CheckScope] = {}
+    for layer in [inline_scopes(entries)] if layers is None else layers:
+        for cmd, spec in layer.items():
+            if cmd in commands and isinstance(spec, dict):
+                scope = _scope(spec)
+                if scope:
+                    scopes[cmd] = scope
+                else:
+                    scopes.pop(cmd, None)
+    return commands, scopes
 
 
 def _scope(spec: dict) -> CheckScope | None:

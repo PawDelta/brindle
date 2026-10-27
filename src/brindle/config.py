@@ -351,10 +351,16 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
         setattr(cfg, key, merged)
     from brindle import check_scope
 
-    # "check_scopes" merges per command: config.local.json over config.json.
-    raw_scopes = {**(shared.get("check_scopes") if isinstance(shared.get("check_scopes"), dict) else {}),
-                  **(local.get("check_scopes") if isinstance(local.get("check_scopes"), dict) else {})}
-    cfg.checks, cfg.check_scopes = check_scope.parse_checks(cfg.checks, raw_scopes)
+    # Scopes by precedence: config.json's inline objects, its "check_scopes", then the same from config.local.json.
+    def scope_layers(raw: dict) -> list[dict]:
+        checks = raw.get("checks")
+        lists = [checks] if isinstance(checks, list) else [checks.get("before"), checks.get("after")] if isinstance(checks, dict) else []
+        inline: dict = {}
+        for entries in lists:
+            inline.update(check_scope.inline_scopes(entries))
+        return [inline, raw["check_scopes"] if isinstance(raw.get("check_scopes"), dict) else {}]
+
+    cfg.checks, cfg.check_scopes = check_scope.parse_checks(cfg.checks, scope_layers(shared) + scope_layers(local))
     for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "autopilot", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",

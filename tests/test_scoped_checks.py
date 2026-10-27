@@ -44,14 +44,21 @@ def write(root: Path, files: dict[str, str]) -> None:
     ("worker", {"tests/conftest.py": "X = 2\n"}, [PYTEST]),
     ("supervisor", {"docs/guide.md": "more\n"}, [PYTEST, APP]),
     ("worker-strings", {"app/src/view.ts": "export const v = 2\n"}, ["cd app && npx vitest related --run src/view.ts"]),
+    ("worker-local", {"tests/test_other.py": "def test_o(): pass\n"}, [f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"]),
 ], ids=["docs-only", "app-only", "python-affected", "deleted-function", "test-helper", "lookup-failed",
-        "fallback-unmapped", "quoted-name", "fallback-conftest", "supervisor", "strings-and-check-scopes"])
+        "fallback-unmapped", "quoted-name", "fallback-conftest", "supervisor", "strings-and-check-scopes",
+        "local-scopes-over-inline"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, changes, ran):
     config = CONFIG
     if where == "worker-strings":   # the form older engines can run: plain commands, scopes beside them
         config = {"checks": [c["run"] for c in CONFIG["checks"]],
                   "check_scopes": {c["run"]: {k: v for k, v in c.items() if k != "run"} for c in CONFIG["checks"]}}
         assert all(isinstance(c, str) for c in config["checks"])
+        where = "worker"
+    if where == "worker-local":   # a local check_scopes entry beats the shared inline object for the same command
+        write(repo, {".brindle/config.local.json": json.dumps(
+            {"check_scopes": {PYTEST: {"paths": ["src/**", "tests/**"], "affected": "pytest"}}})})
+        config = {"checks": [{**CONFIG["checks"][0], "paths": ["src/**"]}]}
         where = "worker"
     write(repo, {".brindle/config.json": json.dumps(config), "src/pkg/mod.py": MOD, "docs/guide.md": "doc\n",
                  "app/src/view.ts": "export const v = 1\n", "tests/conftest.py": "X = 1\n",
