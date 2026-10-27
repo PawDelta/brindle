@@ -347,6 +347,8 @@ class Decision:
     # An ask's: every ask rule that matches it (its parts and each push included).
     # ``rule`` is the strictest of them; a saved allow must fit all of their limits.
     asks: tuple = ()
+    # The id of the saved action that settled it (permission_grants.settle), if one did.
+    saved: str | None = None
 
 
 def rule_id(kind: str, match_type: str, match: str, decision: str) -> str:
@@ -677,7 +679,9 @@ def decide_all(reqs: list[Request] | None, *, checks: list[str] | None = None,
     if all(d.decision == "allow" for d in decisions):
         if len(decisions) == 1:
             return decisions[0]
-        return Decision("allow", f"every one of {len(decisions)} files is allowed")
+        # A saved action that settled any one of them settled the whole (it would ask without it).
+        return Decision("allow", f"every one of {len(decisions)} files is allowed",
+                        saved=next((d.saved for d in decisions if d.saved), None))
     return next(d for d in decisions if d.decision == "ask")
 
 

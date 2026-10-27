@@ -403,9 +403,11 @@ CREATE TABLE IF NOT EXISTS permission_asks (
     summary TEXT NOT NULL,
     reason TEXT NOT NULL,
     asked INTEGER NOT NULL,
-    resolved_by TEXT NOT NULL,      -- policy | person | saved_action | timeout
-    outcome TEXT NOT NULL,          -- allow | deny | prompt (left to the CLI's own prompt)
-    wait_seconds REAL NOT NULL DEFAULT 0
+    -- policy | person | saved_action, or how the hold ended unanswered (timeout,
+    -- terminal, agent_exit, daemon_lost, unheld); NULL while the ask is pending
+    resolved_by TEXT,
+    outcome TEXT NOT NULL,          -- allow | deny | prompt (left to the CLI's own prompt) | none | pending
+    wait_seconds REAL               -- NULL when the end of the person's wait wasn't seen
 );
 CREATE INDEX IF NOT EXISTS permission_asks_ts ON permission_asks(ts);
 -- One row per delegation: which profile brindle would have used without

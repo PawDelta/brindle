@@ -3492,7 +3492,7 @@ def _note_decision(db: DB, agent: Agent, ws: Workspace | None, kind: str, summar
     from brindle import permission_asks
 
     permission_asks.record_decision(db, agent.id, ws.repo_root if ws else "", kind, summary,
-                                    decision.decision, decision.reason)
+                                    decision.decision, decision.reason, saved=decision.saved is not None)
 
 
 def permission_request_decision(db: DB, agent: Agent, payload: dict,
@@ -3677,6 +3677,9 @@ ANSWERED_LOOKS = 3
 # so the hook gives the request to the prompt itself before the CLI cancels it.
 HOOK_SLACK = 30
 ANSWERS = ("allow_once", "allow_always", "deny")
+# Seconds before the hold's end within which the daemon letting go of it reads
+# as the hold running out rather than the daemon going away.
+HOLD_EXPIRY_GRACE = 1.0
 
 
 def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
@@ -3708,15 +3711,16 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
                                        req.summary(), reason)
     db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1],
                               "hook" if held else None, hold_until=hold_until if held else None)
-    answer = None
+    answer = ended = None
     if held:
         try:
-            answer = _await_app_answer(db, agent, holder, req, hold)
+            ended = _await_app_answer(db, agent, holder, req, hold_until - time.time())
+            answer = ended if ended in ANSWERS else None
         finally:
             holder.end()
             db.update_permission_request(agent.id, request_id, channel="answered" if answer else "prompt",
                                          answer=answer)
-    permission_asks.finish_ask(db, ask_id, answer)
+    permission_asks.finish_ask(db, ask_id, ended)
     # A denied request runs no tool, so no PostToolUse will pair with it: kept, it would
     # take the pairing meant for the same command asked again (note_permission_outcome).
     if not keep or answer == "deny":
@@ -3724,25 +3728,36 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     return answer
 
 
-def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | None:
-    """The person's answer from the app's inbox, as the daemon hands it to
-    ``holder`` (brindle.daemon.holds), or None after ``hold`` seconds, when
-    the person asks to answer in the terminal, once the agent is closed or
-    killed, once its CLI's own prompt took the request (its PostToolUse
-    removed the row, or its pane stayed past the prompt for ANSWERED_LOOKS),
-    or if the daemon goes away: then the request goes to the CLI's own
-    prompt (or, where there is none, is refused). The agent shows waiting
-    meanwhile, as at that prompt."""
+def _closed(agent: Agent | None) -> bool:
+    return agent is None or agent.status in ("done", "paused") or agent.dismissed_at is not None
+
+
+def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str:
+    """The person's answer from the app's inbox (one of ANSWERS), as the
+    daemon hands it to ``holder`` (brindle.daemon.holds), or else how the
+    hold ended: "timeout" after ``hold`` seconds, "terminal" when the person
+    asks to answer in the terminal, "agent_exit" once the agent is closed or
+    killed, "prompt" once its CLI's own prompt took the request (its
+    PostToolUse removed the row, or its pane stayed past the prompt for
+    ANSWERED_LOOKS), "daemon_lost" if the daemon goes away. Without an answer
+    the request goes to the CLI's own prompt (or, where there is none, is
+    refused). The agent shows waiting meanwhile, as at that prompt."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline, answer, past = time.monotonic() + hold, None, 0
+    deadline, past = time.monotonic() + hold, 0
     while True:
         now = db.get_agent(agent.id)
         recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
                                    (agent.id, holder.request_id)).fetchone()
         left = deadline - time.monotonic()
-        if (now is None or now.status in ("done", "paused") or now.dismissed_at is not None
-                or recorded is None or left <= 0):
+        if _closed(now):
+            ended = "agent_exit"
+            break
+        if recorded is None:
+            ended = "prompt"
+            break
+        if left <= 0:
+            ended = "timeout"
             break
         # Its CLI shows its own prompt for as long as this hook holds the request: a pane
         # past it was answered there, whether or not a look caught the prompt. An allow
@@ -3750,14 +3765,21 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
         state = _pane_state(now)
         past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
         if past >= ANSWERED_LOOKS:
+            ended = "prompt"
             break
         held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
-        if answer is not None or not held:
+        if answer is not None:
+            ended = answer if answer in ANSWERS else "terminal"   # the person sent it to the prompt
             break
-    answer = answer if answer in ANSWERS else None     # "terminal": the person sent it to the prompt
-    if answer:
+        if not held:
+            # The daemon's hold ran out with this one (it ends at the same hold_until),
+            # the agent was closed, or the daemon is gone.
+            ended = ("timeout" if deadline - time.monotonic() <= HOLD_EXPIRY_GRACE
+                     else "agent_exit" if _closed(db.get_agent(agent.id)) else "daemon_lost")
+            break
+    if ended in ANSWERS:
         db.set_status(agent.id, "processing", only_if="waiting")
-    return answer
+    return ended
 
 
 def _pane_state(agent: Agent) -> str | None:

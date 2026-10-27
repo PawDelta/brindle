@@ -2,25 +2,36 @@
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from starlette.testclient import TestClient
 from typer.testing import CliRunner
 
-from brindle import agents, permission_asks, permissions, workspaces
+from brindle import agents, permission_asks, permissions
 from brindle.cli import app
 from brindle.config import set_local
 from brindle.daemon.app import build_app
-from brindle.db import Agent
+from brindle.db import Agent, Workspace
 from brindle.permissions import Rule
 
 TOKEN = "t" * 43
 
 
 @pytest.fixture
-def ws(db, repo, monkeypatch):
+def ws(db, tmp_path, monkeypatch):
     monkeypatch.setattr("brindle.permissions.PRESET_RULES", ())
-    return workspaces.create(db, str(repo), "feature").workspace
+    ws = Workspace("ws1", str(tmp_path), "feature", "worktree", "feature", "main", str(tmp_path), None,
+                   "brindle-ws1", time.time())
+    db.add_workspace(ws)
+    return ws
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr(permission_asks, "time", SimpleNamespace(time=lambda: now[0]))
+    return now
 
 
 def ask_about(db, ws, agent, command):
@@ -67,33 +78,76 @@ def test_decisions_and_asks_are_kept_and_reported(db, ws, monkeypatch):
     assert permission_asks.report(db, days=1, repo_root="/elsewhere")["decisions"] == 0
 
 
-def test_a_multi_file_codex_ask_is_counted_and_the_wait_runs_from_its_start(db, ws, monkeypatch):
+def test_a_multi_file_codex_request_is_credited_to_the_saved_action_that_settles_it(db, ws):
     set_local(ws.repo_root, "permission_policy", "on")
     a = Agent("c1", ws.id, "developer", "codex", "boss", "assign", "processing", "%c1", None, time.time())
     db.add_agent(a)
     patch = "*** Begin Patch\n*** Update File: a.py\n*** Update File: b.py\n*** End Patch\n"
-    agents.permission_request_decision(db, a, {
-        "cwd": ws.path, "tool_name": "apply_patch", "tool_input": {"command": patch}}, provider="codex")
-    assert permission_asks.report(db, days=1)["asks"] == 1
-    permission_asks.start_ask(db, "w1", "/r", "q9", "bash", "x", "r")
-    with db.tx() as c:
-        c.execute("UPDATE permission_asks SET ts=ts-60 WHERE request_id='q9'")
-    permission_asks.resolve_at_prompt(db, "w1", "q9")
-    wait = db.conn.execute("SELECT wait_seconds FROM permission_asks WHERE request_id='q9'").fetchone()[0]
-    assert wait >= 60
+    payload = {"cwd": ws.path, "tool_name": "apply_patch", "tool_input": {"command": patch}}
+    assert agents.permission_request_decision(db, a, payload, provider="codex") is None   # Codex's prompt asks
+    permissions.save_action("edit", "*.py", "allow", scope="general")
+    out = agents.permission_request_decision(db, a, payload, provider="codex")
+    assert out["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    data = permission_asks.report(db, days=1)
+    assert (data["asks"], data["resolved_by"]) == (2, {"saved_action": 1, "unheld": 1})
 
 
-def test_report_covers_the_window_and_saved_actions(db):
+def _closing(db, agent):
+    db.set_status(agent.id, "done")
+    return True, None
+
+
+@pytest.mark.parametrize("pane, looked, hold, resolved_by, wait", [
+    ("busy", lambda db, a: (True, None), 3600, "person", 10.0),   # its pane read past the prompt for 3 looks
+    (None, lambda db, a: (True, "terminal"), 3600, "terminal", None),
+    (None, _closing, 3600, "agent_exit", None),
+    (None, lambda db, a: (False, None), 3600, "daemon_lost", None),
+    (None, lambda db, a: (True, None), 0, "timeout", None),
+])
+def test_an_ask_ends_with_its_hold_not_with_the_tool(db, ws, clock, monkeypatch, pane, looked, hold, resolved_by,
+                                                     wait):
+    set_local(ws.repo_root, "permission_policy", "on")
+    set_local(ws.repo_root, "permission_hold_seconds", hold)
+    with permissions.editing() as store:
+        store.rules = [Rule("bash", "make", "prefix", "ask")]
+    a = Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing", "%w1", None, time.time())
+    db.add_agent(a)
+    monkeypatch.setattr("brindle.daemon.holds.Holder.register", lambda self, until: True)
+    monkeypatch.setattr("brindle.daemon.holds.Holder.end", lambda self: None)
+    monkeypatch.setattr(agents, "_pane_state", lambda agent: pane)
+
+    def look(self, seconds):
+        clock[0] += agents.HOLD_LOOK_SECONDS
+        return looked(db, a)
+    monkeypatch.setattr("brindle.daemon.holds.Holder.wait", look)
+    ask_about(db, ws, a, "make build")
+
+    def row():
+        return tuple(db.conn.execute("SELECT resolved_by, wait_seconds FROM permission_asks").fetchone())
+    assert row() == (resolved_by, wait)
+    # The build runs five minutes before its PostToolUse says the person allowed it.
+    clock[0] += 300
+    agents.note_permission_outcome(db, a, {
+        "tool_name": "Bash", "tool_input": {"command": "make build"}, "tool_use_id": "t1"})
+    assert row()[1] == wait
+
+
+def test_report_covers_the_window_and_leaves_pending_asks_unanswered(db, clock):
     permission_asks.record_decision(db, "w1", "/r", "bash", "git push", "allow",
-                                    "covered by your saved action ab12 (bash git push)")
-    permission_asks.finish_ask(db, permission_asks.start_ask(
-        db, "w1", "/r", "q1", "bash", "uv run x", "no rule allows or denies it; asking the user"), None)
-    old = time.time() - 10 * 86400
-    with db.tx() as c:
-        c.execute("UPDATE permission_asks SET ts=? WHERE request_id='q1'", (old,))
-    data = permission_asks.report(db, days=7)
-    assert (data["asks"], data["resolved_by"]) == (1, {"saved_action": 1})
-    assert permission_asks.report(db, days=30)["resolved_by"] == {"saved_action": 1, "timeout": 1}
+                                    "covered by your saved action ab12 (bash git push)", saved=True)
+    permission_asks.start_ask(db, "w1", "/r", "q1", "bash", "uv run x", "ask rule; asking the user")
+    answered = permission_asks.start_ask(db, "w1", "/r", "q2", "bash", "uv run y", "ask rule; asking the user")
+    clock[0] += 30
+    permission_asks.finish_ask(db, answered, "allow_once")
+    clock[0] -= 10 * 86400
+    permission_asks.record_unheld_ask(db, "w1", "/r", "bash", "uv run z", "no rule allows it; asking the user")
+    clock[0] += 10 * 86400
+    data = permission_asks.report(db, days=7, now=clock[0])
+    assert (data["decisions"], data["asks"]) == (3, 3)
+    assert data["resolved_by"] == {"person": 1, "saved_action": 1}
+    assert data["avg_wait_seconds"] == 15.0          # the saved action's 0 and the person's 30
+    assert permission_asks.report(db, days=30, now=clock[0])["resolved_by"] == {
+        "person": 1, "saved_action": 1, "unheld": 1}
 
 
 def test_report_is_reachable_from_the_cli_and_the_daemon(db, monkeypatch):
