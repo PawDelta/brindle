@@ -1548,21 +1548,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         ref = a.session_ref if provider.name in ("claude", "antigravity", "opencode", "native") and a.session_ref else None
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
-        if ref:
-            prompt = None
-        elif a.task and a.mode in ("handoff", "assign") and provider.launches_process:
-            # a.task is the raw task now (see decorate_worker_prompt); a fresh
-            # start needs the same decoration it got the first time. A row
-            # from before this change stored the already-decorated text, so
-            # it gets decorated a second time here; harmless, if redundant.
-            prompt = decorate_worker_prompt(
-                a.task, a.id, ws, a.done_when, provider, bool(a.headless),
-                plan_first=bool(a.plan_first) and a.plan_state != "approved",
-                report_only=is_review_profile(a.profile, ws.repo_root),
-                decisions=knowledge.replay_decisions(db, a.id),
-                chunks=knowledge.replay_chunks(db, a.id)) + RESUME_NOTE
-        else:
-            prompt = (a.task + RESUME_NOTE) if a.task else None
+        prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE)
         if a.dismissed_at is not None:
             db.update_agent(a.id, dismissed_at=None)  # running again: show it again
         _launch(db, a, ws, prompt=prompt, resume=ref,
@@ -1580,6 +1566,23 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     if resumed:
         bus.publish_agent(db, "session.resumed", root_id, agents=[a.id for a in resumed])
     return resumed
+
+
+def _fresh_start_prompt(db: DB, a: Agent, ws: Workspace, provider, note: str) -> str | None:
+    """What an agent restarting without its old conversation is told: its
+    task, followed by ``note``."""
+    if a.task and a.mode in ("handoff", "assign") and provider.launches_process:
+        # a.task is the raw task now (see decorate_worker_prompt); a fresh
+        # start needs the same decoration it got the first time. A row
+        # from before this change stored the already-decorated text, so
+        # it gets decorated a second time here; harmless, if redundant.
+        return decorate_worker_prompt(
+            a.task, a.id, ws, a.done_when, provider, bool(a.headless),
+            plan_first=bool(a.plan_first) and a.plan_state != "approved",
+            report_only=is_review_profile(a.profile, ws.repo_root),
+            decisions=knowledge.replay_decisions(db, a.id),
+            chunks=knowledge.replay_chunks(db, a.id)) + note
+    return (a.task + note) if a.task else None
 
 
 def get(db: DB, agent_id: str) -> Agent:
@@ -4305,6 +4308,27 @@ def reopen_reviewer(db: DB, agent: Agent, ws: Workspace,
     if agent.dismissed_at is not None:
         db.update_agent(agent.id, dismissed_at=None)
     _launch(db, agent, ws, prompt=prompt, resume=ref, watch_pane=False, background_setup=True)
+    return True
+
+
+def reopen_worker(db: DB, agent: Agent, ws: Workspace, prompt: str) -> bool:
+    """Start a worker whose process has exited (closed once it reported, say)
+    again in its own worktree with ``prompt``: in its own recorded CLI session
+    if it has one, else fresh on its task with ``prompt`` after it. False when
+    its worktree is gone, its session is paused, or it can't start."""
+    if not os.path.isdir(ws.path) or agent.status == "paused" or not runs_process(agent):
+        return False
+    ref = recorded_session(agent)
+    text = prompt if ref else _fresh_start_prompt(
+        db, agent, ws, get_provider(agent.provider),
+        "\n\n(You stopped after reporting and have just been restarted on your branch; "
+        "`git log` shows what you already did.)\n\n" + prompt) or prompt
+    try:
+        _launch(db, agent, ws, prompt=text, resume=ref, watch_pane=False, background_setup=True)
+    except AgentError:
+        return False
+    if agent.dismissed_at is not None:
+        db.update_agent(agent.id, dismissed_at=None)  # running again: show it again
     return True
 
 
