@@ -46,15 +46,24 @@ def test_decisions_and_asks_are_kept_and_reported(db, ws, monkeypatch):
             "tool_name": "Bash", "tool_input": {"command": "uv run ruff check"}, "tool_use_id": "t1"})
     monkeypatch.setattr(agents, "_await_app_answer", approved_at_terminal)
     ask_about(db, ws, a, "uv run ruff check")
+    # ...or the instant the request becomes visible, before the hold starts waiting.
+    monkeypatch.setattr(agents, "_await_app_answer", lambda *args: None)
+    add = db.add_permission_request
+
+    def add_then_approved(*args, **kw):
+        add(*args, **kw)
+        approved_at_terminal()
+    monkeypatch.setattr(db, "add_permission_request", add_then_approved)
+    ask_about(db, ws, a, "uv run ruff check")
     # A PreToolUse approval by the profile's allowed_tools is a decision too.
     assert agents.pre_tool_decision(db, a, {"tool_name": "Bash", "tool_input": {"command": "git status"}})
 
     data = permission_asks.report(db, days=1, repo_root=ws.repo_root)
-    assert (data["decisions"], data["asks"], data["ask_rate"]) == (5, 2, 0.4)
-    assert data["resolved_by"] == {"person": 2}
-    assert data["outcomes"] == {"allow": 2}
+    assert (data["decisions"], data["asks"], data["ask_rate"]) == (6, 3, 0.5)
+    assert data["resolved_by"] == {"person": 3}
+    assert data["outcomes"] == {"allow": 3}
     [cause] = data["causes"]
-    assert cause["count"] == 2 and cause["kinds"] == ["bash"]
+    assert cause["count"] == 3 and cause["kinds"] == ["bash"]
     assert permission_asks.report(db, days=1, repo_root="/elsewhere")["decisions"] == 0
 
 

@@ -3701,12 +3701,14 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     # Held before it is recorded anywhere, so nothing watching the rows can take its id first.
     hold_until = time.time() + hold
     held = holder.register(hold_until)
-    db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1],
-                              "hook" if held else None, hold_until=hold_until if held else None)
-    answer = None
+    # The history row first: once the pairing row is visible a PostToolUse may pop it
+    # and resolve the ask, which needs the row to exist (permission_asks.resolve_at_prompt).
     ws = db.get_workspace(agent.workspace_id)
     ask_id = permission_asks.start_ask(db, agent.id, ws.repo_root if ws else "", request_id, req.kind,
                                        req.summary(), reason)
+    db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1],
+                              "hook" if held else None, hold_until=hold_until if held else None)
+    answer = None
     if held:
         try:
             answer = _await_app_answer(db, agent, holder, req, hold)
