@@ -1879,9 +1879,11 @@ def _rule_decision(req: Request, rules: list[Rule], checks: list[str] | None) ->
 def decide(req: Request | None, *, checks: list[str] | None = None,
            rules: list[Rule] | None = None, unmatched: str | None = None,
            session: str | None = None, saved: list[SavedAction] | None = None,
-           spend: bool = False) -> Decision:
-    """The policy's answer for ``req``: deny > ask > allow > ``unmatched``
-    (the store's setting when None). An ask a saved action covers (within
+           spend: bool = False, groups: dict[str, dict] | None = None) -> Decision:
+    """The policy's answer for ``req``: deny > ask > allow > the capability
+    group's baseline (``groups``, brindle.permission_groups; the store's when
+    None and ``unmatched`` is too) > ``unmatched`` (the store's setting when
+    None). An ask a saved action covers (within
     every matching ask rule's limits; ``session``: the asking agent's
     session, for saved actions that last one) is settled by it. ``saved``:
     the saved actions to consider (the store's when None). ``spend``: the
@@ -1893,6 +1895,8 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
         store = load_store()
     if rules is None:
         rules = all_rules(req.repo_root or None)
+    if groups is None:
+        groups = store.groups if unmatched is None else {}
     if unmatched is None:
         unmatched = store.unmatched
     if saved is None:
@@ -1918,6 +1922,7 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
             return stopped
     if ruled is not None and ruled.decision == "allow":
         return ruled
+    open_parts = None    # the parts of a command no rule allows
     if ruled is None and req.kind == "bash" and req.command and simple_argv(req.command) is None:
         parts = compound_parts(req.command)
         if parts:
@@ -1928,12 +1933,19 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
             if all(answer.decision == "allow" for answer in answers):
                 return Decision("allow", "every part of the command is allowed by a rule")
             ruled = next((a for a in answers if a.decision == "ask" and a.rule is not None), None)
-    if ruled is None and unmatched == "deny":
-        return Decision("deny", "no rule covers it, and unmatched actions are denied")
-    if ruled is None and unmatched == "allow":
+            open_parts = [words for words, answer in zip(parts, answers) if answer.decision != "allow"]
+    fallback, why = unmatched, "unmatched actions are denied" if unmatched == "deny" else "unmatched actions run"
+    if ruled is None and groups:
+        from brindle import permission_groups
+
+        fallback, where = permission_groups.baseline(req, groups, rules, checks, open_parts)
+        why = f"the {where} baseline is {fallback}"
+    if ruled is None and fallback == "deny":
+        return Decision("deny", f"no rule covers it, and {why}")
+    if ruled is None and fallback == "allow":
         # Nothing covers it, not even a part hiding in it (cd x && git push
         # origin main: _restriction_in_parts above): it runs.
-        return Decision("allow", "no rule covers it; unmatched actions run")
+        return Decision("allow", f"no rule covers it; {why}")
     if ruled is not None and ruled.decision == "ask":
         # Several ask rules may match (git push origin HEAD:main HEAD:release):
         # the strictest is the one shown, and a saved allow must fit every one.
@@ -2456,6 +2468,8 @@ class Store:
     unsupported_rules: list = field(default_factory=list)
     # Top-level keys this engine doesn't know (a 0.4.7 store's "remembered", say), kept as they are.
     extra: dict = field(default_factory=dict)
+    # The capability groups' baselines (brindle.permission_groups); none: ``unmatched`` for every group.
+    groups: dict[str, dict] = field(default_factory=dict)
     unsupported_version: bool = False   # written by a newer engine: read fail-closed, never rewritten
 
     @property
@@ -2484,7 +2498,7 @@ class Store:
             data["saved"] = [s.to_dict() for s in self.saved]
         if self.prompts:
             data["prompts"] = self.prompts
-        for name in ("agy_managed", "agy_created", "agy_repos", "codex_hook"):
+        for name in ("groups", "agy_managed", "agy_created", "agy_repos", "codex_hook"):
             if getattr(self, name):
                 data[name] = getattr(self, name)
         return json.dumps(data, indent=2) + "\n"
@@ -2503,11 +2517,14 @@ class Store:
 def seed_preset(store: Store, name: str) -> Store:
     """Seed ``store`` from preset ``name``: its rules replace the preset-sourced
     ones (the person's own and learned rules stay), and its unmatched setting
-    and name are recorded."""
+    and name are recorded, and its capability group baselines."""
+    from brindle import permission_groups
+
     kept = [r for r in store.rules if r.source != "preset"]
     ids = {r.id for r in kept}    # a seeded rule the person edited keeps their version
     store.rules = [*(r for r in preset_rules(name) if r.id not in ids), *kept]
     store.preset, store.unmatched = name, preset_unmatched(name)
+    store.groups = permission_groups.preset_groups(name)
     return store
 
 
@@ -2536,7 +2553,7 @@ V2_PRESET = "autonomous"    # a 0.4.7 store whose editor chose no preset
 V2_PUSH_LEVELS = {"branch": ("destination", "general"), "remote": ("remote", "remote"),
                   "repo": ("repository", "repository"), "all": ("all", "all")}
 STORE_KEYS = ("version", "preset", "unmatched", "rules", "approvals", "saved", "prompts", "agy_managed",
-              "agy_created", "agy_repos", "codex_hook")
+              "agy_created", "agy_repos", "codex_hook", "groups")
 
 
 def _editor_preset(rules: list[Rule]) -> tuple[str | None, set[str]]:
@@ -2687,8 +2704,11 @@ def load_store() -> Store:
         codex = {os.path.realpath(provider_homes.source("codex")): codex}
     codex = {home: {k: v for k, v in rec.items() if isinstance(v, str)}
              for home, rec in codex.items() if isinstance(rec, dict)}
+    from brindle import permission_groups
+
+    groups = permission_groups.normalized(data["groups"], unmatched) if data.get("groups") else {}
     store = Store(rules, approvals, preset, unmatched, saved, prompts, managed, strings(data.get("agy_created")),
-                  repos, codex, unsupported, {k: v for k, v in data.items() if k not in STORE_KEYS})
+                  repos, codex, unsupported, {k: v for k, v in data.items() if k not in STORE_KEYS}, groups)
     if legacy:
         _migrate(store, data)
         try:
@@ -2815,10 +2835,31 @@ def apply_preset(name: str) -> Store:
 
 
 def set_unmatched(value: str) -> None:
+    """What no rule covers does: every capability group's baseline too
+    (their subcategories' own answers stay)."""
     if value not in UNMATCHED:
         raise ValueError(f"unmatched must be one of {', '.join(UNMATCHED)}")
     with editing() as store:
         store.unmatched = value
+        for entry in store.groups.values():
+            entry["baseline"] = value
+
+
+def set_groups(changes: dict) -> Store:
+    """Change capability group baselines and subcategory answers
+    (permission_groups.merged; ValueError for what it doesn't know)."""
+    from brindle import permission_groups
+
+    with editing() as store:
+        store.groups = permission_groups.merged(effective_groups(store), changes)
+    return store
+
+
+def effective_groups(store: Store) -> dict[str, dict]:
+    """The store's capability group table, its unmatched setting for every group when it has none."""
+    from brindle import permission_groups
+
+    return store.groups or permission_groups.table(store.unmatched)
 
 
 # -- saved actions ------------------------------------------------------------------------------

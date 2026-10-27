@@ -1318,6 +1318,21 @@ def patch_permissions(db: DB, params: dict, body: Body) -> Any:
     return svc.policy_dto().to_json()
 
 
+def set_permission_groups(db: DB, params: dict, body: Body) -> Any:
+    """PUT /permissions/groups {groups: {group: {baseline?, subcategories?}}}:
+    change capability group baselines and subcategory answers (the rest stay).
+    Answers the whole policy."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        store = perms.set_groups(_get(body, "groups", dict, required=True))
+    except ValueError as e:
+        raise _invalid(e) from e
+    _policy_changed()
+    return svc.policy_dto(store).to_json()
+
+
 def _rule_fields(body: Body) -> dict[str, Any]:
     """The rule fields a body may set (make_rule's), validated for type."""
     out: dict[str, Any] = {}
@@ -1945,6 +1960,7 @@ ROUTES = [
     # The permission policy (brindle.permissions, brindle.permission_grants); agents never get here.
     Route("/v1/permissions", _endpoint(patch_permissions), methods=["PATCH"]),
     Route("/v1/permissions/preset", _endpoint(set_permission_preset), methods=["PUT"]),
+    Route("/v1/permissions/groups", _endpoint(set_permission_groups), methods=["PUT"]),
     _post("/permissions/rules", create_permission_rule),
     Route("/v1/permissions/rules/{id}", _endpoint(update_permission_rule), methods=["PUT"]),
     Route("/v1/permissions/rules/{id}", _endpoint(delete_permission_rule), methods=["DELETE"]),
