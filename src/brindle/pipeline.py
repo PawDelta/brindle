@@ -1381,7 +1381,7 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
                 return (f"Not merged: {busy.id} is still working on {ws.branch}; "
                         "retry once it reports.")
         sync_result = workspaces.sync_with_base(ws)
-    except git.GitError as e:
+    except (git.GitError, workspaces.WorkspaceError) as e:
         return _settled(db, ws) or f"Not merged: {e}"
     if sync_result.status == "conflict":
         if conflicts_out is not None:
@@ -1420,7 +1420,7 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
                     "Call merge_workspace again to check the new commits.")
         # git.merge_into serializes merges into one checkout (checkout_lock).
         target = workspaces.merge_back(db, ws, squash=squash)
-    except git.GitError as e:
+    except (git.GitError, workspaces.WorkspaceError) as e:
         return _settled(db, ws) or f"Not merged: {e}"
     db.set_merged(ws.id, report.sha)
     text = f"Merged {ws.branch} into {ws.base_branch} at {target} ({report.summary()})."
