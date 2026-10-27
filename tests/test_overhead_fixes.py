@@ -35,6 +35,15 @@ def test_profile_can_force_tool_search(db, repo):
     assert "ENABLE_TOOL_SEARCH" not in agents.agent_env(ws, "w1", db.get_agent("w1"))
 
 
+def test_agent_env_caps_xdist(db, repo, monkeypatch):
+    ws = workspaces.adopt_root(db, str(repo))
+    add(db, ws, "w1", mode="assign", profile="developer")
+    monkeypatch.delenv("PYTEST_XDIST_AUTO_NUM_WORKERS", raising=False)
+    assert agents.agent_env(ws, "w1", db.get_agent("w1"))["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"
+    monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", "8")
+    assert "PYTEST_XDIST_AUTO_NUM_WORKERS" not in agents.agent_env(ws, "w1", db.get_agent("w1"))
+
+
 # -- 3. checks run once and are shared -------------------------------------------
 
 @pytest.fixture

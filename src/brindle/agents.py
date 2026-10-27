@@ -54,6 +54,8 @@ WORKER_FOOTER = """
 ---
 You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
 {guidance}
+Run only the tests that cover your change (a test file or a `-k` filter), not
+the full suite: brindle's merge gate runs the full suite on your branch.
 Before you finish, check your work against the task and its finish line, item
 by item: each behaviour it asks for needs a test that would fail without your
 change, and a requirement with no such test isn't done yet. If the task turns
@@ -301,6 +303,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         # some never get there). Workers and reviewers only have brindle's own
         # tools, so loading them all up front is cheap.
         env["ENABLE_TOOL_SEARCH"] = "false"
+    # Agents run pytest outside brindle's check slots: cap their xdist workers
+    # so a few of them don't each start one per core. The user's own setting wins.
+    if "PYTEST_XDIST_AUTO_NUM_WORKERS" not in os.environ:
+        env.setdefault("PYTEST_XDIST_AUTO_NUM_WORKERS", "2")
     return env
 
 
