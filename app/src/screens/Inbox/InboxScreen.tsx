@@ -8,20 +8,20 @@
    Each card either acts right here or goes to the session, never through
    a popup, a reply field or a moment to undo: one click, sent at once
    (POST /inbox/{id}/{action}), and the card goes; the engine's refusal, if
-   any, comes back as one line on it. Acted on here: a permission request
-   brindle's hook holds (the provider's own choices as small buttons), a
-   lapsed sign-in (Sign in: the provider CLI's own login on the engine, or
+   any, comes back as one line on it. Permissions are one card
+   (PermissionAsks.tsx), whoever holds them: Deny, Allow once, Allow ▾ for a
+   request brindle's hook holds, a note and a way to the agent's window for
+   a prompt only that window can take. Acted on here too: a lapsed sign-in (Sign in: the provider CLI's own login on the engine, or
    brindle's cloud sign-in for a "login" item), a plan (Approve; changes
    are asked for in its session), proposed checks (Accept / Decline), an
    org notice (Mark read) and a setup problem the engine can repair itself
    (Fix: a job on the engine, POST /v1/setup/codex-hook for a Codex that no
    longer trusts brindle's permission hook; the card goes when the job is
    done, or shows the job's error). Everything else (an agent waiting at
-   its own prompt, a permission only that prompt can take, a failure, a
-   branch to review or merge again) says so in one quiet line and only
-   goes to the session. Requests brindle's hook holds come grouped instead,
-   above the rest (PermissionAsks.tsx): one item per kind and general form,
-   decided at once for every request in it, under the stall notice.
+   its own prompt, a failure, a branch to review or merge again) says so in
+   one quiet line and only goes to the session. Requests brindle's hook
+   holds come grouped, above the rest: one item per kind and general form,
+   decided at once for every request in it, under the stall banner.
 
    The same items count on the sidebar's "Inbox · N" at its top, and
    nowhere else: the Inbox is where what needs a person is read and acted
@@ -38,8 +38,8 @@ import { useSessions } from "../../store/sessions";
 import { useAppState } from "../../store/useStore";
 import { useJob } from "../Branch/useJob";
 import { ItemActions } from "./ItemActions";
-import { PermissionAsks, usePermissionAsks } from "./PermissionAsks";
-import { FIXES, KIND_SHORT, answerable, describeItem, fixable, forgetGone, itemKey, kindLabel, permissionAnswer, permissionLine, seenAt } from "./items";
+import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
+import { FIXES, KIND_SHORT, describeItem, fixable, forgetGone, itemKey, kindLabel, seenAt } from "./items";
 import { useInboxActions } from "./useInboxActions";
 
 export interface InboxScreenProps {
@@ -202,9 +202,13 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
                 </button>
               )}
             </header>
-            {group.items.map((item) => (
+            {group.items.map((item) =>
+              item.kind === "permission" ? (
+                <PermissionItemCard key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
+              ) : (
               <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
-            ))}
+              ),
+            )}
           </section>
         ))}
       </div>
@@ -229,25 +233,9 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
   const note = actions.notes[key];
   const tone = TONE[item.kind] ?? SAP;
   const age = formatAge((Date.now() - seenAt(item)) / 1000);
-  const held = item.kind === "permission" && item.permission?.via === "hook";
-  const [expanded, setExpanded] = useState(false);
-  const line = item.kind === "permission" ? permissionLine(item) : null;
 
   let body: ReactNode = null;
-  if (line) {
-    body = (
-      <button type="button" className={`text-left ${expanded ? "whitespace-pre-wrap break-all" : "truncate"}`} title={expanded ? "Show as one line" : `${line.whole}\n\nClick to show it whole`} aria-expanded={expanded} data-testid="permission-line" onClick={() => setExpanded((e) => !e)}>
-        {expanded ? (
-          <code className="font-mono text-xs">{line.whole}</code>
-        ) : (
-          <>
-            {line.lead && <span>{line.lead}: </span>}
-            {line.code ? <code className="font-mono text-xs">{line.code}</code> : <span>{line.whole}</span>}
-          </>
-        )}
-      </button>
-    );
-  } else if (item.kind === "proposed_checks" || item.kind === "plan") {
+  if (item.kind === "proposed_checks" || item.kind === "plan") {
     // Approved or accepted from this card: shown whole, never cut short.
     body = <pre className="whitespace-pre-wrap font-mono text-xs" data-testid="card-detail">{item.detail}</pre>;
   } else if (item.kind === "org_notice") {
@@ -269,17 +257,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
     </button>
   );
   let acts: ReactNode;
-  if (item.kind === "permission" && answerable(item)) {
-    acts = (
-      <span className="flex flex-wrap items-center gap-1.5" role="group" aria-label="Permission choices">
-        {(item.permission?.choices ?? []).map((c, i) => (
-          <button key={c.choice} type="button" className={`${ACT} ${i === 0 ? PRIMARY : c.choice === "deny" ? GHOST : PLAIN}`} disabled={busy} title={c.rule ?? undefined} data-choice={c.choice} onClick={() => actions.run(item, "permission", permissionAnswer(item, c.choice))}>
-            {c.label}
-          </button>
-        ))}
-      </span>
-    );
-  } else if (item.kind === "plan") {
+  if (item.kind === "plan") {
     acts = (
       <>
         {act("Approve", "approve", { feedback: "" })}
@@ -301,12 +279,6 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
     acts = <span className="text-[11px] text-ink-3">fixed from a terminal: brindle doctor says how</span>;
   } else if (item.kind === "credentials" || item.kind === "login") {
     acts = <ItemActions item={item} actions={actions} repo={repo} onDone={onDone} compact />;
-  } else if (item.kind === "permission") {
-    acts = (
-      <span className="text-[11px] text-ink-3" data-testid="permission-terminal" title={item.permission?.terminal ?? undefined}>
-        answered at its own prompt, in its session
-      </span>
-    );
   } else {
     acts = <span className="text-[11px] text-ink-3">{item.kind === "review" || item.kind === "merge_failed" ? "handled in its session" : "answered in its session"}</span>;
   }
@@ -315,7 +287,6 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
     <article className={`${card} relative grid max-w-[960px] grid-cols-[minmax(0,1fr)_auto] items-start gap-x-s2 gap-y-1 py-[11px] pl-[18px] pr-[14px] before:absolute before:bottom-[10px] before:left-0 before:top-[10px] before:w-[3px] before:rounded-sm ${tone.bar}`} aria-label={kindLabel(item)} data-testid="inbox-card" data-kind={item.kind}>
       <div className={`col-start-1 font-mono text-[10.5px] uppercase tracking-[0.06em] ${tone.ink}`}>
         {KIND_SHORT[item.kind] ?? item.kind}
-        {held && " · held by brindle"}
       </div>
       <div className="col-start-1 text-[13.5px] font-semibold leading-[1.35]">{describeItem(item)}</div>
       {body && <div className="col-start-1 min-w-0 text-[12.5px] leading-[1.45] text-ink-2">{body}</div>}

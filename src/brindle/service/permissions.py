@@ -17,6 +17,7 @@ from brindle.service.dto import (
     AskResultDTO,
     AskScopeDTO,
     PermissionExceptionDTO,
+    PermissionGroupDTO,
     PermissionLimitsDTO,
     PermissionPolicyDTO,
     PermissionPresetDTO,
@@ -51,7 +52,9 @@ def policy_dto(store: permissions.Store | None = None) -> PermissionPolicyDTO:
         presets=[PermissionPresetDTO(name=name, description=desc, unmatched=unmatched, current=name == store.preset)
                  for name, (_, unmatched, desc) in permissions.PRESETS.items()],
         rules=[rule_dto(r, counts) for r in store.rules],
-        saved=[saved_dto(s) for s in store.saved], prompt_counts=counts)
+        saved=[saved_dto(s) for s in store.saved], prompt_counts=counts,
+        groups=[PermissionGroupDTO(name=name, baseline=g["baseline"], subcategories=g["subcategories"])
+                for name, g in permissions.effective_groups(store).items()])
 
 
 def scope_dto(scope: dict) -> AskScopeDTO:

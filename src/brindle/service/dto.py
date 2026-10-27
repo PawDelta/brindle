@@ -498,16 +498,25 @@ class SavedActionDTO(_DTO):
     note: str = ""
 
 
+class PermissionGroupDTO(_DTO):
+    """A capability group (brindle.permission_groups): what it answers for a
+    request no rule covers, unless one of its subcategories says otherwise."""
+    name: str                # files | shell | git | network | mcp
+    baseline: str            # allow | ask | deny
+    subcategories: dict[str, str] = {}   # subcategory -> inherit | allow | ask | deny
+
+
 class PermissionPolicyDTO(_DTO):
     """GET /permissions: the chosen preset, the unmatched setting, every rule
-    (editable, the preset's included), the saved actions and per-rule prompt
-    counts ("unmatched" for asks no rule caused)."""
+    (editable, the preset's included), the saved actions, per-rule prompt
+    counts ("unmatched" for asks no rule caused) and the capability groups."""
     preset: str | None
     unmatched: str
     presets: list[PermissionPresetDTO]
     rules: list[PermissionRuleDTO]
     saved: list[SavedActionDTO]
     prompt_counts: dict[str, int] = {}
+    groups: list[PermissionGroupDTO] = []
 
 
 class AskScopeDTO(_DTO):
