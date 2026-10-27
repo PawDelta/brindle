@@ -45,10 +45,11 @@ NARROWED = f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
     ("infer", OPTS, OTHER, [f"{OPTS} tests/test_other.py || [ $? -eq 5 ]"]),
     ("infer", SELECTS, OTHER, [SELECTS]),   # names tests itself: runs in full
     ("infer", "make lint", OTHER, ["make lint"]),
+    ("infer", PYTEST, {}, []),   # nothing changed: skipped
     ("off", PYTEST, OTHER, [PYTEST]),
     ("supervisor", PYTEST, OTHER, [PYTEST]),
 ], ids=["python-affected", "deleted-function", "test-helper", "lookup-failed", "fallback-unmapped", "quoted-name",
-        "fallback-conftest", "fallback-pyproject", "infer", "infer-options", "infer-selects", "other-command-changed_files_env", "off",
+        "fallback-conftest", "fallback-pyproject", "infer", "infer-options", "infer-selects", "other-command-changed_files_env", "empty-diff", "off",
         "supervisor"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran):
     config = {"checks": [cmd], "scoped_checks": "off" if where == "off" else "infer"}
@@ -77,9 +78,9 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
     else:
         ws = workspaces.adopt_root(db, str(repo))
     write(Path(ws.path), changes)
-    sh("git add -A && git commit -qm work", Path(ws.path))
+    sh("git add -A && git commit -qm work --allow-empty", Path(ws.path))
 
     cfg = load_repo_config(ws.repo_root)
     assert all(gates.run_checked(db, ws, cmd, {}, 30)[0] for cmd in cfg.checks)
     assert commands == ran
-    assert envs == ([None] if where == "supervisor" else ["\n".join(sorted(changes))])   # the real gate dispatch sets it
+    assert envs == [None if where == "supervisor" else "\n".join(sorted(changes))] * len(ran)   # the real gate dispatch sets it

@@ -85,12 +85,12 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     if diff is not None:   # a script can narrow itself; the gate never trusts that for the cache
         env = {**env, "BRINDLE_CHANGED_FILES": "\n".join(diff[1])}
     run = _scoped(ws, cmd, diff)
-    # A narrowed run is cached by the files that narrowed it, so its pass never satisfies a full run.
-    ident = run if run == cmd or diff is None else run + "\n" + "\n".join(diff[1])
     if run is None:
         out = f"{check_scope.SKIPPED}{ws.branch} changes nothing this check covers"
         db.set_check(ws.id, sha, cmd, True, out)
         return True, out
+    # A narrowed run is cached by the files that narrowed it, so its pass never satisfies a full run.
+    ident = run if run == cmd or diff is None else run + "\n" + "\n".join(diff[1])
     dirty = bool(git.dirty_files(ws.path))
     if dirty:
         return _run_queued(db, ws, run, env, timeout, cancel)
