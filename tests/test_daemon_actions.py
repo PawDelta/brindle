@@ -15,7 +15,7 @@ from conftest import sh
 from test_reliability import CLAUDE_BUSY, CLAUDE_IDLE
 
 from brindle import agents, autopilot, bus, config, coordinator, pipeline, preflight, providers, workspaces
-from brindle.daemon import peer, routes_actions
+from brindle.daemon import holds, peer, routes_actions
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
 from brindle.pro.account import ProAccount
@@ -908,7 +908,6 @@ SUGGESTED = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": 
               "behavior": "allow", "destination": "localSettings"}]
 # Claude Code's PermissionRequest input, as documented: no tool_use_id.
 ASK = {"hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input": {"command": "npm test"}}
-# Claude Code's own prompt for it, in its pane.
 CLAUDE_PROMPT = "Bash command\n  npm test\nDo you want to proceed?\n" + "\n".join(
     f"{'❯' if i == 0 else ' '} {i + 1}. {o}" for i, o in enumerate(OPTIONS))
 HOLD = 2    # the repo's permission_hold_seconds in these tests
@@ -1236,68 +1235,41 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     assert code == 409 and pressed == [], reply
 
 
-@pytest.mark.parametrize("screen,late", [(CLAUDE_IDLE, False), pytest.param(CLAUDE_BUSY, False, marks=pytest.mark.variant(
-    "review: allowed in the pane, its tool still running, so no PostToolUse yet")), (CLAUDE_BUSY, True)],
-    ids=["denied", "allowed", "prompt-drawn-late"])
-def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, world, answering, monkeypatch, screen,
-                                                                     late):
+# The pane each second: the prompt, past it twice, a read it can't tell (the count starts over), past it for good.
+# Or drawn after 11s busy: looked at every 5s till a look catches it, so the app's deny at 16s still reaches the hook.
+@pytest.mark.parametrize("reads,looks,deny", [
+    ([CLAUDE_PROMPT, CLAUDE_IDLE, CLAUDE_IDLE, "", CLAUDE_IDLE, CLAUDE_IDLE, CLAUDE_IDLE], list(range(7)), False),
+    pytest.param([CLAUDE_PROMPT, CLAUDE_BUSY, CLAUDE_BUSY, "", CLAUDE_BUSY, CLAUDE_BUSY, CLAUDE_BUSY], list(range(7)),
+                 False, marks=pytest.mark.variant("review: allowed in the pane, its tool still running, so no PostToolUse yet")),
+    ([""] + [CLAUDE_BUSY] * 11 + [CLAUDE_PROMPT] * 5 + [CLAUDE_IDLE], [0, 5, 10, 15, 16], True)], ids=["denied", "allowed", "prompt-drawn-late"])
+def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, answering, monkeypatch, reads, looks, deny):
     from brindle import tmux
-    from brindle.daemon import holds
     from brindle.db import DB
     from brindle.service import inbox
 
-    wk = db.get_agent("wk")
-    if late:
-        # A pane busy before its prompt is drawn is no answer: unreadable at t=0, busy at t=1..11, the
-        # prompt drawn at t=12 (t: the hook's waits on the daemon, a second each). Looking every 5s
-        # until it catches the prompt, then after every wait, the hook still takes the app's deny at t=16.
-        clock, looks, replies, posts, released = [0], [], [], [], threading.Event()
-        wait, release = holds.Holder.wait, holds.HOLDS.release
+    clock, seen, posts, released, release = [0.0], [], [], threading.Event(), holds.HOLDS.release     # a fake clock
+    config.set_local(str(repo), "permission_hold_seconds", 60)
+    monkeypatch.setattr(agents, "HOLD_LOOK_SECONDS", 1.0)
+    monkeypatch.setattr(agents, "time", SimpleNamespace(time=time.time, monotonic=lambda: clock[0]))
+    monkeypatch.setattr(holds.HOLDS, "clock", lambda start=time.time(): start + clock[0])
+    monkeypatch.setattr(holds.HOLDS, "release", lambda *a: [release(*a), released.set()][0])
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: seen.append(int(clock[0])) or reads[int(clock[0])])
 
-        def capture(target, **kw):
-            looks.append(clock[0])
-            if clock[0] == 0:
-                raise tmux.TmuxError("no pane yet")
-            return screen if clock[0] < 12 else CLAUDE_PROMPT
+    def wait(holder, seconds):      # the daemon's, on the fake clock
+        if deny and clock[0] == 16:
+            dto = inbox.pending_permissions(db, db.get_agent("wk"))[0].dto
+            posts.append(threading.Thread(target=lambda: _send("POST", "/v1/inbox/wk/permission", {
+                "request": dto.request_id, "digest": dto.digest, "choice": "deny"})))
+            posts[0].start()
+            assert released.wait(5)     # handed over, for this wait to take
+        clock[0] += seconds
+        return holds.HOLDS.take(holder.request_id, holder.nonce)
 
-        def app_denies_at_16(holder, seconds):
-            if clock[0] == 16:
-                shown = next(p.dto for p in inbox.pending_permissions(db, wk))
-                posts.append(threading.Thread(target=lambda: replies.append(_send("POST", "/v1/inbox/wk/permission", {
-                    "request": shown.request_id, "digest": shown.digest, "choice": "deny"}))))
-                posts[0].start()
-                assert released.wait(5)     # handed over, for this wait to take
-            clock[0] += 1
-            return wait(holder, seconds)
-
-        monkeypatch.setattr(tmux, "capture", capture)
-        monkeypatch.setattr(holds.Holder, "wait", app_denies_at_16)
-        monkeypatch.setattr(holds.HOLDS, "release", lambda *a: [release(*a), released.set()][0])
-        monkeypatch.setattr(agents, "HOLD_LOOK_SECONDS", 0.001)
-        out = agents.permission_request_decision(DB(), wk, {**ASK, "cwd": str(repo)})
-        for post in posts:
-            post.join(5)
-        assert _verdict(out) == "deny" and looks == [0, 5, 10, 15, 16]
-        assert [code for code, _ in replies] == [200]
-        return
-    # The hook's looks: the prompt, past it twice, one it can't tell (the window starts over), then
-    # past it for good.
-    looks, paused, go = iter([CLAUDE_PROMPT, screen, screen, "", screen, screen]), threading.Event(), threading.Event()
-
-    def capture(target, **kw):
-        if (read := next(looks, None)) is None and not paused.is_set():
-            paused.set()        # its seventh look waits on the test
-            go.wait(5)
-        return screen if read is None else read
-
-    monkeypatch.setattr(tmux, "capture", capture)
-    hook = threading.Thread(target=lambda: agents.permission_request_decision(DB(), wk, {**ASK, "cwd": str(repo)}))
-    hook.start()
-    shown = lambda: [i.kind for i in inbox.items(db, str(repo), panes={"%2": True}) if i.agent_id == "wk"]  # noqa: E731
-    assert paused.wait(5) and shown() == ["permission"]     # an interrupted window doesn't end the hold
-    go.set()
-    hook.join(HOLD / 2)         # well before the hold would end
-    assert not hook.is_alive() and shown() == []
+    monkeypatch.setattr(holds.Holder, "wait", wait)
+    out = agents.permission_request_decision(DB(), db.get_agent("wk"), {**ASK, "cwd": str(repo)})
+    [post.join(5) for post in posts]
+    assert _verdict(out) == ("deny" if deny else None) and seen == looks
+    assert [i for i in inbox.items(db, str(repo), panes={"%2": True}) if i.agent_id == "wk"] == []
 
 
 @pytest.fixture
