@@ -223,6 +223,23 @@ def test_license_cached(backend, token, monkeypatch):
     with pytest.raises(LicenseError, match="not logged in"):
         license.current()
 
+    # The same across a read of the disk cache.
+    store = logged_in(backend, token())
+    license.clear_cache()   # as login does
+    license.current()
+    license._cache = None
+    read = license._disk_cache_read
+
+    def read_then_logout(*a):
+        hit = read(*a)
+        auth.logout(None, store)
+        return hit
+
+    monkeypatch.setattr(license, "_disk_cache_read", read_then_logout)
+    for _ in range(2):
+        with pytest.raises(LicenseError, match="not logged in"):
+            license.current()
+
 
 def test_features_fail_closed_on_a_loose_credentials_file(backend, token):
     store = logged_in(backend, token())

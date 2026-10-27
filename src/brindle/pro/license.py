@@ -502,14 +502,16 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
             if default:
                 _cache = (min(now + CACHE_SECONDS, ent.grace_until or ent.exp), ent)
             return ent
+    gen = _disk_cache_generation() if default else None   # before the cache and credentials: see _disk_cache_write
     if default:
         hit = _disk_cache_read(now, max_age)
+        if hit is not None and _disk_cache_generation() != gen:
+            return _read_again(refresh, now, max_age, _first_read)
         if isinstance(hit, str):
             raise LicenseError(hit)
         if hit is not None:
             _cache = (min(now + CACHE_SECONDS, hit.grace_until or hit.exp), hit)
             return hit
-    gen = _disk_cache_generation() if default else None   # before the credentials: see _disk_cache_write
     try:
         store = store or credentials.default_store()
         creds = store.load()
