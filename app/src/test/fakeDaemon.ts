@@ -1540,6 +1540,12 @@ export class FakeDaemon {
       p.unmatched = String(body.unmatched);
       return json(this.policyDTO());
     }
+    if (path === "/permissions/report" && method === "GET") {
+      // permission_asks.report: the 24-hour prompt counts stand in for a week's asks.
+      const asks = Object.values(p.prompts).reduce((n, c) => n + c, 0);
+      const decisions = asks + 20;
+      return json({ days: Number(query.days ?? 7), decisions, asks, ask_rate: asks / decisions, avg_wait_seconds: null, causes: asks ? [{ reason: "bash: git push to the default branch", count: asks, kinds: ["bash"], avg_wait_seconds: null, example: "git push origin main" }] : [] });
+    }
     if (path === "/permissions/groups" && method === "PUT") {
       // routes_actions.set_permission_groups: the named groups' baselines and subcategory answers change, the rest stay.
       const changes = body.groups as Record<string, { baseline?: string; subcategories?: Record<string, string> }> | undefined;
