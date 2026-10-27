@@ -12,6 +12,8 @@ from brindle.config import load_repo_config
 from brindle.db import Agent
 
 PYTEST = "uv run pytest -q"
+OPTS = "python -m pytest -n auto -m serial"
+SELECTS = "uv run pytest -q tests/"
 APP = "cd app && npx vitest run"
 CONFIG = {"checks": [
     {"run": PYTEST, "paths": ["src/**", "tests/**"], "affected": "pytest", "full_when": ["**/conftest.py"]},
@@ -47,10 +49,14 @@ def write(root: Path, files: dict[str, str]) -> None:
     ("worker-local", {"tests/test_other.py": "def test_o(): pass\n"}, [f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"]),
     ("worker-infer", {"tests/test_other.py": "def test_o(): pass\n"}, [f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"]),
     ("worker-infer", {"pyproject.toml": "[x]\n"}, [PYTEST]),
+    ("worker-infer-options", {"tests/test_other.py": "def test_o(): pass\n"},
+     [f"{OPTS} tests/test_other.py || [ $? -eq 5 ]"]),
+    ("worker-infer-selects", {"tests/test_other.py": "def test_o(): pass\n"}, [SELECTS]),   # names tests itself: no narrowing
     ("worker-off", {"tests/test_other.py": "def test_o(): pass\n"}, [PYTEST]),
 ], ids=["docs-only", "app-only", "python-affected", "deleted-function", "test-helper", "lookup-failed",
         "fallback-unmapped", "quoted-name", "fallback-conftest", "supervisor", "strings-and-check-scopes",
-        "local-scopes-over-inline", "infer", "infer-pyproject", "off"])
+        "local-scopes-over-inline", "infer", "infer-pyproject", "infer-options",
+        "infer-selects", "off"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, changes, ran):
     config = CONFIG
     if where == "worker-strings":   # the form older engines can run: plain commands, scopes beside them
@@ -64,7 +70,8 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, changes, ran):
         config = {"checks": [{**CONFIG["checks"][0], "paths": ["src/**"]}]}
         where = "worker"
     if where.startswith(("worker-infer", "worker-off")):   # a plain command with no scope: only the setting decides
-        config = {"checks": [PYTEST], "scoped_checks": where.split("-")[1]}
+        cmd = {"worker-infer-options": OPTS, "worker-infer-selects": SELECTS}.get(where, PYTEST)
+        config = {"checks": [cmd], "scoped_checks": where.split("-")[1]}
         where = "worker"
     write(repo, {".brindle/config.json": json.dumps(config), "src/pkg/mod.py": MOD, "docs/guide.md": "doc\n",
                  "app/src/view.ts": "export const v = 1\n", "tests/conftest.py": "X = 1\n",

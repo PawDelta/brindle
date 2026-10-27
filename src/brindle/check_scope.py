@@ -96,7 +96,9 @@ def parse_checks(entries: list, layers: list[dict] | None = None) -> tuple[list[
     return commands, scopes
 
 
-_PLAIN_PYTEST = re.compile(r"^(?:uv run (?:python3? -m )?|python3? -m )?pytest(?:\s+-[^\s;&|<>$`()]*)*$")
+_PYTEST = re.compile(r"^(?:uv run (?:python3? -m )?|python3? -m )?pytest((?:\s+[^\s;&|<>$`()'\"\\]+)*)$")
+_VALUE_OPTIONS = {"-n", "-m", "-k", "-p", "-o", "-c", "--maxfail", "--tb", "--durations", "--rootdir", "--ignore",
+                  "--deselect", "--dist", "--cov", "--timeout", "--junitxml", "-W", "--basetemp"}
 INFER_FULL_WHEN = ["**/conftest.py", "**/pyproject.toml", "**/setup.cfg", "**/pytest.ini", "**/tox.ini",
                    "**/*.lock", "**/*lock.json", "**/requirements*.txt"]
 NOTICE = ("brindle can now run only the tests a branch's changes reach for a plain pytest check (`{cmd}`), "
@@ -105,26 +107,48 @@ NOTICE = ("brindle can now run only the tests a branch's changes reach for a pla
           'current behaviour with `"scoped_checks": "off"`.')
 
 
+def pytest_selectors(cmd: str) -> bool | None:
+    """None when ``cmd`` is not a plain pytest command (no shell composition);
+    else whether it names tests itself (a positional argument, not an option
+    or an option's value)."""
+    m = _PYTEST.match(cmd.strip())
+    if not m:
+        return None
+    selects, value = False, False
+    for tok in m.group(1).split():
+        if value:
+            value = False
+        elif tok.startswith("-"):
+            value = tok in _VALUE_OPTIONS
+        else:
+            selects = True
+    return selects
+
+
 def inferred(cmd: str, mode: str | None) -> CheckScope | None:
     """The scope ``scoped_checks: "infer"`` gives ``cmd``: pytest on the
-    affected tests when it is a plain pytest command (flags only), else None."""
-    if mode == "infer" and _PLAIN_PYTEST.match(cmd.strip()):
+    affected tests when it is a plain pytest command that picks no tests
+    itself (appending targets would not narrow it), else None."""
+    if mode == "infer" and pytest_selectors(cmd) is False:
         return CheckScope(["**"], "pytest", full_when=INFER_FULL_WHEN)
     return None
 
 
 def notice_command(cfg) -> str | None:
-    """The first plain pytest check of ``cfg`` when ``scoped_checks`` is unset."""
+    """The first pytest check of ``cfg`` when ``scoped_checks`` is unset."""
     if cfg.scoped_checks is not None:
         return None
-    return next((c for c in cfg.checks if c not in cfg.check_scopes and inferred(c, "infer")), None)
+    return next((c for c in cfg.checks if c not in cfg.check_scopes and pytest_selectors(c) is not None), None)
 
 
 def deliver_notice(db: DB, repo_root: str, to_id: str) -> bool:
     """Tell the person in supervisor chat ``to_id``, once per repo, that
-    inferred scoping exists. False when there was nothing to tell."""
+    inferred scoping exists. False when there was nothing to tell. The repo
+    is claimed with an exclusive create before sending, so concurrent
+    sidebars (and other repos' claims) can't announce it twice or overwrite
+    each other."""
+    import hashlib
     import os
-    import tempfile
 
     from brindle import agents
     from brindle.config import brindle_home, load_repo_config
@@ -133,26 +157,20 @@ def deliver_notice(db: DB, repo_root: str, to_id: str) -> bool:
         cmd = notice_command(load_repo_config(repo_root))
     except ValueError:
         return False
-    path = brindle_home() / "scoped-checks-notice.json"
+    if cmd is None:
+        return False
+    claim = brindle_home() / "scoped-checks-notice" / hashlib.sha256(str(repo_root).encode()).hexdigest()
+    claim.parent.mkdir(parents=True, exist_ok=True)
     try:
-        told = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        told = []
-    if cmd is None or not isinstance(told, list) or str(repo_root) in told:
+        os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except FileExistsError:
         return False
     try:
         agents.send_message(db, to_id, "[brindle: a notice for the person to read; just mention it to them.] "
                             + NOTICE.format(cmd=cmd), sender_id=None)
     except agents.AgentError:
-        return False            # no supervisor right now: try again later
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump([*told, str(repo_root)], f)
-        os.replace(tmp, path)
-    except OSError:
-        Path(tmp).unlink(missing_ok=True)
+        claim.unlink(missing_ok=True)   # no supervisor right now: try again later
+        return False
     return True
 
 
