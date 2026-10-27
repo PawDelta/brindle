@@ -199,3 +199,18 @@ def test_the_status_line_reads_the_option_next_to_the_version(monkeypatch, lates
         assert left.endswith(f"{tmux.__version__} #{{@brindle_alert}}")
     assert left.index(tmux.__version__) < left.index("#{@brindle_alert}")
     assert "#(" not in left                  # no process per redraw
+
+
+def test_scoped_checks_notice_goes_once_and_only_while_unset(db, repo, boss):
+    from brindle import check_scope
+
+    (repo / ".brindle").mkdir(exist_ok=True)
+    cfg = repo / ".brindle" / "config.json"
+    cfg.write_text('{"checks": ["uv run pytest -q"], "scoped_checks": "off"}')
+    assert not check_scope.deliver_notice(db, str(repo), "boss")   # chosen: nothing to announce
+    cfg.write_text('{"checks": ["make lint"]}')
+    assert not check_scope.deliver_notice(db, str(repo), "boss")   # no pytest command
+    cfg.write_text('{"checks": ["uv run pytest -q"]}')
+    assert check_scope.deliver_notice(db, str(repo), "boss")
+    assert not check_scope.deliver_notice(db, str(repo), "boss")
+    assert len(boss) == 1 and '"scoped_checks": "infer"' in boss[0][1] and '"off"' in boss[0][1]

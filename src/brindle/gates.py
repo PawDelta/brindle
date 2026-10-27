@@ -115,9 +115,10 @@ def _scoped(db: DB, ws: Workspace, cmd: str) -> str | None:
     from brindle.config import load_repo_config
 
     try:
-        scope = load_repo_config(ws.repo_root).check_scopes.get(cmd)
+        cfg = load_repo_config(ws.repo_root)
     except ValueError:
         return cmd
+    scope = cfg.check_scopes.get(cmd) or check_scope.inferred(cmd, cfg.scoped_checks)
     return check_scope.command(db, ws, cmd, scope)
 
 

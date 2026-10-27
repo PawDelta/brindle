@@ -96,6 +96,66 @@ def parse_checks(entries: list, layers: list[dict] | None = None) -> tuple[list[
     return commands, scopes
 
 
+_PLAIN_PYTEST = re.compile(r"^(?:uv run (?:python3? -m )?|python3? -m )?pytest(?:\s+-[^\s;&|<>$`()]*)*$")
+INFER_FULL_WHEN = ["**/conftest.py", "**/pyproject.toml", "**/setup.cfg", "**/pytest.ini", "**/tox.ini",
+                   "**/*.lock", "**/*lock.json", "**/requirements*.txt"]
+NOTICE = ("brindle can now run only the tests a branch's changes reach for a plain pytest check (`{cmd}`), "
+          "using the code graph; it will be the default next release. Try it now with "
+          '`"scoped_checks": "infer"` in .brindle/config.json (or ~/.brindle/config.json), or keep the '
+          'current behaviour with `"scoped_checks": "off"`.')
+
+
+def inferred(cmd: str, mode: str | None) -> CheckScope | None:
+    """The scope ``scoped_checks: "infer"`` gives ``cmd``: pytest on the
+    affected tests when it is a plain pytest command (flags only), else None."""
+    if mode == "infer" and _PLAIN_PYTEST.match(cmd.strip()):
+        return CheckScope(["**"], "pytest", full_when=INFER_FULL_WHEN)
+    return None
+
+
+def notice_command(cfg) -> str | None:
+    """The first plain pytest check of ``cfg`` when ``scoped_checks`` is unset."""
+    if cfg.scoped_checks is not None:
+        return None
+    return next((c for c in cfg.checks if c not in cfg.check_scopes and inferred(c, "infer")), None)
+
+
+def deliver_notice(db: DB, repo_root: str, to_id: str) -> bool:
+    """Tell the person in supervisor chat ``to_id``, once per repo, that
+    inferred scoping exists. False when there was nothing to tell."""
+    import os
+    import tempfile
+
+    from brindle import agents
+    from brindle.config import brindle_home, load_repo_config
+
+    try:
+        cmd = notice_command(load_repo_config(repo_root))
+    except ValueError:
+        return False
+    path = brindle_home() / "scoped-checks-notice.json"
+    try:
+        told = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        told = []
+    if cmd is None or not isinstance(told, list) or str(repo_root) in told:
+        return False
+    try:
+        agents.send_message(db, to_id, "[brindle: a notice for the person to read; just mention it to them.] "
+                            + NOTICE.format(cmd=cmd), sender_id=None)
+    except agents.AgentError:
+        return False            # no supervisor right now: try again later
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump([*told, str(repo_root)], f)
+        os.replace(tmp, path)
+    except OSError:
+        Path(tmp).unlink(missing_ok=True)
+    return True
+
+
 def _scope(spec: dict) -> CheckScope | None:
     paths = _strings(spec.get("paths"))
     affected = spec.get("affected") if spec.get("affected") in MODES else None
