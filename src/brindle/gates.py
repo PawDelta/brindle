@@ -58,8 +58,9 @@ Abandoned = autopilot.CheckCancelled   # raised when a run's ``cancel`` turns tr
 def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int,
                 cancel=None) -> tuple[bool, str]:
     """Run ``cmd`` in ``ws``, or reuse the cached PASSING result for the same
-    (workspace, HEAD sha, command) if the tree was clean when that result was
-    cached. A dirty tree always runs fresh and is never cached, since the
+    (repo, tree sha, command) if the tree was clean when that result was
+    cached: an identical tree hits in any workspace, or the supervisor's
+    checkout after a merge. A dirty tree always runs fresh and is never cached, since the
     result then reflects more than just the commit at ``sha``. A failure or
     timeout is never cached either, so a retry always re-runs it; and a
     result is only cached if the sha and clean state still hold *after* the
@@ -82,15 +83,18 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     # One run at a time per (workspace, commit, command): a check warmed when
     # the worker reported, a reviewer's summary and the merge gate can all
     # want the same result at once; the later ones wait, then reuse it.
-    with _check_lock(ws.id, sha, cmd, cancel) as result_file:
-        cached = db.get_check(ws.id, sha, cmd)
-        if cached is not None and cached.ok:
-            return True, cached.output or ""
+    tree = git.out(["rev-parse", "HEAD^{tree}"], ws.path)
+    with _check_lock(ws.repo_root, tree, cmd, cancel) as result_file:
+        cached = db.get_tree_check(ws.repo_root, tree, cmd)
+        if cached is not None and cached["ok"]:
+            db.set_check(ws.id, sha, cmd, True, cached["output"] or "")
+            return True, cached["output"] or ""
         if (shared := _read_outcome(result_file, waiting_since)) is not None:
             return shared
         ok, out = _run_queued(db, ws, cmd, env, timeout, cancel)
         if head(ws) == sha and not git.dirty_files(ws.path):
             if ok:
+                db.set_tree_check(ws.repo_root, tree, cmd, ok, out)
                 db.set_check(ws.id, sha, cmd, ok, out)
             else:
                 _write_outcome(result_file, ok, out)
@@ -378,13 +382,13 @@ def tell(db: DB, to_id: str, text: str, sender_id: str | None = None) -> None:
 
 
 @contextmanager
-def _check_lock(ws_id: str, sha: str, cmd: str, cancel=None):
-    """Exclusive lock for one (workspace, sha, cmd); yields the path of the
+def _check_lock(repo_root: str, tree: str, cmd: str, cancel=None):
+    """Exclusive lock for one (repo, tree, cmd); yields the path of the
     file where a holder leaves a failed outcome for the waiters. With
     ``cancel``, waiting for the lock is given up (``Abandoned``) once it is true."""
     from brindle.config import brindle_home
 
-    key = hashlib.sha1(f"{ws_id}\0{sha}\0{cmd}".encode()).hexdigest()[:16]
+    key = hashlib.sha1(f"{repo_root}\0{tree}\0{cmd}".encode()).hexdigest()[:16]
     lock_dir = brindle_home() / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / f"check-{key}.lock", "w") as f:
