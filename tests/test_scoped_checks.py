@@ -43,10 +43,17 @@ def write(root: Path, files: dict[str, str]) -> None:
                  marks=pytest.mark.variant("git C-quotes a non-ASCII name without -z; it was once skipped")),
     ("worker", {"tests/conftest.py": "X = 2\n"}, [PYTEST]),
     ("supervisor", {"docs/guide.md": "more\n"}, [PYTEST, APP]),
+    ("worker-strings", {"app/src/view.ts": "export const v = 2\n"}, ["cd app && npx vitest related --run src/view.ts"]),
 ], ids=["docs-only", "app-only", "python-affected", "deleted-function", "test-helper", "lookup-failed",
-        "fallback-unmapped", "quoted-name", "fallback-conftest", "supervisor"])
+        "fallback-unmapped", "quoted-name", "fallback-conftest", "supervisor", "strings-and-check-scopes"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, changes, ran):
-    write(repo, {".brindle/config.json": json.dumps(CONFIG), "src/pkg/mod.py": MOD, "docs/guide.md": "doc\n",
+    config = CONFIG
+    if where == "worker-strings":   # the form older engines can run: plain commands, scopes beside them
+        config = {"checks": [c["run"] for c in CONFIG["checks"]],
+                  "check_scopes": {c["run"]: {k: v for k, v in c.items() if k != "run"} for c in CONFIG["checks"]}}
+        assert all(isinstance(c, str) for c in config["checks"])
+        where = "worker"
+    write(repo, {".brindle/config.json": json.dumps(config), "src/pkg/mod.py": MOD, "docs/guide.md": "doc\n",
                  "app/src/view.ts": "export const v = 1\n", "tests/conftest.py": "X = 1\n",
                  "tests/test_f.py": TEST_F, "tests/test_g.py": "from test_f import helper\n"})
     sh("git add -A && git commit -qm base", repo)

@@ -106,7 +106,7 @@ class RepoConfig:
     # Autopilot and merge gates.
     autopilot: bool = True             # `brindle` starts the supervisor with autopilot on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
-    check_scopes: dict = field(default_factory=dict)  # command -> brindle.check_scope.CheckScope, for "checks" objects
+    check_scopes: dict = field(default_factory=dict)  # command -> brindle.check_scope.CheckScope, from "check_scopes" (or "checks" objects)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
@@ -351,7 +351,10 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
         setattr(cfg, key, merged)
     from brindle import check_scope
 
-    cfg.checks, cfg.check_scopes = check_scope.parse_checks(cfg.checks)
+    # "check_scopes" merges per command: config.local.json over config.json.
+    raw_scopes = {**(shared.get("check_scopes") if isinstance(shared.get("check_scopes"), dict) else {}),
+                  **(local.get("check_scopes") if isinstance(local.get("check_scopes"), dict) else {})}
+    cfg.checks, cfg.check_scopes = check_scope.parse_checks(cfg.checks, raw_scopes)
     for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "autopilot", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
