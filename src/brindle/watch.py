@@ -18,7 +18,7 @@ import traceback
 from dataclasses import dataclass, field
 
 import brindle
-from brindle import agents, airgap, pricing, sidebar_follow, sidebar_logo, tmux, upgrade, view, watch_costs
+from brindle import agents, airgap, check_scope, pricing, sidebar_follow, sidebar_logo, tmux, upgrade, view, watch_costs
 from brindle.db import DB
 from brindle.service.inbox import awaiting_review, needs_you, summary  # noqa: F401 - moved; callers keep using watch.*
 
@@ -854,6 +854,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
     spend = watch_costs.Local()
     spend_at = 0.0
     poller, bar, delivered_at = _start_status(), None, 0.0
+    scoped_at = 0.0
     if poller is not None and os.environ.get("TMUX_PANE"):
         from brindle.pro import status as org_status
 
@@ -864,6 +865,12 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
       try:
         if install.changed():
             return RESTART
+        if own_root and repo_root and time.time() - scoped_at >= 30.0:
+            scoped_at = time.time()
+            try:
+                check_scope.deliver_notice(db, repo_root, own_root)
+            except Exception:  # noqa: BLE001 - a notice never takes the sidebar down
+                pass
         if poller is not None and own_root and time.time() - delivered_at >= 5.0:
             try:
                 from brindle.pro import status as org_status

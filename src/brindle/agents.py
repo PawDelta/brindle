@@ -54,6 +54,8 @@ WORKER_FOOTER = """
 ---
 You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
 {guidance}
+Run only the tests that cover your change (a test file or a `-k` filter), not
+the full suite: brindle's merge gate runs the full suite on your branch.
 Before you finish, check your work against the task and its finish line, item
 by item: each behaviour it asks for needs a test that would fail without your
 change, and a requirement with no such test isn't done yet. If the task turns
@@ -301,6 +303,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         # some never get there). Workers and reviewers only have brindle's own
         # tools, so loading them all up front is cheap.
         env["ENABLE_TOOL_SEARCH"] = "false"
+    # Agents run pytest outside brindle's check slots: cap their xdist workers
+    # so a few of them don't each start one per core. Passed explicitly, since
+    # a pane can inherit an older tmux environment; a profile's value still wins.
+    env.setdefault("PYTEST_XDIST_AUTO_NUM_WORKERS", os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS", "2"))
     return env
 
 
@@ -494,15 +500,15 @@ def _pause_when_done(agent_id: str, argv: list[str]) -> list[str]:
     return ["/bin/sh", "-c", script, "brindle-agent", *argv]
 
 
-def _guarded_profile(agent: Agent, ws: Workspace | None):
+def _guarded_profile(agent: Agent, ws: Workspace | None, load=None):
     """``agent``'s profile with its guardrails as they apply (cleared, with a
     warning, without the Pro feature: see guardrails.effective); None when
-    it can't be loaded."""
+    it can't be loaded. ``load``: what loads it (default load_profile)."""
     from brindle import guardrails
     from brindle.profiles import ProfileError
 
     try:
-        return guardrails.effective(load_profile(agent.profile, ws.repo_root if ws else None))
+        return guardrails.effective(load() if load else load_profile(agent.profile, ws.repo_root if ws else None))
     except (KeyError, ProfileError):
         return None
 
@@ -1542,21 +1548,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         ref = a.session_ref if provider.name in ("claude", "antigravity", "opencode", "native") and a.session_ref else None
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
-        if ref:
-            prompt = None
-        elif a.task and a.mode in ("handoff", "assign") and provider.launches_process:
-            # a.task is the raw task now (see decorate_worker_prompt); a fresh
-            # start needs the same decoration it got the first time. A row
-            # from before this change stored the already-decorated text, so
-            # it gets decorated a second time here; harmless, if redundant.
-            prompt = decorate_worker_prompt(
-                a.task, a.id, ws, a.done_when, provider, bool(a.headless),
-                plan_first=bool(a.plan_first) and a.plan_state != "approved",
-                report_only=is_review_profile(a.profile, ws.repo_root),
-                decisions=knowledge.replay_decisions(db, a.id),
-                chunks=knowledge.replay_chunks(db, a.id)) + RESUME_NOTE
-        else:
-            prompt = (a.task + RESUME_NOTE) if a.task else None
+        prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE)
         if a.dismissed_at is not None:
             db.update_agent(a.id, dismissed_at=None)  # running again: show it again
         _launch(db, a, ws, prompt=prompt, resume=ref,
@@ -1574,6 +1566,23 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     if resumed:
         bus.publish_agent(db, "session.resumed", root_id, agents=[a.id for a in resumed])
     return resumed
+
+
+def _fresh_start_prompt(db: DB, a: Agent, ws: Workspace, provider, note: str) -> str | None:
+    """What an agent restarting without its old conversation is told: its
+    task, followed by ``note``."""
+    if a.task and a.mode in ("handoff", "assign") and provider.launches_process:
+        # a.task is the raw task now (see decorate_worker_prompt); a fresh
+        # start needs the same decoration it got the first time. A row
+        # from before this change stored the already-decorated text, so
+        # it gets decorated a second time here; harmless, if redundant.
+        return decorate_worker_prompt(
+            a.task, a.id, ws, a.done_when, provider, bool(a.headless),
+            plan_first=bool(a.plan_first) and a.plan_state != "approved",
+            report_only=is_review_profile(a.profile, ws.repo_root),
+            decisions=knowledge.replay_decisions(db, a.id),
+            chunks=knowledge.replay_chunks(db, a.id)) + note
+    return (a.task + note) if a.task else None
 
 
 def get(db: DB, agent_id: str) -> Agent:
@@ -3285,6 +3294,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     # replace that verdict in the same role (gates.standing_reviews).
     if reviewer is not None:
         db.update_agent(reviewer.id, review_slot=profile if second else "")
+        bus.publish_agent(db, "review.started", reviewer.id, workspace_id=ws.id,
+                          repo_root=ws.repo_root, sha=sha)   # the stage_timings rollup
     return reviewer
 
 
@@ -3380,14 +3391,19 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
                 "(brindle MCP server) with your plan and wait for your supervisor's approval, "
                 "which arrives as a message."),
         }}
+    import functools
+
     from brindle import guardrails
 
     tool = payload.get("tool_name")
+    ws = db.get_workspace(agent.workspace_id)
+    # The guardrails, the policy and the allowlist below all read the profile:
+    # load it once per call (a failed load is retried, as each did on its own).
+    load = functools.cache(lambda: load_profile(agent.profile, ws.repo_root if ws else None))
     if tool in (*guardrails.WRITE_TOOLS, *guardrails.READ_TOOLS):
         # A write or read outside the profile's scope (brindle Pro guardrails).
         # Best effort: Bash can still reach any file; the diff check holds.
-        ws = db.get_workspace(agent.workspace_id)
-        profile = _guarded_profile(agent, ws)
+        profile = _guarded_profile(agent, ws, load)
         if ws is not None and profile is not None:
             why = guardrails.tool_denial(profile, str(tool), payload.get("tool_input") or {}, ws.path)
             if why:
@@ -3396,8 +3412,7 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
                     "permissionDecision": "deny",
                     "permissionDecisionReason": why,
                 }}
-    ws = db.get_workspace(agent.workspace_id)
-    ruled = _pre_tool_policy(db, agent, ws, payload)
+    ruled = _pre_tool_policy(db, agent, ws, payload, load)
     if ruled is not None:
         return ruled
     if tool != "Bash":
@@ -3407,7 +3422,7 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
 
     codemap.record_query(db, agent, ws, command)
     try:
-        profile = load_profile(agent.profile, ws.repo_root if ws else None)
+        profile = load()
     except Exception:
         return None
     from brindle.native.permissions import Permissions, uncovered_part
@@ -3426,20 +3441,20 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     }}
 
 
-def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict) -> dict | None:
+def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, load) -> dict | None:
     """With ``permission_policy`` on, the policy's word on a PreToolUse call
     before any approval of brindle's own: a deny denies it, and an ask a rule
     makes explicitly forces Claude Code's prompt (``permissionDecision``
     "ask"), so the PermissionRequest hook then holds it for the person,
     whatever the profile's allowed_tools or Claude Code's own mode would have
     run without asking. None otherwise (an allow, or an ask no rule made,
-    leaves the rest of the hook to decide). Never raises."""
+    leaves the rest of the hook to decide). ``load`` loads the agent's
+    profile. Never raises."""
     try:
         if ws is None:
             return None
         from brindle import permissions
         from brindle.config import load_repo_config
-        from brindle.profiles import profile_rules_for
 
         cfg = load_repo_config(ws.repo_root)
         if cfg.permission_policy != "on":
@@ -3447,7 +3462,11 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict) 
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
         if req is None:
             return None
-        rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+        try:
+            profile_rules = permissions.profile_rules(load())
+        except KeyError:  # a deleted profile: no override (profiles.profile_rules_for)
+            profile_rules = []
+        rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
         decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
         if decision.decision == "deny" or (decision.decision == "ask" and decision.rule is not None):
             return {"hookSpecificOutput": {
@@ -3631,11 +3650,16 @@ def _session_of(db: DB, agent: Agent) -> str | None:
 
 # Seconds a hold waits on the daemon at a time between looks at whether the
 # agent was closed or its request answered at the CLI's own prompt.
-HOLD_LOOK_SECONDS = 5.0
-# Looks in a row (HOLD_LOOK_SECONDS apart) a pane must read past its CLI's own
-# permission prompt, busy or idle, before the hold ends: longer than one look,
-# so a read while the prompt is redrawn doesn't take it for answered. Any
-# other read starts the count over.
+HOLD_LOOK_SECONDS = 1.0
+# Those waits between looks at the pane until a look has caught its CLI's own
+# prompt (it may not be drawn yet, so the pane reads busy for a while): 5s
+# apart, so ANSWERED_LOOKS past it span long enough for it to be drawn. Once
+# one has, the pane is looked at after every wait.
+UNSEEN_LOOK_EVERY = 5
+# Looks in a row a pane must read past its CLI's own permission prompt, busy
+# or idle, before the hold ends: longer than one look, so a read while the
+# prompt is redrawn doesn't take it for answered. Any other read starts the
+# count over.
 ANSWERED_LOOKS = 3
 # Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
 # so the hook gives the request to the prompt itself before the CLI cancels it.
@@ -3693,7 +3717,7 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     meanwhile, as at that prompt."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline, answer, past = time.monotonic() + hold, None, 0
+    deadline, answer, past, seen, waits = time.monotonic() + hold, None, 0, False, 0
     while True:
         now = db.get_agent(agent.id)
         recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
@@ -3705,11 +3729,14 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
         # Its CLI shows its own prompt for as long as this hook holds the request: a pane
         # past it was answered there, whether or not a look caught the prompt. An allow
         # runs the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
-        state = _pane_state(now)
-        past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
-        if past >= ANSWERED_LOOKS:
-            break
+        if seen or waits % UNSEEN_LOOK_EVERY == 0:
+            state = _pane_state(now)
+            past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
+            seen = seen or state == "prompt"
+            if past >= ANSWERED_LOOKS:
+                break
         held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
+        waits += 1
         if answer is not None or not held:
             break
     answer = answer if answer in ANSWERS else None     # "terminal": the person sent it to the prompt
@@ -3740,6 +3767,8 @@ def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
     The request is the oldest recorded one for the same tool and input
     (PermissionRequest has no tool_use_id to pair them by)."""
     try:
+        if not db.permission_requests_of(agent.id):
+            return   # nothing was left to the person: skip the permissions import
         from brindle import permissions
 
         ws = db.get_workspace(agent.workspace_id)
@@ -3835,7 +3864,10 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
         }
     if needs_report:
         db.set_status(agent.id, "idle")
-        tell_parent_unreported(db, agent)
+        from brindle import prompt_answer
+
+        if not prompt_answer.at_turn_end(db, agent):   # a question it ended on says more
+            tell_parent_unreported(db, agent)
         return None
     if agent.mode == "interactive":
         from brindle import autopilot as pilot
@@ -4038,7 +4070,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 # its supervisor hears about.
                 if unreported_note_expired(agent):
                     db.update_agent(agent_id, unreported_noted=None)
-                tell_parent_unreported(db, db.get_agent(agent_id) or agent)
+                from brindle import prompt_answer
+
+                if not prompt_answer.at_turn_end(db, agent):   # a question it ended on says more
+                    tell_parent_unreported(db, db.get_agent(agent_id) or agent)
             if db.pending_count(agent_id) and not agent.headless:
                 flush(db, agent_id)
     elif event == "stop-failure":
@@ -4281,6 +4316,27 @@ def reopen_reviewer(db: DB, agent: Agent, ws: Workspace,
     if agent.dismissed_at is not None:
         db.update_agent(agent.id, dismissed_at=None)
     _launch(db, agent, ws, prompt=prompt, resume=ref, watch_pane=False, background_setup=True)
+    return True
+
+
+def reopen_worker(db: DB, agent: Agent, ws: Workspace, prompt: str) -> bool:
+    """Start a worker whose process has exited (closed once it reported, say)
+    again in its own worktree with ``prompt``: in its own recorded CLI session
+    if it has one, else fresh on its task with ``prompt`` after it. False when
+    its worktree is gone, its session is paused, or it can't start."""
+    if not os.path.isdir(ws.path) or agent.status == "paused" or not runs_process(agent):
+        return False
+    ref = recorded_session(agent)
+    text = prompt if ref else _fresh_start_prompt(
+        db, agent, ws, get_provider(agent.provider),
+        "\n\n(You stopped after reporting and have just been restarted on your branch; "
+        "`git log` shows what you already did.)\n\n" + prompt) or prompt
+    try:
+        _launch(db, agent, ws, prompt=text, resume=ref, watch_pane=False, background_setup=True)
+    except AgentError:
+        return False
+    if agent.dismissed_at is not None:
+        db.update_agent(agent.id, dismissed_at=None)  # running again: show it again
     return True
 
 

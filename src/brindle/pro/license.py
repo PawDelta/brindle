@@ -289,10 +289,11 @@ LICENSE_FILE = "license.jwt"
 MAX_LICENSE_FILE = 64 * 1024
 
 
-def license_path():
+def license_path(create: bool = True):
     from brindle.pro._files import private_dir
 
-    return private_dir() / LICENSE_FILE
+    d = private_dir(create)
+    return None if d is None else d / LICENSE_FILE
 
 
 def parse_license_file(data: bytes | str) -> str:
@@ -350,7 +351,8 @@ def installed(*, now: float | None = None, grace: float = DEFAULT_GRACE) -> Enti
     from brindle.pro.credentials import CredentialError
 
     try:
-        raw = read_private(license_path(), MAX_LICENSE_FILE)
+        path = license_path(create=False)
+        raw = read_private(path, MAX_LICENSE_FILE) if path is not None else None
     except CredentialError as e:
         raise LicenseError(str(e)) from e
     if raw is None:
@@ -367,20 +369,134 @@ CACHE_SECONDS = 300
 _clear_hooks: list = []   # callables run by clear_cache: caches that depend on the entitlement
 
 
+DISK_CACHE_FILE = "entitlement-cache.json"
+DISK_CACHE_SECONDS = 120   # how long another process may reuse a keystore read
+DISK_CACHE_GEN = "entitlement-cache.gen"   # bumped by every clear_cache, under the lock
+
+
+def _disk_cache_path(create: bool = True):
+    from brindle.pro._files import private_dir
+
+    d = private_dir(create)
+    return None if d is None else d / DISK_CACHE_FILE
+
+
+@contextmanager
+def _disk_cache_lock():
+    """The cross-process lock that orders cache writes against
+    invalidations; yields the private directory."""
+    import fcntl
+
+    from brindle.pro._files import private_dir
+
+    d = private_dir()
+    fd = os.open(d / f"{DISK_CACHE_FILE}.lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield d
+    finally:
+        os.close(fd)   # releases the lock
+
+
+def _disk_cache_generation(d=None) -> int | None:
+    """How many times the cache has been invalidated, or None if unreadable
+    (then no write is accepted)."""
+    from brindle.pro._files import private_dir, read_private
+
+    try:
+        d = d or private_dir(create=False)
+        raw = read_private(d / DISK_CACHE_GEN, 32) if d is not None else None
+        return int(raw) if raw else 0
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _disk_cache_read(now: float, max_age: float | None) -> Entitlement | str | None:
+    """What an earlier process stored, still within its bounded time: the
+    entitlement (re-verified, never trusted from the file), the message of
+    the LicenseError it hit (a str), or None for no usable cache."""
+    from brindle.pro._files import read_private
+
+    try:
+        path = _disk_cache_path(create=False)
+        raw = read_private(path, MAX_LICENSE_FILE) if path is not None else None
+        data = json.loads(raw) if raw else None
+        if not isinstance(data, dict) or not isinstance(data.get("until"), (int, float)) \
+                or data["until"] <= now or data["until"] - DISK_CACHE_SECONDS > now:
+            return None
+        if isinstance(data.get("error"), str):
+            return data["error"]
+        ent = verify(data["token"], issuer=data.get("issuer"), now=now)
+        if max_age is not None and now - ent.iat > max_age:
+            return None
+        return ent if not needs_refresh(ent, now) else None
+    except Exception:  # noqa: BLE001 - a cache is never worth failing over
+        return None
+
+
+def _disk_cache_write(now: float, gen: int | None, *, token: str | None = None,
+                      issuer: str | None = None, error: str | None = None) -> None:
+    """Atomically store the result for DISK_CACHE_SECONDS: 0600, via a unique
+    temp file in the same directory. Dropped when the cache was invalidated
+    since ``gen`` was read (before the credentials were): a logout or account
+    switch meanwhile must not be undone by old credentials."""
+    import tempfile
+
+    from brindle.config import brindle_home
+
+    try:
+        if not brindle_home().is_dir():
+            return   # no home yet: a lookup that caches a result mustn't create it
+        with _disk_cache_lock() as d:
+            if gen is None or _disk_cache_generation(d) != gen:
+                return   # invalidated while this process read the credentials
+            body = {"until": now + DISK_CACHE_SECONDS}
+            body.update({"error": error} if error is not None else {"token": token, "issuer": issuer})
+            fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{DISK_CACHE_FILE}.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w") as fh:
+                    json.dump(body, fh)
+                os.replace(tmp, d / DISK_CACHE_FILE)
+            except BaseException:
+                try:
+                    os.unlink(tmp)
+                except FileNotFoundError:
+                    pass
+                raise
+    except Exception:  # noqa: BLE001
+        log.debug("couldn't write the entitlement cache", exc_info=True)
+
+
 def clear_cache() -> None:
+    """Forget the cached entitlement, here and on disk, and bump the
+    generation so a read already in flight can't store what it saw."""
     global _cache
     _cache = None
+    from brindle.config import brindle_home
+    from brindle.pro._files import write_private
+
+    try:
+        if brindle_home().is_dir():   # no home, so nothing on disk to invalidate
+            with _disk_cache_lock() as d:
+                write_private(d / DISK_CACHE_GEN, str((_disk_cache_generation(d) or 0) + 1).encode())
+                (d / DISK_CACHE_FILE).unlink(missing_ok=True)
+    except Exception:  # noqa: BLE001 - no usable private directory: nothing is cached there
+        log.debug("couldn't invalidate the entitlement cache", exc_info=True)
     for hook in _clear_hooks:
         hook()
 
 
 def current(*, refresh: bool = True, now: float | None = None, store=None, client=None,
-            max_age: float | None = None) -> Entitlement:
+            max_age: float | None = None, _first_read: bool = True) -> Entitlement:
     """The entitlement from the stored credentials, fetching a new one (and
     rotating the refresh token if needed) when it is expired or near expiry
     (``refresh``), or was issued more than ``max_age`` seconds ago. Offline,
     a stored entitlement is used within its grace. Raises
-    :class:`LicenseError` when there is none."""
+    :class:`LicenseError` when there is none.
+
+    What was read while the cache was invalidated (a logout, login or account
+    switch meanwhile) is never cached or returned: the credentials are read
+    once more, and a second such change fails closed."""
     global _cache
     now = time.time() if now is None else now
     default = store is None and client is None
@@ -397,6 +513,16 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
             if default:
                 _cache = (min(now + CACHE_SECONDS, ent.grace_until or ent.exp), ent)
             return ent
+    gen = _disk_cache_generation() if default else None   # before the cache and credentials: see _disk_cache_write
+    if default:
+        hit = _disk_cache_read(now, max_age)
+        if hit is not None and _disk_cache_generation() != gen:
+            return _read_again(refresh, now, max_age, _first_read)
+        if isinstance(hit, str):
+            raise LicenseError(hit)
+        if hit is not None:
+            _cache = (min(now + CACHE_SECONDS, hit.grace_until or hit.exp), hit)
+            return hit
     try:
         store = store or credentials.default_store()
         creds = store.load()
@@ -409,9 +535,14 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
         ent = installed(now=now)
         if ent is not None:
             if default:
+                if _disk_cache_generation() != gen:
+                    return _read_again(refresh, now, max_age, _first_read)
                 _cache = (min(now + CACHE_SECONDS, ent.grace_until or ent.exp), ent)
             return ent
-        raise LicenseError("not logged in to brindle Pro (run `brindle account login`)")
+        msg = "not logged in to brindle Pro (run `brindle account login`)"
+        if default:
+            _disk_cache_write(now, gen, error=msg)
+        raise LicenseError(msg)
     try:
         issuer = client.base if client is not None else auth.base_url(creds.get("base_url"))
     except auth.AuthError as e:
@@ -422,6 +553,8 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
     except LicenseError:
         if not refresh:
             raise
+    if default and ent is not None and not offline and not needs_refresh(ent, now, max_age):
+        _disk_cache_write(now, gen, token=creds["entitlement"], issuer=issuer)
     if refresh and (ent is None or needs_refresh(ent, now, max_age)) and creds.get("refresh_token"):
         try:
             ent = auth.refresh(client or auth.Client(issuer), store, creds, now=now)
@@ -437,8 +570,17 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
                 raise LicenseError(_lapsed(creds)) from e   # couldn't renew it
             raise
     if default:
+        if _disk_cache_generation() != gen:   # also after this call's own renewal (it clears the cache)
+            return _read_again(refresh, now, max_age, _first_read)
         _cache = (min(now + CACHE_SECONDS, ent.grace_until or ent.exp), ent)
     return ent
+
+
+def _read_again(refresh: bool, now: float, max_age: float | None, first: bool) -> Entitlement:
+    """:func:`current` once more, for a read the cache's invalidation made stale."""
+    if not first:
+        raise LicenseError("the brindle Pro login changed while it was being read; run the command again")
+    return current(refresh=refresh, now=now, max_age=max_age, _first_read=False)
 
 
 def _lapsed(creds: dict) -> str:
