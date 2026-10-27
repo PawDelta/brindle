@@ -297,7 +297,7 @@ def test_milestone_check_cached(db, root, repo, monkeypatch):
     from brindle import gates
 
     _, ws = root
-    with_goal(db, checks=("one", "two"))
+    with_goal(db, checks=("one", "two", "pending"))   # the third stays outstanding, so the goal isn't done
     calls = []
     monkeypatch.setattr(autopilot, "run_check", lambda cmd, cwd, env, timeout, **kw: calls.append(cmd) or (True, "ok"))
     monkeypatch.setattr(gates, "_concurrency", lambda ws: 0)

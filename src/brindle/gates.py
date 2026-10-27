@@ -75,7 +75,9 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     reuses that outcome instead of re-running the whole command."""
     # Taken before the git calls below, which can be slow on a loaded
     # machine: a holder that finished after we arrived still counts.
-    waiting_since = time.time()
+    # A review waiting on the report's warm run counts from that report (its
+    # queue place), so the warm run's failure is handed to it, not re-run.
+    waiting_since = min(time.time(), getattr(_place, "since", None) or float("inf"))
     sha = head(ws)
     dirty = bool(git.dirty_files(ws.path))
     if dirty:
