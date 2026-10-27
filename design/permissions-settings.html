@@ -193,12 +193,19 @@ const PRESET_DATA={
  standard:{base:{files:'ask',shell:'ask',git:'ask',network:'ask',mcp:'ask'},ov:{'f-read':'allow','f-cred':'deny','s-ro':'allow','s-test':'allow','s-bad':'deny','g-ro':'allow','g-local':'allow','g-force':'deny','n-docs':'allow','m-read':'allow','m-del':'deny'}},
  secure:{base:{files:'ask',shell:'ask',git:'ask',network:'deny',mcp:'deny'},ov:{'f-read':'allow','f-cred':'deny','s-bad':'deny','g-ro':'allow','g-force':'deny'}}};
 const LEVELS=['allow','ask','deny'],LABEL={allow:'Allow',ask:'Ask',deny:'Deny'};
-let preset='autonomous',customized=false,base={},ov={},edited=new Set(),baseEdited=new Set(),open=new Set(['shell']),view='compact';
+let preset='autonomous',customized=false,base={},ov={},edited=new Set(),baseEdited=new Set(),open=new Set(),view='compact';
 let saved=[
  {id:1,action:'Read files',target:'docs/**',decision:'allow',life:'Forever'},
  {id:2,action:'Edit files',target:'src/**',decision:'allow',life:'This session'},
  {id:3,action:'Fetch web content',target:'https://tracker.example.com/**',decision:'deny',life:'Forever'}];
-function load(p){const d=PRESET_DATA[p];preset=p;base={...d.base};ov={...d.ov};edited=new Set();baseEdited=new Set();customized=false}
+// A preset replaces only its own values; baselines and items the person set stay (an explicit Inherit too)
+function load(p){
+ const d=PRESET_DATA[p],mineBase={...base},mineOv={...ov};
+ preset=p;base={...d.base};ov={...d.ov};
+ baseEdited.forEach(c=>{base[c]=mineBase[c]});
+ edited.forEach(id=>{if(mineOv[id])ov[id]=mineOv[id];else delete ov[id]});
+ customized=baseEdited.size+edited.size>0;
+}
 const capItems=cap=>ITEMS.filter(i=>i.cap===cap);
 const eff=i=>ov[i.id]||base[i.cap];
 const capName=cap=>CAPS.find(c=>c.id===cap).name;
