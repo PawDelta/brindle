@@ -171,23 +171,47 @@ describe("settings screen", () => {
     stop();
   });
 
-  it("permissions: changes the preset, allows a noisy ask rule automatically, removes a former default with undo, and sets unmatched actions", async () => {
+  it("permissions: groups are the default view with the preset and ask rate; a group baseline and a subcategory override save through the groups API and show their marker", async () => {
     const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: { "d-push-default": 7 } } });
     const perms = await screen.findByTestId("permissions-settings");
     await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Autonomous"));
-    // Change preset: the four presets, Autonomous recommended; one click seeds it.
-    fireEvent.click(within(perms).getByRole("button", { name: "Change preset" }));
     expect(within(perms).getByTestId("presets").querySelector('[data-preset="autonomous"]')!.textContent).toContain("RECOMMENDED");
+    await waitFor(() => expect(within(perms).getByTestId("ask-rate").textContent).toContain("7 asks in the last 7 days"));
+    expect(within(perms).getByTestId("saved-count").textContent).toBe("0 saved actions");
+    // A group's baseline: one click, sent as the group's baseline only.
+    fireEvent.click(within(within(perms).getByTestId("groups").querySelector<HTMLElement>('[data-group="shell"]')!).getByRole("button", { name: "Deny" }));
+    await waitFor(() => expect(daemon.data.policy.groups?.shell.baseline).toBe("deny"));
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/groups")?.body).toEqual({ groups: { shell: { baseline: "deny" } } });
+    // Open it: a subcategory overrides the group, marked while it does.
+    fireEvent.click(within(perms).getByRole("button", { name: "Show Shell items" }));
+    const installs = () => within(perms).getByTestId("group-shell").querySelector<HTMLElement>('[data-sub="install"]')!;
+    expect(installs().textContent).toContain("Inherits Deny");
+    fireEvent.click(within(installs()).getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(installs().textContent).toContain("Overrides Shell: Deny → Ask"));
+    expect(daemon.requests.filter((r) => r.path === "/permissions/groups").at(-1)?.body).toEqual({ groups: { shell: { subcategories: { install: "ask" } } } });
+    stop();
+  });
+
+  it("permissions: changes the preset, searches and filters the Advanced rules, removes a former default with undo, and sets unmatched actions", async () => {
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} } });
+    const perms = await screen.findByTestId("permissions-settings");
+    await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Autonomous"));
     fireEvent.click(within(perms).getByRole("button", { name: "Use Standard" }));
     await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Standard"));
     expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/preset")?.body).toEqual({ preset: "standard" });
+    // The flat list lives in Advanced: searchable, and filterable by decision.
+    fireEvent.click(within(perms).getByRole("button", { name: "Open advanced view" }));
     expect(within(perms).getByRole("combobox", { name: "Unmatched actions" })).toHaveProperty("value", "ask");
-    // What interrupts your agents: the push rule asked 7 times; Allow automatically turns it into an allow.
-    const noisy = within(perms).getByTestId("interrupts");
-    expect(noisy.textContent).toContain("7 approval prompts in the last 24 hours across 1 rule");
-    fireEvent.click(within(noisy).getByRole("button", { name: "Allow automatically" }));
-    await waitFor(() => expect(daemon.data.policy.rules.find((r) => r.id === "d-push-default")?.decision).toBe("allow"));
-    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/rules/d-push-default")?.body).toEqual({ decision: "allow", limits: null });
+    const total = within(perms).getByTestId("rules").querySelectorAll("[data-rule]").length;
+    fireEvent.change(within(perms).getByRole("searchbox", { name: "Search rules" }), { target: { value: "ssh" } });
+    const found = within(perms).getByTestId("rules").querySelectorAll("[data-rule]");
+    expect(found.length).toBeGreaterThan(0);
+    expect(found.length).toBeLessThan(total);
+    expect(within(perms).getByText(`${found.length} of ${total} rules`)).toBeTruthy();
+    fireEvent.change(within(perms).getByRole("combobox", { name: "Decision filter" }), { target: { value: "allow" } });
+    expect(within(perms).getByText("No matching rules. Clear the search or try another action or target.")).toBeTruthy();
+    fireEvent.click(within(perms).getByRole("button", { name: "Clear" }));
+    expect(within(perms).getByTestId("rules").querySelectorAll("[data-rule]").length).toBe(total);
     // A preset's deny is removable like any rule, and Undo adds it back.
     const row = () => within(perms).getByTestId("rules").querySelector<HTMLElement>('[data-rule="d-ssh"]');
     fireEvent.click(within(row()!).getByRole("button", { name: "Remove Read files rule" }));
@@ -203,7 +227,7 @@ describe("settings screen", () => {
   it("permissions: a rule opens in a three-step editor, saves its limits, and a new rule that disagrees with one is checked and auto-resolved", async () => {
     const npm = { id: "u-npm", kind: "bash", match: "npm ", match_type: "prefix", decision: "allow", source: "user", created: 1, describe: "bash prefix 'npm '", exclusions: [] };
     const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), npm], saved: [], prompts: {} } }, undefined, undefined, undefined, "d-push-default");
-    // Opened for a rule (the Inbox's "Open the deny rule"): its editor, at once.
+    // Opened for a rule (the Inbox's "Open the deny rule"): its editor, over the Advanced list.
     const editor = await screen.findByTestId("rule-editor");
     expect(within(editor).getByRole("combobox", { name: "Action" })).toHaveProperty("value", "push");
     fireEvent.change(within(editor).getByRole("combobox", { name: "Remember approvals for" }), { target: { value: "time" } });
@@ -230,7 +254,8 @@ describe("settings screen", () => {
   it("permissions: a saved action moves along its scope ladder with a duration, is deleted with undo, and shows in Activity", async () => {
     const saved = { id: "s9", kind: "write", pattern: "src/auth/login.ts", decision: "allow", scope: "exact", life: "forever", created: 1_700_000_000, note: "This file only · src/auth/login.ts" };
     const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [saved], prompts: {} } });
-    fireEvent.click(await screen.findByRole("tab", { name: "Saved actions (1)" }));
+    await waitFor(() => expect(screen.getByTestId("saved-count").textContent).toBe("1 saved action"));
+    fireEvent.click(screen.getByRole("button", { name: "Manage saved actions" }));
     fireEvent.click(screen.getByRole("button", { name: "Edit Write files saved action" }));
     const editor = screen.getByTestId("saved-editor");
     fireEvent.change(within(editor).getByRole("combobox", { name: "Scope" }), { target: { value: "general" } });
@@ -244,7 +269,8 @@ describe("settings screen", () => {
     await waitFor(() => expect(daemon.data.policy.saved).toHaveLength(0));
     fireEvent.click(screen.getByRole("button", { name: "Undo" }));
     await waitFor(() => expect(daemon.data.policy.saved).toMatchObject([{ kind: "write", pattern: "src/**", life: "time", minutes: 120 }]));
-    fireEvent.click(screen.getByRole("tab", { name: "Activity" }));
+    fireEvent.click(screen.getByRole("button", { name: "← Back to permissions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Activity" }));
     expect(screen.getByTestId("activity").textContent).toContain("Saved action deleted");
     stop();
   });

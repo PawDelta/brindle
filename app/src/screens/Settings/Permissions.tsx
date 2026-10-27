@@ -1,10 +1,16 @@
-/* Settings › Permissions (design/permissions-preview.html): the person's
-   permission policy (GET /permissions), in three tabs.
+/* Settings › Permissions (design/permissions-settings.html): the person's
+   permission policy (GET /permissions).
 
-   Rules: the preset it started from (Change preset: PUT /permissions/preset,
-   Autonomous recommended), "What interrupts your agents" (the ask rules that
-   asked in the last day, each with Allow automatically), every rule with its
-   decision and limits (the preset's own included: each can be edited or
+   Capability groups, the default view: the preset picker
+   (PUT /permissions/preset, Autonomous recommended), the ask rate from
+   GET /permissions/report, and one row per group (Files, Shell, Git & push,
+   Network, MCP) with an Allow / Ask / Deny baseline, expanding to its
+   subcategories (Inherit / Allow / Ask / Deny, marked when one overrides its
+   group); both are set with PUT /permissions/groups. Saved actions are a count
+   with a link.
+
+   Advanced: every rule with its decision and limits, searchable and
+   filterable (the preset's own included: each can be edited or
    removed, and a removal can be undone by adding it back), and what a
    request no rule covers does (PATCH /permissions). A rule is edited in a
    slide-out sheet in three steps (the action, its decision, its limits or
@@ -19,7 +25,7 @@
    timestamps and this screen's changes. */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DaemonClient, PermissionDecision, PermissionKind, PermissionLife, PermissionMatchType, PermissionPreset, PermissionRulePut, PermissionUnmatched, SavedActionKind, SavedActionPut } from "../../api/client";
+import type { DaemonClient, PermissionReport, PermissionDecision, PermissionKind, PermissionLife, PermissionMatchType, PermissionPreset, PermissionRulePut, PermissionUnmatched, SavedActionKind, SavedActionPut } from "../../api/client";
 import {
   DECISIONS,
   LEVELS,
@@ -52,7 +58,22 @@ import { alert, button, card, field, h2, mono, pill, primary, quiet } from "../.
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
-type Tab = "rules" | "saved" | "activity";
+type View = "groups" | "advanced" | "saved" | "activity";
+const VIEW_TITLE: Record<View, string> = { groups: "Permissions", advanced: "Advanced: all rules", saved: "Saved actions", activity: "Activity" };
+
+/* brindle.permission_groups.GROUPS, as the page names them. */
+const GROUP_LIST: { id: string; name: string; subs: [string, string, string][] }[] = [
+  { id: "files", name: "Files", subs: [["read", "Read files", "Files in the worktree and elsewhere"], ["write-worktree", "Write and edit in the worktree", "Inside this checkout"], ["write-outside", "Write and edit outside the worktree", "Anywhere else on disk"]] },
+  { id: "shell", name: "Shell", subs: [["readonly", "Read-only commands", "grep, ls, cat, head"], ["dev-tools", "Tests & build tools", "npm, pytest, make, cargo"], ["install", "Package installs", "npm install, pip install, uv add"], ["destructive", "Destructive commands", "rm, kill, dd"], ["other", "Other commands", "Anything not listed above"]] },
+  { id: "git", name: "Git & push", subs: [["readonly", "Read-only git", "status, diff, log, show"], ["commit", "Commit and branch locally", "commit, branch, switch, merge"], ["push-feature", "Push to feature branches", "Any branch that is not the default or a release"], ["push-protected", "Push to the default or a release branch", "A release push starts a signed build"], ["other", "Other git commands", "reset, clean, rebase, force flags"]] },
+  { id: "network", name: "Network", subs: [["fetch", "Fetch URLs", "Web pages and APIs"], ["search", "Web search", "Search the web"]] },
+  { id: "mcp", name: "MCP", subs: [["tool", "MCP tool calls", "Tools from connected MCP servers"], ["other", "Other MCP requests", "Resources and prompts"]] },
+];
+const BASELINE_LEVELS = ["allow", "ask", "deny"] as const;
+const LEVEL_NAME: Record<string, string> = { allow: "Allow", ask: "Ask", deny: "Deny", inherit: "Inherit" };
+const BY_DEFAULT: Record<string, string> = { allow: "Allowed by default", ask: "Asks by default", deny: "Denied by default" };
+/* Which group a rule belongs to, from its kind (a push is a bash rule with the push matcher). */
+const ruleGroup = (r: PermissionRuleDTO) => (r.match_type === "push" ? "git" : r.kind === "bash" ? "shell" : r.kind === "fetch" ? "network" : r.kind === "mcp" ? "mcp" : ["read", "write", "edit"].includes(r.kind) ? "files" : "other");
 interface Feedback {
   text: string;
   failed?: boolean;
@@ -106,7 +127,8 @@ export interface PermissionsProps {
 export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
   const [policy, setPolicy] = useState<PermissionPolicyDTO | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("rules");
+  const [view, setView] = useState<View>("groups");
+  const [report, setReport] = useState<PermissionReport | null>(null);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [log, setLog] = useState<Activity[]>([]);
   const [busy, setBusy] = useState(false);
@@ -115,13 +137,17 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
 
   const load = useCallback(
     () =>
-      client.permissions().then(
-        (p) => {
-          setPolicy(p);
-          setLoadError(null);
-        },
-        (e: unknown) => setLoadError(message(e)),
-      ),
+      Promise.all([
+        client.permissions().then(
+          (p) => {
+            setPolicy(p);
+            setLoadError(null);
+          },
+          (e: unknown) => setLoadError(message(e)),
+        ),
+        // The ask-rate summary is context only: without it the page still works.
+        client.permissionReport().then(setReport, () => setReport(null)),
+      ]),
     [client],
   );
   useEffect(() => {
@@ -136,7 +162,7 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
     const found = policy.rules.find((r) => r.id === openId);
     if (!found) return;
     opened.current = want;
-    setTab("rules");
+    setView("advanced");
     setEditing(found);
     document.getElementById("permissions")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   }, [openId, ask, policy]);
@@ -192,12 +218,6 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
       record("Delete", "Saved action deleted", `${kindLabel(s.kind)} · ${s.pattern}`);
     }, { text: `${kindLabel(s.kind)} · ${s.pattern} deleted. The next matching request follows your rules again.`, undo: () => restoreSaved(s) });
 
-  const tabs: { id: Tab; label: string }[] = [
-    { id: "rules", label: "Rules" },
-    { id: "saved", label: `Saved actions${policy ? ` (${policy.saved.length})` : ""}` },
-    { id: "activity", label: "Activity" },
-  ];
-
   return (
     <section id="permissions" aria-labelledby="permissions-title" className="flex scroll-mt-s2 flex-col gap-s1" data-testid="permissions-settings">
       <header className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5">
@@ -206,20 +226,14 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
         </h2>
         <span className="text-xs text-ink-3">What your agents do without asking, what asks you, and what is blocked. When two rules disagree, the deny wins.</span>
       </header>
-      <div role="tablist" aria-label="Permissions" className="flex flex-wrap gap-1">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            role="tab"
-            aria-selected={tab === t.id}
-            className={`rounded-full border px-s2 py-0.5 text-sm ${tab === t.id ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2 hover:bg-surface-2"}`}
-            onClick={() => setTab(t.id)}
-          >
-            {t.label}
+      {view !== "groups" && (
+        <div className="flex items-center gap-s2">
+          <button type="button" className={`${quiet} -ml-2 text-branch`} onClick={() => setView("groups")}>
+            ← Back to permissions
           </button>
-        ))}
-      </div>
+          <span className="text-sm font-medium">{VIEW_TITLE[view]}</span>
+        </div>
+      )}
       {loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
           <span>Could not load the permission policy: {loadError}</span>
@@ -238,19 +252,10 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
           )}
         </p>
       )}
-      {policy && tab === "rules" && (
-        <RulesTab
-          client={client}
-          policy={policy}
-          busy={busy}
-          run={run}
-          record={record}
-          onEdit={setEditing}
-          onRemove={removeRule}
-        />
-      )}
-      {policy && tab === "saved" && <SavedTab saved={policy.saved} busy={busy} onEdit={setSavedEditing} onDelete={deleteSaved} />}
-      {policy && tab === "activity" && <ActivityTab policy={policy} log={log} />}
+      {policy && view === "groups" && <GroupsView client={client} policy={policy} report={report} busy={busy} run={run} record={record} onOpen={setView} />}
+      {policy && view === "advanced" && <AdvancedView client={client} policy={policy} busy={busy} run={run} record={record} onEdit={setEditing} onRemove={removeRule} />}
+      {policy && view === "saved" && <SavedTab saved={policy.saved} busy={busy} onEdit={setSavedEditing} onDelete={deleteSaved} />}
+      {policy && view === "activity" && <ActivityTab policy={policy} log={log} />}
       {policy && editing && (
         <RuleEditor
           key={editing === "new" ? "new" : editing.id}
@@ -289,7 +294,184 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
   );
 }
 
-function RulesTab({ client, policy, busy, run, record, onEdit, onRemove }: {
+/* A segmented Allow / Ask / Deny (and Inherit) control: the pressed one is the current answer. */
+function Segmented({ label, value, levels, disabled, onPick }: { label: string; value: string; levels: readonly string[]; disabled: boolean; onPick(level: string): void }) {
+  return (
+    <div role="group" aria-label={label} className="inline-flex overflow-hidden rounded-md border border-line bg-canvas-2">
+      {levels.map((l) => (
+        <button
+          key={l}
+          type="button"
+          aria-pressed={value === l}
+          disabled={disabled}
+          className={`border-l border-line px-s2 py-0.5 text-sm first:border-l-0 ${value === l ? (l === "inherit" ? "bg-surface-2 text-ink" : TONE[l]) : "text-ink-2 hover:bg-surface-2"}`}
+          onClick={() => onPick(l)}
+        >
+          {LEVEL_NAME[l]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* The default view (design/permissions-settings.html): the preset, how often agents are asked, and one row per
+   capability group with its baseline, expanding to the subcategories that may override it. */
+function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
+  client: DaemonClient;
+  policy: PermissionPolicyDTO;
+  report: PermissionReport | null;
+  busy: boolean;
+  run(change: () => Promise<unknown>, done: Feedback): Promise<void>;
+  record(kind: string, what: string, detail: string): void;
+  onOpen(view: View): void;
+}) {
+  const [open, setOpen] = useState<string | null>(null);
+  const customized = policy.rules.some((r) => r.source !== "preset");
+  const stored = new Map((policy.groups ?? []).map((g) => [g.name, g]));
+  // A daemon that sent no table leaves every group at the unmatched answer.
+  const baselineOf = (id: string) => stored.get(id)?.baseline ?? policy.unmatched;
+  const overrideOf = (id: string, sub: string) => stored.get(id)?.subcategories?.[sub] ?? "inherit";
+
+  const usePreset = (name: string) =>
+    void run(async () => {
+      await client.setPermissionPreset(name as PermissionPreset);
+      record("Policy", `${presetLabel(name)} preset chosen`, "Its rules replace the earlier preset's; your own and learned rules stay");
+    }, { text: `${presetLabel(name)} loaded. Every rule it added can be edited or removed.` });
+  const setBaseline = (g: { id: string; name: string }, level: string) =>
+    void run(async () => {
+      await client.setPermissionGroups({ [g.id]: { baseline: level } });
+      record("Policy", `${g.name} baseline changed`, LEVEL_NAME[level]);
+    }, { text: `${g.name} baseline: ${LEVEL_NAME[level]}.` });
+  const setOverride = (g: { id: string; name: string }, sub: string, name: string, level: string) =>
+    void run(async () => {
+      await client.setPermissionGroups({ [g.id]: { subcategories: { [sub]: level } } });
+      record("Policy", `${g.name} · ${name} changed`, level === "inherit" ? "Inherits the group" : LEVEL_NAME[level]);
+    }, { text: `${name}: ${level === "inherit" ? `inherits ${LEVEL_NAME[baselineOf(g.id)]}` : LEVEL_NAME[level]}.` });
+
+  return (
+    <div className="flex flex-col gap-s2">
+      <div className={`${card} flex flex-col gap-s2 p-s2`}>
+        <div className="flex flex-wrap items-baseline gap-x-s2">
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold">Preset</h3>
+            <p className="text-xs text-ink-3">A starting point. Picking one replaces the preset's rules and keeps your own.</p>
+          </div>
+          <span className="text-sm">
+            <span className="font-medium" data-testid="preset-name">{presetLabel(policy.preset)}</span>
+            {customized && <span className="text-ink-3"> · customized</span>}
+          </span>
+        </div>
+        <div className="grid gap-s2 sm:grid-cols-2 xl:grid-cols-4" data-testid="presets">
+          {policy.presets.map((p) => (
+            <div key={p.name} className={`flex flex-col gap-1 rounded-md border p-s2 ${p.current ? "border-branch bg-branch-soft" : "border-line bg-canvas-2"}`} data-preset={p.name}>
+              <h4 className="flex items-center gap-1 text-sm font-medium">
+                {presetLabel(p.name)}
+                {p.name === "autonomous" && <span className="rounded-sm bg-branch-soft px-1 text-[10px] text-branch">RECOMMENDED</span>}
+              </h4>
+              <p className="flex-1 text-xs text-ink-2">{p.description}</p>
+              <button type="button" className={`${p.name === "autonomous" ? primary : button} mt-1 self-start`} disabled={busy || p.current} onClick={() => usePreset(p.name)}>
+                {p.current ? "Current" : `Use ${presetLabel(p.name)}`}
+              </button>
+            </div>
+          ))}
+        </div>
+        <p className="border-l-2 border-branch px-s1 py-1 text-sm" aria-live="polite" data-testid="ask-rate">
+          {!report
+            ? "The ask rate is not available right now."
+            : report.decisions === 0
+              ? `No requests in the last ${report.days} days.`
+              : report.asks === 0
+                ? `No asks in the last ${report.days} days. Your agents ran uninterrupted.`
+                : `${report.asks} ask${report.asks === 1 ? "" : "s"} in the last ${report.days} days (${Math.round(report.ask_rate * 100)}% of ${report.decisions} requests)${report.causes[0] ? `; most from ${report.causes[0].reason}` : ""}.`}
+        </p>
+      </div>
+
+      <div>
+        <h3 className="text-sm font-semibold">Capabilities</h3>
+        <p className="text-xs text-ink-3">Set a baseline for each group, then open it to override finer items. Combined commands (a &amp;&amp; b | c) are checked part by part.</p>
+      </div>
+      <div className={`${card} divide-y divide-line`} data-testid="groups">
+        {GROUP_LIST.map((g) => {
+          const base = baselineOf(g.id);
+          const overrides = g.subs.filter(([s]) => overrideOf(g.id, s) !== "inherit");
+          const expanded = open === g.id;
+          return (
+            <div key={g.id} data-group={g.id}>
+              <div className="flex flex-wrap items-center gap-s2 p-s2">
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium">
+                    {g.name} <span className="text-[11px] font-normal text-ink-3">{g.subs.length} items</span>
+                  </div>
+                  <div className="text-xs text-ink-3">
+                    {BY_DEFAULT[base] ?? base} · {overrides.length ? `${overrides.length} override${overrides.length === 1 ? "" : "s"}` : "no overrides"}
+                  </div>
+                </div>
+                <Segmented label={`${g.name} baseline`} value={base} levels={BASELINE_LEVELS} disabled={busy} onPick={(l) => setBaseline(g, l)} />
+                <button type="button" className={iconButton} aria-expanded={expanded} aria-label={`Show ${g.name} items`} onClick={() => setOpen(expanded ? null : g.id)}>
+                  {expanded ? "▾" : "▸"}
+                </button>
+              </div>
+              {expanded && (
+                <div className="flex flex-col bg-canvas-2 px-s2 pb-s1" data-testid={`group-${g.id}`}>
+                  {g.subs.map(([sub, name, hint]) => {
+                    const o = overrideOf(g.id, sub);
+                    return (
+                      <div key={sub} data-sub={sub} className={`flex flex-wrap items-center gap-s2 border-b border-line border-l-2 py-s1 pl-s1 text-sm last:border-b-0 ${o === "inherit" ? "border-l-transparent" : "border-l-branch bg-branch-soft"}`}>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1">
+                            {name}
+                            {o === "inherit" ? (
+                              <span className="text-[11px] text-ink-3">Inherits {LEVEL_NAME[base]}</span>
+                            ) : (
+                              <span className="rounded-sm border border-branch bg-surface px-1 text-[11px] text-branch" data-testid="override-marker">
+                                {o === base ? `Pinned to ${LEVEL_NAME[o]} (same as group)` : `Overrides ${g.name}: ${LEVEL_NAME[base]} → ${LEVEL_NAME[o]}`}
+                              </span>
+                            )}
+                          </div>
+                          <small className="block text-xs text-ink-3">{hint}</small>
+                        </div>
+                        <Segmented label={`${name} level`} value={o} levels={["inherit", ...BASELINE_LEVELS]} disabled={busy} onPick={(l) => setOverride(g, sub, name, l)} />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className={`${card} flex flex-wrap items-center justify-between gap-s2 p-s2`}>
+        <div>
+          <strong className="text-sm font-medium" data-testid="saved-count">
+            {policy.saved.length} saved action{policy.saved.length === 1 ? "" : "s"}
+          </strong>
+          <p className="text-xs text-ink-3">Allows and denials you saved from the Inbox.</p>
+        </div>
+        <button type="button" className={`${quiet} text-branch`} onClick={() => onOpen("saved")}>
+          Manage saved actions
+        </button>
+      </div>
+      <div className={`${card} flex flex-wrap items-center justify-between gap-s2 p-s2`}>
+        <div>
+          <strong className="text-sm font-medium">Advanced</strong>
+          <p className="text-xs text-ink-3">{policy.rules.length} rules in total. Search, filter and inspect every rule.</p>
+        </div>
+        <span className="flex gap-s1">
+          <button type="button" className={`${quiet} text-branch`} onClick={() => onOpen("activity")}>
+            Activity
+          </button>
+          <button type="button" className={button} onClick={() => onOpen("advanced")}>
+            Open advanced view
+          </button>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* The flat rule list: search and filter, add, edit and remove, and what a request no rule covers does. */
+function AdvancedView({ client, policy, busy, run, record, onEdit, onRemove }: {
   client: DaemonClient;
   policy: PermissionPolicyDTO;
   busy: boolean;
@@ -298,25 +480,20 @@ function RulesTab({ client, policy, busy, run, record, onEdit, onRemove }: {
   onEdit(rule: PermissionRuleDTO | "new"): void;
   onRemove(rule: PermissionRuleDTO): void;
 }) {
-  const [choosing, setChoosing] = useState(false);
   const [query, setQuery] = useState("");
-  const customized = policy.rules.some((r) => r.source !== "preset");
-  const asking = policy.rules.filter((r) => r.decision === "ask" && (r.prompts ?? 0) > 0).sort((a, b) => (b.prompts ?? 0) - (a.prompts ?? 0));
-  const total = asking.reduce((n, r) => n + (r.prompts ?? 0), 0);
+  const [capability, setCapability] = useState("");
+  const [decision, setDecision] = useState("");
+  const [source, setSource] = useState("");
   const q = query.trim().toLocaleLowerCase();
-  const shown = policy.rules.filter((r) => [ruleAction(r), r.kind, r.label ?? "", r.describe, r.match, ruleSummary(r), ruleLimits(r), r.source].join(" ").toLocaleLowerCase().includes(q));
+  const filtered = !!(q || capability || decision || source);
+  const shown = policy.rules.filter(
+    (r) =>
+      (!capability || ruleGroup(r) === capability) &&
+      (!decision || r.decision === decision) &&
+      (!source || r.source === source) &&
+      [ruleAction(r), r.kind, r.label ?? "", r.describe, r.match, ruleSummary(r), ruleLimits(r), r.source].join(" ").toLocaleLowerCase().includes(q),
+  );
 
-  const usePreset = (name: string) =>
-    void run(async () => {
-      await client.setPermissionPreset(name as PermissionPreset);
-      setChoosing(false);
-      record("Policy", `${presetLabel(name)} preset chosen`, "Its rules replace the earlier preset's; your own and learned rules stay");
-    }, { text: `${presetLabel(name)} loaded. Every rule it added can be edited or removed.` });
-  const allowAutomatically = (r: PermissionRuleDTO) =>
-    void run(async () => {
-      await client.updatePermissionRule(r.id, { decision: "allow", limits: null });
-      record("Policy", "Rule changed to allow automatically", `${ruleAction(r)} · ${r.label || r.describe}`);
-    }, { text: `${ruleAction(r)} (${r.label || r.describe}) now runs without asking.` });
   const setUnmatched = (value: string) =>
     void run(async () => {
       await client.setPermissionUnmatched(value as PermissionUnmatched);
@@ -325,57 +502,6 @@ function RulesTab({ client, policy, busy, run, record, onEdit, onRemove }: {
 
   return (
     <div className="flex flex-col gap-s2">
-      <div className={`${card} flex flex-col gap-s2 p-s2`}>
-        <div className="flex flex-wrap items-center gap-s1 text-sm">
-          <span>
-            Preset: <span className="font-medium" data-testid="preset-name">{presetLabel(policy.preset)}</span>
-            {customized && <span className="text-ink-3"> · customized</span>}
-          </span>
-          <span className="flex-1" />
-          <button type="button" className={`${quiet} text-branch`} aria-expanded={choosing} onClick={() => setChoosing((c) => !c)}>
-            Change preset
-          </button>
-        </div>
-        {choosing && (
-          <div className="grid gap-s2 sm:grid-cols-2 xl:grid-cols-4" data-testid="presets">
-            {policy.presets.map((p) => (
-              <div key={p.name} className={`flex flex-col gap-1 rounded-md border p-s2 ${p.current ? "border-branch bg-branch-soft" : "border-line bg-canvas-2"}`} data-preset={p.name}>
-                <h3 className="flex items-center gap-1 text-sm font-medium">
-                  {presetLabel(p.name)}
-                  {p.name === "autonomous" && <span className="rounded-sm bg-branch-soft px-1 text-[10px] text-branch">RECOMMENDED</span>}
-                </h3>
-                <p className="flex-1 text-xs text-ink-2">{p.description}</p>
-                <button type="button" className={`${p.name === "autonomous" ? primary : button} mt-1 self-start`} disabled={busy || p.current} onClick={() => usePreset(p.name)}>
-                  {p.current ? "Current" : `Use ${presetLabel(p.name)}`}
-                </button>
-              </div>
-            ))}
-            <p className="text-xs text-ink-3 sm:col-span-2 xl:col-span-4">A preset replaces the rules the last one added. Rules you added or brindle learned stay.</p>
-          </div>
-        )}
-      </div>
-
-      <div className={`${card} flex flex-col p-s2`} data-testid="interrupts">
-        <h3 className="text-sm font-semibold">What interrupts your agents</h3>
-        <p className="text-xs text-ink-3">
-          {total
-            ? `${total} approval prompt${total === 1 ? "" : "s"} in the last 24 hours across ${asking.length} rule${asking.length === 1 ? "" : "s"}. Each one paused a worker until someone answered.`
-            : "No rule asked for approval in the last 24 hours. Your agents are running uninterrupted."}
-        </p>
-        {asking.map((r) => (
-          <div key={r.id} className="flex items-center gap-s2 border-b border-line py-s1 text-sm last:border-b-0" data-rule={r.id}>
-            <span className="min-w-0 flex-1">
-              <span className="font-medium">{ruleAction(r)}</span>
-              <small className={`block truncate text-xs text-ink-3 ${mono}`}>{r.label || r.describe}</small>
-            </span>
-            <span className="whitespace-nowrap font-mono text-sap">{r.prompts}×</span>
-            <button type="button" className={button} disabled={busy} onClick={() => allowAutomatically(r)}>
-              Allow automatically
-            </button>
-          </div>
-        ))}
-      </div>
-
       <div className={`${card} flex flex-col gap-s1 p-s2`}>
         <div className="flex flex-wrap items-center gap-s2">
           <div className="min-w-0 flex-1">
@@ -386,9 +512,37 @@ function RulesTab({ client, policy, busy, run, record, onEdit, onRemove }: {
             + Add rule
           </button>
         </div>
-        <input type="search" className={`${field} w-full`} aria-label="Search rules" placeholder="Search rules by action, target or decision" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <div className="flex flex-wrap gap-s1">
+          <input type="search" className={`${field} min-w-48 flex-1`} aria-label="Search rules" placeholder="Search rules by action, target or decision" value={query} onChange={(e) => setQuery(e.target.value)} />
+          <select className={field} aria-label="Capability" value={capability} onChange={(e) => setCapability(e.target.value)}>
+            <option value="">Any capability</option>
+            {GROUP_LIST.map((g) => (
+              <option key={g.id} value={g.id}>
+                {g.name}
+              </option>
+            ))}
+            <option value="other">Other</option>
+          </select>
+          <select className={field} aria-label="Decision filter" value={decision} onChange={(e) => setDecision(e.target.value)}>
+            <option value="">Any decision</option>
+            {BASELINE_LEVELS.map((l) => (
+              <option key={l} value={l}>
+                {LEVEL_NAME[l]}
+              </option>
+            ))}
+          </select>
+          <select className={field} aria-label="Source" value={source} onChange={(e) => setSource(e.target.value)}>
+            <option value="">Any source</option>
+            <option value="preset">Preset</option>
+            <option value="user">You</option>
+            <option value="learned">Learned</option>
+          </select>
+          <button type="button" className={`${quiet} text-branch`} disabled={!filtered} onClick={() => { setQuery(""); setCapability(""); setDecision(""); setSource(""); }}>
+            Clear
+          </button>
+        </div>
         <span className="text-xs text-ink-3" aria-live="polite">
-          {q ? `${shown.length} of ${policy.rules.length} rules` : `${policy.rules.length} rules`}
+          {filtered ? `${shown.length} of ${policy.rules.length} rules` : `${policy.rules.length} rules`}
         </span>
         <table className="w-full border-collapse text-left text-[13px]" data-testid="rules">
           <thead>
