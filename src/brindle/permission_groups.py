@@ -27,7 +27,7 @@ from brindle.permissions import Request, Rule
 GROUPS: dict[str, tuple[str, ...]] = {
     "files": ("read", "write-worktree", "write-outside"),
     "shell": ("readonly", "dev-tools", "install", "destructive", "other"),
-    "git": ("readonly", "commit", "push-feature", "push-protected"),
+    "git": ("readonly", "commit", "push-feature", "push-protected", "other"),
     "network": ("fetch", "search"),
     "mcp": ("tool", "other"),
 }
@@ -44,10 +44,15 @@ PRESET_OVERRIDES: dict[str, dict[str, str]] = {
     "secure": {},
 }
 
-# Programs that build, test or run a project's code.
-DEV_TOOLS = frozenset({*permissions.PRESET_COMMANDS, "node", "npx", "bun", "deno", "tsc", "ruff", "mypy", "black",
-                       "eslint", "prettier", "jest", "vitest", "tox", "poetry", "pip", "pip3", "python3", "rustc",
-                       "cmake", "just", "mvn", "gradle", "swift", "xcodebuild", "bundle", "rake", "ruby"})
+# Programs that build, lint or test a project (the presets' everyday commands, and no
+# other interpreter that runs whatever it's given).
+DEV_TOOLS = frozenset({*permissions.PRESET_COMMANDS, "tsc", "ruff", "mypy", "black", "eslint", "prettier", "jest",
+                       "vitest", "tox", "rustc", "cmake", "mvn", "gradle", "swift", "xcodebuild"})
+# git subcommands that record work without discarding any (git/commit); any other git
+# command that isn't read-only or a push (reset, clean, checkout, rebase, branch -D,
+# config ...) is git/other.
+COMMITS = frozenset({"add", "commit", "tag", "merge", "switch", "cherry-pick", "revert", "mv", "fetch", "pull"})
+DISCARDING = ("-f", "--force", "--discard-changes", "-d", "-D", "--delete", "--worktree", "-W")
 # program -> the subcommands that install or add packages ("pip install" two words deep).
 INSTALLERS: dict[str, tuple[str, ...]] = {
     "pip": ("install",), "pip3": ("install",), "npm": ("install", "i", "ci", "add"), "pnpm": ("install", "i", "add"),
@@ -121,11 +126,29 @@ def _protected(push: permissions.Push, repo_root: str) -> bool:
         for dest in (permissions.DEFAULT_BRANCH, "release", "release/*"))
 
 
+def _commits(words: list[str]) -> bool:
+    """A git command in COMMITS (``stash`` only to save, ``restore`` only
+    ``--staged``, ``tag`` to make one) with no option that discards or deletes."""
+    args = words[1:]
+    while args and args[0].startswith("-"):    # global options
+        args = args[2:] if args[0] in ("-C", "-c") else args[1:]
+    if not args or any(a in DISCARDING for a in args[1:]):
+        return False
+    sub, rest = args[0], args[1:]
+    if sub == "stash":
+        return rest[:1] in ([], ["push"], ["save"])
+    if sub == "restore":
+        return "--staged" in rest
+    return sub in COMMITS
+
+
 def _git(req: Request, words: list[str]) -> str:
     pushes = permissions.push_calls(shlex.join(words))
     if pushes:
         return "push-protected" if any(_protected(p, req.repo_root) for p in pushes) else "push-feature"
-    return "readonly" if permissions._readonly_part(req, words) else "commit"
+    if permissions._readonly_part(req, words):
+        return "readonly"
+    return "commit" if _commits(words) else "other"
 
 
 def _installs(program: str, words: list[str]) -> bool:

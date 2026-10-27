@@ -25,6 +25,7 @@ def fetch(ws, tool):
     # The preset's baselines, by subcategory.
     ("autonomous", {}, lambda ws: bash(ws, "git push origin feature"), "allow", [("git", "push-feature")]),
     ("permissive", {}, lambda ws: bash(ws, 'git commit -m "wip"'), "allow", [("git", "commit")]),
+    ("permissive", {}, lambda ws: bash(ws, "git reset --hard"), "ask", [("git", "other")]),     # discards work
     ("standard", {}, lambda ws: bash(ws, "cd src && ls"), "allow", [("shell", "readonly"), ("shell", "readonly")]),
     ("permissive", {}, lambda ws: bash(ws, "make build && pip install foo"), "ask",
      [("shell", "dev-tools"), ("shell", "install")]),                       # the strictest part
