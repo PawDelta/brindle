@@ -93,3 +93,25 @@ jobs:
           name: dist
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Tell pawdelta.com/brindle about the release: PawDelta/pawdelta-web's "Sync
+  # brindle release" workflow (repository_dispatch brindle-release) rebuilds
+  # the changelog and opens its PR. Needs the repository secret
+  # SITE_DISPATCH_TOKEN (a token with Contents: write on pawdelta-web); without
+  # it this skips and the site's hourly sync picks the release up instead.
+  notify-site:
+    if: startsWith(github.event.release.tag_name, 'v')
+    needs: publish
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.SITE_DISPATCH_TOKEN }}
+    steps:
+      - name: No token configured
+        if: env.GH_TOKEN == ''
+        run: echo "SITE_DISPATCH_TOKEN is unset; the site's hourly sync will pick up the release."
+      - name: Start the site's release sync
+        if: env.GH_TOKEN != ''
+        run: |
+          gh api repos/PawDelta/pawdelta-web/dispatches \
+            -f event_type=brindle-release \
+            -F "client_payload[version]=${GITHUB_REF_NAME}"
