@@ -292,17 +292,22 @@ def screens(monkeypatch):
     return shown
 
 
-def test_trust_dialog_nobody_answered_is_reported_by_the_sweep(db, root, screens):
-    """No hook runs before the trust dialog is answered, so the sweep reads
-    the screen itself and forwards the live menu immediately."""
+@pytest.mark.parametrize("status,mode", [
+    ("idle", "assign"), ("starting", "assign"), ("processing", "review"), ("waiting", "assign"),
+])
+def test_note_stuck_waiting_only(db, root, screens, monkeypatch, status, mode):
+    """The sweep reads only a waiting worker's pane, and forwards its live
+    menu once; turn-end hooks and settle_startups own the others."""
     _, ws = root
     screens["%w1"] = TRUST_SCREEN
-    worker_on(db, ws, "starting", time.time() - 600)
+    worker_on(db, ws, status, time.time() - 600)
+    db.update_agent("w1", mode=mode)
     now = time.time()
-    assert cull.note_stuck(db, now, {}) != []
-    assert db.get_agent("w1").status == "waiting"
+    if status != "waiting":
+        monkeypatch.setattr(tmux, "capture", lambda *a, **k: pytest.fail("captured a pane"))
+    assert (cull.note_stuck(db, now, {}) != []) == (status == "waiting")
     assert cull.note_stuck(db, now + cull.STUCK_AFTER + 1, {}) == []
-    assert db.pending_count("boss") == 1
+    assert db.pending_count("boss") == (status == "waiting")
 
 
 def test_trust_writes_through_a_symlinked_config(tmp_path, claude_config):

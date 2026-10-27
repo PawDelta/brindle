@@ -65,8 +65,12 @@ def _save(data: dict) -> None:
     p = path()
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    tmp.replace(p)
+    try:
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(p)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _number(v) -> float | None:

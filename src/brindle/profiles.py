@@ -430,10 +430,26 @@ def lint_profile(name: str, repo: str | None) -> tuple[list[str], list[str]]:
     return errors, warnings
 
 
+_ORG_FEATURE = "org_profiles"   # brindle.pro.org_profiles.FEATURE, checked before importing it
+
+
+def _org_entitled() -> bool:
+    """Whether the (cached) entitlement includes the org library: without
+    it, profile lookups never load or enter brindle.pro.org_profiles."""
+    try:
+        from brindle.pro import license
+
+        return license.has(_ORG_FEATURE)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _org_item(kind: str, name: str):
     """The org library's profile or rule pack ``name`` (brindle Team, feature
     ``org_profiles``; see ``brindle.pro.org_profiles``), or None: no
     entitlement, no usable library, or no such item."""
+    if not _org_entitled():
+        return None
     try:
         from brindle.pro import org_profiles
 
@@ -443,6 +459,8 @@ def _org_item(kind: str, name: str):
 
 
 def _org_names(kind: str) -> set[str]:
+    if not _org_entitled():
+        return set()
     try:
         from brindle.pro import org_profiles
 
