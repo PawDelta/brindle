@@ -27,7 +27,7 @@
    nowhere else: the Inbox is where what needs a person is read and acted
    on. */
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, type ReactNode } from "react";
 import type { DaemonClient, InboxAction } from "../../api/client";
 import { useDaemon } from "../../api/context";
 import type { InboxItemDTO } from "../../api/schema";
