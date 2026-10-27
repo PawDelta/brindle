@@ -331,6 +331,7 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     for a in db.list_agents():
         if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.result is not None
                 or a.dismissed_at is not None or a.status not in ("starting", "processing", "waiting", "idle")
+                or (a.status == "processing" and a.mode != "review")   # busy; its hooks mark a wait
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
@@ -346,8 +347,6 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         if prompt_answer.blocking_prompt(screen, a.provider, brief):
             if prompt_answer.tell(db, a, "\n".join(prompt_answer._tail(screen))):
                 done.append(f"told {a.parent_id} that worker {a.id} is waiting on input")
-            continue
-        if a.status == "idle":
             continue
         if a.status != "waiting":
             agents.screen_status(db, a, samples=1)

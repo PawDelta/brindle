@@ -305,6 +305,13 @@ def test_trust_dialog_nobody_answered_is_reported_by_the_sweep(db, root, screens
     assert db.pending_count("boss") == 1
 
 
+def test_note_stuck_waiting_only(db, root, screens, monkeypatch):
+    _, ws = root
+    worker_on(db, ws, "processing", time.time() - 600)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: pytest.fail("captured a pane"))
+    assert cull.note_stuck(db, time.time(), {}) == []
+
+
 def test_trust_writes_through_a_symlinked_config(tmp_path, claude_config):
     real = tmp_path / "dotfiles" / "claude.json"
     real.parent.mkdir()

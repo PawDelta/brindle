@@ -367,9 +367,72 @@ CACHE_SECONDS = 300
 _clear_hooks: list = []   # callables run by clear_cache: caches that depend on the entitlement
 
 
+DISK_CACHE_FILE = "entitlement-cache.json"
+DISK_CACHE_SECONDS = 120   # how long another process may reuse a keystore read
+
+
+def _disk_cache_path():
+    from brindle.pro._files import private_dir
+
+    return private_dir() / DISK_CACHE_FILE
+
+
+def _disk_cache_read(now: float, max_age: float | None) -> Entitlement | str | None:
+    """What an earlier process stored, still within its bounded time: the
+    entitlement (re-verified, never trusted from the file), the message of
+    the LicenseError it hit (a str), or None for no usable cache."""
+    from brindle.pro._files import read_private
+
+    try:
+        raw = read_private(_disk_cache_path(), MAX_LICENSE_FILE)
+        data = json.loads(raw) if raw else None
+        if not isinstance(data, dict) or not isinstance(data.get("until"), (int, float)) \
+                or data["until"] <= now or data["until"] - DISK_CACHE_SECONDS > now:
+            return None
+        if isinstance(data.get("error"), str):
+            return data["error"]
+        ent = verify(data["token"], issuer=data.get("issuer"), now=now)
+        if max_age is not None and now - ent.iat > max_age:
+            return None
+        return ent if not needs_refresh(ent, now) else None
+    except Exception:  # noqa: BLE001 - a cache is never worth failing over
+        return None
+
+
+def _disk_cache_write(now: float, *, token: str | None = None, issuer: str | None = None,
+                      error: str | None = None) -> None:
+    """Atomically store the result for DISK_CACHE_SECONDS: 0600, via a unique
+    temp file in the same directory."""
+    import tempfile
+
+    try:
+        path = _disk_cache_path()
+        body = {"until": now + DISK_CACHE_SECONDS}
+        body.update({"error": error} if error is not None else {"token": token, "issuer": issuer})
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{DISK_CACHE_FILE}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                json.dump(body, fh)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            raise
+    except Exception:  # noqa: BLE001
+        log.debug("couldn't write the entitlement cache", exc_info=True)
+
+
 def clear_cache() -> None:
     global _cache
     _cache = None
+    try:
+        from brindle.config import brindle_home
+
+        (brindle_home() / "pro" / DISK_CACHE_FILE).unlink()
+    except Exception:  # noqa: BLE001 - nothing cached, or no home yet
+        pass
     for hook in _clear_hooks:
         hook()
 
@@ -397,6 +460,13 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
             if default:
                 _cache = (min(now + CACHE_SECONDS, ent.grace_until or ent.exp), ent)
             return ent
+    if default:
+        hit = _disk_cache_read(now, max_age)
+        if isinstance(hit, str):
+            raise LicenseError(hit)
+        if hit is not None:
+            _cache = (min(now + CACHE_SECONDS, hit.grace_until or hit.exp), hit)
+            return hit
     try:
         store = store or credentials.default_store()
         creds = store.load()
@@ -411,7 +481,10 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
             if default:
                 _cache = (min(now + CACHE_SECONDS, ent.grace_until or ent.exp), ent)
             return ent
-        raise LicenseError("not logged in to brindle Pro (run `brindle account login`)")
+        msg = "not logged in to brindle Pro (run `brindle account login`)"
+        if default:
+            _disk_cache_write(now, error=msg)
+        raise LicenseError(msg)
     try:
         issuer = client.base if client is not None else auth.base_url(creds.get("base_url"))
     except auth.AuthError as e:
@@ -422,6 +495,8 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
     except LicenseError:
         if not refresh:
             raise
+    if default and ent is not None and not offline and not needs_refresh(ent, now, max_age):
+        _disk_cache_write(now, token=creds["entitlement"], issuer=issuer)
     if refresh and (ent is None or needs_refresh(ent, now, max_age)) and creds.get("refresh_token"):
         try:
             ent = auth.refresh(client or auth.Client(issuer), store, creds, now=now)

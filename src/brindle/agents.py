@@ -3740,6 +3740,8 @@ def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
     The request is the oldest recorded one for the same tool and input
     (PermissionRequest has no tool_use_id to pair them by)."""
     try:
+        if not db.permission_requests_of(agent.id):
+            return   # nothing was left to the person: skip the permissions import
         from brindle import permissions
 
         ws = db.get_workspace(agent.workspace_id)
