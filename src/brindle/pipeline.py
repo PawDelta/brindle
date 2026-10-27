@@ -817,7 +817,11 @@ def has_supervisor_action(summary: str) -> bool:
     """Parse review summary for actionable supervisor findings.
     Distinguishes empty or negated sections (e.g. 'Needs supervisor action: None.')
     from actual items requiring escalation."""
-    m = re.search(r"(?:^|[^\w])needs[-_ ]*supervisor(?:[-_ ]*action)?\s*[:\n\-*]*\s*(.*)", summary, re.IGNORECASE)
+    # A blocker the reviewer calls out of scope for the worker (a bug in code
+    # its task doesn't cover) is the same escalation: another fix round
+    # can't settle it.
+    m = re.search(r"(?:^|[^\w])(?:needs[-_ ]*supervisor(?:[-_ ]*action)?|out[-_ ]*of[-_ ]*scope)"
+                  r"\s*[:\n\-*]*\s*(.*)", summary, re.IGNORECASE)
     if not m:
         return False
     # Capture text under this section until the next header/section
