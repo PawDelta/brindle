@@ -442,10 +442,10 @@ def _disk_cache_write(now: float, gen: int | None, *, token: str | None = None,
     switch meanwhile must not be undone by old credentials."""
     import tempfile
 
-    from brindle.pro._files import private_dir
+    from brindle.config import brindle_home
 
     try:
-        if private_dir(create=False) is None:
+        if not brindle_home().is_dir():
             return   # no home yet: a lookup that caches a result mustn't create it
         with _disk_cache_lock() as d:
             if gen is None or _disk_cache_generation(d) != gen:
@@ -472,10 +472,11 @@ def clear_cache() -> None:
     generation so a read already in flight can't store what it saw."""
     global _cache
     _cache = None
-    from brindle.pro._files import private_dir, write_private
+    from brindle.config import brindle_home
+    from brindle.pro._files import write_private
 
     try:
-        if private_dir(create=False) is not None:   # no home, so nothing on disk to invalidate
+        if brindle_home().is_dir():   # no home, so nothing on disk to invalidate
             with _disk_cache_lock() as d:
                 write_private(d / DISK_CACHE_GEN, str((_disk_cache_generation(d) or 0) + 1).encode())
                 (d / DISK_CACHE_FILE).unlink(missing_ok=True)

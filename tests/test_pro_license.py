@@ -202,6 +202,10 @@ def test_license_cached(backend, token, monkeypatch):
     put the old login back."""
     assert license.features() == frozenset()
     assert not os.path.exists(os.environ["BRINDLE_HOME"])   # a lookup doesn't create the home
+    os.mkdir(os.environ["BRINDLE_HOME"])
+    assert license.features() == frozenset()
+    assert os.path.exists(license._disk_cache_path())   # an existing home caches, creating pro/
+    license.clear_cache()   # as login does
     store = logged_in(backend, token())
     first = license.current()
     license._cache = None   # as in a new process
