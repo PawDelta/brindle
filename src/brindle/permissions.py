@@ -1922,24 +1922,33 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
             return stopped
     if ruled is not None and ruled.decision == "allow":
         return ruled
-    open_parts = None    # the parts of a command no rule allows
-    if ruled is None and req.kind == "bash" and req.command and simple_argv(req.command) is None:
+    # The parts of a command no rule covers: a capability group answers for
+    # them even beside a part an ask rule covers (None: the whole command).
+    open_parts = None
+    compound = req.kind == "bash" and req.command and simple_argv(req.command) is None
+    if compound and (ruled is None or groups):
         parts = compound_parts(req.command)
         if parts:
             answers = [_part_decision(req, words, checks, rules) for words in parts]
             for answer in answers:
                 if answer.decision == "deny":
                     return answer
-            if all(answer.decision == "allow" for answer in answers):
+            if ruled is None and all(answer.decision == "allow" for answer in answers):
                 return Decision("allow", "every part of the command is allowed by a rule")
-            ruled = next((a for a in answers if a.decision == "ask" and a.rule is not None), None)
-            open_parts = [words for words, answer in zip(parts, answers) if answer.decision != "allow"]
+            ruled = ruled or next((a for a in answers if a.decision == "ask" and a.rule is not None), None)
+            open_parts = [words for words, answer in zip(parts, answers)
+                          if answer.decision != "allow" and answer.rule is None]
     fallback, why = unmatched, "unmatched actions are denied" if unmatched == "deny" else "unmatched actions run"
-    if ruled is None and groups:
+    # An ask on one part of a command whose parts can't be read: the group answers for the whole.
+    partial = (compound and open_parts is None and ruled is not None
+               and (ruled.rule is None or not rule_matches(ruled.rule, req, checks)))
+    if groups and (ruled is None or open_parts or partial):
         from brindle import permission_groups
 
         fallback, where = permission_groups.baseline(req, groups, rules, checks, open_parts)
         why = f"the {where} baseline is {fallback}"
+        if ruled is not None and fallback == "deny":
+            return Decision("deny", f"{ruled.reason}, but {why}", ruled.rule)
     if ruled is None and fallback == "deny":
         return Decision("deny", f"no rule covers it, and {why}")
     if ruled is None and fallback == "allow":

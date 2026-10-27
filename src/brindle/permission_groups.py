@@ -179,8 +179,10 @@ def _shell_part(req: Request, words: list[str], rules: list[Rule], checks: list[
 def classify(req: Request, rules: list[Rule], checks: list[str] | None = None,
              parts: list[list[str]] | None = None) -> list[tuple[str, str]]:
     """The (group, subcategory) of ``req``: one per simple command of a shell
-    command (``parts``: just those; a command it can't read is shell/other),
-    else one."""
+    command (``parts``: just those), else one. A command compound_parts
+    can't read (a redirection, a substitution) is shell/other and also each
+    command the restriction parsers find in it, so none hides a restricted
+    subcategory."""
     if req.kind == "read":
         return [("files", "read")]
     if req.kind in ("write", "edit"):
@@ -191,11 +193,18 @@ def classify(req: Request, rules: list[Rule], checks: list[str] | None = None,
         return [("mcp", "tool")]
     if req.kind != "bash":
         return [("mcp", "other")]
-    if parts is None:
-        parts = permissions.compound_parts(req.command) if req.command and req.command.strip() else None
+    command = (req.command or "").strip()
+    unread = []
+    if parts is None and command:
+        parts = permissions.compound_parts(command)
+        if parts is None:
+            unread = [("shell", "other")]
+            parts = (permissions._restriction_parts(command)
+                     or permissions._restriction_parts(command, word_pattern=permissions.RESTRICTION_WORD)
+                     or permissions._segments(command))
     if not parts:
         return [("shell", "other")]
-    return [_shell_part(req, words, rules, checks or []) for words in parts]
+    return [*unread, *(_shell_part(req, words, rules, checks or []) for words in parts)]
 
 
 def answer(groups: dict[str, dict], group: str, sub: str) -> str:

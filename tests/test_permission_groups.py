@@ -21,6 +21,16 @@ def fetch(ws, tool):
     return Request("claude", "fetch", tool, ws.path, ws.path, ws.repo_root, url="https://example.com")
 
 
+def confirmed(ws, command):
+    """``command`` where an ask rule covers ``confirm`` and a saved allow settles it."""
+    permissions.add_rule("bash", "confirm", "ask")
+    permissions.save_action("bash", "confirm *", "allow", scope="general")
+    return bash(ws, command)
+
+
+DESTRUCTIVE_DENIED = {"shell": {"baseline": "allow", "subcategories": {"destructive": "deny"}}}
+
+
 @pytest.mark.parametrize("preset, change, request_of, decision, where", [
     # The preset's baselines, by subcategory.
     ("autonomous", {}, lambda ws: bash(ws, "git push origin feature"), "allow", [("git", "push-feature")]),
@@ -31,12 +41,16 @@ def fetch(ws, tool):
      [("shell", "dev-tools"), ("shell", "install")]),                       # the strictest part
     ("permissive", {}, lambda ws: write(ws, "src/new.py"), "allow", [("files", "write-worktree")]),
     ("permissive", {}, lambda ws: write(ws, os.path.expanduser("~/x.py")), "ask", [("files", "write-outside")]),
-    ("standard", {}, lambda ws: bash(ws, "echo $(whoami)"), "ask", [("shell", "other")]),
+    ("standard", {}, lambda ws: bash(ws, "echo $(whoami)"), "ask",
+     [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),   # unreadable: other, and its parts
     # A subcategory over its group's baseline, set through the daemon.
     ("autonomous", {"git": {"subcategories": {"push-feature": "deny"}}},
      lambda ws: bash(ws, "git push origin feature"), "deny", [("git", "push-feature")]),
-    ("standard", {"shell": {"baseline": "allow", "subcategories": {"destructive": "deny"}}},
-     lambda ws: bash(ws, "rm notes.txt"), "deny", [("shell", "destructive")]),
+    ("standard", DESTRUCTIVE_DENIED, lambda ws: bash(ws, "rm notes.txt"), "deny", [("shell", "destructive")]),
+    ("standard", DESTRUCTIVE_DENIED, lambda ws: bash(ws, "rm notes.txt > out.log"), "deny",
+     [("shell", "other"), ("shell", "destructive")]),                       # a redirection hides nothing
+    ("standard", DESTRUCTIVE_DENIED, lambda ws: confirmed(ws, "confirm && rm notes.txt"), "deny",
+     [("shell", "other"), ("shell", "destructive")]),                       # nor a part an ask rule covers
     ("standard", {"network": {"subcategories": {"search": "allow"}}},
      lambda ws: fetch(ws, "WebSearch"), "allow", [("network", "search")]),
     ("standard", {"network": {"subcategories": {"search": "allow"}}},
