@@ -300,9 +300,17 @@ def _memory_gb() -> float:
         return 0.0
 
 
+def check_xdist_workers(slots: int) -> int:
+    """pytest-xdist workers each of ``slots`` concurrent checks may start, so
+    that all the slots together stay within the logical cores."""
+    return max(1, (os.cpu_count() or 1) // max(1, slots))
+
+
 def host_check_concurrency() -> int:
     """Check runs at once when the repo doesn't say: half the logical cores and
-    RAM for ``CHECK_RAM_GB`` per run, never below 2 or above the cap (#169)."""
+    RAM for ``CHECK_RAM_GB`` per run, never below 2 or above the cap (#169).
+    Each run's xdist workers are capped by ``check_xdist_workers``, so the
+    slots share the cores instead of each taking all of them."""
     cores = os.cpu_count() or 1
     by_ram = int(_memory_gb() // CHECK_RAM_GB)
     return max(2, min(cores // 2, by_ram, CHECK_CONCURRENCY_CAP))

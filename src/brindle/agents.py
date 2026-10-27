@@ -54,6 +54,8 @@ WORKER_FOOTER = """
 ---
 You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
 {guidance}
+Run only the tests that cover your change (a test file or a `-k` filter), not
+the full suite: brindle's merge gate runs the full suite on your branch.
 Before you finish, check your work against the task and its finish line, item
 by item: each behaviour it asks for needs a test that would fail without your
 change, and a requirement with no such test isn't done yet. If the task turns
@@ -301,6 +303,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         # some never get there). Workers and reviewers only have brindle's own
         # tools, so loading them all up front is cheap.
         env["ENABLE_TOOL_SEARCH"] = "false"
+    # Agents run pytest outside brindle's check slots: cap their xdist workers
+    # so a few of them don't each start one per core. Passed explicitly, since
+    # a pane can inherit an older tmux environment; a profile's value still wins.
+    env.setdefault("PYTEST_XDIST_AUTO_NUM_WORKERS", os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS", "2"))
     return env
 
 
@@ -3285,6 +3291,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     # replace that verdict in the same role (gates.standing_reviews).
     if reviewer is not None:
         db.update_agent(reviewer.id, review_slot=profile if second else "")
+        bus.publish_agent(db, "review.started", reviewer.id, workspace_id=ws.id,
+                          repo_root=ws.repo_root, sha=sha)   # the stage_timings rollup
     return reviewer
 
 
@@ -3631,11 +3639,16 @@ def _session_of(db: DB, agent: Agent) -> str | None:
 
 # Seconds a hold waits on the daemon at a time between looks at whether the
 # agent was closed or its request answered at the CLI's own prompt.
-HOLD_LOOK_SECONDS = 5.0
-# Looks in a row (HOLD_LOOK_SECONDS apart) a pane must read past its CLI's own
-# permission prompt, busy or idle, before the hold ends: longer than one look,
-# so a read while the prompt is redrawn doesn't take it for answered. Any
-# other read starts the count over.
+HOLD_LOOK_SECONDS = 1.0
+# Those waits between looks at the pane until a look has caught its CLI's own
+# prompt (it may not be drawn yet, so the pane reads busy for a while): 5s
+# apart, so ANSWERED_LOOKS past it span long enough for it to be drawn. Once
+# one has, the pane is looked at after every wait.
+UNSEEN_LOOK_EVERY = 5
+# Looks in a row a pane must read past its CLI's own permission prompt, busy
+# or idle, before the hold ends: longer than one look, so a read while the
+# prompt is redrawn doesn't take it for answered. Any other read starts the
+# count over.
 ANSWERED_LOOKS = 3
 # Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
 # so the hook gives the request to the prompt itself before the CLI cancels it.
@@ -3693,7 +3706,7 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
     meanwhile, as at that prompt."""
     db.set_status(agent.id, "waiting")
     bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline, answer, past = time.monotonic() + hold, None, 0
+    deadline, answer, past, seen, waits = time.monotonic() + hold, None, 0, False, 0
     while True:
         now = db.get_agent(agent.id)
         recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
@@ -3705,11 +3718,14 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | N
         # Its CLI shows its own prompt for as long as this hook holds the request: a pane
         # past it was answered there, whether or not a look caught the prompt. An allow
         # runs the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
-        state = _pane_state(now)
-        past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
-        if past >= ANSWERED_LOOKS:
-            break
+        if seen or waits % UNSEEN_LOOK_EVERY == 0:
+            state = _pane_state(now)
+            past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
+            seen = seen or state == "prompt"
+            if past >= ANSWERED_LOOKS:
+                break
         held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
+        waits += 1
         if answer is not None or not held:
             break
     answer = answer if answer in ANSWERS else None     # "terminal": the person sent it to the prompt
