@@ -227,7 +227,6 @@ async def _watch(server, activity: Activity, idle_exit: bool) -> None:
               and time.monotonic() - activity.last >= IDLE_SECONDS
               and not await asyncio.to_thread(_agents_running)):
             server.should_exit = True
-    awake.release()
 
 
 def _reset_window_sizes() -> None:

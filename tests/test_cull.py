@@ -484,44 +484,61 @@ def test_sweep_retries_a_flush_the_pane_blocked(db, ws, monkeypatch):
 
 
 def test_awake_while_workers(db, ws, monkeypatch):
+    import threading
+
     from brindle import awake
     from brindle.daemon import lifecycle
     from brindle.daemon.session_review import ReadinessWatch
 
-    class Proc:
-        def __init__(self, argv, **_kw):
-            self.argv, self.alive = argv, True
+    live, started, ended = set(), [], []
 
-        def poll(self):
-            return None if self.alive else 0
+    def popen(argv, **kw):
+        started.append((argv, kw.get("start_new_session")))
+        live.add(1000 + len(started))
+        return SimpleNamespace(pid=1000 + len(started))
 
-        def terminate(self):
-            self.alive = False
-
-        def wait(self):
-            pass
-
-    started = []
-    monkeypatch.setattr(awake, "subprocess",
-                        SimpleNamespace(Popen=lambda argv, **kw: started.append(Proc(argv, **kw)) or started[-1],
-                                        DEVNULL=-3))
-    monkeypatch.setattr(awake, "_process", awake.Awake())
+    monkeypatch.setattr(awake, "subprocess", SimpleNamespace(Popen=popen, DEVNULL=-3))
+    monkeypatch.setattr(awake, "_alive", lambda pid: pid in live)
+    monkeypatch.setattr(awake, "_terminate", lambda pid: (live.discard(pid), ended.append(pid)))
     monkeypatch.setattr(agents, "is_alive", lambda a, panes: True)
     monkeypatch.setattr(sys, "platform", "linux")
     add(db, ws, "w1", status="processing")
     cull.sweep(db)
     assert not started                       # nothing to hold off macOS
 
+    # Each sweep is a separate short-lived process in the CLI case (no watcher): the
+    # assertion is detached and shared through awake.json, not tied to the sweeper.
     monkeypatch.setattr(sys, "platform", "darwin")
     cull.sweep(db)
     cull.sweep(db)
-    assert [p.argv for p in started] == [["caffeinate", "-i", "-w", str(os.getpid())]]   # once, not per sweep
+    assert started == [(["caffeinate", "-i", "-t", str(awake.LEASE_SECONDS)], True)]
+
+    # Overlapping background sweeps still make exactly one.
+    barrier = threading.Barrier(8)
+
+    def sweep_together():
+        barrier.wait()
+        awake.sync(True)
+
+    threads = [threading.Thread(target=sweep_together) for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert len(started) == 1
+
+    # A lease running out is renewed (new one first, then the old one ends).
+    state = json.loads((awake._dir() / "awake.json").read_text())
+    state["until"] = time.time() + 10
+    (awake._dir() / "awake.json").write_text(json.dumps(state))
+    cull.sweep(db)
+    assert len(started) == 2 and ended == [1001]
+
     db.set_status("w1", "done")
     cull.sweep(db)
-    assert not started[0].alive              # released when none are active
+    assert ended == [1001, 1002] and not (awake._dir() / "awake.json").exists()   # released when none are active
 
     # The daemon's watch loop shares the same assertion.
     server = SimpleNamespace(should_exit=False)
+
     def running():
         server.should_exit = True
         return True
@@ -531,4 +548,4 @@ def test_awake_while_workers(db, ws, monkeypatch):
     monkeypatch.setattr(ReadinessWatch, "sweep_safely", lambda self: None)
     import asyncio
     asyncio.run(lifecycle._watch(server, lifecycle.Activity(None), False))
-    assert len(started) == 2 and not started[1].alive   # taken on the tick, released on exit
+    assert len(started) == 3
