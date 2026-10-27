@@ -13,7 +13,7 @@
    rule sit under Details, collapsed. Above the cards, the stall banner: one
    line, and a button to the first card. */
 
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { AskDecide, DaemonClient } from "../../api/client";
 import { UNITS, covered, limitsText, minutesText, scopeWithin, splitMinutes, toMinutes, type Unit } from "../../api/permissions";
 import type { AskDecisionDTO, AskGroupDTO, AskResultDTO, InboxItemDTO } from "../../api/schema";
@@ -96,13 +96,18 @@ type Run = (work: () => Promise<string>) => Promise<void>;
 export function PermissionAsks({ client, groups, onDone, onOpenRule }: PermissionAsksProps) {
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<{ text: string; failed?: boolean } | null>(null);
+  const inflight = useRef(false);
   const run: Run = async (work) => {
+    // One decision at a time: a second click while one is out waits for its answer.
+    if (inflight.current) return;
+    inflight.current = true;
     setBusy(true);
     try {
       setSaid({ text: await work() });
     } catch (e) {
       setSaid({ text: message(e), failed: true });
     } finally {
+      inflight.current = false;
       setBusy(false);
       onDone();
     }
@@ -191,12 +196,12 @@ export function PermissionCard({ label, source, id, dataKey, who, what, chip, ag
 }
 
 /* Allow ▾: the Allow button, and the other ways to allow in a menu. */
-function AllowSplit({ label, disabled, onPrimary, children }: { label: string; disabled: boolean; onPrimary(): void; children(): ReactNode }) {
+function AllowSplit({ label, disabled, onPrimary, children }: { label: string; disabled: boolean; /* none: Allow only opens the menu */ onPrimary?(): void; children(): ReactNode }) {
   const [open, setOpen] = useState(false);
   const close = () => setOpen(false);
   return (
     <div className="relative inline-flex" onKeyDown={(e) => e.key === "Escape" && close()}>
-      <button type="button" className={`${BTN} ${PRIMARY} rounded-r-none`} disabled={disabled} onClick={onPrimary}>
+      <button type="button" className={`${BTN} ${PRIMARY} rounded-r-none`} disabled={disabled} onClick={onPrimary ?? (() => setOpen((o) => !o))}>
         {label}
       </button>
       <button type="button" className={`${BTN} ${PRIMARY} min-w-8 rounded-l-none border-l border-l-on-sap/35 px-2.5`} disabled={disabled} aria-haspopup="menu" aria-expanded={open} aria-label="More ways to allow" onClick={() => setOpen((o) => !o)}>
@@ -204,7 +209,7 @@ function AllowSplit({ label, disabled, onPrimary, children }: { label: string; d
       </button>
       {open && (
         // An item closes the menu once it has run, unless it only opens more of it (`keep`).
-        <div role="menu" aria-label="Allow" className="absolute right-0 top-[calc(100%+6px)] z-20 flex min-w-72 flex-col rounded-[10px] border border-line-strong bg-surface p-1 shadow-lg" onClick={(e) => (e.target as HTMLElement).closest("[role=menuitem]:not([data-keep])") && close()}>
+        <div role="menu" aria-label="Allow" className="absolute right-0 top-[calc(100%+6px)] z-20 flex min-w-72 flex-col rounded-[10px] border border-line-strong bg-surface p-1 shadow-lg" onClick={(e) => (e.target as HTMLElement).closest("[role=menuitem]:not([data-keep]), [data-close]") && close()}>
           {children()}
         </div>
       )}
@@ -212,9 +217,9 @@ function AllowSplit({ label, disabled, onPrimary, children }: { label: string; d
   );
 }
 
-function MenuItem({ title, hint, keep, onClick }: { title: string; hint: string; keep?: boolean; onClick(): void }) {
+function MenuItem({ title, hint, keep, disabled, onClick }: { title: string; hint: string; keep?: boolean; disabled?: boolean; onClick(): void }) {
   return (
-    <button type="button" role="menuitem" data-keep={keep ? "" : undefined} className="flex w-full flex-col items-start rounded-md px-2.5 py-2 text-left text-sm font-medium hover:bg-surface-2 disabled:opacity-50" onClick={onClick}>
+    <button type="button" role="menuitem" disabled={disabled} data-keep={keep ? "" : undefined} className="flex w-full flex-col items-start rounded-md px-2.5 py-2 text-left text-sm font-medium hover:bg-surface-2 disabled:opacity-50" onClick={onClick}>
       {title}
       <small className="text-xs font-normal text-ink-3">{hint}</small>
     </button>
@@ -342,8 +347,8 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
             <AllowSplit label="Allow" disabled={busy} onPrimary={() => decide(session ? "session" : "timed")}>
               {() => (
                 <>
-                  {session && <MenuItem title="For this session" hint="Until the session ends" onClick={() => decide("session")} />}
-                  {timed && <MenuItem keep title={`For ${duration}…`} hint="Choose how long" onClick={() => setTiming(true)} />}
+                  {session && <MenuItem disabled={busy} title="For this session" hint="Until the session ends" onClick={() => decide("session")} />}
+                  {timed && <MenuItem keep disabled={busy} title={`For ${duration}…`} hint="Choose how long" onClick={() => setTiming(true)} />}
                   {timing && timed && (
                     <div className="flex items-center gap-2 px-2.5 py-2 text-[13px] text-ink-2">
                       <input type="number" min={1} className={`${field} w-16 py-0.5 text-xs`} aria-label="Approval duration" value={amount} onChange={(e) => setAmount(e.target.value)} />
@@ -355,13 +360,13 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
                         ))}
                       </select>
                       {cap !== null && <span>Up to {minutesText(cap)}</span>}
-                      <button type="button" className={`${BTN} ${PLAIN} ml-auto min-h-7 px-3`} onClick={() => decide("timed")}>
+                      <button type="button" data-close className={`${BTN} ${PLAIN} ml-auto min-h-7 px-3`} disabled={busy} onClick={() => decide("timed")}>
                         Allow for {duration}
                       </button>
                     </div>
                   )}
-                  {slot && <MenuItem title={`Always for ${slot.label}`} hint="Saved as an override in Settings" onClick={alwaysForItem} />}
-                  {modes.includes("forever") && exact && fits("exact") && <MenuItem title="Always allow this exact request" hint="Kept in Saved actions" onClick={() => decide("forever", minutes, "exact")} />}
+                  {slot && <MenuItem disabled={busy} title={`Always for ${slot.label}`} hint="Saved as an override in Settings" onClick={alwaysForItem} />}
+                  {modes.includes("forever") && exact && fits("exact") && <MenuItem disabled={busy} title="Always allow this exact request" hint="Kept in Saved actions" onClick={() => decide("forever", minutes, "exact")} />}
                 </>
               )}
             </AllowSplit>
@@ -388,6 +393,10 @@ export function PermissionItemCard({ item, actions, who, onGo }: { item: InboxIt
   const once = choices.find((c) => c.choice.endsWith("once"));
   const deny = choices.find((c) => c.choice === "deny");
   const more = choices.filter((c) => c !== once && c !== deny);
+  // Allow itself answers only with an explicit session choice; a permanent one stays a labelled menu item.
+  const session = more.find((c) => c.choice.includes("session"));
+  const sent = actions.notes[itemKey(item)];
+  const first = (line.lead ?? line.whole).split("\n")[0];
   const window = choices.length === 0;
   const age = formatAge((Date.now() - seenAt(item)) / 1000);
   return (
@@ -395,21 +404,28 @@ export function PermissionItemCard({ item, actions, who, onGo }: { item: InboxIt
       label={`${who} permission`}
       source={window ? "window" : "hook"}
       who={who}
-      what={window ? "asks" : "wants to run"}
+      what={window ? <>asks: {first}{line.code && <> <code className="font-mono text-[13px]">{line.code}</code></>}</> : <>wants to run <code className="font-mono text-[13px]">{line.code ?? line.whole}</code></>}
       chip={window ? "Agent prompt" : null}
       age={`waiting ${age}`}
       why={window ? (p?.terminal ?? "Brindle can't answer this one: it is a question for the agent itself") : (item.reason || "Held by brindle")}
       note={
-        window && (
-          <div className="flex items-center gap-2 rounded-lg bg-branch-soft px-3 py-2 text-[13px] font-medium text-branch" data-testid="permission-terminal">
-            <span className="flex-1">Answer in the agent’s window</span>
-            {onGo && (
-              <button type="button" className={`${BTN} min-h-7 border-line-strong px-3 text-branch`} onClick={onGo}>
-                Open {who}
-              </button>
-            )}
-          </div>
-        )
+        <>
+          {sent && (
+            <p role={sent.failed ? "alert" : "status"} className={`text-xs ${sent.failed ? "text-sap" : "text-pass"}`}>
+              {sent.text}
+            </p>
+          )}
+          {window && (
+            <div className="flex items-center gap-2 rounded-lg bg-branch-soft px-3 py-2 text-[13px] font-medium text-branch" data-testid="permission-terminal">
+              <span className="flex-1">Answer in the agent’s window</span>
+              {onGo && (
+                <button type="button" className={`${BTN} min-h-7 border-line-strong px-3 text-branch`} onClick={onGo}>
+                  Open {who}
+                </button>
+              )}
+            </div>
+          )}
+        </>
       }
       details={
         <>
@@ -430,8 +446,8 @@ export function PermissionItemCard({ item, actions, who, onGo }: { item: InboxIt
             </button>
           )}
           {more.length > 0 && (
-            <AllowSplit label="Allow" disabled={busy} onPrimary={() => answer(more[0].choice)}>
-              {() => more.map((c) => <MenuItem key={c.choice} title={c.label} hint={c.rule ?? "Answered at once"} onClick={() => answer(c.choice)} />)}
+            <AllowSplit label="Allow" disabled={busy} onPrimary={session ? () => answer(session.choice) : undefined}>
+              {() => more.map((c) => <MenuItem key={c.choice} title={c.label} hint={c.rule ?? "Answered at once"} onClick={() => answer(c.choice)} disabled={busy} />)}
             </AllowSplit>
           )}
         </div>

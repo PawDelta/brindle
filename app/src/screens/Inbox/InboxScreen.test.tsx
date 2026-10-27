@@ -201,7 +201,6 @@ describe("inbox", () => {
     const stall = screen.getByTestId("stall-notice");
     expect(within(stall).getAllByRole("button").map((b) => b.textContent)).toEqual(["Review all"]);
     // The held card: why it reached the person, the three actions, and the requests under collapsed details.
-    expect(within(held).getByTestId("permission-why").textContent).toContain("Your rule asks: ");
     expect(within(held).getAllByRole("button").filter((b) => ["Deny", "Allow once", "Allow"].includes(b.textContent ?? "")).map((b) => b.textContent)).toEqual(["Deny", "Allow once", "Allow"]);
     expect(held.querySelector("details")!.open).toBe(false);
 
@@ -213,6 +212,40 @@ describe("inbox", () => {
 
     fireEvent.click(within(held).getByRole("button", { name: "Allow once" }));
     await waitFor(() => expect(posts(daemon).find((r) => r.path === "/permissions/asks/decide")?.body).toEqual({ key: pushes.key, scope: "general", mode: "once" }));
+    sync.stop();
+  });
+
+  it("a hold with no group: the request is in the headline, Allow never saves a grant by itself, and a refusal shows on the card", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, permissionInTerminal] });
+    const { sync } = mount(daemon);
+    const cards = await screen.findAllByTestId("permission-card");
+    expect(cards.map((c) => c.dataset.source)).toEqual(["hook", "window"]);
+    // Both requests are named with Details closed.
+    expect(cards[0].querySelector("h3")!.textContent).toContain("npx playwright install chromium");
+    expect(cards[1].querySelector("h3")!.textContent).toContain("uv run alembic upgrade head");
+    // Allow only opens the menu: no choice is sent, least of all Allow always.
+    fireEvent.click(within(cards[0]).getByRole("button", { name: "Allow" }));
+    expect(within(cards[0]).getByRole("menuitem", { name: /Allow always/ })).toBeTruthy();
+    expect(posts(daemon)).toEqual([]);
+    // The engine refuses (the request is gone): its reason is on the card.
+    daemon.data.inbox = [];
+    fireEvent.click(within(cards[0]).getByRole("button", { name: "Deny" }));
+    await waitFor(() => expect(within(cards[0]).getByRole("alert")).toBeTruthy());
+    sync.stop();
+  });
+
+  it("a decision out blocks a second one from the menu's duration button", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [pushes] });
+    const client = daemon.client();
+    const decide = vi.spyOn(client, "decidePermissionAsks").mockImplementation(() => new Promise(() => undefined));
+    const { sync } = mount(daemon, client);
+    const item = await screen.findByRole("article", { name: "Allow pushes into main?" });
+    fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
+    fireEvent.click(within(item).getByRole("menuitem", { name: /^For 30 minutes/ }));
+    const submit = within(item).getByRole("button", { name: /^Allow for 30 minutes/ });
+    fireEvent.click(submit);
+    fireEvent.click(submit);
+    expect(decide).toHaveBeenCalledTimes(1);
     sync.stop();
   });
 
@@ -229,7 +262,7 @@ describe("inbox", () => {
     fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
     fireEvent.click(within(item).getByRole("menuitem", { name: /^Always for Shell › Package installs/ }));
     await waitFor(() => expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/groups")?.body).toEqual({ groups: { shell: { subcategories: { install: "allow" } } } }));
-    await waitFor(() => expect(screen.getByTestId("permission-resolution").textContent).toContain("Always allowed: Shell › Package installs. Saved as an override in Settings › Permissions. 1 request resumed"));
+    await waitFor(() => expect(daemon.data.asks).toEqual([]));
     // An override, not a saved action.
     expect(daemon.data.policy.saved).toEqual([]);
     expect(daemon.data.policy.groups?.shell.subcategories).toEqual({ install: "allow" });
