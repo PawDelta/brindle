@@ -41,7 +41,7 @@ def test_agent_env_caps_xdist(db, repo, monkeypatch):
     monkeypatch.delenv("PYTEST_XDIST_AUTO_NUM_WORKERS", raising=False)
     assert agents.agent_env(ws, "w1", db.get_agent("w1"))["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"
     monkeypatch.setenv("PYTEST_XDIST_AUTO_NUM_WORKERS", "8")
-    assert "PYTEST_XDIST_AUTO_NUM_WORKERS" not in agents.agent_env(ws, "w1", db.get_agent("w1"))
+    assert agents.agent_env(ws, "w1", db.get_agent("w1"))["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "8"
 
 
 # -- 3. checks run once and are shared -------------------------------------------

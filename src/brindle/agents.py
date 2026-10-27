@@ -304,9 +304,9 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
         # tools, so loading them all up front is cheap.
         env["ENABLE_TOOL_SEARCH"] = "false"
     # Agents run pytest outside brindle's check slots: cap their xdist workers
-    # so a few of them don't each start one per core. The user's own setting wins.
-    if "PYTEST_XDIST_AUTO_NUM_WORKERS" not in os.environ:
-        env.setdefault("PYTEST_XDIST_AUTO_NUM_WORKERS", "2")
+    # so a few of them don't each start one per core. Passed explicitly, since
+    # a pane can inherit an older tmux environment; a profile's value still wins.
+    env.setdefault("PYTEST_XDIST_AUTO_NUM_WORKERS", os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS", "2"))
     return env
 
 
