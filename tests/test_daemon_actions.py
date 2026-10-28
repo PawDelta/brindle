@@ -658,6 +658,45 @@ def test_api_key_lifecycle_check_result_stays_with_the_key_it_checked(db, monkey
         assert rec == {}
 
 
+@pytest.mark.parametrize("fault", ["lock-unavailable", "delete-during-update"])
+def test_api_key_lifecycle_key_updates_hold_the_store_lock(monkeypatch, provider_http, fault):
+    import fcntl
+    import threading
+
+    from brindle import keys_cmds, keystore
+
+    name = "ANTHROPIC_API_KEY"
+    keys_cmds.store(name, SECRET, None)
+    if fault == "lock-unavailable":
+        def refuse(fd, op):
+            raise OSError("no lock")
+
+        with monkeypatch.context() as m:
+            m.setattr(fcntl, "flock", refuse)
+            with pytest.raises(keystore.CredentialError):
+                keystore.set_check(name, "rejected", SECRET)
+            with pytest.raises(keystore.CredentialError):
+                keystore.unset_key(name)
+        assert keystore.get_key(name) == SECRET
+        return
+    # Another caller's delete, started while the update has the record loaded, waits for it.
+    store, deleters = keystore._key_store(name), []
+    load = type(store).load
+
+    def load_then_delete(self):
+        rec = load(self)
+        if not deleters:
+            deleters.append(threading.Thread(target=keystore.unset_key, args=(name,)))
+            deleters[0].start()
+        return rec
+
+    with monkeypatch.context() as m:
+        m.setattr(type(store), "load", load_then_delete)
+        assert keystore.set_check(name, "rejected", SECRET)
+        deleters[0].join()
+    assert keystore.get_key(name) is None
+
+
 @pytest.mark.parametrize("status,expected", [(200, "verified"), (400, "rejected")])
 def test_api_key_lifecycle_checks_gemini_keys_with_a_models_call(provider_http, status, expected):
     from brindle import key_check

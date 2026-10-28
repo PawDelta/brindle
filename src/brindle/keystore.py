@@ -298,10 +298,11 @@ def _locked():
                 home.mkdir(mode=0o700, parents=True, exist_ok=True)
                 fd = os.open(home / "keys.lock", os.O_RDWR | os.O_CREAT, 0o600)
                 fcntl.flock(fd, fcntl.LOCK_EX)
-            except OSError:
+            except OSError as e:
+                # Without it another process could delete the key mid-update and have it recreated.
                 if fd is not None:
                     os.close(fd)
-                fd = None
+                raise CredentialError(f"couldn't lock the key store ({type(e).__name__})") from None
         try:
             yield
         finally:
