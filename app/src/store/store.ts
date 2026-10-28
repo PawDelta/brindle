@@ -6,7 +6,7 @@
    status, a removed workspace, a git sweep, liveness, org status) it patches.
    Any other event marks the store stale, and sync.ts fetches a fresh snapshot. */
 
-import type { InboxItemDTO, WorkspaceDTO } from "../api/schema";
+import type { AccountDTO, InboxItemDTO, WorkspaceDTO } from "../api/schema";
 import type { AppUpdateStatus } from "../api/tauri";
 import type { BusEvent, OrgNotice, StreamMessage, StreamState } from "../api/events";
 
@@ -14,6 +14,8 @@ export const RECENT_EVENTS = 50;
 
 export interface AppState {
   connection: StreamState | "idle";
+  /* Shared identity, refreshed by the sidebar and Account page. */
+  account: AccountDTO | null;
   /* The newest bus event id applied: what a reconnect resumes from. */
   lastEventId: number;
   workspaces: WorkspaceDTO[];
@@ -33,6 +35,7 @@ export interface AppState {
 }
 
 export type Action =
+  | { type: "account"; account: AccountDTO }
   | { type: "app_update"; status: AppUpdateStatus }
   | { type: "connection"; state: StreamState }
   | { type: "snapshot"; workspaces: WorkspaceDTO[]; inbox: InboxItemDTO[] }
@@ -41,6 +44,7 @@ export type Action =
 
 export const initialState: AppState = {
   connection: "idle",
+  account: null,
   lastEventId: 0,
   workspaces: [],
   inbox: [],
@@ -55,6 +59,8 @@ export const initialState: AppState = {
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
+    case "account":
+      return { ...state, account: action.account };
     case "app_update":
       return { ...state, appUpdate: action.status };
     case "connection":

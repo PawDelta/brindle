@@ -6021,12 +6021,24 @@
       "path": "/v1/kb/sources/{id}/sync"
     },
     {
+      "method": "DELETE",
+      "path": "/v1/keys/{name}"
+    },
+    {
       "method": "PUT",
       "path": "/v1/keys/{name}"
     },
     {
       "method": "POST",
+      "path": "/v1/keys/{name}/import"
+    },
+    {
+      "method": "POST",
       "path": "/v1/keys/{name}/set"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/keys/{name}/test"
     },
     {
       "method": "GET",

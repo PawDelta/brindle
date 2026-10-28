@@ -46,6 +46,7 @@ describe("Sidebar", () => {
   it("lists every open session by repo with its agents nested in the CLI's rows, recent ones folded, and opens them", async () => {
     const { sync, navigate } = mount({ workspaces: [root, { ...worker, agents: [...worker.agents!, child] }], inbox: [waiting] }, { screen: "session", root: "sup1", repo: REPO, agent: "w1" });
     expect(list().textContent).toContain("Loading");
+    expect(within(screen.getByTestId("status-line")).getByRole("button", { name: "Open Account › Usage" })).toBeTruthy();
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
     expect(screen.getByTestId("repo-proj")).toBeTruthy();
     // Under "Sessions": the session (its goal, its id and mode under it) with the supervisor and its workers

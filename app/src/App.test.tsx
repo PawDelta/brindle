@@ -152,11 +152,14 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
 
     // The pages behind the sidebar's foot, each for the repo in view.
-    for (const name of ["Knowledge", "Agents", "Settings", "Account"]) {
+    for (const name of ["Knowledge", "Agents", "Settings"]) {
       fireEvent.click(link(name));
       expect(await screen.findByRole("region", { name })).toBeTruthy();
       expect(link(name).getAttribute("aria-current")).toBe("page");
     }
+    fireEvent.click(link("Open Account"));
+    expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
+    expect(link("Open Account").getAttribute("aria-current")).toBe("page");
 
     // ⌘1 is the first live session, back from any page; ⌘N the composer.
     fireEvent.keyDown(window, { key: "1", metaKey: true });
@@ -510,8 +513,7 @@ describe("providers in the sidebar", () => {
     expect(nav().textContent).not.toContain("Claude Code");
     expect(within(nav()).queryByRole("button", { name: /Connect|Sign in/ })).toBeNull();
     expect(within(nav()).queryByTestId("provider-problem")).toBeNull();
-    // The footer's links stay the four pages, on one line.
-    expect(within(screen.getByRole("navigation", { name: "Pages" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["Knowledge", "Agents", "Settings", "Account"]);
+    expect(within(nav()).getByRole("button", { name: "Open Account" })).toBeTruthy();
     stop();
   });
 
@@ -524,6 +526,8 @@ describe("providers in the sidebar", () => {
     );
     await waitFor(() => expect(treeAgent("sup1")).toBeTruthy());
     const problem = await within(nav()).findByTestId("provider-problem");
+    expect(statusLine().lastElementChild).toBe(problem);
+    expect(within(statusLine()).getByTestId("usage-reading")).toBeTruthy();
     expect(problem.textContent).toBe("Codex signed out");
     expect(problem.getAttribute("data-kind")).toBe("signed_out");
     expect(problem.className).toContain("text-sap");
