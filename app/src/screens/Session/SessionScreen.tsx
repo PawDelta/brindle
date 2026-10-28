@@ -3,7 +3,8 @@
    branch against its PR base, even before readiness; Repo, the session
    checkout's files to open and edit, and a shell there (RepoView). Each
    remains mounted after opening so switching tabs keeps the pane and unsaved drafts.
-   The bar always names the session branch, even when a worker is selected.
+   The session branch is named in the Repo tab, whichever agent is selected;
+   the change counts, in the Changes view's own header.
    Continue in the bar and on the state card share useContinue.
    The goal and PR lifecycle stay in the sidebar; Review & open PR opens
    its sheet from there and uses the same editor as Changes.
@@ -167,7 +168,6 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         onAgent={(id) => select(id, null)}
         onOpen={onOpen}
         closeSession={closeSession}
-        branch={branch}
         tab={tab}
         onTab={(tab) => {
           setView({ root, tab });
@@ -177,8 +177,6 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
           }
           if (tab === "repo") setRepoVisited(root);
         }}
-        added={changes.files.reduce((n, f) => n + f.added, 0)}
-        removed={changes.files.reduce((n, f) => n + f.removed, 0)}
       />
       {pausedUnder && (
         <div role="status" className="flex items-center gap-s2 border-b border-line px-s2 py-1 text-sm text-ink-2">
@@ -220,7 +218,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         {visited === root && <SessionDiffEditor key={root} client={client} root={root} state={changes} />}
       </div>
       <div role="tabpanel" id="session-repo" aria-labelledby="session-tab-repo" hidden={tab !== "repo"} className={tab === "repo" ? "flex min-h-0 min-w-0 flex-1 flex-col p-s2" : "hidden"}>
-        {repoVisited === root && <RepoView key={root} client={client} root={root} repo={repo} cwd={checkout?.path ?? null} active={tab === "repo"} />}
+        {repoVisited === root && <RepoView key={root} client={client} root={root} repo={repo} branch={branch} cwd={checkout?.path ?? null} active={tab === "repo"} />}
       </div>
       {/* The one thing that ever lies over a session, opened on purpose from the goal panel's Ready for PR step.
           Open, it stays through readiness being read again (an edit here, a sweep): it says so quietly instead. */}
@@ -229,8 +227,8 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   );
 }
 
-/* Tabs, session branch, and the selected agent's status and controls. */
-function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, reload, refresh, recovery, onAgent, onOpen, closeSession, branch, tab, onTab, added, removed }: {
+/* Tabs, and the selected agent's status and controls. */
+function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, reload, refresh, recovery, onAgent, onOpen, closeSession, tab, onTab }: {
   client: DaemonClient;
   root: string;
   repo: string;
@@ -244,11 +242,8 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
   onAgent(id: string): void;
   onOpen?(root: string, repo: string): void;
   closeSession?: CloseSessionItem;
-  branch: string;
   tab: Tab;
   onTab(tab: Tab): void;
-  added: number;
-  removed: number;
 }) {
   const workspaces = useAppState((s) => s.workspaces);
   const [busy, setBusy] = useState(false);
@@ -291,11 +286,10 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
               onTab(next);
               document.getElementById(`session-tab-${next}`)?.focus();
             }}>
-            {item === "terminal" ? "Terminal" : item === "repo" ? "Repo" : <>Changes <span className={`${mono} ml-1 text-xs`}><span className="text-pass">+{added}</span> <span className="text-sap">−{removed}</span></span></>}
+            {item === "terminal" ? "Terminal" : item === "repo" ? "Repo" : "Changes"}
           </button>
         ))}
       </div>
-      <span data-testid="session-branch" title={branch} className={`${mono} min-w-0 max-w-64 truncate rounded border border-line bg-surface-2 px-s1 py-0.5 text-xs text-ink-2`}>{branch}</span>
       <div className="flex min-w-0 items-center gap-s1">
         <span className="truncate text-sm font-semibold" data-testid="surface-title">
           {provider} · {who}

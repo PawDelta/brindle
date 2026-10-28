@@ -228,16 +228,19 @@ describe("SessionScreen", () => {
     });
     await waitFor(() => expect(term().written).toBe(drawnLive));
     const tabs = () => within(screen.getByTestId("session-tabs"));
-    await waitFor(() => expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+2 −1"));
-    expect(screen.getByTestId("session-branch").textContent).toContain("brindle/session-18");
+    // The diff is read before Changes is first opened, and again on a git status event.
+    await waitFor(() => expect(diffReads).toBeGreaterThan(0));
+    expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toBe("Changes");
     pick("w1");
-    expect(screen.getByTestId("session-branch").textContent).toContain("brindle/session-18");
     const terminal = term();
+    const readsBefore = diffReads;
     daemon.data.sessionFiles.sup1["docs/readme.md"] = "hello\nworld\n";
     daemon.send({ type: "git", workspace_id: root.id, status: { branch: "brindle/session-18", base: "main", ahead: 0, behind: 0, dirty_files: ["docs/readme.md"], unpushed: 0 } });
-    await waitFor(() => expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+3 −1"));
+    await waitFor(() => expect(diffReads).toBeGreaterThan(readsBefore));
     fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
     const changes = () => within(screen.getByRole("tabpanel", { name: /Changes/ }));
+    const summary = () => changes().getByTestId("changes-summary").textContent;
+    await waitFor(() => expect(summary()).toBe("2 files changed against main · +3 −1"));
     const files = await changes().findByRole("navigation", { name: "Changed files" });
     fireEvent.click(within(files).getByRole("button", { name: "src/" }));
     expect(within(files).queryByTitle("src/a.ts")).toBeNull();
@@ -263,7 +266,7 @@ describe("SessionScreen", () => {
     fireEvent.click(changes().getByRole("button", { name: /Save/ }));
     await waitFor(() => expect(daemon.sessionEdits).toHaveLength(1));
     expect(daemon.data.sessionFiles.sup1["src/a.ts"]).toBe("edited\ncontext\nextra\n");
-    await waitFor(() => expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+4 −1"));
+    await waitFor(() => expect(summary()).toContain("+4 −1"));
     fireEvent.click(changes().getByRole("button", { name: "Unified" }));
     await waitFor(() => expect(changes().queryByTestId("hunk-editor")).toBeNull());
     expect(changes().getByTestId("hunk").textContent).toContain("+edited");
@@ -282,7 +285,7 @@ describe("SessionScreen", () => {
       });
       daemon.data.sessionFiles.sup1["docs/readme.md"] = "amended\nsecond\nthird\n";
       await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-      expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+5 −1");
+      expect(summary()).toContain("+5 −1");
       fireEvent.click(changes().getByTitle("docs/readme.md"));
       expect(changes().getByTestId("hunk").textContent).toContain("+amended");
       fireEvent.click(changes().getByTitle("src/a.ts"));
@@ -310,7 +313,7 @@ describe("SessionScreen", () => {
         fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
         await vi.advanceTimersByTimeAsync(0);
       });
-      expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+3 −1");
+      expect(summary()).toContain("+3 −1");
       expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
       fireEvent.click(changes().getByTitle("docs/readme.md"));
       expect(changes().getByTestId("hunk").textContent).toContain("+on activation");
@@ -373,6 +376,76 @@ describe("SessionScreen", () => {
     fireEvent.click(within(drawer).getByRole("button", { name: "Close this shell" }));
     await waitFor(() => expect(repoTab().queryByTestId("repo-shell-drawer")).toBeNull());
     expect(daemon.closedTerminals).toEqual([daemon.actions[0].id]);
+    sync.stop();
+  });
+
+  it("Repo: a save under way stays the file's through looking at another, and a shell that starts after its drawer closed or its view went is closed", async () => {
+    const held = () => {
+      let release!: () => void;
+      const until = new Promise<void>((resolve) => (release = resolve));
+      return { until, release };
+    };
+    let holdPut: ReturnType<typeof held> | null = null;
+    let holdShell: ReturnType<typeof held> | null = null;
+    let puts = 0;
+    let shellStarts = 0;
+    const { daemon, sync, term } = mount({ sup1: live, w1: live }, {
+      sessionFiles: { sup1: { "a.ts": "one\n", "b.ts": "bee\n" } },
+    }, (daemon) => async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/sessions/sup1/file") && init?.method === "PUT") {
+        puts++;
+        await holdPut?.until;
+      }
+      if (url.endsWith("/terminals/shell")) {
+        shellStarts++;
+        await holdShell?.until;
+      }
+      return daemon.fetch(input, init);
+    });
+    await waitFor(() => expect(term().written).toBe(drawnLive));
+    fireEvent.click(screen.getByTestId("repo-tab"));
+    const repoTab = () => within(screen.getByRole("tabpanel", { name: "Repo" }));
+    const files = await repoTab().findByRole("navigation", { name: "Repository files" });
+    const box = (path: string) => repoTab().getByLabelText(`Edit ${path}`) as HTMLTextAreaElement;
+    fireEvent.click(within(files).getByTitle("a.ts"));
+    await waitFor(() => expect(box("a.ts").value).toBe("one\n"));
+    fireEvent.change(box("a.ts"), { target: { value: "two\n" } });
+    holdPut = held();
+    fireEvent.click(repoTab().getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(puts).toBe(1));
+
+    // Away and back while the PUT is out: the box is still locked on what was sent, and Save sends nothing more.
+    fireEvent.click(within(files).getByTitle("b.ts"));
+    await waitFor(() => expect(box("b.ts").value).toBe("bee\n"));
+    fireEvent.click(within(files).getByTitle("a.ts"));
+    await waitFor(() => expect(box("a.ts").value).toBe("two\n"));
+    expect(box("a.ts").disabled).toBe(true);
+    fireEvent.keyDown(box("a.ts"), { key: "s", metaKey: true });
+    expect(puts).toBe(1);
+    holdPut.release();
+    await waitFor(() => expect(box("a.ts").disabled).toBe(false));
+    expect(daemon.sessionEdits.map((e) => e.content)).toEqual(["two\n"]);
+    expect(box("a.ts").value).toBe("two\n");
+
+    // Shell twice while the first is starting: one start. Closed before it comes: the shell it gets is closed.
+    holdShell = held();
+    fireEvent.click(repoTab().getByTestId("repo-shell"));
+    fireEvent.click(repoTab().getByTestId("repo-shell"));
+    await waitFor(() => expect(shellStarts).toBe(1));
+    fireEvent.click(within(repoTab().getByTestId("repo-shell-drawer")).getByRole("button", { name: "Close this shell" }));
+    expect(repoTab().queryByTestId("repo-shell-drawer")).toBeNull();
+    holdShell.release();
+    await waitFor(() => expect(daemon.closedTerminals).toEqual([daemon.shells[0].terminal]));
+    expect(repoTab().queryByTestId("repo-shell-drawer")).toBeNull();
+
+    // The view goes while a shell starts: that shell is closed too.
+    holdShell = held();
+    fireEvent.click(repoTab().getByTestId("repo-shell"));
+    await waitFor(() => expect(shellStarts).toBe(2));
+    cleanup();
+    holdShell.release();
+    await waitFor(() => expect(daemon.closedTerminals).toEqual([daemon.shells[0].terminal, daemon.shells[1].terminal]));
     sync.stop();
   });
 
@@ -842,7 +915,6 @@ describe("SessionScreen", () => {
     expect(fake.Xterm.all).toHaveLength(0);
     expect(screen.getByTestId("session-status").textContent).toContain("paused");
     expect(screen.getByTestId("session-bar").textContent).not.toContain("Refactor the cache"); // the goal is the sidebar's
-    expect(screen.getByTestId("session-branch").textContent).toBe(root.branch);
     fireEvent.click(screen.getByRole("tab", { name: /Changes/ }));
     await within(screen.getByRole("tabpanel", { name: /Changes/ })).findByRole("navigation", { name: "Changed files" });
     expect(screen.getByTestId("new-file")).toHaveProperty("disabled", true);

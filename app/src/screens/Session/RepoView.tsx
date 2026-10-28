@@ -1,12 +1,15 @@
-/* The session's Repo tab: the session checkout's tracked files down the
-   left (GET /sessions/{root}/tree, read again each time the tab is shown),
-   the file clicked in an editor beside them (GET .../file), saved with PUT
-   .../file against the blob it was read at. As in Changes, nothing read
-   again replaces an unsaved edit: a file that moved on says so in one line
-   with Copy my edit / Discard / Reload, and the engine's 409 busy shows in
-   the save bar. Shell opens the person's own shell in the session checkout
-   (POST /terminals/shell) in a drawer at the foot, shown as the Terminal's
-   shells are; it closes with its × or when the view goes. */
+/* The session's Repo tab: the session branch, and the session checkout's
+   tracked files down the left (GET /sessions/{root}/tree, read again each
+   time the tab is shown), the file clicked in an editor beside them (GET
+   .../file), saved with PUT .../file against the blob it was read at. As in
+   Changes, nothing read again replaces an unsaved edit: a file that moved on
+   says so in one line with Copy my edit / Discard / Reload, and the engine's
+   409 busy shows in the save bar. A save under way is the file's, not its
+   box's: it keeps the box locked through looking at other files, and clears
+   the edit only if it still is what was sent. Shell opens the person's own
+   shell in the session checkout (POST /terminals/shell) in a drawer at the
+   foot, shown as the Terminal's shells are; it closes with its × or when
+   the view goes, and a shell that starts after either is closed at once. */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DaemonError, type DaemonClient, type FileContent, type SessionTree } from "../../api/client";
@@ -17,17 +20,23 @@ import { COMMIT, CONFLICT, EditBox, FileTree, refusal } from "./SessionDiffEdito
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
-/* An unsaved edit of a file: its text, the blob it started from, and whether a save found the file moved on. */
+/* An unsaved edit of a file: its text, the blob it started from, whether a
+   save found the file moved on, the text a save under way sent, and what
+   refused the last save. */
 interface Edit {
   text: string;
   base: string;
   conflict: boolean;
+  saving?: string;
+  refused?: string;
 }
 
-export function RepoView({ client, root, repo, cwd, active }: {
+export function RepoView({ client, root, repo, branch, cwd, active }: {
   client: DaemonClient;
   root: string;
   repo: string;
+  /* The session branch as the view knows it until the tree names it. */
+  branch: string;
   /* The session checkout's folder, where Shell starts; null while the snapshot doesn't have it. */
   cwd: string | null;
   /* The tab is shown: its tree is read again. */
@@ -47,6 +56,7 @@ export function RepoView({ client, root, repo, cwd, active }: {
     };
   }, [client, root, active]);
   const files = useMemo(() => (tree?.files ?? []).map((path) => ({ path })), [tree]);
+  const shownBranch = tree?.branch || branch;
 
   // Each file opened, as read (or why it couldn't be), and the edits under way, kept apart so a read never takes an edit.
   const [opened, setOpened] = useState<string | null>(null);
@@ -65,37 +75,72 @@ export function RepoView({ client, root, repo, cwd, active }: {
     },
     [client, root],
   );
+  const patch = (path: string, change: Partial<Edit>) => setEdits((all) => (all[path] ? { ...all, [path]: { ...all[path], ...change } } : all));
   const drop = (path: string) =>
     setEdits((all) => {
       const { [path]: _, ...rest } = all;
       return rest;
     });
+  // A save goes against the blob the edit started from; once written, the edit goes only if it still is what was sent.
+  const save = async (path: string, edit: Edit) => {
+    if (edit.saving !== undefined || edit.conflict) return;
+    const sent = edit.text;
+    patch(path, { saving: sent, refused: undefined });
+    try {
+      const got = await client.putSessionFile(root, { path, content: sent, base: edit.base });
+      setEdits((all) => {
+        const now = all[path];
+        if (!now) return all;
+        if (now.text === sent) {
+          const { [path]: _, ...rest } = all;
+          return rest;
+        }
+        return { ...all, [path]: { ...now, saving: undefined, base: got.blob ?? now.base } };
+      });
+      if (got.blob) setPins((p) => ({ ...p, [path]: { path, content: sent, base: got.blob! } }));
+      else void read(path);
+    } catch (e) {
+      patch(path, e instanceof DaemonError && e.code === "stale" ? { saving: undefined, conflict: true } : { saving: undefined, refused: refusal(e) });
+    }
+  };
   const pin = opened ? pins[opened] : undefined;
 
-  // The drawer's shell: one at a time; Shell while one starts or runs shows that one.
+  // The drawer's shell: one at a time; Shell while one starts or runs shows that one. A start belongs to the
+  // drawer only while `starting` holds its ticket: closed or unmounted meanwhile, the shell it gets is closed.
   const [shell, setShell] = useState<ShellTab | null>(null);
   const [drawer, setDrawer] = useState(false);
   const [shellError, setShellError] = useState<string | null>(null);
-  const starting = useRef(false);
+  const starting = useRef<number | null>(null);
+  const tickets = useRef(0);
   const running = useRef<string | null>(null);
   running.current = shell?.terminal ?? null;
   const openShell = async () => {
     setDrawer(true);
-    if (!cwd || shell || starting.current) return;
-    starting.current = true;
+    if (!cwd || shell || starting.current !== null) return;
+    const ticket = ++tickets.current;
+    starting.current = ticket;
     setShellError(null);
     try {
       const got = await client.openShell(cwd);
+      if (starting.current !== ticket) {
+        void client.closeTerminal(got.terminal).catch(() => undefined);
+        return;
+      }
       const name = repo.split("/").filter(Boolean).pop() ?? repo;
       setShell({ repo, name, cwd, why: "started in the session checkout", terminal: got.terminal, at: { server: got.server ?? null, target: got.target }, shell: got.shell || "shell" });
     } catch (e) {
-      setShellError(`Couldn't start a shell: ${message(e)}`);
+      if (starting.current === ticket) setShellError(`Couldn't start a shell: ${message(e)}`);
     } finally {
-      starting.current = false;
+      if (starting.current === ticket) starting.current = null;
     }
   };
   const closeShell = async () => {
-    if (!shell) return setDrawer(false);
+    if (!shell) {
+      // A start under way loses its owner: its shell is closed when it comes.
+      starting.current = null;
+      setShellError(null);
+      return setDrawer(false);
+    }
     setShellError(null);
     try {
       await client.closeTerminal(shell.terminal);
@@ -106,9 +151,10 @@ export function RepoView({ client, root, repo, cwd, active }: {
     setShell(null);
     setDrawer(false);
   };
-  // Leaving the session's view ends its drawer's shell.
+  // Leaving the session's view ends its drawer's shell, and any still starting.
   useEffect(
     () => () => {
+      starting.current = null;
       if (running.current) void client.closeTerminal(running.current).catch(() => undefined);
     },
     [client],
@@ -117,9 +163,10 @@ export function RepoView({ client, root, repo, cwd, active }: {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-s1">
       <div className="flex flex-wrap items-center gap-s2">
-        <span className={`${label} flex-1`}>
-          {tree ? <>{tree.files.length} {tree.files.length === 1 ? "file" : "files"} on <span className={mono}>{tree.branch}</span></> : "The session checkout"}
+        <span data-testid="session-branch" title={shownBranch} className={`${mono} min-w-0 max-w-64 truncate text-xs text-ink-2`}>
+          {shownBranch}
         </span>
+        <span className={`${label} flex-1`}>{tree && `${tree.files.length} ${tree.files.length === 1 ? "file" : "files"}`}</span>
         <button type="button" className={`${button} text-xs`} aria-pressed={drawer} disabled={!cwd} title={cwd ? `A shell in ${tilde(cwd)}` : "The session checkout isn't known yet"} onClick={() => void openShell()} data-testid="repo-shell">
           Shell
         </button>
@@ -141,7 +188,7 @@ export function RepoView({ client, root, repo, cwd, active }: {
                     type="button"
                     title={f.path}
                     aria-current={f.path === opened ? "true" : undefined}
-                    className={`flex w-full min-w-0 items-baseline gap-s1 px-s2 py-1 text-left ${mono} ${f.path === opened ? "bg-branch-soft text-ink" : "text-ink-2 hover:bg-surface-2"}`}
+                    className={`flex w-full min-w-0 items-baseline gap-s1 px-s2 py-1 text-left ${mono} ${f.path === opened ? "bg-surface-2 text-ink" : "text-ink-2 hover:bg-surface-2"}`}
                     onClick={() => {
                       setOpened(f.path);
                       void read(f.path);
@@ -167,29 +214,30 @@ export function RepoView({ client, root, repo, cwd, active }: {
             ) : typeof pin === "string" ? (
               <p className="p-s2 text-sap">Couldn't open {opened}: {pin}</p>
             ) : (
-              <RepoFile
+              <EditBox
                 key={opened}
-                client={client}
-                root={root}
-                path={opened}
-                pin={pin}
-                edit={edits[opened]}
-                onEdit={(text) => setEdits((all) => ({ ...all, [opened]: all[opened] ? { ...all[opened], text } : { text, base: pin.base, conflict: false } }))}
-                onConflict={() => setEdits((all) => (all[opened] ? { ...all, [opened]: { ...all[opened], conflict: true } } : all))}
-                onSaved={(text, blob) => {
-                  drop(opened);
-                  if (blob) setPins((p) => ({ ...p, [opened]: { path: opened, content: text, base: blob } }));
-                  else void read(opened);
-                }}
-                onDiscard={() => {
+                ariaLabel={`Edit ${opened}`}
+                text={edits[opened]?.text ?? pin.content}
+                setText={(text) => setEdits((all) => ({ ...all, [opened]: all[opened] ? { ...all[opened], text } : { text, base: pin.base, conflict: false } }))}
+                busy={edits[opened]?.saving !== undefined}
+                saveable={!!edits[opened] && !edits[opened].conflict}
+                error={edits[opened]?.refused ?? null}
+                conflict={edits[opened]?.conflict ? CONFLICT : null}
+                onSave={() => edits[opened] && void save(opened, edits[opened])}
+                onDone={() => {
+                  // In conflict the file as read is stale too: read it again.
                   const stale = edits[opened]?.conflict;
+                  if (edits[opened]?.saving !== undefined) return;
                   drop(opened);
                   if (stale) void read(opened);
                 }}
+                onCopy={() => void navigator.clipboard?.writeText(edits[opened]?.text ?? "").catch(() => undefined)}
                 onReload={() => {
                   drop(opened);
                   void read(opened);
                 }}
+                what={COMMIT}
+                testId="repo-editor"
               />
             )}
           </div>
@@ -220,55 +268,5 @@ export function RepoView({ client, root, repo, cwd, active }: {
         </section>
       )}
     </div>
-  );
-}
-
-/* The open file in its box: the edit under way, else the file as read. Save
-   goes against the blob the edit started from; a 409 stale is a conflict,
-   any other refusal (busy) shows in the bar. */
-function RepoFile({ client, root, path, pin, edit, onEdit, onConflict, onSaved, onDiscard, onReload }: {
-  client: DaemonClient;
-  root: string;
-  path: string;
-  pin: FileContent;
-  edit: Edit | undefined;
-  onEdit(text: string): void;
-  onConflict(): void;
-  onSaved(text: string, blob: string | null): void;
-  onDiscard(): void;
-  onReload(): void;
-}) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const save = async () => {
-    if (!edit || busy || edit.conflict) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const got = await client.putSessionFile(root, { path, content: edit.text, base: edit.base });
-      onSaved(edit.text, got.blob);
-    } catch (e) {
-      if (e instanceof DaemonError && e.code === "stale") onConflict();
-      else setError(refusal(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <EditBox
-      ariaLabel={`Edit ${path}`}
-      text={edit?.text ?? pin.content}
-      setText={onEdit}
-      busy={busy}
-      saveable={!!edit && !edit.conflict}
-      error={error}
-      conflict={edit?.conflict ? CONFLICT : null}
-      onSave={() => void save()}
-      onDone={() => (setError(null), onDiscard())}
-      onCopy={() => void navigator.clipboard?.writeText(edit?.text ?? "").catch(() => undefined)}
-      onReload={() => (setError(null), onReload())}
-      what={COMMIT}
-      testId="repo-editor"
-    />
   );
 }

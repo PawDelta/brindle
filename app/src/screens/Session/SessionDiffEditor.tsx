@@ -177,7 +177,10 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-s1">
           <div className="flex flex-wrap items-center gap-s2">
-            <span className={`${label} flex-1`}>{files.length} {files.length === 1 ? "file" : "files"} changed against {diff.base}</span>
+            <span className={`${label} flex-1`} data-testid="changes-summary">
+              {files.length} {files.length === 1 ? "file" : "files"} changed against {diff.base} ·{" "}
+              <span className={mono}><span className="text-pass">+{files.reduce((n, f) => n + f.added, 0)}</span> <span className="text-sap">−{files.reduce((n, f) => n + f.removed, 0)}</span></span>
+            </span>
             <div role="group" aria-label="Diff layout" className="flex gap-1">
               {[false, true].map((value) => <button key={String(value)} type="button" aria-pressed={split === value} className={`${button} text-xs ${split === value ? "bg-branch-soft text-branch" : ""}`} onClick={() => setSplit(value)}>{value ? "Split" : "Unified"}</button>)}
             </div>
