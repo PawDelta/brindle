@@ -641,6 +641,23 @@ describe("settings screen", () => {
     stop();
   });
 
+  it("keeps Engine & health to one summary line with Details closed when healthy, and opens them when a check fails", async () => {
+    const healthy = setup({ doctor: [{ name: "git", level: "ok", detail: "git 2.45" }] });
+    const summary = await screen.findByTestId("engine-health-summary");
+    await waitFor(() => expect(summary.textContent).toContain("Healthy"));
+    expect(summary.textContent).toContain("brindle 0.5.0");
+    expect(summary.textContent).toContain("CLI not installed");
+    expect(screen.queryByTestId("engine-details")).toBeNull();
+    fireEvent.click(within(summary).getByRole("button", { name: /Details/ }));
+    expect(screen.getByTestId("engine-details")).toBeTruthy();
+    healthy.stop();
+    cleanup();
+    const bad = setup();
+    await screen.findByTestId("engine-details");
+    expect(screen.getByTestId("health-status").getAttribute("data-bad")).toBe("true");
+    bad.stop();
+  });
+
   it("installs the command-line tool through the shell when it offers to, and says where the link went on the row", async () => {
     const install = vi.fn(() => Promise.resolve({ path: "/home/sam/.local/bin/brindle", target: "/Applications/brindle.app/Contents/Resources/engine/bin/brindle" }));
     const { stop } = setup({}, install);
