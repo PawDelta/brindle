@@ -453,7 +453,7 @@ def _part_family(req: Request, part: permissions.ShellPart, rules: list[Rule],
     if part.unknown:
         # A word only the run knows is text to what only prints or compares, and a
         # query's argument (gh run view "$id"): anything else may take it as a file.
-        if program in permissions.TEXT_ONLY:
+        if part.words[0] in permissions.TEXT_ONLY:    # the bare name: ./echo may be any program
             return [READ_FILTER, *writes]
         quoted = all(not permissions._unread(w) or re.fullmatch(r'"\$\{?\w+\}?"', w) for w in part.words)
         query = _dev_operation(part.words) == QUERIES and _runs_in(part.cwd, roots)

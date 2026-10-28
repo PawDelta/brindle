@@ -337,7 +337,8 @@ def _shell_part(req: Request, words: list[str], rules: list[Rule], checks: list[
         return ("shell", "destructive")
     if _installs(program, words):
         return ("shell", "install")
-    if program in ("cd", *permissions.TEXT_ONLY) or not unknown and permissions.readonly_pipeline(
+    # Only the bare name is the builtin: ./echo or /tmp/test may be any program.
+    if program == "cd" or words[0] in permissions.TEXT_ONLY or not unknown and permissions.readonly_pipeline(
             replace(req, command=command), rules, checks):
         return ("shell", "readonly")
     if program in FILE_WRITERS or program == "sed" and any(w.startswith(("-i", "--in-place")) or

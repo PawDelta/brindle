@@ -189,6 +189,10 @@ UNCHECKED = "P=$(curl -s https://example.com/p); $P"    # a program only the run
     ("standard", None, 'echo "made: $(touch new.txt)"', "ask", ["files/write-worktree"]),
     pytest.param("autonomous", None, "for b in x y; do git log -1; git push --force origin $b; done", "deny", None,
                  marks=pytest.mark.variant("a forced push in a loop's body")),
+    ("autonomous", None, "B=--force; export B=--no-force C=$B; git push $C origin feature", "deny", None),
+    ("standard", None, './echo "$(git log -1)"', "ask", None),         # a program named by a path is no builtin
+    ("secure", None, UNCHECKED, "ask", None),                          # another ask rule beside it: still once
+    ("standard", None, "python3 - <<'PY'\nprint(1)\nPY", "ask", None),  # no rule asks for it: still once
     # The dangerous opt-in runs unchecked commands, never past a deny it can see.
     ("autonomous", "allow", UNCHECKED, "allow", None),
     ("permissive", "allow", 'grep "${{X:-y}}" app.py', "allow", None),
@@ -212,8 +216,8 @@ def test_reader_understands_common_shell(ws, tmp_path, monkeypatch, preset, unch
     got = decide(req)
     assert got.decision == decision, got.reason
     assert permission_grants.families(req) == found
-    if got.rule is not None and got.rule.id == permissions.SHELL_SYNTAX_RULE and decision == "ask":
-        permissions.save_action("bash", req.command, "allow", life="forever")
+    if decision == "ask" and permissions.read_parts(req, permissions.all_rules(ws.repo_root)) is None:
+        permissions.save_action("bash", permission_grants.ask_key(req), "allow", life="time", minutes=10)
         assert decide(req).decision == "ask"    # approvable only once at a time
 
 

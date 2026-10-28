@@ -2060,19 +2060,29 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
         if strictest is not None and strictest is not ruled.rule:
             ruled = Decision("ask", f"{VERBS['ask']} by {strictest.source} rule {strictest.id} "
                                     f"({strictest.describe()})", strictest)
+        # A command brindle can't verify is approved once at a time, whatever else asks for it.
+        if compound and not any(r.id == SHELL_SYNTAX_RULE for r in asks) and (
+                unverified or read is None and read_parts(req, rules, checks) is None):
+            asks += (_syntax_ask(req).rule,)
         ruled = replace(ruled, asks=asks)
+    # What brindle can't verify that no rule asks for: an ask no rule made (a profile's
+    # allowed_tools may still answer it), limited as the syntax ask is (once at a time).
+    unruled = (_syntax_ask(req).rule,) if ruled is None and unverified else ()
     if saved:
         settled = permission_grants.settle(req, ruled.rule if ruled else None, saved, session=session,
-                                           asks=ruled.asks if ruled else (), spend=spend)
+                                           asks=ruled.asks if ruled else unruled, spend=spend)
         if settled is not None:
             return settled
     unchecked = permission_groups.unverifiable(groups, unmatched)
-    syntax = ruled is not None and ruled.rule is not None and ruled.rule.id == SHELL_SYNTAX_RULE
-    if (syntax or ruled is None and unverified) and unchecked == "deny":
+    # Unchecked: brindle can't verify it (the syntax ask is in force), alone or beside other asks.
+    asks = ruled.asks if ruled else unruled
+    syntax = any(r.id == SHELL_SYNTAX_RULE for r in (*asks, ruled.rule if ruled else None) if r)
+    if syntax and unchecked == "deny":
         return Decision("deny", permission_groups.UNVERIFIABLE_GUIDANCE, ruled.rule if ruled else None)
     # The opt-in runs what brindle can't read; never what it could read but a deny rule may
     # cover a word of (read_parts: no reason in ``unread``), nor what another rule asks for.
-    if (syntax and not ruled.asks[1:] or ruled is None and unverified) and unchecked == "allow" and unread:
+    alone = ruled is None or ruled.rule is not None and ruled.rule.id == SHELL_SYNTAX_RULE and not asks[1:]
+    if syntax and alone and unchecked == "allow" and unread:
         return Decision("allow", f"brindle can't check it, and the {permission_groups.UNVERIFIABLE} setting runs "
                                  f"such commands", ruled.rule if ruled else None)
     if ruled is not None:
@@ -2083,7 +2093,7 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
         why = "not a file git tracks in the worktree, and no rule allows it"
     else:
         why = "no rule allows or denies it"
-    return Decision("ask", f"{why}; asking the user")
+    return Decision("ask", f"{why}; asking the user", asks=unruled)
 
 
 def decide_in_parts(req: Request, *, checks: list[str] | None = None,
@@ -2958,6 +2968,9 @@ class _Flattener:
         # command of its own (what it exports reaches every program after it).
         exported = (len(words) == len(tokens) > 1 and words[0].raw == "export"
                     and all(_ASSIGNMENT.match(w.raw) for w in words[1:]))
+        # Plain assignments expand left to right, each seeing the one before; export's
+        # words all expand before any of its assignments is made.
+        seen = dict(env) if exported else env
         if exported or len(words) == len(tokens) and all(_ASSIGNMENT.match(w.raw) for w in words):
             self.changed = True
             for word in words[exported:]:
@@ -2965,8 +2978,8 @@ class _Flattener:
                 if _PROGRAM_VARIABLES.fullmatch(f"{name}="):
                     raise ValueError(f"{name} changes which program runs or how words split")
                 for inner in word.substitutions:
-                    self.substitution(inner, env)
-                text = self.text(word, env, assignment=True)[len(name) + 1:]
+                    self.substitution(inner, seen)
+                text = self.text(word, seen, assignment=True)[len(name) + 1:]
                 found = _tokens(text) if text else [(False, "")]
                 known = (definite and not word.substitutions and "~" not in text and found is not None
                          and len(found) == 1 and not found[0][0])
@@ -2993,7 +3006,7 @@ class _Flattener:
                     raise ValueError("a heredoc on another descriptor")
                 self.changed = True    # its body is only the program's input
                 continue
-            spaced, text = (token[1].spaced, self.text(token[1], env)) if token[0] == "word" else (token[2], token[1])
+            spaced, text = (token[1].spaced, self.text(token[1], seen)) if token[0] == "word" else (token[2], token[1])
             pieces.append((" " if spaced and pieces else "") + text)
         if pieces:
             self.emit("".join(pieces), definite, chained)
