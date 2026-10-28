@@ -200,18 +200,23 @@ export interface ReleaseBuildUpdater {
   restart: () => Promise<void>;
   /* Staff on a release-branch build: install the stable feed's build over it
      (app_return_to_stable), checked against the production key; same answers. */
-  returnToStable: (progress: (p: ReleaseProgress) => void) => Promise<string | null>;
+  /* The stable version it would install (app_stable_check), or null when
+     there is none to return to; the person confirms that version, and the
+     install (app_return_to_stable) refuses if the feed now names another. */
+  checkStable: () => Promise<string | null>;
+  returnToStable: (progress: (p: ReleaseProgress) => void, version: string) => Promise<string | null>;
 }
 
-function release(cmd: string, progress: (p: ReleaseProgress) => void) {
+function release(cmd: string, progress: (p: ReleaseProgress) => void, args: Record<string, unknown> = {}) {
   const onProgress = new Channel<ReleaseProgress>();
   onProgress.onmessage = progress;
-  return invoke<string | null>(cmd, { onProgress });
+  return invoke<string | null>(cmd, { onProgress, ...args });
 }
 
 export const releaseBuildUpdater: ReleaseBuildUpdater = {
   install: (progress) => release("app_release_build_install", progress),
-  returnToStable: (progress) => release("app_return_to_stable", progress),
+  checkStable: () => invoke<string | null>("app_stable_check"),
+  returnToStable: (progress, version) => release("app_return_to_stable", progress, { version }),
   restart: () => invoke<void>("app_restart"),
 };
 

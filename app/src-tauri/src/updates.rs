@@ -844,9 +844,12 @@ pub async fn app_release_build_install<R: Runtime>(
 /// over this release-branch build even at the same version
 /// (`stable_return_wanted`), its bundle checked against the production key.
 /// Same gate and one-install rule as the release-branch install.
+/// It installs only `version`, the one `app_stable_check` showed the person
+/// to confirm: a feed naming another by now is an error, so they confirm again.
 #[tauri::command]
 pub async fn app_return_to_stable<R: Runtime>(
     app: AppHandle<R>,
+    version: String,
     on_progress: Channel<ReleaseProgress>,
 ) -> Result<Option<String>, String> {
     let current = app.package_info().version.clone();
@@ -855,7 +858,25 @@ pub async fn app_return_to_stable<R: Runtime>(
         let _ = on_progress.send(progress);
     };
     let installs = app.state::<Installs>();
-    install_build(&installs, || staff_gate_now(&app), &current, &mut feed, stable_return_wanted, report).await
+    let wanted = |current: &Version, found: &str| {
+        if found != version {
+            return Err(format!("the stable release is now {found}, not {version}; check again"));
+        }
+        stable_return_wanted(current, found)
+    };
+    install_build(&installs, || staff_gate_now(&app), &current, &mut feed, wanted, report).await
+}
+
+/// Settings' "Return to stable", first step: the stable version
+/// `stable_return_wanted` would install over this build, or none. Same staff
+/// gate, same production-key feed; nothing is downloaded.
+#[tauri::command]
+pub async fn app_stable_check<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+    staff_gate_now(&app).await?;
+    let current = app.package_info().version.clone();
+    let mut feed = PluginFeed { app: app.clone(), stable: true, update: None };
+    let Some(found) = feed.check().await? else { return Ok(None) };
+    Ok(stable_return_wanted(&current, &found)?.then_some(found))
 }
 
 /// Check this build's feed (`endpoint`) and install an update found

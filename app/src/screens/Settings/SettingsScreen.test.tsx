@@ -698,13 +698,15 @@ describe("settings screen", () => {
 
   it("staff update: hides the app's Update from anyone the daemon doesn't call staff", async () => {
     const updater = { install: vi.fn(async () => "0.1.0-rc.8"), restart: vi.fn(async () => {}) };
-    const { daemon, stop } = setup({ debug: { staff: false, enabled: false } }, undefined, updater, releaseBuildUpdater);
+    // Even on a release-branch build (which makes Return to stable eligible by version), a non-staff account sees nothing.
+    const { daemon, stop } = setup({ debug: { staff: false, enabled: false } }, undefined, updater, releaseBuildUpdater, undefined, async () => ({ version: "0.2.4+release.42.0123456789ab", files: [] }));
     await screen.findByTestId("engine");
     await waitFor(() => expect(daemon.requests.some((r) => r.method === "GET" && r.path === "/debug")).toBe(true));
     await flush();
     expect(screen.queryByTestId("app-update")).toBeNull();
     expect(screen.queryByTestId("app-update-row")).toBeNull();
     expect(screen.queryByTestId("release-build-row")).toBeNull();
+    expect(screen.queryByTestId("return-to-stable-row")).toBeNull();
     expect(screen.queryByText("Update the app")).toBeNull();
     expect(updater.install).not.toHaveBeenCalled();
     expect(ipc.calls).toEqual([]);
@@ -747,14 +749,22 @@ describe("settings screen", () => {
     const { stop } = setup({ debug: { staff: true, enabled: false } }, undefined, undefined, releaseBuildUpdater, undefined, about("0.2.4+release.42.0123456789ab"));
     const row = await screen.findByTestId("return-to-stable-row");
     fireEvent.click(within(row).getByRole("button", { name: "Return to stable" }));
-    // Asked first: nothing reaches the shell until it is confirmed.
-    expect(row.textContent).toContain("Installs brindle stable; restart to finish.");
-    expect(ipc.calls).toEqual([]);
-    fireEvent.click(within(row).getByRole("button", { name: "Confirm" }));
-    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_return_to_stable"]);
+    // The shell is asked which version first; nothing installs until it is confirmed, and Cancel installs nothing.
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check"]);
     ipc.answers[0]("0.2.4");
+    await within(row).findByRole("button", { name: "Confirm" });
+    expect(row.textContent).toContain("0.2.4");
+    fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check"]);
+    fireEvent.click(within(row).getByRole("button", { name: "Return to stable" }));
+    ipc.answers[1]("0.2.4");
+    fireEvent.click(await within(row).findByRole("button", { name: "Confirm" }));
+    // The install is pinned to the version the person confirmed.
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check", "app_stable_check", "app_return_to_stable"]);
+    expect(ipc.calls[2].args.version).toBe("0.2.4");
+    ipc.answers[2]("0.2.4");
     fireEvent.click(await within(row).findByRole("button", { name: "Restart" }));
-    await waitFor(() => expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_return_to_stable", "app_restart"]));
+    await waitFor(() => expect(ipc.calls.at(-1)?.cmd).toBe("app_restart"));
     stop();
   });
 

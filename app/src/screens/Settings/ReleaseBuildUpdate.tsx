@@ -56,7 +56,8 @@ export function ReleaseBuildUpdate({ updater, version }: { updater: ReleaseBuild
           idle="Goes back to the current stable release, even at this version."
           latest="The stable release is not newer than this build."
           action="Return to stable"
-          confirm="Installs brindle stable; restart to finish."
+          check={updater.checkStable}
+          confirm={(v) => `Installs brindle ${v} stable; restart to finish.`}
           updater={updater}
           run={updater.returnToStable}
         />
@@ -65,12 +66,15 @@ export function ReleaseBuildUpdate({ updater, version }: { updater: ReleaseBuild
   );
 }
 
+/* `check`/`confirm`: ask the shell first which version this would install,
+   show it, and install only that one after Confirm (`run` gets it back). */
 function BuildRow({
   testId,
   label,
   idle,
   latest,
   action,
+  check,
   confirm,
   updater,
   run,
@@ -80,15 +84,30 @@ function BuildRow({
   idle: string;
   latest: string;
   action: string;
-  confirm?: string;
+  check?: () => Promise<string | null>;
+  confirm?: (version: string) => string;
   updater: ReleaseBuildUpdater;
-  run: ReleaseBuildUpdater["install"];
+  run: (progress: (p: ReleaseProgress) => void, target: string) => Promise<string | null>;
 }) {
   const [state, setState] = useState<Step>({ step: "idle" });
-  const [asking, setAsking] = useState(false);
+  const [asking, setAsking] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const install = async () => {
-    setAsking(false);
+  const ask = async () => {
+    setChecking(true);
+    setError(null);
+    try {
+      const target = await check!();
+      if (target) setAsking(target);
+      else setState({ step: "latest" });
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setChecking(false);
+    }
+  };
+  const install = async (target = "") => {
+    setAsking(null);
     setState({ step: "working", version: null, progress: null });
     setError(null);
     try {
@@ -98,6 +117,7 @@ function BuildRow({
           version: progress.kind === "found" ? progress.version : s.step === "working" ? s.version : null,
           progress,
         })),
+        target,
       );
       setState(version ? { step: "installed", version } : { step: "latest" });
     } catch (e) {
@@ -122,7 +142,7 @@ function BuildRow({
         : state.step === "latest"
           ? latest
           : asking && confirm
-            ? confirm
+            ? confirm(asking)
             : idle;
   const downloading = state.step === "working" && state.progress?.kind === "downloading" ? state.progress : null;
   return (
@@ -141,16 +161,16 @@ function BuildRow({
           </button>
         ) : asking ? (
           <>
-            <button type="button" className={primary} onClick={() => void install()}>
+            <button type="button" className={primary} onClick={() => void install(asking)}>
               Confirm
             </button>
-            <button type="button" className={button} onClick={() => setAsking(false)}>
+            <button type="button" className={button} onClick={() => setAsking(null)}>
               Cancel
             </button>
           </>
         ) : (
-          <button type="button" className={button} disabled={state.step === "working"} onClick={() => (confirm ? setAsking(true) : void install())}>
-            {state.step === "working" ? "Installing…" : action}
+          <button type="button" className={button} disabled={state.step === "working" || checking} onClick={() => (check ? void ask() : void install())}>
+            {state.step === "working" ? "Installing…" : checking ? "Checking…" : action}
           </button>
         )}
       </div>
