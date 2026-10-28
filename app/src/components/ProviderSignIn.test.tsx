@@ -170,6 +170,27 @@ describe("ProviderSignIn, the CLI read through a pty view", () => {
     await waitFor(() => expect(flow().dataset.phase).toBe("done"));
   });
 
+  it("login failure frees the terminal: a CLI that fails without exiting is said, Try again replaces it, and Cancel ends it", async () => {
+    const { daemon, check, shell, flow } = setup();
+    check.mockResolvedValue(false);
+    shell({ kind: "ready", tmux: "tmux 3.8" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
+    await waitFor(() => expect(daemon.views).toHaveLength(1));
+    // The CLI says its sign-in failed and waits at its own prompt: its pane never dies.
+    daemon.print(daemon.actions[0].id, "\r\nLogin failed: OAuth error (invalid_grant). Press Enter to retry.\r\n");
+    await waitFor(() => expect(flow().dataset.phase).toBe("failed"));
+    expect(within(flow()).getByRole("alert").textContent).toContain("Login failed: OAuth error (invalid_grant)");
+    fireEvent.click(within(flow()).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(daemon.actions).toHaveLength(2));
+    expect(daemon.actions[0].alive).toBe(false);
+    await waitFor(() => expect(flow().dataset.phase).toBe("waiting"));
+    // Cancelled, the stuck CLI goes with the card: the next press starts a fresh one rather than attaching to it.
+    fireEvent.click(within(flow()).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(daemon.closedTerminals).toEqual([daemon.actions[1].id]));
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
+    await waitFor(() => expect(daemon.actions).toHaveLength(3));
+  });
+
   it("closes its reader when cancelled", async () => {
     const { daemon, shell, flow } = setup();
     shell({ kind: "ready", tmux: "tmux 3.8" });

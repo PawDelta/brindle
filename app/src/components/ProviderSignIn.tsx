@@ -9,8 +9,11 @@
    which types the one line the person gave. The provider's state is read
    periodically and when the CLI exits (`check`): "Signed in to <provider> ✓",
    or what went wrong, with the terminal behind "Show details" the whole
-   time (PtyTerminal on its pane). The pane is read once the shell says
-   the pty view can run, which may come after the sign-in started; one
+   time (PtyTerminal on its pane). A CLI that says its sign-in failed but
+   doesn't exit (it waits at its own prompt) fails the card on its words,
+   with Try again, which ends it and starts afresh; Cancel and Close end
+   the CLI's terminal too, so the next press never finds a stuck one. The
+   pane is read once the shell says the pty view can run, which may come after the sign-in started; one
    that can't run here (tmux too old or missing) fails the card with why.
    Where the app has no pty views at all (a browser tab), the card still
    checks for completed browser sign-in. The app never sees a password or a token: the browser and
@@ -20,7 +23,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { ActionTerminal } from "../api/client";
 import { useDaemon } from "../api/context";
 import { openExternal } from "../api/open";
-import { keptLink, readPane, READ_SIZE, type PaneReading } from "../api/paneText";
+import { keptLink, PANE_DEAD, readPane, READ_SIZE, type PaneReading } from "../api/paneText";
 import { usePtyViews, type PtyViews, type PtyViewTarget } from "../api/ptyView";
 import { providerLabel } from "../api/providers";
 import { PtyTerminal } from "./PtyTerminal";
@@ -76,6 +79,15 @@ export function readPrompt(text: string): { kind: "choose"; question: string; ch
   const code = [...tail].reverse().find((l) => /paste.*code|enter.*code|authorization code|code:\s*$|code here/i.test(l));
   if (code) return { kind: "code", prompt: code };
   return null;
+}
+
+/* The line where the CLI says its sign-in failed, if its last lines say so:
+   a CLI that fails without exiting (asks to retry, waits at its own prompt)
+   never ends its pane, so this is the only word the card gets of it. */
+export function readFailure(text: string): string | null {
+  const tail = text.split("\n").map((l) => l.trim()).slice(-12);
+  const failed = /\b(log ?in|sign ?in|oauth|auth\w*|token)\b.*\b(fail\w*|error|denied|invalid|expired|timed? ?out)\b|\b(error|failed)\b.*\b(log ?in|sign ?in|oauth|auth\w*)\b/i;
+  return [...tail].reverse().find((l) => failed.test(l) && !PANE_DEAD.test(l)) ?? null;
 }
 
 /* The link the CLI printed, if any (opened in the browser by the CLI, or offered here). */
@@ -205,8 +217,11 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
         const found = readLink(text);
         if (found) setLink((had) => keptLink(had, found));
         const prompt = readPrompt(text);
+        const failure = readFailure(text);
         setPhase((p) => {
           if (p.kind !== "waiting" && p.kind !== "choose" && p.kind !== "code") return p;
+          // Said, with Try again; the checks go on, so a sign-in the browser finishes after all still counts.
+          if (failure) return { kind: "failed", terminal, message: failure };
           if (!prompt) return p.kind === "waiting" ? p : { kind: "waiting", terminal };
           return prompt.kind === "choose" ? { kind: "choose", terminal, question: prompt.question, choices: prompt.choices } : { kind: "code", terminal, prompt: prompt.prompt };
         });
@@ -250,8 +265,11 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
       return false;
     }
   };
+  /* Cancel or Close: the CLI's terminal goes too, so a sign-in stuck where it
+     failed isn't the one the next press finds still running and attaches to. */
   const cancel = () => {
     attempt.current++;
+    if (action) void client.closeTerminal(action.terminal).catch(() => undefined);
     setAction(null);
     finished.current = true;
     setPhase({ kind: "idle" });

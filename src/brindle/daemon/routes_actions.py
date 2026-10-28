@@ -1598,6 +1598,8 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
     repo, profile = _get(body, "repo"), _get(body, "profile")
     if bool(repo) != bool(profile):
         raise ServiceError("invalid", "repo and profile must be supplied together")
+    # "Try again" in the app: end the sign-in still running and start a fresh one.
+    restart = _get(body, "restart", bool, False)
     identity = agents.consent_identity(db, repo, profile, provider, _get(body, "session")) if repo else (
         company_login.stored_env() if provider == "claude" else {})
     if ((provider == "claude" and not providers.claude_org_managed()) or
@@ -1614,14 +1616,12 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
                    **({"BROWSER": browser["BROWSER"]} if browser else {})}
             return terminal.open_action(f"login cloud-{cloud_login.action_key(identity)}",
                                         cloud_login.interactive_command(),
-                                        env=env)
+                                        env=env, restart=restart)
     from brindle import provider_homes
 
     browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
     # The CLI signs in to brindle's config home for it, which brindle uses from then on.
     env = {**provider_homes.login_env(provider), **({"BROWSER": browser["BROWSER"]} if browser else {})}
-    # "Try again" in the app: end the sign-in still running and start a fresh one.
-    restart = _get(body, "restart", bool, False)
     return terminal.open_action(f"login {provider}", picker._login_command(provider, method), env=env,
                                 restart=restart)
 
