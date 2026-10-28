@@ -684,10 +684,14 @@ describe("settings screen", () => {
     stop();
   });
 
-  it("gives staff one debug logging switch, which turns it on with PUT /debug", async () => {
-    const { daemon, stop } = setup({ debug: { staff: true, enabled: false } });
+  it("gives staff one Staff only section holding debug logging, app update and the release-branch rows, which turns debug logging on with PUT /debug", async () => {
+    const updater = { install: vi.fn(async () => "0.1.0-rc.8"), restart: vi.fn(async () => {}) };
+    const { daemon, stop } = setup({ debug: { staff: true, enabled: false } }, undefined, updater, releaseBuildUpdater, undefined, async () => ({ version: "0.2.4+release.42.0123456789ab", files: [] }));
     // The staff section holds the staff controls, last before About, and is in the nav.
     const staffOnly = await screen.findByTestId("staff-only");
+    await within(staffOnly).findByTestId("return-to-stable-row");
+    expect(within(staffOnly).getByTestId("app-update-row")).toBeTruthy();
+    expect(within(staffOnly).getByTestId("release-build-row")).toBeTruthy();
     expect(staffOnly.nextElementSibling?.id).toBe("about");
     expect(screen.getByRole("button", { name: "Staff only" })).toBeTruthy();
     const section = within(staffOnly).getByTestId("debug-logging");
