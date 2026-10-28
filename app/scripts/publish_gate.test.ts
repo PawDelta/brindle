@@ -111,7 +111,7 @@ describe("app-release publish gate", () => {
     expect(text).toMatch(/target: aarch64-apple-darwin\n\s+runner: macos-latest\n/);
     expect(text).toMatch(/target: x86_64-apple-darwin\n\s+runner: macos-15-intel\n/);
     const publish = text.slice(text.indexOf("\n  macos-publish:\n"), text.indexOf("\n  linux:\n"));
-    expect(publish).toContain("    needs: macos\n");
+    expect(publish).toContain("    needs: [stable-gate, macos]\n");
     expect(publish).toContain('"darwin-aarch64": {signature: $arm_sig, url: $arm_url}');
     expect(publish).toContain('"darwin-x86_64": {signature: $x64_sig, url: $x64_url}');
     const build = text.slice(text.indexOf("\n  macos:\n"), text.indexOf("\n  macos-publish:\n"));
@@ -160,8 +160,15 @@ describe("app-release publish gate", () => {
     for (const [env, staffFile, key] of keys) expect(updaterKey(env, staffFile), JSON.stringify(env)).toBe(key);
     // A scheduled run builds no release (and so signs and publishes nothing): only the nightly smoke runs.
     // A release-branch push builds the Macs only, once release-gate says so, and publishes them only from release-publish.
-    const release = "(github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)";
-    for (const name of ["macos", "macos-publish", "linux", "windows"]) expect(job(name), name).toContain(release.split(" || ")[0]);
+    // A pushed tag builds only past stable-gate: its commit on release/desktop, approved in desktop-release.
+    const release = "(github.event_name == 'push' && github.ref_type == 'tag' && needs.stable-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)";
+    for (const name of ["macos", "macos-publish", "linux", "windows"]) {
+      expect(job(name), name).toContain(release.split(" || ")[0]);
+      expect(job(name), name).toMatch(/\n {4}needs: (stable-gate|\[.*\bstable-gate\b.*\])\n/);
+    }
+    expect(job("stable-gate")).toContain("if: github.event_name == 'push' && github.ref_type == 'tag'\n");
+    expect(job("stable-gate")).toContain("environment: desktop-release\n");
+    expect(jobOf(text, "stable-gate")).toContain('git merge-base --is-ancestor "$GITHUB_SHA" origin/release/desktop');
     for (const name of ["macos-publish", "linux", "windows"]) expect(job(name), name).toContain(release);
     expect(job("macos")).toContain("|| needs.release-gate.outputs.go == 'true')");
     expect(job("release-gate")).toContain("if: github.event_name == 'push' && github.ref == 'refs/heads/release/desktop'");
