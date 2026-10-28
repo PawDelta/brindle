@@ -163,11 +163,13 @@ FAMILY_LABELS = {"git/readonly": "read-only git commands", READ_FILTER: "read-on
 # runs a command (rebase --exec, a merge strategy that isn't git's own) or discards the
 # checkout's changes (checkout/switch --force, a restore or checkout of a whole checkout, as
 # reset --hard would) is never in it.
-GIT_LOCAL = {"add": ((), "", ""), "commit": ((), "", "mFcCtS"), "stash": ((), "", "m"), "tag": ((), "", "mFu"),
-             "branch": ((), "", ""), "merge": ((), "", "mFsXS"), "rebase": (("--exec",), "x", "sXCS"),
+GIT_LOCAL = {"add": ((), "", ""), "commit": ((), "", "mFcCt"), "stash": ((), "", "m"), "tag": ((), "", "mFu"),
+             "branch": ((), "", ""), "merge": ((), "", "mFsX"), "rebase": (("--exec",), "x", "sXC"),
              "restore": ((), "", "s"), "switch": (("--force", "--discard-changes"), "f", "cC"),
              "checkout": (("--force",), "f", "bB")}
 STRATEGIES = frozenset({"ort", "recursive", "resolve", "octopus", "ours", "subtree"})
+# Short options whose value is optional and only ever attached (-S, -Skey): never the next word.
+GIT_ATTACHED_VALUES = "S"
 # A package manager's install or add, into the project where it runs (and pip, from the project's
 # own environment: .venv/bin/pip, .venv/bin/python -m pip).
 INSTALLS = (("npm", "install"), ("npm", "i"), ("npm", "add"), ("pnpm", "install"), ("pnpm", "i"), ("pnpm", "add"),
@@ -314,6 +316,8 @@ def _git_local(words: list[str], cwd: str, roots: list[str]) -> bool:
             for j, c in enumerate(arg[1:], 2):    # j: where c's value starts
                 if c in shorts:
                     return False
+                if c in GIT_ATTACHED_VALUES:
+                    break
                 if c in values:
                     value = arg[j:] or (args[i] if i < len(args) else "")
                     if strategies and c == "s" and value not in STRATEGIES:
@@ -382,8 +386,8 @@ def _removes(words: list[str], cwd: str, roots: list[str]) -> bool:
 def _file_writes(program: str, args: list[str], cwd: str, roots: list[str]) -> bool:
     """Whether every file a FILE_WRITERS program (not ln) or ``sed -i``
     changes stays in a checkout: each name it is given, what cp or mv makes
-    in a destination folder (a recursive copy only into a new one), and no
-    sed backup put in another folder."""
+    in a destination folder (a recursive copy only into a new one; no option
+    that names the destination), and no sed backup put in another folder."""
     from brindle import permission_groups
 
     targets = permission_groups._write_targets(program, args)
@@ -392,13 +396,21 @@ def _file_writes(program: str, args: list[str], cwd: str, roots: list[str]) -> b
     if program == "sed" and any(re.fullmatch(r"-[nErsuz]*i.*/.*|--in-place=.*/.*", a, re.S) for a in args):
         return False
     paths = [os.path.join(cwd, t) for t in targets]
-    if program in ("cp", "mv") and len(paths) >= 2 and (len(paths) > 2 or os.path.isdir(paths[-1])
-                                                        or targets[-1].endswith("/")):
-        made = [os.path.join(paths[-1], os.path.basename(os.path.normpath(p))) for p in paths[:-1]]
-        recursive = program == "cp" and any(re.fullmatch(r"-[A-Za-z]*[rRa][A-Za-z]*|--recursive|--archive", a)
-                                            for a in args)
-        if recursive and any(os.path.lexists(m) for m in made):
-            return False    # what it copies into may lead anywhere
+    if program in ("cp", "mv"):
+        # Only the last name is the destination: no long option (--target-directory=) and no -T.
+        if any(a.startswith("--") and a != "--" or re.fullmatch(r"-[A-Za-z]*T[A-Za-z]*", a) for a in args):
+            return False
+        if len(paths) < 2:
+            return False
+        dest, sources = paths[-1], targets[:-1]
+        into = len(paths) > 2 or os.path.isdir(dest) or targets[-1].endswith("/")
+        recursive = program == "cp" and any(re.fullmatch(r"-[A-Za-z]*[rRa][A-Za-z]*", a) for a in args)
+        made = [os.path.join(dest, os.path.basename(os.path.normpath(p))) for p in paths[:-1]] if into else []
+        # A recursive copy only makes a new folder: into one that's there (or src/'s contents into dest,
+        # as BSD cp copies them) it writes below names that may lead anywhere.
+        if recursive and (any(os.path.lexists(m) for m in made) or os.path.lexists(dest) and (
+                not into or any(s.endswith(("/", "/.")) for s in sources))):
+            return False
         paths += made
     return all(_changeable(p, roots) for p in paths)
 

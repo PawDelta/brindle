@@ -302,12 +302,15 @@ def test_cd_chain_keeps_its_family(ws, command, found):
     ("git add -A", "git -c core.hooksPath=/x commit -m wip", "ask"),
     ("git add -A", "git rebase --exec make main", "ask"),                           # runs a command
     *(pytest.param("git add -A", c, "ask", marks=pytest.mark.variant("bypass: an option spelled another way"))
-      for c in ["git rebase -x'touch {out}/x' main", "git rebase --exe=make main", "git merge -s evil topic"]),
+      for c in ["git rebase -x'touch {out}/x' main", "git rebase --exe=make main", "git merge -s evil topic",
+                "git rebase -S --exec=make main", "git merge -S -sevil topic"]),
     ("npm install", "npm install -g left-pad", "ask"),                             # outside the project
     ("npm install", "npm install --cache={out} foo", "ask"),
     pytest.param("npm install", ".venv/bin/pip install --log={out}/log httpx", "ask",
                  marks=pytest.mark.variant("bypass: an option's value writes outside")),
     ("mkdir -p build", "cp notes.txt build/", "ask"),                              # build/notes.txt links out
+    *(pytest.param("mkdir -p build", c, "ask", marks=pytest.mark.variant("bypass: a destination cp doesn't name last"))
+      for c in ["cp --target-directory=build notes.txt", "cp -RT src build", "cp -R src/ build"]),
     ("mkdir -p build", "sed -i'{out}/*' s/a/b/ app.py", "ask"),                    # its backup, outside
     ("npm install", "sudo npm install", "ask"),
     ("npm install", "npm install $(cat pkgs)", "ask"),                             # brindle can't read it
