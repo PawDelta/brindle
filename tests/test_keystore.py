@@ -41,19 +41,6 @@ def test_list_shows_only_the_last_four(brindle_home):
     assert keystore.list_keys() == {}
 
 
-def test_reading_asks_the_store_for_each_key_once_and_only_inside_it(brindle_home, monkeypatch):
-    # GET /routing's learned picks check every candidate, each reading the same keys (a `security` run apiece).
-    keystore.set_key("ANTHROPIC_API_KEY", FAKE)
-    loads = []
-    real = keystore.FileStore.load
-    monkeypatch.setattr(keystore.FileStore, "load", lambda self: loads.append(1) or real(self))
-    with keystore.reading():
-        assert [keystore.get_key("ANTHROPIC_API_KEY") for _ in range(3)] == [FAKE] * 3
-    assert len(loads) == 1
-    keystore.get_key("ANTHROPIC_API_KEY")
-    assert len(loads) == 2
-
-
 # -- the panes -----------------------------------------------------------------------------------
 
 

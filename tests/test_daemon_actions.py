@@ -2003,6 +2003,7 @@ def test_config_reports_a_projects_overrides_and_unset_clears_a_local_one(db, re
     assert cfg["overrides"] == {}
 
 
+@pytest.mark.variant("a race: a second settings write lands between the first's read and its write")
 def test_a_local_write_made_while_another_is_reading_is_not_lost(repo, monkeypatch):
     """Forces the interleaving: a second action starts between the first's read and write, and the
     first waits until the second has either finished (unlocked writes: its update is then
