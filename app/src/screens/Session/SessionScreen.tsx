@@ -1,7 +1,8 @@
-/* A session's main area has Terminal and Changes tabs. Terminal keeps
+/* A session's main area has Terminal, Changes and Repo tabs. Terminal keeps
    the selected agent's ProviderSurface; Changes shows the whole session
-   branch against its PR base, even before readiness. Both remain mounted
-   after opening so switching tabs keeps the pane and unsaved drafts.
+   branch against its PR base, even before readiness; Repo, the session
+   checkout's files to open and edit, and a shell there (RepoView). Each
+   remains mounted after opening so switching tabs keeps the pane and unsaved drafts.
    The bar always names the session branch, even when a worker is selected.
    Continue in the bar and on the state card share useContinue.
    The goal and PR lifecycle stay in the sidebar; Review & open PR opens
@@ -25,6 +26,7 @@ import { AgentMenu, SessionMenu, closeSessionLabel, type CloseSessionItem } from
 import { failure, type Notice } from "./notice";
 import { ProviderSurface } from "./ProviderSurface";
 import { usePrReadiness, useSessionDiff } from "./review";
+import { RepoView } from "./RepoView";
 import { ReviewSheet } from "./ReviewSheet";
 import { SessionDiffEditor } from "./SessionDiffEditor";
 import { agentIds, sessionTree, sessionWork, since, type AgentNode } from "./tree";
@@ -50,6 +52,9 @@ export interface SessionScreenProps {
   /* Closes this whole session and moves the view on (the ⋯'s Close session). */
   onCloseSession?(root: string): void;
 }
+
+const TABS = ["terminal", "changes", "repo"] as const;
+type Tab = (typeof TABS)[number];
 
 export function findNode(node: AgentNode | null, id: string): AgentNode | null {
   if (!node) return null;
@@ -119,10 +124,12 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // The engine's word on a PR: the Review & open PR entry exists only once it says ready.
   const readiness = usePrReadiness(client, root, store);
   const changes = useSessionDiff(client, root, store);
-  const [view, setView] = useState<{ root: string; tab: "terminal" | "changes" }>({ root, tab: "terminal" });
+  const [view, setView] = useState<{ root: string; tab: Tab }>({ root, tab: "terminal" });
   const tab = view.root === root ? view.tab : "terminal";
   const [visited, setVisited] = useState<string | null>(null);
-  const branch = changes.diff?.branch || workspaces.find((ws) => ws.id === rootWorkspace)?.branch || "…";
+  const [repoVisited, setRepoVisited] = useState<string | null>(null);
+  const checkout = workspaces.find((ws) => ws.id === rootWorkspace);
+  const branch = changes.diff?.branch || checkout?.branch || "…";
 
   const host = useRef<HTMLElement>(null);
   useEffect(() => {
@@ -168,6 +175,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
             setVisited(root);
             changes.reload();
           }
+          if (tab === "repo") setRepoVisited(root);
         }}
         added={changes.files.reduce((n, f) => n + f.added, 0)}
         removed={changes.files.reduce((n, f) => n + f.removed, 0)}
@@ -211,6 +219,9 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
       <div role="tabpanel" id="session-changes" aria-labelledby="session-tab-changes" hidden={tab !== "changes"} className={tab === "changes" ? "flex min-h-0 min-w-0 flex-1 flex-col p-s2" : "hidden"}>
         {visited === root && <SessionDiffEditor key={root} client={client} root={root} state={changes} />}
       </div>
+      <div role="tabpanel" id="session-repo" aria-labelledby="session-tab-repo" hidden={tab !== "repo"} className={tab === "repo" ? "flex min-h-0 min-w-0 flex-1 flex-col p-s2" : "hidden"}>
+        {repoVisited === root && <RepoView key={root} client={client} root={root} repo={repo} cwd={checkout?.path ?? null} active={tab === "repo"} />}
+      </div>
       {/* The one thing that ever lies over a session, opened on purpose from the goal panel's Ready for PR step.
           Open, it stays through readiness being read again (an edit here, a sweep): it says so quietly instead. */}
       {shownSheet?.kind === "review" && <ReviewSheet key={root} client={client} root={root} repo={repo} readiness={readiness} state={changes} onClose={closeSheet} openUrl={openUrl} />}
@@ -234,8 +245,8 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
   onOpen?(root: string, repo: string): void;
   closeSession?: CloseSessionItem;
   branch: string;
-  tab: "terminal" | "changes";
-  onTab(tab: "terminal" | "changes"): void;
+  tab: Tab;
+  onTab(tab: Tab): void;
   added: number;
   removed: number;
 }) {
@@ -268,18 +279,19 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
   return (
     <header className="flex flex-wrap items-center gap-x-s2 gap-y-1 border-b border-line bg-surface px-s2 py-1" data-testid="session-bar">
       <div role="tablist" aria-label="Session views" data-testid="session-tabs" className="flex shrink-0 items-center self-stretch gap-s1 pr-s2">
-        {(["terminal", "changes"] as const).map((item) => (
-          <button key={item} id={`session-tab-${item}`} role="tab" type="button" aria-selected={tab === item} aria-controls={`session-${item}`} tabIndex={tab === item ? 0 : -1}
+        {TABS.map((item, at) => (
+          <button key={item} id={`session-tab-${item}`} role="tab" type="button" aria-selected={tab === item} aria-controls={`session-${item}`} tabIndex={tab === item ? 0 : -1} data-testid={`${item}-tab`}
             className={`border-b-2 px-s2 py-2 text-sm ${tab === item ? "border-branch text-ink" : "border-transparent text-ink-3 hover:text-ink"}`}
             onClick={() => onTab(item)}
             onKeyDown={(e) => {
               if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
               e.preventDefault();
-              const next = e.key === "Home" ? "terminal" : e.key === "End" ? "changes" : item === "terminal" ? "changes" : "terminal";
+              const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+              const next = e.key === "Home" ? TABS[0] : e.key === "End" ? TABS[TABS.length - 1] : TABS[(at + step + TABS.length) % TABS.length];
               onTab(next);
               document.getElementById(`session-tab-${next}`)?.focus();
             }}>
-            {item === "terminal" ? "Terminal" : <>Changes <span className={`${mono} ml-1 text-xs`}><span className="text-pass">+{added}</span> <span className="text-sap">−{removed}</span></span></>}
+            {item === "terminal" ? "Terminal" : item === "repo" ? "Repo" : <>Changes <span className={`${mono} ml-1 text-xs`}><span className="text-pass">+{added}</span> <span className="text-sap">−{removed}</span></span></>}
           </button>
         ))}
       </div>

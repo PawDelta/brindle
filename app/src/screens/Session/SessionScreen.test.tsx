@@ -324,6 +324,58 @@ describe("SessionScreen", () => {
     }
   });
 
+  it("Repo: opens a checkout file from its tree and saves it against its blob, a moved file a conflict and a busy engine inline, and a shell in the checkout in a drawer", async () => {
+    const { daemon, sync, term } = mount({ sup1: live, w1: live }, {
+      workspaces: [{ ...root, branch: "brindle/session-18" }, worker],
+      sessionReview: { sup1: { ready: false, reasons: ["work in progress"], branch: "brindle/session-18", base: "main", diff: "" } },
+      sessionFiles: { sup1: { "src/a.ts": "one\n", "docs/readme.md": "hello\n" } },
+    });
+    await waitFor(() => expect(term().written).toBe(drawnLive));
+    fireEvent.click(screen.getByTestId("repo-tab"));
+    const repoTab = () => within(screen.getByRole("tabpanel", { name: "Repo" }));
+    const files = await repoTab().findByRole("navigation", { name: "Repository files" });
+    expect(screen.getByTestId("session-branch").textContent).toBe("brindle/session-18");
+    expect(within(files).queryByTitle("src/a.ts")).toBeNull();
+    fireEvent.click(within(files).getByRole("button", { name: "src/" }));
+    fireEvent.click(within(files).getByTitle("src/a.ts"));
+    const box = () => repoTab().getByLabelText("Edit src/a.ts") as HTMLTextAreaElement;
+    await waitFor(() => expect(box().value).toBe("one\n"));
+    fireEvent.change(box(), { target: { value: "two\n" } });
+    fireEvent.click(repoTab().getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(daemon.sessionEdits).toHaveLength(1));
+    expect(daemon.data.sessionFiles.sup1["src/a.ts"]).toBe("two\n");
+
+    // The file moved on under an edit: a conflict, the edit kept; Reload reads the file as it now is.
+    fireEvent.change(box(), { target: { value: "three\n" } });
+    daemon.data.sessionFiles.sup1["src/a.ts"] = "moved\n";
+    fireEvent.click(repoTab().getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(repoTab().getByTestId("draft-conflict").textContent).toBe("Changed since you started editing"));
+    expect(box().value).toBe("three\n");
+    expect(repoTab().getByRole("button", { name: "Copy my edit" })).toBeTruthy();
+    fireEvent.click(repoTab().getByRole("button", { name: "Reload" }));
+    await waitFor(() => expect(box().value).toBe("moved\n"));
+
+    // The supervisor mid-turn: the engine's 409 busy shows in the bar, the edit kept.
+    daemon.data.workspaces = daemon.data.workspaces.map((w) => ({ ...w, agents: w.agents?.map((a) => (a.id === "sup1" ? { ...a, status: "processing" } : a)) }));
+    fireEvent.change(box(), { target: { value: "four\n" } });
+    fireEvent.click(repoTab().getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(within(repoTab().getByTestId("save-bar")).getByRole("alert").textContent).toContain("Busy"));
+    expect(box().value).toBe("four\n");
+    expect(daemon.sessionEdits).toHaveLength(1);
+
+    // Shell: one shell in the session checkout, in the drawer; pressed again, the same one.
+    fireEvent.click(repoTab().getByTestId("repo-shell"));
+    const drawer = await repoTab().findByTestId("repo-shell-drawer");
+    await waitFor(() => expect(daemon.shells).toEqual([{ terminal: daemon.actions[0].id, cwd: REPO }]));
+    await waitFor(() => expect(within(drawer).getByTestId("terminal").dataset.target).toBe(daemon.actions[0].target));
+    fireEvent.click(repoTab().getByTestId("repo-shell"));
+    expect(daemon.shells).toHaveLength(1);
+    fireEvent.click(within(drawer).getByRole("button", { name: "Close this shell" }));
+    await waitFor(() => expect(repoTab().queryByTestId("repo-shell-drawer")).toBeNull());
+    expect(daemon.closedTerminals).toEqual([daemon.actions[0].id]);
+    sync.stop();
+  });
+
   it("shows the selected agent's pane, bare, named by provider and agent, through a tmux client on its window, and types into it as is", async () => {
     const { daemon, sync, term } = mount({ sup1: live, w1: { ...live, screen: "worker" } });
     await waitFor(() => expect(shownAgent()).toBe("sup1"));

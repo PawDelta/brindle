@@ -766,7 +766,7 @@ export class FakeDaemon {
     this.publish("autopilot.done", { root_id: root, agent_id: root, payload: {} });
   }
 
-  /* GET /sessions/{root}/pr/readiness, /diff, /pr/draft, /file (routes_read). */
+  /* GET /sessions/{root}/pr/readiness, /diff, /tree, /pr/draft, /file (routes_read). */
   private sessionReviewRead(root: string, what: string, query: Record<string, string>): Response {
     const d = this.data;
     const session = d.sessions.find((s) => s.id === root);
@@ -780,6 +780,8 @@ export class FakeDaemon {
       if (content === undefined) return error("not_found", `no file ${query.path} in the session's checkout`, 404);
       return json({ path: query.path, content, base: fakeBlob(content) });
     }
+    // The checkout's files as `git ls-files` lists them: sessionFiles' paths, sorted.
+    if (what === "tree") return json({ root_id: root, branch: review.branch, files: Object.keys(d.sessionFiles[root] ?? {}).sort() });
     if (what === "diff") {
       // From the base and the checkout as they stand, when the base is known: the diff follows every edit.
       const base = d.sessionBase[root];
@@ -2316,7 +2318,7 @@ export class FakeDaemon {
       return json(d.providers);
     }
     if ((m = path.match(/^\/providers\/([^/]+)\/preflight$/))) return json(this.preflightOf(m[1]));
-    if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
+    if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|tree|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
     return error("not_found", `no route ${path}`, 404);
   };
 
