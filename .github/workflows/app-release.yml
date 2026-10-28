@@ -62,8 +62,8 @@
 #
 # Staff builds: a push to main that touches the app (the
 # paths app.yml runs for) builds the Macs only, at that commit, once
-# `release-gate` has found it on main with the newest CI and App runs for
-# exactly that commit passed. The build carries
+# `release-gate` has found it on main with the newest matching App run passed,
+# and the newest matching CI run passed when one exists. The build carries
 # the version <package.json version>+release.<run>.<sha12>, its updater
 # bundle signed with the staff key (app/src-tauri/staff-updater.pub), and
 # `release-publish` publishes it under brindle/downloads/desktop/release/
