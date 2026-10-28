@@ -500,12 +500,14 @@ function Dangerous({ client, policy, busy, run, record }: {
   record(kind: string, what: string, detail: string): void;
 }) {
   const [confirming, setConfirming] = useState(false);
-  const on = policy.unchecked_commands === "allow";
-  const lockedBy = policy.unchecked_commands_locked_by;
+  // The shell/unchecked entry of the groups table: "ask" (default), "allow", or "deny" (org policy's to set).
+  const level = policy.groups?.find((g) => g.name === "shell")?.subcategories?.unchecked ?? "ask";
+  const on = level === "allow";
+  const lockedBy = level === "deny" ? "your organization" : null;
   const set = (value: "ask" | "allow") => {
     setConfirming(false);
     void run(async () => {
-      await client.setUncheckedCommands(value);
+      await client.setPermissionGroups({ shell: { subcategories: { unchecked: value } } });
       record("Policy", "Unchecked commands changed", value === "allow" ? "Run without asking" : "Ask every time");
     }, { text: value === "allow" ? "Unchecked commands now run without asking." : "Unchecked commands ask every time." });
   };

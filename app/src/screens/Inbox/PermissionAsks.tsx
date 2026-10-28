@@ -247,6 +247,8 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
   const timed = modes.includes("timed");
   const session = modes.includes("session");
   const slot = g.rule || g.blocked ? null : groupItem(rep.reason);
+  // The shell/unchecked entry of the groups table asked: the reason names it.
+  const unchecked = !g.blocked && /\bshell\/unchecked\b/.test(rep.reason ?? "");
   const subject = g.title.replace(/^Allow /, "").replace(/\?$/, "");
   const names = [...new Set(g.items.map((a) => a.worker || a.agent_id))];
 
@@ -269,7 +271,7 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
     });
   };
   // An unchecked command is allowed once or denied, never remembered; the way out of asking is the Settings opt-in.
-  const allowable = !g.blocked && !g.unchecked && (session || timed);
+  const allowable = !g.blocked && !unchecked && (session || timed);
 
   return (
     <PermissionCard
@@ -374,7 +376,7 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
           )}
         </div>
       )}
-      {g.unchecked && onOpenRule && (
+      {unchecked && onOpenRule && (
         <button type="button" className={`${LINK} self-end`} onClick={() => onOpenRule("unchecked-commands")}>
           Stop asking for these…
         </button>

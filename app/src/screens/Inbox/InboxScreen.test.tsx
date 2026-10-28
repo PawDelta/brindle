@@ -225,7 +225,7 @@ describe("inbox", () => {
   });
 
   it("unchecked commands opt-in: the ask offers only Deny and Allow once, and a link to the Settings row", async () => {
-    const unchecked: AskGroupDTO = { ...pushes, key: "k-unchecked", title: "Allow this unchecked command?", unchecked: true, modes: ["once", "deny"], rule: null };
+    const unchecked: AskGroupDTO = { ...pushes, key: "k-unchecked", title: "Allow this unchecked command?", modes: ["once", "deny"], rule: null, items: pushes.items.map((a) => ({ ...a, reason: "the shell/unchecked baseline is ask" })) };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [unchecked] });
     const { sync, onOpenRule } = mount(daemon);
     const held = await screen.findByRole("article", { name: "Allow this unchecked command?" });

@@ -253,21 +253,21 @@ describe("settings screen", () => {
     // On needs the confirmation; Cancel sends nothing.
     fireEvent.click(toggle());
     fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
-    expect(daemon.requests.some((r) => r.method === "PATCH")).toBe(false);
+    expect(daemon.requests.some((r) => r.method === "PUT" && r.path === "/permissions/groups")).toBe(false);
     fireEvent.click(toggle());
     fireEvent.click(within(row).getByRole("button", { name: "Run unchecked commands" }));
     await waitFor(() => expect(toggle().getAttribute("aria-checked")).toBe("true"));
-    expect(daemon.requests.find((r) => r.method === "PATCH" && r.path === "/permissions")?.body).toEqual({ unchecked_commands: "allow" });
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/groups")?.body).toEqual({ groups: { shell: { subcategories: { unchecked: "allow" } } } });
     fireEvent.click(toggle());
     await waitFor(() => expect(toggle().getAttribute("aria-checked")).toBe("false"));
-    expect(daemon.data.policy.unchecked_commands).toBe("ask");
+    expect(daemon.data.policy.groups?.shell.subcategories.unchecked).toBe("ask");
     stop();
   });
 
-  it("permissions: unchecked commands opt-in is locked, with the org named, when org policy forces it off", async () => {
-    const { stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", unchecked_commands_locked_by: "Acme", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} } });
+  it("permissions: unchecked commands opt-in is locked when org policy denies it", async () => {
+    const { stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", groups: { shell: { baseline: "ask", subcategories: { unchecked: "deny" } } }, rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} } });
     const row = await screen.findByTestId("dangerous");
-    expect(within(row).getByText("Set by Acme")).toBeTruthy();
+    expect(within(row).getByText("Set by your organization")).toBeTruthy();
     expect((within(row).getByRole("switch") as HTMLButtonElement).disabled).toBe(true);
     stop();
   });
