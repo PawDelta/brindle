@@ -10,7 +10,7 @@
 import { useDaemon } from "../../api/context";
 import type { InboxItemDTO } from "../../api/schema";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
-import { primary, quiet } from "../../components/ui";
+import { button, quiet } from "../../components/ui";
 import { useAppState } from "../../store/useStore";
 import { CloudLoginStatus, useCloudLogin } from "./CloudSignIn";
 import { itemKey, loginProvider } from "./items";
@@ -58,7 +58,7 @@ export function ItemActions({ item, actions, onGo, repo, onDone, compact = false
           />
         )}
         {item.kind === "login" && (
-          <button type="button" className={`${primary} ${size}`} disabled={cloud.busy} onClick={cloud.start}>
+          <button type="button" className={`${button} ${size}`} disabled={cloud.busy} onClick={cloud.start}>
             Sign in to brindle
           </button>
         )}

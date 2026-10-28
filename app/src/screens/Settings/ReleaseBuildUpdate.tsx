@@ -12,7 +12,7 @@
 import { useState } from "react";
 import type { ReleaseBuildUpdater, ReleaseProgress } from "../../api/tauri";
 import { plain } from "../../api/wording";
-import { alert, button, primary } from "../../components/ui";
+import { alert, button } from "../../components/ui";
 
 type Step =
   | { step: "idle" }
@@ -158,12 +158,12 @@ function BuildRow({
       </div>
       <div className="flex min-w-0 flex-wrap items-center justify-end gap-s1">
         {state.step === "installed" || state.step === "restarting" ? (
-          <button type="button" className={primary} disabled={state.step === "restarting"} onClick={() => void restart(state.version)}>
+          <button type="button" className={button} disabled={state.step === "restarting"} onClick={() => void restart(state.version)}>
             Restart
           </button>
         ) : asking ? (
           <>
-            <button type="button" className={primary} onClick={() => void install(asking)}>
+            <button type="button" className={button} onClick={() => void install(asking)}>
               Confirm
             </button>
             <button type="button" className={button} onClick={() => setAsking(null)}>

@@ -4,10 +4,13 @@
    text-ink-2, gap-s2 or rounded-lg mean the same thing here as on the site:
    its green-tinted near-black and cool light grounds, its ink, its lines,
    its accents (each at least 4.5:1 on canvas-2, in both themes). --fawn
-   keeps its name but is the UI accent, pass green, as on the site (the
-   primary button, the focus ring, links); the tan it once was lives on
-   only in the logo's threads (--thread-*). Radii are crisp, 2px for pills
-   and 4px for the rest, and pills are hairlines rather than fills. The app
+   keeps its name but is pass green; the tan it once was lives on only in
+   the logo's threads (--thread-*). The look is quiet: near-monochrome,
+   with green only in status dots, ticks and the one main action a screen
+   has (ui.ts `main`); focus, selection and links are branch. Grounds and
+   surfaces are one plane (the surface is the canvas), lines are neutral
+   hairlines, and sections are dividers and whitespace, not boxes. Radii
+   are crisp, 2px and 4px, and pills are a dot and text, never a box. The app
    adds what the site has no word for: a fail red beside the accents,
    on-branch / on-sap for text on those two, and for the terminal a raised
    shell ground (its tab strip) and the shell's own fail red. The sidebar
@@ -19,8 +22,8 @@
 @import "tailwindcss";
 
 :root {
-  --canvas: #080d0b; --canvas-2: #0d1411; --surface: #111a16; --surface-2: #16211c;
-  --line: rgba(52, 96, 74, 0.4); --line-strong: rgba(72, 124, 96, 0.55);
+  --canvas: #080d0b; --canvas-2: #0a100d; --surface: #080d0b; --surface-2: #121a16;
+  --line: rgba(120, 150, 135, 0.16); --line-strong: rgba(130, 160, 145, 0.28);
   --ink: #e8f0eb; --ink-2: #afbfb6; --ink-3: #889a90;
   --fawn: #34d399; --fawn-soft: color-mix(in srgb, var(--fawn) 10%, transparent);
   --sap: #e8875a; --sap-soft: rgba(232, 135, 90, 0.12);
@@ -29,7 +32,7 @@
   --fail: #f08c88; --fail-soft: rgba(240, 140, 136, 0.12);
   --on-fawn: #03160e; --on-branch: #15102a; --on-sap: #1a0f08;
   --thread-in: #d7af87; --thread-top: #e8875a; --thread-mid: #a99be0; --thread-out: #34d399;
-  --shell-bg: #070b09; --shell-bg-2: color-mix(in srgb, var(--shell-bg), white 5%); --shell-ink: #e8f0eb; --shell-dim: #859a8e; --shell-acc: #34d399; --shell-bad: #f08c88; --shell-line: rgba(52, 96, 74, 0.5);
+  --shell-bg: #070b09; --shell-bg-2: color-mix(in srgb, var(--shell-bg), white 5%); --shell-ink: #e8f0eb; --shell-dim: #859a8e; --shell-acc: #34d399; --shell-cursor: #a4aba7; --shell-bad: #f08c88; --shell-line: rgba(52, 96, 74, 0.5);
   --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -40,8 +43,8 @@
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --canvas: #f1f5f5; --canvas-2: #e7eeed; --surface: #ffffff; --surface-2: #f6f9f8;
-    --line: rgba(30, 80, 70, 0.18); --line-strong: rgba(30, 80, 70, 0.34);
+    --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
+    --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
     --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
     --fawn: #046e50;
     --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
@@ -55,8 +58,8 @@
 }
 
 :root[data-theme="light"] {
-  --canvas: #f1f5f5; --canvas-2: #e7eeed; --surface: #ffffff; --surface-2: #f6f9f8;
-  --line: rgba(30, 80, 70, 0.18); --line-strong: rgba(30, 80, 70, 0.34);
+  --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
+  --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
   --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
   --fawn: #046e50;
   --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
@@ -152,9 +155,10 @@ body {
   input[type="radio"] {
     accent-color: var(--branch);
   }
-  /* The focus ring, as the site's. */
+  /* The focus ring: branch, as the fields' focus border and the sidebar's
+     selection, so green stays the action and the pass and nothing else. */
   :focus-visible {
-    outline: 2px solid var(--fawn);
+    outline: 2px solid var(--branch);
     outline-offset: 2px;
   }
   /* Scrollbars that sit quietly on either ground. */
@@ -222,18 +226,20 @@ body {
 .side-dot[data-tone="fail"] { background: var(--fail); }
 .side-dot[data-tone="paused"] { background: transparent; border: 1.5px solid var(--ink-3); width: 7px; height: 7px; }
 .side-h { display: flex; align-items: center; gap: 8px; padding: 6px 8px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); }
-.side-nb { background: var(--sap); color: var(--on-sap); border-radius: var(--r-sm); padding: 0 6px; font-size: 11px; font-weight: 600; line-height: 20px; }
+.side-nb { color: var(--sap); font-family: var(--mono); font-size: 11px; font-weight: 600; line-height: 20px; }
 .side-ring { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; flex: none; }
 .side-ring::after { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--canvas-2); }
 .side-ms { display: flex; flex-direction: column; gap: 1px; }
 .side-ms .m { display: flex; align-items: flex-start; gap: 8px; padding: 4px 6px; border-radius: var(--r); font-size: 12px; color: var(--ink); }
 .side-ms .m .i { width: 16px; height: 16px; border-radius: 8px; display: grid; place-items: center; font-size: 9px; flex: none; margin-top: 1px; border: 1px solid var(--line-strong); color: var(--ink-3); }
 .side-ms .m[data-state="done"] .i { background: var(--pass); border-color: var(--pass); color: var(--surface); }
-.side-ms .m[data-state="now"] { background: var(--branch-soft); }
-.side-ms .m[data-state="now"] .i { border-color: var(--branch); color: var(--branch); }
+.side-ms .m[data-state="now"] .i { border-color: var(--ink-2); color: var(--ink); }
 .side-ms .m[data-state="todo"] { color: var(--ink-3); }
 .side-ms .m .t { flex: 1; min-width: 0; line-height: 1.35; }
 .side-ms .m .t small { display: block; font-family: var(--mono); font-size: 10px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.side-btn { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px; border-radius: var(--r); font-size: 11px; font-weight: 500; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); white-space: nowrap; }
+.side-btn { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px; border-radius: var(--r); font-size: 11px; font-weight: 500; border: 1px solid var(--line-strong); background: transparent; color: var(--ink); white-space: nowrap; }
 .side-btn:hover { background: var(--surface-2); }
 .side-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* A pill is its tone in the text and a dot in that tone, no box; a pill
+   with its own dot (a .rounded-full inside) or in mono (a path) has none. */
+.pill:not(:has(.rounded-full)):not(.font-mono)::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }

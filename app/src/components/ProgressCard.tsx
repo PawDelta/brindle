@@ -28,7 +28,7 @@ export function ProgressCard({ title, status, lines, failure, onRetry, other, la
   const failed = status === "failed";
   const done = status === "done";
   return (
-    <section className="flex flex-col gap-s2 rounded-lg border border-line bg-surface p-s2" aria-label={label} data-testid={testId} data-state={status}>
+    <section className="flex flex-col gap-s2 border-t border-line py-s2" aria-label={label} data-testid={testId} data-state={status}>
       <div className="flex items-center gap-s1">
         {title}
         <span className="flex-1" />

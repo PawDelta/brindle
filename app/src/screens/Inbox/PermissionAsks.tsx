@@ -18,7 +18,7 @@ import type { AskDecide, DaemonClient } from "../../api/client";
 import { UNITS, covered, limitsText, minutesText, scopeWithin, splitMinutes, toMinutes, type Unit } from "../../api/permissions";
 import type { AskDecisionDTO, AskGroupDTO, AskResultDTO, InboxItemDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
-import { card, field } from "../../components/ui";
+import { card, field, mainTone } from "../../components/ui";
 import { formatAge } from "../../store/overview";
 import { describeItem, itemKey, permissionAnswer, permissionLine, seenAt } from "./items";
 import type { useInboxActions } from "./useInboxActions";
@@ -34,10 +34,11 @@ const ago = (since: number) => {
 const skippedText = (skipped: AskResultDTO[] | undefined) =>
   skipped?.length ? ` ${requests(skipped.length)} left waiting: ${skipped.map((s) => `${s.exact}${s.why ? ` (${s.why})` : ""}`).join(", ")}.` : "";
 
-const BTN = "inline-flex min-h-8 items-center justify-center gap-2 whitespace-nowrap rounded-lg border px-4 text-sm font-medium disabled:opacity-50";
+/* The card's buttons: one shape; Allow wears the main action's tone (ui.ts). */
+const SHAPE = "inline-flex min-h-8 items-center justify-center gap-2 whitespace-nowrap rounded-lg border px-4";
+const BTN = `${SHAPE} text-sm font-medium disabled:opacity-50`;
 const DENY = "border-transparent text-ink-2 hover:bg-fail-soft hover:text-fail";
-const PLAIN = "border-line-strong bg-surface text-ink hover:bg-surface-2";
-const PRIMARY = "border-fawn bg-fawn text-on-fawn hover:opacity-90";
+const PLAIN = "border-line-strong bg-transparent text-ink hover:bg-surface-2";
 const LINK = "text-xs text-branch hover:underline disabled:opacity-50";
 
 const GROUP_NAMES: Record<string, string> = { files: "Files", shell: "Shell", git: "Git", network: "Network", mcp: "MCP" };
@@ -167,14 +168,14 @@ export function PermissionCard({ label, source, id, dataKey, who, what, chip, ag
 }) {
   const window = source === "window";
   return (
-    <article id={id} tabIndex={-1} aria-label={label} data-testid="permission-card" data-source={source} data-key={dataKey} className={`${card} relative flex max-w-[960px] scroll-mt-s3 flex-col gap-s1 py-s2 pl-5 pr-4 outline-none before:absolute before:bottom-3 before:left-0 before:top-3 before:w-[3px] before:rounded-sm focus:ring-2 focus:ring-branch ${window ? "before:bg-branch" : "before:bg-sap"}`}>
+    <article id={id} tabIndex={-1} aria-label={label} data-testid="permission-card" data-source={source} data-key={dataKey} className={`${card} relative flex max-w-[960px] scroll-mt-s3 flex-col gap-s1 py-s2 pl-5 pr-4 outline-none before:absolute before:bottom-3 before:left-0 before:top-3 before:w-[2px] before:rounded-sm before:opacity-80 focus:ring-2 focus:ring-branch ${window ? "before:bg-branch" : "before:bg-sap"}`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-[15px] font-semibold leading-[1.4]">
             {who} <span className="font-normal text-ink-2">{what}</span>
           </h3>
           {chip && (
-            <span className={`mt-2 inline-flex items-center rounded border px-1.5 py-0.5 text-xs ${window ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2"}`} data-testid="permission-chip">
+            <span className={`mt-2 inline-flex items-center text-xs ${window ? "text-branch" : "text-ink-2"}`} data-testid="permission-chip">
               {chip}
             </span>
           )}
@@ -201,10 +202,10 @@ function AllowSplit({ label, disabled, onPrimary, children }: { label: string; d
   const close = () => setOpen(false);
   return (
     <div className="relative inline-flex" onKeyDown={(e) => e.key === "Escape" && close()}>
-      <button type="button" className={`${BTN} ${PRIMARY} rounded-r-none`} disabled={disabled} onClick={onPrimary ?? (() => setOpen((o) => !o))}>
+      <button type="button" className={`${SHAPE} ${mainTone} rounded-r-none border-r-0`} disabled={disabled} onClick={onPrimary ?? (() => setOpen((o) => !o))}>
         {label}
       </button>
-      <button type="button" className={`${BTN} ${PRIMARY} min-w-8 rounded-l-none border-l border-l-on-fawn/35 px-2.5`} disabled={disabled} aria-haspopup="menu" aria-expanded={open} aria-label="More ways to allow" onClick={() => setOpen((o) => !o)}>
+      <button type="button" className={`${SHAPE} ${mainTone} min-w-8 rounded-l-none px-2.5`} disabled={disabled} aria-haspopup="menu" aria-expanded={open} aria-label="More ways to allow" onClick={() => setOpen((o) => !o)}>
         ▾
       </button>
       {open && (

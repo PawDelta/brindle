@@ -23,7 +23,7 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import type { DaemonClient, Rewound, Transferred } from "../../api/client";
 import type { AgentDTO, ProfileDTO, WorkspaceDTO } from "../../api/schema";
-import { button, card, danger, field, primary, quiet } from "../../components/ui";
+import { button, danger, field, panel, quiet } from "../../components/ui";
 import { SessionsContext } from "../../store/sessions";
 import { useJob } from "../Branch/useJob";
 import { failure, type Notice } from "./notice";
@@ -78,7 +78,7 @@ export function SessionMenu({ closeSession }: { closeSession: CloseSessionItem }
         ⋯
       </button>
       {menu && (
-        <div role="menu" className={`${card} absolute right-0 top-full z-10 mt-1 flex min-w-32 flex-col py-1 shadow-lg`}>
+        <div role="menu" className={`${panel} absolute right-0 top-full z-10 mt-1 flex min-w-32 flex-col py-1 shadow-lg`}>
           <button
             type="button"
             role="menuitem"
@@ -194,7 +194,7 @@ export function AgentMenu({ client, agent, workspace, gone = false, root, repo, 
         </button>
       )}
       {menu && !gone && (
-        <div role="menu" className={`${card} absolute right-0 top-full z-10 mt-1 flex min-w-32 flex-col py-1 shadow-lg`}>
+        <div role="menu" className={`${panel} absolute right-0 top-full z-10 mt-1 flex min-w-32 flex-col py-1 shadow-lg`}>
           {supervisor ? (
             <>
               <button type="button" role="menuitem" className={item} disabled={pending} onClick={start("handover")}>
@@ -231,7 +231,7 @@ export function AgentMenu({ client, agent, workspace, gone = false, root, repo, 
         </div>
       )}
       {(open || note) && (
-        <div className={`${card} absolute right-0 top-full z-10 mt-1 flex w-80 flex-col gap-1 px-s2 py-s1 shadow-lg`} role="dialog" aria-label={open ? `Confirm ${open.action}` : "Result"}>
+        <div className={`${panel} absolute right-0 top-full z-10 mt-1 flex w-80 flex-col gap-1 px-s2 py-s1 shadow-lg`} role="dialog" aria-label={open ? `Confirm ${open.action}` : "Result"}>
           {open?.action === "rewind" && (
             <RewindForm
               client={client}
@@ -420,7 +420,7 @@ function HandoverForm({ client, root, busy, setBusy, onCancel, onDone }: {
       </span>
       {error && <span className="text-xs text-sap">{error.text}</span>}
       <div className="flex items-center gap-1">
-        <button type="button" className={primary} disabled={!to.trim() || busy} onClick={() => void handover()}>
+        <button type="button" className={button} disabled={!to.trim() || busy} onClick={() => void handover()}>
           {busy ? "Handing over…" : "Confirm handover"}
         </button>
         <button type="button" className={button} disabled={busy} onClick={onCancel}>
@@ -480,7 +480,7 @@ function TransferForm({ client, root, scratch, repos, job, onCancel, onDone }: {
       </span>
       {job.job?.status === "failed" && <span className="text-xs text-sap">{job.job.error}</span>}
       <div className="flex items-center gap-1">
-        <button type="button" className={primary} disabled={!target || job.busy} onClick={transfer}>
+        <button type="button" className={button} disabled={!target || job.busy} onClick={transfer}>
           {job.busy ? "Moving…" : "Move the work"}
         </button>
         <button type="button" className={button} disabled={job.busy} onClick={onCancel}>

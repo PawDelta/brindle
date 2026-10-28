@@ -268,14 +268,14 @@ export function TerminalToggle() {
   return (
     <button
       type="button"
-      className={`ml-auto inline-flex h-5 flex-none items-center gap-1.5 rounded-md border pl-1.5 pr-[7px] text-[11.5px] disabled:opacity-50 ${open ? "border-fawn bg-fawn-soft text-ink" : "border-line text-ink-3 hover:border-ink-3 hover:text-ink"}`}
+      className={`ml-auto inline-flex h-5 flex-none items-center gap-1.5 rounded-md border pl-1.5 pr-[7px] text-[11.5px] disabled:opacity-50 ${open ? "border-branch bg-branch-soft text-ink" : "border-line text-ink-3 hover:border-ink-3 hover:text-ink"}`}
       aria-pressed={open}
       disabled={!here}
       title="Show or hide the Terminal (⌃`)"
       data-testid="terminal-toggle"
       onClick={toggle}
     >
-      <span className={`font-mono text-[10.5px] font-bold tracking-[-0.04em] ${open ? "text-fawn" : ""}`} aria-hidden>
+      <span className={`font-mono text-[10.5px] font-bold tracking-[-0.04em] ${open ? "text-branch" : ""}`} aria-hidden>
         &gt;_
       </span>
       Terminal
