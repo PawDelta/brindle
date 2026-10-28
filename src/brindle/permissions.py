@@ -147,6 +147,7 @@ class Request:
     command: str | None = None
     path: str | None = None
     url: str | None = None
+    agent: str = ""        # the asking agent's id (session_roots), when the hook knows it
 
     def target(self) -> str:
         return self.command or self.path or self.url or self.tool
@@ -507,7 +508,7 @@ CLAUDE_KINDS = {
 MCP_TOOL_PATTERN = "mcp__.*"
 
 
-def from_claude(payload: dict, worktree: str = "", repo_root: str = "") -> Request | None:
+def from_claude(payload: dict, worktree: str = "", repo_root: str = "", agent: str = "") -> Request | None:
     """Claude Code's PermissionRequest payload as a Request; None when it
     names no tool (nothing to decide)."""
     tool = payload.get("tool_name")
@@ -529,7 +530,7 @@ def from_claude(payload: dict, worktree: str = "", repo_root: str = "") -> Reque
             path = raw if os.path.isabs(raw) else os.path.join(cwd or os.getcwd(), raw)
     elif kind == "fetch":
         url = ti.get("url") if isinstance(ti.get("url"), str) else None
-    return Request("claude", kind, tool, cwd, worktree, repo_root, command, path, url)
+    return Request("claude", kind, tool, cwd, worktree, repo_root, command, path, url, agent)
 
 
 def claude_output(decision: Decision) -> dict | None:
@@ -644,7 +645,7 @@ def _codex_text(value: object) -> str | None:
     return None
 
 
-def from_codex(payload: dict, worktree: str = "", repo_root: str = "") -> list[Request] | None:
+def from_codex(payload: dict, worktree: str = "", repo_root: str = "", agent: str = "") -> list[Request] | None:
     """Codex's PermissionRequest payload as Requests: one, or one per file an
     apply_patch touches; None when it names no tool."""
     tool = payload.get("tool_name")
@@ -652,7 +653,7 @@ def from_codex(payload: dict, worktree: str = "", repo_root: str = "") -> list[R
         return None
     ti = payload.get("tool_input")
     cwd = str(payload.get("cwd") or worktree or "")
-    base = dict(provider="codex", tool=tool, cwd=cwd, worktree=worktree, repo_root=repo_root)
+    base = dict(provider="codex", tool=tool, cwd=cwd, worktree=worktree, repo_root=repo_root, agent=agent)
     if tool.startswith("mcp__"):
         return [Request(kind="mcp", **base)]
     command = _codex_text(ti.get("command") if isinstance(ti, dict) else ti)
@@ -731,7 +732,7 @@ OPENCODE_KINDS = {
 }
 
 
-def from_opencode(payload: dict, worktree: str = "", repo_root: str = "") -> list[Request] | None:
+def from_opencode(payload: dict, worktree: str = "", repo_root: str = "", agent: str = "") -> list[Request] | None:
     """The plugin's {tool, args} as Requests (one per file an ``apply_patch``
     touches); None when it names no tool."""
     tool = payload.get("tool")
@@ -743,7 +744,7 @@ def from_opencode(payload: dict, worktree: str = "", repo_root: str = "") -> lis
     if tool == "apply_patch":   # what OpenCode gives GPT-5/Codex models in place of edit and write
         patch = args.get("patchText") if isinstance(args.get("patchText"), str) else None
         return _patch_requests(patch, cwd, dict(provider="opencode", tool=tool, cwd=cwd,
-                                                worktree=worktree, repo_root=repo_root))
+                                                worktree=worktree, repo_root=repo_root, agent=agent))
     kind = OPENCODE_KINDS.get(tool, "other")
     command = path = url = None
     if kind == "bash":
@@ -756,7 +757,7 @@ def from_opencode(payload: dict, worktree: str = "", repo_root: str = "") -> lis
             path = _abs_path(raw, cwd)
     elif kind == "fetch":
         url = args.get("url") if isinstance(args.get("url"), str) else None
-    return [Request("opencode", kind, tool, cwd, worktree, repo_root, command, path, url)]
+    return [Request("opencode", kind, tool, cwd, worktree, repo_root, command, path, url, agent)]
 
 
 # -- providers: Antigravity (agy) --------------------------------------------------------------
@@ -799,7 +800,7 @@ def _agy_arg(args: dict, name: str) -> str | None:
     return value
 
 
-def from_agy(payload: dict, worktree: str = "", repo_root: str = "") -> Request | None:
+def from_agy(payload: dict, worktree: str = "", repo_root: str = "", agent: str = "") -> Request | None:
     """agy's PreToolUse payload as a Request; None when it names no tool."""
     call = payload.get("toolCall")
     if not isinstance(call, dict):
@@ -824,7 +825,7 @@ def from_agy(payload: dict, worktree: str = "", repo_root: str = "") -> Request 
         server, inner = _agy_arg(args, "ServerName"), _agy_arg(args, "ToolName")
         if server and inner:
             tool = f"mcp__{server}__{inner}"
-    return Request("antigravity", kind, tool, cwd, worktree, repo_root, command, path, url)
+    return Request("antigravity", kind, tool, cwd, worktree, repo_root, command, path, url, agent)
 
 
 def agy_output(decision: Decision | None, req: Request | None = None,
@@ -1157,6 +1158,49 @@ def _roots(req: Request) -> list[str]:
     return list(dict.fromkeys(r for r in (req.worktree, req.repo_root) if r))
 
 
+def session_roots(req: Request) -> list[str]:
+    """Every checkout ``req``'s session works in: its own worktree and repo,
+    the session's own repo and each repo attached to it (session_repos of the
+    asking agent's root agent), and the session's worktrees in them. Another
+    session's repos stay out. Read from the database read-only; with no
+    agent, or one brindle doesn't know, just ``req``'s own (_roots)."""
+    import sqlite3
+
+    from brindle.config import db_path
+
+    roots = _roots(req)
+    path = db_path()
+    if not req.agent or not path.exists():
+        return roots
+    try:
+        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+        try:
+            root, seen = None, set()
+            parent = req.agent
+            while parent and parent not in seen:       # autopilot.root_of: the topmost ancestor
+                seen.add(parent)
+                row = conn.execute("SELECT id, parent_id FROM agents WHERE id=?", (parent,)).fetchone()
+                if row is None:
+                    break
+                root, parent = row
+            if root is None:
+                return roots
+            repos = [r for (r,) in conn.execute(
+                "SELECT w.repo_root FROM agents a JOIN workspaces w ON w.id = a.workspace_id WHERE a.id=? "
+                "UNION ALL SELECT repo_root FROM session_repos WHERE root_id=?", (root, root))]
+            worktrees = conn.execute(
+                "WITH RECURSIVE tree(id) AS (SELECT ? UNION SELECT a.id FROM agents a JOIN tree ON a.parent_id = tree.id) "
+                "SELECT w.repo_root, w.path FROM agents a JOIN workspaces w ON w.id = a.workspace_id "
+                "WHERE a.id IN (SELECT id FROM tree)", (root,)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return roots
+    wanted = {os.path.normpath(r) for r in repos}
+    roots += repos + [p for repo, p in worktrees if os.path.normpath(repo) in wanted]
+    return list(dict.fromkeys(os.path.normpath(r) for r in roots if r))
+
+
 def path_candidates(req: Request, resolved_only: bool = False) -> list[str]:
     """The forms of ``req.path`` a rule may match. ``resolved_only`` (for
     allows) leaves out the name as given: a symlink under an allowed folder
@@ -1168,9 +1212,9 @@ def path_candidates(req: Request, resolved_only: bool = False) -> list[str]:
     given = os.path.join(os.path.realpath(os.path.dirname(os.path.abspath(req.path))),
                          os.path.basename(req.path))
     paths = [real] if resolved_only else [real, os.path.abspath(req.path), given]
-    out = list(paths)
+    out, roots = list(paths), session_roots(req)
     for p in paths:
-        for root in _roots(req):
+        for root in roots:
             rel = _inside(p, root)
             if rel:
                 out.append(rel)
@@ -1249,7 +1293,7 @@ def _is_force(arg: str) -> bool:
 
 def _readonly_git(req: Request, argv: list[str]) -> bool:
     """Whether ``argv`` is a read-only git command (READONLY_GIT, no unsafe or
-    force option), with ``-C`` only into the worktree or repo root."""
+    force option), with ``-C`` only into a checkout of the session (session_roots)."""
     if not argv or argv[0] != "git":
         return False
     args = argv[1:]
@@ -1257,7 +1301,7 @@ def _readonly_git(req: Request, argv: list[str]) -> bool:
         if len(args) < 3:
             return False
         path = os.path.realpath(os.path.join(req.cwd or req.worktree, args[1]))
-        if not any(path == os.path.realpath(root) or _inside(path, root) for root in _roots(req)):
+        if not any(path == os.path.realpath(root) or _inside(path, root) for root in session_roots(req)):
             return False
         args = args[2:]
     return bool(args and args[0] in READONLY_GIT
@@ -1802,11 +1846,11 @@ def forced_push(command: str) -> bool:
 
 
 def _in_worktree(req: Request) -> bool:
-    """A path (resolved) inside the worktree or repo root, not under .git."""
+    """A path (resolved) inside a checkout of the session (session_roots), not under .git."""
     if not req.path:
         return False
     real = os.path.realpath(req.path)
-    for root in _roots(req):
+    for root in session_roots(req):
         rel = _inside(real, root)
         if rel and ".git" not in Path(rel).parts:
             return True
@@ -1815,7 +1859,7 @@ def _in_worktree(req: Request) -> bool:
 
 def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
     if rule.match_type == "tracked":
-        return req.kind == "read" and is_tracked(req.path, _roots(req))
+        return req.kind == "read" and is_tracked(req.path, session_roots(req))
     if rule.match_type == "worktree":
         return req.kind in PATH_KINDS and _in_worktree(req)
     command = (req.command or "").strip()
@@ -3935,7 +3979,7 @@ def learnable_pattern(req: Request) -> tuple[str, str] | None:
         if not req.path:
             return None
         real = os.path.realpath(req.path)
-        for root in _roots(req):
+        for root in session_roots(req):
             rel = _inside(real, root)
             if rel:
                 return req.kind, rel
