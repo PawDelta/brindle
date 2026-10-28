@@ -30,7 +30,6 @@ import fnmatch
 import hashlib
 import os
 import re
-import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -136,8 +135,8 @@ def push_scopes(keys: list[str]) -> list[dict]:
 # shell command (grep, ls, cat, cd ...), or, of a dev tool's commands, only
 # a test run or a query whose operation brindle knows (DEV_OPERATIONS; "uv
 # run" alone may run anything). Three more change files, each only in a
-# checkout (_checkouts: any repo brindle works in or a session attached, and
-# its worktrees): a local git command (GIT_LOCAL: never a push), a package
+# checkout (_checkouts: a repo of the asking agent's session, attached or its
+# own, and the session's worktrees): a local git command (GIT_LOCAL: never a push), a package
 # install into the project (INSTALLS), and a file change (a write, edit,
 # move, copy or delete, a redirection) whose every path is in one. An
 # approval at the general scope covers any command whose every part falls in
@@ -242,25 +241,10 @@ def _dev_operation(words: list[str]) -> str | None:
 
 
 def _checkouts(req: Request) -> list[str]:
-    """Where a family's change may land: ``req``'s worktree and repo, every
-    repo brindle has a workspace in or a session attached, and each of their
-    worktrees. Read from the database read-only (none yet: just ``req``'s)."""
-    from brindle.config import db_path
-
-    roots = permissions._roots(req)
-    path = db_path()
-    if path.exists():
-        try:
-            conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
-            try:
-                rows = [*conn.execute("SELECT repo_root, path FROM workspaces"),
-                        *conn.execute("SELECT repo_root, '' FROM session_repos")]
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            rows = []
-        roots += [r for row in rows for r in row if r]
-    return list(dict.fromkeys(os.path.normpath(r) for r in roots))
+    """Where a family's change may land: every checkout of ``req``'s session
+    (permissions.session_roots: its worktree and repo, each repo attached to
+    the session and the session's worktrees in them), never another session's."""
+    return permissions.session_roots(req)
 
 
 def _runs_in(cwd: str, roots: list[str]) -> bool:

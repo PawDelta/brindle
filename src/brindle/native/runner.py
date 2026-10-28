@@ -278,7 +278,7 @@ def permission_decision(db: DB, agent_id: str, ws: Workspace, tool: str, args: d
         return "deny"
     name = f"mcp__brindle__{tool}" if tool in tool_names() else tool
     req = permissions.from_claude({"tool_name": name, "tool_input": args, "cwd": ws.path},
-                                  ws.path, ws.repo_root)
+                                  ws.path, ws.repo_root, agent_id)
     if req is None:
         return "deny"
     req = dataclasses.replace(req, provider="native")
@@ -299,7 +299,7 @@ def ask_person(db: DB, agent_id: str, ws: Workspace, tool: str, args: dict) -> b
     from brindle import permissions as policy
     from brindle.config import load_repo_config
 
-    req = policy.from_claude({"tool_name": tool, "tool_input": args, "cwd": ws.path}, ws.path, ws.repo_root)
+    req = policy.from_claude({"tool_name": tool, "tool_input": args, "cwd": ws.path}, ws.path, ws.repo_root, agent_id)
     held = db.get_agent(agent_id)
     if req is None or held is None:
         return False

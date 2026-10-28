@@ -325,7 +325,7 @@ def test_cd_chain_keeps_its_family(ws, command, found):
 ])
 def test_approval_widens_to_change_families(db, ws, tmp_path, approved, sibling, decision):
     """An approved local git change, install or file change covers every
-    other of its family in any repo attached to brindle or its worktrees;
+    other of its family in any repo of the asking agent's session or its worktrees;
     never a push, a reset or clean of a checkout, a delete of a repo, a write
     outside the repos, sudo, or what brindle can't read."""
     permissions.apply_preset("secure")
@@ -339,13 +339,47 @@ def test_approval_widens_to_change_families(db, ws, tmp_path, approved, sibling,
     (Path(ws.path) / "src" / "link").symlink_to(out)
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
     db.add_session_repo("boss", "lib", str(lib))
-    db.add_workspace(replace(ws, id="other", path=str(other), repo_root=str(tmp_path / "other"), tmux_session="o"))
-    worker(db, ws, "w1")
-    hook = Hook(db, "w1", bash(ws, approved))
+    other_ws = replace(ws, id="other", path=str(other), repo_root=str(lib), tmux_session="o")
+    db.add_workspace(other_ws)
+    worker(db, ws, "w1"), worker(db, other_ws, "w2")
+    hook = Hook(db, "w1", replace(bash(ws, approved), agent="w1"))
     [item] = grants.groups(grants.pending_asks(db, ws.repo_root))
     grants.decide_group(db, item.key, "general", "timed", 15)
     assert hook.done.wait(5) and hook.answer == "allow_once"
-    assert decide(bash(ws, sibling.format(ws=ws.path, lib=lib, other=other, out=out))).decision == decision
+    sibling = sibling.format(ws=ws.path, lib=lib, other=other, out=out)
+    assert decide(replace(bash(ws, sibling), agent="w1")).decision == decision
+
+
+@pytest.mark.parametrize("agent, kind, where, sub, decision", [
+    ("w1", "write", "lib", "write-worktree", "allow"),        # a second repo attached to the session
+    ("w1", "bash", "lib", "write-worktree", "allow"),
+    ("w1", "write", "alien", "write-outside", "ask"),        # attached only to another session
+    ("w1", "bash", "alien", "write-outside", "ask"),
+    ("", "write", "lib", "write-outside", "ask"),             # no session known: its own checkout only
+])
+def test_session_repos_count_as_checkout(db, ws, tmp_path, agent, kind, where, sub, decision):
+    """Every repo attached to the asking agent's session is in the checkout
+    for the worktree matcher, the write classes and the change families;
+    another session's repo is not."""
+    from brindle import permission_groups
+
+    permissions.apply_preset("permissive")
+    for name in ("lib", "alien"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "x.py").write_text("a\n")
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
+    db.add_agent(Agent("boss2", ws.id, "supervisor", "claude", None, "interactive", "processing", "%c", None,
+                       time.time()))
+    db.add_session_repo("boss", "lib", str(tmp_path / "lib"))
+    db.add_session_repo("boss2", "alien", str(tmp_path / "alien"))
+    worker(db, ws, "w1")
+    target = tmp_path / where / "x.py"
+    req = replace(write(ws, "x.py"), path=str(target)) if kind == "write" else bash(ws, f"sed -i '' s/a/b/ {target}")
+    req = replace(req, agent=agent)
+    assert permission_groups.classify(req, permissions.all_rules(ws.repo_root)) == [("files", sub)]
+    if kind == "bash":
+        assert grants.families(req) == ([grants.WRITES] if sub == "write-worktree" else None)
+    assert decide(req).decision == decision
 
 
 def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_blocks(db, ws):
