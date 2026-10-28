@@ -495,7 +495,7 @@ describe("review", () => {
     expect(screen.getByRole("dialog", { name: "Review & open PR" })).toBeTruthy();
   });
 
-  it("opens the PR with the title and body pre-filled from the engine's draft; when the person's settings let brindle open it, shows that it did, with the link, and keeps the diff editable", async () => {
+  it("opens the PR with the title and body pre-filled from the engine's draft; an open PR's new commits wait for the person's Push, and the diff stays editable", async () => {
     const { daemon, openUrl } = mount({ sessionReview: { sup1: READY } }, { ...onSession, sheet: { kind: "review" } });
     await screen.findByRole("dialog", { name: "Review & open PR" });
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
@@ -521,23 +521,29 @@ describe("review", () => {
     sync?.stop();
     cleanup();
 
-    // brindle opened the PR itself (the engine's auto-PR setting): the sheet says so, with the link and no Open
-    // PR of its own, and the diff stays editable: edits go to the branch, which is the PR's.
-    const auto = mount(
-      {
-        sessionReview: { sup1: { ...READY, pr: { url: "https://github.com/example/proj/pull/7" } } },
-        config: { user: {}, repo: { auto_pr: true }, local: {}, keys: [] },
-        goal: { ...goal, goal_phase: "pr_open", pr_url: "https://github.com/example/proj/pull/7" },
-      },
-      { ...onSession, sheet: { kind: "review" } },
-    );
+    // The PR the person opened, everything on it; then a commit in the session checkout, said only by a git
+    // sweep: it waits, the goal panel's way back into Review says so, and Push is the only way onto the PR.
+    const later = mount({
+      sessionReview: { sup1: { ...READY, pr: { url: "https://github.com/example/proj/pull/7", unpushed: 0 } } },
+      goal: { ...goal, goal_phase: "pr_open", pr_url: "https://github.com/example/proj/pull/7" },
+    });
+    const back = await within(nav()).findByTestId("goal-pr-review");
+    expect(back.textContent).not.toContain("not on the PR");
+    later.daemon.data.sessionReview.sup1.pr = { url: "https://github.com/example/proj/pull/7", unpushed: 2 };
+    later.daemon.send({ type: "git", workspace_id: root.id, status: { branch: "dev/ls", base: "main", ahead: 3, behind: 0, dirty_files: [], unpushed: 2 } });
+    await waitFor(() => expect(within(nav()).getByTestId("goal-pr-review").textContent).toContain("2 not on the PR"));
+    fireEvent.click(within(nav()).getByTestId("goal-pr-review"));
     await screen.findByRole("dialog", { name: "Review & open PR" });
     const notice = await within(sheet()).findByTestId("pr-opened");
-    expect(notice.textContent).toContain("brindle opened the PR");
     expect(notice.textContent).toContain("https://github.com/example/proj/pull/7");
+    expect(within(notice).getByTestId("pr-unpushed").textContent).toBe("2 new commits not on the PR");
     expect(within(sheet()).queryByTestId("open-pr-step")).toBeNull();
+    expect(later.daemon.prPushes).toEqual([]);
+    fireEvent.click(within(notice).getByRole("button", { name: "Push" }));
+    await waitFor(() => expect(later.daemon.prPushes).toEqual(["sup1"]));
+    await waitFor(() => expect(within(sheet()).queryByTestId("pr-unpushed")).toBeNull());
     fireEvent.click(within(sheet()).getByRole("button", { name: "Open the PR ↗" }));
-    expect(auto.openUrl).toHaveBeenCalledWith("https://github.com/example/proj/pull/7");
+    expect(later.openUrl).toHaveBeenCalledWith("https://github.com/example/proj/pull/7");
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
     await waitFor(() => expect(within(hunk()).getByRole("button", { name: HUNK })).toHaveProperty("disabled", false));
     // The sidebar says it once, in the goal's lifecycle: PR open, with its link.

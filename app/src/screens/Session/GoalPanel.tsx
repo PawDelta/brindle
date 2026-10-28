@@ -346,7 +346,9 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
   // The milestone being worked on: the running one, else the first not yet passed; none once the goal is done.
   const current = finished ? undefined : (milestones.find((m) => m.status === "running") ?? milestones.find((m) => m.status !== "passed"));
   const phaseLabel = GOAL_PHASE_LABEL[phase];
-  /* The lifecycle's own step, where it has one: Ready for PR's Review & open PR, PR open's link. */
+  /* The lifecycle's own step, where it has one: Ready for PR's Review & open PR, PR open's link and the
+     way back into Review, where the session's commits not on the PR yet wait for the person's Push. */
+  const unpushed = readiness.pr?.unpushed ?? 0;
   const step =
     phase === "ready_for_pr" && onReview ? (
       <button
@@ -360,17 +362,31 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
         <span className="flex-1" />›
       </button>
     ) : phase === "pr_open" && prUrl ? (
-      <button
-        type="button"
-        className={`flex items-center gap-s1 rounded-md bg-branch-soft px-s1 py-1 text-left text-xs font-medium text-branch hover:opacity-90 ${compact ? "mx-0.5" : ""}`}
-        data-testid="goal-pr"
-        title={prUrl}
-        onClick={() => void openUrl(prUrl).catch((e: unknown) => setActionError(message(e)))}
-      >
-        <span className="min-w-0 truncate">{prUrl.replace(/^https?:\/\//, "")}</span>
-        <span className="flex-1" />
-        Open the PR ↗
-      </button>
+      <div className={`flex flex-col gap-0.5 ${compact ? "mx-0.5" : ""}`}>
+        <button
+          type="button"
+          className="flex items-center gap-s1 rounded-md bg-branch-soft px-s1 py-1 text-left text-xs font-medium text-branch hover:opacity-90"
+          data-testid="goal-pr"
+          title={prUrl}
+          onClick={() => void openUrl(prUrl).catch((e: unknown) => setActionError(message(e)))}
+        >
+          <span className="min-w-0 truncate">{prUrl.replace(/^https?:\/\//, "")}</span>
+          <span className="flex-1" />
+          Open the PR ↗
+        </button>
+        {onReview && (
+          <button
+            type="button"
+            className="flex items-center gap-s1 rounded-md px-s1 py-0.5 text-left text-xs text-ink-2 hover:bg-surface-2"
+            data-testid="goal-pr-review"
+            onClick={onReview}
+          >
+            Review changes
+            {unpushed > 0 && <span className="text-sap">· {unpushed} not on the PR</span>}
+            <span className="flex-1" />›
+          </button>
+        )}
+      </div>
     ) : null;
   /* Done's step, beside the Done status: close the session, one click, nothing asked. */
   const closeSession =

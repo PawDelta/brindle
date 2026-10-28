@@ -18,6 +18,7 @@ import { watchInbox } from "./notify";
 afterEach(cleanup);
 
 const notice: InboxItemDTO = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };
+const prReady: InboxItemDTO = { kind: "pr_ready", reason: "PR ready for your approval", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "Ship ls --json" };
 const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship ls --json" };
 
 function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client(), props: Partial<InboxScreenProps> = {}) {
@@ -61,11 +62,15 @@ describe("inbox", () => {
       repos: [{ repo_root: REPO, name: "proj" }],
       sessions: [session],
       workspaces: [root, worker],
-      inbox: [question, waiting, notice],
+      inbox: [question, waiting, notice, prReady],
     });
     const { sync, onOpen } = mount(daemon);
     const group = await screen.findByRole("region", { name: "Ship ls --json" });
-    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(2);
+    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(3);
+    // The PR brindle prepared (its checks passed, nothing pushed): Review & open PR opens the session's sheet.
+    expect(card("pr_ready").textContent).toContain("PR ready for your approval");
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Review & open PR" }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "review" });
     expect(group.textContent).toContain("sup1 · proj");
     fireEvent.click(within(group).getByRole("button", { name: "Open the session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO);
@@ -216,6 +221,21 @@ describe("inbox", () => {
 
     fireEvent.click(within(held).getByRole("button", { name: "Allow once" }));
     await waitFor(() => expect(posts(daemon).find((r) => r.path === "/permissions/asks/decide")?.body).toEqual({ key: pushes.key, scope: "general", mode: "once" }));
+    sync.stop();
+  });
+
+  it.each([
+    ["the groups entry's reason", null, "the shell/unchecked baseline is ask"],
+    ["the engine's d-shell-syntax rule", "d-shell-syntax", "shell syntax cannot be checked safely"],
+  ])("unchecked commands opt-in: the ask (%s) offers only Deny and Allow once, and a link to the Settings row", async (_, rule, reason) => {
+    const unchecked: AskGroupDTO = { ...pushes, key: "k-unchecked", title: "Allow this unchecked command?", modes: ["once", "deny"], rule, items: pushes.items.map((a) => ({ ...a, rule, reason })) };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [unchecked] });
+    const { sync, onOpenRule } = mount(daemon);
+    const held = await screen.findByRole("article", { name: "Allow this unchecked command?" });
+    expect(within(held).getAllByRole("button").filter((b) => ["Deny", "Allow once", "Allow"].includes(b.textContent ?? "")).map((b) => b.textContent)).toEqual(["Deny", "Allow once"]);
+    fireEvent.click(within(held).getByRole("button", { name: "Stop asking for these…" }));
+    expect(within(held).queryByRole("button", { name: /rule/ })).toBeNull();
+    expect(onOpenRule).toHaveBeenCalledWith("unchecked-commands");
     sync.stop();
   });
 

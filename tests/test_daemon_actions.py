@@ -784,6 +784,166 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     assert len(typed) == 2
 
 
+class _FakeCLI:
+    """subprocess.Popen for a cloud CLI's sign-in: ``on_run(argv, env)`` gives its output lines."""
+    on_run = staticmethod(lambda argv, env: [])
+
+    def __init__(self, argv, env=None, **kwargs):
+        self.stdout, self.returncode = iter(self.on_run(argv, env)), 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.mark.parametrize("case", ["api_key", "bedrock", "foundry", "org_refuses", "org_route_wins", "opencode_azure",
+                                  "concurrent", "options"])
+def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_org(
+        db, world, tmp_path, monkeypatch, case):
+    import subprocess
+
+    from brindle import cloud_login, connections, profiles, tmux
+    from brindle.pro import managed_models
+    from brindle.pro.team_policy import ProviderConfig
+
+    path = "/v1/providers/claude/connection"
+    aws = tmp_path / "no-aws" / "config"     # AWS_CONFIG_FILE (conftest)
+    aws.parent.mkdir()
+    ran = []
+    # The sign-in job's cloud CLI: a fake process, nothing else's.
+    monkeypatch.setattr(routes_actions, "subprocess", SimpleNamespace(
+        **{k: getattr(subprocess, k) for k in ("DEVNULL", "PIPE", "STDOUT", "CompletedProcess")}, Popen=_FakeCLI))
+    if case == "api_key":
+        code, reply = _send("PUT", path, {"method": "api_key"})
+        assert code == 200 and (reply["method"], reply["choice"]["method"], reply["cloud"]) == ("api_key",) * 2 + (None,)
+        assert profiles.load_profile("developer", world.repo_root).auth == "api_key"
+    elif case == "bedrock":
+        aws.write_text("[profile work-sso]\nsso_session = corp\n")
+        settings = {"AWS_PROFILE": "work-sso", "AWS_REGION": "us-east-1"}
+        code, reply = _send("PUT", path, {"method": "cloud", "cloud": "bedrock", "settings": settings})
+        assert code == 200 and (reply["cloud"], reply["settings"]) == ("bedrock", settings)
+        assert reply["login"] is not None and reply["clouds"] == ["bedrock", "vertex", "foundry"]
+        # Another route inherited from the shell, and a personal key: the choice wins, the key goes.
+        monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "FAKE_PERSONAL_KEY")
+        monkeypatch.setattr(tmux, "inherited_env", lambda *a: dict(os.environ))
+        env = agents._effective_window_env(db.get_agent("wk"), db.get_workspace("w-1"))
+        assert {k: env.get(k) for k in settings} == settings and cloud_login.provider_from_env(env) == "bedrock"
+        assert not env.get("ANTHROPIC_API_KEY") and not env.get("CLAUDE_CODE_USE_VERTEX")
+        # A first sign-in (no SSO token yet) runs the route's login; a second press while it runs waits.
+        def first(argv, env):
+            ran.append((argv, env.get("CLAUDE_CODE_USE_VERTEX")))
+            assert _send("POST", "/v1/providers/claude/cloud-sign-in")[0] == 202
+            return ["Open https://device.sso.example/ABCD\n"]
+        monkeypatch.setattr(_FakeCLI, "on_run", staticmethod(first))
+        code, job = _send("POST", "/v1/providers/claude/cloud-sign-in")
+        assert code == 202 and ran == [(["aws", "sso", "login", "--profile", "work-sso"], "")]
+        done = [e["payload"] for e in bus.tail(db, kinds=("job.done",))]
+        assert [d["result"]["result"] for d in done] == ["waiting", "signed in"] and done[-1]["job"] == job["job"]
+        assert any(e["payload"]["text"].startswith("Open https://device") for e in bus.tail(db, kinds=("job.progress",)))
+    elif case == "foundry":
+        # An endpoint inherited for an older resource: the chosen resource is the only one the pane sees.
+        settings = {"ANTHROPIC_FOUNDRY_RESOURCE": "new-resource", "AZURE_TENANT_ID": "tenant-1"}
+        real_status = cloud_login.status     # not signed in to the Azure CLI yet
+        monkeypatch.setattr(cloud_login, "status", lambda *a, run=None, **kw: real_status(
+            *a, run=lambda argv, **_: subprocess.CompletedProcess(argv, 1, "", "Please run 'az login'"), **kw))
+        code, reply = _send("PUT", path, {"method": "cloud", "cloud": "foundry", "settings": settings})
+        assert code == 200 and reply["login"]["valid"] is False
+        monkeypatch.setenv("ANTHROPIC_FOUNDRY_BASE_URL", "https://old-resource.services.ai.azure.com/anthropic")
+        monkeypatch.setattr(tmux, "inherited_env", lambda *a: dict(os.environ))
+        env = agents._effective_window_env(db.get_agent("wk"), db.get_workspace("w-1"))
+        assert env["ANTHROPIC_FOUNDRY_RESOURCE"] == "new-resource" and not env.get("ANTHROPIC_FOUNDRY_BASE_URL")
+        assert cloud_login.provider_from_env(env) == "foundry"
+        monkeypatch.setattr(_FakeCLI, "on_run", staticmethod(lambda argv, env: ran.append(argv) or []))
+        assert _send("POST", "/v1/providers/claude/cloud-sign-in")[0] == 202
+        assert ran == [["az", "login", "--tenant", "tenant-1"]]
+        assert bus.tail(db, kinds=("job.done",))[-1]["payload"]["result"]["result"] == "signed in"
+    elif case == "org_refuses":
+        monkeypatch.setattr(managed_models, "current", lambda repo: managed_models.Managed("acme", None, True))
+        code, reply = _send("PUT", path, {"method": "api_key"})
+        assert code == 403 and "acme" in reply["error"]["message"]
+        assert _send("GET", path)[1]["choice"] is None
+    elif case == "org_route_wins":
+        # An older provider_config: the org's Bedrock route, over a choice saved before it.
+        assert _send("PUT", path, {"method": "api_key"})[0] == 200
+        org = managed_models.Managed("acme", ProviderConfig("bedrock", region="us-west-2"), False)
+        monkeypatch.setattr(managed_models, "current", lambda repo: org)
+        code, reply = _send("PUT", path, {"method": "sign_in"})
+        assert code == 403 and "acme" in reply["error"]["message"]
+        code, reply = _send("GET", path)
+        assert (reply["method"], reply["cloud"], reply["settings"], reply["choice"]["method"]) == (
+            "cloud", "bedrock", {"AWS_REGION": "us-west-2"}, "api_key") and reply["managed"]
+        assert profiles.load_profile("developer", world.repo_root).auth == "auto"
+    elif case == "opencode_azure":
+        (Path(world.repo_root) / ".brindle" / "agents").mkdir(parents=True, exist_ok=True)
+        (Path(world.repo_root) / ".brindle" / "agents" / "oc.md").write_text(
+            "---\nname: oc\nprovider: opencode\nmodel: azure/gpt-5\n---\nWork.\n")
+        # The Azure CLI is signed in; OpenCode's own store isn't connected yet.
+        token = json.dumps({"accessToken": "FAKE", "expires_on": time.time() + 3600})
+        real_status = cloud_login.status
+        monkeypatch.setattr(cloud_login, "status", lambda *a, run=None, **kw: real_status(
+            *a, run=lambda argv, **_: subprocess.CompletedProcess(argv, 0, token, ""), **kw))
+        code, _ = _send("PUT", "/v1/providers/opencode/connection",
+                        {"method": "cloud", "cloud": "azure", "settings": {"AZURE_RESOURCE_NAME": "res"}})
+        assert code == 200
+
+        def connect(argv, env):     # OpenCode's Entra connection, written to the store it was given
+            store = Path(env["XDG_DATA_HOME"]) / "opencode"
+            store.mkdir(parents=True)
+            (store / "auth.json").write_text(json.dumps({"azure": {"type": "oauth", "accountId": "res"}}))
+            return []
+        monkeypatch.setattr(_FakeCLI, "on_run", staticmethod(connect))
+        assert _send("POST", "/v1/providers/opencode/cloud-sign-in")[0] == 202
+        assert bus.tail(db, kinds=("job.done",))[-1]["payload"]["result"]["result"] == "signed in"
+        oc = profiles.load_profile("oc", world.repo_root)
+        assert cloud_login.azure_connected({**oc.env, **cloud_login.profile_env(oc, oc.env)})
+    elif case == "concurrent":
+        # Codex's choice is saved while Claude's is being written: both are kept.
+        real_read, real_refusal, others, codex = config._read_json, connections.refusal, [], []
+        state = {"armed": False, "fired": False}
+        # Codex's PUT got as far as it can while Claude's is between reading and writing:
+        # waiting on the config writer's lock, or (unserialized) all the way through.
+        progressed = threading.Event()
+
+        class Writer:
+            def __init__(self):
+                self.lock = threading.Lock()
+
+            def __enter__(self):
+                if not self.lock.acquire(blocking=False):
+                    progressed.set()
+                    self.lock.acquire()
+
+            def __exit__(self, *exc):
+                self.lock.release()
+        monkeypatch.setattr(config, "_USER_WRITE", Writer())
+        monkeypatch.setattr(connections, "refusal", lambda *a, **kw: state.update(armed=True) or real_refusal(*a, **kw))
+
+        def read(p, *rest):
+            # Claude's first read of the config after its policy check: Codex's PUT starts there.
+            data = real_read(p, *rest)
+            if state["armed"] and not state["fired"] and Path(p) == config.user_config_path():
+                state["fired"] = True
+                t = threading.Thread(target=lambda: codex.append(_send(
+                    "PUT", "/v1/providers/codex/connection", {"method": "sign_in"})) or progressed.set())
+                t.start()
+                progressed.wait()
+                others.append(t)
+            return data
+        monkeypatch.setattr(config, "_read_json", read)
+        assert _send("PUT", path, {"method": "api_key"})[0] == 200
+        others[0].join()
+        assert codex[0][0] == 200 and set(config.user_settings()[connections.KEY]) == {"claude", "codex"}
+    else:
+        aws.write_text("[profile work-sso]\nsso_session = corp\nregion = us-east-1\n[default]\nregion = eu-west-1\n")
+        code, reply = _send("GET", "/v1/cloud/options")
+        assert code == 200 and reply["aws_profiles"] == [
+            {"name": "work-sso", "sso": True, "region": "us-east-1"}, {"name": "default", "sso": False, "region": "eu-west-1"}]
+        assert reply["gcloud"]["adc"] is False and reply["azure"] is None and "us-east-1" in reply["regions"]["bedrock"]
+
+
 @pytest.mark.parametrize("route", ["bedrock", "vertex"])
 def test_cloud_profile_login_uses_launch_identity(db, world, tmp_path, monkeypatch, route):
     import hashlib
@@ -1681,130 +1841,68 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     assert "--base main --head sess --title Ship it --body" in called.read_text()
 
 
-@pytest.mark.parametrize("opening,passed", [(True, False), (False, False), (False, True)])
-def test_auto_pr_checks(db, lead, monkeypatch, opening, passed):
-    from brindle import gates, git
-
-    messages, pushes = [], []
-    config.set_local(lead.repo_root, "auto_pr", True)
-    config.set_local(lead.repo_root, "checks", ["validate"])
-    monkeypatch.setattr(routes_actions.review, "require_ready", lambda *a: None)
-    monkeypatch.setattr(gates, "head", lambda ws: "verified")
-    monkeypatch.setattr(gates, "run_checked", lambda *a: (passed, "x" * gates.MAX_FAILURE_CHARS + "failure tail"))
-    monkeypatch.setattr(agents, "send_message", lambda db, to, text, **kw: messages.append((to, text)))
-    monkeypatch.setattr(git, "push", lambda path, branch, sha=None: pushes.append(sha))
-    monkeypatch.setattr(workspaces, "open_pull_request", lambda *a, **kw: pushes.append(kw["sha"]))
-    if not opening:
-        routes_actions._record_pr(db, ("lead", lead.branch), "https://github.com/o/r/pull/7", "old", True)
-    routes_actions.auto_pr(db, "lead", opening=opening)
-    row = db.conn.execute("SELECT pushed_sha FROM session_prs").fetchone()
-    if passed:
-        assert pushes == ["verified"] and row["pushed_sha"] == "verified" and messages == []
-        assert bus.tail(db, kinds=("session.pr_pushed",))[-1]["payload"]["commit"] == "verified"
-    else:
-        assert pushes == [] and (row is None if opening else row["pushed_sha"] == "old")
-        assert len(messages) == 1 and messages[0][0] == "lead"
-        assert "validate" in messages[0][1] and "failure tail" in messages[0][1]
-    assert not routes_actions._PR_WORK
-
-
-@pytest.mark.parametrize("auto_pr,org,opened", [
-    (True, None, True),
-    (False, None, False),
-    (True, "requires-review", False),
-], ids=["on", "off", "policy-forbids"])
-def test_session_review_auto_pr_opens_once_when_ready_and_allowed(db, lead, tmp_path, monkeypatch,
-                                                                   auto_pr, org, opened):
+@pytest.mark.parametrize("step,passed", [
+    ("ready", True),
+    ("ready", False),
+    ("open", True),
+    ("new-commits", True),
+], ids=["ready", "checks-fail", "open", "new-commits"])
+def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, step, passed):
+    """A ready session's PR is prepared (drafted, its checks run, nothing pushed) and put to the
+    person in the Inbox; only their Open PR pushes the checked sha, and an open PR's new commits
+    wait for their Push."""
+    from brindle import gates
     from brindle.daemon import session_review
-    from brindle.pro import team_policy
+    from brindle.service import inbox
 
-    sess, called = Path(lead.path), tmp_path / "gh-called"
+    sess, called, runs, told = Path(lead.path), tmp_path / "gh-called", [], []
     fake = tmp_path / "bin" / "gh"
     fake.parent.mkdir()
     fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
-    if org:
-        monkeypatch.setattr(team_policy.ProPolicy, "policy", lambda self: team_policy.OrgPolicy(
-            "acme", 1, require_human_review=True))
-    config.set_local(lead.repo_root, "auto_pr", auto_pr)
-    watch = session_review.ReadinessWatch()
-    watch.sweep(db)
-    _commit(sess, "a.py", "a\n")
-    assert watch.sweep(db) == ["lead"]
-    code, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
-    assert code == 200 and (ready["ready"], ready["auto_pr"]) == (True, opened)
-    _, cfg = _send("GET", f"/v1/config?repo={lead.repo_root}")
-    assert (cfg["repo"]["auto_pr"], cfg["auto_pr_forbidden"] is None) == (auto_pr, not org)
-    # Not ready (uncommitted work), then ready again with a new commit: no second PR, only a push.
-    (sess / "a.py").write_text("b\n")
-    assert watch.sweep(db) == []
-    head = _commit(sess, "a.py", "b\n")
-    assert watch.sweep(db) == ["lead"] and watch.sweep(db) == []
-    creates = called.read_text().count("pr create") if called.exists() else 0
-    urls = [e["payload"]["url"] for e in bus.tail(db, kinds=("session.pr_opened",))]
-    pushed = sh("git ls-remote origin sess", sess).split()[:1]
-    assert (creates, urls, pushed == [head]) == ((1, ["https://github.com/o/r/pull/7"], True) if opened
-                                                  else (0, [], False))
-
-
-def test_session_review_auto_pr_survives_gh_failing_a_restart_and_another_identity(db, lead, tmp_path, monkeypatch):
-    from brindle import identity_lock
-
-    sess, called, fail = Path(lead.path), tmp_path / "gh-called", tmp_path / "gh-fails"
-    fake = tmp_path / "bin" / "gh"
-    fake.parent.mkdir()
-    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\n[ -f {fail} ] && exit 1\necho https://github.com/o/r/pull/7\n")
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
-    config.set_local(lead.repo_root, "auto_pr", True)
-    _commit(sess, "a.py", "a\n")
-
-    def prs() -> list[tuple]:
-        return [tuple(r) for r in db.conn.execute("SELECT url, pushed_sha FROM session_prs")]
-
-    # gh can't open it: the compare page is no PR, so nothing is recorded and the next turn to ready retries.
-    fail.touch()
-    routes_actions.auto_pr(db, "lead", opening=True)
-    assert prs() == [] and bus.tail(db, kinds=("session.pr_opened",)) == []
-    fail.unlink()
-    creates = called.read_text().count("pr create")
+    config.set_local(lead.repo_root, "checks", ["validate"])
+    monkeypatch.setattr(gates, "run_checked", lambda db, ws, cmd, *a, **kw: (runs.append(cmd), (passed, "boom"))[1])
+    monkeypatch.setattr(agents, "send_message", lambda db, to, text, **kw: told.append((to, text)))
 
     def remote() -> str:
-        return sh("git ls-remote origin sess", sess).split()[0]
+        return (sh("git ls-remote origin sess", sess).split() or [""])[0]
 
-    # Its job dispatched but not yet run: a second trigger leaves that work alone, and someone
-    # else signing in before it runs keeps it from pushing or opening anything under their name.
-    head = _commit(sess, "a.py", "b\n")
-    held = []
+    def asked() -> list[tuple]:
+        return [(i.kind, i.reason) for i in inbox.items(db, None, panes={}) if i.kind.startswith("pr_")]
+
+    watch, held = session_review.ReadinessWatch(), []
+    watch.sweep(db)
+    head = _commit(sess, "a.py", "a\n")
+    # Its preparation dispatched but not yet run: the next sweep leaves that work alone.
     monkeypatch.setattr(routes_actions, "_spawn", held.append)
-    assert routes_actions.auto_pr(db, "lead", opening=True) is not None
-    assert routes_actions.auto_pr(db, "lead", opening=True) is None and len(held) == 1 and prs() == [(None, None)]
-    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: "someone@other.example")
+    assert watch.sweep(db) == ["lead"] and watch.sweep(db) == [] and len(held) == 1
+    assert (runs, asked(), remote()) == ([], [], "")
     held.pop()()
-    assert prs() == [] and remote() != head and called.read_text().count("pr create") == creates
-    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: None)
-    # The daemon stopped before running its job: after a restart the claim is matched to the PR gh finds open.
-    routes_actions.auto_pr(db, "lead", opening=True)
-    monkeypatch.setattr(routes_actions, "_PR_WORK", set())
     monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
-    routes_actions.auto_pr(db, "lead", opening=False)
-    assert prs() == [("https://github.com/o/r/pull/7", None)] and called.read_text().count("pr create") == creates
-    routes_actions.auto_pr(db, "lead", opening=False)
-    assert prs() == [("https://github.com/o/r/pull/7", head)]
-    # A push that fails is tried again (here on the session's next turn to ready), with no second PR.
-    origin = sh("git remote get-url origin", sess)
-    sh("git remote set-url origin /nowhere", sess)
-    head = _commit(sess, "a.py", "c\n")
-    routes_actions.auto_pr(db, "lead", opening=False)
-    sh(f"git remote set-url origin {origin}", sess)
-    assert routes_actions.auto_pr(db, "lead", opening=False) is None and prs()[0][1] != head
-    routes_actions.auto_pr(db, "lead", opening=True)
-    assert prs()[0][1] == head == remote() and called.read_text().count("pr create") == creates
-    # Signed in as someone else: the session's new commit isn't pushed under their name.
-    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: "someone@other.example")
-    newer = _commit(sess, "a.py", "d\n")
-    assert routes_actions.auto_pr(db, "lead", opening=False) is None and prs()[0][1] == head != newer
+    assert watch.sweep(db) == []        # checked once per HEAD
+    assert (runs, remote(), called.exists()) == (["validate"], "", False)
+    if not passed:      # the supervisor hears which check failed, and the PR waits
+        assert asked() == [("pr_failed", "PR checks failed: validate")]
+        assert [to for to, _ in told] == ["lead"] and "validate" in told[0][1] and "boom" in told[0][1]
+        return
+    assert asked() == [("pr_ready", "PR ready for your approval")] and told == []
+    if step == "ready":
+        return
+    # A check required since brindle prepared it, the HEAD the same: that one runs, the passed one isn't run again.
+    config.set_local(lead.repo_root, "checks", ["validate", "lint"])
+    assert _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})[0] == 202
+    # The sha brindle checked; the Inbox item goes.
+    assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1, [])
+    if step == "open":
+        return
+    newer = _commit(sess, "a.py", "b\n")
+    watch.sweep(db)
+    _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
+    assert (remote(), ready["pr"]) == (head, {"url": "https://github.com/o/r/pull/7", "unpushed": 1})
+    assert _send("POST", "/v1/sessions/lead/pr/push")[0] == 202
+    _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
+    assert (remote(), ready["pr"]["unpushed"], runs) == (newer, 0, ["validate", "lint", "validate", "lint"])
 
 
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:

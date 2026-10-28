@@ -741,35 +741,22 @@ def delete_session_file(db: DB, params: dict, body: Body) -> Any:
 _SESSION_PR = "root_id = ? AND branch = ?"
 
 
-@contextlib.contextmanager
-def _session_pr_checked(db: DB, root: Agent, ws: Workspace, job: Job, auto: bool):
-    """Check and hold the session checkout, waking its supervisor on an
-    automatic refusal. Manual requests report the refusal through the app.
-
-    Enter the gate separately so failures in the push or PR creation aren't
-    mistaken for check refusals. The gate's error already includes the check
-    command and the bounded tail of its output, or the checkout problem.
-    """
-    with contextlib.ExitStack() as held:
-        try:
-            head = held.enter_context(gates.pr_checked(
-                db, ws, lambda t: bus.publish(db, "job.progress", job=job.id, text=t)))
-        except workspaces.WorkspaceError as e:
-            if auto:
-                gates.tell(db, root.id, f"[brindle auto PR] Nothing was pushed: {e}\n"
-                           "Fix the problem so the session's PR can be opened or updated.")
-            raise
-        yield head
+def _checked(db: DB, ws: Workspace, job: Job, passed: tuple[str, list[str]] | None = None,
+             checked: list[str] | None = None):
+    """The PR gate on the session checkout (gates.pr_checked), each check's start as the job's progress."""
+    return gates.pr_checked(db, ws, lambda t: bus.publish(db, "job.progress", job=job.id, text=t),
+                            passed=passed, checked=checked)
 
 
-def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any:
+def open_session_pr(db: DB, params: dict, body: Body) -> Any:
     """Push the session branch and open its PR (``title``, ``body``,
-    ``draft``) the way ``brindle pr`` does; refused (409, with the reasons)
-    unless the session is ready. The job's result carries the URL, which is
-    also published as ``session.pr_opened`` and recorded in ``session_prs``
-    (``auto``: brindle's own, whose row :func:`auto_pr` claimed first). When
-    gh can't open it, the URL is the compare page's and nothing is recorded
-    (brindle's own fails instead)."""
+    ``draft``) the way ``brindle pr`` does: only ever on the person's
+    request. Refused (409, with the reasons) unless the session is ready.
+    The checks run first, unless brindle's preparation recorded them passing
+    on this very HEAD (prepare_pr). The job's result carries the URL, which
+    is also published as ``session.pr_opened`` and recorded in
+    ``session_prs``. When gh can't open it, the URL is the compare page's
+    and nothing is recorded."""
     root, ws = review.session(db, params["root"])
     identity_lock.ensure(root)
     review.require_ready(db, root, ws)
@@ -777,36 +764,52 @@ def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any
     key = (root.id, ws.branch)
 
     def work(db: DB, job: Job) -> Any:
-        try:
-            identity_lock.ensure(root)      # again: the person signed in may have changed since
-            with _session_pr_checked(db, root, ws, job, auto) as head:
-                url = workspaces.open_pull_request(ws, title, draft, body=text, sha=head)
-            if url is None and auto:
-                raise workspaces.WorkspaceError("pushed, but gh couldn't open the PR")
-            if url is None:     # the person opens it from the compare page: no PR to record yet
-                url = workspaces.compare_url(ws)
-            else:
-                _record_pr(db, key, url, head, auto)
-        except BaseException:
-            if auto:    # its claim goes, so the session's next turn to ready tries again
-                db.conn.execute(f"DELETE FROM session_prs WHERE {_SESSION_PR} AND url IS NULL", key)
-            raise
-        finally:
-            if auto:
-                _end_pr_work(key)
+        identity_lock.ensure(root)      # again: the person signed in may have changed since
+        # The commands brindle's preparation saw pass on its sha: any check configured since still runs.
+        prep = db.conn.execute(f"SELECT sha, checks FROM session_pr_prep WHERE {_SESSION_PR} AND state = 'passed'",
+                               key).fetchone()
+        passed = (prep["sha"], json.loads(prep["checks"] or "[]")) if prep else None
+        with _checked(db, ws, job, passed=passed) as head:
+            url = workspaces.open_pull_request(ws, title, draft, body=text, sha=head)
+        if url is None:     # the person opens it from the compare page: no PR to record yet
+            url = workspaces.compare_url(ws)
+        else:
+            _record_pr(db, key, url, head)
         return {"url": url, "keeps_merged_branches": workspaces.keeps_merged_branches(ws.repo_root)}
 
     return start_job("session.pr", work, root_id=root.id, repo_root=ws.repo_root)
 
 
-# The session branches (root id, branch) whose PR this daemon is opening or pushing
-# to now: a session_prs row with no url and no entry here was left by a daemon that
-# stopped half way. And the commit last tried on each and when, so a failed push
-# is tried again after PUSH_RETRY_SECONDS (or as soon as the session turns ready
-# again) instead of every sweep.
+def push_session_pr(db: DB, params: dict, body: Body) -> Any:
+    """Push the session's commits that aren't on its open PR yet: the
+    person's Push in the review (brindle never pushes them itself), through
+    the same checks as opening it. Refused (409) unless the session is
+    ready and its branch has a PR."""
+    root, ws = review.session(db, params["root"])
+    identity_lock.ensure(root)
+    review.require_ready(db, root, ws)
+    if (pr := review.open_pr(db, root, ws)) is None:
+        raise ServiceError("conflict", f"{ws.branch} has no PR to push to; open it first", 409)
+    key = (root.id, ws.branch)
+
+    def work(db: DB, job: Job) -> Any:
+        identity_lock.ensure(root)
+        with _checked(db, ws, job) as verified:
+            git.push(ws.path, ws.branch, sha=verified)
+        db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR}", (verified, *key))
+        bus.publish_agent(db, "session.pr_pushed", root.id, url=pr["url"], commit=verified)
+        return {"url": pr["url"], "commit": verified}
+
+    return start_job("session.push", work, root_id=root.id, repo_root=ws.repo_root)
+
+
+# The session branches (root id, branch) whose PR this daemon is preparing now, and
+# the HEAD last tried on each and when: a preparation whose checks couldn't run (the
+# checkout busy, or moved under them) is tried again after PREPARE_AGAIN_SECONDS
+# instead of every sweep.
 _PR_WORK: set[tuple[str, str]] = set()
 _PR_TRIED: dict[tuple[str, str], tuple[str, float]] = {}
-PUSH_RETRY_SECONDS = 60.0
+PREPARE_AGAIN_SECONDS = 60.0
 _PR_LOCK = threading.Lock()
 
 
@@ -823,31 +826,32 @@ def _end_pr_work(key: tuple[str, str]) -> None:
         _PR_WORK.discard(key)
 
 
-def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None, auto: bool) -> None:
-    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, auto, opened_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
+def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None) -> None:
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at)"
+                    " VALUES (?, ?, ?, ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
                     " url = excluded.url, pushed_sha = excluded.pushed_sha,"
                     # a different PR on the branch starts afresh; the same one keeps its merge
                     " merged_at = CASE WHEN url = excluded.url THEN merged_at END,"
                     " opened_at = CASE WHEN url = excluded.url THEN opened_at ELSE excluded.opened_at END",
-                    (*key, url, pushed, int(auto), time.time()))
-    bus.publish_agent(db, "session.pr_opened", key[0], url=url, auto=auto)
+                    (*key, url, pushed, time.time()))
+    bus.publish_agent(db, "session.pr_opened", key[0], url=url)
 
 
-def auto_pr(db: DB, root_id: str, opening: bool) -> Job | None:
-    """For the ready session ``root_id``, where its repo allows ``auto_pr``
-    (review.auto_pr): open its PR with the drafted title and body when it
-    just became ready (``opening``) and its branch has none yet, or push a
-    commit made since to the PR it has. Once per branch: the row is claimed
-    before the PR is opened, and a claim a stopped daemon left is first
-    matched to the PR gh finds open. Nothing while the session belongs to
-    another identity, or while this daemon is already at work on its PR."""
+def prepare_pr(db: DB, root_id: str) -> Job | None:
+    """Prepare the ready session ``root_id``'s PR for the person's approval:
+    draft its title, run the full pre-PR checks on its HEAD (gates.pr_checked,
+    pushing nothing) and record how they went in ``session_pr_prep``, which
+    the Inbox shows as "PR ready for your approval" or "PR checks failed" (a
+    failure is also told to the supervisor). Once per HEAD. Nothing once its
+    branch has a PR (new commits wait for the person's Push), while the
+    session belongs to another identity, or while this daemon is already
+    preparing it."""
     root, ws = review.session(db, root_id)
     key = (root.id, ws.branch)
-    if identity_lock.locked_by(root.id) or not _start_pr_work(key):
+    if identity_lock.locked_by(root.id) or review.open_pr(db, root, ws) or not _start_pr_work(key):
         return None
     try:
-        job = _auto_pr(db, root, ws, key, opening)
+        job = _prepare_pr(db, root, ws, key)
     except BaseException:
         _end_pr_work(key)
         raise
@@ -856,44 +860,51 @@ def auto_pr(db: DB, root_id: str, opening: bool) -> Job | None:
     return job
 
 
-def _auto_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str], opening: bool) -> Job | None:
-    row = db.conn.execute(f"SELECT url, pushed_sha FROM session_prs WHERE {_SESSION_PR}", key).fetchone()
+def _prepare_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str]) -> Job | None:
     head = git.out(["rev-parse", "HEAD"], ws.path)
-    if row and row["url"]:
-        tried, at = _PR_TRIED.get(key, (None, 0.0))
-        waiting = tried == head and not opening and time.monotonic() - at < PUSH_RETRY_SECONDS
-        if head == row["pushed_sha"] or waiting or not review.auto_pr(ws.repo_root):
-            return None
-        _PR_TRIED[key] = (head, time.monotonic())
+    row = db.conn.execute(f"SELECT sha, state FROM session_pr_prep WHERE {_SESSION_PR}", key).fetchone()
+    # A row still checking with nobody at work on it was left by a daemon that stopped half way.
+    if row and row["sha"] == head and row["state"] != "checking":
+        return None
+    tried, at = _PR_TRIED.get(key, (None, 0.0))
+    if tried == head and time.monotonic() - at < PREPARE_AGAIN_SECONDS:
+        return None
+    db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, title, prepared_at)"
+                    " VALUES (?, ?, ?, 'checking', ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
+                    " sha = excluded.sha, state = excluded.state, title = excluded.title, checks = NULL,"
+                    " check_cmd = NULL, output = NULL, prepared_at = excluded.prepared_at",
+                    (*key, head, review.draft(db, root, ws)["title"], time.time()))
 
-        def push(db: DB, job: Job) -> Any:
-            try:
-                identity_lock.ensure(root)
-                with _session_pr_checked(db, root, ws, job, auto=True) as verified:
-                    git.push(ws.path, ws.branch, sha=verified)
-                db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR}", (verified, *key))
-            finally:
-                _end_pr_work(key)
-            bus.publish_agent(db, "session.pr_pushed", root.id, url=row["url"], commit=verified)
-            return {"url": row["url"], "commit": verified}
+    def settle(db: DB, state: str, sha: str, cmd: str | None = None, output: str | None = None,
+               checks: list[str] | None = None) -> None:
+        # Only the row this preparation wrote: one the sweep dropped meanwhile (not ready) stays gone.
+        db.conn.execute(f"UPDATE session_pr_prep SET state = ?, sha = ?, check_cmd = ?, output = ?, checks = ?"
+                        f" WHERE {_SESSION_PR} AND sha = ?",
+                        (state, sha, cmd, output, json.dumps(checks) if checks is not None else None, *key, head))
 
-        return start_job("session.push", push, root_id=root.id, repo_root=ws.repo_root)
-    abandoned = row is not None
-    if not (opening or abandoned) or not review.auto_pr(ws.repo_root):
-        return None
-    if abandoned and (url := workspaces.existing_pull_request(ws)):
-        _record_pr(db, key, url, None, True)     # its commits are pushed on the next sweep
-        return None
-    if not abandoned and not db.conn.execute(
-            "INSERT OR IGNORE INTO session_prs (root_id, branch, auto, opened_at) VALUES (?, ?, 1, ?)",
-            (*key, time.time())).rowcount:
-        return None
-    try:
-        d = review.draft(db, root, ws)
-        return open_session_pr(db, {"root": root.id}, {"title": d["title"], "body": d["body"]}, auto=True)
-    except BaseException:
-        db.conn.execute(f"DELETE FROM session_prs WHERE {_SESSION_PR} AND url IS NULL", key)
-        raise
+    def work(db: DB, job: Job) -> Any:
+        checked: list[str] = []
+        try:
+            identity_lock.ensure(root)
+            with _checked(db, ws, job, checked=checked) as sha:
+                settle(db, "passed", sha, checks=checked)
+        except gates.ChecksFailed as e:
+            settle(db, "failed", head, e.cmd, str(e))
+            gates.tell(db, root.id, f"[brindle PR] The pre-PR checks failed, so the session's PR waits: {e}\n"
+                       "Fix the problem; brindle checks again once the session is ready.")
+            bus.publish_agent(db, "session.pr_prepared", root.id, passed=False, check=e.cmd)
+            return {"passed": False, "check": e.cmd}
+        except BaseException:   # the checks couldn't run: tried again later, its row gone meanwhile
+            db.conn.execute(f"DELETE FROM session_pr_prep WHERE {_SESSION_PR} AND sha = ? AND state = 'checking'",
+                            (*key, head))
+            _PR_TRIED[key] = (head, time.monotonic())
+            raise
+        finally:
+            _end_pr_work(key)
+        bus.publish_agent(db, "session.pr_prepared", root.id, passed=True, commit=sha)
+        return {"passed": True, "commit": sha}
+
+    return start_job("session.pr_prepare", work, root_id=root.id, repo_root=ws.repo_root)
 
 
 # -- goal ------------------------------------------------------------------------
@@ -1761,6 +1772,63 @@ def provider_logout(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("logout_failed", str(e), 422) from None
 
 
+def put_provider_connection(db: DB, params: dict, body: Body) -> Any:
+    """How the provider connects (brindle.connections), into
+    ~/.brindle/config.json: ``method`` auto | sign_in | api_key | cloud, and
+    for cloud ``cloud`` (the route) and ``settings`` (its non-secret
+    variables, e.g. AWS_PROFILE and AWS_REGION). A choice the org's policy
+    decides instead is refused (403) with the reason. Answers GET's shape."""
+    from brindle import connections
+    from brindle.service.dto import ProviderConnectionDTO
+
+    provider, repo = params["provider"], _get(body, "repo")
+    try:
+        connections.choose(provider, _get(body, "method", required=True), _get(body, "cloud"),
+                           _get(body, "settings", dict), repo)
+        return ProviderConnectionDTO(**connections.view(provider, repo)).to_json()
+    except connections.Invalid as e:
+        raise ServiceError("invalid", str(e)) from None
+    except connections.Refused as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+
+
+def _streamed(db: DB, job: Job):
+    """A ``run`` for a cloud CLI's sign-in: no terminal input, its output
+    (the URL or device code to confirm in the browser) as ``job.progress``."""
+    def run(argv: list[str], env=None, pass_fds=()) -> subprocess.CompletedProcess:
+        with subprocess.Popen(argv, env=env, pass_fds=pass_fds, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              start_new_session=True) as proc:
+            for line in proc.stdout:
+                bus.publish(db, "job.progress", job=job.id, text=line.rstrip("\n"))
+        return subprocess.CompletedProcess(argv, proc.returncode)
+    return run
+
+
+def provider_cloud_sign_in(db: DB, params: dict, body: Body) -> Any:
+    """The cloud sign-in for the provider's saved cloud route, a first one or
+    a renewal, as a job (202): the CLI's output arrives as ``job.progress``,
+    and the result says what happened: "signed in", "failed", "waiting" (one
+    is already running for this login) or "manual"."""
+    from brindle import connections, picker
+
+    provider = params["provider"]
+    try:
+        connections.sign_in_target(provider)
+    except connections.Invalid as e:
+        raise ServiceError("invalid", str(e)) from None
+    except connections.Refused as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+    browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
+
+    def work(db: DB, job: Job) -> Any:
+        return connections.sign_in(provider, run=_streamed(db, job),
+                                   say=lambda text: bus.publish(db, "job.progress", job=job.id, text=text),
+                                   extra_env={"BROWSER": browser["BROWSER"]} if browser else None)
+
+    return start_job("provider.cloud_sign_in", work, provider=provider)
+
+
 def terminal_input(db: DB, params: dict, body: Body) -> Any:
     """Type ``text``, one line the person typed or pasted in the app (a
     sign-in's code), into the action terminal ``id``, then Enter unless
@@ -2042,6 +2110,7 @@ ROUTES = [
     # GET on the file path reads (routes_read); agent callers are refused by the guard.
     Route("/v1/sessions/{root:path}/file", _endpoint(put_session_file), methods=["PUT"]),
     Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),
+    _post("/sessions/{root:path}/pr/push", push_session_pr),
     _post("/sessions/{root:path}/pr", open_session_pr),
     _post("/inbox/{id}/{action}", inbox_action),
     _post("/agents/{id}/message", message_agent),
@@ -2097,6 +2166,8 @@ ROUTES = [
     _post("/providers/{provider}/consent", provider_consent),
     _post("/providers/{provider}/install", install_provider),
     _post("/providers/{provider}/use-mine", use_provider_install),
+    Route("/v1/providers/{provider}/connection", _endpoint(put_provider_connection), methods=["PUT"]),
+    _post("/providers/{provider}/cloud-sign-in", provider_cloud_sign_in),
     Route("/v1/providers/{provider}", _endpoint(turn_off_provider), methods=["DELETE"]),
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),

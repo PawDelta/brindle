@@ -17,7 +17,12 @@ export interface ApiSchema {
   AskGroupDTO: AskGroupDTO;
   AskResultDTO: AskResultDTO;
   AskScopeDTO: AskScopeDTO;
+  AwsProfileDTO: AwsProfileDTO;
+  AzureOptionsDTO: AzureOptionsDTO;
+  CloudLoginDTO: CloudLoginDTO;
+  CloudOptionsDTO: CloudOptionsDTO;
   DecisionDTO: DecisionDTO;
+  GcloudOptionsDTO: GcloudOptionsDTO;
   GoalDTO: GoalDTO;
   InboxActionDTO: InboxActionDTO;
   InboxItemDTO: InboxItemDTO;
@@ -43,6 +48,8 @@ export interface ApiSchema {
   PreflightActionDTO: PreflightActionDTO;
   PreflightItemDTO: PreflightItemDTO;
   ProfileDTO: ProfileDTO;
+  ProviderChoiceDTO: ProviderChoiceDTO;
+  ProviderConnectionDTO: ProviderConnectionDTO;
   RoutingDTO: RoutingDTO;
   RoutingKindDTO: RoutingKindDTO;
   RoutingLockDTO: RoutingLockDTO;
@@ -285,6 +292,65 @@ export interface AskGroupDTO {
   rule?: string | null;
   scopes: AskScopeDTO[];
   title: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AwsProfileDTO".
+ */
+export interface AwsProfileDTO {
+  name: string;
+  region?: string | null;
+  sso: boolean;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AzureOptionsDTO".
+ */
+export interface AzureOptionsDTO {
+  subscription_id?: string | null;
+  subscription_name?: string | null;
+  tenant_id: string;
+}
+/**
+ * A cloud login's state (brindle.cloud_login.status): ``valid`` now,
+ * ``expires_at`` (epoch seconds, None when unknown), ``expired`` when only
+ * ``renew_command`` (the person) can renew it.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "CloudLoginDTO".
+ */
+export interface CloudLoginDTO {
+  expired: boolean;
+  expires_at?: number | null;
+  note?: string;
+  renew_command?: string;
+  valid: boolean;
+}
+/**
+ * What this machine's cloud CLIs are set up with, read from their files
+ * (never a secret): AWS profiles, gcloud's application-default login and
+ * default project, the Azure CLI's signed-in tenant (None when signed out),
+ * and the usual ``regions`` per route.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "CloudOptionsDTO".
+ */
+export interface CloudOptionsDTO {
+  aws_profiles: AwsProfileDTO[];
+  azure?: AzureOptionsDTO | null;
+  gcloud: GcloudOptionsDTO;
+  regions?: {
+    [k: string]: string[];
+  };
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "GcloudOptionsDTO".
+ */
+export interface GcloudOptionsDTO {
+  adc: boolean;
+  project?: string | null;
+  region?: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -628,6 +694,42 @@ export interface ProfileDTO {
   name: string;
   permission_mode?: string | null;
   provider: string;
+}
+/**
+ * The person's saved choice (PUT /providers/{p}/connection).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ProviderChoiceDTO".
+ */
+export interface ProviderChoiceDTO {
+  cloud?: string | null;
+  method: string;
+  settings?: {
+    [k: string]: string;
+  };
+}
+/**
+ * How a provider connects now: ``method`` auto | sign_in | api_key |
+ * cloud | org (the org decides, with no cloud route here), and for cloud the
+ * route (``cloud``: bedrock, vertex, foundry, azure), its non-secret
+ * ``settings`` (variable -> value) and the ``login`` it uses. An org's route
+ * wins over ``choice``, the person's saved choice; ``managed`` says why.
+ * ``clouds``: the routes the person can choose for this provider.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ProviderConnectionDTO".
+ */
+export interface ProviderConnectionDTO {
+  choice?: ProviderChoiceDTO | null;
+  cloud?: string | null;
+  clouds?: string[];
+  login?: CloudLoginDTO | null;
+  managed?: string | null;
+  method: string;
+  provider: string;
+  settings?: {
+    [k: string]: string;
+  };
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

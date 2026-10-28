@@ -1521,6 +1521,263 @@
       "title": "AskScopeDTO",
       "type": "object"
     },
+    "AwsProfileDTO": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        },
+        "sso": {
+          "title": "Sso",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "sso"
+      ],
+      "title": "AwsProfileDTO",
+      "type": "object"
+    },
+    "AzureOptionsDTO": {
+      "properties": {
+        "subscription_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subscription Id"
+        },
+        "subscription_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subscription Name"
+        },
+        "tenant_id": {
+          "title": "Tenant Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id"
+      ],
+      "title": "AzureOptionsDTO",
+      "type": "object"
+    },
+    "CloudLoginDTO": {
+      "description": "A cloud login's state (brindle.cloud_login.status): ``valid`` now,\n``expires_at`` (epoch seconds, None when unknown), ``expired`` when only\n``renew_command`` (the person) can renew it.",
+      "properties": {
+        "expired": {
+          "title": "Expired",
+          "type": "boolean"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At"
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        },
+        "renew_command": {
+          "default": "",
+          "title": "Renew Command",
+          "type": "string"
+        },
+        "valid": {
+          "title": "Valid",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "valid",
+        "expired"
+      ],
+      "title": "CloudLoginDTO",
+      "type": "object"
+    },
+    "CloudOptionsDTO": {
+      "$defs": {
+        "AwsProfileDTO": {
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "region": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Region"
+            },
+            "sso": {
+              "title": "Sso",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "sso"
+          ],
+          "title": "AwsProfileDTO",
+          "type": "object"
+        },
+        "AzureOptionsDTO": {
+          "properties": {
+            "subscription_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Subscription Id"
+            },
+            "subscription_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Subscription Name"
+            },
+            "tenant_id": {
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tenant_id"
+          ],
+          "title": "AzureOptionsDTO",
+          "type": "object"
+        },
+        "GcloudOptionsDTO": {
+          "properties": {
+            "adc": {
+              "title": "Adc",
+              "type": "boolean"
+            },
+            "project": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Project"
+            },
+            "region": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Region"
+            }
+          },
+          "required": [
+            "adc"
+          ],
+          "title": "GcloudOptionsDTO",
+          "type": "object"
+        }
+      },
+      "description": "What this machine's cloud CLIs are set up with, read from their files\n(never a secret): AWS profiles, gcloud's application-default login and\ndefault project, the Azure CLI's signed-in tenant (None when signed out),\nand the usual ``regions`` per route.",
+      "properties": {
+        "aws_profiles": {
+          "items": {
+            "$ref": "#/$defs/AwsProfileDTO"
+          },
+          "title": "Aws Profiles",
+          "type": "array"
+        },
+        "azure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AzureOptionsDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gcloud": {
+          "$ref": "#/$defs/GcloudOptionsDTO"
+        },
+        "regions": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "title": "Regions",
+          "type": "object"
+        }
+      },
+      "required": [
+        "aws_profiles",
+        "gcloud"
+      ],
+      "title": "CloudOptionsDTO",
+      "type": "object"
+    },
     "DecisionDTO": {
       "properties": {
         "body": {
@@ -1570,6 +1827,43 @@
         "created_at"
       ],
       "title": "DecisionDTO",
+      "type": "object"
+    },
+    "GcloudOptionsDTO": {
+      "properties": {
+        "adc": {
+          "title": "Adc",
+          "type": "boolean"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        }
+      },
+      "required": [
+        "adc"
+      ],
+      "title": "GcloudOptionsDTO",
       "type": "object"
     },
     "GoalDTO": {
@@ -4376,6 +4670,198 @@
       "title": "ProfileDTO",
       "type": "object"
     },
+    "ProviderChoiceDTO": {
+      "description": "The person's saved choice (PUT /providers/{p}/connection).",
+      "properties": {
+        "cloud": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cloud"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "settings": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Settings",
+          "type": "object"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "title": "ProviderChoiceDTO",
+      "type": "object"
+    },
+    "ProviderConnectionDTO": {
+      "$defs": {
+        "CloudLoginDTO": {
+          "description": "A cloud login's state (brindle.cloud_login.status): ``valid`` now,\n``expires_at`` (epoch seconds, None when unknown), ``expired`` when only\n``renew_command`` (the person) can renew it.",
+          "properties": {
+            "expired": {
+              "title": "Expired",
+              "type": "boolean"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires At"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "renew_command": {
+              "default": "",
+              "title": "Renew Command",
+              "type": "string"
+            },
+            "valid": {
+              "title": "Valid",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "valid",
+            "expired"
+          ],
+          "title": "CloudLoginDTO",
+          "type": "object"
+        },
+        "ProviderChoiceDTO": {
+          "description": "The person's saved choice (PUT /providers/{p}/connection).",
+          "properties": {
+            "cloud": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cloud"
+            },
+            "method": {
+              "title": "Method",
+              "type": "string"
+            },
+            "settings": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "title": "Settings",
+              "type": "object"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "title": "ProviderChoiceDTO",
+          "type": "object"
+        }
+      },
+      "description": "How a provider connects now: ``method`` auto | sign_in | api_key |\ncloud | org (the org decides, with no cloud route here), and for cloud the\nroute (``cloud``: bedrock, vertex, foundry, azure), its non-secret\n``settings`` (variable -> value) and the ``login`` it uses. An org's route\nwins over ``choice``, the person's saved choice; ``managed`` says why.\n``clouds``: the routes the person can choose for this provider.",
+      "properties": {
+        "choice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderChoiceDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cloud": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cloud"
+        },
+        "clouds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Clouds",
+          "type": "array"
+        },
+        "login": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CloudLoginDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "managed": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Managed"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "settings": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Settings",
+          "type": "object"
+        }
+      },
+      "required": [
+        "provider",
+        "method"
+      ],
+      "title": "ProviderConnectionDTO",
+      "type": "object"
+    },
     "RoutingDTO": {
       "$defs": {
         "RoutingKindDTO": {
@@ -5914,6 +6400,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/cloud/options"
+    },
+    {
+      "method": "GET",
       "path": "/v1/config"
     },
     {
@@ -6150,6 +6640,18 @@
     },
     {
       "method": "POST",
+      "path": "/v1/providers/{provider}/cloud-sign-in"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/providers/{provider}/connection"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/providers/{provider}/connection"
+    },
+    {
+      "method": "POST",
       "path": "/v1/providers/{provider}/consent"
     },
     {
@@ -6235,6 +6737,10 @@
     {
       "method": "GET",
       "path": "/v1/sessions/{root:path}/pr/draft"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root:path}/pr/push"
     },
     {
       "method": "GET",

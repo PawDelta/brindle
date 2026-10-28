@@ -247,6 +247,9 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
   const timed = modes.includes("timed");
   const session = modes.includes("session");
   const slot = g.rule || g.blocked ? null : groupItem(rep.reason);
+  // The shell/unchecked entry of the groups table asked (its reason names it), or the engine's synthetic
+  // d-shell-syntax rule did ("shell syntax cannot be checked safely"): not a rule the editor holds.
+  const unchecked = !g.blocked && (g.rule === "d-shell-syntax" || /\bshell\/unchecked\b/.test(rep.reason ?? ""));
   const subject = g.title.replace(/^Allow /, "").replace(/\?$/, "");
   const names = [...new Set(g.items.map((a) => a.worker || a.agent_id))];
 
@@ -268,7 +271,8 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
       return `Always allowed: ${slot.label}. Saved as an override in Settings › Permissions. ${requests(resumed.length)} resumed (${workers(distinct(resumed))}).`;
     });
   };
-  const allowable = !g.blocked && (session || timed);
+  // An unchecked command is allowed once or denied, never remembered; the way out of asking is the Settings opt-in.
+  const allowable = !g.blocked && !unchecked && (session || timed);
 
   return (
     <PermissionCard
@@ -283,7 +287,7 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
       why={
         <>
           {rep.escalation && !g.blocked ? rep.escalation : g.blocked ? "A deny rule blocks this." : g.rule ?`Your rule asks: ${limitsText(g.limits).toLowerCase()}.` : slot ? `${slot.label} is set to ask.` : (rep.reason ? plain(rep.reason) : "No rule covers this, and unmatched actions ask you.")}
-          {onOpenRule && (g.rule || !g.blocked) && (
+          {onOpenRule && !unchecked && (g.rule || !g.blocked) && (
             <button type="button" className={`${LINK} ml-2`} onClick={() => onOpenRule(g.rule ?? undefined)}>
               {g.blocked ? "Change the rule that blocks this" : g.rule ? "Change the rule" : "Add a rule"}
             </button>
@@ -372,6 +376,11 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
             </AllowSplit>
           )}
         </div>
+      )}
+      {unchecked && onOpenRule && (
+        <button type="button" className={`${LINK} self-end`} onClick={() => onOpenRule("unchecked-commands")}>
+          Stop asking for these…
+        </button>
       )}
       {help && (
         <p role="alert" className="text-xs text-sap">

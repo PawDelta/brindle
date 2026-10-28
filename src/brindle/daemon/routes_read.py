@@ -41,10 +41,12 @@ from brindle.service import inbox
 from brindle.service.dto import (
     AccountDTO,
     AgentDTO,
+    CloudOptionsDTO,
     DecisionDTO,
     GoalDTO,
     PreflightItemDTO,
     ProfileDTO,
+    ProviderConnectionDTO,
     RoutingDTO,
     RoutingKindDTO,
     RoutingProfileDTO,
@@ -173,11 +175,12 @@ def workspace_file(db: DB, request: Request) -> Any:
 @_json
 def session_readiness(db: DB, request: Request) -> Any:
     """Whether brindle judges the session ready for a PR; ``reasons``: what
-    is missing, in plain words (none when it is ready); ``auto_pr``: whether
-    brindle opens its PR on its own once it is."""
+    is missing, in plain words (none when it is ready); ``pr``: the PR the
+    person opened, with how many session commits aren't pushed to it yet
+    (session_review.open_pr), or None."""
     root, ws = session_review.session(db, request.path_params["root"])
     why = session_review.reasons(db, root, ws)
-    return {"root_id": root.id, "ready": not why, "reasons": why, "auto_pr": session_review.auto_pr(ws.repo_root)}
+    return {"root_id": root.id, "ready": not why, "reasons": why, "pr": session_review.open_pr(db, root, ws)}
 
 
 @_json
@@ -309,8 +312,6 @@ def get_config(db: DB, request: Request) -> Any:
         settings["repo"] = dataclasses.asdict(config.load_repo_config(repo))
         # Settings this project's own files set (over the person's): key -> "local" or "repo".
         settings["overrides"] = {k: s for k in settings["repo"] if (s := config.setting_source(repo, k)) in ("local", "repo")}
-        # The org's policy may force auto_pr off whatever the files say: why, or None.
-        settings["auto_pr_forbidden"] = session_review.auto_pr_forbidden(repo)
     try:
         denied = key_check.personal_keys_denied(repo)
     except Exception:  # noqa: BLE001 - policy unreadable: fail closed, as storing does
@@ -558,6 +559,30 @@ def providers_installed(db: DB, request: Request) -> Any:
 
 
 @_json
+def provider_connection(db: DB, request: Request) -> Any:
+    """How the provider connects (brindle.connections): sign-in, API key or a
+    cloud, and for a cloud its settings and login (valid, expiry, the command
+    that renews it). ``managed`` says why the org decides it instead."""
+    from brindle import connections
+
+    try:
+        got = connections.view(request.path_params["provider"], _repo(request))
+    except connections.Invalid as e:
+        raise ServiceError("invalid", str(e)) from None
+    return ProviderConnectionDTO(**got).to_json()
+
+
+@_json
+def cloud_options(db: DB, request: Request) -> Any:
+    """The cloud choices this machine is set up for, from the cloud CLIs' own
+    files: AWS profiles (SSO or not), gcloud's application-default login and
+    default project, the Azure CLI's tenant, and the usual regions. No secrets."""
+    from brindle import connections
+
+    return CloudOptionsDTO(**connections.options()).to_json()
+
+
+@_json
 def account(db: DB, request: Request) -> Any:
     from brindle.pro import license
     from brindle.pro.account import ProAccount
@@ -679,6 +704,8 @@ ROUTES = [
     # Before the action routes' DELETE /v1/providers/{provider}.
     Route("/v1/providers/installed", providers_installed),
     Route("/v1/providers/{provider}/preflight", provider_preflight),
+    Route("/v1/providers/{provider}/connection", provider_connection),
+    Route("/v1/cloud/options", cloud_options),
     Route("/v1/account", account),
     Route("/v1/cost", get_cost),
     Route("/v1/usage", get_usage),
