@@ -426,6 +426,30 @@ but no private key") and its `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, or `--config
 '{"bundle":{"createUpdaterArtifacts":false}}'` to skip the updater bundle
 (`scripts/smoke_bundle.sh` does that).
 
+## Testing local changes
+
+`app/scripts/dev.sh` runs your checkout's brindle, uncommitted edits included,
+under the app, with no in-app buttons needed. Run it from any brindle checkout
+or worktree. Quit the installed brindle app first: it refuses a daemon started
+by hand (an engine conflict).
+
+**Default (dev app against your engine).** Run `bash app/scripts/dev.sh`. It
+stops the running daemon, starts this checkout's engine
+(`.venv/bin/brindle daemon`, in the background, logging to
+`~/.brindle/dev-daemon.log`), installs the npm packages if `app/node_modules`
+is missing, and runs `npm --prefix app run tauri dev` with `BRINDLE_BIN` set to
+that engine. If `.venv` is missing, it says to run `uv sync` first. Ctrl-C
+stops the app and leaves the local daemon running. To go back, run
+`brindle daemon stop`, then open the installed app.
+
+**`--bundle` (a built app with its engine).** Run `bash app/scripts/dev.sh
+--bundle`. It runs `scripts/smoke_bundle.sh --engine` and, if that passes,
+opens the built `brindle.app` from `src-tauri/target/release/bundle/macos/`.
+It builds only committed code, so uncommitted edits are not in it. The app is
+not copied into `/Applications`.
+
+`bash app/scripts/dev.sh --help` lists both modes.
+
 ## Releases
 
 The version lives in `package.json` (`tauri.conf.json` reads it from there).
