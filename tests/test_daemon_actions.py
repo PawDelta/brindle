@@ -588,10 +588,11 @@ def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, 
 @pytest.mark.parametrize("action,stored,env,provider_status,expect", [
     ("put", False, False, 200, ("verified", True, False)),
     ("test", True, False, 401, ("rejected", True, False)),
+    ("test", True, False, 500, ("unchecked", True, False)),
     ("delete", True, False, 200, (None, False, False)),
     ("auth", True, False, 401, ("rejected", True, False)),
     ("import", False, True, 200, ("verified", True, False)),
-], ids=["save-verify", "test-rejected", "delete", "auth-failure", "import-env"])
+], ids=["save-verify", "test-rejected", "test-inconclusive", "delete", "auth-failure", "import-env"])
 def test_api_key_lifecycle(db, world, monkeypatch, provider_http, action, stored, env, provider_status, expect):
     from brindle import keys_cmds, keystore
 
@@ -614,7 +615,7 @@ def test_api_key_lifecycle(db, world, monkeypatch, provider_http, action, stored
         assert _send("PUT", f"/v1/keys/{name}", {"value": SECRET})[0] == 200
     elif action == "test":
         code, reply = _send("POST", f"/v1/keys/{name}/test")
-        assert code == 200 and reply["status"] == "rejected" and reply["checked_at"]
+        assert code == 200 and reply["status"] == expect[0] and reply["checked_at"]
     elif action == "delete":
         assert _send("DELETE", f"/v1/keys/{name}")[0] == 200
     elif action == "auth":
@@ -627,6 +628,34 @@ def test_api_key_lifecycle(db, world, monkeypatch, provider_http, action, stored
     assert got["key_page"] and got["provider"] == "claude" and got["personal_keys_denied"] is False
     assert (keystore.get_key(name) is not None) is expect[1]
     assert SECRET not in json.dumps(got)
+
+
+@pytest.mark.parametrize("during", ["replaced", "deleted"])
+def test_api_key_lifecycle_check_result_stays_with_the_key_it_checked(db, monkeypatch, provider_http, during):
+    from brindle import key_check, keys_cmds, keystore
+
+    name, newer = "ANTHROPIC_API_KEY", "sk-ant-replacement-0123456789"
+    keys_cmds.store(name, SECRET, None)
+
+    asked = []
+
+    def rejects_while_the_key_changes(url, headers):
+        if asked:                       # the replacement's own check
+            return 200, {}
+        asked.append(url)
+        if during == "replaced":
+            keys_cmds.store(name, newer, None)
+        else:
+            keys_cmds.remove(name)
+        return 401, {}
+
+    monkeypatch.setattr(key_check, "_get", rejects_while_the_key_changes)
+    keys_cmds.retest(name)
+    rec = keystore.get_record(name)
+    if during == "replaced":
+        assert rec["value"] == newer and rec["status"] == "verified"
+    else:
+        assert rec == {}
 
 
 @pytest.mark.parametrize("status,expected", [(200, "verified"), (400, "rejected")])

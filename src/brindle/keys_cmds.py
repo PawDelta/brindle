@@ -57,21 +57,19 @@ def store(name: str, value: str, repo_root: str | None) -> None:
         status, problem = key_check.evaluate(name, value)
         if problem:
             raise keystore.CredentialError(f"{name} not stored: {problem}")
-    keystore.set_key(name, value, repo_root)
-    keystore.set_check(name, status)
+    keystore.set_key(name, value, repo_root, status=status)
 
 
 def retest(name: str) -> str:
-    """Re-check the stored key with its provider and remember the result.
-    A check that couldn't reach the provider leaves the last result alone.
+    """Re-check the stored key with its provider and remember the result and when,
+    including an inconclusive one (unchecked). The result is kept only if the key
+    wasn't replaced or removed meanwhile; the reply is what is stored then.
     Raises CredentialError when no key is stored."""
     value = keystore.get_key(name)
     if not value:
         raise keystore.CredentialError(f"no {name} is stored")
     status, _ = key_check.evaluate(name, value)
-    if status != key_check.UNCHECKED:
-        keystore.set_check(name, status)
-        return status
+    keystore.set_check(name, status, value)
     return keystore.get_record(name).get("status") or key_check.UNCHECKED
 
 

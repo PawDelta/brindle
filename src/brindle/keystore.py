@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import contextlib
 import contextvars
+import hashlib
 import json
 import os
 import re
@@ -29,8 +30,14 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:     # Windows: threads are still serialized
+    fcntl = None
 
 ACCOUNT = "default"
 MAX_BLOB = 64 * 1024
@@ -274,12 +281,50 @@ def check_name(name: str, repo_root: str | None = None) -> None:
         raise KeyNameError(f"{name} is not a variable any provider or profile reads")
 
 
-def set_key(name: str, value: str, repo_root: str | None = None) -> None:
+_key_lock = threading.RLock()
+
+
+@contextlib.contextmanager
+def _locked():
+    """Serializes every change to a stored key across daemon threads and, through
+    a lock file, across the CLI and hook processes."""
+    with _key_lock:
+        fd = None
+        if fcntl is not None:
+            from brindle.config import brindle_home
+
+            home = brindle_home()
+            try:
+                home.mkdir(mode=0o700, parents=True, exist_ok=True)
+                fd = os.open(home / "keys.lock", os.O_RDWR | os.O_CREAT, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:
+                if fd is not None:
+                    os.close(fd)
+                fd = None
+        try:
+            yield
+        finally:
+            if fd is not None:
+                os.close(fd)     # closing drops the flock
+
+
+def value_digest(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def set_key(name: str, value: str, repo_root: str | None = None, status: str | None = None) -> None:
+    """Keep ``value``; with ``status``, its check result is saved in the same write."""
     check_name(name, repo_root)
     value = value.strip()
     if not value:
         raise KeyNameError("empty key")
-    _key_store(name).save({"value": value, "updated_at": time.time()})
+    now = time.time()
+    rec = {"value": value, "updated_at": now}
+    if status:
+        rec.update(status=status, checked_at=now, checked_for=value_digest(value))
+    with _locked():
+        _key_store(name).save(rec)
 
 
 _reads: contextvars.ContextVar[dict[str, str | None] | None] = contextvars.ContextVar("keystore_reads", default=None)
@@ -324,13 +369,17 @@ def get_record(name: str) -> dict:
     return _key_store(name).load() or {}
 
 
-def set_check(name: str, status: str, checked_at: float | None = None) -> None:
-    """Remember how the key's last check came out (verified, rejected or unchecked) and when."""
+def set_check(name: str, status: str, value: str) -> bool:
+    """Remember how the check of ``value`` came out (verified, rejected or unchecked) and
+    when. Only if ``value`` is still the stored key: a key replaced or removed while the
+    check ran keeps its own result (and a removed one stays removed). True when saved."""
     store = _key_store(name)
-    rec = store.load()
-    if not rec or not rec.get("value"):
-        return
-    store.save({**rec, "status": status, "checked_at": checked_at if checked_at is not None else time.time()})
+    with _locked():
+        rec = store.load()
+        if not rec or rec.get("value") != value:
+            return False
+        store.save({**rec, "status": status, "checked_at": time.time(), "checked_for": value_digest(value)})
+        return True
 
 
 def provider_of(name: str) -> str | None:
@@ -353,7 +402,8 @@ def provider_key_names(provider: str) -> list[str]:
 
 
 def unset_key(name: str) -> None:
-    _key_store(name).delete()
+    with _locked():
+        _key_store(name).delete()
 
 
 def list_keys(repo_root: str | None = None) -> dict[str, str]:
