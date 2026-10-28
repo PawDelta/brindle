@@ -484,6 +484,28 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     return "\n".join(lines)
 
 
+def require_pr_checks(db: DB, ws: Workspace, progress=None) -> None:
+    """Before ``ws``'s branch is pushed for a PR: run every configured check
+    in full on its HEAD (a tree that already passed counts) and raise
+    ``WorkspaceError`` ("checks failed: <cmd>" and its output) on the first
+    failure, or if the branch moved or got dirty meanwhile, so what is
+    pushed is what was checked. ``progress(text)`` hears each check start."""
+    from brindle.config import load_repo_config
+
+    cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
+    sha = head(ws)
+    env = workspaces.workspace_env(ws)
+    with queue_place(time.time()):
+        for n, cmd in enumerate(cfg.checks, 1):
+            if progress:
+                progress(f"check {n}/{len(cfg.checks)}: {cmd}")
+            ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+            if not ok:
+                raise workspaces.WorkspaceError(f"checks failed: {cmd}\n{out[-MAX_FAILURE_CHARS:]}")
+    if cfg.checks and (head(ws) != sha or git.dirty_files(ws.path, tracked_only=True)):
+        raise workspaces.WorkspaceError(f"{ws.branch} changed while its checks ran; nothing was pushed. Try again.")
+
+
 def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Report:
     r = Report()
     dirty = git.dirty_files(ws.path, tracked_only=True)   # untracked scratch files don't travel with the branch

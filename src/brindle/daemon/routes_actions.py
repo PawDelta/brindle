@@ -36,7 +36,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from brindle import agents, autopilot, bus, git, identity_lock, knowledge, pipeline, preflight, scratch, tmux, workspaces
+from brindle import agents, autopilot, bus, gates, git, identity_lock, knowledge, pipeline, preflight, scratch, tmux, workspaces
 from brindle import sessions as sessions_mod
 from brindle.daemon import session_review as review
 from brindle.daemon import terminal
@@ -741,24 +741,6 @@ def delete_session_file(db: DB, params: dict, body: Body) -> Any:
 _SESSION_PR = "root_id = ? AND branch = ?"
 
 
-def _run_pr_checks(db: DB, job: Job, ws: Workspace) -> None:
-    """Run every configured check in full on the session branch's HEAD (a
-    check that already passed for this exact tree counts, via the gates'
-    tree cache), reporting each as ``job.progress``; raises with the first
-    failure's name and output, so nothing is pushed."""
-    from brindle import gates
-    from brindle.config import load_repo_config
-
-    cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
-    env = workspaces.workspace_env(ws)
-    with gates.queue_place(time.time()):
-        for n, cmd in enumerate(cfg.checks, 1):
-            bus.publish(db, "job.progress", job=job.id, text=f"check {n}/{len(cfg.checks)}: {cmd}")
-            ok, out = gates.run_checked(db, ws, cmd, env, cfg.check_timeout)
-            if not ok:
-                raise workspaces.WorkspaceError(f"checks failed: {cmd}\n{out[-gates.MAX_FAILURE_CHARS:]}")
-
-
 def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any:
     """Push the session branch and open its PR (``title``, ``body``,
     ``draft``) the way ``brindle pr`` does; refused (409, with the reasons)
@@ -777,7 +759,7 @@ def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any
         try:
             identity_lock.ensure(root)      # again: the person signed in may have changed since
             head = git.out(["rev-parse", "HEAD"], ws.path)
-            _run_pr_checks(db, job, ws)
+            gates.require_pr_checks(db, ws, lambda text: bus.publish(db, "job.progress", job=job.id, text=text))
             url = workspaces.open_pull_request(ws, title, draft, body=text)
             if url is None and auto:
                 raise workspaces.WorkspaceError("pushed, but gh couldn't open the PR")

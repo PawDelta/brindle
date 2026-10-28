@@ -2407,7 +2407,11 @@ def pr(
     draft: bool = typer.Option(False, "--draft"),
 ) -> None:
     """Push and open a pull request against the base branch."""
-    ws = _ws(DB(), workspace)
+    from brindle import gates
+
+    db = DB()
+    ws = _ws(db, workspace)
+    _run(gates.require_pr_checks, db, ws, lambda text: typer.echo(text, err=True))
     url = _run(workspaces.pull_request, ws, title, draft)
     typer.echo(url)
     _offer_delete_on_merge(ws.repo_root)

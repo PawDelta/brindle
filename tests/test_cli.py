@@ -79,6 +79,24 @@ def test_rm_survives_a_missing_base_branch(db, repo, monkeypatch):
     assert db.get_workspace(ws.id) is None
 
 
+@pytest.mark.parametrize("check,pushed,said", [
+    ("echo boom; false", False, "checks failed: echo boom; false"),
+    ("git -c user.name=a -c user.email=a@a commit --allow-empty -qm moved", False, "changed while its checks ran"),
+    ("true", True, ""),
+], ids=["fails", "head-moves", "passes"])
+def test_pr_runs_the_checks_before_pushing(db, repo, monkeypatch, check, pushed, said):
+    from brindle import config
+
+    ws = workspaces.create(db, str(repo), "feat/x").workspace
+    config.set_local(str(repo), "checks", [check])
+    opened = []
+    monkeypatch.setattr(workspaces, "pull_request", lambda *a: opened.append(a) or "https://gh.test/pr/1")
+    monkeypatch.setattr(workspaces, "keeps_merged_branches", lambda root: False)
+    monkeypatch.chdir(ws.path)
+    res = CliRunner().invoke(app, ["pr"])
+    assert (bool(opened), res.exit_code == 0) == (pushed, pushed) and said in res.output
+
+
 def test_version_flag_prints_the_installed_version():
     from typer.testing import CliRunner
 
