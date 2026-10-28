@@ -1164,10 +1164,6 @@ export class DaemonClient {
     return this.patch<PermissionPolicyDTO>("/permissions", { unmatched });
   }
 
-  setUncheckedCommands(unchecked_commands: "ask" | "allow") {
-    return this.patch<PermissionPolicyDTO>("/permissions", { unchecked_commands });
-  }
-
   createPermissionRule(body: PermissionRulePut & { kind: PermissionKind; match: string; decision: PermissionDecision }) {
     return this.post<PermissionRuleDTO>("/permissions/rules", body);
   }
