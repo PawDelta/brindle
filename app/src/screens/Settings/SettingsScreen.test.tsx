@@ -612,20 +612,29 @@ describe("settings screen", () => {
     daemon.deferUpgrade = true;
     daemon.upgradeFails = true;
     fireEvent.click(screen.getByRole("button", { name: "Update brindle" }));
-    const card = await screen.findByTestId("upgrade-card");
+    const toggleDetails = () => fireEvent.click(within(screen.getByTestId("engine-health-summary")).getByRole("button", { name: /Details|Less/ }));
+    let card = await screen.findByTestId("upgrade-card");
     expect(posts(daemon).at(-1)).toEqual({ method: "POST", path: "/engine/upgrade", query: {}, body: {} });
     await waitFor(() => expect(card.getAttribute("data-state")).toBe("running"));
     expect(screen.queryByRole("button", { name: "Update brindle" })).toBeNull();
+    // Details closed mid-update: the summary alone carries the progress and then the failure.
+    toggleDetails();
+    expect(screen.queryByTestId("upgrade-card")).toBeNull();
+    expect(screen.getByTestId("update-status").textContent).toBe("Updating…");
     daemon.completeUpgrade();
-    await waitFor(() => expect(card.getAttribute("data-state")).toBe("failed"));
-    // The summary carries only the compact result; the card and its log live in Details.
-    expect(within(screen.getByTestId("engine-health-summary")).getByTestId("update-status").textContent).toContain("Update failed");
-    expect(screen.getByTestId("engine-details").contains(card)).toBe(true);
+    await waitFor(() => expect(screen.getByTestId("update-status").textContent).toContain("Update failed"));
+    expect(screen.queryByTestId("upgrade-card")).toBeNull();
+    expect(screen.queryByTestId("upgrade-log")).toBeNull();
+    // Reopened, the card still holds the failure and the log.
+    toggleDetails();
+    card = screen.getByTestId("upgrade-card");
+    expect(card.getAttribute("data-state")).toBe("failed");
     expect(card.textContent).toContain("The update didn't finish: uv tool upgrade brindle exited 1");
     expect(screen.getByTestId("upgrade-log").textContent).toContain("network unreachable");
     expect(screen.queryByTestId("terminal")).toBeNull();
     fireEvent.click(within(card).getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("upgrade-card")).toBeNull();
+    expect(screen.queryByTestId("update-status")).toBeNull();
     // Done, the engine and the doctor are read again: the new version, nothing left to update.
     daemon.upgradeFails = false;
     fireEvent.click(screen.getByRole("button", { name: "Update brindle" }));

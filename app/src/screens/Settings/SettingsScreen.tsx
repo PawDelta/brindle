@@ -1305,13 +1305,11 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
                 Update brindle
               </button>
             )}
+            {upgrade.state.kind !== "idle" && (
+              <span data-testid="update-status">{upgrade.state.kind === "done" ? "Updated" : upgrade.state.kind === "failed" ? "Update failed: see Details" : "Updating…"}</span>
+            )}
             <More open={detailsOpen} onToggle={() => setDetails(!detailsOpen)} label="Details" />
           </div>
-          {upgrade.state.kind !== "idle" && (
-            <span className="text-xs text-ink-2" data-testid="update-status">
-              {upgrade.state.kind === "done" ? "Updated" : upgrade.state.kind === "failed" ? "Update failed: see Details" : "Updating…"}
-            </span>
-          )}
         </div>
         {detailsOpen && (
           <div data-testid="engine-details">
