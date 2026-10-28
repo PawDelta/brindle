@@ -2681,8 +2681,8 @@ def _script_tokens(command: str) -> list[tuple] | None:
 
 def _script_items(tokens: list[tuple]) -> list[tuple]:
     """The script as ``("kw", word)``, ``("for", name, values or None)`` and
-    ``("cmd", tokens, separator before, separator after)`` items. Raises
-    ValueError for what _flat_script doesn't read."""
+    ``("cmd", tokens, separator before, separator after, negated by !)``
+    items. Raises ValueError for what _flat_script doesn't read."""
     commands: list[tuple[list, str, str]] = []
     current: list[tuple] = []
     before = ""
@@ -2695,10 +2695,12 @@ def _script_items(tokens: list[tuple]) -> list[tuple]:
         elif token[1] not in ("\n", ""):
             raise ValueError("an empty command")
     items: list[tuple] = []
+    negated = False    # a ! before a { on a line of its own marks the group's first command
     for toks, before, after in commands:
         while toks and toks[0][0] == "word" and toks[0][1].plain() in (*_SCRIPT_OPENERS, "!"):
             if toks[0][1].raw != "!":
                 items.append(("kw", toks[0][1].raw))
+            negated |= toks[0][1].raw == "!"
             toks = toks[1:]
         first = toks[0][1].plain() if toks and toks[0][0] == "word" else None
         if first == "for":
@@ -2721,7 +2723,8 @@ def _script_items(tokens: list[tuple]) -> list[tuple]:
         elif first in _SCRIPT_UNREAD:
             raise ValueError(f"{first} isn't read")
         if toks:
-            items.append(("cmd", toks, before, after))
+            items.append(("cmd", toks, before, after, negated))
+            negated = False
     return items
 
 
@@ -2817,11 +2820,18 @@ class _Flattener:
         # Whether each runs in this shell whenever the script does (not in an if, a loop,
         # after && or ||, in a pipeline, or a substitution's subshell).
         self.definite: list[bool] = []
+        # Whether each runs only if the command before it succeeded (after && or in its
+        # pipeline), and whether what follows it runs only if it succeeded, in this shell
+        # (before &&, not negated or at a pipeline's end): what a cd's chain is (_PartReader).
+        # Neither in an if, a loop or a substitution, nor anywhere after a negation (! { ... }).
+        self.chained: list[tuple[bool, bool]] = []
+        self.track = True
         self.changed = False
 
-    def emit(self, command: str, definite: bool = False) -> None:
+    def emit(self, command: str, definite: bool = False, chained: tuple[bool, bool] = (False, False)) -> None:
         self.out.append(command)
         self.definite.append(definite)
+        self.chained.append(chained if self.track else (False, False))
         if len(self.out) > _FLAT_LIMIT:
             raise ValueError("too many commands")
 
@@ -2835,15 +2845,18 @@ class _Flattener:
         nodes, _ = _script_tree(_script_items(tokens))
         self.walk(nodes, env, True)
 
-    def walk(self, nodes: list[tuple], env: dict, definite: bool) -> None:
+    def walk(self, nodes: list[tuple], env: dict, definite: bool, chains: bool = True) -> None:
         for node in nodes:
             if node[0] == "cmd":
+                self.track &= not node[4]
+                chained = (chains and node[2] in ("&&", "|", "|&"),
+                           chains and node[2] in ("", ";", "\n", "&&", "&") and node[3] == "&&")
                 self.command(node[1], env, definite and node[2] in ("", ";", "\n")
-                             and node[3] in ("", ";", "\n", "&&", "||"))
+                             and node[3] in ("", ";", "\n", "&&", "||"), chained)
                 continue
             self.changed = True
             if node[0] == "group":
-                self.walk(node[1], env, definite)
+                self.walk(node[1], env, definite, chains)
                 continue
             body = node[3] if node[0] == "for" else node[1]
             values = self.loop_values(node[2], env) if node[0] == "for" else []
@@ -2853,14 +2866,14 @@ class _Flattener:
             for name in assigned or ():
                 env.pop(name, None)    # a later pass sees what an earlier one set
             if node[0] == "maybe":
-                self.walk(body, env, False)
+                self.walk(body, env, False, False)
                 continue
             for value in dict.fromkeys(values):
                 if value is None:
                     env.pop(node[1], None)
                 else:
                     env[node[1]] = value
-                self.walk(body, env, False)
+                self.walk(body, env, False, False)
             env.pop(node[1], None)
 
     def loop_values(self, words: list[_Word] | None, env: dict) -> list[tuple | None]:
@@ -2923,7 +2936,8 @@ class _Flattener:
                 self.changed = True
         return "".join(out) + word.raw[last:]
 
-    def command(self, tokens: list[tuple], env: dict, definite: bool) -> None:
+    def command(self, tokens: list[tuple], env: dict, definite: bool,
+                chained: tuple[bool, bool] = (False, False)) -> None:
         from brindle.native.permissions import _tokens
 
         words = [t[1] for t in tokens if t[0] == "word"]
@@ -2964,7 +2978,7 @@ class _Flattener:
             spaced, text = (token[1].spaced, self.text(token[1], env)) if token[0] == "word" else (token[2], token[1])
             pieces.append((" " if spaced and pieces else "") + text)
         if pieces:
-            self.emit("".join(pieces), definite)
+            self.emit("".join(pieces), definite, chained)
 
 
 def _flat_script(command: str, cwd: str) -> str | None:
@@ -3032,13 +3046,15 @@ class _PartReader:
     def __init__(self, req: Request):
         self.req = req
         self.cwd: str | None = req.cwd or req.worktree or None
+        self.settled = self.cwd    # where the shell is once a cd's && chain ends, whether the cd ran or not
         self.parts: list[ShellPart] = []
         self.wrote = False    # an earlier part may have made files a later pattern would match
         self.expanded = self.tilde = False    # the part being read's ShellPart.expanded and .tilde
 
-    def read(self, command: str, definite: bool = True) -> None:
+    def read(self, command: str, definite: bool = True, chains: bool = True) -> None:
         """``command``'s parts; ``definite``: whether it surely runs in this
-        shell (an eval's words inside an if or a pipeline may not)."""
+        shell (an eval's words inside an if or a pipeline may not); ``chains``:
+        whether a cd's && chain is followed in it (not in an eval's words)."""
         if "`" in command:
             raise ValueError("a backtick")
         if "<<" in command and any(os.path.basename(w) in _CODE_RUNNERS
@@ -3046,19 +3062,25 @@ class _PartReader:
             raise ValueError("a heredoc a program may run as code")
         flattener = _Flattener(self.cwd or "")
         flattener.script(command, {})
-        for line, sure in zip(flattener.out, flattener.definite):
-            self.part(line, definite and sure)
+        for line, sure, (chained, leads) in zip(flattener.out, flattener.definite, flattener.chained):
+            self.part(line, definite and sure, chains and chained, chains and leads)
 
     def inner(self, command: str) -> None:
         """A substitution's commands: they run in a subshell of their own."""
-        kept = self.cwd, self.expanded, self.tilde
+        kept = self.cwd, self.settled, self.expanded, self.tilde
+        self.settled = self.cwd
         self.read(command)
-        self.cwd, self.expanded, self.tilde = kept
+        self.cwd, self.settled, self.expanded, self.tilde = kept
 
-    def part(self, line: str, definite: bool) -> None:
+    def part(self, line: str, definite: bool, chained: bool = False, leads: bool = False) -> None:
+        """One simple command; ``chained``: it runs only if the one before it
+        succeeded (_Flattener.chained); ``leads``: what follows it runs only if
+        it succeeded."""
         tokens = _script_tokens(line)
         if tokens is None or any(t[0] == "heredoc" for t in tokens):
             raise ValueError("unreadable syntax")
+        if not chained:
+            self.cwd = self.settled
         part = ShellPart([], line, self.cwd)
         self.expanded = self.tilde = False
         program: str | None = None
@@ -3107,7 +3129,7 @@ class _PartReader:
             return
         if program == "eval" and not (part.unknown or part.expanded or part.writes or part.reads):
             # The command its literal words make, run where the eval runs (if it surely does).
-            self.read(" ".join(part.words[1:]), definite)
+            self.read(" ".join(part.words[1:]), definite, chains=False)
             return
         if program == "eval":
             raise _Unverifiable("eval runs what only the run knows")
@@ -3115,10 +3137,13 @@ class _PartReader:
             raise ValueError(f"{program} runs what only the run knows")
         self.parts.append(part)
         if program in ("cd", "pushd"):
-            # A cd that may not run (in an if, after &&, in a pipeline) leaves the folder unknown,
-            # unless it leads where the shell already is.
+            # What runs only if the cd succeeded (cd x && ...) runs where it leads; anything else
+            # after it (after ; or ||, past an if or a pipeline) runs where it may or may not have
+            # led: somewhere unknown, unless that is where the shell already is.
             target = self.directory(part.words[1:], part.unknown)
-            self.cwd = target if definite or target == self.cwd else None
+            if target != self.cwd:
+                self.settled = self.settled if target == self.settled else None
+                self.cwd = target if leads else self.settled
         elif part.writes or not _readonly_part(replace(self.req, cwd=self.cwd), part.words):
             self.wrote = True
 
