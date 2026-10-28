@@ -1402,7 +1402,7 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     db.update_agent("wf", merge_failed="conflict in a.py")     # as the pipeline records it
     real_head = gates.head
     monkeypatch.setattr(gates, "head", lambda ws: head if ws.id == "proj/w-f" else real_head(ws))
-    assert missing() == 5 and _send("GET", "/v1/sessions/lead/diff")[0] == 409
+    assert missing() == 5 and _send("GET", "/v1/sessions/lead/pr/draft")[0] == 409
     assert watch.sweep(db) == []
     db.set_merged("proj/w-f", head)
     assert missing() == 4
@@ -1462,6 +1462,22 @@ def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):
     assert [(w["id"], w["kind"], w["branch"]) for w in d["workers"]] == [
         ("wa", "worker", "feat-a"), ("supervisor", "supervisor", "sess"), ("wb", "worker", "feat-b"),
         ("you", "you", None), ("feat-c", "worker", "feat-c")]
+
+
+def test_session_diff_before_ready(db, repo, lead):
+    code, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
+    assert code == 200 and not reply["ready"]        # nothing ahead of main yet
+    assert _send("GET", "/v1/sessions/lead/pr/draft")[0] == 409
+    code, d = _send("GET", "/v1/sessions/lead/diff")
+    assert code == 200 and d["files"] == []
+
+
+def test_session_tree_lists_tracked_files(db, repo, lead):
+    _commit(Path(lead.path), "a.py", "a\n")
+    (Path(lead.path) / " b.py").write_text("b\n")    # leading whitespace survives
+    sh("git add -A && git commit -qm space", Path(lead.path))
+    code, tree = _send("GET", "/v1/sessions/lead/tree")
+    assert code == 200 and tree["branch"] == lead.branch and {"a.py", " b.py"} <= set(tree["files"])
 
 
 @pytest.mark.parametrize("path,body,setup,status", [
