@@ -448,13 +448,31 @@ class ProviderChoiceDTO(_DTO):
     settings: dict[str, str] = {}
 
 
+class ConnectionReadyDTO(_DTO):
+    """Whether an agent of the provider would launch with its method now
+    (connections.ready); if not, ``reason`` and the ``action`` the app can
+    offer: install | sign_in | sign_out | renew | set_key."""
+    ok: bool
+    reason: str | None = None
+    action: Literal["install", "sign_in", "sign_out", "renew", "set_key"] | None = None
+
+
+class StoppedAgentDTO(_DTO):
+    """An agent stopped because the provider's credentials were refused (failed_why auth)."""
+    id: str
+    name: str
+    profile: str
+
+
 class ProviderConnectionDTO(_DTO):
     """How a provider connects now: ``method`` auto | sign_in | api_key |
     cloud | org (the org decides, with no cloud route here), and for cloud the
     route (``cloud``: bedrock, vertex, foundry, azure), its non-secret
     ``settings`` (variable -> value) and the ``login`` it uses. An org's route
     wins over ``choice``, the person's saved choice; ``managed`` says why.
-    ``clouds``: the routes the person can choose for this provider."""
+    ``clouds``: the routes the person can choose for this provider.
+    ``blocked_by`` "codex_login": Codex's ChatGPT login keeps an API key from
+    being used until POST /providers/codex/sign-out."""
     provider: str
     method: str
     choice: ProviderChoiceDTO | None = None
@@ -463,6 +481,9 @@ class ProviderConnectionDTO(_DTO):
     login: CloudLoginDTO | None = None
     managed: str | None = None
     clouds: list[str] = []
+    ready: ConnectionReadyDTO
+    blocked_by: Literal["codex_login"] | None = None
+    stopped_agents: list[StoppedAgentDTO] = []
 
 
 class AwsProfileDTO(_DTO):

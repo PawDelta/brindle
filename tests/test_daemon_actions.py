@@ -944,6 +944,81 @@ def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_o
         assert reply["gcloud"]["adc"] is False and reply["azure"] is None and "us-east-1" in reply["regions"]["bedrock"]
 
 
+@pytest.mark.parametrize("case", ["agy_gemini_key", "codex_login", "no_cli", "turned_off", "rejected_key",
+                                  "sign_in_exported_key", "stopped_agents"])
+def test_connection_readiness_says_what_an_agent_would_launch_with(db, world, monkeypatch, case):
+    from brindle import company_login, keystore, pane_auth, providers_install
+    from brindle.profiles import Profile
+
+    installed = {"no_cli": ()}.get(case, providers_install.PROVIDERS)
+    monkeypatch.setattr(providers_install, "found", lambda p: f"/bin/{p}" if p in installed else None)
+    for name in (*pane_auth.API_KEYS["claude"], *pane_auth.API_KEYS["codex"], "GEMINI_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    # Claude's own login, as `claude auth status` answers it: signed in except where the case says not.
+    probed = []
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: probed.append(env) or (
+        0, json.dumps({"loggedIn": case != "sign_in_exported_key"})))
+    if case == "agy_gemini_key":
+        settings = Path(providers.agy_settings_path())
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({"modelProvider": "vertex", "theme": "dark"}))
+        keystore.set_key("GEMINI_API_KEY", SECRET)
+        agy = Profile(name="g", description="", provider="antigravity", prompt="", auth="api_key")
+        assert pane_auth.key_problem(agy, "antigravity", (), False)      # agy would ignore the key
+        code, reply = _send("PUT", "/v1/providers/antigravity/connection", {"method": "api_key"})
+        assert code == 200 and reply["ready"]["ok"] and reply["ready"]["reason"]     # the person's agy changed too
+        assert pane_auth.key_problem(agy, "antigravity", (), False) is None
+        # Leaving the key gives the person's agy its own setting back, by choice or by removing the key.
+        assert _send("PUT", "/v1/providers/antigravity/connection", {"method": "sign_in"})[0] == 200
+        assert json.loads(settings.read_text()) == {"modelProvider": "vertex", "theme": "dark"}
+        assert _send("PUT", "/v1/providers/antigravity/connection", {"method": "api_key"})[0] == 200
+        assert _send("DELETE", "/v1/keys/GEMINI_API_KEY")[0] == 200
+        assert providers.agy_model_provider() == "vertex"
+        assert _send("GET", "/v1/providers/antigravity/connection")[1]["ready"]["action"] == "set_key"
+    elif case == "codex_login":
+        auth = Path(providers.codex_auth_path())
+        auth.parent.mkdir(parents=True, exist_ok=True)
+        auth.write_text(json.dumps({"auth_mode": "chatgpt"}))
+        keystore.set_key("OPENAI_API_KEY", SECRET)
+        code, reply = _send("PUT", "/v1/providers/codex/connection", {"method": "api_key"})
+        assert (reply["blocked_by"], reply["ready"]["action"]) == ("codex_login", "sign_out")
+        ran = []
+        monkeypatch.setattr(company_login, "run_cmd", lambda argv, env=None, **kw: (
+            ran.append((argv, env["CODEX_HOME"])), auth.unlink(), (0, ""))[-1])
+        code, job = _send("POST", "/v1/providers/codex/sign-out")
+        assert code == 202 and ran == [(["/bin/codex", "logout"], str(auth.parent))]
+        result = bus.tail(db, kinds=("job.done",))[-1]["payload"]["result"]
+        assert result["blocked_by"] is None and result["ready"] == {"ok": True, "reason": None, "action": None}
+    elif case == "no_cli":
+        reply = _send("PUT", "/v1/providers/claude/connection", {"method": "api_key"})[1]
+        assert reply["ready"]["action"] == "install"
+    elif case == "turned_off":
+        keystore.set_key("ANTHROPIC_API_KEY", SECRET)
+        monkeypatch.setattr(providers_install, "turned_off", lambda p: p == "claude")
+        reply = _send("PUT", "/v1/providers/claude/connection", {"method": "api_key"})[1]
+        assert (reply["ready"]["ok"], reply["ready"]["action"]) == (False, None)
+    elif case == "rejected_key":
+        # auto puts the stored key in the pane ahead of the (valid) login; api_key needs it.
+        keystore.set_key("ANTHROPIC_API_KEY", SECRET, status="rejected")
+        for method in ("auto", "api_key"):
+            reply = _send("PUT", "/v1/providers/claude/connection", {"method": method})[1]
+            assert (reply["method"], reply["ready"]["ok"], reply["ready"]["action"]) == (method, False, "set_key")
+    elif case == "sign_in_exported_key":
+        # The exported key is taken out of a sign_in pane: only the login counts.
+        monkeypatch.setenv("ANTHROPIC_API_KEY", SECRET)
+        reply = _send("PUT", "/v1/providers/claude/connection", {"method": "sign_in"})[1]
+        assert (reply["ready"]["ok"], reply["ready"]["action"]) == (False, "sign_in")
+        assert probed and not probed[-1]["ANTHROPIC_API_KEY"]
+    else:
+        for aid, provider, why in [("a1", "codex", "auth"), ("a2", "codex", "model"), ("a3", "claude", "auth"),
+                                   ("a4", "codex", "auth")]:
+            db.add_agent(Agent(aid, "w-1", "developer", provider, "sup", "assign", "failed", "%9", None, time.time()))
+            db.update_agent(aid, failed_why=why, name="Docs fix" if aid == "a4" else None)
+        reply = _send("GET", "/v1/providers/codex/connection")[1]
+        assert reply["stopped_agents"] == [{"id": "a1", "name": "developer", "profile": "developer"},
+                                           {"id": "a4", "name": "Docs fix", "profile": "developer"}]
+
+
 @pytest.mark.parametrize("route", ["bedrock", "vertex"])
 def test_cloud_profile_login_uses_launch_identity(db, world, tmp_path, monkeypatch, route):
     import hashlib

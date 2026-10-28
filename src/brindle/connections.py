@@ -6,7 +6,9 @@ The person's choice (PUT /v1/providers/{p}/connection) is kept in
 ``auth:`` runs with it (:func:`apply`): the method as its ``auth`` and the
 route's non-secret variables (cloud_login.IDENTITY_ENV) under its own
 ``env.`` lines, which still win. No secret is kept here: a key goes to
-`brindle keys`, a cloud login stays the cloud CLI's. An org's managed
+`brindle keys`, a cloud login stays the cloud CLI's. Antigravity's API key
+also sets agy's own ``modelProvider`` (:func:`_agy_setup`), put back when the
+key goes. An org's managed
 identity still wins at launch (agents.agent_env, pane_auth), and a choice it
 would override is refused with the reason (:func:`refusal`).
 """
@@ -16,6 +18,7 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Mapping
@@ -230,6 +233,8 @@ def choose(provider: str, method: str, cloud: str | None = None, settings: Mappi
     def change(current):
         # Under the config writer's lock: another provider's choice saved meanwhile is kept.
         all_ = dict(current) if isinstance(current, dict) else {}
+        if provider == "antigravity":
+            entry.update(_agy_setup(all_.get(provider), method))
         if method == "auto":
             all_.pop(provider, None)
         else:
@@ -240,18 +245,76 @@ def choose(provider: str, method: str, cloud: str | None = None, settings: Mappi
     return entry
 
 
+# The modelProvider agy's settings had before brindle set "gemini" for an API
+# key, kept in the saved choice so that leaving the key puts it back.
+AGY_WAS = "agy_model_provider_was"
+
+
+def _agy_setup(old, method: str) -> dict:
+    """agy reads GEMINI_API_KEY only with ``"modelProvider": "gemini"`` in its
+    one settings.json, which the person's own agy shares (it has no other
+    config): for an API key set it, recording what it replaced; leaving the
+    key, put that back. What to keep in the saved entry."""
+    from brindle import providers
+
+    old = old if isinstance(old, dict) else {}
+    try:
+        if method == "api_key":
+            kept = {AGY_WAS: old[AGY_WAS] if AGY_WAS in old else providers.agy_model_provider()}
+            providers.set_agy_gemini()
+            return kept
+        if AGY_WAS in old:
+            _agy_restore(old[AGY_WAS])
+    except (OSError, ValueError) as e:
+        raise Invalid(f"couldn't update Antigravity's settings ({providers.agy_settings_path()}): {e}") from e
+    return {}
+
+
+def _agy_restore(was: str | None) -> None:
+    """agy's modelProvider back to ``was``, unless it was changed by hand since brindle set it."""
+    from brindle import providers
+
+    if providers.agy_model_provider() == "gemini" and was != "gemini":
+        providers.set_agy_model_provider(was)
+
+
+def key_removed(name: str) -> None:
+    """A stored key was removed: GEMINI_API_KEY gives agy its modelProvider
+    back (see _agy_setup); the choice stays, and the connection's ``ready``
+    asks for a key again."""
+    from brindle import pane_auth
+
+    if name not in pane_auth.API_KEYS["antigravity"]:
+        return
+
+    def change(current):
+        all_ = dict(current) if isinstance(current, dict) else {}
+        entry = all_.get("antigravity")
+        if isinstance(entry, dict) and AGY_WAS in entry:
+            try:
+                _agy_restore(entry[AGY_WAS])
+            except (OSError, ValueError):
+                return all_      # the key is gone either way; tried again on the next removal or choice
+            all_["antigravity"] = {k: v for k, v in entry.items() if k != AGY_WAS}
+        return all_
+
+    config.update_user(KEY, change)
+
+
 def _login(route: str, env: Mapping[str, str]) -> dict:
     s = cloud_login.status(route, env=env)
     return {"valid": s.ok, "expired": s.expired, "expires_at": s.expires_at,
             "renew_command": s.refresh_cmd, "note": s.note}
 
 
-def view(provider: str, repo: str | None = None) -> dict:
+def view(provider: str, repo: str | None = None, db=None) -> dict:
     """How ``provider`` connects now: the org's route when it decides, else
     the saved choice, else what the environment selects; for a cloud, the
     state of the login that route uses. ``choice`` is the saved choice,
     which an org's route overrides; method "org" when the org decides with
-    no cloud route here."""
+    no cloud route here. ``ready``: whether an agent would launch with it now;
+    ``blocked_by``: a login in the way; ``stopped_agents`` (with ``db``): the
+    agents its credentials stopped."""
     if provider not in PROVIDERS:
         raise Invalid(f"provider must be one of {', '.join(PROVIDERS)}")
     c = saved(provider)
@@ -275,8 +338,115 @@ def view(provider: str, repo: str | None = None) -> dict:
             method = "cloud" if route else "auto"
         if route:
             login = _login(route, identity_env(provider, route, env))
+    blocked_by = _blocked_by(provider, method)
     return {"provider": provider, "method": method, "choice": choice, "cloud": route, "settings": env,
-            "login": login, "managed": managed, "clouds": list(ROUTES.get(provider, {}))}
+            "login": login, "managed": managed, "clouds": list(ROUTES.get(provider, {})),
+            "ready": ready(provider, method, login, blocked_by), "blocked_by": blocked_by,
+            "stopped_agents": stopped_agents(db, provider) if db is not None else []}
+
+
+def _blocked_by(provider: str, method: str) -> str | None:
+    """The login that keeps ``method`` from being used: Codex signed in with
+    ChatGPT runs interactive agents on the plan whatever key is set
+    (providers.CODEX_INTERACTIVE_IGNORES_KEYS), until brindle's copy signs out."""
+    from brindle import providers
+
+    if provider == "codex" and method == "api_key" and providers.codex_chatgpt_login():
+        return "codex_login"
+    return None
+
+
+def _key(provider: str) -> tuple[str | None, str | None]:
+    """The API key an agent of ``provider`` would get (the environment's,
+    else a stored one) and how its last check came out (verified, rejected,
+    unchecked; None for one from the environment): (None, None) without one."""
+    from brindle import keystore, pane_auth
+
+    names = pane_auth.API_KEYS.get(provider, ())
+    for name in names:
+        if os.environ.get(name):
+            return name, None
+    for name in names:
+        try:
+            rec = keystore.get_record(name)
+        except keystore.CredentialError:
+            continue
+        if rec.get("value"):
+            return name, rec.get("status")
+    return None, None
+
+
+def ready(provider: str, method: str, login: dict | None, blocked_by: str | None) -> dict:
+    """Whether an agent of ``provider`` would launch with ``method`` right
+    now, and if not why and what the app can offer (``action``): install the
+    CLI, sign in, sign brindle's copy out, renew a cloud login, or set a key.
+    A key's own check (verified, rejected) is the key's; a rejected one only
+    makes a method that needs it not ready."""
+    from brindle import pane_auth, providers, providers_install
+
+    name = providers_install.NAMES[provider]
+
+    def no(reason: str, action: str | None) -> dict:
+        return {"ok": False, "reason": reason, "action": action}
+
+    if providers_install.found(provider) is None:
+        return no(f"{name} isn't installed", "install")
+    if providers_install.turned_off(provider):
+        return no(f"{name} is turned off in brindle", None)
+    if login is not None and not login["valid"]:
+        if login["expired"]:
+            return no("the cloud login has expired", "renew")
+        return no("not signed in to the cloud", "sign_in")
+    if method in ("cloud", "org"):
+        return {"ok": True, "reason": None, "action": None}
+    key, status = _key(provider)
+    if method == "api_key" and pane_auth.API_KEYS.get(provider):
+        if key is None:
+            return no(f"no API key: store {pane_auth.API_KEYS[provider][0]}", "set_key")
+        if status == "rejected":
+            return no(f"{key} was rejected by {name}", "set_key")
+        if blocked_by == "codex_login":
+            return no(providers.CODEX_INTERACTIVE_IGNORES_KEYS, "sign_out")
+        if provider == "antigravity":
+            if not providers.agy_uses_gemini_key():
+                return no(providers.agy_ignores_key_message(), "set_key")
+            where = "this Mac" if sys.platform == "darwin" else "this computer"
+            return {"ok": True, "reason": f"Antigravity on {where} now uses your Gemini key", "action": None}
+        return {"ok": True, "reason": None, "action": None}
+    if method == "auto" and key is not None:
+        # auto runs with the key ahead of any login (pane_auth), a rejected one too.
+        if status == "rejected":
+            return no(f"{key} was rejected by {name}", "set_key")
+        return {"ok": True, "reason": None, "action": None}
+    if provider != "opencode" and _signed_out(provider, method):
+        return no(f"{name} isn't signed in", "sign_in")
+    return {"ok": True, "reason": None, "action": None}
+
+
+def _signed_out(provider: str, method: str) -> bool:
+    """Whether the CLI's own login is definitely missing, probed as the pane
+    would run: without the provider's API keys and, under sign_in, without
+    another route's selectors (_selectors), so an exported key can't stand in
+    for the login; a subscription token stays."""
+    from brindle import pane_auth, provider_homes, providers
+
+    pending = provider_homes.confirm_login(provider)      # a login just finished in the app
+    if pending is not None:
+        return not pending
+    if provider_homes.signed_out(provider):
+        return True
+    env = {**(_selectors(provider, method, None) if method == "sign_in" else {}),
+           **{k: "" for k in pane_auth.API_KEYS.get(provider, ())}}
+    return providers.signed_out(provider, env) is not None
+
+
+def stopped_agents(db, provider: str) -> list[dict]:
+    """The agents of ``provider`` stopped because its credentials were
+    refused (failed_why auth, service.inbox's kind "credentials")."""
+    rows = db.conn.execute(
+        "SELECT id, name, profile FROM agents WHERE provider = ? AND status = 'failed' AND failed_why = 'auth'"
+        " AND dismissed_at IS NULL ORDER BY created_at", (provider,)).fetchall()
+    return [{"id": r["id"], "name": r["name"] or r["profile"], "profile": r["profile"]} for r in rows]
 
 
 def sign_in_target(provider: str) -> tuple[str, dict[str, str]]:

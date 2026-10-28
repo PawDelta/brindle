@@ -1778,6 +1778,51 @@
       "title": "CloudOptionsDTO",
       "type": "object"
     },
+    "ConnectionReadyDTO": {
+      "description": "Whether an agent of the provider would launch with its method now\n(connections.ready); if not, ``reason`` and the ``action`` the app can\noffer: install | sign_in | sign_out | renew | set_key.",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "enum": [
+                "install",
+                "sign_in",
+                "sign_out",
+                "renew",
+                "set_key"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Action"
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "title": "ConnectionReadyDTO",
+      "type": "object"
+    },
     "DecisionDTO": {
       "properties": {
         "body": {
@@ -4747,6 +4792,51 @@
           "title": "CloudLoginDTO",
           "type": "object"
         },
+        "ConnectionReadyDTO": {
+          "description": "Whether an agent of the provider would launch with its method now\n(connections.ready); if not, ``reason`` and the ``action`` the app can\noffer: install | sign_in | sign_out | renew | set_key.",
+          "properties": {
+            "action": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "install",
+                    "sign_in",
+                    "sign_out",
+                    "renew",
+                    "set_key"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Action"
+            },
+            "ok": {
+              "title": "Ok",
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            }
+          },
+          "required": [
+            "ok"
+          ],
+          "title": "ConnectionReadyDTO",
+          "type": "object"
+        },
         "ProviderChoiceDTO": {
           "description": "The person's saved choice (PUT /providers/{p}/connection).",
           "properties": {
@@ -4780,10 +4870,47 @@
           ],
           "title": "ProviderChoiceDTO",
           "type": "object"
+        },
+        "StoppedAgentDTO": {
+          "description": "An agent stopped because the provider's credentials were refused (failed_why auth).",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "profile": {
+              "title": "Profile",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "profile"
+          ],
+          "title": "StoppedAgentDTO",
+          "type": "object"
         }
       },
-      "description": "How a provider connects now: ``method`` auto | sign_in | api_key |\ncloud | org (the org decides, with no cloud route here), and for cloud the\nroute (``cloud``: bedrock, vertex, foundry, azure), its non-secret\n``settings`` (variable -> value) and the ``login`` it uses. An org's route\nwins over ``choice``, the person's saved choice; ``managed`` says why.\n``clouds``: the routes the person can choose for this provider.",
+      "description": "How a provider connects now: ``method`` auto | sign_in | api_key |\ncloud | org (the org decides, with no cloud route here), and for cloud the\nroute (``cloud``: bedrock, vertex, foundry, azure), its non-secret\n``settings`` (variable -> value) and the ``login`` it uses. An org's route\nwins over ``choice``, the person's saved choice; ``managed`` says why.\n``clouds``: the routes the person can choose for this provider.\n``blocked_by`` \"codex_login\": Codex's ChatGPT login keeps an API key from\nbeing used until POST /providers/codex/sign-out.",
       "properties": {
+        "blocked_by": {
+          "anyOf": [
+            {
+              "const": "codex_login",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blocked By"
+        },
         "choice": {
           "anyOf": [
             {
@@ -4846,6 +4973,9 @@
           "title": "Provider",
           "type": "string"
         },
+        "ready": {
+          "$ref": "#/$defs/ConnectionReadyDTO"
+        },
         "settings": {
           "additionalProperties": {
             "type": "string"
@@ -4853,11 +4983,20 @@
           "default": {},
           "title": "Settings",
           "type": "object"
+        },
+        "stopped_agents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StoppedAgentDTO"
+          },
+          "title": "Stopped Agents",
+          "type": "array"
         }
       },
       "required": [
         "provider",
-        "method"
+        "method",
+        "ready"
       ],
       "title": "ProviderConnectionDTO",
       "type": "object"
@@ -6021,6 +6160,30 @@
       "title": "SessionDTO",
       "type": "object"
     },
+    "StoppedAgentDTO": {
+      "description": "An agent stopped because the provider's credentials were refused (failed_why auth).",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "profile"
+      ],
+      "title": "StoppedAgentDTO",
+      "type": "object"
+    },
     "WorkspaceDTO": {
       "$defs": {
         "AgentDTO": {
@@ -6673,6 +6836,10 @@
     {
       "method": "POST",
       "path": "/v1/providers/{provider}/preflight"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/sign-out"
     },
     {
       "method": "POST",
