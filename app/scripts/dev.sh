@@ -82,9 +82,13 @@ mkdir -p "$LOG_DIR"
 
 "$BRINDLE" daemon stop || true
 
-# The daemon serves in the foreground, so it goes to the background; its
-# SIGINT is ignored there, so Ctrl-C at this script leaves it running.
+# The daemon serves in the foreground, so it goes to the background. Job
+# control gives it its own process group: the terminal's Ctrl-C goes to this
+# script's group, not to the daemon (uvicorn re-installs its own SIGINT
+# handler, so ignoring SIGINT alone doesn't keep the daemon running).
+set -m
 nohup "$BRINDLE" daemon >>"$LOG" 2>&1 &
+set +m
 for _ in $(seq 40); do
   if "$BRINDLE" daemon status >/dev/null 2>&1; then
     break
