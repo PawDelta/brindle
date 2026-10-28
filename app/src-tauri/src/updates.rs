@@ -227,6 +227,19 @@ pub fn release_build_wanted(current: &Version, remote: &str) -> Result<bool, Str
     })
 }
 
+/// Whether the stable feed's `remote` is one to install over this build at
+/// `current` for "Return to stable": only a release-branch build returns
+/// (anything else never), and only to a plain release (no pre-release, no
+/// build metadata), whatever its version: main runs ahead of stable once its
+/// version is bumped, so `0.2.5+release.7.…` returns to stable 0.2.4.
+pub fn stable_return_wanted(current: &Version, remote: &str) -> Result<bool, String> {
+    Version::parse(remote)
+        .ok()
+        .filter(|v| v.pre.is_empty() && v.build.is_empty())
+        .ok_or_else(|| format!("the stable feed names {remote:?}, not a stable release"))?;
+    Ok(release_run(current).is_some())
+}
+
 fn version<R: Runtime>(app: &AppHandle<R>) -> String {
     app.package_info().version.to_string()
 }
@@ -264,6 +277,25 @@ fn release_updater<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
+/// The stable feed's updater for "Return to stable": every build it names
+/// comes back (`stable_return_wanted` decides), each bundle checked against
+/// the production key from the config, set explicitly here: never the staff
+/// key, and an unsigned or staff-signed bundle fails the check.
+fn stable_updater<R: Runtime>(
+    app: &AppHandle<R>,
+    feed: &str,
+) -> Result<tauri_plugin_updater::Updater, String> {
+    let url = feed.parse::<tauri::Url>().map_err(|e| e.to_string())?;
+    let key = config_pubkey(app).ok_or("this build has no production update key")?;
+    app.updater_builder()
+        .pubkey(key)
+        .endpoints(vec![url])
+        .map_err(|e| e.to_string())?
+        .version_comparator(|_, _| true)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 /// This build's own updater: its feed (`endpoint`), an update being `newer`,
 /// each bundle checked against the configured (production) key.
 fn app_updater<R: Runtime>(app: &AppHandle<R>) -> Result<tauri_plugin_updater::Updater, String> {
@@ -280,14 +312,21 @@ fn app_updater<R: Runtime>(app: &AppHandle<R>) -> Result<tauri_plugin_updater::U
     builder.build().map_err(|e| e.to_string())
 }
 
-fn has_pubkey<R: Runtime>(app: &AppHandle<R>) -> bool {
+/// The production minisign public key the config names, if any.
+fn config_pubkey<R: Runtime>(app: &AppHandle<R>) -> Option<String> {
     app.config()
         .plugins
         .0
         .get("updater")
         .and_then(|updater| updater.get("pubkey"))
         .and_then(Value::as_str)
-        .is_some_and(|key| !key.trim().is_empty())
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_string)
+}
+
+fn has_pubkey<R: Runtime>(app: &AppHandle<R>) -> bool {
+    config_pubkey(app).is_some()
 }
 
 /// Whether the engine, asked through `get` as in `engine_says`, calls this
@@ -701,6 +740,20 @@ async fn install_release_build<G: Future<Output = Result<(), String>>>(
     gate: impl Fn() -> G,
     current: &Version,
     feed: &mut impl ReleaseFeed,
+    report: impl FnMut(ReleaseProgress) + Send,
+) -> Result<Option<String>, String> {
+    install_build(installs, gate, current, feed, release_build_wanted, report).await
+}
+
+/// `install_release_build` with the decision (`wanted`, given this build and
+/// the feed's version) left to the caller: "Return to stable" uses
+/// `stable_return_wanted`.
+async fn install_build<G: Future<Output = Result<(), String>>>(
+    installs: &Installs,
+    gate: impl Fn() -> G,
+    current: &Version,
+    feed: &mut impl ReleaseFeed,
+    wanted: impl Fn(&Version, &str) -> Result<bool, String>,
     mut report: impl FnMut(ReleaseProgress) + Send,
 ) -> Result<Option<String>, String> {
     gate().await?;
@@ -708,7 +761,7 @@ async fn install_release_build<G: Future<Output = Result<(), String>>>(
         let Some(version) = feed.check().await? else {
             return Ok(None);
         };
-        if !release_build_wanted(current, &version)? {
+        if !wanted(current, &version)? {
             return Ok(None);
         }
         report(ReleaseProgress::Found { version: version.clone() });
@@ -731,14 +784,21 @@ async fn install_release_build<G: Future<Output = Result<(), String>>>(
 /// `release_endpoint`, with the staff public key (`release_updater`).
 struct PluginFeed<R: Runtime> {
     app: AppHandle<R>,
+    /// Read the stable feed with the production key ("Return to stable")
+    /// instead of the release feed with the staff key.
+    stable: bool,
     update: Option<tauri_plugin_updater::Update>,
 }
 
 impl<R: Runtime> ReleaseFeed for PluginFeed<R> {
     async fn check(&mut self) -> Result<Option<String>, String> {
         let stable = stable_endpoint(&self.app).ok_or("this build names no update feed")?;
-        let feed = release_endpoint(&stable).ok_or("this build's update feed has no release feed")?;
-        let updater = release_updater(&self.app, &feed)?;
+        let updater = if self.stable {
+            stable_updater(&self.app, &stable)?
+        } else {
+            let feed = release_endpoint(&stable).ok_or("this build's update feed has no release feed")?;
+            release_updater(&self.app, &feed)?
+        };
         self.update = updater.check().await.map_err(|e| e.to_string())?;
         Ok(self.update.as_ref().map(|update| update.version.clone()))
     }
@@ -771,12 +831,51 @@ pub async fn app_release_build_install<R: Runtime>(
     on_progress: Channel<ReleaseProgress>,
 ) -> Result<Option<String>, String> {
     let current = app.package_info().version.clone();
-    let mut feed = PluginFeed { app: app.clone(), update: None };
+    let mut feed = PluginFeed { app: app.clone(), stable: false, update: None };
     let report = |progress| {
         let _ = on_progress.send(progress);
     };
     let installs = app.state::<Installs>();
     install_release_build(&installs, || staff_gate_now(&app), &current, &mut feed, report).await
+}
+
+/// Settings' staff-only "Return to stable": install the stable feed's build
+/// over this release-branch build even at the same version
+/// (`stable_return_wanted`), its bundle checked against the production key.
+/// Same gate and one-install rule as the release-branch install.
+/// It installs only `version`, the one `app_stable_check` showed the person
+/// to confirm: a feed naming another by now is an error, so they confirm again.
+#[tauri::command]
+pub async fn app_return_to_stable<R: Runtime>(
+    app: AppHandle<R>,
+    version: String,
+    on_progress: Channel<ReleaseProgress>,
+) -> Result<Option<String>, String> {
+    let current = app.package_info().version.clone();
+    let mut feed = PluginFeed { app: app.clone(), stable: true, update: None };
+    let report = |progress| {
+        let _ = on_progress.send(progress);
+    };
+    let installs = app.state::<Installs>();
+    let wanted = |current: &Version, found: &str| {
+        if found != version {
+            return Err(format!("the stable release is now {found}, not {version}; check again"));
+        }
+        stable_return_wanted(current, found)
+    };
+    install_build(&installs, || staff_gate_now(&app), &current, &mut feed, wanted, report).await
+}
+
+/// Settings' "Return to stable", first step: the stable version
+/// `stable_return_wanted` would install over this build, or none. Same staff
+/// gate, same production-key feed; nothing is downloaded.
+#[tauri::command]
+pub async fn app_stable_check<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
+    staff_gate_now(&app).await?;
+    let current = app.package_info().version.clone();
+    let mut feed = PluginFeed { app: app.clone(), stable: true, update: None };
+    let Some(found) = feed.check().await? else { return Ok(None) };
+    Ok(stable_return_wanted(&current, &found)?.then_some(found))
 }
 
 /// Check this build's feed (`endpoint`) and install an update found
@@ -1070,6 +1169,25 @@ mod tests {
         ] {
             let current = Version::parse(current).expect("version");
             let got = release_build_wanted(&current, remote).map_err(|_| ());
+            assert_eq!(got, wanted, "{current} -> {remote}");
+        }
+    }
+
+    #[test]
+    fn only_a_release_build_returns_to_stable_whatever_its_version() {
+        for (current, remote, wanted) in [
+            ("0.2.4+release.7.0123456789ab", "0.2.4", Ok(true)),
+            ("0.2.4+release.7.0123456789ab", "0.2.5", Ok(true)),
+            ("0.2.5+release.7.0123456789ab", "0.2.4", Ok(true)),
+            // Not a release-branch build: never.
+            ("0.2.4", "0.2.4", Ok(false)),
+            ("0.2.4", "0.2.5", Ok(false)),
+            // The feed must name a plain release.
+            ("0.2.4+release.7.0123456789ab", "0.2.5-rc.1", Err(())),
+            ("0.2.4+release.7.0123456789ab", "0.2.5+release.8.0123456789ab", Err(())),
+        ] {
+            let current = Version::parse(current).expect("version");
+            let got = stable_return_wanted(&current, remote).map_err(|_| ());
             assert_eq!(got, wanted, "{current} -> {remote}");
         }
     }

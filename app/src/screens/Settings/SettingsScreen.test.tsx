@@ -38,7 +38,7 @@ afterEach(() => {
   ipc.answers.length = 0;
 });
 
-function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps["installCli"], appUpdater?: SettingsScreenProps["appUpdater"], releaseUpdater?: SettingsScreenProps["releaseBuildUpdater"], rule?: string) {
+function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps["installCli"], appUpdater?: SettingsScreenProps["appUpdater"], releaseUpdater?: SettingsScreenProps["releaseBuildUpdater"], rule?: string, readAbout?: SettingsScreenProps["readAbout"]) {
   const daemon = new FakeDaemon({
     repos: [{ repo_root: REPO, name: "proj" }],
     config: {
@@ -78,7 +78,7 @@ function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps[
           <ProvidersProvider client={client}>
             {/* A sign-in's CLI read through the fake daemon's pty views, as the shell's show it. */}
             <PtyViewsProvider value={daemon.ptyViews()}>
-              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} rule={rule} />
+              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} readAbout={readAbout} rule={rule} />
             </PtyViewsProvider>
           </ProvidersProvider>
         </SessionsProvider>
@@ -679,15 +679,25 @@ describe("settings screen", () => {
     await flush();
     expect(screen.queryByTestId("debug-logging")).toBeNull();
     expect(screen.queryByRole("switch", { name: "Debug logging" })).toBeNull();
+    expect(screen.queryByTestId("staff-only")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Staff only" })).toBeNull();
     stop();
   });
 
-  it("gives staff one debug logging switch, which turns it on with PUT /debug", async () => {
-    const { daemon, stop } = setup({ debug: { staff: true, enabled: false } });
-    const section = await screen.findByTestId("debug-logging");
+  it("gives staff one Staff only section holding debug logging, app update and the release-branch rows, which turns debug logging on with PUT /debug", async () => {
+    const updater = { install: vi.fn(async () => "0.1.0-rc.8"), restart: vi.fn(async () => {}) };
+    const { daemon, stop } = setup({ debug: { staff: true, enabled: false } }, undefined, updater, releaseBuildUpdater, undefined, async () => ({ version: "0.2.4+release.42.0123456789ab", files: [] }));
+    // The staff section holds the staff controls, last before About, and is in the nav.
+    const staffOnly = await screen.findByTestId("staff-only");
+    await within(staffOnly).findByTestId("return-to-stable-row");
+    expect(within(staffOnly).getByTestId("app-update-row")).toBeTruthy();
+    expect(within(staffOnly).getByTestId("release-build-row")).toBeTruthy();
+    expect(staffOnly.nextElementSibling?.id).toBe("about");
+    expect(screen.getByRole("button", { name: "Staff only" })).toBeTruthy();
+    const section = within(staffOnly).getByTestId("debug-logging");
     expect(section.textContent).toContain("upload to brindle");
     const toggle = within(section).getByRole("switch", { name: "Debug logging" });
-    expect(within(section).getAllByRole("switch")).toHaveLength(1);
+    expect(within(staffOnly).getAllByRole("switch")).toHaveLength(1);
     expect(toggle.getAttribute("aria-checked")).toBe("false");
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
@@ -698,13 +708,15 @@ describe("settings screen", () => {
 
   it("staff update: hides the app's Update from anyone the daemon doesn't call staff", async () => {
     const updater = { install: vi.fn(async () => "0.1.0-rc.8"), restart: vi.fn(async () => {}) };
-    const { daemon, stop } = setup({ debug: { staff: false, enabled: false } }, undefined, updater, releaseBuildUpdater);
+    // Even on a release-branch build (which makes Return to stable eligible by version), a non-staff account sees nothing.
+    const { daemon, stop } = setup({ debug: { staff: false, enabled: false } }, undefined, updater, releaseBuildUpdater, undefined, async () => ({ version: "0.2.4+release.42.0123456789ab", files: [] }));
     await screen.findByTestId("engine");
     await waitFor(() => expect(daemon.requests.some((r) => r.method === "GET" && r.path === "/debug")).toBe(true));
     await flush();
     expect(screen.queryByTestId("app-update")).toBeNull();
     expect(screen.queryByTestId("app-update-row")).toBeNull();
     expect(screen.queryByTestId("release-build-row")).toBeNull();
+    expect(screen.queryByTestId("return-to-stable-row")).toBeNull();
     expect(screen.queryByText("Update the app")).toBeNull();
     expect(updater.install).not.toHaveBeenCalled();
     expect(ipc.calls).toEqual([]);
@@ -732,6 +744,40 @@ describe("settings screen", () => {
     expect(row.textContent).toContain(build);
     fireEvent.click(restart);
     await waitFor(() => expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_release_build_install", "app_restart"]));
+    stop();
+  });
+
+  it("staff update: Return to stable shows only on a release-branch build, and installs the stable feed after a confirmation", async () => {
+    const about = (version: string) => async () => ({ version, files: [] });
+    const plain = setup({ debug: { staff: true, enabled: false } }, undefined, undefined, releaseBuildUpdater, undefined, about("0.2.4"));
+    await within(await screen.findByTestId("app-update")).findByTestId("release-build-row");
+    await flush();
+    expect(screen.queryByTestId("return-to-stable-row")).toBeNull();
+    plain.stop();
+    cleanup();
+
+    const { stop } = setup({ debug: { staff: true, enabled: false } }, undefined, undefined, releaseBuildUpdater, undefined, about("0.2.4+release.42.0123456789ab"));
+    const row = await screen.findByTestId("return-to-stable-row");
+    fireEvent.click(within(row).getByRole("button", { name: "Return to stable" }));
+    // The shell is asked which version first; nothing installs until it is confirmed, and Cancel installs nothing.
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check"]);
+    // Nothing to return to at first (the stable is older); a later check finds one, and that version is what is shown to confirm.
+    ipc.answers[0](null);
+    fireEvent.click(await within(row).findByRole("button", { name: "Return to stable" }));
+    ipc.answers[1]("0.2.4");
+    await within(row).findByRole("button", { name: "Confirm" });
+    expect(row.textContent).toContain("0.2.4");
+    fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check", "app_stable_check"]);
+    fireEvent.click(within(row).getByRole("button", { name: "Return to stable" }));
+    ipc.answers[2]("0.2.4");
+    fireEvent.click(await within(row).findByRole("button", { name: "Confirm" }));
+    // The install is pinned to the version the person confirmed.
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check", "app_stable_check", "app_stable_check", "app_return_to_stable"]);
+    expect(ipc.calls[3].args.version).toBe("0.2.4");
+    ipc.answers[3]("0.2.4");
+    fireEvent.click(await within(row).findByRole("button", { name: "Restart" }));
+    await waitFor(() => expect(ipc.calls.at(-1)?.cmd).toBe("app_restart"));
     stop();
   });
 
