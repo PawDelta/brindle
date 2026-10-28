@@ -60,12 +60,18 @@ def test_session_config_setup_comes_from_base_branch(db, repo, monkeypatch):
     assert reviewed == [["pytest -q"]]
     # A session's own workspace reads its own branch; its worker reads the session branch as its base.
     sess = workspaces.create(db, str(repo), "brindle/session-2", base="main", apply_prefix=False).workspace
-    write_config(Path(sess.path),setup=["echo sess > marker"], checks=["own"], scoped_checks="off")
+    write_config(Path(sess.path), setup=["echo sess > marker"], checks=["own"], scoped_checks="off",
+                     services=[{"name": "db", "image": "img", "port": 5432, "env": {"SESS_URL": "s:{port}"}}])
     sh("git add -A && git commit -qm sess-config", sess.path)
     add(db, sess, "boss", "interactive", profile="supervisor")
     worker = workspaces.create(db, str(repo), "w2", base=sess.branch).workspace
     assert workspaces.config_for(db, sess).checks == ["own"]   # not main's ["pytest -q"]
     assert workspaces.config_for(db, worker).checks == ["own"]   # its base is the session branch
+    cfg = workspaces.config_for(db, sess)
+    assert workspaces.workspace_env(sess, cfg)["SESS_URL"] == f"s:{sess.port_base + 1}"
+    reviewed.clear()
+    asyncio.run(mcp_server.request_review(sess.id))
+    assert reviewed == [["own"]]
     # A base without the file committed falls back to the working tree.
     sh("git checkout -q --orphan bare && git rm -rqf --cached .brindle", repo)
     sh("git commit -qm bare --allow-empty", repo)
