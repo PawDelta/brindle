@@ -376,6 +376,7 @@ describe("App", () => {
     const sync = startSync({ client, store, connect: daemon.connect });
     const installCli = vi.fn(() => Promise.resolve({ path: "/home/sam/.local/bin/brindle", target: "/Applications/brindle.app/Contents/Resources/engine/bin/brindle" }));
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "settings" }} installCli={installCli} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Details/ }));
     const cli = await screen.findByTestId("install-cli");
     const btn = within(cli).getByRole("button", { name: "Install command-line tool" });
     expect(btn).toHaveProperty("disabled", false);
@@ -415,6 +416,7 @@ describe("App", () => {
     fireEvent.click(link("Settings"));
     await screen.findByRole("region", { name: "Settings" });
     const engineSection = screen.getByTestId("engine");
+    fireEvent.click(within(engineSection).getByRole("button", { name: /Details/ }));
     expect(within(engineSection).getByTestId("connection").textContent).toBe("daemon · connected");
     expect(screen.queryByTestId("engine-health")).toBeNull();
     expect(within(nav()).queryByTestId("connection")).toBeNull();
@@ -441,6 +443,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
     fireEvent.click(link("Settings"));
     await screen.findByRole("region", { name: "Settings" });
+    fireEvent.click(within(screen.getByTestId("engine")).getByRole("button", { name: /Details/ }));
     expect(within(screen.getByTestId("engine")).getByTestId("connection").textContent).toBe("daemon · connected");
     const after = daemon.requests.slice(before).filter((r) => r.method === "GET").map((r) => r.path);
     expect(after).toContain("/snapshot");

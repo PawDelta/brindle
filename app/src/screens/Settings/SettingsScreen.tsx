@@ -914,6 +914,8 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const [rest, setRest] = useState(false);
   const [yours, setYours] = useState(false);
   const [optional, setOptional] = useState(false);
+  /* Engine & health's Details: null follows the health (open when bad), a click decides. */
+  const [details, setDetails] = useState<boolean | null>(null);
   useEffect(() => {
     setSaved(null);
     setSaveError(null);
@@ -1052,6 +1054,9 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   // What needs attention here: the sign-in rows show their own state in their own section.
   const wrong = health.filter((c) => c.level !== "ok" || c.name === "brindle update").length;
   const upgradeNotice = checks ? updateNotice(checks) : undefined;
+  // Details: closed unless health is bad (a failed check or a doctor that didn't answer), until the user chooses.
+  const healthBad = !!doctorError || health.some((c) => c.level === "fail");
+  const detailsOpen = details ?? healthBad;
   const common = YOURS.filter((s) => s.common);
   const others = YOURS.filter((s) => !s.common);
   const shown = SETTINGS.map((s) => s.key);
@@ -1285,12 +1290,39 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         }
         testId="engine"
       >
+        <div className="flex flex-col gap-s1 px-s2 py-s1" data-testid="engine-health-summary">
+          <div className="flex flex-wrap items-center gap-x-s2 gap-y-1 text-xs text-ink-2">
+            {meta ? <span className={mono}>brindle {meta.engine_version}</span> : <span>No engine</span>}
+            <span data-testid="health-status" data-bad={healthBad ? "true" : "false"} className={healthBad ? "text-sap" : undefined}>
+              {doctorError ? "Checks didn't run" : checks === null ? "Checking…" : wrong === 0 ? "Healthy" : wrong === 1 ? "1 needs attention" : `${wrong} need attention`}
+            </span>
+            {cliState !== "idle" && (
+              <span data-testid="cli-status">{cliState === "installing" ? "Installing CLI…" : cliState === "installed" ? "CLI installed" : "CLI install failed"}</span>
+            )}
+            <span className="flex-1" />
+            {upgradeNotice && upgrade.state.kind === "idle" && (
+              <button type="button" className={primary} onClick={update}>
+                Update brindle
+              </button>
+            )}
+            {upgrade.state.kind !== "idle" && (
+              <span data-testid="update-status">{upgrade.state.kind === "done" ? "Updated" : upgrade.state.kind === "failed" ? "Update failed: see Details" : "Updating…"}</span>
+            )}
+            <More open={detailsOpen} onToggle={() => setDetails(!detailsOpen)} label="Details" />
+          </div>
+        </div>
+        {detailsOpen && (
+          <div data-testid="engine-details">
+            {upgrade.state.kind !== "idle" && (
+              <div className="px-s2 py-1">
+                <UpgradeCard state={upgrade.state} onDismiss={upgrade.dismiss} />
+              </div>
+            )}
         <Row label="Daemon connection" help="The live connection between the app and brindle." testId="daemon-connection">
           <span className="text-xs text-ink-2" data-testid="connection">daemon · {connection === "open" ? "connected" : connection === "closed" ? "reconnecting…" : connection === "unauthorized" ? "token refused" : connection === "connecting" ? "connecting…" : "no engine"}</span>
         </Row>
         <Row
           label="Engine"
-          wide={upgrade.state.kind !== "idle"}
           help={
             upgradeNotice ? (
               <span className="text-sap" data-testid="update-notice">
@@ -1309,16 +1341,6 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
               brindle {meta.engine_version} · API {meta.api_version}
               {meta.airgap ? " · air-gapped" : ""}
             </span>
-          )}
-          {upgradeNotice && upgrade.state.kind === "idle" && (
-            <button type="button" className={primary} onClick={update}>
-              Update brindle
-            </button>
-          )}
-          {upgrade.state.kind !== "idle" && (
-            <div className="w-full">
-              <UpgradeCard state={upgrade.state} onDismiss={upgrade.dismiss} />
-            </div>
           )}
         </Row>
         <Row
@@ -1352,6 +1374,8 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
                 ))}
               </ul>
             )}
+          </div>
+        )}
           </div>
         )}
       </Section>

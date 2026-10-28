@@ -738,6 +738,10 @@ def test_cloud_profile_login_uses_launch_identity(db, world, tmp_path, monkeypat
     code, again = _send("POST", item.action.path, item.action.body)
     assert code == 200 and not again["started"] and again["terminal"] == opened["terminal"]
     assert len(windows) == 1
+    # "Try again" after a cloud sign-in failed and stuck: that terminal ends and a fresh one starts.
+    monkeypatch.setattr(tmux, "kill_window", lambda pane: windows.pop(next(iter(windows))))
+    code, opened = _send("POST", item.action.path, {**item.action.body, "restart": True})
+    assert code == 200 and opened["started"] and opened["terminal"] != again["terminal"] and len(windows) == 1
     shared = {**cloud, ("AWS_REGION" if route == "bedrock" else "CLOUD_ML_REGION"): "other-region"}
     (directory / "shared.md").write_text("---\nname: shared\nprovider: claude\nauth: cloud\n" +
         "".join(f"env.{k}: {v}\n" for k, v in shared.items()) + "---\nWork.\n")
@@ -864,7 +868,13 @@ def test_opencode_cloud_identity_dispatch(db, world, tmp_path, monkeypatch, rout
         (f"%{i + 1}", name, True, tid) for i, (tid, (name, _, _)) in enumerate(windows.items())])
     code, opened = _send("POST", item.action.path, item.action.body)
     assert code == 200, opened
-    assert _send("POST", item.action.path, {**item.action.body, "restart": True})[1]["terminal"] == opened["terminal"]
+    assert _send("POST", item.action.path, item.action.body)[1]["terminal"] == opened["terminal"]
+    # Try again: the cloud sign-in still running goes, and a fresh one carries the same identity.
+    monkeypatch.setattr(tmux, "kill_window", lambda pane: windows.pop(next(iter(windows))))
+    code, fresh = _send("POST", item.action.path, {**item.action.body, "restart": True})
+    assert code == 200 and fresh["started"] and fresh["terminal"] != opened["terminal"]
+    assert list(windows) == [fresh["terminal"]]
+    opened = fresh
     _, argv, env = windows[opened["terminal"]]
     assert all(env[k] == v for k, v in cloud.items()) and env["XDG_DATA_HOME"] == identity["XDG_DATA_HOME"]
     if route == "vertex":
@@ -1402,7 +1412,7 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     db.update_agent("wf", merge_failed="conflict in a.py")     # as the pipeline records it
     real_head = gates.head
     monkeypatch.setattr(gates, "head", lambda ws: head if ws.id == "proj/w-f" else real_head(ws))
-    assert missing() == 5 and _send("GET", "/v1/sessions/lead/diff")[0] == 409
+    assert missing() == 5 and _send("GET", "/v1/sessions/lead/pr/draft")[0] == 409
     assert watch.sweep(db) == []
     db.set_merged("proj/w-f", head)
     assert missing() == 4
@@ -1462,6 +1472,22 @@ def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):
     assert [(w["id"], w["kind"], w["branch"]) for w in d["workers"]] == [
         ("wa", "worker", "feat-a"), ("supervisor", "supervisor", "sess"), ("wb", "worker", "feat-b"),
         ("you", "you", None), ("feat-c", "worker", "feat-c")]
+
+
+def test_session_diff_before_ready(db, repo, lead):
+    code, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
+    assert code == 200 and not reply["ready"]        # nothing ahead of main yet
+    assert _send("GET", "/v1/sessions/lead/pr/draft")[0] == 409
+    code, d = _send("GET", "/v1/sessions/lead/diff")
+    assert code == 200 and d["files"] == []
+
+
+def test_session_tree_lists_tracked_files(db, repo, lead):
+    _commit(Path(lead.path), "a.py", "a\n")
+    (Path(lead.path) / " b.py").write_text("b\n")    # leading whitespace survives
+    sh("git add -A && git commit -qm space", Path(lead.path))
+    code, tree = _send("GET", "/v1/sessions/lead/tree")
+    assert code == 200 and tree["branch"] == lead.branch and {"a.py", " b.py"} <= set(tree["files"])
 
 
 @pytest.mark.parametrize("path,body,setup,status", [
@@ -1525,6 +1551,33 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     done = bus.tail(db, kinds=("job.done", "job.failed"))
     assert done[-1]["payload"]["result"]["url"] == "https://github.com/o/r/pull/7"
     assert "--base main --head sess --title Ship it --body" in called.read_text()
+
+
+@pytest.mark.parametrize("opening,passed", [(True, False), (False, False), (False, True)])
+def test_auto_pr_checks(db, lead, monkeypatch, opening, passed):
+    from brindle import gates, git
+
+    messages, pushes = [], []
+    config.set_local(lead.repo_root, "auto_pr", True)
+    config.set_local(lead.repo_root, "checks", ["validate"])
+    monkeypatch.setattr(routes_actions.review, "require_ready", lambda *a: None)
+    monkeypatch.setattr(gates, "head", lambda ws: "verified")
+    monkeypatch.setattr(gates, "run_checked", lambda *a: (passed, "x" * gates.MAX_FAILURE_CHARS + "failure tail"))
+    monkeypatch.setattr(agents, "send_message", lambda db, to, text, **kw: messages.append((to, text)))
+    monkeypatch.setattr(git, "push", lambda path, branch, sha=None: pushes.append(sha))
+    monkeypatch.setattr(workspaces, "open_pull_request", lambda *a, **kw: pushes.append(kw["sha"]))
+    if not opening:
+        routes_actions._record_pr(db, ("lead", lead.branch), "https://github.com/o/r/pull/7", "old", True)
+    routes_actions.auto_pr(db, "lead", opening=opening)
+    row = db.conn.execute("SELECT pushed_sha FROM session_prs").fetchone()
+    if passed:
+        assert pushes == ["verified"] and row["pushed_sha"] == "verified" and messages == []
+        assert bus.tail(db, kinds=("session.pr_pushed",))[-1]["payload"]["commit"] == "verified"
+    else:
+        assert pushes == [] and (row is None if opening else row["pushed_sha"] == "old")
+        assert len(messages) == 1 and messages[0][0] == "lead"
+        assert "validate" in messages[0][1] and "failure tail" in messages[0][1]
+    assert not routes_actions._PR_WORK
 
 
 @pytest.mark.parametrize("auto_pr,org,opened", [

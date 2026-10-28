@@ -771,7 +771,8 @@ export class FakeDaemon {
     const d = this.data;
     const session = d.sessions.find((s) => s.id === root);
     if (!session) return error("not_found", `no session ${root}`, 404);
-    const review = d.sessionReview[root] ?? { ready: false, reasons: ["autopilot isn't on for this session, so there is no goal to judge it by"], branch: "", base: "", diff: "" };
+    const workspace = d.workspaces.find((ws) => ws.id === session.workspace_id);
+    const review = d.sessionReview[root] ?? { ready: false, reasons: ["autopilot isn't on for this session, so there is no goal to judge it by"], branch: workspace?.branch ?? "", base: workspace?.base_branch ?? "main", diff: "" };
     if (what === "pr/readiness") return json({ root_id: root, ready: review.ready, reasons: review.reasons, pr: review.pr ?? null });
     if (what === "file") {
       const content = d.sessionFiles[root]?.[query.path ?? ""];
@@ -779,7 +780,6 @@ export class FakeDaemon {
       if (content === undefined) return error("not_found", `no file ${query.path} in the session's checkout`, 404);
       return json({ path: query.path, content, base: fakeBlob(content) });
     }
-    if (!review.ready) return json({ error: { code: "not_ready", message: `the session isn't ready for a PR: ${review.reasons.join("; ")}` }, reasons: review.reasons }, 409);
     if (what === "diff") {
       // From the base and the checkout as they stand, when the base is known: the diff follows every edit.
       const base = d.sessionBase[root];
@@ -795,6 +795,7 @@ export class FakeDaemon {
       }));
       return json({ root_id: root, branch: review.branch, base: review.base, base_sha: "b".repeat(40), head: `h${this.nextId}`.padEnd(40, "0"), files, workers: [] });
     }
+    if (!review.ready) return json({ error: { code: "not_ready", message: `the session isn't ready for a PR: ${review.reasons.join("; ")}` }, reasons: review.reasons }, 409);
     if (what === "pr/draft") {
       const goal = d.goal?.root_id === root ? d.goal : null;
       const titles = goal?.milestones?.map((m) => `- ${m.title}`) ?? [];
