@@ -33,7 +33,7 @@ import { DaemonContext } from "./api/context";
 import { checkEngine, type EngineStatus } from "./api/engine";
 import { openExternal, pickFolder as nativePicker, type OpenUrl, type PickFolder } from "./api/open";
 import type { SessionDTO } from "./api/schema";
-import type { About, AppUpdater, CliLink, ReleaseBuildUpdater } from "./api/tauri";
+import type { About, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from "./api/tauri";
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
 import { Sidebar } from "./components/Sidebar";
@@ -74,6 +74,8 @@ export interface AppProps {
   installCli?: () => Promise<CliLink | void>;
   /* Settings' staff-only app Update: the shell's in the app, none in a browser tab. */
   appUpdater?: AppUpdater;
+  /* The app's own updates (the Inbox's Restart to update, Settings' About): the shell's in the app, none in a browser tab. */
+  appUpdates?: AppUpdates;
   /* Settings' staff-only release-branch build install: the shell's in the app, none in a browser tab. */
   releaseBuildUpdater?: ReleaseBuildUpdater;
   /* Settings' About license files: the shell's in the app, none in a browser tab. */
@@ -109,7 +111,7 @@ export function landing(repos: { repo_root: string }[], sessions: Record<string,
 /* Agents' "Connect …" links and the Inbox's rule links: each press asks Settings to scroll (and open the rule) again. */
 let providerAsks = 0;
 
-function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, releaseBuildUpdater, readAbout }: {
+function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: {
   route: Route;
   navigate(route: Route): void;
   client: DaemonClient;
@@ -119,6 +121,7 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
   pickFolder?: PickFolder;
   installCli?: AppProps["installCli"];
   appUpdater?: AppProps["appUpdater"];
+  appUpdates?: AppProps["appUpdates"];
   releaseBuildUpdater?: AppProps["releaseBuildUpdater"];
   readAbout?: AppProps["readAbout"];
 }) {
@@ -130,13 +133,13 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     case "settings":
-      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} section={route.section} ask={route.ask} rule={route.rule} />;
+      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} section={route.section} ask={route.ask} rule={route.rule} />;
     case "account":
       return <AccountScreen client={client} openUrl={openUrl} onNavigate={(screen) => navigate({ screen })} section={route.section} ask={route.ask} />;
     case "new":
       return <NewSession key={route.repo} client={client} onOpen={openSession} initialRepo={route.repo} pickFolder={pickFolder} refresh={refresh} />;
     case "inbox":
-      return <InboxScreen client={client} refresh={refresh} onOpen={openSession} session={route.session ?? null} onShowAll={() => navigate({ screen: "inbox" })} onOpenRule={(rule) => navigate({ screen: "settings", section: "permissions", rule, ask: ++providerAsks })} />;
+      return <InboxScreen client={client} refresh={refresh} onOpen={openSession} session={route.session ?? null} onShowAll={() => navigate({ screen: "inbox" })} onOpenRule={(rule) => navigate({ screen: "settings", section: "permissions", rule, ask: ++providerAsks })} appUpdates={appUpdates} openUrl={openUrl} />;
     case "session":
       return (
         <SessionScreen
@@ -186,7 +189,7 @@ function Banner({ status, connection, onRetry, client, store }: { status: Engine
   );
 }
 
-function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, releaseBuildUpdater, readAbout }: AppProps) {
+function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: AppProps) {
   // Until the sessions are known the app shows the empty state, quietly; then it lands.
   const [route, setRoute] = useState<Route | null>(initialRoute ?? null);
   const navigate = useCallback((to: Route) => setRoute(to), []);
@@ -237,7 +240,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
             {client ? (
               route ? (
                 <div className={`relative flex min-h-0 flex-1 flex-col ${shown.screen === "inbox" ? "gap-s2 p-s3" : ""}`}>
-                  <Screen route={route} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
+                  <Screen route={route} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
 </div>
               ) : feedError ? (
                 // Nothing to land on: the sessions couldn't be read (the engine itself may be fine). Ask again.

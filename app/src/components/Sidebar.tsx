@@ -41,6 +41,7 @@ import { goalPhase, useGoal } from "../screens/Session/GoalPanel";
 import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
+import { waitingCount } from "../store/appUpdates";
 import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
 import { nearReading, nowSeconds } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
@@ -448,9 +449,10 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
 
 /* "Inbox · N" at the very top (design/options-v3/C2b-inbox-only): the one
    entry about what needs a person, everything else about attention being
-   the Inbox page's. "empty" when nothing waits. */
+   the Inbox page's. "empty" when nothing waits. The app's own update item
+   counts too (store/appUpdates.ts). */
 function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
-  const total = useAppState((s) => s.inbox.length);
+  const total = useAppState(waitingCount);
   const on = route.screen === "inbox";
   return (
     <button
