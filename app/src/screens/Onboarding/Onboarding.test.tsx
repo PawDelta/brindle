@@ -58,14 +58,13 @@ describe("Onboarding", () => {
     expect(openUrl).toHaveBeenCalledTimes(2);
     daemon.completeLogin();
 
-    // Connect your providers: a card each, Connect on every missing one; the one button names the picks.
+    // Connect your providers: a section each, choosing how a missing one connects picks it; the one button names the picks.
     await step("connect");
     const claude = screen.getByTestId("onb-card-claude");
-    expect(within(claude).getByText("by Anthropic")).toBeTruthy();
     // Nothing picked: the one button below the cards is off.
     expect(screen.getAllByRole("button", { name: "Connect" }).filter((b) => (b as HTMLButtonElement).disabled)).toHaveLength(1);
-    fireEvent.click(within(claude).getByRole("button", { name: "Connect" }));
-    expect(within(claude).getByTestId("onb-chosen-claude").textContent).toContain("Runs Anthropic's installer");
+    fireEvent.click(within(claude).getByRole("radio", { name: "Sign in" }));
+    expect((await within(claude).findByTestId("onb-chosen-claude")).textContent).toContain("Runs Anthropic's installer");
     fireEvent.click(screen.getByRole("button", { name: "Connect Claude Code" }));
 
     // The calm progress card: the installer's own lines as it prints them, no Continue until it's done.
@@ -120,7 +119,6 @@ describe("Onboarding", () => {
     await step("connect");
     const codex = screen.getByTestId("onb-card-codex");
     expect(within(codex).getByTestId("onb-found-codex").textContent).toContain("Found at /opt/homebrew/bin/codex · 0.46.0");
-    expect(within(codex).queryByRole("button")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Continue with Codex" }));
 
     await step("install");
@@ -154,14 +152,196 @@ describe("Onboarding", () => {
     expect(daemon.data.policy.preset).toBe("secure");
   });
 
+  const puts = (daemon: FakeDaemon, path: string) => daemon.requests.filter((r) => r.method === "PUT" && r.path === path).map((r) => r.body);
+  const methodOn = (card: HTMLElement) => within(card).getByTestId("connect-method").getAttribute("data-method");
+
+  it("onboarding's connect method choice: a cloud signed in before its CLI is installed, an API key checked and imported, connected only once the engine reads it ready", async () => {
+    const daemon = new FakeDaemon({ account: SIGNED_IN, providers: freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.46.0", signed_in: false } }) });
+    daemon.rejectedKeys.add("OPENAI_API_KEY");
+    daemon.shellKeys.add("OPENAI_API_KEY");
+    daemon.codexChatGPT = true;
+    const { openUrl } = launch(daemon);
+    await step("connect");
+
+    // The first not connected is open; the others are a line with Choose.
+    const claude = screen.getByTestId("onb-card-claude");
+    const codex = screen.getByTestId("onb-card-codex");
+    expect(claude.getAttribute("data-open")).toBe("true");
+    expect(codex.getAttribute("data-open")).toBe("false");
+
+    // Your cloud on a CLI still to install: Bedrock seeded from the SSO profile found; Sign in saves the route, then runs its login.
+    fireEvent.click(await within(claude).findByRole("radio", { name: "Your cloud" }));
+    const setup = await within(claude).findByTestId("cloud-setup");
+    await waitFor(() => expect(within(setup).getByLabelText("AWS profile")).toHaveProperty("value", "work-sso"));
+    expect(within(setup).getByLabelText("Region")).toHaveProperty("value", "us-east-1");
+    // While the route is being saved, the route, its fields and the method are held: nothing can write over it.
+    daemon.holdConnections = true;
+    fireEvent.click(within(within(setup).getByTestId("cloud-sign-in")).getByRole("button"));
+    await waitFor(() => expect(within(setup).getByRole("radio", { name: "Google Vertex AI" })).toHaveProperty("disabled", true));
+    fireEvent.click(within(setup).getByRole("radio", { name: "Google Vertex AI" }));
+    expect(within(setup).getByLabelText("Region")).toHaveProperty("disabled", true);
+    expect(within(claude).getByRole("radio", { name: "API key" })).toHaveProperty("disabled", true);
+    expect(setup.getAttribute("data-route")).toBe("bedrock");
+    daemon.holdConnections = false;
+    daemon.releaseKeys();
+    await waitFor(() => expect(daemon.cloudSignIns).toEqual(["claude"]));
+    expect(puts(daemon, "/providers/claude/connection")).toEqual([{ method: "cloud", cloud: "bedrock", settings: { AWS_PROFILE: "work-sso", AWS_REGION: "us-east-1" } }]);
+    await waitFor(() => expect(openUrl).toHaveBeenCalledWith("https://device.sso.us-east-1.amazonaws.com/?user_code=ABCD-EFGH"));
+    daemon.completeCloudSignIn();
+    await waitFor(() => expect(within(setup).getByTestId("cloud-sign-in").getAttribute("data-state")).toBe("signed in"));
+    // Claude Code isn't installed yet: the first launch isn't done.
+    expect(localStorage.getItem(ONBOARDED_KEY)).toBeNull();
+
+    // Codex has no cloud route: Your cloud isn't offered.
+    fireEvent.click(within(codex).getByRole("button", { name: "Choose how Codex connects" }));
+    await waitFor(() => expect(codex.getAttribute("data-open")).toBe("true"));
+    expect(within(codex).queryByRole("radio", { name: "Your cloud" })).toBeNull();
+    // API key: another maker's key can't be saved here; OpenAI refuses this one, and nothing is stored.
+    fireEvent.click(within(codex).getByRole("radio", { name: "API key" }));
+    const key = await within(codex).findByLabelText("Paste your key");
+    fireEvent.change(key, { target: { value: "sk-ant-api03-zzzz" } });
+    expect(within(codex).getByRole("button", { name: "Save" })).toHaveProperty("disabled", true);
+    fireEvent.change(key, { target: { value: "sk-proj-abcd-x9Qa" } });
+    fireEvent.click(within(codex).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(codex).getByTestId("key-state").getAttribute("data-status")).toBe("rejected"));
+    expect(daemon.keysStored).toEqual([]);
+    // The shell's key is good: imported, verified, the method saved; but Codex's ChatGPT login still wins, so it isn't connected yet.
+    daemon.rejectedKeys.clear();
+    fireEvent.click(within(codex).getByRole("button", { name: "Use OPENAI_API_KEY from my shell" }));
+    await waitFor(() => expect(within(codex).getByTestId("key-state").getAttribute("data-status")).toBe("verified"));
+    expect(puts(daemon, "/providers/codex/connection")).toEqual([{ method: "api_key" }]);
+    const blocked = await within(codex).findByTestId("provider-ready");
+    expect(blocked.getAttribute("data-action")).toBe("sign_out");
+    expect(localStorage.getItem(ONBOARDED_KEY)).toBeNull();
+    // Its fix, signing ChatGPT out: now Codex is ready, and the first launch done.
+    fireEvent.click(within(blocked).getByRole("button"));
+    await waitFor(() => expect(within(codex).queryByTestId("provider-ready")).toBeNull());
+    expect(daemon.codexSignOuts).toBe(1);
+    await waitFor(() => expect(localStorage.getItem(ONBOARDED_KEY)).toBe("1"));
+
+    // Neither waits for a browser sign-in: Claude Code installs, then You're ready with both connected.
+    fireEvent.click(screen.getByRole("button", { name: "Connect Claude Code" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
+    await step("ready");
+    await waitFor(() => expect(screen.getByTestId("onb-ready-claude").getAttribute("data-connected")).toBe("true"));
+    expect(screen.getByTestId("onb-ready-codex").getAttribute("data-connected")).toBe("true");
+    expect(posts(daemon).some((p) => p.endsWith("/login"))).toBe(false);
+  });
+
+  it("onboarding saves an explicit Sign in even over auto with a key stored, shows a refused one, and a key saved before an install stops counting once the method changes", async () => {
+    const daemon = new FakeDaemon({
+      account: SIGNED_IN,
+      providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47", signed_in: false } }),
+      config: { user: {}, repo: {}, local: {}, keys: [{ name: "ANTHROPIC_API_KEY", set: true, last4: "WXYZ", status: "verified" }] },
+      connections: { codex: { managed: "org acme decides how Codex connects" } },
+    });
+    launch(daemon);
+    await step("connect");
+
+    // Claude Code is on auto with a key stored: that key would bill, so no method is claimed until one is picked; Sign in is saved.
+    const claude = screen.getByTestId("onb-card-claude");
+    await waitFor(() => expect(methodOn(claude)).toBe(""));
+    // While that Sign in is being saved, no other choice can land before it and be undone by its answer.
+    daemon.holdConnections = true;
+    fireEvent.click(within(claude).getByRole("radio", { name: "Sign in" }));
+    await waitFor(() => expect(within(claude).getByRole("radio", { name: "API key" })).toHaveProperty("disabled", true));
+    fireEvent.click(within(claude).getByRole("radio", { name: "API key" }));
+    expect(within(claude).queryByLabelText("Paste your key")).toBeNull();
+    daemon.holdConnections = false;
+    daemon.releaseKeys();
+    await waitFor(() => expect(methodOn(claude)).toBe("sign_in"));
+    expect(puts(daemon, "/providers/claude/connection")).toEqual([{ method: "sign_in" }]);
+
+    // A key save still waiting on its check holds the choices: a Sign in can't race it and be overwritten after.
+    const agy = screen.getByTestId("onb-card-antigravity");
+    fireEvent.click(within(agy).getByRole("button", { name: "Choose how Antigravity connects" }));
+    fireEvent.click(await within(agy).findByRole("radio", { name: "API key" }));
+    daemon.holdKeys = true;
+    fireEvent.change(await within(agy).findByLabelText("Paste your key"), { target: { value: "AIzaSyHeld0001" } });
+    fireEvent.click(within(agy).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(agy).getByRole("radio", { name: "Sign in" })).toHaveProperty("disabled", true));
+    fireEvent.click(within(agy).getByRole("radio", { name: "Sign in" }));
+    expect(within(agy).getByRole("button", { name: "Undo" })).toHaveProperty("disabled", true);
+    daemon.holdKeys = false;
+    daemon.releaseKeys();
+    await waitFor(() => expect(puts(daemon, "/providers/antigravity/connection")).toEqual([{ method: "api_key" }]));
+    // Picked once the save answered, Sign in is saved last and is the method that stands.
+    await waitFor(() => expect(within(agy).getByRole("radio", { name: "Sign in" })).toHaveProperty("disabled", false));
+    fireEvent.click(within(agy).getByRole("radio", { name: "Sign in" }));
+    await waitFor(() => expect(methodOn(agy)).toBe("sign_in"));
+    expect(puts(daemon, "/providers/antigravity/connection")).toEqual([{ method: "api_key" }, { method: "sign_in" }]);
+    fireEvent.click(within(agy).getByRole("button", { name: "Undo" }));
+
+    // The org decides Codex's: Sign in is refused, said in the section, and nothing is picked.
+    const codex = screen.getByTestId("onb-card-codex");
+    fireEvent.click(within(codex).getByRole("button", { name: "Choose how Codex connects" }));
+    fireEvent.click(await within(codex).findByRole("radio", { name: "Sign in" }));
+    expect((await within(codex).findByRole("alert")).textContent).toContain("org acme decides how Codex connects");
+    expect(codex.getAttribute("data-picked")).toBe("false");
+
+    // OpenCode, not installed: a key saved before the install doesn't finish the first launch...
+    const opencode = screen.getByTestId("onb-card-opencode");
+    fireEvent.click(within(opencode).getByRole("button", { name: "Choose how OpenCode connects" }));
+    fireEvent.click(await within(opencode).findByRole("radio", { name: "API key" }));
+    fireEvent.change(await within(opencode).findByLabelText("Paste your key"), { target: { value: "sk-or-v1-abcd" } });
+    fireEvent.click(within(opencode).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(opencode).getByTestId("key-state").getAttribute("data-status")).toBe("verified"));
+    expect(daemon.keysStored).toEqual(["GEMINI_API_KEY", "OPENROUTER_API_KEY"]);
+    expect(localStorage.getItem(ONBOARDED_KEY)).toBeNull();
+    // ...and switching it to Sign in (saved, once the key's own write is done) drops what the key set up: installed, it still waits for its sign-in.
+    await waitFor(() => expect(within(opencode).getByRole("radio", { name: "Sign in" })).toHaveProperty("disabled", false));
+    fireEvent.click(within(opencode).getByRole("radio", { name: "Sign in" }));
+    await waitFor(() => expect(methodOn(opencode)).toBe("sign_in"));
+    expect(puts(daemon, "/providers/opencode/connection")).toEqual([{ method: "api_key" }, { method: "sign_in" }]);
+    fireEvent.click(screen.getByRole("button", { name: "Connect OpenCode" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
+    await step("provider-signin");
+    expect(localStorage.getItem(ONBOARDED_KEY)).toBeNull();
+  });
+
+  it("onboarding resumed with a key and a cloud saved before: the Ready screen goes by the saved connections, connected when ready, the engine's fix when not, never a sign-in over them", async () => {
+    // A first launch left earlier: OpenRouter's key and OpenCode's api_key method saved before its install; Claude Code on Bedrock, its login expired.
+    const daemon = new FakeDaemon({
+      account: SIGNED_IN,
+      providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47", signed_in: false } }),
+      config: { user: {}, repo: {}, local: {}, keys: [{ name: "OPENROUTER_API_KEY", set: true, last4: "abcd", status: "verified" }] },
+      connections: {
+        opencode: { method: "api_key", choice: { method: "api_key", settings: {} } },
+        claude: { method: "cloud", cloud: "bedrock", settings: { AWS_REGION: "us-east-1" }, login: { valid: false, expired: true } },
+      },
+    });
+    launch(daemon);
+    await step("connect");
+
+    // OpenCode reads as on its saved key; picking it for the install saves nothing again.
+    const opencode = screen.getByTestId("onb-card-opencode");
+    fireEvent.click(within(opencode).getByRole("button", { name: "Choose how OpenCode connects" }));
+    await waitFor(() => expect(methodOn(opencode)).toBe("api_key"));
+    fireEvent.click(within(opencode).getByRole("radio", { name: "API key" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect OpenCode" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
+
+    // Neither waits for a browser sign-in. OpenCode is installed and ready on its key: connected, no Sign in offered.
+    await step("ready");
+    const ready = screen.getByTestId("onb-ready-opencode");
+    await waitFor(() => expect(ready.getAttribute("data-connected")).toBe("true"));
+    expect(within(ready).queryByRole("button")).toBeNull();
+    // Claude Code's cloud login expired: not connected, and its fix is renewing that login, not a subscription sign-in.
+    const claude = screen.getByTestId("onb-ready-claude");
+    expect(claude.getAttribute("data-connected")).toBe("false");
+    expect(within(claude).getByTestId("provider-ready").getAttribute("data-action")).toBe("renew");
+    expect(daemon.keysStored).toEqual([]);
+    expect(daemon.requests.some((r) => r.method === "PUT" && r.path.endsWith("/connection"))).toBe(false);
+  });
+
   it("onboarding: an install that fails says what the installer said on its card, and Retry runs it again inline", async () => {
     const daemon = new FakeDaemon({ account: SIGNED_IN, providers: freshProviders() });
     daemon.installFails.claude = 1;
     launch(daemon);
 
     await step("connect");
-    fireEvent.click(within(screen.getByTestId("onb-card-claude")).getByRole("button", { name: "Connect" }));
-    fireEvent.click(screen.getByRole("button", { name: "Connect Claude Code" }));
+    fireEvent.click(within(screen.getByTestId("onb-card-claude")).getByRole("radio", { name: "Sign in" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect Claude Code" }));
 
     const failed = await screen.findByTestId("onb-install-claude-failed");
     expect(failed.textContent).toContain("Install failed.");
@@ -182,8 +362,9 @@ describe("Onboarding", () => {
     daemon.installFails.opencode = 1;
     launch(daemon);
     await step("connect");
-    fireEvent.click(within(screen.getByTestId("onb-card-opencode")).getByRole("button", { name: "Connect" }));
-    fireEvent.click(screen.getByRole("button", { name: "Connect OpenCode" }));
+    fireEvent.click(within(screen.getByTestId("onb-card-opencode")).getByRole("button", { name: "Choose how OpenCode connects" }));
+    fireEvent.click(within(screen.getByTestId("onb-card-opencode")).getByRole("radio", { name: "Sign in" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect OpenCode" }));
     const failed = await screen.findByTestId("onb-install-opencode-failed");
     fireEvent.click(within(failed).getByRole("button", { name: "Skip for now" }));
     await step("connect");
@@ -299,8 +480,8 @@ describe("Onboarding", () => {
     let down = false;
     launchWith(daemon, () => (down ? refusal(503, "unavailable", "the engine is restarting") : null));
     await step("connect");
-    fireEvent.click(within(screen.getByTestId("onb-card-claude")).getByRole("button", { name: "Connect" }));
-    fireEvent.click(screen.getByRole("button", { name: "Connect Claude Code" }));
+    fireEvent.click(within(screen.getByTestId("onb-card-claude")).getByRole("radio", { name: "Sign in" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Connect Claude Code" }));
     await step("install");
     await screen.findByTestId("onb-install-claude-lines");
 

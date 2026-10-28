@@ -9,7 +9,7 @@ import { StoreContext } from "../../store/useStore";
 import { DaemonClient } from "../../api/client";
 import { BASE_URL, FAKE_PRESETS, FakeDaemon, TOKEN, flush, freshProviders, type DaemonData } from "../../test/fakeDaemon";
 import { PtyViewsProvider } from "../../api/ptyView";
-import { REPO } from "../../test/fixtures";
+import { REPO, root } from "../../test/fixtures";
 import { releaseBuildUpdater } from "../../api/tauri";
 import { SettingsScreen } from ".";
 import type { SettingsScreenProps } from "./SettingsScreen";
@@ -366,58 +366,141 @@ describe("settings screen", () => {
     stop();
   });
 
-  it("keeps the keys in Providers: a key stored write-only from a password field, no terminal anywhere", async () => {
-    const { daemon, stop } = setup();
-    const keys = await screen.findByTestId("providers");
-    expect(within(keys).queryByRole("form", { name: "Add a key" })).toBeNull();
-    const advanced = await within(keys).findByRole("button", { name: "API keys (optional, for advanced setups)" });
-    fireEvent.click(advanced);
-    await within(keys).findByTestId("key-ANTHROPIC_API_KEY");
-    expect(keys.textContent).not.toContain("in a terminal");
-    expect(within(keys).getByTestId("key-ANTHROPIC_API_KEY").textContent).toContain("••••WXYZ");
-    expect(within(keys).getByTestId("key-OPENAI_API_KEY").textContent).toContain("Not set");
+  it("providers: each row says how it connects, an API key with its health (Test, Replace, Remove, rejected naming only the agents its credentials stopped), a cloud with its login (Renew login), Change method saving Sign in over auto, and an Import for a key in the shell", async () => {
+    const now = Date.now() / 1000;
+    const failed = (id: string) => ({ ...root.agents![0], id, provider: "claude", status: "failed" });
+    const { daemon, stop } = setup({
+      providers: freshProviders({ claude: { path: "/opt/homebrew/bin/claude", version: "2.1.0" }, opencode: { path: "/home/u/.opencode/bin/opencode", version: "1.2.8" } }),
+      connections: {
+        // Two Claude agents failed, one of them on its credentials: only that one is the key's.
+        claude: { method: "api_key", stopped_agents: [{ id: "a1", name: "fix-login", profile: "developer" }] },
+        opencode: { method: "cloud", cloud: "vertex", settings: { GOOGLE_CLOUD_PROJECT: "my-project", VERTEX_LOCATION: "us-central1" }, login: { valid: true, expired: false, expires_at: now + 40 * 60 + 30 } },
+      },
+      config: { user: {}, repo: {}, local: {}, keys: [{ name: "ANTHROPIC_API_KEY", set: true, last4: "WXYZ", status: "verified", checked_at: now - 2 * 3600 - 60 }] },
+      workspaces: [{ ...root, agents: [failed("a1"), failed("a2")] }],
+    });
+    daemon.shellKeys.add("GEMINI_API_KEY");
+    const health = (p: string) => within(screen.getByTestId(`provider-${p}`)).getByTestId("provider-health");
+    const claude = await screen.findByTestId("provider-claude");
+    expect(screen.queryByRole("button", { name: "API keys (optional, for advanced setups)" })).toBeNull();
 
-    // Set a key: a password field; Save sends the value to PUT /keys/{name} and keeps nothing of it.
-    fireEvent.click(within(keys).getByRole("button", { name: "Set OPENAI_API_KEY" }));
-    const form = within(keys).getByRole("form", { name: "Value for OPENAI_API_KEY" });
-    const value = within(form).getByLabelText("OPENAI_API_KEY value") as HTMLInputElement;
-    expect(value.type).toBe("password");
-    fireEvent.change(value, { target: { value: "sk-test-0000-9xTz" } });
-    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(screen.getByTestId("key-OPENAI_API_KEY").textContent).toContain("••••9xTz"));
-    expect(daemon.requests.filter((r) => r.method === "PUT")).toEqual([{ method: "PUT", path: "/keys/OPENAI_API_KEY", query: {}, body: { value: "sk-test-0000-9xTz", repo: REPO } }]);
-    expect(daemon.keysStored).toEqual(["OPENAI_API_KEY"]);
-    expect(screen.queryByDisplayValue("sk-test-0000-9xTz")).toBeNull();
-    expect(screen.queryByRole("form", { name: "Value for OPENAI_API_KEY" })).toBeNull();
-    expect(screen.getByTestId("key-OPENAI_API_KEY").textContent).toContain("OPENAI_API_KEY stored.");
-    // A key brindle doesn't know yet, by name. A value typed for one new key never carries over to the field
-    // for another: the second starts empty, with nothing to save.
-    const add = screen.getByRole("form", { name: "Add a key" });
-    fireEvent.change(within(add).getByLabelText("Key name"), { target: { value: "review_first" } });
-    expect(within(add).getByLabelText("Key name")).toHaveProperty("value", "REVIEW_FIRST");
-    fireEvent.click(within(add).getByRole("button", { name: "Add a key…" }));
-    fireEvent.change(screen.getByLabelText("REVIEW_FIRST value"), { target: { value: "first-value-0001" } });
-    fireEvent.change(within(add).getByLabelText("Key name"), { target: { value: "REVIEW_SECOND" } });
-    fireEvent.click(within(add).getByRole("button", { name: "Add a key…" }));
-    expect(screen.queryByRole("form", { name: "Value for REVIEW_FIRST" })).toBeNull();
-    const second = screen.getByRole("form", { name: "Value for REVIEW_SECOND" });
-    expect(within(second).getByLabelText("REVIEW_SECOND value")).toHaveProperty("value", "");
-    expect(within(second).getByRole("button", { name: "Save" })).toHaveProperty("disabled", true);
-    fireEvent.click(within(second).getByRole("button", { name: "Cancel" }));
-    // Brindle's own token is refused by the engine, in its words, in the field.
-    fireEvent.change(within(add).getByLabelText("Key name"), { target: { value: "brindle_token" } });
-    expect(within(add).getByLabelText("Key name")).toHaveProperty("value", "BRINDLE_TOKEN");
-    fireEvent.click(within(add).getByRole("button", { name: "Add a key…" }));
-    const token = screen.getByRole("form", { name: "Value for BRINDLE_TOKEN" });
-    fireEvent.change(within(token).getByLabelText("BRINDLE_TOKEN value"), { target: { value: "nope" } });
-    fireEvent.click(within(token).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(within(token).getByRole("alert").textContent).toContain("Could not store BRINDLE_TOKEN: BRINDLE_TOKEN isn't a key agents can be given"));
-    expect(daemon.keysStored).toEqual(["OPENAI_API_KEY"]);
-    fireEvent.click(within(token).getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByRole("form", { name: "Value for BRINDLE_TOKEN" })).toBeNull();
+    const puts = () => daemon.requests.filter((r) => r.method === "PUT" && r.path === "/providers/claude/connection").map((r) => (r.body as { method: string }).method);
+
+    // API key: its last four, verified.
+    await waitFor(() => expect(within(claude).getByTestId("provider-method").textContent).toContain("WXYZ"));
+    await waitFor(() => expect(health("claude").getAttribute("data-tone")).toBe("pass"));
+    // Test: Anthropic refuses it now: the fail tone, naming the one agent its credentials stopped.
+    daemon.rejectedKeys.add("ANTHROPIC_API_KEY");
+    fireEvent.click(within(claude).getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(health("claude").getAttribute("data-tone")).toBe("fail"));
+    expect(health("claude").getAttribute("data-stopped")).toBe("1");
+    expect(health("claude").textContent).toContain("fix-login");
+    // Replace: one editor at a time, so opening it closes Change method.
+    daemon.rejectedKeys.clear();
+    fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
+    fireEvent.click(within(claude).getByRole("button", { name: "Replace" }));
+    expect(within(claude).queryByTestId("connect-method")).toBeNull();
+    // A fresh key pasted in place; while its check is pending Change method can't open (a Sign in there would be
+    // overwritten by this save's method write).
+    const key = within(claude).getByLabelText("Paste your key") as HTMLInputElement;
+    expect(key.type).toBe("password");
+    fireEvent.change(key, { target: { value: "sk-ant-api03-new-k7Qa" } });
+    daemon.holdKeys = true;
+    fireEvent.click(within(claude).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(claude).getByRole("button", { name: "Change method ▾" })).toHaveProperty("disabled", true));
+    fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
+    expect(within(claude).queryByTestId("connect-method")).toBeNull();
+    daemon.holdKeys = false;
+    daemon.releaseKeys();
+    await waitFor(() => expect(within(screen.getByTestId("provider-claude")).getByTestId("provider-method").textContent).toContain("k7Qa"));
+    expect(health("claude").getAttribute("data-tone")).toBe("pass");
+    expect(screen.queryByDisplayValue("sk-ant-api03-new-k7Qa")).toBeNull();
+    // Remove: the key and the method go; the row is on auto.
+    fireEvent.click(within(claude).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(screen.getByTestId("provider-claude").getAttribute("data-method")).toBe("auto"));
+    expect(daemon.requests.filter((r) => r.method === "DELETE").map((r) => r.path)).toEqual(["/keys/ANTHROPIC_API_KEY"]);
+    expect(puts()).toEqual(["api_key", "auto"]);
+    // Change method on auto: nothing is claimed; Sign in is saved at once.
+    fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
+    expect(within(claude).getByTestId("connect-method").getAttribute("data-method")).toBe("");
+    fireEvent.click(within(claude).getByRole("radio", { name: "Sign in" }));
+    await waitFor(() => expect(screen.getByTestId("provider-claude").getAttribute("data-method")).toBe("sign_in"));
+    expect(puts()).toEqual(["api_key", "auto", "sign_in"]);
+    // And back to an API key, chosen and pasted in the row; while its check is pending, nothing else can be chosen or closed.
+    fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
+    fireEvent.click(within(claude).getByRole("radio", { name: "API key" }));
+    fireEvent.change(within(claude).getByLabelText("Paste your key"), { target: { value: "sk-ant-api03-again-Zz99" } });
+    daemon.holdKeys = true;
+    fireEvent.click(within(claude).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(claude).getByRole("radio", { name: "Sign in" })).toHaveProperty("disabled", true));
+    expect(within(claude).getByRole("button", { name: "Change method ▴" })).toHaveProperty("disabled", true);
+    daemon.holdKeys = false;
+    daemon.releaseKeys();
+    await waitFor(() => expect(screen.getByTestId("provider-claude").getAttribute("data-method")).toBe("api_key"));
+    expect(within(screen.getByTestId("provider-claude")).getByTestId("provider-method").textContent).toContain("Zz99");
+    expect(within(claude).queryByTestId("connect-method")).toBeNull();
+
+    // Your cloud: the route and its settings, the login near its end, and Renew login runs it again.
+    const opencode = screen.getByTestId("provider-opencode");
+    expect(within(opencode).getByTestId("provider-method").textContent).toContain("my-project");
+    expect(health("opencode").getAttribute("data-tone")).toBe("sap");
+    fireEvent.click(within(opencode).getByRole("button", { name: "Renew login" }));
+    await waitFor(() => expect(daemon.cloudSignIns).toEqual(["opencode"]));
+    daemon.completeCloudSignIn();
+    await waitFor(() => expect(health("opencode").getAttribute("data-tone")).toBe("pass"));
+
+    // A key the shell has and brindle doesn't: offered, and imported on request.
+    fireEvent.click(within(await screen.findByTestId("key-import-GEMINI_API_KEY")).getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(screen.queryByTestId("key-import-GEMINI_API_KEY")).toBeNull());
+    expect(posts(daemon).map((r) => r.path)).toContain("/keys/GEMINI_API_KEY/import");
     expect(screen.queryByTestId("terminal")).toBeNull();
-    fireEvent.click(advanced);
-    expect(within(keys).queryByRole("form", { name: "Add a key" })).toBeNull();
+    stop();
+  });
+
+  it("providers: a key on an auto row stays manageable, an imported one too, OpenCode's controls follow its model provider's own key, and keys no provider reads keep a row", async () => {
+    const stored = (name: string, last4: string) => ({ name, set: true, last4, status: "verified" as const, checked_at: Date.now() / 1000 });
+    const { daemon, stop } = setup({
+      providers: freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" }, opencode: { path: "/home/u/.opencode/bin/opencode", version: "1.2.8" }, antigravity: { path: "/home/u/.local/bin/agy", version: "1.3.0" } }),
+      connections: { opencode: { method: "api_key" } },
+      config: { user: {}, repo: {}, local: {}, keys: [stored("OPENAI_API_KEY", "1111"), stored("OPENROUTER_API_KEY", "2222"), stored("ANTHROPIC_API_KEY", "3333"), stored("REVIEW_KEY", "4444")] },
+    });
+    daemon.shellKeys.add("GEMINI_API_KEY");
+    const deletes = () => daemon.requests.filter((r) => r.method === "DELETE").map((r) => r.path);
+
+    // Codex left on auto with a key stored: the row says auto, and the key keeps Test and Remove; removing it leaves the method alone.
+    const codex = await screen.findByTestId("provider-codex");
+    await waitFor(() => expect(within(codex).getByTestId("provider-auto")).toBeTruthy());
+    await waitFor(() => expect(within(codex).getByTestId("provider-state").textContent).toContain("1111"));
+    fireEvent.click(within(codex).getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(posts(daemon).map((r) => r.path)).toContain("/keys/OPENAI_API_KEY/test"));
+    fireEvent.click(within(codex).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(deletes()).toEqual(["/keys/OPENAI_API_KEY"]));
+    expect(daemon.requests.some((r) => r.method === "PUT" && r.path === "/providers/codex/connection")).toBe(false);
+
+    // OpenCode runs two model providers' keys: an Anthropic key saved through Change method moves the row's
+    // controls onto it, so Test and Remove reach that key, never OpenRouter's.
+    const opencode = screen.getByTestId("provider-opencode");
+    await waitFor(() => expect(within(opencode).getByTestId("provider-method").textContent).toContain("2222"));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Change method ▾" }));
+    fireEvent.change(within(opencode).getByLabelText("Model provider"), { target: { value: "anthropic" } });
+    fireEvent.change(within(opencode).getByLabelText("Paste your key"), { target: { value: "sk-ant-api03-new-5555" } });
+    fireEvent.click(within(opencode).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(opencode).getByTestId("provider-method").textContent).toContain("5555"));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(posts(daemon).map((r) => r.path)).toContain("/keys/ANTHROPIC_API_KEY/test"));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(deletes()).toEqual(["/keys/OPENAI_API_KEY", "/keys/ANTHROPIC_API_KEY"]));
+
+    // A key imported from the shell lands on its provider's auto row, with its controls.
+    fireEvent.click(within(await screen.findByTestId("key-import-GEMINI_API_KEY")).getByRole("button", { name: "Import" }));
+    const agy = screen.getByTestId("provider-antigravity");
+    await waitFor(() => expect(within(agy).getByRole("button", { name: "Test" })).toBeTruthy());
+
+    // A profile's own key, read by no provider: listed, and removable.
+    const other = within(screen.getByTestId("other-keys")).getByTestId("other-key-REVIEW_KEY");
+    expect(other.getAttribute("data-set")).toBe("true");
+    fireEvent.click(within(other).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(deletes()).toContain("/keys/REVIEW_KEY"));
     stop();
   });
 
@@ -435,7 +518,6 @@ describe("settings screen", () => {
     expect(claude.getAttribute("data-state")).toBe("signed_in");
     expect(claude.textContent).toContain("Found at /opt/homebrew/bin/claude · 2.1.0");
     expect(claude.textContent).toContain("brindle keeps its own copy of Claude Code's settings.");
-    expect(within(claude).getByTestId("provider-state").textContent).toBe("Signed in");
     expect(within(claude).queryByRole("button", { name: /Sign in/ })).toBeNull();
     const codex = screen.getByTestId("provider-codex");
     expect(codex.getAttribute("data-state")).toBe("signed_out");
@@ -513,6 +595,8 @@ describe("settings screen", () => {
     const { daemon, stop } = setup();
     const codex = await screen.findByTestId("provider-codex");
     await waitFor(() => expect(codex.getAttribute("data-state")).toBe("signed_out"));
+    // The engine reads it not ready, wanting a sign-in.
+    expect((await within(codex).findByTestId("provider-ready")).getAttribute("data-action")).toBe("sign_in");
     fireEvent.click(within(codex).getByRole("button", { name: "Sign in to Codex" }));
     const flow = await within(codex).findByTestId("sign-in-flow");
     expect(posts(daemon).at(-1)).toEqual({ method: "POST", path: "/providers/codex/login", query: {}, body: {} });
@@ -526,6 +610,8 @@ describe("settings screen", () => {
     await waitFor(() => expect(flow.getAttribute("data-phase")).toBe("done"));
     expect(flow.textContent).toContain("Signed in to Codex ✓");
     expect(screen.getByTestId("provider-codex").getAttribute("data-state")).toBe("signed_in");
+    // Its readiness is read again with the rows, without reopening the page: nothing left to fix.
+    await waitFor(() => expect(within(screen.getByTestId("provider-codex")).queryByTestId("provider-ready")).toBeNull());
     stop();
   });
 
