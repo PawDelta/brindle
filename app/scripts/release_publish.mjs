@@ -153,6 +153,27 @@ export function ciState(workflows, sha) {
 }
 
 /**
+ * Why the checks `look` reports refuse the build, or null once they all passed:
+ * looks again every `intervalSeconds` while some are pending. Only the first
+ * look counts whenever it lands; a later one taken past `deadlineMinutes`
+ * refuses, even if everything has passed by then.
+ * @param {() => Promise<{ refusal: string | null, pending: string | null }>} look
+ * @param {{ deadlineMinutes: number, intervalSeconds: number, now?: () => number, pause?: (ms: number) => Promise<void> }} opts
+ */
+export async function waitForChecks(look, { deadlineMinutes, intervalSeconds, now = Date.now, pause }) {
+  const wait = pause ?? ((ms) => new Promise((done) => setTimeout(done, ms)));
+  const waitUntil = now() + deadlineMinutes * 60_000;
+  for (let first = true; ; first = false) {
+    const state = await look();
+    if (state.refusal) return state.refusal;
+    if (!state.pending && (first || now() <= waitUntil)) return null;
+    if (now() >= waitUntil) return `still waiting after ${deadlineMinutes} minutes: ${state.pending ?? "they passed only past the deadline"}`;
+    console.log(`waiting: ${state.pending}`);
+    await wait(Math.min(intervalSeconds * 1000, waitUntil - now()));
+  }
+}
+
+/**
  * Whether the new manifest `next` may replace the published `current` (null: none yet).
  * @param {{ version: string } | null} current @param {{ version: string }} next
  * @param {(ancestor: string, commit: string) => boolean} descends
@@ -247,22 +268,13 @@ async function main(args) {
       let refusal = isAncestor(sha, mainRef) ? null : `${sha} is not on ${mainRef}`;
       if (!refusal) {
         const active = (await list(`${repo}/actions/workflows?per_page=100`, "workflows", token)).filter((w) => w.state === "active");
-        const waitUntil = Date.now() + deadlineMinutes * 60_000;
-        for (;;) {
+        refusal = await waitForChecks(async () => {
           const workflows = [];
           for (const w of active.filter((w) => REQUIRED.includes(w.path))) {
             workflows.push({ path: w.path, runs: await list(`${repo}/actions/workflows/${w.id}/runs?head_sha=${sha}&per_page=100`, "workflow_runs", token) });
           }
-          const state = ciState(workflows, sha);
-          refusal = state.refusal;
-          if (refusal || !state.pending) break;
-          if (Date.now() >= waitUntil) {
-            refusal = `still waiting after ${deadlineMinutes} minutes: ${state.pending}`;
-            break;
-          }
-          console.log(`waiting: ${state.pending}`);
-          await new Promise((done) => setTimeout(done, intervalSeconds * 1000));
-        }
+          return ciState(workflows, sha);
+        }, { deadlineMinutes, intervalSeconds });
       }
       if (refusal) {
         console.log(`::error::not building ${sha}: ${refusal}`);

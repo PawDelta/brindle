@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { ciState, REQUIRED, waitForChecks } from "./release_publish.mjs";
 
 const cli = fileURLToPath(new URL("./release_publish.mjs", import.meta.url));
 
@@ -83,16 +84,30 @@ describe("ci-gate: App (and CI when it ran), newest run for exactly the commit, 
   afterAll(() => server.close());
 
   const running = green(2, { status: "in_progress", conclusion: null });
-  it.each<[string, Runs | Runs[], string, string | null]>([
+  it.each<[string, Runs | Runs[], string, string | null, "fake clock"?]>([
     ["both passed", { ci: [[green(1)]], app: [[green(2)]] }, sha, null],
     ["App's run on its second page", { ci: [[green(1)]], app: [[green(9, { head_sha: R.b })], [green(2)]] }, sha, null],
     ["no CI run (an app-only push): App alone", { app: [[green(2)]] }, sha, null],
     ["App still running at the deadline", { ci: [[green(1)]], app: [[running]] }, sha, "still waiting after 0 minutes: .github/workflows/app.yml run 2 (attempt 1) is in_progress"],
     ["App finishes while the gate waits", [{ ci: [[green(1)]], app: [[running]] }, { ci: [[green(1)]], app: [[green(2)]] }], sha, null],
+    ["App passes only on a look past the deadline", [{ app: [[running]] }, { app: [[running]] }, { app: [[green(2)]] }], sha, "they passed only past the deadline", "fake clock"],
     ["CI's newest run failed after an older one passed", { ci: [[green(1), green(5, { conclusion: "failure", run_attempt: 2 })]], app: [[green(2)]] }, sha, "(attempt 2) ended failure"],
     ["only a pull request's and another branch's App passed", { ci: [[green(1)]], app: [[green(2, { event: "pull_request" }), green(3, { head_branch: "release/desktop" })]] }, sha, "app.yml has no run on main"],
     ["a commit that is not on main", { ci: [[green(1, { head_sha: R.x })]], app: [[green(2, { head_sha: R.x })]] }, R.x, "is not on main"],
-  ])("%s", async (_case, runs, commit, refusal) => {
+  ])("%s", async (_case, runs, commit, refusal, clock) => {
+    if (clock) {
+      // A 1-minute deadline, a 30 s interval, each look taking 1 ms: the third look lands at 60.001 s.
+      let t = 0;
+      const looks = runs as Runs[];
+      const look = async () => {
+        const poll = looks[Math.min(Math.floor(t / 30_000), looks.length - 1)];
+        t += 1;
+        return ciState(REQUIRED.map((path) => ({ path, runs: (poll[path.includes("ci.yml") ? "ci" : "app"] ?? []).flat() })), commit);
+      };
+      const pause = async (ms: number) => void (t += ms);
+      expect(await waitForChecks(look, { deadlineMinutes: 1, intervalSeconds: 30, now: () => t, pause })).toContain(refusal);
+      return;
+    }
     pages = runs;
     polls = {};
     // A gate that has to wait polls at once (interval 0); one that never sees an end gives up at its first look (deadline 0).
