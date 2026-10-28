@@ -1820,6 +1820,53 @@ def put_key(db: DB, params: dict, body: Body) -> Any:
     return {"name": name, "last4": value.strip()[-4:], "set": True}
 
 
+def delete_key(db: DB, params: dict, body: Body) -> Any:
+    """``brindle keys unset NAME``."""
+    from brindle import keys_cmds, keystore
+
+    name = params["name"]
+    try:
+        keys_cmds.remove(name)
+    except keystore.KeyNameError as e:
+        raise ServiceError("invalid", str(e)) from None
+    except keystore.CredentialError as e:
+        raise ServiceError("not_stored", str(e), 422) from None
+    return {"name": name, "set": False}
+
+
+def retest_key(db: DB, params: dict, body: Body) -> Any:
+    """Re-check the stored key with its provider; the reply says how it came out."""
+    from brindle import keys_cmds, keystore
+
+    name = params["name"]
+    try:
+        status = keys_cmds.retest(name)
+        checked_at = keystore.get_record(name).get("checked_at")
+    except keystore.KeyNameError as e:
+        raise ServiceError("invalid", str(e)) from None
+    except keystore.CredentialError as e:
+        raise ServiceError("not_found", str(e), 404) from None
+    return {"name": name, "status": status, "checked_at": checked_at}
+
+
+def import_key(db: DB, params: dict, body: Body) -> Any:
+    """Store the daemon's environment value of ``name``, as a save would (never returned)."""
+    from brindle import keys_cmds, keystore
+
+    name, repo = params["name"], _get(body, "repo")
+    try:
+        last4 = keys_cmds.import_env(name, repo)
+    except keystore.KeyNameError as e:
+        raise ServiceError("invalid", str(e)) from None
+    except keys_cmds.PolicyDenied as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+    except keystore.CredentialError as e:
+        raise ServiceError("not_stored", str(e), 422) from None
+    except Exception:  # noqa: BLE001 - no traceback: its frames held the value
+        raise ServiceError("internal", "couldn't store the key", 500) from None
+    return {"name": name, "last4": last4, "set": True}
+
+
 def set_key(db: DB, params: dict, body: Body) -> Any:
     """``brindle keys set NAME``: the value goes into the terminal's hidden prompt."""
     from brindle import keystore, providers
@@ -2058,6 +2105,9 @@ ROUTES = [
     Route("/v1/providers/{provider}", _endpoint(turn_off_provider), methods=["DELETE"]),
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
+    Route("/v1/keys/{name}", _endpoint(delete_key), methods=["DELETE"]),
+    _post("/keys/{name}/test", retest_key),
+    _post("/keys/{name}/import", import_key),
     _post("/terminals/{id}/input", terminal_input),
     _post("/terminals/shell", shell_terminal),
     Route("/v1/terminals/{id}", _endpoint(close_terminal), methods=["DELETE"]),

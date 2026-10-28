@@ -24,7 +24,7 @@ import { RepoSelect, useRepo } from "../../components/RepoSelect";
 import { alert, button, card, chip, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
 import { useSessions } from "../../store/sessions";
 import { useUsage } from "../../store/usage";
-import { useAppState } from "../../store/useStore";
+import { useAppState, useStore } from "../../store/useStore";
 import { useJob } from "../Branch/useJob";
 import { UsageSection } from "./UsageSection";
 import { ACCOUNT_URL, PLANS, PLAN_GUIDE_URL, PLAN_LABEL, PRICING_URL, TIERS, UPGRADE_URL, dollars, entitled, nextPlan, paid, planHas, planOf, tierOf, tokens, when, type FeatureUse, type Plan, type TierFeature } from "./account";
@@ -509,6 +509,7 @@ function Spend({ client, openUrl, signedIn, paying, revision }: { client: Daemon
 }
 
 export function AccountScreen({ client, openUrl, onNavigate, section, ask }: AccountScreenProps) {
+  const store = useStore();
   const spend = useRef<HTMLDivElement>(null);
   const usageRef = useRef<HTMLElement>(null);
   const { reload: reloadUsage } = useUsage();
@@ -542,12 +543,13 @@ export function AccountScreen({ client, openUrl, onNavigate, section, ask }: Acc
       client.account(repo).then(
         (a) => {
           setAccount(a);
+          store.dispatch({ type: "account", account: a });
           setRevision((n) => n + 1);
           setLoadError(null);
         },
         (e: unknown) => setLoadError(message(e)),
       ),
-    [client, repo],
+    [client, repo, store],
   );
   // On start, and again when the stream (re)opens: a sign-in from the CLI changes it too.
   useEffect(() => {

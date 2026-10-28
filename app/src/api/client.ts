@@ -429,6 +429,23 @@ export interface KeyInfo {
   name: string;
   set: boolean;
   last4: string;
+  provider?: string | null;
+  /* How the last check came out; null while no key is stored. */
+  status?: "verified" | "rejected" | "unchecked" | null;
+  checked_at?: number | null;
+  /* Where to get a key. */
+  key_page?: string | null;
+  /* Storing it makes a signed-in subscription's agents bill the key instead. */
+  bills?: boolean;
+  personal_keys_denied?: boolean;
+  /* Set in the daemon's environment but not stored (POST /keys/{name}/import). */
+  importable?: boolean;
+}
+
+export interface KeyTested {
+  name: string;
+  status: "verified" | "rejected" | "unchecked";
+  checked_at: number | null;
 }
 
 export interface Config {
@@ -1332,6 +1349,21 @@ export class DaemonClient {
      the answer carries the last four characters and never the value. */
   putKey(name: string, value: string, repo?: string) {
     return this.put<KeyStored>(`/keys/${encodeURIComponent(name)}`, repo ? { value, repo } : { value });
+  }
+
+  /* `brindle keys unset NAME` (DELETE /keys/{name}). */
+  deleteKey(name: string) {
+    return this.delete<{ name: string; set: false }>(`/keys/${encodeURIComponent(name)}`, {});
+  }
+
+  /* Re-checks the stored key with its provider (POST /keys/{name}/test). */
+  testKey(name: string) {
+    return this.post<KeyTested>(`/keys/${encodeURIComponent(name)}/test`);
+  }
+
+  /* Stores the daemon's own environment value of `name` (POST /keys/{name}/import). */
+  importKey(name: string, repo?: string) {
+    return this.post<KeyStored>(`/keys/${encodeURIComponent(name)}/import`, repo ? { repo } : {});
   }
 
   /* `brindle keys set NAME` in a terminal of the daemon's: the value is typed

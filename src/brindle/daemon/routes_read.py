@@ -23,6 +23,8 @@ from brindle import (
     doctor,
     git,
     kb,
+    key_check,
+    keys_cmds,
     keystore,
     knowledge,
     profiles,
@@ -308,10 +310,25 @@ def get_config(db: DB, request: Request) -> Any:
         settings["repo"] = dataclasses.asdict(config.load_repo_config(repo))
         # Settings this project's own files set (over the person's): key -> "local" or "repo".
         settings["overrides"] = {k: s for k in settings["repo"] if (s := config.setting_source(repo, k)) in ("local", "repo")}
+    try:
+        denied = key_check.personal_keys_denied(repo)
+    except Exception:  # noqa: BLE001 - policy unreadable: fail closed, as storing does
+        denied = True
     keys = []
     for name in keystore.known_names(repo):
         value = keystore.get_key(name)
-        keys.append({"name": name, "set": value is not None, "last4": _last4(value or "")})
+        rec = keystore.get_record(name) if value else {}
+        keys.append({
+            "name": name, "set": value is not None, "last4": _last4(value or ""),
+            "provider": keystore.provider_of(name),
+            "status": (rec.get("status") or "unchecked") if value else None,
+            "checked_at": rec.get("checked_at") if value else None,
+            "key_page": key_check.key_page(name),
+            "bills": keys_cmds.bills_instead_of_subscription(name),
+            "personal_keys_denied": denied,
+            # Set in the daemon's environment but not stored; the value is never returned.
+            "importable": value is None and keys_cmds.importable(name),
+        })
     return {**settings, "keys": keys}
 
 
