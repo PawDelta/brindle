@@ -868,7 +868,13 @@ def test_opencode_cloud_identity_dispatch(db, world, tmp_path, monkeypatch, rout
         (f"%{i + 1}", name, True, tid) for i, (tid, (name, _, _)) in enumerate(windows.items())])
     code, opened = _send("POST", item.action.path, item.action.body)
     assert code == 200, opened
-    assert _send("POST", item.action.path, {**item.action.body, "restart": True})[1]["terminal"] == opened["terminal"]
+    assert _send("POST", item.action.path, item.action.body)[1]["terminal"] == opened["terminal"]
+    # Try again: the cloud sign-in still running goes, and a fresh one carries the same identity.
+    monkeypatch.setattr(tmux, "kill_window", lambda pane: windows.pop(next(iter(windows))))
+    code, fresh = _send("POST", item.action.path, {**item.action.body, "restart": True})
+    assert code == 200 and fresh["started"] and fresh["terminal"] != opened["terminal"]
+    assert list(windows) == [fresh["terminal"]]
+    opened = fresh
     _, argv, env = windows[opened["terminal"]]
     assert all(env[k] == v for k, v in cloud.items()) and env["XDG_DATA_HOME"] == identity["XDG_DATA_HOME"]
     if route == "vertex":

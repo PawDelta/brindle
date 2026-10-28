@@ -20,7 +20,7 @@
    the CLI handle those. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ActionTerminal } from "../api/client";
+import { DaemonError, type ActionTerminal } from "../api/client";
 import { useDaemon } from "../api/context";
 import { openExternal } from "../api/open";
 import { keptLink, PANE_DEAD, readPane, READ_SIZE, type PaneReading } from "../api/paneText";
@@ -82,7 +82,7 @@ export function readPrompt(text: string): { kind: "choose"; question: string; ch
 }
 
 /* The line where the CLI says its sign-in failed, if its last lines say so:
-   a CLI that fails without exiting (asks to retry, waits at its own prompt)
+   a CLI that fails without exiting (offers another go, waits at its own prompt)
    never ends its pane, so this is the only word the card gets of it. */
 export function readFailure(text: string): string | null {
   const tail = text.split("\n").map((l) => l.trim()).slice(-12);
@@ -130,6 +130,8 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
   // Each attempt's number (a start, a cancel, the hook gone): only the newest one's answers are taken.
   const attempt = useRef(0);
   const pending = useRef<Promise<boolean> | null>(null);
+  // A cancelled sign-in's terminal closing: why it couldn't be, or null once it's gone (or was already).
+  const closing = useRef<Promise<string | null>>(Promise.resolve(null));
   const ended = useCallback(
     async (terminal: string, exited = true) => {
       if (finished.current) return;
@@ -162,7 +164,9 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
 
   /* Start the sign-in. `restart` (Try again): the daemon ends a login of the
      CLI's still running and starts a fresh one, rather than handing back
-     the same terminal. */
+     the same terminal. A start after a cancel waits for its terminal to
+     close, so it can't attach to the one that is going; one that couldn't
+     close is said, unless this start ends it anyway (`restart`). */
   const start = useCallback(async (restart = false) => {
     const n = ++attempt.current;
     setPhase({ kind: "starting" });
@@ -170,6 +174,13 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
     setAction(null);
     finished.current = false;
     pending.current = null;
+    const unclosed = await closing.current;
+    closing.current = Promise.resolve(null);
+    if (n !== attempt.current) return;
+    if (unclosed && !restart) {
+      setPhase({ kind: "failed", terminal: null, message: unclosed });
+      return;
+    }
     let started: ActionTerminal;
     try {
       started = await client.providerLogin(provider, undefined, restart, loginContext);
@@ -266,10 +277,19 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
     }
   };
   /* Cancel or Close: the CLI's terminal goes too, so a sign-in stuck where it
-     failed isn't the one the next press finds still running and attaches to. */
+     failed isn't the one the next press finds still running and attaches to.
+     One that couldn't be closed (not merely gone already) is said, with Try again. */
   const cancel = () => {
-    attempt.current++;
-    if (action) void client.closeTerminal(action.terminal).catch(() => undefined);
+    const n = ++attempt.current;
+    if (action) {
+      const closed = (closing.current = client.closeTerminal(action.terminal).then(
+        () => null,
+        (e) => (e instanceof DaemonError && e.status === 404 ? null : `Couldn't end ${name}'s sign-in: ${message(e)}`),
+      ));
+      void closed.then((why) => {
+        if (why && n === attempt.current) setPhase({ kind: "failed", terminal: null, message: why });
+      });
+    }
     setAction(null);
     finished.current = true;
     setPhase({ kind: "idle" });

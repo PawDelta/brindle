@@ -24,14 +24,14 @@ const link = () => {
 const LINK = "https://accounts.google.com/o/oauth2/auth?client_id=agy";
 
 /* A sign-in to Antigravity over the fake daemon, its pty views as the shell's say `status`;
-   `holdLogin`: POST /providers/{p}/login answers only once released. */
-function setup(holdLogin = false) {
+   `holdLogin`: POST /providers/{p}/login answers only once released (`holdClose`: DELETE /terminals/{id}). */
+function setup(holdLogin = false, holdClose = false) {
   const daemon = new FakeDaemon();
   daemon.data.actionScreens["login antigravity"] = `$ agy\nOpening your browser to sign in: ${LINK}\n`;
   let release: () => void = () => {};
   const held = new Promise<void>((ok) => (release = ok));
   const fetch: typeof globalThis.fetch = (input, init) =>
-    holdLogin && String(input).endsWith("/login") ? held.then(() => daemon.fetch(input, init)) : daemon.fetch(input, init);
+    (holdLogin && String(input).endsWith("/login")) || (holdClose && init?.method === "DELETE") ? held.then(() => daemon.fetch(input, init)) : daemon.fetch(input, init);
   const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch });
   const check = vi.fn(async () => true);
   const ui = (status: PtyStatus) => (
@@ -171,24 +171,30 @@ describe("ProviderSignIn, the CLI read through a pty view", () => {
   });
 
   it("login failure frees the terminal: a CLI that fails without exiting is said, Try again replaces it, and Cancel ends it", async () => {
-    const { daemon, check, shell, flow } = setup();
+    const { daemon, check, shell, flow, release } = setup(false, true);
     check.mockResolvedValue(false);
     shell({ kind: "ready", tmux: "tmux 3.8" });
     fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
     await waitFor(() => expect(daemon.views).toHaveLength(1));
     // The CLI says its sign-in failed and waits at its own prompt: its pane never dies.
-    daemon.print(daemon.actions[0].id, "\r\nLogin failed: OAuth error (invalid_grant). Press Enter to retry.\r\n");
+    daemon.print(daemon.actions[0].id, "\r\nLogin failed: OAuth error (invalid_grant). Press Enter to sign in again.\r\n");
     await waitFor(() => expect(flow().dataset.phase).toBe("failed"));
     expect(within(flow()).getByRole("alert").textContent).toContain("Login failed: OAuth error (invalid_grant)");
     fireEvent.click(within(flow()).getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(daemon.actions).toHaveLength(2));
     expect(daemon.actions[0].alive).toBe(false);
     await waitFor(() => expect(flow().dataset.phase).toBe("waiting"));
-    // Cancelled, the stuck CLI goes with the card: the next press starts a fresh one rather than attaching to it.
+    // Cancelled, the stuck CLI goes with the card: a press made while it is still closing waits for it, then
+    // starts a fresh one rather than attaching to the one going.
     fireEvent.click(within(flow()).getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(daemon.closedTerminals).toEqual([daemon.actions[1].id]));
     fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
+    await flush();
+    expect(daemon.actions).toHaveLength(2);
+    release();
     await waitFor(() => expect(daemon.actions).toHaveLength(3));
+    expect(daemon.closedTerminals).toEqual([daemon.actions[1].id]);
+    expect(daemon.actions[2].alive).toBe(true);
+    await waitFor(() => expect(flow().dataset.phase).toBe("waiting"));
   });
 
   it("closes its reader when cancelled", async () => {
