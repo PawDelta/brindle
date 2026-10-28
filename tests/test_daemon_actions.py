@@ -658,11 +658,15 @@ def test_api_key_lifecycle_check_result_stays_with_the_key_it_checked(db, monkey
         assert rec == {}
 
 
+NOFLOCK = False   # True: children skip flock, which must make the lock test below fail
+
+
 @pytest.mark.parametrize("fault", ["lock-unavailable", "delete-during-update"])
 def test_api_key_lifecycle_key_updates_hold_the_store_lock(monkeypatch, provider_http, fault):
     import fcntl
-    import threading
+    import multiprocessing
 
+    import key_lock_procs
     from brindle import keys_cmds, keystore
 
     name = "ANTHROPIC_API_KEY"
@@ -679,21 +683,24 @@ def test_api_key_lifecycle_key_updates_hold_the_store_lock(monkeypatch, provider
                 keystore.unset_key(name)
         assert keystore.get_key(name) == SECRET
         return
-    # Another caller's delete, started while the update has the record loaded, waits for it.
-    store, deleters = keystore._key_store(name), []
-    load = type(store).load
-
-    def load_then_delete(self):
-        rec = load(self)
-        if not deleters:
-            deleters.append(threading.Thread(target=keystore.unset_key, args=(name,)))
-            deleters[0].start()
-        return rec
-
-    with monkeypatch.context() as m:
-        m.setattr(type(store), "load", load_then_delete)
-        assert keystore.set_check(name, "rejected", SECRET)
-        deleters[0].join()
+    # Another process's delete, started while the update has the record loaded, waits for it.
+    ctx = multiprocessing.get_context("spawn")
+    loaded, go, updated, trying, deleted = (ctx.Event() for _ in range(5))
+    updater = ctx.Process(target=key_lock_procs.update, args=(name, SECRET, NOFLOCK, loaded, go, updated))
+    deleter = ctx.Process(target=key_lock_procs.delete, args=(name, NOFLOCK, trying, deleted))
+    updater.start()
+    try:
+        assert loaded.wait(60)
+        deleter.start()
+        assert trying.wait(60)
+        assert not deleted.wait(2), "the delete got through while the update held the record"
+        go.set()
+        assert updated.wait(60) and deleted.wait(60)
+    finally:
+        go.set()
+        for p in (updater, deleter):
+            if p.pid is not None:
+                p.join(60)
     assert keystore.get_key(name) is None
 
 
