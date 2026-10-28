@@ -123,9 +123,10 @@ describe("inbox", () => {
     const plan: InboxItemDTO = { kind: "plan", reason: "plan awaiting approval", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", detail: "1. Keep the plan.\n2. Ship it." };
     const checks: InboxItemDTO = { kind: "proposed_checks", reason: "checks proposed", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "npm test\nnpm run build" };
     const review: InboxItemDTO = { kind: "review", reason: "to review", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1" };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [plan, checks, review] });
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, name: "Login fix" }], workspaces: [root, worker], inbox: [plan, checks, review] });
     const { sync, onOpen } = mount(daemon);
-    const group = await screen.findByRole("region", { name: "Ship ls --json" });
+    // A named session is headed by its name, not its goal.
+    const group = await screen.findByRole("region", { name: "Login fix" });
     // A plan: Approve alone (changes are asked for in its session), no reply field, no undo; the plan whole on the
     // card, never cut short.
     expect(within(card("plan")).queryByRole("textbox")).toBeNull();

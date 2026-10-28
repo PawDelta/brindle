@@ -193,8 +193,9 @@ def seeded(db, repo, monkeypatch):
 
     def no_license(**kw):
         raise license.LicenseError("not logged in")
+    current_license = license.current
     monkeypatch.setattr(license, "current", no_license)
-    return {"repo": str(repo), "ws": ws.id}
+    return {"repo": str(repo), "ws": ws.id, "current_license": current_license}
 
 
 @pytest.mark.parametrize("path,check", [
@@ -507,6 +508,45 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
     heavy = [m for t in body["tiers"].values() for m in t["models"] if m["profile"] == "developer-heavy"]
     assert heavy and all((m["model"], m["provider_name"], m["allowed"]) == (ROUTE_ID, "Claude Code", heavy_ok)
                          for m in heavy)
+
+
+@pytest.mark.parametrize("keychain_status", [44, 1])
+def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypatch, keychain_status):
+    # The Agents tab opens on this read: it must not run the dispatch's learned
+    # resolution (a keychain read per credential per candidate) nor any
+    # provider's sign-in CLI (up to its timeout each, a signed-out answer never
+    # cached), the picker's own readiness check in the config load included.
+    from brindle import autopilot, config, providers, worker_models
+    from brindle.pro import credentials
+
+    repo = Path(seeded["repo"])
+    (repo / ".brindle" / "agents").mkdir(parents=True)
+    (repo / ".brindle" / "agents" / "repo-only.md").write_text("---\nname: repo-only\nextends: developer\n---\n")
+    config.set_user("routing", {"medium": ["developer-codex"]})
+    config.set_user("routing_light", "claude-haiku")
+    config.set_user("routing_heavy", "or-glm-4.6")      # a hosted pick: its key is in the keychain
+    config.set_local(str(repo), "routing", {"medium": ["developer"]})
+    routed, probed, pro_reads = [], [], []
+    monkeypatch.setattr(license, "current", seeded["current_license"])
+    monkeypatch.setattr(keystore, "backend_name", lambda: "keychain")
+    monkeypatch.setattr(credentials.KeychainStore, "_run",
+                        lambda self, args: pro_reads.append(args) or SimpleNamespace(returncode=keychain_status))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(autopilot, "_route_by_weight", lambda *a, **k: routed.append(a) or (None, False, ""))
+    monkeypatch.setattr(doctor, "signin_providers", lambda: list(doctor.CLI_INSTALL))
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: probed.append(argv[0]))
+    monkeypatch.setattr(keystore, "get_key", lambda name: probed.append(name))
+    monkeypatch.setattr(worker_models, "_signed_in", None)
+    code, body = _get("/v1/routing", AUTH, f"repo={repo}&scope=user&learned=0")
+    assert code == 200 and routed == [] and probed == []
+    assert len(pro_reads) <= 1
+    # The person's own view: their settings and library, not this repo's.
+    assert (body["tiers"]["medium"]["values"], body["tiers"]["medium"]["source"]) == (["developer-codex"], "user")
+    assert "repo-only" not in {p["name"] for p in body["profiles"]}
+    assert all(k["learned"] is None for k in body["kinds"].values())
+    pro_reads.clear()
+    assert _get("/v1/routing", AUTH, f"repo={repo}&scope=user&learned=0")[0] == 200
+    assert len(pro_reads) <= 1       # at most one read; main's cross-process entitlement cache may serve it
 
 
 def test_knowledge_search_returns_hits_for_an_indexed_doc(seeded, db):

@@ -1,5 +1,6 @@
 import type { EngineStatus } from "../api/engine";
 import { BELOW_API_MAJOR, MIN_API } from "../api/engine";
+import type { AppState } from "../store/store";
 
 const SUPPORTED = `${MIN_API.join(".")} up to ${BELOW_API_MAJOR}.0`;
 export const UPGRADE_COMMAND = "uv tool upgrade brindle";
@@ -10,6 +11,39 @@ const ACTION = "shrink-0 rounded-md border border-current px-s1 py-0.5 text-xs f
 /* What the banner's upgrade is doing, when the app runs it (components/EngineUpgrade). */
 export type UpgradeProgress = "idle" | "running" | "failed";
 
+const CONNECTION: Record<AppState["connection"], { label: string; dot: string }> = {
+  idle: { label: "no engine", dot: "bg-ink-3" },
+  connecting: { label: "connecting…", dot: "bg-fawn" },
+  open: { label: "connected", dot: "bg-pass" },
+  closed: { label: "reconnecting…", dot: "bg-sap" },
+  unauthorized: { label: "token refused", dot: "bg-sap" },
+};
+
+interface EngineBannerProps {
+  status: EngineStatus;
+  connection?: AppState["connection"];
+  onRetry?: () => void;
+  onUpgrade?: () => void;
+  upgrading?: UpgradeProgress;
+}
+
+/* Engine health includes the event stream even when the version check passes. */
+export function EngineBanner({ connection, ...props }: EngineBannerProps) {
+  if (props.status.state === "ok" && (connection === undefined || connection === "open")) return null;
+  const { label, dot } = CONNECTION[connection ?? "connecting"];
+  return (
+    <div data-testid="engine-health">
+      {connection !== "open" && <div className={`${STRIP} text-ink-3`}>
+        <span className="flex items-center gap-1.5 text-xs" data-testid="connection">
+          <span className={`size-[7px] rounded-full ${dot}`} aria-hidden />
+          daemon · {label}
+        </span>
+      </div>}
+      <EngineNotice {...props} />
+    </div>
+  );
+}
+
 /* The strip above the app when its engine isn't one it can simply use: too
    old (upgrade it, run by the engine itself in the background when the app
    can ask it to, with the button saying so while it runs or after it
@@ -17,7 +51,7 @@ export type UpgradeProgress = "idle" | "running" | "failed";
    new one), newer than the app (it still runs: update the app),
    unreachable, or refusing this app. Nothing while connecting or when all
    is well. `onRetry` checks again. */
-export function EngineBanner({ status, onRetry, onUpgrade, upgrading = "idle" }: { status: EngineStatus; onRetry?: () => void; onUpgrade?: () => void; upgrading?: UpgradeProgress }) {
+function EngineNotice({ status, onRetry, onUpgrade, upgrading = "idle" }: EngineBannerProps) {
   if (status.state === "connecting" || status.state === "ok") return null;
   const retry = onRetry && (
     <button type="button" className={`${ACTION} ml-auto`} onClick={onRetry}>

@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS agents (
     merge_failed TEXT,             -- why the pipeline couldn't merge its approved branch (pipeline.review_state)
     config_home TEXT,              -- the CLI config home it runs with, decided once at spawn (provider_homes): '' the person's own
     review_slot TEXT,              -- the review claim slot a reviewer was started in (gates.standing_reviews)
-    failed_why TEXT                -- why its status is 'failed': auth | model | delivery (service.inbox)
+    failed_why TEXT,               -- why its status is 'failed': auth | model | delivery (service.inbox)
+    name TEXT                      -- a session root's name, given by the person (POST /sessions/{root}/rename)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -698,6 +699,7 @@ class Agent:
     weight: str | None = None              # the weight its task was routed as, known from launch (agents.spawn)
     review_slot: str | None = None         # the review claim slot it was started in (gates.standing_reviews)
     failed_why: str | None = None          # why it is 'failed': auth | model | delivery; None from an older brindle
+    name: str | None = None                # a session root's name from the person; None: listed by its goal
 
 
 @dataclass
@@ -987,7 +989,8 @@ class DB:
                           ("reopened_at", "REAL"), ("hooks_off", "TEXT"),
                           ("reviewing_since", "REAL"), ("review_restarted", "REAL"),
                           ("merge_failed", "TEXT"), ("plan_text", "TEXT"), ("config_home", "TEXT"),
-                          ("weight", "TEXT"), ("review_slot", "TEXT"), ("failed_why", "TEXT")):
+                          ("weight", "TEXT"), ("review_slot", "TEXT"), ("failed_why", "TEXT"),
+                          ("name", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         if "failed_why" not in cols:

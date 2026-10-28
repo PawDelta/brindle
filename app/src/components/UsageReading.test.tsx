@@ -48,13 +48,13 @@ const statusLine = () => screen.getByTestId("status-line");
 const usageAsked = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "GET" && r.path === "/usage").length;
 
 describe("the sidebar's reading near a usage limit", () => {
-  it("says nothing in the normal state: the status line is the daemon and the theme, the links on one line", async () => {
+  it("says nothing about usage in the normal state, keeping the links on one line", async () => {
     const { daemon, stop } = app("normal");
     await waitFor(() => expect(usageAsked(daemon)).toBeGreaterThan(0));
-    await waitFor(() => expect(screen.getByTestId("connection").textContent).toBe("daemon · connected"));
+    await waitFor(() => expect(screen.getByTestId("pages")).toBeTruthy());
     expect(screen.queryByTestId("usage-reading")).toBeNull();
     expect(statusLine().textContent).not.toMatch(/%|limit/);
-    expect(screen.getByTestId("connection").querySelector(".sr-only")).toBeNull();
+    expect(within(statusLine()).queryByTestId("connection")).toBeNull();
     // The footer's links never wrap, whatever the status line carries.
     const pages = screen.getByTestId("pages");
     expect(pages.className).toContain("flex-nowrap");
@@ -63,7 +63,7 @@ describe("the sidebar's reading near a usage limit", () => {
     stop();
   });
 
-  it("near a limit shows the worst provider in a few warm words beside the daemon, and opens Account › Usage", async () => {
+  it("near a limit shows the worst provider in a few warm words, and opens Account › Usage", async () => {
     const scrolled = vi.fn();
     Element.prototype.scrollIntoView = scrolled;
     const { stop } = app("near");
@@ -72,15 +72,12 @@ describe("the sidebar's reading near a usage limit", () => {
     expect(reading.className).toContain("text-sap");
     expect(reading.getAttribute("aria-label")).toBe("Open Account › Usage");
     expect(screen.queryByTestId("usage-more")).toBeNull();
-    // In the status line, between the daemon's state and the theme switch (beside any provider's problem).
+    // The reading sits before the terminal and theme switches, beside any provider problem.
     const parts = [...statusLine().children];
     const slot = reading.parentElement!;
-    expect(parts.indexOf(screen.getByTestId("connection"))).toBeLessThan(parts.indexOf(slot));
-    expect(parts.indexOf(slot)).toBe(1);
+    expect(parts.indexOf(slot)).toBe(0);
     expect(statusLine().className).toContain("whitespace-nowrap");
-    // The daemon's "· connected" gives way to the reading, its dot staying, its words left to a screen reader.
-    await waitFor(() => expect(screen.getByTestId("connection").querySelector(".sr-only")?.textContent).toBe(" · connected"));
-    expect(screen.getByTestId("connection").textContent).toBe("daemon · connected");
+    expect(within(statusLine()).queryByTestId("connection")).toBeNull();
 
     fireEvent.click(reading);
     const usage = await screen.findByTestId("usage");

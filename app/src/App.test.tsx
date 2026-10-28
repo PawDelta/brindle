@@ -117,7 +117,7 @@ describe("App", () => {
     expect(treeAgent("sup1").getAttribute("aria-current")).toBe("page");
     expect(screen.queryByRole("complementary", { name: "Session panel" })).toBeNull();
     const context = within(nav()).getByTestId("session-context");
-    await waitFor(() => expect(within(context).getByTestId("goal-line").textContent).toContain("1 of 1 passed"));
+    await waitFor(() => expect(within(context).getByTestId("goal-line").textContent).toContain("1 of 1 milestones complete"));
     expect(within(context).getByRole("list", { name: "Milestones" }).textContent).toContain("Client wired");
     expect(within(nav()).getByTestId("split-handle")).toBeTruthy();
     expect(daemon.requests.find((r) => r.path === "/goal")?.query).toEqual({ repo: REPO, root: "sup1" });
@@ -412,10 +412,20 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
     expect(screen.queryByTestId("engine-banner")).toBeNull();
 
+    fireEvent.click(link("Settings"));
+    await screen.findByRole("region", { name: "Settings" });
+    const engineSection = screen.getByTestId("engine");
+    expect(within(engineSection).getByTestId("connection").textContent).toBe("daemon · connected");
+    expect(screen.queryByTestId("engine-health")).toBeNull();
+    expect(within(nav()).queryByTestId("connection")).toBeNull();
+    fireEvent.click(within(nav()).getByTestId("inbox-link"));
+    await screen.findByRole("region", { name: "Inbox" });
+
     // The engine dies: the stream drops and nothing answers. The banner says so; the app asks for nothing.
     const before = daemon.requests.length;
     daemon.die();
     await waitFor(() => expect(screen.getByTestId("engine-banner").textContent).toContain("Can't reach the brindle engine"));
+    expect(within(screen.getByTestId("engine-health")).getByTestId("connection").textContent).toBe("daemon · reconnecting…");
     // It keeps trying on its own (the shell starts the daemon again on the next attempt).
     await waitFor(() => expect(daemon.sockets.filter((s) => s.closed).length).toBeGreaterThan(2));
     expect(store.getState().connection).not.toBe("open");
@@ -429,11 +439,15 @@ describe("App", () => {
     await waitFor(() => expect(store.getState().connection).toBe("open"));
     await waitFor(() => expect(screen.queryByTestId("engine-banner")).toBeNull());
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
+    fireEvent.click(link("Settings"));
+    await screen.findByRole("region", { name: "Settings" });
+    expect(within(screen.getByTestId("engine")).getByTestId("connection").textContent).toBe("daemon · connected");
     const after = daemon.requests.slice(before).filter((r) => r.method === "GET").map((r) => r.path);
     expect(after).toContain("/snapshot");
     expect(after).toContain("/inbox");
     expect(after).toContain("/meta");
-    expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    fireEvent.click(link("Knowledge"));
+    expect(await screen.findByRole("region", { name: "Knowledge" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
     sync.stop();
   });
@@ -521,7 +535,7 @@ describe("providers in the sidebar", () => {
 
     // An install that fails reaches the status line too, after the sign-out: "+1", still there on another page.
     daemon.installFails.opencode = 1;
-    fireEvent.click(within(screen.getByTestId("provider-opencode")).getByRole("button", { name: "Connect OpenCode" }));
+    fireEvent.click(within(screen.getByTestId("provider-opencode")).getByRole("button", { name: "Install OpenCode" }));
     await screen.findByTestId("provider-install-opencode-failed");
     await waitFor(() => expect(within(statusLine()).getByTestId("provider-problem-more").textContent).toBe("+1"));
     expect(within(statusLine()).getByTestId("provider-problem").textContent).toContain("Codex signed out");
@@ -532,10 +546,11 @@ describe("providers in the sidebar", () => {
     fireEvent.click(within(await screen.findByTestId("provider-install-opencode-failed")).getByRole("button", { name: "Dismiss" }));
     await waitFor(() => expect(within(statusLine()).queryByTestId("provider-problem-more")).toBeNull());
     // An install failure alone says so in its own words.
+    fireEvent.click(within(screen.getByTestId("provider-codex")).getByRole("button", { name: "Connection details" }));
     fireEvent.click(within(screen.getByTestId("provider-codex")).getByRole("button", { name: "Remove Codex from brindle" }));
     await waitFor(() => expect(within(nav()).queryByTestId("provider-problem")).toBeNull());
     daemon.installFails.antigravity = 1;
-    fireEvent.click(within(screen.getByTestId("provider-antigravity")).getByRole("button", { name: "Connect Antigravity" }));
+    fireEvent.click(within(screen.getByTestId("provider-antigravity")).getByRole("button", { name: "Install Antigravity" }));
     await waitFor(() => expect(within(nav()).getByTestId("provider-problem").textContent).toBe("Antigravity install failed"));
     expect(screen.queryByRole("dialog")).toBeNull();
     Element.prototype.scrollIntoView = before;

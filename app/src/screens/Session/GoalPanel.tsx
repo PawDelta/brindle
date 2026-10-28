@@ -386,8 +386,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
       </button>
     ) : null;
   if (compact) {
-    // The sidebar's goal (design/options-v2/M3b-multi .side .goal): a ring and "Milestone N of T · state"
-    // with a bar per milestone at the right, the milestones as a list (✓ done, every unfinished one lit),
+    // The sidebar's goal: a ring and completed count, the milestones as a list (✓ done, every unfinished one lit),
     // then when the supervisor last checked, with the autopilot switch beside it.
     const lastCheck = Math.max(0, ...milestones.map((m) => m.checked_at ?? 0));
     const donePct = finished ? 100 : total === 0 ? 0 : (passed / total) * 100;
@@ -399,18 +398,13 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
         <div className="flex items-center gap-s1 px-0.5 text-xs font-medium text-ink">
           <span className="side-ring" style={{ background: `conic-gradient(var(--pass) 0 ${donePct}%, var(--branch) ${donePct}% ${nowPct}%, var(--line) ${nowPct}% 100%)` }} aria-hidden />
           <span data-testid="goal-line">
-            {total > 0 && passed === total ? `${passed} of ${total} passed · ` : current ? `Milestone ${current.position} of ${total} · ` : ""}
+            {total > 0 ? `${passed} of ${total} milestones complete · ` : ""}
             <span data-testid="goal-phase" className={finished || phase === "ready_for_pr" ? "text-pass" : undefined}>
               {phaseLabel}
             </span>
           </span>
           {closeSession}
           <span className="flex-1" />
-          {total > 0 && (
-            <span className="side-prog" role="progressbar" aria-label="Progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
-              {milestones.map((m) => <b key={m.id} data-on={finished || m.status === "passed"} data-now={!finished && m.status !== "passed"} />)}
-            </span>
-          )}
         </div>
         {total > 0 ? (
           <ul className="side-ms" aria-label="Milestones">
@@ -459,7 +453,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
         {closeSession}
         <span className="flex-1" />
         <span className="text-xs text-ink-2">
-          {passed} of {total} passed
+          {passed} of {total} milestones complete
         </span>
       </div>
       {/* In the sidebar the pane's own title line names the goal already. */}

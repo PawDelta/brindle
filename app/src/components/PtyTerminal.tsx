@@ -35,7 +35,12 @@
    text reads the app's clipboard, `paste`); elsewhere ⌘V reads the app's
    clipboard, the webview's paste prevented. What's pasted goes to
    the pane as xterm.js pastes (bracketed, where the program asked), and
-   nothing else does.
+   nothing else does. A press anywhere in the view, its margin too, gives
+   xterm.js the keyboard, so the ⌘V after it reaches the pane.
+
+   Links: a URL the pane prints (xterm's web-links addon) or a program's OSC
+   8 hyperlink, ⌘-clicked (Ctrl-clicked elsewhere), opens in the system
+   browser (api/open.ts openExternal), http(s) only (linkOpener).
 
    A window with brindle's CLI sidebar pane (a person's terminal shows it)
    is shown without it: the view says which columns to crop (api/ptyView.ts
@@ -52,11 +57,13 @@
 
 import { ClipboardAddon, type IClipboardProvider } from "@xterm/addon-clipboard";
 import { FitAddon } from "@xterm/addon-fit";
+import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useEffect, useRef, useState } from "react";
 import { logDebug } from "../api/debug";
+import { openExternal, type OpenUrl } from "../api/open";
 import type { Crop, PtyViewOpener, PtyViewTarget } from "../api/ptyView";
 import { scrollByWheel } from "./terminalScroll";
 
@@ -110,6 +117,8 @@ export interface PtyTerminalProps {
   copy?(text: string): Promise<void>;
   /* What the app's clipboard holds, for ⌘V. */
   paste?(): Promise<string>;
+  /* Where a link ⌘-clicked in the pane opens: the system browser (openExternal) unless given. */
+  openUrl?: OpenUrl;
   onView?(view: TerminalView): void;
   /* The view's size in cells, once it opens and on each change (what its client asks tmux for, the crop's columns not counted). */
   onSize?(cols: number, rows: number): void;
@@ -162,7 +171,17 @@ export const COPIED_SHOWN = 1500;
 /* Whether the keys are a Mac's: ⌘C, ⌘V through the webview's Edit menu (Tauri's default on macOS), Ctrl+C always ^C. */
 const onMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(navigator.platform);
 
-export function PtyTerminal({ at, open, copy, paste, onView, onSize }: PtyTerminalProps) {
+/* A link in the pane, a URL it prints or a program's OSC 8 hyperlink (tmux passes them on): ⌘-clicked (Ctrl-clicked
+   off a Mac), as iTerm2 and Ghostty open one, it opens in the system browser. A plain click is the pane's, so a drag
+   over a URL copies it; only http(s) links open. */
+export function linkOpener(openUrl: () => OpenUrl, mac: boolean): (e: MouseEvent, uri: string) => void {
+  return (e, uri) => {
+    if (!(mac ? e.metaKey : e.ctrlKey) || !/^https?:\/\//i.test(uri)) return;
+    openUrl()(uri).catch((err) => logDebug("pty_view", "error", `couldn't open a link: ${String(err)}`));
+  };
+}
+
+export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: PtyTerminalProps) {
   const host = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLDivElement>(null);
   const mask = useRef<HTMLDivElement>(null);
@@ -177,6 +196,8 @@ export function PtyTerminal({ at, open, copy, paste, onView, onSize }: PtyTermin
   copied.current = copy;
   const pasted = useRef(paste);
   pasted.current = paste;
+  const browsed = useRef(openUrl ?? openExternal);
+  browsed.current = openUrl ?? openExternal;
   useEffect(() => {
     viewed.current?.(view);
   }, [view]);
@@ -186,6 +207,8 @@ export function PtyTerminal({ at, open, copy, paste, onView, onSize }: PtyTermin
     const el = host.current;
     const inner = box.current;
     if (!el || !inner) return;
+    const mac = onMac();
+    const follow = linkOpener(() => browsed.current, mac);
     const term = new XTerm({
       cursorBlink: true,
       fontFamily: '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
@@ -193,9 +216,11 @@ export function PtyTerminal({ at, open, copy, paste, onView, onSize }: PtyTermin
       scrollback: 0,
       macOptionClickForcesSelection: true,
       theme: shellTheme(),
+      linkHandler: { activate: follow },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
+    term.loadAddon(new WebLinksAddon(follow));
     let gone = false;
     // Every copy onto the app's clipboard, whoever made it (xterm.js's selection, tmux's, the program's), and
     // "Copied" over the view for a moment once the clipboard holds text. A copy that failed says nothing here
@@ -286,6 +311,15 @@ export function PtyTerminal({ at, open, copy, paste, onView, onSize }: PtyTermin
     const focused = () => pty.focus();
     term.textarea?.addEventListener("focus", focused);
     el.addEventListener("mousedown", focused, true);
+    // A press anywhere in the view gives xterm.js the keyboard. It takes it itself only for presses on its own element;
+    // one on the view's margin, the strip under its last row or the mask would leave the focus on nothing, and the ⌘V
+    // (or key) after it would reach no pane: the webview's paste goes to the page, not the view.
+    const keyboard = (e: MouseEvent) => {
+      if (term.element?.contains(e.target as Node)) return;
+      e.preventDefault();
+      term.focus();
+    };
+    el.addEventListener("mousedown", keyboard, true);
     // So does the view opening, and the app's window coming to the front (or the app shown again) with the view on
     // screen, its keyboard focus elsewhere: the person is at the app, looking at the pane. A wider terminal typed in
     // last would otherwise keep the window, the agent's pane wider than the view and its lines cut at its edge.
@@ -339,7 +373,6 @@ export function PtyTerminal({ at, open, copy, paste, onView, onSize }: PtyTermin
     };
     el.addEventListener("mousedown", pressing, true);
     window.addEventListener("mouseup", letGo);
-    const mac = onMac();
     // ⌘C and ⌘V through the app's clipboard, Ctrl+C's copy on Windows and Linux. ⌘C taken (its default prevented):
     // neither the webview's copy nor a key goes to the pane. Each ⌘V has one way to paste, chosen before its default
     // goes on or not: on a Mac (the shell's Edit menu) the webview's paste, `pasting` taking it; elsewhere the key is
@@ -401,6 +434,7 @@ export function PtyTerminal({ at, open, copy, paste, onView, onSize }: PtyTermin
       setCopiedShown(false);
       term.textarea?.removeEventListener("focus", focused);
       el.removeEventListener("mousedown", focused, true);
+      el.removeEventListener("mousedown", keyboard, true);
       window.removeEventListener("focus", atApp);
       document.removeEventListener("visibilitychange", atApp);
       el.removeEventListener("copy", copying, true);

@@ -93,59 +93,110 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const doctorCalls = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.path === "/doctor");
 
 describe("settings screen", () => {
-  it("shows the repo's common settings as rows with the rest behind More, and saves what changed where the person says", async () => {
+  it("edits your settings and saves them to the user scope, and keeps the repo-only rules in Project rules, saved to the repo", async () => {
     const { daemon, stop } = setup();
-    const repoSettings = await screen.findByTestId("repo-settings");
+    const mine = await screen.findByTestId("your-settings");
     expect(daemon.requests.find((r) => r.path === "/config")?.query).toEqual({ repo: REPO });
-    // The handful people change most, read as the engine merges the files; the rest behind More.
-    const checks = screen.getByRole("textbox", { name: "Checks" });
-    expect(checks).toHaveProperty("value", "npm test");
-    expect(screen.getByRole("spinbutton", { name: "Workers at once" })).toHaveProperty("value", "5");
-    expect(screen.getByRole("switch", { name: "Plan first" }).getAttribute("aria-checked")).toBe("false");
-    expect(screen.queryByRole("combobox", { name: "Overlapping tasks" })).toBeNull();
-    expect(screen.queryByTestId("settings-save")).toBeNull();
-    // Typed a keystroke at a time: the space and the Enter stay on screen while the draft reads the lines.
-    for (const typed of ["npm test ", "npm test \n", "npm test \nn", "npm test \nnpm run build"]) fireEvent.change(checks, { target: { value: typed } });
-    expect(checks).toHaveProperty("value", "npm test \nnpm run build");
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Workers at once" }), { target: { value: "3" } });
-    fireEvent.click(screen.getByRole("switch", { name: "Plan first" }));
-    expect(screen.getByRole("switch", { name: "Plan first" }).getAttribute("aria-checked")).toBe("true");
-    expect(repoSettings.querySelector('[data-setting="plan_first"]')!.textContent).toContain("edited");
-    const bar = screen.getByTestId("settings-save");
-    expect(bar.textContent).toContain("3 changes");
-    // Checks live in the repo's files only: the save is pinned to this repo, whatever was picked before.
-    expect(within(bar).getByRole("radio", { name: "This repo" })).toHaveProperty("checked", true);
-    expect(within(bar).getByRole("radio", { name: "Every repo" })).toHaveProperty("disabled", true);
-    expect(screen.getByTestId("repo-only").textContent).toContain("Checks only count from a repo's own files");
-    fireEvent.click(within(bar).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Saved checks, max_agents, plan_first to /home/u/proj/.brindle/config.local.json"));
-    expect(patches(daemon)[0].body).toEqual({ scope: "repo", repo: REPO, values: { checks: ["npm test", "npm run build"], max_agents: 3, plan_first: true } });
-    // The local file took them; read back as the engine merges the files (a local list replaces the shared one): the
-    // same lines, so the text stays as typed, and nothing is left to save.
-    expect(daemon.data.config.local).toEqual({ checks: ["npm test", "npm run build"], max_agents: 3, plan_first: true });
-    await waitFor(() => expect(screen.getByRole("textbox", { name: "Checks" })).toHaveProperty("value", "npm test \nnpm run build"));
-    expect(screen.queryByTestId("settings-save")).toBeNull();
+    // Your settings lead; the handful people change most show, the rest behind More. Checks is not among them.
+    expect(screen.getAllByRole("region").map((s) => s.id).filter(Boolean).slice(0, 3)).toEqual(["your-settings", "you", "this-repo"]);
+    expect(within(mine).queryByRole("textbox", { name: "Checks" })).toBeNull();
+    expect(within(mine).queryByRole("combobox", { name: "Overlapping tasks" })).toBeNull();
+    expect(screen.queryByTestId("user-save")).toBeNull();
+    fireEvent.click(within(mine).getByRole("switch", { name: "Plan first" }));
     // A number can't be left empty: the engine would store the null and choke on it later.
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Workers at once" }), { target: { value: "" } });
+    const workers = within(mine).getByRole("spinbutton", { name: "Workers at once" });
+    fireEvent.change(workers, { target: { value: "" } });
     expect(screen.getByTestId("settings-invalid").textContent).toContain("Workers at once needs a number");
-    expect(screen.getByRole("button", { name: "Save" })).toHaveProperty("disabled", true);
-    // A change the person's file can carry goes there, without the repo.
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Workers at once" }), { target: { value: "2" } });
-    fireEvent.click(screen.getByRole("radio", { name: "Every repo" }));
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(patches(daemon)).toHaveLength(2));
-    expect(patches(daemon)[1].body).toEqual({ scope: "user", values: { max_agents: 2 } });
-    expect(daemon.data.config.user.max_agents).toBe(2);
-    // The local file still wins for this repo: the screen reads 3 again, as the engine would.
-    await waitFor(() => expect(screen.getByRole("spinbutton", { name: "Workers at once" })).toHaveProperty("value", "3"));
-    // More: the other settings; Everything else: the rest of the config to read; the person's own defaults likewise.
-    fireEvent.click(within(repoSettings).getByRole("button", { name: /^More/ }));
+    expect(screen.getByRole("button", { name: "Save your settings" })).toHaveProperty("disabled", true);
+    fireEvent.change(workers, { target: { value: "2" } });
+    expect(mine.querySelector('[data-setting="plan_first"]')!.textContent).toContain("edited");
+    fireEvent.click(screen.getByRole("button", { name: "Save your settings" }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Saved max_agents, plan_first for every project to /home/u/.brindle/config.json"));
+    expect(patches(daemon)[0].body).toEqual({ scope: "user", values: { max_agents: 2, plan_first: true } });
+    expect(daemon.data.config.user).toMatchObject({ max_agents: 2, plan_first: true });
+    expect(daemon.data.config.local).toEqual({});
+    // More: the other settings; what the person has set beyond the rows is listed to read.
+    fireEvent.click(within(mine).getByRole("button", { name: /^More/ }));
     expect(screen.getByRole("combobox", { name: "Overlapping tasks" })).toBeTruthy();
     expect(screen.getByRole("switch", { name: "Coordinator" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /Everything else/ }));
-    expect(screen.getByTestId("config-rest").textContent).toContain("default_agent");
-    fireEvent.click(screen.getByRole("button", { name: /Your defaults for every repo/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Other settings you have/ }));
     expect(screen.getByTestId("user-rest").textContent).toContain("supervisor");
+
+    // Project rules: checks, typed a keystroke at a time (the space and the Enter stay on screen), saved to the repo.
+    const rules = screen.getByTestId("repo-settings");
+    const checks = within(rules).getByRole("textbox", { name: "Checks" });
+    expect(checks).toHaveProperty("value", "npm test");
+    for (const typed of ["npm test ", "npm test \n", "npm test \nn", "npm test \nnpm run build"]) fireEvent.change(checks, { target: { value: typed } });
+    expect(checks).toHaveProperty("value", "npm test \nnpm run build");
+    const bar = screen.getByTestId("settings-save");
+    expect(bar.textContent).toContain("1 change");
+    fireEvent.click(within(bar).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(patches(daemon)).toHaveLength(2));
+    expect(patches(daemon)[1].body).toEqual({ scope: "repo", repo: REPO, values: { checks: ["npm test", "npm run build"] } });
+    expect(daemon.data.config.local).toEqual({ checks: ["npm test", "npm run build"] });
+    await waitFor(() => expect(screen.queryByTestId("settings-save")).toBeNull());
+    fireEvent.click(within(rules).getByRole("button", { name: /Everything else/ }));
+    expect(screen.getByTestId("config-rest").textContent).toContain("default_agent");
+    stop();
+  });
+
+  it("marks a setting a project overrides, and clears an override in the local file but not the committed one", async () => {
+    const { daemon, stop } = setup({
+      config: {
+        user: { plan_first: false },
+        repo: { max_agents: 2 },
+        local: { plan_first: true },
+        keys: [],
+      },
+    });
+    const mine = await screen.findByTestId("your-settings");
+    // The row is the person's own value; the marker says what this project does instead.
+    expect(within(mine).getByRole("switch", { name: "Plan first" }).getAttribute("aria-checked")).toBe("false");
+    const marker = await within(mine).findByTestId("override-plan_first");
+    expect(marker.textContent).toContain("On in this project");
+    expect(within(mine).getByTestId("override-max_agents").textContent).toContain("2 in this project");
+    expect(within(mine).queryByTestId("override-autopilot")).toBeNull();
+    // Edits not saved yet, in both sections: a cleared override reloads the config but must not eat them.
+    fireEvent.click(within(mine).getByRole("switch", { name: "Plan first" }));
+    const checks = screen.getByRole("textbox", { name: "Checks" });
+    fireEvent.change(checks, { target: { value: "npm test\nnpm run lint" } });
+    fireEvent.click(within(marker).getByRole("button", { name: "Clear override" }));
+    await waitFor(() => expect(within(mine).queryByTestId("override-plan_first")).toBeNull());
+    expect(patches(daemon)[0].body).toEqual({ scope: "repo", repo: REPO, unset: ["plan_first"] });
+    expect(daemon.data.config.local).toEqual({});
+    expect(daemon.data.config.user).toEqual({ plan_first: false });
+    expect(within(mine).getByRole("switch", { name: "Plan first" }).getAttribute("aria-checked")).toBe("true");
+    expect(checks).toHaveProperty("value", "npm test\nnpm run lint");
+    // The committed file's override has its own explicit clear, scoped to that file; saving your settings keeps the rules' edit.
+    fireEvent.click(within(within(mine).getByTestId("override-max_agents")).getByRole("button", { name: "Clear in .brindle/config.json" }));
+    await waitFor(() => expect(within(mine).queryByTestId("override-max_agents")).toBeNull());
+    expect(patches(daemon)[1].body).toEqual({ scope: "shared", repo: REPO, unset: ["max_agents"] });
+    expect(daemon.data.config.repo).toEqual({});
+    fireEvent.click(screen.getByRole("button", { name: "Save your settings" }));
+    await waitFor(() => expect(daemon.data.config.user).toEqual({ plan_first: true }));
+    expect(screen.getByRole("textbox", { name: "Checks" })).toHaveProperty("value", "npm test\nnpm run lint");
+    expect(screen.getByTestId("settings-save")).toBeTruthy();
+    stop();
+  });
+
+  it("never saves one project's rules into another while its config has not loaded", async () => {
+    const OTHER = "/home/u/other";
+    const { daemon, failing, stop } = setup({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }] });
+    const checks = await screen.findByRole("textbox", { name: "Checks" });
+    fireEvent.change(checks, { target: { value: "npm test\nmake all" } });
+    expect(screen.getByTestId("settings-save")).toBeTruthy();
+    // The other repo's config fails to load: no rules to edit and no save bar to write this repo's edit into it.
+    failing.add("/config");
+    fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: OTHER } });
+    await screen.findByText(/Could not load settings/);
+    expect(screen.queryByTestId("settings-save")).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Checks" })).toBeNull();
+    expect(patches(daemon)).toHaveLength(0);
+    // Once it loads, the draft is that repo's own, not the edit made for the first.
+    failing.clear();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("textbox", { name: "Checks" })).toHaveProperty("value", "npm test");
+    expect(screen.queryByTestId("settings-save")).toBeNull();
     stop();
   });
 
@@ -291,6 +342,9 @@ describe("settings screen", () => {
   it("keeps the keys in Providers: a key stored write-only from a password field, no terminal anywhere", async () => {
     const { daemon, stop } = setup();
     const keys = await screen.findByTestId("providers");
+    expect(within(keys).queryByRole("form", { name: "Add a key" })).toBeNull();
+    const advanced = await within(keys).findByRole("button", { name: "API keys (optional, for advanced setups)" });
+    fireEvent.click(advanced);
     await within(keys).findByTestId("key-ANTHROPIC_API_KEY");
     expect(keys.textContent).not.toContain("in a terminal");
     expect(within(keys).getByTestId("key-ANTHROPIC_API_KEY").textContent).toContain("••••WXYZ");
@@ -335,6 +389,8 @@ describe("settings screen", () => {
     fireEvent.click(within(token).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByRole("form", { name: "Value for BRINDLE_TOKEN" })).toBeNull();
     expect(screen.queryByTestId("terminal")).toBeNull();
+    fireEvent.click(advanced);
+    expect(within(keys).queryByRole("form", { name: "Add a key" })).toBeNull();
     stop();
   });
 
@@ -343,6 +399,11 @@ describe("settings screen", () => {
     const section = await screen.findByTestId("providers");
     expect(within(section).getByRole("heading", { name: "Providers" })).toBeTruthy();
     const claude = await within(section).findByTestId("provider-claude");
+    const details = within(claude).getByRole("button", { name: "Connection details" });
+    expect(details.getAttribute("aria-expanded")).toBe("false");
+    expect(within(claude).queryByRole("button", { name: "Remove Claude Code from brindle" })).toBeNull();
+    fireEvent.click(details);
+    expect(details.getAttribute("aria-expanded")).toBe("true");
     expect([...section.querySelectorAll("[data-provider]")].map((r) => r.getAttribute("data-provider"))).toEqual(["claude", "codex", "opencode", "antigravity"]);
     expect(claude.getAttribute("data-state")).toBe("signed_in");
     expect(claude.textContent).toContain("Found at /opt/homebrew/bin/claude · 2.1.0");
@@ -353,14 +414,19 @@ describe("settings screen", () => {
     expect(codex.getAttribute("data-state")).toBe("signed_out");
     expect(within(codex).getByTestId("provider-state").textContent).toBe("Not signed in");
     expect(within(codex).getByRole("button", { name: "Sign in to Codex" })).toBeTruthy();
+    fireEvent.click(within(codex).getByRole("button", { name: "Connection details" }));
     const opencode = screen.getByTestId("provider-opencode");
     expect(opencode.getAttribute("data-state")).toBe("not_installed");
+    fireEvent.click(within(opencode).getByRole("button", { name: "Connection details" }));
     expect(opencode.textContent).toContain("Connect runs Anomaly's official installer (opencode.ai/install), as-is.");
-    expect(within(opencode).getByRole("button", { name: "Connect OpenCode" })).toBeTruthy();
+    expect(within(opencode).getByRole("button", { name: "Install OpenCode" })).toBeTruthy();
     expect(within(opencode).queryByRole("button", { name: /Remove/ })).toBeNull();
     // Each found CLI can be taken out of brindle; one not installed can't.
     expect(within(claude).getByRole("button", { name: "Remove Claude Code from brindle" })).toBeTruthy();
     expect(within(codex).getByRole("button", { name: "Remove Codex from brindle" })).toBeTruthy();
+    fireEvent.click(details);
+    expect(details.getAttribute("aria-expanded")).toBe("false");
+    expect(within(claude).queryByRole("button", { name: "Remove Claude Code from brindle" })).toBeNull();
     // The CLI keeps itself up to date: nothing here offers or reports an update.
     expect(within(section).queryByRole("button", { name: /update/i })).toBeNull();
     expect(section.textContent).not.toMatch(/updated|update now|is ready/i);
@@ -373,6 +439,7 @@ describe("settings screen", () => {
     const { stop } = setup({ providers: freshProviders({ antigravity: { path: "/home/u/.local/bin/agy", version: "1.3.0" } }) });
     const agy = await screen.findByTestId("provider-antigravity");
     await waitFor(() => expect(agy.getAttribute("data-state")).toBe("signed_in"));
+    fireEvent.click(within(agy).getByRole("button", { name: "Connection details" }));
     expect(agy.textContent).toContain("Antigravity shares its settings with yours, in ~/.gemini.");
     expect(agy.textContent).not.toContain("own copy");
     stop();
@@ -383,17 +450,18 @@ describe("settings screen", () => {
     const opencode = await screen.findByTestId("provider-opencode");
     await waitFor(() => expect(opencode.getAttribute("data-state")).toBe("not_installed"));
     daemon.deferInstall = true;
-    fireEvent.click(within(opencode).getByRole("button", { name: "Connect OpenCode" }));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Install OpenCode" }));
     await waitFor(() => expect(posts(daemon).at(-1)).toEqual({ method: "POST", path: "/providers/opencode/install", query: {}, body: {} }));
     const card = await within(opencode).findByTestId("provider-install-opencode");
     await waitFor(() => expect(within(card).getByTestId("provider-install-opencode-lines").textContent).toContain("Downloading opencode-darwin-arm64.zip"));
     expect(card.getAttribute("data-state")).toBe("running");
-    expect(within(opencode).queryByRole("button", { name: "Connect OpenCode" })).toBeNull();
+    expect(within(opencode).queryByRole("button", { name: "Install OpenCode" })).toBeNull();
     const asked = daemon.requests.filter((r) => r.path === "/providers/installed").length;
     daemon.completeInstall();
     // Done: the rows are read again, and the row says where the installer put it.
     await waitFor(() => expect(screen.getByTestId("provider-opencode").getAttribute("data-state")).toBe("signed_out"));
     expect(daemon.requests.filter((r) => r.path === "/providers/installed").length).toBeGreaterThan(asked);
+    fireEvent.click(within(opencode).getByRole("button", { name: "Connection details" }));
     expect(screen.getByTestId("provider-opencode").textContent).toContain("Found at /home/u/.opencode/bin/opencode · 1.2.8");
     expect(screen.queryByTestId("provider-install-opencode")).toBeNull();
     expect(within(screen.getByTestId("provider-opencode")).getByRole("button", { name: "Sign in to OpenCode" })).toBeTruthy();
@@ -402,7 +470,7 @@ describe("settings screen", () => {
     daemon.deferInstall = false;
     daemon.installFails.antigravity = 1;
     const agy = screen.getByTestId("provider-antigravity");
-    fireEvent.click(within(agy).getByRole("button", { name: "Connect Antigravity" }));
+    fireEvent.click(within(agy).getByRole("button", { name: "Install Antigravity" }));
     const failed = await within(agy).findByTestId("provider-install-antigravity-failed");
     expect(failed.textContent).toContain("Install failed.");
     expect(failed.textContent).toContain("Connection reset by peer");
@@ -434,9 +502,28 @@ describe("settings screen", () => {
     stop();
   });
 
+  it("providers: Sign out on a signed-in row signs brindle's copy out and the row reads Not signed in", async () => {
+    const { daemon, stop } = setup();
+    const codex = await screen.findByTestId("provider-codex");
+    await waitFor(() => expect(codex.getAttribute("data-state")).toBe("signed_out"));
+    expect(within(codex).queryByRole("button", { name: "Sign out of Codex" })).toBeNull();
+    fireEvent.click(within(codex).getByRole("button", { name: "Sign in to Codex" }));
+    const flow = await within(codex).findByTestId("sign-in-flow");
+    await waitFor(() => expect(flow.getAttribute("data-phase")).toBe("waiting"));
+    daemon.signInProvider("codex");
+    await waitFor(() => expect(screen.getByTestId("provider-codex").getAttribute("data-state")).toBe("signed_in"));
+    fireEvent.click(within(flow).getByRole("button", { name: "Close" }));
+    fireEvent.click(await within(screen.getByTestId("provider-codex")).findByRole("button", { name: "Sign out of Codex" }));
+    await waitFor(() => expect(screen.getByTestId("provider-codex").getAttribute("data-state")).toBe("signed_out"));
+    expect(posts(daemon).at(-1)).toEqual({ method: "POST", path: "/providers/codex/logout", query: {}, body: {} });
+    expect(within(screen.getByTestId("provider-codex")).getByTestId("provider-state").textContent).toBe("Not signed in");
+    stop();
+  });
+
   it("providers: Remove from brindle turns the CLI off without uninstalling it, and Connect turns the copy still found back on, no installer run", async () => {
     const { daemon, failing, stop } = setup();
     const codex = await screen.findByTestId("provider-codex");
+    fireEvent.click(within(codex).getByRole("button", { name: "Connection details" }));
     await waitFor(() => expect(codex.getAttribute("data-state")).toBe("signed_out"));
     fireEvent.click(within(codex).getByRole("button", { name: "Remove Codex from brindle" }));
     await waitFor(() => expect(screen.getByTestId("provider-codex").getAttribute("data-state")).toBe("off"));
@@ -471,12 +558,12 @@ describe("settings screen", () => {
     const opencode = await screen.findByTestId("provider-opencode");
     await waitFor(() => expect(opencode.getAttribute("data-state")).toBe("not_installed"));
     daemon.installDetectFails = 2;
-    fireEvent.click(within(opencode).getByRole("button", { name: "Connect OpenCode" }));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Install OpenCode" }));
     // The installer finished; the look after it failed. The stale row offers no second install.
     const detect = await screen.findByTestId("provider-install-opencode-detect");
     await waitFor(() => expect(detect.textContent).toContain("OpenCode is installed, but brindle couldn't look for it again"));
     expect(screen.getByTestId("provider-install-opencode").getAttribute("data-state")).toBe("done");
-    expect(within(screen.getByTestId("provider-opencode")).queryByRole("button", { name: "Connect OpenCode" })).toBeNull();
+    expect(within(screen.getByTestId("provider-opencode")).queryByRole("button", { name: "Install OpenCode" })).toBeNull();
     expect(screen.getByTestId("providers-refresh-error").textContent).toContain("Couldn't look for the providers again");
     // Looking again fails once more, then finds it: the row reads it, the card goes, one install all along.
     const looks = () => daemon.requests.filter((r) => r.path === "/providers/installed").length;
@@ -490,6 +577,7 @@ describe("settings screen", () => {
     await waitFor(() => expect(screen.getByTestId("provider-opencode").getAttribute("data-state")).toBe("signed_out"));
     expect(screen.queryByTestId("provider-install-opencode")).toBeNull();
     expect(screen.queryByTestId("providers-refresh-error")).toBeNull();
+    fireEvent.click(within(opencode).getByRole("button", { name: "Connection details" }));
     expect(screen.getByTestId("provider-opencode").textContent).toContain("Found at /home/u/.opencode/bin/opencode · 1.2.8");
     expect(posts(daemon).filter((r) => r.path === "/providers/opencode/install")).toHaveLength(1);
     expect(daemon.installs).toEqual(["opencode"]);

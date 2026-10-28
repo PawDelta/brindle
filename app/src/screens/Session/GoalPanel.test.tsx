@@ -101,7 +101,7 @@ describe("GoalPanel", () => {
     const daemon = new FakeDaemon({ goal: structuredClone(goal) });
     const store = createAppStore();
     render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} />);
-    await waitFor(() => expect(screen.getByText("1 of 2 passed")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("1 of 2 milestones complete")).toBeTruthy());
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
   });
 
@@ -166,7 +166,7 @@ describe("GoalPanel", () => {
     const store = createAppStore();
     const sync = startSync({ client: daemon.client(), store, connect: daemon.connect });
     render(<GoalPanel client={client} repo={REPO} root={ROOT} store={store} />);
-    await waitFor(() => expect(screen.getByText("1 of 2 passed")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("1 of 2 milestones complete")).toBeTruthy());
 
     // An autopilot event starts a refresh (an event also marks the store stale, so there
     // can be a second); their responses are held, so they carry the old goal.
@@ -180,12 +180,12 @@ describe("GoalPanel", () => {
     finished.milestones!.forEach((m) => (m.status = "passed"));
     daemon.data.goal = finished;
     daemon.publish("autopilot.progress", { repo_root: REPO, root_id: ROOT });
-    await waitFor(() => expect(screen.getByText("2 of 2 passed")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("2 of 2 milestones complete")).toBeTruthy());
 
     // The older response arrives last; it must not win.
     held.forEach((release) => release());
     await flush();
-    expect(screen.getByText("2 of 2 passed")).toBeTruthy();
+    expect(screen.getByText("2 of 2 milestones complete")).toBeTruthy();
     expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("false");
     sync.stop();
   });
@@ -261,8 +261,8 @@ describe("GoalPanel", () => {
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
     await waitFor(() => expect(sidebar.getAllByTestId("milestone")).toHaveLength(3));
     expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now", "now"]);
-    const bars = Array.from(sidebar.getByRole("progressbar").querySelectorAll("b"));
-    expect(bars.map((b) => b.dataset.now)).toEqual(["false", "true", "true"]);
+    expect(sidebar.queryByRole("progressbar")).toBeNull();
+    expect(sidebar.getByTestId("goal-line").textContent).toContain("1 of 3 milestones complete");
   });
 
   /* One row per goal phase: the panel's one status in both views, and the step that phase has (Ready for PR's
@@ -337,13 +337,14 @@ describe("GoalPanel", () => {
     if (compact) {
       expect(items.map((li) => li.dataset.state)).toEqual(["done", "done"]);
       expect(items.map((li) => li.textContent)).toEqual(["✓Client wiredDone", "✓Screen rendersDone"]);
-      expect(view.getByTestId("goal-line").textContent).toBe("2 of 2 passed · Done");
+      expect(view.getByTestId("goal-line").textContent).toBe("2 of 2 milestones complete · Done");
+      expect(view.queryByRole("progressbar")).toBeNull();
     } else {
       expect(view.getByRole("heading", { name: "Ship the Goal screen" })).toBeTruthy();
       expect(items.map((li) => li.textContent)).toEqual([expect.stringContaining("✓1. Client wiredDone"), expect.stringContaining("✓2. Screen rendersDone")]);
       expect(view.queryByTestId("milestone-now")).toBeNull();
+      expect(view.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("100");
     }
-    expect(view.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("100");
     expect(view.container.textContent).not.toContain("No milestones yet");
     expect(view.queryByTestId("goal-review")).toBeNull();
     expect(view.queryByTestId("goal-pr")).toBeNull();

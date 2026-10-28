@@ -249,7 +249,8 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
     }
   };
   const status = node ? cliStatus(node.agent, node.workspace, alive) : { glyph: "‖", label: sessionStatus ?? "paused", style: "dim" as const, needs: false };
-  const who = node ? (node.agent.id === root ? "supervisor" : agentName(workspaces, node.agent.id)) : "supervisor";
+  const named = useContext(SessionsContext)?.find(root)?.name;
+  const who = node ? (node.agent.id === root ? (named || "supervisor") : agentName(workspaces, node.agent.id)) : named || "supervisor";
   const provider = node ? providerName(node.agent.provider) : "Session";
   const ago = node ? since(node.agent.status_since) : null;
   // The bar's own notice is the pause's; a continue's shows on the surface's card, where it was asked for.

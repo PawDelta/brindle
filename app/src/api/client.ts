@@ -426,6 +426,8 @@ export interface KeyInfo {
 export interface Config {
   user: Record<string, unknown>;
   repo?: Record<string, unknown>;
+  /* Settings this project's own files set over the person's: key -> the file's scope. */
+  overrides?: Record<string, "local" | "repo">;
   keys: KeyInfo[];
 }
 
@@ -456,12 +458,15 @@ export interface DecisionRecorded {
 
 /* PATCH /config (routes_actions.patch_config): `values` into
    ~/.brindle/config.json ("user") or the repo's gitignored
-   .brindle/config.local.json ("repo"); only the repo config's own keys,
-   each a value of its default's type, or null to unset it. */
+   .brindle/config.local.json ("repo") or its committed .brindle/config.json
+   ("shared"); only the repo config's own keys,
+   each a value of its default's type, or null to unset it. `unset` (scope
+   "repo") removes keys from the local file: a project's override, cleared. */
 export interface ConfigPatch {
-  scope: "user" | "repo";
+  scope: "user" | "repo" | "shared";
   repo?: string;
-  values: Record<string, unknown>;
+  values?: Record<string, unknown>;
+  unset?: string[];
 }
 
 export interface ConfigUpdated {
@@ -651,6 +656,8 @@ export interface StartSession {
   /* The supervisor's CLI (claude, codex ...); the repo's default when omitted. */
   provider?: string;
   prompt?: string;
+  /* The new session's name, kept with it (listed instead of its goal). */
+  name?: string;
   watch?: boolean;
   /* The repo's default when omitted. */
   autopilot?: boolean;
@@ -848,6 +855,12 @@ export class DaemonClient {
   /* Resume a paused session (or recover its chat if it has stopped). */
   continueSession(root: string) {
     return this.post<ContinueResult>(`/sessions/${encodeURIComponent(root)}/continue`);
+  }
+
+  /* POST /sessions/{root}/rename (routes_actions.rename_session): an empty
+     name clears it, and the session is listed by its goal again. */
+  renameSession(root: string, name: string) {
+    return this.post<{ id: string; name: string | null }>(`/sessions/${encodeURIComponent(root)}/rename`, { name });
   }
 
   /* The ids of the agents it paused. */
@@ -1217,9 +1230,12 @@ export class DaemonClient {
 
   /* Which profiles each weight tier tries, the reviewer, the excluded
      providers (each with the scope it comes from) and every profile's
-     model, provider, availability and cost tier. */
-  routing(repo: string) {
-    return this.get<RoutingDTO>("/routing", { repo });
+     model, provider, availability and cost tier. `scope: "user"`: the
+     person's own settings and library, as every repo starts from them (`repo`
+     still gives the org policy). `learned: false`: each kind's `learned` is
+     null, without the seconds working it out takes. */
+  routing(repo: string, opts: { scope?: "user"; learned?: boolean } = {}) {
+    return this.get<RoutingDTO>("/routing", { repo, scope: opts.scope, learned: opts.learned === false ? 0 : undefined });
   }
 
   putRouting(body: RoutingPut) {
@@ -1262,6 +1278,12 @@ export class DaemonClient {
      installed (brindle never uninstalls); answers the provider, now off. */
   removeProvider(provider: string) {
     return this.delete<ProviderInstalled>(`/providers/${encodeURIComponent(provider)}`, {});
+  }
+
+  /* Signs brindle's own copy of Claude Code or Codex out (`claude auth logout`,
+     `codex logout`); the person's own CLI login stays. Answers the provider, not signed in. */
+  signOutProvider(provider: string) {
+    return this.post<ProviderInstalled>(`/providers/${encodeURIComponent(provider)}/logout`, {});
   }
 
   /* Runs `path`, one of the copies found, and turns the provider back on

@@ -342,10 +342,13 @@ def kind_overrides(found: object) -> dict[str, dict[str, str]]:
     return out
 
 
-def load_repo_config(repo_root: str | Path) -> RepoConfig:
+def load_repo_config(repo_root: str | Path, *, user_only: bool = False) -> RepoConfig:
+    """The settings for ``repo_root``: its local file over its shared one over
+    the person's ~/.brindle/config.json. ``user_only``: the person's file
+    alone, as every repo starts from it (the app's Agents tab)."""
     base = config_root(repo_root) / CONFIG_DIR
-    shared = _read_json(base / CONFIG_FILE)
-    local = _read_json(base / LOCAL_CONFIG_FILE)
+    shared = {} if user_only else _read_json(base / CONFIG_FILE)
+    local = {} if user_only else _read_json(base / LOCAL_CONFIG_FILE)
     user = user_settings()
 
     cfg = RepoConfig()
@@ -402,7 +405,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
             cfg.routing_overrides.setdefault(kind, {}).update(fields)
     from brindle import worker_models
 
-    worker_models.apply(cfg, user, str(repo_root))   # the models picked on the picker's workers screen
+    # The models picked on the picker's workers screen (the person's own profiles, for user_only).
+    worker_models.apply(cfg, user, str(repo_root), user_library=user_only)
     for source in (shared, local):  # per weight, so a repo can override one and keep the rest
         second = source.get("second_review")
         if isinstance(second, dict):
@@ -520,15 +524,33 @@ def _sync_setting(key: str) -> None:
         pass
 
 
+_REPO_WRITE = threading.Lock()
+
+
+def _change_json(path: Path, change) -> None:
+    """Read ``path``, apply ``change`` to its dict and replace the file, one at a
+    time (daemon actions run in threads) through a unique temp file in the same
+    directory, so a reader never sees half a file and no write is lost."""
+    with _REPO_WRITE:
+        data = _read_json(path)
+        change(data)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2) + "\n")
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+
 def set_local(repo_root: str | Path, key: str, value: object) -> Path:
     """Set one key in ``.brindle/config.local.json`` (gitignored: this person's
     own settings; other keys are kept)."""
     base = config_root(repo_root) / CONFIG_DIR
     base.mkdir(parents=True, exist_ok=True)
     path = base / LOCAL_CONFIG_FILE
-    data = _read_json(path)
-    data[key] = value
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    _change_json(path, lambda data: data.__setitem__(key, value))
     ignore = base / ".gitignore"
     if not ignore.exists():
         ignore.write_text(f"{LOCAL_CONFIG_FILE}\n", encoding="utf-8")
@@ -540,9 +562,24 @@ def set_repo(repo_root: str | Path, key: str, value: object) -> Path:
     everyone's settings; other keys are kept)."""
     path = scope_paths(repo_root)["repo"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = _read_json(path)
-    data[key] = value
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    _change_json(path, lambda data: data.__setitem__(key, value))
+    return path
+
+
+def unset_local(repo_root: str | Path, key: str) -> Path:
+    """Remove one key from ``.brindle/config.local.json`` (other keys are kept),
+    so the repo's shared file or the person's own value reads through again."""
+    path = scope_paths(repo_root)["local"]
+    if path.exists():
+        _change_json(path, lambda data: data.pop(key, None))
+    return path
+
+
+def unset_repo(repo_root: str | Path, key: str) -> Path:
+    """Remove one key from the repo's committed ``.brindle/config.json``."""
+    path = scope_paths(repo_root)["repo"]
+    if path.exists():
+        _change_json(path, lambda data: data.pop(key, None))
     return path
 
 

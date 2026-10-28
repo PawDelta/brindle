@@ -290,6 +290,16 @@ export function mergeCommands(shared: unknown, local: unknown): string[] {
   return base;
 }
 
+/* routes_read.get_config's `overrides`: the keys the repo's own files set (config.setting_source). */
+function configOverrides(files: { repo: Record<string, unknown>; local: Record<string, unknown> }): Record<string, "local" | "repo"> {
+  const out: Record<string, "local" | "repo"> = {};
+  for (const key of Object.keys(REPO_CONFIG_TYPES)) {
+    if (key in files.local) out[key] = "local";
+    else if (key in files.repo) out[key] = "repo";
+  }
+  return out;
+}
+
 function effectiveConfig(files: { user: Record<string, unknown>; repo: Record<string, unknown>; local: Record<string, unknown> }): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of REPO_ONLY_LISTS) out[key] = mergeCommands(files.repo[key], files.local[key]);
@@ -1016,6 +1026,14 @@ export class FakeDaemon {
     return json(this.data.providers.find((r) => r.provider === provider));
   }
 
+  /* routes_actions.provider_logout (POST /providers/{p}/logout): brindle's own
+     copy of Claude Code or Codex signed out; answers the provider, not signed in. */
+  private signOutProvider(provider: string): Response {
+    if (provider !== "claude" && provider !== "codex") return error("invalid", "sign out is offered for claude, codex", 400);
+    this.data.providers = this.data.providers.map((r) => (r.provider === provider ? { ...r, signed_in: false } : r));
+    return json(this.data.providers.find((r) => r.provider === provider));
+  }
+
   /* routes_actions.use_provider_install (POST /providers/{p}/use-mine
      {path}): runs that copy, one of those found, and turns the provider back on. */
   private pickProviderInstall(provider: string, body: Record<string, unknown>): Response {
@@ -1207,6 +1225,7 @@ export class FakeDaemon {
     }
     if ((m = path.match(/^\/providers\/([^/]+)\/install$/))) return this.installProvider(m[1]);
     if ((m = path.match(/^\/providers\/([^/]+)\/use-mine$/))) return this.pickProviderInstall(m[1], body);
+    if ((m = path.match(/^\/providers\/([^/]+)\/logout$/))) return this.signOutProvider(m[1]);
     if (path === "/repos/clone") return this.cloneRepo(body);
     if (path === "/repos/open") return this.openRepo(body);
     if (path === "/terminals/shell") return this.openShell(body);
@@ -1286,9 +1305,10 @@ export class FakeDaemon {
   /* routes_actions.patch_config: `values` into the user's file or the repo's local one. */
   private patchConfig(body: Record<string, unknown>): Response {
     const scope = body.scope ?? "user";
-    if (scope !== "user" && scope !== "repo") return error("invalid", "scope must be user or repo", 400);
-    if (scope === "repo" && typeof body.repo !== "string") return error("invalid", "repo is required", 400);
-    const values = body.values;
+    if (scope !== "user" && scope !== "repo" && scope !== "shared") return error("invalid", "scope must be user, repo or shared", 400);
+    if (scope !== "user" && typeof body.repo !== "string") return error("invalid", "repo is required", 400);
+    const unset = Array.isArray(body.unset) ? (body.unset as string[]) : [];
+    const values = body.values ?? (unset.length > 0 ? {} : null);
     if (values == null) return error("invalid", "values is required", 400);
     if (typeof values !== "object" || Array.isArray(values)) return error("invalid", "values has the wrong type", 400);
     const entries = Object.entries(values as Record<string, unknown>);
@@ -1299,9 +1319,10 @@ export class FakeDaemon {
       if (!fits(value, type)) return error("invalid", `${key} must be a ${type === "number" ? "int" : type === "boolean" ? "bool" : type === "string" ? "str" : type}`, 400);
     }
     // config.set_user / set_local store the value as given: a null is a stored null, not an unset.
-    const file = scope === "user" ? this.data.config.user : this.data.config.local;
+    const file = scope === "user" ? this.data.config.user : scope === "shared" ? this.data.config.repo : this.data.config.local;
     for (const [key, value] of entries) file[key] = value;
-    return json({ updated: entries.map(([k]) => k).sort(), path: scope === "user" ? "/home/u/.brindle/config.json" : `${String(body.repo)}/.brindle/config.local.json` });
+    for (const key of unset) delete file[key];
+    return json({ updated: [...entries.map(([k]) => k), ...unset].sort(), path: scope === "user" ? "/home/u/.brindle/config.json" : `${String(body.repo)}/.brindle/${scope === "shared" ? "config.json" : "config.local.json"}` });
   }
 
   /* Engine branch desktop/kb-sources: a folder added to the repo's knowledge
@@ -1698,7 +1719,9 @@ export class FakeDaemon {
 
   /* The three settings files a repo is read with: the user's, and the repo's own
      shared and local ones where it has them. */
-  private routingFiles(repo: string): Record<RoutingScope, RoutingFile> {
+  private routingFiles(repo: string, userOnly = false): Record<RoutingScope, RoutingFile> {
+    // config.load_repo_config(user_only=True): the person's file alone.
+    if (userOnly) return { user: this.data.routingConfig.user, repo: {}, local: {} };
     const own = this.data.routingByRepo[repo];
     if (!own) return this.data.routingConfig;
     own.repo ??= {};
@@ -1715,9 +1738,10 @@ export class FakeDaemon {
   /* GET /routing (routes_read.get_routing): each tier's list and the scope it
      comes from, as load_repo_config reads them (local over repo over user over
      the default, per tier), the reviewer and the excluded providers likewise
-     (config.setting_source), and every profile with `excluded` from the latter. */
-  private routing(repo: string): RoutingDTO {
-    const files = this.routingFiles(repo);
+     (config.setting_source), and every profile with `excluded` from the latter.
+     `userOnly` (scope=user): the user's file alone; `learn` false (learned=0): no learned picks. */
+  private routing(repo: string, userOnly = false, learn = true): RoutingDTO {
+    const files = this.routingFiles(repo, userOnly);
     const precedence: RoutingScope[] = ["local", "repo", "user"];
     const byName = new Map(this.data.routingProfiles.map((p) => [p.name, p]));
     const refusals = new Map(this.data.routingProfiles.map((p) => [p.name, this.refusal(p)]));
@@ -1744,7 +1768,7 @@ export class FakeDaemon {
     const lockedIn = precedence.find((s) => files[s].routing_locked !== undefined);
     const locked = new Set(lockedIn ? files[lockedIn].routing_locked : []);
     const kind = (k: string, names: string[]): RoutingKindDTO & KindExtras => {
-      const learned = this.data.learned[k];
+      const learned = learn ? this.data.learned[k] : undefined;
       return {
         model: names[0] ?? null,
         fallbacks: names.slice(1),
@@ -1829,7 +1853,8 @@ export class FakeDaemon {
     const extras: Record<string, KindExtras> = {};
     const kindFallbacks: Record<string, string[]> = {};
     let supervisor: string | null = null;
-    const current = this.routing(repo);
+    // A user-scope change builds on the user's own lists.
+    const current = this.routing(repo, scope === "user");
     for (const [k, spec] of Object.entries((kinds ?? {}) as Record<string, unknown>)) {
       if (!ROUTING_KINDS.includes(k) || typeof spec !== "object" || spec === null) return error("invalid", `kind must be one of ${ROUTING_KINDS.join(", ")}, not '${k}'`, 400);
       const { model, fallbacks, locked, effort, instructions } = spec as Record<string, unknown>;
@@ -2236,12 +2261,12 @@ export class FakeDaemon {
       case "/profiles":
         return json((repo && d.profilesByRepo[repo]) || d.profiles);
       case "/routing":
-        return needRepo() ?? json(this.routing(repo));
+        return needRepo() ?? json(this.routing(repo, query.scope === "user", query.learned !== "0"));
       case "/rules":
         return needRepo() ?? json(d.rulePacks);
       case "/config":
         // The repo's config comes only when a repo is asked for (routes_read.get_config).
-        return json(repo ? { user: d.config.user, repo: effectiveConfig(d.config), keys: d.config.keys } : { user: d.config.user, keys: d.config.keys });
+        return json(repo ? { user: d.config.user, repo: effectiveConfig(d.config), overrides: configOverrides(d.config), keys: d.config.keys } : { user: d.config.user, keys: d.config.keys });
       case "/user-settings":
         return json(d.userSettings);
       case "/debug":
@@ -2469,6 +2494,7 @@ export class FakeDaemon {
         created_at: Date.now() / 1000,
         status_since: null,
         goal: null,
+        name: typeof body.name === "string" && body.name.trim() ? body.name.trim() : null,
       };
       // GET /sessions shows the goal line (the start prompt); the start reply has none.
       d.sessions = [...d.sessions, { ...session, goal: prompt ?? null }];
@@ -2510,6 +2536,14 @@ export class FakeDaemon {
       this.setGoalPhase(root, "pr_open", url);
       setTimeout(() => this.publish("job.done", { root_id: root, agent_id: root, payload: { job, job_kind: "session.pr", result: { url, keeps_merged_branches: true } } }), 0);
       return json({ job, kind: "session.pr" }, 202);
+    }
+    const rename = path.match(/^\/sessions\/([^/]+)\/rename$/);
+    if (rename) {
+      // routes_actions.rename_session: the name is trimmed; empty clears it.
+      if (!d.sessions.some((s) => s.id === rename[1])) return error("not_found", `no agent ${rename[1]}`, 404);
+      const name = String(body.name ?? "").trim().replace(/\s+/g, " ") || null;
+      d.sessions = d.sessions.map((s) => (s.id === rename[1] ? { ...s, name } : s));
+      return json({ id: rename[1], name });
     }
     const handover = path.match(/^\/sessions\/([^/]+)\/handover$/);
     if (handover) {

@@ -18,6 +18,7 @@ import type { PickFolder } from "../../api/open";
 import type { SessionDTO } from "../../api/schema";
 import Logo from "../../components/Logo";
 import { Preflight } from "../../components/Preflight";
+import { ProjectCombobox } from "../../components/ProjectCombobox";
 import { ProjectPicker } from "../../components/ProjectPicker";
 import { alert, button, card, field, mono, primary, quiet } from "../../components/ui";
 import { isPaused } from "../../store/overview";
@@ -125,6 +126,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
   const [prompt, setPrompt] = useState("");
   const [options, setOptions] = useState(false);
   const [branch, setBranch] = useState("");
+  const [sessionName, setSessionName] = useState("");
   const [provider, setProvider] = useState("");
   // "" leaves it to the repo's `autopilot` config.
   const [autopilot, setAutopilot] = useState<"" | "on" | "off">("");
@@ -184,10 +186,12 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
       prompt: prompt.trim() || undefined,
       branch: branch.trim() || undefined,
       provider: provider || undefined,
+      name: sessionName.trim() || undefined,
     });
     if (ok) {
       setPrompt("");
       setBranch("");
+      setSessionName("");
     }
   };
 
@@ -211,13 +215,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
       </div>
       <div className="flex flex-wrap items-center gap-s1">
         {repos.length > 1 ? (
-          <select className={field} aria-label="Repo" value={repo} onChange={(e) => setRepo(e.target.value)}>
-            {repos.map((r) => (
-              <option key={r.repo_root} value={r.repo_root}>
-                {r.name}
-              </option>
-            ))}
-          </select>
+          <ProjectCombobox repos={repos} value={repo} onChange={setRepo} />
         ) : (
           <span className="text-sm text-ink-2">
             in <span className="font-medium text-ink">{repos[0]?.name}</span>
@@ -238,6 +236,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
       </div>
       {options && (
         <div className="flex flex-wrap items-center gap-s1 border-t border-line pt-s1">
+          <input className={`${field} w-48`} placeholder="Session name (optional)" aria-label="Session name" value={sessionName} onChange={(e) => setSessionName(e.target.value)} />
           <input className={`${field} w-48 font-mono`} placeholder="Branch (its own worktree)" aria-label="Branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
           {providers.length > 0 && (
             <select className={field} aria-label="Supervisor CLI" value={provider} onChange={(e) => setProvider(e.target.value)}>
@@ -307,7 +306,7 @@ function ConflictChoice({ conflict, onChoose, onCancel }: { conflict: SessionCon
         <label key={s.id} className="flex items-center gap-s1">
           <input type="radio" name="conflict-session" checked={picked === s.id} onChange={() => setPicked(s.id)} />
           <span className={mono}>{s.id}</span>
-          <span className="text-ink-2">{s.goal || s.status}</span>
+          <span className="text-ink-2">{s.name || s.goal || s.status}</span>
         </label>
       ))}
       <div className="flex flex-wrap gap-s1">

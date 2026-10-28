@@ -20,6 +20,8 @@ This module is shared: brindle Pro keeps its sign-in here (service
 from __future__ import annotations
 
 import base64
+import contextlib
+import contextvars
 import json
 import os
 import re
@@ -280,10 +282,31 @@ def set_key(name: str, value: str, repo_root: str | None = None) -> None:
     _key_store(name).save({"value": value, "updated_at": time.time()})
 
 
+_reads: contextvars.ContextVar[dict[str, str | None] | None] = contextvars.ContextVar("keystore_reads", default=None)
+
+
+@contextlib.contextmanager
+def reading():
+    """Within this block each stored key is read from the store once (on
+    macOS every read runs ``security``): for a read-only pass that checks
+    many candidates, each asking for the same keys. Nothing outlives it."""
+    token = _reads.set({})
+    try:
+        yield
+    finally:
+        _reads.reset(token)
+
+
 def get_key(name: str) -> str | None:
+    memo = _reads.get()
+    if memo is not None and name in memo:
+        return memo[name]
     rec = _key_store(name).load()
     value = rec.get("value") if rec else None
-    return value if isinstance(value, str) and value else None
+    value = value if isinstance(value, str) and value else None
+    if memo is not None:
+        memo[name] = value
+    return value
 
 
 def get_key_info(name: str) -> tuple[str | None, float]:

@@ -215,10 +215,6 @@ body {
 .side-nb { background: var(--sap); color: var(--on-sap); border-radius: 10px; padding: 0 6px; font-size: 11px; font-weight: 600; line-height: 20px; }
 .side-ring { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; flex: none; }
 .side-ring::after { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--canvas-2); }
-.side-prog { display: inline-flex; gap: 3px; align-items: center; }
-.side-prog b { display: block; width: 18px; height: 5px; border-radius: 2px; background: var(--line); }
-.side-prog b[data-on="true"] { background: var(--pass); }
-.side-prog b[data-now="true"] { background: var(--branch); }
 .side-ms { display: flex; flex-direction: column; gap: 1px; }
 .side-ms .m { display: flex; align-items: flex-start; gap: 8px; padding: 4px 6px; border-radius: 5px; font-size: 12px; color: var(--ink); }
 .side-ms .m .i { width: 16px; height: 16px; border-radius: 8px; display: grid; place-items: center; font-size: 9px; flex: none; margin-top: 1px; border: 1px solid var(--line-strong); color: var(--ink-3); }

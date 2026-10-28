@@ -103,7 +103,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
   const here = useMemo(() => (session === null ? inbox : inbox.filter(inSession)).filter((i) => !actions.hidden.has(itemKey(i)) && !asks.held(i)), [inbox, session, agents, hidden, actions.hidden, asks.held]); // eslint-disable-line react-hooks/exhaustive-deps
   const askGroups = useMemo(() => (session === null ? asks.groups : asks.groups.map((g) => ({ ...g, items: g.items.filter((a) => a.root_id === session) })).filter((g) => g.items.length > 0)), [asks.groups, session]);
   const waiting = here.length + askGroups.length;
-  const sessionTitle = session === null ? null : (find(session)?.goal ?? session);
+  const sessionTitle = session === null ? null : (find(session)?.name || (find(session)?.goal ?? session));
 
   /* By session: the root each item's agent hangs under, with the session's
      goal as the title. A setup item (brindle on this computer) and an org
@@ -120,7 +120,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
         } else if (root) {
           const s = find(root);
           const repo = repoOf(root);
-          group = { key, title: s?.goal || root, subtitle: `${root}${repo ? ` · ${repos?.find((r) => r.repo_root === repo)?.name ?? repo}` : ""}`, root, repo, items: [] };
+          group = { key, title: s?.name || s?.goal || root, subtitle: `${root}${repo ? ` · ${repos?.find((r) => r.repo_root === repo)?.name ?? repo}` : ""}`, root, repo, items: [] };
         } else if (item.agent_id) {
           group = { key, title: item.workspace_id ?? item.agent_id, subtitle: "not in a session shown here", items: [] };
         } else {

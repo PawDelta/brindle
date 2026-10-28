@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from brindle import cloud_credential, config
+from brindle.pro.license import request_cached
 
 log = logging.getLogger(__name__)
 
@@ -575,6 +576,7 @@ def route_in_use(org_id: str, setup) -> bool:
     return isinstance(got, dict) and got.get("org") == org_id
 
 
+@request_cached
 def org_setup(repo_root: str | None = None, store=None, client=None, max_age: float | None = None):
     """(org id, AgentSetup) for the signed-in org; personal policies supply
     only federated Claude setup. None when there is no applicable setup;
@@ -583,8 +585,8 @@ def org_setup(repo_root: str | None = None, store=None, client=None, max_age: fl
     from brindle.pro import credentials, license, team_policy
 
     try:
-        store = store or credentials.default_store()
         ent = license.current(store=store, client=client, max_age=max_age)
+        store = store or credentials.default_store()
         personal = team_policy.FEATURE not in ent.features
         if personal and (ent.policy_version <= 0 or (store.load() or {}).get("org_id")
                          or ent.plan in ("team", "enterprise")):

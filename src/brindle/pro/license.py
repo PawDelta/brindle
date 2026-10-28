@@ -51,7 +51,10 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import wraps
+from inspect import signature
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -467,6 +470,47 @@ def _disk_cache_write(now: float, gen: int | None, *, token: str | None = None,
         log.debug("couldn't write the entitlement cache", exc_info=True)
 
 
+_request_reads: ContextVar[dict | None] = ContextVar("license_request_reads", default=None)
+
+
+@contextmanager
+def reading():
+    """Reuse completed licensing evaluations for one routing request.
+
+    Credential reads inside an evaluation remain fresh, especially under
+    the refresh lock. The next request starts with an empty view.
+    """
+    token = _request_reads.set({})
+    try:
+        yield
+    finally:
+        _request_reads.reset(token)
+
+
+def request_cached(fn):
+    sig = signature(fn)
+
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        memo = _request_reads.get()
+        if memo is None:
+            return fn(*args, **kwargs)
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        key = (fn, tuple(bound.arguments.items()))
+        if key not in memo:
+            try:
+                memo[key] = fn(*args, **kwargs)
+            except LicenseError as e:
+                memo[key] = e
+        result = memo[key]
+        if isinstance(result, LicenseError):
+            raise result
+        return result
+
+    return wrapped
+
+
 def clear_cache() -> None:
     """Forget the cached entitlement, here and on disk, and bump the
     generation so a read already in flight can't store what it saw."""
@@ -482,10 +526,14 @@ def clear_cache() -> None:
                 (d / DISK_CACHE_FILE).unlink(missing_ok=True)
     except Exception:  # noqa: BLE001 - no usable private directory: nothing is cached there
         log.debug("couldn't invalidate the entitlement cache", exc_info=True)
+    memo = _request_reads.get()
+    if memo is not None:
+        memo.clear()
     for hook in _clear_hooks:
         hook()
 
 
+@request_cached
 def current(*, refresh: bool = True, now: float | None = None, store=None, client=None,
             max_age: float | None = None, _first_read: bool = True) -> Entitlement:
     """The entitlement from the stored credentials, fetching a new one (and

@@ -247,6 +247,34 @@ def test_without_the_lock_concurrent_refreshers_would_trip_reuse_detection(
     assert backend.revoked and errors
 
 
+@pytest.mark.variant("credentials rotate between routing's initial read and refresh lock entry")
+def test_routing_refresh_observes_rotation_at_lock_entry(backend, monkeypatch):
+    from contextlib import contextmanager
+
+    store = credentials.default_store()
+    seen = seed(store, backend)
+    client = auth.Client(BASE, backend)
+    real_lock = auth.refresh_lock
+    rotated = False
+
+    @contextmanager
+    def lock():
+        nonlocal rotated
+        if not rotated:
+            rotated = True
+            auth.refresh(client, store, seen)
+        with real_lock():
+            yield
+
+    monkeypatch.setattr(auth, "refresh_lock", lock)
+    monkeypatch.setattr(auth, "Client", lambda *a, **k: client)
+    with license.reading():
+        assert license.current().plan == "pro"
+    assert backend.paths().count("POST /token/refresh") == 1
+    assert not backend.revoked
+    assert store.load()["refresh_token"] == "cpr_2"
+
+
 def test_refresh_lock_times_out(tmp_path):
     with auth.refresh_lock():
         t0 = time.monotonic()

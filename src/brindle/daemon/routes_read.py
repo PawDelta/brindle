@@ -298,6 +298,8 @@ def get_config(db: DB, request: Request) -> Any:
     settings = {"user": config.user_settings()}
     if repo:
         settings["repo"] = dataclasses.asdict(config.load_repo_config(repo))
+        # Settings this project's own files set (over the person's): key -> "local" or "repo".
+        settings["overrides"] = {k: s for k in settings["repo"] if (s := config.setting_source(repo, k)) in ("local", "repo")}
         # The org's policy may force auto_pr off whatever the files say: why, or None.
         settings["auto_pr_forbidden"] = session_review.auto_pr_forbidden(repo)
     keys = []
@@ -363,14 +365,36 @@ def get_debug(db: DB, request: Request) -> Any:
 def get_routing(db: DB, request: Request) -> Any:
     """Each tier's profiles (and the model and agent each runs), the reviewer
     and the excluded providers, with the scope each comes from, every profile
-    with what routing knows of it, and the org policy all of it answers to."""
+    with what routing knows of it, and the org policy all of it answers to.
+    ``scope=user``: the person's own view, as every repo starts from it (their
+    ~/.brindle/config.json and their library, never this repo's files); the
+    repo still gives the org policy and what learning knows. ``learned=0``
+    answers at once, for the app to read the rest after the page is up: no
+    learned picks (each kind's ``learned`` is null; working them out
+    resolves the dispatch for every candidate) and no sign-in probe (each
+    ``signed_in`` as an earlier probe found it, else as can't-be-told,
+    true)."""
+    from brindle import providers
+    from brindle.pro import license
+
+    if request.query_params.get("learned") != "0":
+        return _routing(db, request, learn=True)
+    with providers.no_sign_in_probes(), license.reading():
+        return _routing(db, request, learn=False)
+
+
+def _routing(db: DB, request: Request, learn: bool) -> Any:
+    from concurrent.futures import ThreadPoolExecutor
+
     from brindle import autopilot, providers
     from brindle.service.routing import RoutingPolicy, provider_name
 
     repo = _need_repo(request)
-    cfg = config.load_repo_config(repo)
-    policy = RoutingPolicy.load(repo)
-    every = profiles.list_profiles(repo)
+    user = request.query_params.get("scope") == "user"
+    lib = None if user else repo        # where profiles are looked up: the repo's own first, or only the person's
+    cfg = config.load_repo_config(repo, user_only=user)
+    policy = RoutingPolicy.load(repo, user_library=user)
+    every = profiles.list_profiles(lib)
     refusals = {p.name: policy.refusal(p) for p in every}
     scope_of = {str(path): scope for scope, path in config.scope_paths(repo).items()}
 
@@ -383,34 +407,57 @@ def get_routing(db: DB, request: Request) -> Any:
                                models=[as_model(n) for n in cfg.routing[t]])
              for t in config.WEIGHTS}
     installed = doctor.signin_providers()
+    # A provider with no CLI of its own (native) is always there.
+    here = {p.name: p.provider not in doctor.CLI_INSTALL or p.provider in installed for p in every}
+    # Each sign-in once per environment its profiles give it, all at once: a
+    # probe runs the provider's CLI, and a signed-out answer isn't cached.
+    # (Without probes each answer is at hand, and a pool thread wouldn't see that mode.)
+    probes = list({(p.provider, tuple(sorted(p.env.items()))) for p in every if here[p.name]})
+
+    def probe(k: tuple) -> bool:
+        return providers.signed_out(k[0], dict(k[1])) is None
+
+    if not providers.probing():
+        signed = {k: probe(k) for k in probes}
+    else:
+        with ThreadPoolExecutor(max_workers=max(1, len(probes))) as pool:
+            signed = dict(zip(probes, pool.map(probe, probes)))
     rows = []
     for p in every:
-        # A provider with no CLI of its own (native) is always there.
-        here = p.provider not in doctor.CLI_INSTALL or p.provider in installed
-        errors, warnings = profiles.lint_profile(p.name, repo)
+        errors, warnings = profiles.lint_profile(p.name, lib)
         rows.append(RoutingProfileDTO(
             lint_errors=errors, lint_warnings=warnings,
             name=p.name, provider=p.provider, provider_name=provider_name(p.provider),
-            model=autopilot.effective_profile_model(p, repo) or None,
-            installed=here, signed_in=here and providers.signed_out(p.provider, p.env) is None,
-            excluded=p.provider in cfg.exclude_providers, cost_tier=autopilot.cost_tier(p.name, cfg, repo),
+            model=autopilot.effective_profile_model(p, lib) or None,
+            installed=here[p.name],
+            signed_in=here[p.name] and signed[(p.provider, tuple(sorted(p.env.items())))],
+            excluded=p.provider in cfg.exclude_providers, cost_tier=autopilot.cost_tier(p.name, cfg, lib),
             allowed=refusals[p.name] is None, refusal=refusals[p.name]))
+
+    def source(key: str) -> str:
+        if user:
+            return "user" if key in config.user_settings() else "default"
+        return config.setting_source(repo, key)
+
+    # Every candidate's check reads the same stored keys: each from the store once.
+    with keystore.reading():
+        kinds = _routing_kinds(db, cfg, repo, learn=learn)
     return RoutingDTO(
         tiers=tiers,
-        reviewer=RoutingSettingDTO(values=[cfg.reviewer], source=config.setting_source(repo, "reviewer")),
-        exclude_providers=RoutingSettingDTO(values=cfg.exclude_providers,
-                                            source=config.setting_source(repo, "exclude_providers")),
-        profiles=rows, policy=policy.to_dto(every), kinds=_routing_kinds(db, cfg, repo)).to_json()
+        reviewer=RoutingSettingDTO(values=[cfg.reviewer], source=source("reviewer")),
+        exclude_providers=RoutingSettingDTO(values=cfg.exclude_providers, source=source("exclude_providers")),
+        profiles=rows, policy=policy.to_dto(every), kinds=kinds).to_json()
 
 
-def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str) -> dict[str, RoutingKindDTO]:
+def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True) -> dict[str, RoutingKindDTO]:
     """Per kind of work: the owner's pick, its ordered fallbacks, whether it
-    is locked, and the different profile hosted learning runs for it now.
-    A locked kind is never overridden, so it never reports one."""
+    is locked, and the different profile hosted learning runs for it now
+    (``learn=False``: none asked for, each null). A locked kind is never
+    overridden, so it never reports one."""
     from brindle import agents, autopilot
 
     def learned(kind: str, run) -> str | None:
-        if cfg.routing_locked.get(kind):
+        if not learn or cfg.routing_locked.get(kind):
             return None
         try:
             return run()

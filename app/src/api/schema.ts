@@ -785,6 +785,7 @@ export interface SessionDTO {
   goal?: string | null;
   id: string;
   mode: string;
+  name?: string | null;
   profile: string;
   status: string;
   status_since?: number | null;

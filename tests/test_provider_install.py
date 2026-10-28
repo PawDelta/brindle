@@ -96,6 +96,40 @@ def test_use_mine_picks_an_install_and_delete_only_turns_it_off(machine):
     assert standard.exists()            # never uninstalled
 
 
+@pytest.mark.parametrize("provider,argv", [("claude", ["auth", "logout"]), ("codex", ["logout"])])
+def test_provider_logout_runs_the_cli_with_brindles_config_home(machine, tmp_path, monkeypatch, provider, argv):
+    _, bin_dir = machine
+    exe = _exe(bin_dir / pi.CLI[provider])
+    variable = provider_homes.VARIABLE[provider]
+    personal, brindles = tmp_path / "personal", tmp_path / "brindles"
+    personal.mkdir()
+    (personal / "auth.json").write_text("{}")
+    monkeypatch.setenv(variable, str(personal))
+    monkeypatch.setenv(f"BRINDLE_{provider.upper()}_CONFIG_HOME", str(brindles))
+    monkeypatch.setenv(*(("ANTHROPIC_API_KEY", "k") if provider == "claude" else ("OPENAI_API_KEY", "k")))
+    runs = []
+    monkeypatch.setattr(company_login, "run_cmd", lambda a, *_, env=None, **__: runs.append((a, env)) or (0, ""))
+    code, row = _send("POST", f"/v1/providers/{provider}/logout")
+    assert (code, row["signed_in"]) == (200, False)
+    [(cmd, env)] = runs
+    assert cmd == [str(exe), *argv]
+    assert env[variable] == str(brindles)
+    # A later read says signed out, brindle keeps launching with its own home, the person's login stays.
+    assert _row(provider)["signed_in"] is False
+    assert provider_homes.launch_env(provider) == {variable: str(brindles)}
+    assert (personal / "auth.json").exists()
+    # A re-login that fails or is cancelled leaves brindle on its own home, signed out; a good one signs in.
+    provider_homes.login_env(provider)
+    monkeypatch.setattr(providers, "_auth_probe", lambda *a, **k: None)
+    provider_homes._confirmed_at.clear()
+    assert _row(provider)["signed_in"] is False
+    assert provider_homes.launch_env(provider) == {variable: str(brindles)}
+    monkeypatch.setattr(providers, "_auth_probe", lambda *a, **k: (0, '{"loggedIn": true}'))
+    provider_homes._confirmed_at.clear()
+    assert _row(provider)["signed_in"] is True
+    assert provider_homes.launch_env(provider) == {variable: str(brindles)}
+
+
 @pytest.mark.parametrize("script,ends", [
     ("echo fetching; mkdir -p {bin}; printf '#!/bin/sh\\necho 1.2.3\\n' > {bin}/opencode; "
      "chmod +x {bin}/opencode; echo installed", "job.done"),

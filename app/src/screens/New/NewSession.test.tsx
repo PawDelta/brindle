@@ -95,7 +95,6 @@ describe("NewSession", () => {
     const { daemon, onOpen, stop } = setup();
     const prompt = await screen.findByLabelText("What should brindle work on?");
     fireEvent.change(prompt, { target: { value: "Add a cache" } });
-    fireEvent.change(screen.getByLabelText("Repo"), { target: { value: REPO } });
     // Branch, CLI and autopilot wait behind Options.
     expect(screen.queryByLabelText("Autopilot")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Options/ }));
@@ -111,6 +110,79 @@ describe("NewSession", () => {
       { repo: REPO, autopilot: true, prompt: "Add a cache", choice: "p", session_id: "sup1" },
     ]);
     stop();
+  });
+
+  it("lists a named session by its name in the running chooser, and a name given at creation goes in the start request and is kept", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...live, name: "Login fix" }], workspaces: [root, worker] });
+    const { onOpen, stop } = setup(daemon);
+    fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Add a cache" } });
+    fireEvent.click(screen.getByRole("button", { name: /Options/ }));
+    fireEvent.change(screen.getByLabelText("Session name"), { target: { value: "Cache" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    const ask = await screen.findByRole("group", { name: "Session already running" });
+    expect(ask.textContent).toContain("Login fix");
+    fireEvent.click(within(ask).getByRole("button", { name: "New session in its own worktree" }));
+    await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
+    // The chosen start carries the name too, and the engine lists the new session by it.
+    expect(posts(daemon).at(-1)!.body).toMatchObject({ choice: "n", name: "Cache" });
+    expect(daemon.data.sessions.find((s) => s.id === "new1")?.name).toBe("Cache");
+    stop();
+  });
+
+  it("filters the project list as you type, picks with the keyboard, and closes on an outside click or Escape", async () => {
+    const { stop } = setup();
+    const repo = await screen.findByRole("combobox", { name: "Repo" });
+    fireEvent.focus(repo);
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["proj", "other"]);
+    fireEvent.change(repo, { target: { value: "oth" } });
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["other"]);
+    fireEvent.keyDown(repo, { key: "Enter" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect((repo as HTMLInputElement).value).toBe("other");
+
+    fireEvent.focus(repo);
+    fireEvent.keyDown(repo, { key: "ArrowUp" });
+    fireEvent.keyDown(repo, { key: "ArrowDown" });
+    fireEvent.keyDown(repo, { key: "ArrowDown" });
+    fireEvent.keyDown(repo, { key: "Enter" });
+    expect((repo as HTMLInputElement).value).toBe("other");
+
+    fireEvent.focus(repo);
+    expect(screen.getByRole("listbox")).toBeTruthy();
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("listbox")).toBeNull();
+    fireEvent.focus(repo);
+    fireEvent.keyDown(repo, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
+
+    // Tabbing away closes it.
+    fireEvent.focus(repo);
+    fireEvent.blur(repo, { relatedTarget: screen.getByRole("button", { name: "Add a project…" }) });
+    expect(screen.queryByRole("listbox")).toBeNull();
+    stop();
+  });
+
+  it("scrolls the option an arrow key reaches into view, and Enter picks it", async () => {
+    const names = ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7"];
+    const repos = names.map((name) => ({ repo_root: `/home/u/${name}`, name }));
+    const { stop } = setup(new FakeDaemon({ repos, sessions: [], workspaces: [] }));
+    const original = Element.prototype.scrollIntoView;
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = function (this: Element) {
+      scrolled(this.textContent);
+    };
+    try {
+      const repo = await screen.findByRole("combobox", { name: "Repo" });
+      fireEvent.focus(repo);
+      scrolled.mockClear();
+      for (let i = 0; i < 6; i++) fireEvent.keyDown(repo, { key: "ArrowDown" });
+      expect(scrolled).toHaveBeenLastCalledWith("p6");
+      fireEvent.keyDown(repo, { key: "Enter" });
+      expect((repo as HTMLInputElement).value).toBe("p6");
+    } finally {
+      Element.prototype.scrollIntoView = original;
+      stop();
+    }
   });
 
   it("opens a session it started once the sessions list has it, so it arrives not paused (#216)", async () => {
@@ -212,7 +284,7 @@ describe("NewSession", () => {
     const adding = screen.getByRole("region", { name: "Add a project" });
     fireEvent.change(within(adding).getByRole("textbox", { name: "Repository URL" }), { target: { value: "git@github.com:sam/site.git" } });
     fireEvent.click(within(adding).getByRole("button", { name: "Clone" }));
-    await waitFor(() => expect((screen.getByRole("combobox", { name: "Repo" }) as HTMLSelectElement).value).toBe("~/Projects/site"));
+    await waitFor(() => expect((screen.getByRole("combobox", { name: "Repo" }) as HTMLInputElement).value).toBe("site"));
     expect(screen.queryByRole("region", { name: "Add a project" })).toBeNull();
     sync.stop();
   });
