@@ -198,14 +198,20 @@ export type ReleaseProgress =
 export interface ReleaseBuildUpdater {
   install: (progress: (p: ReleaseProgress) => void) => Promise<string | null>;
   restart: () => Promise<void>;
+  /* Staff on a release-branch build: install the stable feed's build over it
+     (app_return_to_stable), checked against the production key; same answers. */
+  returnToStable: (progress: (p: ReleaseProgress) => void) => Promise<string | null>;
+}
+
+function release(cmd: string, progress: (p: ReleaseProgress) => void) {
+  const onProgress = new Channel<ReleaseProgress>();
+  onProgress.onmessage = progress;
+  return invoke<string | null>(cmd, { onProgress });
 }
 
 export const releaseBuildUpdater: ReleaseBuildUpdater = {
-  install: (progress) => {
-    const onProgress = new Channel<ReleaseProgress>();
-    onProgress.onmessage = progress;
-    return invoke<string | null>("app_release_build_install", { onProgress });
-  },
+  install: (progress) => release("app_release_build_install", progress),
+  returnToStable: (progress) => release("app_return_to_stable", progress),
   restart: () => invoke<void>("app_restart"),
 };
 

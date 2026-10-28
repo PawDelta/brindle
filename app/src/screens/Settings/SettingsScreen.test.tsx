@@ -38,7 +38,7 @@ afterEach(() => {
   ipc.answers.length = 0;
 });
 
-function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps["installCli"], appUpdater?: SettingsScreenProps["appUpdater"], releaseUpdater?: SettingsScreenProps["releaseBuildUpdater"], rule?: string) {
+function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps["installCli"], appUpdater?: SettingsScreenProps["appUpdater"], releaseUpdater?: SettingsScreenProps["releaseBuildUpdater"], rule?: string, readAbout?: SettingsScreenProps["readAbout"]) {
   const daemon = new FakeDaemon({
     repos: [{ repo_root: REPO, name: "proj" }],
     config: {
@@ -78,7 +78,7 @@ function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps[
           <ProvidersProvider client={client}>
             {/* A sign-in's CLI read through the fake daemon's pty views, as the shell's show it. */}
             <PtyViewsProvider value={daemon.ptyViews()}>
-              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} rule={rule} />
+              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} readAbout={readAbout} rule={rule} />
             </PtyViewsProvider>
           </ProvidersProvider>
         </SessionsProvider>
@@ -732,6 +732,29 @@ describe("settings screen", () => {
     expect(row.textContent).toContain(build);
     fireEvent.click(restart);
     await waitFor(() => expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_release_build_install", "app_restart"]));
+    stop();
+  });
+
+  it("staff update: Return to stable shows only on a release-branch build, and installs the stable feed after a confirmation", async () => {
+    const about = (version: string) => async () => ({ version, files: [] });
+    const plain = setup({ debug: { staff: true, enabled: false } }, undefined, undefined, releaseBuildUpdater, undefined, about("0.2.4"));
+    await within(await screen.findByTestId("app-update")).findByTestId("release-build-row");
+    await flush();
+    expect(screen.queryByTestId("return-to-stable-row")).toBeNull();
+    plain.stop();
+    cleanup();
+
+    const { stop } = setup({ debug: { staff: true, enabled: false } }, undefined, undefined, releaseBuildUpdater, undefined, about("0.2.4+release.42.0123456789ab"));
+    const row = await screen.findByTestId("return-to-stable-row");
+    fireEvent.click(within(row).getByRole("button", { name: "Return to stable" }));
+    // Asked first: nothing reaches the shell until it is confirmed.
+    expect(row.textContent).toContain("Installs brindle stable; restart to finish.");
+    expect(ipc.calls).toEqual([]);
+    fireEvent.click(within(row).getByRole("button", { name: "Confirm" }));
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_return_to_stable"]);
+    ipc.answers[0]("0.2.4");
+    fireEvent.click(await within(row).findByRole("button", { name: "Restart" }));
+    await waitFor(() => expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_return_to_stable", "app_restart"]));
     stop();
   });
 
