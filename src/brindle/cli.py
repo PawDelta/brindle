@@ -2333,10 +2333,9 @@ def open_cmd(
 @app.command()
 def setup(workspace: Optional[str] = typer.Argument(None)) -> None:
     """Re-run setup commands in a workspace."""
-    from brindle.config import load_repo_config
-
-    ws = _ws(DB(), workspace)
-    cmds = load_repo_config(ws.repo_root, branch=ws.base_branch).setup
+    db = DB()
+    ws = _ws(db, workspace)
+    cmds = workspaces.config_for(db, ws).setup
     res = workspaces.run_commands(cmds, ws.path, workspaces.workspace_env(ws))
     typer.echo(res.log or "(no setup commands)")
     raise typer.Exit(0 if res.ok else 1)

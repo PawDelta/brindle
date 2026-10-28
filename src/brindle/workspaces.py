@@ -54,6 +54,12 @@ class SetupResult:
 # -- lookup ----------------------------------------------------------------
 
 
+def config_for(db: DB, ws: Workspace) -> RepoConfig:
+    """``ws``'s config: a session's own workspace (it holds a supervisor) reads
+    its own branch, a worker's reads the session branch it was cut from."""
+    return workspace_config(ws, session=any(a.profile == "supervisor" for a in db.list_agents(ws.id)))
+
+
 def workspace_env(ws: Workspace) -> dict[str, str]:
     env = {
         "BRINDLE_ROOT_PATH": ws.repo_root,

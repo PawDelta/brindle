@@ -47,7 +47,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config
+from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config, workspace_config
 from brindle import bus, escapes, knowledge
 from brindle.db import DB, Agent, Autopilot, Milestone, Workspace, check_state
 from brindle.profiles import load_profile
@@ -1310,7 +1310,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
     ap = db.get_autopilot(root_id)
     if ap and ap.state == "done":
         return progress(db, root_id, in_flight=False)
-    cfg = cfg or load_repo_config(ws.repo_root)
+    cfg = cfg or workspace_config(ws, session=True)
     ms = db.milestones(root_id)
     if not ms:
         raise AutopilotError("no milestones yet: record the goal with set_goal first")
@@ -1569,7 +1569,7 @@ def start_audit(db: DB, root_id: str, ws: Workspace, cfg: RepoConfig | None = No
         if ap.audit_sha == head:
             return None
         agents.close(db, running.id)
-    cfg = cfg or load_repo_config(ws.repo_root)
+    cfg = cfg or workspace_config(ws, session=True)
     profile = agents.default_review_profile(cfg, db.get_agent(root_id), db, ws.repo_root, ap.goal)
     auditor = agents.spawn(db, ws, profile, prompt=audit_prompt(db, ap, head), parent_id=root_id,
                            mode="review", background_setup=True)
