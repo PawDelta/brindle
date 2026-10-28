@@ -1,13 +1,16 @@
 #!/usr/bin/env node
 /* release_publish.mjs — the release-branch (staff) builds of app-release.yml.
-   A push to release/desktop builds the Macs at that commit, signed and
-   notarized like a release, and publishes them under
+   A push to main that touches the app builds the Macs at that commit, signed
+   and notarized like a release, and publishes them under
    brindle/downloads/desktop/release/ only (app/README.md, "Release-branch
    builds"). Subcommands, each reading the GitHub Actions environment:
 
    ci-gate   the commit (GITHUB_SHA) must be on main (MAIN_REF, default
-             origin/main) and the newest run of BOTH the CI and the App
-             workflows for exactly that commit, on main, must have passed.
+             origin/main) and the newest App run for exactly that commit, on
+             main, must pass, and CI's too when ci.yml has one (it skips
+             app-only pushes). Both start on the same push, so it waits for
+             them, every CI_GATE_INTERVAL_SECONDS (default 30), for at most
+             CI_GATE_DEADLINE_MINUTES (default 45).
    identity  the build's app version <package.json version>+release.<run>.<sha12>,
              its file stem and its immutable directory.
    verify    both Mac builds' status files in DIR must be signed, notarized,
@@ -30,6 +33,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ARCHES = ["aarch64", "x86_64"];
 /** The workflows a release-branch build needs green for its commit, by path. */
 export const REQUIRED = [".github/workflows/ci.yml", ".github/workflows/app.yml"];
+/** Of those, the ones a commit may have no run of: ci.yml ignores app-only pushes. */
+const WHEN_RUN = new Set([".github/workflows/ci.yml"]);
 const IDENTITY = /^release\.(\d+)\.([0-9a-f]{12})$/;
 
 /**
@@ -118,26 +123,33 @@ async function list(url, key, token) {
 }
 
 /**
- * Why the commit `sha` may not be built, or null when it may: the newest
- * run of each REQUIRED workflow for exactly that commit, on main (pushed or
- * dispatched there), must be completed and successful.
+ * Whether the commit `sha` may be built: the newest run of each REQUIRED
+ * workflow for exactly that commit, on main (pushed or dispatched there),
+ * must be completed and successful (a WHEN_RUN one only if it has a run).
+ * `refusal` says why not; `pending` what is still to finish (null: nothing).
  * @param {{ path: string, runs: any[] }[]} workflows
  * @param {string} sha
+ * @returns {{ refusal: string | null, pending: string | null }}
  */
-export function ciRefusal(workflows, sha) {
+export function ciState(workflows, sha) {
+  /** @type {string | null} */
+  let pending = null;
   for (const path of REQUIRED) {
     const workflow = workflows.find((w) => w.path === path);
-    if (!workflow) return `${path} is not an active workflow`;
+    if (!workflow) return { refusal: `${path} is not an active workflow`, pending: null };
     const runs = workflow.runs
       .filter((r) => r.head_sha === sha && r.head_branch === "main" && ["push", "workflow_dispatch"].includes(r.event))
       .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id);
     const newest = runs[0];
-    if (!newest) return `${path} has no run on main for ${sha}`;
+    if (!newest) {
+      if (!WHEN_RUN.has(path)) pending ??= `${path} has no run on main for ${sha}`;
+      continue;
+    }
     const attempt = `${path} run ${newest.id} (attempt ${newest.run_attempt})`;
-    if (newest.status !== "completed") return `${attempt} is ${newest.status}`;
-    if (newest.conclusion !== "success") return `${attempt} ended ${newest.conclusion}`;
+    if (newest.status !== "completed") pending ??= `${attempt} is ${newest.status}`;
+    else if (newest.conclusion !== "success") return { refusal: `${attempt} ended ${newest.conclusion}`, pending: null };
   }
-  return null;
+  return { refusal: null, pending };
 }
 
 /**
@@ -195,7 +207,7 @@ export function verify(dir, { version, name, path, site, sha, runId, attempt }) 
   }
   const manifest = {
     version,
-    notes: `brindle desktop ${version} (release/desktop ${sha})`,
+    notes: `brindle desktop ${version} (main ${sha})`,
     pub_date: new Date().toISOString().replace(/\.\d+Z$/, "Z"),
     platforms,
   };
@@ -229,14 +241,28 @@ async function main(args) {
       const repo = `${env.GITHUB_API_URL ?? "https://api.github.com"}/repos/${need("GITHUB_REPOSITORY")}`;
       const token = need("GITHUB_TOKEN");
       const mainRef = env.MAIN_REF ?? "origin/main";
+      const deadlineMinutes = Number(env.CI_GATE_DEADLINE_MINUTES || "45");
+      const intervalSeconds = Number(env.CI_GATE_INTERVAL_SECONDS || "30");
+      if (!(deadlineMinutes >= 0) || !(intervalSeconds >= 0)) throw new Error("bad CI_GATE_DEADLINE_MINUTES / CI_GATE_INTERVAL_SECONDS");
       let refusal = isAncestor(sha, mainRef) ? null : `${sha} is not on ${mainRef}`;
       if (!refusal) {
         const active = (await list(`${repo}/actions/workflows?per_page=100`, "workflows", token)).filter((w) => w.state === "active");
-        const workflows = [];
-        for (const w of active.filter((w) => REQUIRED.includes(w.path))) {
-          workflows.push({ path: w.path, runs: await list(`${repo}/actions/workflows/${w.id}/runs?head_sha=${sha}&per_page=100`, "workflow_runs", token) });
+        const waitUntil = Date.now() + deadlineMinutes * 60_000;
+        for (;;) {
+          const workflows = [];
+          for (const w of active.filter((w) => REQUIRED.includes(w.path))) {
+            workflows.push({ path: w.path, runs: await list(`${repo}/actions/workflows/${w.id}/runs?head_sha=${sha}&per_page=100`, "workflow_runs", token) });
+          }
+          const state = ciState(workflows, sha);
+          refusal = state.refusal;
+          if (refusal || !state.pending) break;
+          if (Date.now() >= waitUntil) {
+            refusal = `still waiting after ${deadlineMinutes} minutes: ${state.pending}`;
+            break;
+          }
+          console.log(`waiting: ${state.pending}`);
+          await new Promise((done) => setTimeout(done, intervalSeconds * 1000));
         }
-        refusal = ciRefusal(workflows, sha);
       }
       if (refusal) {
         console.log(`::error::not building ${sha}: ${refusal}`);
