@@ -77,6 +77,8 @@ def _title(g: grants.Group) -> str:
     if g.kind in permissions.PATH_KINDS:
         verb = {"read": "reads", "write": "writes", "edit": "edits"}[g.kind]
         return f"Allow {verb} under {general['pattern']}?"
+    if g.kind == "bash" and general["pattern"].startswith(grants.FAMILY):
+        return f"Allow {general['label'][0].lower()}{general['label'][1:]}?"
     if g.kind == "bash":
         return f"Allow commands starting with {general['pattern'].removesuffix(' *')}?"
     return f"Allow {g.rep.request.tool}?"

@@ -3,7 +3,9 @@
 An **ask** is a request the policy left to a person. Each one carries its
 exact form and a ladder of scopes a decision may cover (``generalize``): a
 push's destination ("into main from any branch"), a file's top directory, a
-command's family (its first two words), an MCP tool (or its whole server).
+command's families (read-only git, read-only shell, a dev tool's subcommand:
+"Command families" below) or else its first two words, an MCP tool (or its
+whole server).
 The second rung, the general form, is what brindle proposes as the default
 grant; pending asks of the same kind and general form make one Inbox item
 (``groups``), one decision resolves the item, and the person may narrow to
@@ -26,6 +28,7 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -124,9 +127,94 @@ def push_scopes(keys: list[str]) -> list[dict]:
             _scope("all", f"*{PUSH_ARROW}*{PUSH_AT}*", "All pushes in every repository", "all")]
 
 
-def scopes_for(kind: str, key: str, name: str = "") -> list[dict]:
+# -- command families ----------------------------------------------------------------------------
+#
+# A shell command's families are what its simple commands are, as
+# permission_groups classifies them: a read-only git command, a read-only
+# shell command (grep, ls, cat, cd ...) or a dev tool's subcommand ("uv run
+# *"). An approval at the general scope covers any command whose every part
+# falls in the families it was granted for, however they are piped or
+# chained. A part of any other class (a write, a push, a delete, an install,
+# a git command that isn't read-only, a redirection to a file, a word only
+# the run knows) puts the command in no family: only its own grant covers it.
+
+FAMILY = "family: "
+READONLY_FAMILIES = {"git/readonly": "read-only git commands", "shell/readonly": "read-only shell commands"}
+READ_FILTER = "shell/readonly"
+_PROGRAM = re.compile(r"[A-Za-z0-9_\-./]+")
+_SUBCOMMAND = re.compile(r"[a-z][a-z0-9_-]*")
+
+
+def _part_family(req: Request, part: permissions.ShellPart, rules: list[Rule]) -> str | None:
+    from brindle import permission_groups
+
+    if part.unknown or part.expanded or part.assigned or part.reads or part.writes:
+        return None
+    [(group, sub)] = permission_groups.part_classes(req, part, rules, [])
+    if f"{group}/{sub}" in READONLY_FAMILIES:
+        return f"{group}/{sub}"
+    # A dev tool runs the project where it runs: one in this repo's checkout, never another's.
+    words, cwd = part.words, os.path.realpath(part.cwd) if part.cwd else None
+    if (f"{group}/{sub}" != "shell/dev-tools" or not words or not _PROGRAM.fullmatch(words[0]) or cwd is None
+            or not any(cwd == os.path.realpath(r) or permissions._inside(cwd, r) for r in permissions._roots(req))):
+        return None
+    sub_word = words[1] if len(words) > 1 and _SUBCOMMAND.fullmatch(words[1]) else None
+    return " ".join([words[0], *([sub_word] if sub_word else []), "*"])
+
+
+def _part_families(req: Request, rules: list[Rule] | None = None) -> list[str | None] | None:
+    """Each part of ``req``'s shell command's family (None: in none), or None
+    when brindle can't read what it runs. What a part is doesn't depend on the
+    ask rules that make it ask, only on the denies (a read of a denied file is no read-only command)."""
+    parts = permissions.shell_parts(req) if req.kind == "bash" else None
+    if not parts:
+        return None
+    rules = permissions.all_rules(req.repo_root or None) if rules is None else rules
+    denies = [r for r in rules if r.decision == "deny"]
+    return [_part_family(req, part, denies) for part in parts]
+
+
+def families(req: Request, rules: list[Rule] | None = None) -> list[str] | None:
+    """The families ``req``'s shell command falls in, or None unless every
+    part falls in one. A read-only shell part beside another family's (the
+    ``| tail -5`` after a test run) only reads what that one prints: the
+    command is of the other family alone."""
+    found = _part_families(req, rules)
+    if found is None or None in found:
+        return None
+    return sorted(set(found) - {READ_FILTER}) or [READ_FILTER]
+
+
+def family_pattern(found: list[str]) -> str:
+    return FAMILY + PUSH_LIST.join(found)
+
+
+def pattern_families(pattern: str) -> set[str] | None:
+    return set(pattern.removeprefix(FAMILY).split(PUSH_LIST)) if pattern.startswith(FAMILY) else None
+
+
+def family_label(found: list[str]) -> str:
+    names = [READONLY_FAMILIES.get(f, f"{f.removesuffix(' *')} commands") for f in found]
+    text = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    return text[0].upper() + text[1:]
+
+
+def _family_matches(pattern: str, req: Request | None, rules: list[Rule] | None, loose: bool) -> bool:
+    """Whether family pattern ``pattern`` covers ``req``: a part in one of its
+    families and every other part in one too or read-only (families), or for
+    a deny (``loose``) any part in one."""
+    wanted = pattern_families(pattern) or set()
+    found = _part_families(req, rules) if req is not None else None
+    if not found:
+        return False
+    hit = any(f in wanted for f in found)
+    return hit if loose else hit and all(f in wanted or f == READ_FILTER for f in found)
+
+
+def scopes_for(kind: str, key: str, name: str = "", families: list[str] | None = None) -> list[dict]:
     """The scope ladder for a request of ``kind`` with ask key ``key``,
-    narrowest first; the general form is the one valued GENERAL."""
+    narrowest first; the general form is the one valued GENERAL: for a shell
+    command whose every part falls in a family (``families``), those families."""
     if kind == "push":
         return push_scopes(key.split(PUSH_LIST))
     if kind in permissions.PATH_KINDS:
@@ -141,9 +229,13 @@ def scopes_for(kind: str, key: str, name: str = "") -> list[dict]:
         return out
     if kind == "bash":
         out = [_scope(EXACT, key, f"This command only · {key}")]
-        if simple_argv(key) is not None:
-            family = " ".join(key.split()[:2])
-            out.append(_scope(GENERAL, f"{family} *", f"Commands starting with {family}"))
+        prefix = " ".join(key.split()[:2]) if simple_argv(key) is not None else None
+        if families:
+            if prefix:
+                out.append(_scope("command", f"{prefix} *", f"Commands starting with {prefix}"))
+            out.append(_scope(GENERAL, family_pattern(families), family_label(families)))
+        elif prefix:
+            out.append(_scope(GENERAL, f"{prefix} *", f"Commands starting with {prefix}"))
         else:
             out.append(_scope(GENERAL, key, f"This command only · {key}"))
         out.append(_scope("repository", "*", "Any command in the repository"))
@@ -191,7 +283,7 @@ def generalize(req: Request) -> Ask:
     if kind == "push":
         keys = list(dict.fromkeys(ask_keys(req)))
         return Ask(kind, _join(keys), push_scopes(keys))
-    return Ask(kind, ask_key(req), scopes_for(kind, ask_key(req), req.tool))
+    return Ask(kind, ask_key(req), scopes_for(kind, ask_key(req), req.tool, families(req) if kind == "bash" else None))
 
 
 # -- matching saved actions ----------------------------------------------------------------------
@@ -213,15 +305,20 @@ def _push_fits(pattern: str, key: str, loose: bool) -> bool:
     return True
 
 
-def scope_matches(kind: str, pattern: str, key: str, loose: bool = False) -> bool:
+def scope_matches(kind: str, pattern: str, key: str, loose: bool = False, req: Request | None = None,
+                  rules: list[Rule] | None = None) -> bool:
     """Whether a saved action's ``pattern`` covers ask key ``key``. A push
     pattern may list several pushes (push_scopes): the key fits any one.
     ``loose``: for a deny, a push whose branch only git knows counts as
-    covered whenever it may be the one the pattern names."""
+    covered whenever it may be the one the pattern names, and a family
+    pattern any command with a part in one of its families. A family pattern
+    reads the command itself: ``req``, the request ``key`` is of (none: no match)."""
     if pattern in ("*", "**"):
         return True
     if kind == "push":
         return any(_push_fits(p, key, loose) for p in pattern.split(PUSH_LIST))
+    if kind == "bash" and pattern.startswith(FAMILY):
+        return _family_matches(pattern, req, rules, loose)
     if kind == "bash":
         if simple_argv(key) is None:
             return pattern == key   # a compound or quoted command: only the exact grant
@@ -265,7 +362,7 @@ def covers(action: SavedAction, req: Request, rules: list[Rule] | None = None) -
     if action.repo is not None and req.repo_root and action.repo != req.repo_root:
         return False
     deny = action.decision == "deny"
-    hits = [scope_matches(action.kind, action.pattern, key, loose=deny) for key in ask_keys(req)]
+    hits = [scope_matches(action.kind, action.pattern, key, deny, req, rules) for key in ask_keys(req)]
     if deny:
         return any(hits)
     if not all(hits) or action.binding and not _binding_holds(action.binding, req):
@@ -356,7 +453,7 @@ def limits_allow(action_level: str | None, action_pattern: str, action_life: str
 # nothing here limits the person's own.
 
 # A saved action's level or scope value -> the org scope it needs.
-ORG_SCOPES = {"branch": "branch", "destination": "branch", "exact": "branch", "general": "branch",
+ORG_SCOPES = {"branch": "branch", "destination": "branch", "exact": "branch", "general": "branch", "command": "branch",
               "remote": "remote", "repository": "repo", "server": "repo", "all": "all"}
 
 
@@ -575,7 +672,7 @@ def eligible(ask: PendingAsk, scope: dict, mode: str, minutes: float | None) -> 
         return "blocked by a deny rule"
     if mode in ("deny", "always-deny"):
         return None
-    if not all(scope_matches(ask.ask.kind, scope["pattern"], key) for key in ask_keys(ask.request)):
+    if not all(scope_matches(ask.ask.kind, scope["pattern"], key, req=ask.request) for key in ask_keys(ask.request)):
         if not _is_exact(ask, scope):
             return "pushes outside this scope"     # a command pushing to more than the scope covers
         if mode != "once":
@@ -604,7 +701,7 @@ def candidates(asks: list[PendingAsk], g: Group, scope: dict, loose: bool = Fals
     scope is). ``loose``: for a deny, as scope_matches reads it."""
     return [a for a in asks if a.repo_root == g.repo_root and a.ask.kind == g.kind
             and (_is_exact(a, scope)
-                 or all(scope_matches(g.kind, scope["pattern"], key, loose) for key in ask_keys(a.request)))]
+                 or all(scope_matches(g.kind, scope["pattern"], key, loose, a.request) for key in ask_keys(a.request)))]
 
 
 def _result(a: PendingAsk, why: str | None = None) -> dict:
@@ -794,6 +891,8 @@ def unblock_denied(db, repo_root: str | None = None, forever: bool = False) -> d
         a.policy = _policy(req, a.repo_root)
         if a.blocked:    # unmatched actions are denied: a rule for its general form, that asks
             general = a.ask.general
+            if general["pattern"].startswith(FAMILY):    # no rule matches a family: its command's own prefix
+                general = a.ask.scope("command") or a.ask.scopes[0]
             match_type = "push" if a.ask.kind == "push" else ("exact" if general["pattern"] == key else "glob")
             permissions.add_rule(kind, general["pattern"], "ask", match_type)
             added += 1
