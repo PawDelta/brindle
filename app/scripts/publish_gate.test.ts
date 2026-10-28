@@ -70,7 +70,7 @@ describe("app-release publish gate", () => {
     const names = [1, 2].map((attempt) => artifact.replace("${{ github.run_attempt }}", String(attempt)));
     expect(new Set(names).size).toBe(2);
   });
-  it.each([
+  it.each<[string, Record<string, string>, string, number?]>([
     ["a pushed tag, signed, notarized, bucket set", { EVENT: "push", REF_TYPE: "tag", ...ready }, "go=true"],
     ["a manual run on a branch", { EVENT: "workflow_dispatch", REF_TYPE: "branch", ...ready }, "go=false"],
     ["a manual run on an existing tag", { EVENT: "workflow_dispatch", REF_TYPE: "tag", ...ready }, "go=false"],
