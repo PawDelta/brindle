@@ -368,13 +368,23 @@ describe("settings screen", () => {
     await waitFor(() => expect(health("claude").getAttribute("data-tone")).toBe("fail"));
     expect(health("claude").getAttribute("data-stopped")).toBe("1");
     expect(health("claude").textContent).toContain("fix-login");
-    // Replace: a fresh key pasted in place, verified, the value kept nowhere.
+    // Replace: one editor at a time, so opening it closes Change method.
     daemon.rejectedKeys.clear();
+    fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
     fireEvent.click(within(claude).getByRole("button", { name: "Replace" }));
+    expect(within(claude).queryByTestId("connect-method")).toBeNull();
+    // A fresh key pasted in place; while its check is pending Change method can't open (a Sign in there would be
+    // overwritten by this save's method write).
     const key = within(claude).getByLabelText("Paste your key") as HTMLInputElement;
     expect(key.type).toBe("password");
     fireEvent.change(key, { target: { value: "sk-ant-api03-new-k7Qa" } });
+    daemon.holdKeys = true;
     fireEvent.click(within(claude).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(claude).getByRole("button", { name: "Change method ▾" })).toHaveProperty("disabled", true));
+    fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
+    expect(within(claude).queryByTestId("connect-method")).toBeNull();
+    daemon.holdKeys = false;
+    daemon.releaseKeys();
     await waitFor(() => expect(within(screen.getByTestId("provider-claude")).getByTestId("provider-method").textContent).toContain("k7Qa"));
     expect(health("claude").getAttribute("data-tone")).toBe("pass");
     expect(screen.queryByDisplayValue("sk-ant-api03-new-k7Qa")).toBeNull();

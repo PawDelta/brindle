@@ -74,7 +74,7 @@ import { plain } from "../../api/wording";
 import { UpgradeCard, useEngineUpgrade } from "../../components/EngineUpgrade";
 import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
-import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, ReadyNote, RenewLogin, type Method } from "../../components/ProviderConnect";
+import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, ReadyNote, RenewLogin, useLock, type Lock, type Method } from "../../components/ProviderConnect";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import { About } from "./About";
@@ -613,7 +613,7 @@ function Health({ connection, keyInfo, keyLine = false }: { connection: Provider
 /* Change method: the three choices (Your cloud only where the engine has a
    route), and the chosen one's setup, in the row. Sign in is saved as soon
    as it is picked, over auto too, so a stored or exported key stops billing. */
-function ChangeMethod({ client, row, connection, keys, repo, model: rowModel, onModel, onBusy, onChanged, onClose }: {
+function ChangeMethod({ client, row, connection, keys, repo, model: rowModel, onModel, lock, onChanged, onClose }: {
   client: DaemonClient;
   row: ProviderInstalled;
   connection: ProviderConnection;
@@ -622,8 +622,8 @@ function ChangeMethod({ client, row, connection, keys, repo, model: rowModel, on
   /* OpenCode: the row's model provider, where this starts, and where a key saved here moves it. */
   model: (typeof MODEL_PROVIDERS)[number];
   onModel(model: (typeof MODEL_PROVIDERS)[number]): void;
-  /* A write is under way (true) or over: the row holds back closing this until it answers. */
-  onBusy(busy: boolean): void;
+  /* The row's write lock: a Sign in, a key or a cloud route saved here holds it until it settles. */
+  lock: Lock;
   onChanged(): void;
   onClose(): void;
 }) {
@@ -634,33 +634,19 @@ function ChangeMethod({ client, row, connection, keys, repo, model: rowModel, on
   const opencode = row.provider === "opencode";
   const [model, setModel] = useState(rowModel);
   const cloud = (connection.clouds ?? []).length > 0;
-  /* Sign in being saved, or the key or cloud form saving: no other choice until it answers. */
-  const [signingIn, setSigningIn] = useState(false);
-  const [formBusy, setFormBusy] = useState(false);
-  const busy = signingIn || formBusy;
-  useEffect(() => {
-    onBusy(busy);
-    return () => {
-      if (busy) onBusy(false);
-    };
-  }, [busy, onBusy]);
+  const busy = lock.busy;
   const done = () => {
     onChanged();
     onClose();
   };
   const pick = async (m: Method) => {
+    if (busy) return;
     setChoice(m);
     setError(null);
     if (m !== "sign_in" || saved === "sign_in") return;
-    setSigningIn(true);
-    try {
-      await client.setProviderConnection(row.provider, { method: "sign_in", ...(repo ? { repo } : {}) });
-      done();
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setSigningIn(false);
-    }
+    const got = await lock.run(() => client.setProviderConnection(row.provider, { method: "sign_in", ...(repo ? { repo } : {}) }).then(() => null, (e: unknown) => message(e)));
+    if (got) setError(got);
+    else done();
   };
   return (
     <div className="flex w-full flex-col gap-s2 pt-s1" data-testid={`change-method-${row.provider}`}>
@@ -687,7 +673,7 @@ function ChangeMethod({ client, row, connection, keys, repo, model: rowModel, on
             expect={(opencode ? model.key : undefined) ?? PROVIDER_KEYS[row.provider]?.[0] ?? "ANTHROPIC_API_KEY"}
             keys={keys}
             repo={repo}
-            onBusy={setFormBusy}
+            lock={lock}
             onSaved={() => {
               // The row's key controls follow the model provider whose key was just saved.
               if (opencode && model.key) onModel(model);
@@ -696,7 +682,7 @@ function ChangeMethod({ client, row, connection, keys, repo, model: rowModel, on
             onCancel={onClose}
           />
         ))}
-      {choice === "cloud" && cloud && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} repo={repo} onBusy={setFormBusy} onSignedIn={done} />}
+      {choice === "cloud" && cloud && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} repo={repo} lock={lock} onSignedIn={done} />}
       {error && (
         <p className={alert} role="alert">
           Couldn't change how {f.name} connects: {error}
@@ -758,10 +744,15 @@ function ProviderRowView({ client, repo, connection, keys, onChanged, row, insta
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState<"removing" | "connecting" | "signing-out" | "testing" | "removing-key" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [changing, setChanging] = useState(false);
-  const [replacing, setReplacing] = useState(false);
-  /* A key or a method being saved in the row: Change method can't open, close or switch until it answers. */
-  const [saving, setSaving] = useState(false);
+  // One editor at a time: Change method or Replace, never both.
+  const [editor, setEditor] = useState<"change" | "replace" | null>(null);
+  const changing = editor === "change";
+  const replacing = editor === "replace";
+  const setReplacing = (on: boolean) => setEditor(on ? "replace" : null);
+  /* The row's connection writes (a key saved, a method chosen, a key removed): while one is in
+     flight nothing else in the row can write, open, close or switch, whichever form started it. */
+  const lock = useLock();
+  const locked = lock.busy;
   const installing = install?.status === "starting" || install?.status === "running";
   // A key or a cloud, as saved; its own sign-in (sign_in); auto, a key when one is set, else
   // its sign-in; or the org's say.
@@ -798,8 +789,10 @@ function ProviderRowView({ client, repo, connection, keys, onChanged, row, insta
     act(
       "removing-key",
       async () => {
-        if (keyInfo) await client.deleteKey(keyInfo.name);
-        if (viaKey) await client.setProviderConnection(row.provider, { method: "auto", ...(repo ? { repo } : {}) });
+        await lock.run(async () => {
+          if (keyInfo) await client.deleteKey(keyInfo.name);
+          if (viaKey) await client.setProviderConnection(row.provider, { method: "auto", ...(repo ? { repo } : {}) });
+        });
         onChanged();
       },
       "remove the key of",
@@ -906,15 +899,15 @@ function ProviderRowView({ client, repo, connection, keys, onChanged, row, insta
       {on && keyed && !replacing && (
         <>
           {keyInfo && (
-            <button type="button" className={button} disabled={busy !== null} onClick={() => void testKey()}>
+            <button type="button" className={button} disabled={busy !== null || locked} onClick={() => void testKey()}>
               {busy === "testing" ? "Testing…" : "Test"}
             </button>
           )}
-          <button type="button" className={button} disabled={busy !== null} onClick={() => setReplacing(true)}>
+          <button type="button" className={button} disabled={busy !== null || locked} onClick={() => setReplacing(true)}>
             {keyInfo ? "Replace" : "Add a key"}
           </button>
           {(keyInfo || viaKey) && (
-            <button type="button" className={button} disabled={busy !== null} onClick={() => void removeKey()}>
+            <button type="button" className={button} disabled={busy !== null || locked} onClick={() => void removeKey()}>
               {busy === "removing-key" ? "Removing…" : "Remove"}
             </button>
           )}
@@ -922,18 +915,18 @@ function ProviderRowView({ client, repo, connection, keys, onChanged, row, insta
       )}
       {on && replacing && keyName && (
         <div className="w-full">
-          <ApiKeyPaste key={keyName} client={client} provider={row.provider} expect={keyName} keys={keys} repo={repo} onBusy={setSaving} onSaved={() => (setReplacing(false), setSaving(false), onChanged())} onCancel={() => setReplacing(false)} />
+          <ApiKeyPaste key={keyName} client={client} provider={row.provider} expect={keyName} keys={keys} repo={repo} lock={lock} onSaved={() => (setReplacing(false), onChanged())} onCancel={() => setReplacing(false)} />
         </div>
       )}
       {on && viaCloud && <RenewLogin client={client} provider={row.provider} route={connection!.cloud!} onSignedIn={onChanged} />}
       {on && !viaKey && !viaCloud && canSignOut && state === "signed_in" && !signing && (
-        <button type="button" className={quiet} aria-label={`Sign out of ${f.name}`} disabled={busy !== null} onClick={() => void act("signing-out", onSignOut, "sign out of")}>
+        <button type="button" className={quiet} aria-label={`Sign out of ${f.name}`} disabled={busy !== null || locked} onClick={() => void act("signing-out", onSignOut, "sign out of")}>
           {busy === "signing-out" ? "Signing out…" : "Sign out"}
         </button>
       )}
       {on && !viaKey && !viaCloud && (row.signed_in !== true || signing) && <ProviderSignIn provider={row.provider} check={check} onActive={setSigning} details={false} />}
       {on && connection && method !== "org" && !signing && (
-        <button type="button" className={quiet} aria-expanded={changing} disabled={saving} onClick={() => setChanging((c) => !c)}>
+        <button type="button" className={quiet} aria-expanded={changing} disabled={locked} onClick={() => setEditor(changing ? null : "change")}>
           Change method {changing ? "▴" : "▾"}
         </button>
       )}
@@ -946,13 +939,9 @@ function ProviderRowView({ client, repo, connection, keys, onChanged, row, insta
           repo={repo}
           model={model}
           onModel={(m) => setModel(KEY_MODELS.find((k) => k.id === m.id) ?? model)}
-          onBusy={setSaving}
+          lock={lock}
           onChanged={onChanged}
-          onClose={() => {
-            // Closed means its write answered: free the toggle in the same update, not on its later unmount.
-            setChanging(false);
-            setSaving(false);
-          }}
+          onClose={() => setEditor(null)}
         />
       )}
       {install && (

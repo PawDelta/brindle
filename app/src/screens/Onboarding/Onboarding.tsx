@@ -27,7 +27,7 @@ import type { OpenUrl, PickFolder } from "../../api/open";
 import { plain } from "../../api/wording";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ProjectPicker } from "../../components/ProjectPicker";
-import { ApiKeyPaste, CLOUD_NAME, CloudSetup, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, ReadyNote, type Method } from "../../components/ProviderConnect";
+import { ApiKeyPaste, CLOUD_NAME, CloudSetup, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, ReadyNote, type Lock, type Method } from "../../components/ProviderConnect";
 import { useProviderSignIn } from "../../components/ProviderSignIn";
 import { alert, button, card, field, mono, primary, quiet } from "../../components/ui";
 import type { Route } from "../../routes";
@@ -161,10 +161,9 @@ function BrindleSignIn({ client, openUrl, onSignedIn, onSkip }: { client: Daemon
    here, or the person's cloud signed in here. Choosing one on a missing CLI
    picks it for its installer. One is open at a time (the first not yet
    connected, or the one Choose opened); the others are a line with Choose. */
-function ProviderCard({ client, row, picked, installed, method, connection, open, error, keys, openUrl, busy, onBusy, onOpen, onMethod, onUndo, onConnected }: {
-  /* A key or a cloud route is being saved here: the method can't change until it answers. */
-  busy: boolean;
-  onBusy(busy: boolean): void;
+function ProviderCard({ client, row, picked, installed, method, connection, open, error, keys, openUrl, lock, onOpen, onMethod, onUndo, onConnected }: {
+  /* The provider's write lock: while a key, a cloud route or a Sign in is being saved, nothing here can change. */
+  lock: Lock;
   client: DaemonClient;
   row: ProviderInstalled;
   picked: boolean;
@@ -189,6 +188,7 @@ function ProviderCard({ client, row, picked, installed, method, connection, open
   const opencode = row.provider === "opencode";
   const [model, setModel] = useState(MODEL_PROVIDERS[0]);
   const cloud = (connection?.clouds ?? []).length > 0;
+  const busy = lock.busy;
   return (
     <section
       className={`${card} flex flex-col gap-s2 p-s2 ${picked ? "border-branch" : found ? "border-pass" : ""}`}
@@ -272,10 +272,10 @@ function ProviderCard({ client, row, picked, installed, method, connection, open
                 keys={keys}
                 openUrl={openUrl}
                 onSaved={(_, last4, c) => onConnected("api_key", `API key ending ${last4}`, c)}
-                onBusy={onBusy}
+                lock={lock}
               />
             ))}
-          {method === "cloud" && cloud && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} openUrl={openUrl} onSignedIn={(route, c) => onConnected("cloud", `through ${CLOUD_NAME[route] ?? route}`, c)} onBusy={onBusy} />}
+          {method === "cloud" && cloud && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} openUrl={openUrl} onSignedIn={(route, c) => onConnected("cloud", `through ${CLOUD_NAME[route] ?? route}`, c)} lock={lock} />}
         </>
       )}
     </section>
@@ -818,30 +818,47 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
     );
   }, [step, reload, client]);
 
+  /* Each provider's connection writes in flight (components/ProviderConnect Lock): a key save,
+     a cloud route, an explicit Sign in. Kept here, not in the forms, so a form leaving never frees one. */
+  const [writing, setWriting] = useState<Record<string, number>>({});
+  const lockOf = (p: string): Lock => ({
+    busy: (writing[p] ?? 0) > 0,
+    run: async <T,>(work: () => Promise<T>): Promise<T> => {
+      setWriting((w) => ({ ...w, [p]: (w[p] ?? 0) + 1 }));
+      try {
+        return await work();
+      } finally {
+        setWriting((w) => ({ ...w, [p]: (w[p] ?? 1) - 1 }));
+      }
+    },
+  });
   const choose = async (row: ProviderInstalled, method: Method) => {
     const p = row.provider;
+    const lock = lockOf(p);
+    if (lock.busy) return false;
     // The section worked in stays open, whatever becomes connected.
     setOpen(p);
     setErrors(({ [p]: _, ...rest }) => rest);
     // An explicit Sign in is saved, even over auto: a key stored or exported would bill otherwise.
+    // It holds the provider's lock until it answers, so no other choice can land before it.
     if (method === "sign_in" && connections[p]?.method !== "sign_in") {
-      try {
-        putConnection(p, await client.setProviderConnection(p, { method: "sign_in" }));
-      } catch (e) {
-        setErrors((all) => ({ ...all, [p]: plain(e instanceof Error ? e.message : String(e)) }));
+      const got = await lock.run(() => client.setProviderConnection(p, { method: "sign_in" }).then((c) => ({ c }), (e: unknown) => ({ e })));
+      if ("e" in got) {
+        setErrors((all) => ({ ...all, [p]: plain(got.e instanceof Error ? got.e.message : String(got.e)) }));
         return false;
       }
+      putConnection(p, got.c);
     }
     setMethods((m) => ({ ...m, [p]: method }));
     if (via[p]?.method !== method) forgetVia(p);
     if (!connected(row)) setPicks((all) => (all.includes(p) ? all : [...all, p]));
     return true;
   };
-  /* The provider whose key or cloud route is being saved: its section stays open and its method can't change until that answers. */
-  const [saving, setSaving] = useState<string | null>(null);
-  /* The open section: one saving, else the one Choose opened, else the first not yet connected. */
+  /* A provider with a write in flight: its section stays open and the flow can't move on until it answers. */
+  const writingTo = rows.find((r) => (writing[r.provider] ?? 0) > 0)?.provider ?? null;
+  /* The open section: one writing, else the one Choose opened, else the first not yet connected. */
   const [open, setOpen] = useState<string | null>(null);
-  const opened = saving ?? open ?? rows.find((r) => !done(r))?.provider ?? null;
+  const opened = writingTo ?? open ?? rows.find((r) => !done(r))?.provider ?? null;
 
   const order = rows.map((r) => r.provider);
   const queue = order.filter((p) => picks.includes(p));
@@ -932,8 +949,7 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
                 error={errors[r.provider] ?? null}
                 keys={keys}
                 openUrl={openUrl}
-                busy={saving === r.provider}
-                onBusy={(b) => setSaving((s) => (b ? r.provider : s === r.provider ? null : s))}
+                lock={lockOf(r.provider)}
                 onOpen={() => setOpen(r.provider)}
                 onMethod={(m) => void choose(r, m)}
                 onUndo={() => {
@@ -950,7 +966,7 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
           </div>
           {refreshProblem}
           <div className="mt-s1 flex flex-wrap items-center gap-s2">
-            <button type="button" className={big} disabled={(queue.length === 0 && found.length === 0) || !!refreshError || !!saving} onClick={() => setStep("install")}>
+            <button type="button" className={big} disabled={(queue.length === 0 && found.length === 0) || !!refreshError || !!writingTo} onClick={() => setStep("install")}>
               {queue.length ? `Connect ${names(queue.map(label))}` : found.length ? `Continue with ${names(found.map((r) => factsOf(r).name))}` : "Connect"}
             </button>
             <p className={`${fine} min-w-0 flex-1`}>

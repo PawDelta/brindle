@@ -687,8 +687,10 @@ export class FakeDaemon {
   /* The cloud sign-ins POST /providers/{p}/cloud-sign-in started, by provider; held until completeCloudSignIn(). */
   readonly cloudSignIns: string[] = [];
   private pendingCloudSignIns: Array<(result: string) => void> = [];
-  /* Hold each PUT /keys/{name} (the provider's check of the key) until releaseKeys(). */
+  /* Hold each PUT /keys/{name} (the provider's check of the key), and with holdConnections each
+     PUT /providers/{p}/connection, until releaseKeys(): applied and answered then, in order. */
   holdKeys = false;
+  holdConnections = false;
   private pendingKeys: Array<() => void> = [];
   releaseKeys(): void {
     for (const answer of this.pendingKeys.splice(0)) answer();
@@ -2324,6 +2326,7 @@ export class FakeDaemon {
       if (method === "DELETE" && key) return this.deleteKey(key[1]);
       if (method === "DELETE") return error("not_found", `no route DELETE ${path}`, 404);
       const connection = path.match(/^\/providers\/([^/]+)\/connection$/);
+      if (connection && this.holdConnections) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>))));
       if (connection) return this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>);
       if (path === "/routing") return this.putRouting((body ?? {}) as Record<string, unknown>);
       if (path === "/debug") return this.putDebug((body ?? {}) as Record<string, unknown>);

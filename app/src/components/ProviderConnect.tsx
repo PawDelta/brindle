@@ -20,7 +20,7 @@
    (POST .../cloud-sign-in), followed on the bus like brindle's own
    sign-in: the browser opens, the screen waits, Try again if it fails. */
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DaemonError, type DaemonClient, type KeyInfo, type ProviderConnection } from "../api/client";
 import { openExternal, type OpenUrl } from "../api/open";
 import type { CloudOptionsDTO } from "../api/schema";
@@ -171,16 +171,28 @@ function useLive() {
   return live;
 }
 
-/* Tells `onBusy` when work starts and ends, and that it ended when the component goes. */
-function useBusy(busy: boolean, onBusy?: (busy: boolean) => void) {
-  const report = useRef(onBusy);
-  report.current = onBusy;
-  useEffect(() => {
-    report.current?.(busy);
-    return () => {
-      if (busy) report.current?.(false);
-    };
-  }, [busy]);
+/* One provider's connection writes, one at a time: a key save, a cloud
+   route, an explicit Sign in, a key removed. `busy` while any is in flight,
+   until its request settles, whichever form started it and whether or not
+   that form is still on screen; everything that could write something else
+   for the provider is held meanwhile. The owner (the first launch for each
+   provider, a Settings row) keeps the count, so closing a form never frees it. */
+export interface Lock {
+  busy: boolean;
+  run<T>(work: () => Promise<T>): Promise<T>;
+}
+
+export function useLock(): Lock {
+  const [writes, setWrites] = useState(0);
+  const run = useCallback(async <T,>(work: () => Promise<T>): Promise<T> => {
+    setWrites((n) => n + 1);
+    try {
+      return await work();
+    } finally {
+      setWrites((n) => n - 1);
+    }
+  }, []);
+  return useMemo(() => ({ busy: writes > 0, run }), [writes, run]);
 }
 
 /* "just now", "4 min ago", "2h ago", "3d ago" since `ts` (seconds). */
@@ -226,7 +238,7 @@ function KeyState({ outcome }: { outcome: KeyOutcome }) {
 /* The paste field. `expect`: the key the provider reads (OpenCode's: its
    model provider's own, nothing else); `provider` null stores a key that is
    no provider's (a profile's api_key_env) and saves no method. */
-export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = openExternal, onSaved, onCancel, onBusy }: {
+export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = openExternal, onSaved, onCancel, lock: shared }: {
   client: DaemonClient;
   provider: string | null;
   expect: string;
@@ -237,13 +249,14 @@ export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = op
   /* Stored, and for a provider the method saved: the connection as the engine now reads it. */
   onSaved?(name: string, last4: string, connection: ProviderConnection | null): void;
   onCancel?(): void;
-  /* A save is under way (true) or over: the caller holds back changes that would race it. */
-  onBusy?(busy: boolean): void;
+  /* The provider's write lock: the save (key, then method) holds it until it settles. */
+  lock?: Lock;
 }) {
   const [value, setValue] = useState("");
-  const [busy, setBusy] = useState(false);
+  const own = useLock();
+  const lock = shared ?? own;
+  const busy = lock.busy;
   const live = useLive();
-  useBusy(busy, onBusy);
   const [outcome, setOutcome] = useState<KeyOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refused, setRefused] = useState<string | null>(null);
@@ -258,44 +271,44 @@ export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = op
   const f = factsOfKey(name);
   const page = info?.key_page || f.page;
 
-  /* Stored: the key's state as the engine now reads it, then the method saved as an API key. */
-  // Gone from the screen (another method chosen, the form closed): a save still answering
-  // writes no method and reports nothing.
-  const stored = async (key: string, last4: string) => {
-    const got = await client.config(repo ?? undefined).then((c) => c.keys.find((k) => k.name === key), () => undefined);
-    if (!live.current) return;
-    setOutcome({ kind: "stored", name: key, last4: got?.last4 || last4, status: got?.status ?? "verified", checked_at: got?.checked_at ?? Date.now() / 1000 });
-    if (!provider) return onSaved?.(key, last4, null);
-    let now: ProviderConnection;
-    try {
-      now = await client.setProviderConnection(provider, { method: "api_key", ...(repo ? { repo } : {}) });
-    } catch (e) {
-      // The key is stored; the org (or the engine) refuses running the provider on it.
-      if (live.current) setRefused(message(e));
-      return;
-    }
-    if (!live.current) return;
-    setConnection(now);
-    onSaved?.(key, last4, now);
-  };
+  /* The save, under the provider's lock from the key's PUT to the method's: the key (checked
+     by its provider first), its state as the engine reads it, then the method saved as an
+     API key. Gone from the screen meanwhile, it writes no method and reports nothing. What
+     it found is reported once the lock is free again. */
+  type Saved =
+    | { kind: "stored"; last4: string; info?: KeyInfo; connection: ProviderConnection | null; refused?: string }
+    | { kind: "rejected"; why: string }
+    | { kind: "failed"; why: string };
   const run = async (key: string, act: () => Promise<{ last4: string }>) => {
-    setBusy(true);
     setError(null);
     setRefused(null);
     setOutcome(null);
-    try {
-      const done = await act();
-      if (!live.current) return;
-      setValue("");
-      await stored(key, done.last4);
-    } catch (e) {
-      if (!live.current) return;
-      // The engine checks the key with its provider first: a refusal is the key's, not the app's.
-      if (e instanceof DaemonError && e.code === "not_stored") setOutcome({ kind: "rejected", name: key, why: plain(e.message.replace(new RegExp(`^${key} not stored: `), "")) });
-      else setError(message(e));
-    } finally {
-      if (live.current) setBusy(false);
-    }
+    const saved = await lock.run(async (): Promise<Saved> => {
+      let last4: string;
+      try {
+        last4 = (await act()).last4;
+      } catch (e) {
+        // A refusal is the key's, not the app's.
+        if (e instanceof DaemonError && e.code === "not_stored") return { kind: "rejected", why: plain(e.message.replace(new RegExp(`^${key} not stored: `), "")) };
+        return { kind: "failed", why: message(e) };
+      }
+      const info = await client.config(repo ?? undefined).then((c) => c.keys.find((k) => k.name === key), () => undefined);
+      if (!provider || !live.current) return { kind: "stored", last4, info, connection: null };
+      try {
+        return { kind: "stored", last4, info, connection: await client.setProviderConnection(provider, { method: "api_key", ...(repo ? { repo } : {}) }) };
+      } catch (e) {
+        // The key is stored; the org (or the engine) refuses running the provider on it.
+        return { kind: "stored", last4, info, connection: null, refused: message(e) };
+      }
+    });
+    if (!live.current) return;
+    if (saved.kind === "rejected") return setOutcome({ kind: "rejected", name: key, why: saved.why });
+    if (saved.kind === "failed") return setError(saved.why);
+    setValue("");
+    setOutcome({ kind: "stored", name: key, last4: saved.info?.last4 || saved.last4, status: saved.info?.status ?? "verified", checked_at: saved.info?.checked_at ?? Date.now() / 1000 });
+    if (saved.refused) return setRefused(saved.refused);
+    setConnection(saved.connection);
+    onSaved?.(key, saved.last4, saved.connection);
   };
   const save = () => {
     if (!value.trim() || busy || mismatch) return;
@@ -438,12 +451,20 @@ function detected(route: string, o: CloudOptionsDTO): string {
 
 /* The cloud sign-in's job: the browser opens on the first URL it prints;
    done, its result says how it went. */
-function CloudSignIn({ client, provider, route, openUrl, save, label, onSignedIn, onBusy }: { client: DaemonClient; provider: string; route: string; openUrl: OpenUrl; save(): Promise<boolean>; label?: string; onSignedIn?(): void; onBusy?(busy: boolean): void }) {
+function CloudSignIn({ client, provider, route, openUrl, save, label, locked = false, onSignedIn }: {
+  client: DaemonClient;
+  provider: string;
+  route: string;
+  openUrl: OpenUrl;
+  /* Saves the route first (under the provider's lock); false when it couldn't. */
+  save(): Promise<boolean>;
+  label?: string;
+  /* A write for the provider is in flight: no sign-in starts over it. */
+  locked?: boolean;
+  onSignedIn?(): void;
+}) {
   const { job, busy, start, clear } = useJob();
   const live = useLive();
-  /* The route being saved before its sign-in starts: the write that would race another choice. */
-  const [saving, setSaving] = useState(false);
-  useBusy(saving, onBusy);
   const opened = useRef<string | null>(null);
   const url = job?.status === "running" ? (job.progress.find((line) => /^https?:\/\//.test(line)) ?? null) : null;
   useEffect(() => {
@@ -460,10 +481,8 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, onSignedIn
   const begin = async () => {
     opened.current = null;
     clear();
-    setSaving(true);
     const saved = await save();
     if (!live.current) return;
-    setSaving(false);
     if (saved) void start(`Sign in to ${CLOUD_NAME[route] ?? route}`, () => client.cloudSignIn(provider));
   };
   const failed = job?.status === "failed" || result === "failed";
@@ -483,7 +502,7 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, onSignedIn
             Signed in through {CLOUD_NAME[route] ?? route}
           </span>
         ) : (
-          <button type="button" className={button} disabled={saving} onClick={() => void begin()}>
+          <button type="button" className={button} disabled={locked} onClick={() => void begin()}>
             {failed ? "Try again" : (label ?? cloud.signIn)}
           </button>
         )}
@@ -508,7 +527,7 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, onSignedIn
 }
 
 /* Choose the route, fill in its settings from what the machine has, then sign in. */
-export function CloudSetup({ client, provider, name, route: wanted, repo, openUrl = openExternal, onSignedIn, onBusy }: {
+export function CloudSetup({ client, provider, name, route: wanted, repo, openUrl = openExternal, onSignedIn, lock: shared }: {
   client: DaemonClient;
   provider: string;
   name: string;
@@ -518,9 +537,13 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
   openUrl?: OpenUrl;
   /* Signed in: the route, and the connection as the engine reads it after (its readiness). */
   onSignedIn?(route: string, connection: ProviderConnection | null): void;
-  /* The route is being saved (true) or not: the caller holds back changes that would race it. */
-  onBusy?(busy: boolean): void;
+  /* The provider's write lock: saving the route holds it until the request settles, and
+     the route and its fields can't change while any write for the provider is in flight. */
+  lock?: Lock;
 }) {
+  const own = useLock();
+  const lock = shared ?? own;
+  const locked = lock.busy;
   const live = useLive();
   const [connection, setConnection] = useState<ProviderConnection | null>(null);
   const [after, setAfter] = useState<ProviderConnection | null>(null);
@@ -580,24 +603,25 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
   }
   const missing = fields.filter((f) => f.required && !settings[f.name]?.trim());
   const save = async () => {
-    if (!route || missing.length) return false;
+    if (!route || missing.length || locked) return false;
     setSaveError(null);
-    try {
-      const got = await client.setProviderConnection(provider, { method: "cloud", cloud: route, settings: Object.fromEntries(Object.entries(settings).filter(([, v]) => v.trim())), ...(repo ? { repo } : {}) });
-      if (!live.current) return false;
-      setConnection(got);
-      return true;
-    } catch (e) {
-      if (live.current) setSaveError(message(e));
+    const body = { method: "cloud", cloud: route, settings: Object.fromEntries(Object.entries(settings).filter(([, v]) => v.trim())), ...(repo ? { repo } : {}) };
+    // Held until the PUT settles, whatever unmounts meanwhile.
+    const got = await lock.run(() => client.setProviderConnection(provider, body).then((c) => ({ c }), (e: unknown) => ({ e })));
+    if (!live.current) return false;
+    if ("e" in got) {
+      setSaveError(message(got.e));
       return false;
     }
+    setConnection(got.c);
+    return true;
   };
   const input = (f: CloudField): ReactNode => {
     const set = (v: string) => setSettings((s) => ({ ...s, [f.name]: v }));
     const value = settings[f.name] ?? "";
     if (f.kind === "profile") {
       return (
-        <select className={field} value={value} onChange={(e) => set(e.target.value)}>
+        <select className={field} value={value} disabled={locked} onChange={(e) => set(e.target.value)}>
           <option value="">Default credentials</option>
           {options.aws_profiles.map((p) => (
             <option key={p.name} value={p.name}>
@@ -611,7 +635,7 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
     const regions = route ? (options.regions?.[route] ?? []) : [];
     if (f.kind === "region" && regions.length) {
       return (
-        <select className={field} value={value} onChange={(e) => set(e.target.value)}>
+        <select className={field} value={value} disabled={locked} onChange={(e) => set(e.target.value)}>
           {!value && <option value="">Choose a region</option>}
           {[...new Set([...(value ? [value] : []), ...regions])].map((r) => (
             <option key={r} value={r}>
@@ -621,7 +645,7 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
         </select>
       );
     }
-    return <input className={`${field} font-mono`} value={value} placeholder={f.required ? "required" : "optional"} onChange={(e) => set(e.target.value)} />;
+    return <input className={`${field} font-mono`} value={value} disabled={locked} placeholder={f.required ? "required" : "optional"} onChange={(e) => set(e.target.value)} />;
   };
 
   return (
@@ -629,7 +653,7 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
       {connection.managed && <p className={fine}>{plain(connection.managed)}</p>}
       <div role="radiogroup" aria-label="Cloud" className="flex flex-wrap gap-s1">
         {clouds.map((c) => (
-          <button key={c} type="button" role="radio" aria-checked={route === c} className="rounded-md px-s2 py-1 text-sm text-ink-2 hover:bg-surface-2 aria-checked:bg-surface-2 aria-checked:text-ink" onClick={() => setRoute(c)}>
+          <button key={c} type="button" role="radio" aria-checked={route === c} disabled={locked} className="rounded-md px-s2 py-1 text-sm text-ink-2 hover:bg-surface-2 disabled:opacity-50 aria-checked:bg-surface-2 aria-checked:text-ink" onClick={() => setRoute(c)}>
             {CLOUD_NAME[c] ?? c}
           </button>
         ))}
@@ -648,7 +672,7 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
           {missing.length > 0 ? (
             <p className={fine}>Fill in {missing.map((f) => f.label.toLowerCase()).join(" and ")} to sign in.</p>
           ) : (
-            <CloudSignIn key={route} client={client} provider={provider} route={route} openUrl={openUrl} save={save} onSignedIn={() => void signedIn(route)} onBusy={onBusy} />
+            <CloudSignIn key={route} client={client} provider={provider} route={route} openUrl={openUrl} save={save} locked={locked} onSignedIn={() => void signedIn(route)} />
           )}
           {after && (
             <ReadyNote

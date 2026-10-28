@@ -174,7 +174,16 @@ describe("Onboarding", () => {
     const setup = await within(claude).findByTestId("cloud-setup");
     await waitFor(() => expect(within(setup).getByLabelText("AWS profile")).toHaveProperty("value", "work-sso"));
     expect(within(setup).getByLabelText("Region")).toHaveProperty("value", "us-east-1");
+    // While the route is being saved, the route, its fields and the method are held: nothing can write over it.
+    daemon.holdConnections = true;
     fireEvent.click(within(within(setup).getByTestId("cloud-sign-in")).getByRole("button"));
+    await waitFor(() => expect(within(setup).getByRole("radio", { name: "Google Vertex AI" })).toHaveProperty("disabled", true));
+    fireEvent.click(within(setup).getByRole("radio", { name: "Google Vertex AI" }));
+    expect(within(setup).getByLabelText("Region")).toHaveProperty("disabled", true);
+    expect(within(claude).getByRole("radio", { name: "API key" })).toHaveProperty("disabled", true);
+    expect(setup.getAttribute("data-route")).toBe("bedrock");
+    daemon.holdConnections = false;
+    daemon.releaseKeys();
     await waitFor(() => expect(daemon.cloudSignIns).toEqual(["claude"]));
     expect(puts(daemon, "/providers/claude/connection")).toEqual([{ method: "cloud", cloud: "bedrock", settings: { AWS_PROFILE: "work-sso", AWS_REGION: "us-east-1" } }]);
     await waitFor(() => expect(openUrl).toHaveBeenCalledWith("https://device.sso.us-east-1.amazonaws.com/?user_code=ABCD-EFGH"));
@@ -232,7 +241,14 @@ describe("Onboarding", () => {
     // Claude Code is on auto with a key stored: that key would bill, so no method is claimed until one is picked; Sign in is saved.
     const claude = screen.getByTestId("onb-card-claude");
     await waitFor(() => expect(methodOn(claude)).toBe(""));
+    // While that Sign in is being saved, no other choice can land before it and be undone by its answer.
+    daemon.holdConnections = true;
     fireEvent.click(within(claude).getByRole("radio", { name: "Sign in" }));
+    await waitFor(() => expect(within(claude).getByRole("radio", { name: "API key" })).toHaveProperty("disabled", true));
+    fireEvent.click(within(claude).getByRole("radio", { name: "API key" }));
+    expect(within(claude).queryByLabelText("Paste your key")).toBeNull();
+    daemon.holdConnections = false;
+    daemon.releaseKeys();
     await waitFor(() => expect(methodOn(claude)).toBe("sign_in"));
     expect(puts(daemon, "/providers/claude/connection")).toEqual([{ method: "sign_in" }]);
 
