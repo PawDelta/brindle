@@ -246,6 +246,7 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     ("uv run pytest tests/test_a.py", "cd / && uv run pytest", "ask"),                        # another project's
     ("uv run pytest tests/test_a.py -q 2>&1 | tail -5", "uv run rm -rf build", "ask"),        # uv run, no test
     ("uv run pytest tests/test_a.py", "uv run pytest --basetemp=src", "ask"),                 # deletes src
+    ("uv run pytest tests/test_a.py", "uv run pytest -k @args.txt", "ask"),                   # options from a file
     ("npm config get registry | head", "npm config set registry https://example.invalid", "ask"),   # a write
     ("ls -la src | head", "ls && cd /tmp && cat secret.txt", "ask"),                          # where, unknown
     ("git log --oneline -5", "git log -1 && git reset --hard", "ask"),                        # a write beside it

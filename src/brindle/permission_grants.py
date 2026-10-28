@@ -168,10 +168,12 @@ DEV_QUERIES = (("npm", "ls"), ("npm", "list"), ("npm", "view"), ("npm", "info"),
 
 def _local(word: str) -> bool:
     """A test path or name inside the checkout: nothing absolute, from home, or up a level."""
-    return not word.startswith(("/", "~", "-")) and ".." not in word.split("/")
+    return not word.startswith(("/", "~", "-", "@")) and ".." not in word.split("/")
 
 
 def _pytest_args(args: list[str]) -> bool:
+    if any(a.startswith("@") for a in args):    # an argument file: options brindle doesn't see, wherever it is
+        return False
     i = 0
     while i < len(args):
         if args[i] in PYTEST_VALUES and i + 1 < len(args):
