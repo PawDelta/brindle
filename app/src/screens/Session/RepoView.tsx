@@ -67,8 +67,9 @@ export function RepoView({ client, root, repo, branch, cwd, active }: {
       try {
         const got = await client.sessionFile(root, path);
         setPins((p) => ({ ...p, [path]: got }));
-        // Read at another blob than an edit started from: that edit is in conflict.
-        setEdits((all) => (all[path] && all[path].base !== got.base ? { ...all, [path]: { ...all[path], conflict: true } } : all));
+        // Read at another blob than an edit started from: that edit is in conflict. One being saved is the
+        // save's to settle (the blob read may be its own write); a file moved on by others fails it as stale.
+        setEdits((all) => (all[path] && all[path].saving === undefined && all[path].base !== got.base ? { ...all, [path]: { ...all[path], conflict: true } } : all));
       } catch (e) {
         setPins((p) => ({ ...p, [path]: message(e) }));
       }
@@ -81,13 +82,19 @@ export function RepoView({ client, root, repo, branch, cwd, active }: {
       const { [path]: _, ...rest } = all;
       return rest;
     });
-  // A save goes against the blob the edit started from; once written, the edit goes only if it still is what was sent.
+  // A save goes against the blob the edit started from; once written, the edit goes only if it still is what was
+  // sent. Each save has its number: one that ends after a later one began for its file changes nothing.
+  const saves = useRef<Record<string, number>>({});
+  const saveCount = useRef(0);
   const save = async (path: string, edit: Edit) => {
     if (edit.saving !== undefined || edit.conflict) return;
     const sent = edit.text;
+    const id = ++saveCount.current;
+    saves.current[path] = id;
     patch(path, { saving: sent, refused: undefined });
     try {
       const got = await client.putSessionFile(root, { path, content: sent, base: edit.base });
+      if (saves.current[path] !== id) return;
       setEdits((all) => {
         const now = all[path];
         if (!now) return all;
@@ -100,6 +107,7 @@ export function RepoView({ client, root, repo, branch, cwd, active }: {
       if (got.blob) setPins((p) => ({ ...p, [path]: { path, content: sent, base: got.blob! } }));
       else void read(path);
     } catch (e) {
+      if (saves.current[path] !== id) return;
       patch(path, e instanceof DaemonError && e.code === "stale" ? { saving: undefined, conflict: true } : { saving: undefined, refused: refusal(e) });
     }
   };
@@ -233,6 +241,8 @@ export function RepoView({ client, root, repo, branch, cwd, active }: {
                 }}
                 onCopy={() => void navigator.clipboard?.writeText(edits[opened]?.text ?? "").catch(() => undefined)}
                 onReload={() => {
+                  // A save under way keeps its edit until it ends.
+                  if (edits[opened]?.saving !== undefined) return;
                   drop(opened);
                   void read(opened);
                 }}

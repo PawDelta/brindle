@@ -394,8 +394,11 @@ describe("SessionScreen", () => {
     }, (daemon) => async (input, init) => {
       const url = String(input);
       if (url.endsWith("/sessions/sup1/file") && init?.method === "PUT") {
+        // The write is applied, its answer held: a read meanwhile sees the new blob.
         puts++;
+        const applied = await daemon.fetch(input, init);
         await holdPut?.until;
+        return applied;
       }
       if (url.endsWith("/terminals/shell")) {
         shellStarts++;
@@ -415,12 +418,19 @@ describe("SessionScreen", () => {
     fireEvent.click(repoTab().getByRole("button", { name: /Save/ }));
     await waitFor(() => expect(puts).toBe(1));
 
-    // Away and back while the PUT is out: the box is still locked on what was sent, and Save sends nothing more.
+    // Away and back while the PUT's answer is out, the file read again at the save's own new blob: the box is
+    // still locked on what was sent, with no conflict (so no Reload to drop it), and Save sends nothing more.
     fireEvent.click(within(files).getByTitle("b.ts"));
     await waitFor(() => expect(box("b.ts").value).toBe("bee\n"));
+    const fileReads = () => daemon.requests.filter((r) => r.method === "GET" && r.path === "/sessions/sup1/file" && r.query.path === "a.ts").length;
+    const reads = fileReads();
     fireEvent.click(within(files).getByTitle("a.ts"));
-    await waitFor(() => expect(box("a.ts").value).toBe("two\n"));
+    await waitFor(() => expect(fileReads()).toBe(reads + 1));
+    await act(() => flush());
+    expect(box("a.ts").value).toBe("two\n");
     expect(box("a.ts").disabled).toBe(true);
+    expect(repoTab().queryByTestId("draft-conflict")).toBeNull();
+    expect(repoTab().queryByRole("button", { name: "Reload" })).toBeNull();
     fireEvent.keyDown(box("a.ts"), { key: "s", metaKey: true });
     expect(puts).toBe(1);
     holdPut.release();
