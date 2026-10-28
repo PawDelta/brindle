@@ -201,14 +201,14 @@ export interface FileEdited {
    no worker running or task queued, nothing waiting on the person, the
    branch committed and ahead of its base), and `reasons`, what is missing
    in plain words (none when ready). `session.pr_ready` arrives on the bus
-   when it flips. `pr`: once brindle has opened the PR itself (the engine's
-   auto-PR setting, branch desktop/auto-pr; stubbed in the fake daemon until
-   it merges), where it is. */
+   when it flips. `pr`: once the person has opened the PR, where it is and
+   `unpushed`, how many session commits aren't on it yet (brindle never
+   pushes them itself: pushSessionPr does). */
 export interface SessionReadiness {
   root_id: string;
   ready: boolean;
   reasons: string[];
-  pr?: { url: string } | null;
+  pr?: { url: string; unpushed: number } | null;
 }
 
 /* GET /sessions/{root}/diff (session_review.diff): the session branch
@@ -949,6 +949,11 @@ export class DaemonClient {
   /* Pushes the session branch and opens its PR: a job whose result carries the URL. */
   openSessionPr(root: string, body: OpenSessionPr = {}) {
     return this.post<Job>(`${this.sessionPath(root)}/pr`, body);
+  }
+
+  /* Pushes the session's commits not on its open PR yet, through the same checks: a job. */
+  pushSessionPr(root: string) {
+    return this.post<Job>(`${this.sessionPath(root)}/pr/push`, {});
   }
 
   snapshot(repo?: string) {

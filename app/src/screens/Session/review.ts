@@ -26,8 +26,8 @@ export interface Readiness {
   /* unknown: not read yet, or the engine can't say (no route, no session). */
   state: "unknown" | "ready" | "not_ready";
   reasons: string[];
-  /* The PR brindle opened itself, when the engine's auto-PR is on. */
-  pr: { url: string } | null;
+  /* The PR the person opened, and how many session commits aren't pushed to it yet. */
+  pr: { url: string; unpushed: number } | null;
 }
 
 export const UNKNOWN: Readiness = { state: "unknown", reasons: [], pr: null };
@@ -58,15 +58,24 @@ export function usePrReadiness(client: DaemonClient, root: string, store: AppSto
     load();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
+    let workspaces = store.getState().workspaces;
     const unsubscribe = store.subscribe(() => {
       const s = store.getState();
+      // A git sweep (a commit in the checkout: one more not on an open PR) replaces a workspace's
+      // metadata and keeps its agents, with no bus event, as useSessionDiff reads it too.
+      const swept = s.workspaces.some((ws) => {
+        const before = workspaces.find((old) => old.id === ws.id);
+        return before && ws !== before && ws.agents === before.agents;
+      });
+      workspaces = s.workspaces;
+      let changed = swept || (s.stale && !stale);
       if (s.lastEventId !== seen) {
         const fresh = s.recent.filter((e) => e.id > seen);
         seen = s.lastEventId;
-        if (fresh.some((e) => concernsReadiness(e, root))) load();
+        changed ||= fresh.some((e) => concernsReadiness(e, root));
       }
-      if (s.stale && !stale) load();
       stale = s.stale;
+      if (changed) load();
     });
     return () => {
       live = false;
@@ -193,24 +202,4 @@ export function useSessionDiff(client: DaemonClient, root: string, store: AppSto
   }, [client, root, store, reload]);
   const files = useMemo(() => (diff?.files ?? []).map(toFileDiff), [diff]);
   return { diff, files, error, notReady, reload };
-}
-
-/* Whether the person's settings let brindle open the session's PR on its
-   own: the repo's `auto_pr` (engine branch desktop/auto-pr; read from GET
-   /config's repo settings, false until it lands). */
-export const autoPrOn = (config: { repo?: Record<string, unknown> } | null | undefined): boolean => config?.repo?.auto_pr === true;
-
-export function useAutoPr(client: DaemonClient, repo: string): boolean {
-  const [on, setOn] = useState(false);
-  useEffect(() => {
-    let live = true;
-    client.config(repo).then(
-      (c) => live && setOn(autoPrOn(c)),
-      () => live && setOn(false),
-    );
-    return () => {
-      live = false;
-    };
-  }, [client, repo]);
-  return on;
 }

@@ -7,6 +7,7 @@ import json
 import threading
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -269,6 +270,7 @@ def test_approval_covers_its_family(db, ws, approved, sibling, decision):
 
 @pytest.mark.parametrize("command, found", [
     ("cd app && npm test", ["dev/tests"]),                              # a leading cd: the rest runs in app
+    ("cd app && mkdir dist && git add dist", ["files/write-worktree", "git/local"]),   # changes, there too
     ("git status && cd {ws}/app && git log -3", ["git/readonly"]),      # a cd in the chain, inside the checkout
     ("cd $DIR && npm test", None),                                      # where only the run knows
     ("cd / && npm test", None),                                         # another project's
@@ -283,6 +285,67 @@ def test_cd_chain_keeps_its_family(ws, command, found):
     the cd led; after one that may have failed, where is unknown."""
     (Path(ws.path) / "app").mkdir()
     assert grants.families(bash(ws, command.format(ws=ws.path))) == found
+
+
+@pytest.mark.parametrize("approved, sibling, decision", [
+    ("git add -A", "git commit -m wip && git switch -c topic && git stash pop && git rebase main", "allow"),
+    ("git add -A", "git branch -D old && git tag -d v1 && git stash drop && git merge -s ours topic", "allow"),
+    ("npm install", "uv add httpx && cd {lib} && npm add -D left-pad", "allow"),     # in another attached repo
+    ("mkdir -p build", "sed -i '' s/a/b/ app.py && rm -rf build/x > out.log && cp app.py build/", "allow"),
+    ("mkdir -p build", "rm -rf {lib}/dist && echo x > {other}/notes.txt", "allow"),   # another repo, its worktree
+    ("uv run pytest tests/test_a.py", "cd {lib} && uv run pytest", "allow"),
+    ("git add -A", "git commit -m wip && git push origin HEAD:main", "ask"),        # never a push
+    ("git add -A", "git push -f origin feature", "deny"),
+    ("git add -A", "git reset --hard", "ask"),
+    ("git add -A", "git clean -fdx", "deny"),
+    ("git add -A", "git checkout -- .", "ask"),                                     # the whole checkout
+    ("git add -A", "git -c core.hooksPath=/x commit -m wip", "ask"),
+    ("git add -A", "git rebase --exec make main", "ask"),                           # runs a command
+    *(pytest.param("git add -A", c, "ask", marks=pytest.mark.variant("bypass: an option spelled another way"))
+      for c in ["git rebase -x'touch {out}/x' main", "git rebase --exe=make main", "git merge -s evil topic",
+                "git rebase -S --exec=make main", "git merge -S -sevil topic"]),
+    ("npm install", "npm install -g left-pad", "ask"),                             # outside the project
+    ("npm install", "npm install --cache={out} foo", "ask"),
+    pytest.param("npm install", ".venv/bin/pip install --log={out}/log httpx", "ask",
+                 marks=pytest.mark.variant("bypass: an option's value writes outside")),
+    ("mkdir -p build", "cp notes.txt build/", "ask"),                              # build/notes.txt links out
+    *(pytest.param("mkdir -p build", c, "ask", marks=pytest.mark.variant("bypass: a destination cp doesn't name last"))
+      for c in ["cp --target-directory=build notes.txt", "cp -RT src build", "cp -R src/ build"]),
+    ("mkdir -p build", "cp -R src copied && echo changed > copied/link/file", "ask"),   # src/link leads out
+    ("mkdir -p build", "sed -i'{out}/*' s/a/b/ app.py", "ask"),                    # its backup, outside
+    ("npm install", "sudo npm install", "ask"),
+    ("npm install", "npm install $(cat pkgs)", "ask"),                             # brindle can't read it
+    ("npm install", "cd {out} && npm install", "ask"),
+    ("mkdir -p build", "rm -rf {ws}", "ask"),                                      # a repo root
+    ("mkdir -p build", "rm -rf {lib}", "ask"),
+    ("mkdir -p build", "rm -rf {out}/x", "ask"),                                   # outside every repo
+    ("mkdir -p build", "mv app.py {out}/", "ask"),
+    ("mkdir -p build", "echo x > {out}/notes.txt", "ask"),
+    ("mkdir -p build", "echo x > .git/hooks/pre-commit", "ask"),
+])
+def test_approval_widens_to_change_families(db, ws, tmp_path, approved, sibling, decision):
+    """An approved local git change, install or file change covers every
+    other of its family in any repo attached to brindle or its worktrees;
+    never a push, a reset or clean of a checkout, a delete of a repo, a write
+    outside the repos, sudo, or what brindle can't read."""
+    permissions.apply_preset("secure")
+    permissions.forget("d-git-ro")
+    (Path(ws.path) / "build").mkdir()
+    lib, other, out = tmp_path / "lib", tmp_path / "other-wt", tmp_path / "elsewhere"
+    for d in (lib, other, out):
+        d.mkdir()
+    (Path(ws.path) / "build" / "notes.txt").symlink_to(out / "notes.txt")
+    (Path(ws.path) / "src").mkdir()
+    (Path(ws.path) / "src" / "link").symlink_to(out)
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
+    db.add_session_repo("boss", "lib", str(lib))
+    db.add_workspace(replace(ws, id="other", path=str(other), repo_root=str(tmp_path / "other"), tmux_session="o"))
+    worker(db, ws, "w1")
+    hook = Hook(db, "w1", bash(ws, approved))
+    [item] = grants.groups(grants.pending_asks(db, ws.repo_root))
+    grants.decide_group(db, item.key, "general", "timed", 15)
+    assert hook.done.wait(5) and hook.answer == "allow_once"
+    assert decide(bash(ws, sibling.format(ws=ws.path, lib=lib, other=other, out=out))).decision == decision
 
 
 def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_blocks(db, ws):

@@ -18,6 +18,7 @@ import { watchInbox } from "./notify";
 afterEach(cleanup);
 
 const notice: InboxItemDTO = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };
+const prReady: InboxItemDTO = { kind: "pr_ready", reason: "PR ready for your approval", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "Ship ls --json" };
 const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship ls --json" };
 
 function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client(), props: Partial<InboxScreenProps> = {}) {
@@ -61,11 +62,15 @@ describe("inbox", () => {
       repos: [{ repo_root: REPO, name: "proj" }],
       sessions: [session],
       workspaces: [root, worker],
-      inbox: [question, waiting, notice],
+      inbox: [question, waiting, notice, prReady],
     });
     const { sync, onOpen } = mount(daemon);
     const group = await screen.findByRole("region", { name: "Ship ls --json" });
-    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(2);
+    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(3);
+    // The PR brindle prepared (its checks passed, nothing pushed): Review & open PR opens the session's sheet.
+    expect(card("pr_ready").textContent).toContain("PR ready for your approval");
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Review & open PR" }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "review" });
     expect(group.textContent).toContain("sup1 · proj");
     fireEvent.click(within(group).getByRole("button", { name: "Open the session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO);

@@ -3,8 +3,9 @@
 An **ask** is a request the policy left to a person. Each one carries its
 exact form and a ladder of scopes a decision may cover (``generalize``): a
 push's destination ("into main from any branch"), a file's top directory, a
-command's families (read-only git, read-only shell, test runs, tool queries:
-"Command families" below) or else its first two words, an MCP tool (or its
+command's families (read-only git, read-only shell, test runs, tool queries,
+local git changes, installs, file changes in a checkout: "Command families"
+below) or else its first two words, an MCP tool (or its
 whole server).
 The second rung, the general form, is what brindle proposes as the default
 grant; pending asks of the same kind and general form make one Inbox item
@@ -29,6 +30,7 @@ import fnmatch
 import hashlib
 import os
 import re
+import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -133,19 +135,60 @@ def push_scopes(keys: list[str]) -> list[dict]:
 # permission_groups classifies them: a read-only git command or a read-only
 # shell command (grep, ls, cat, cd ...), or, of a dev tool's commands, only
 # a test run or a query whose operation brindle knows (DEV_OPERATIONS; "uv
-# run" alone may run anything). An approval at the general scope covers any
-# command whose every part falls in the families it was granted for, however
-# they are piped or chained. A part of any other class (a write, a push, a
-# delete, an install, a git command that isn't read-only, a redirection to a
-# file, a word only the run knows, a cd brindle can't follow before it) puts
-# the command in no family: only its own grant covers it.
+# run" alone may run anything). Three more change files, each only in a
+# checkout (_checkouts: any repo brindle works in or a session attached, and
+# its worktrees): a local git command (GIT_LOCAL: never a push), a package
+# install into the project (INSTALLS), and a file change (a write, edit,
+# move, copy or delete, a redirection) whose every path is in one. An
+# approval at the general scope covers any command whose every part falls in
+# the families it was granted for, however they are piped or chained. A part
+# of any other class (a push, a reset or clean, a delete of a checkout or of
+# anything outside one, a write outside, a word only the run knows, a cd
+# brindle can't follow before it) puts the command in no family: only its
+# own grant covers it.
 
 FAMILY = "family: "
 READ_FILTER = "shell/readonly"
 TESTS = "dev/tests"
 QUERIES = "dev/queries"
+LOCAL_GIT = "git/local"
+INSTALL = "dev/install"
+WRITES = "files/write-worktree"
 FAMILY_LABELS = {"git/readonly": "read-only git commands", READ_FILTER: "read-only shell commands",
-                 TESTS: "test runs", QUERIES: "package and GitHub queries"}
+                 TESTS: "test runs", QUERIES: "package and GitHub queries", LOCAL_GIT: "local git changes",
+                 INSTALL: "package installs into the project", WRITES: "file changes in the checkout"}
+# git subcommands that change only the local repository -> (long options never in the family,
+# short ones, the short options that take a value). A long option counts however git lets it be
+# abbreviated (--exe), a short one anywhere in a cluster before a value (-x"cmd", -tf). What
+# runs a command (rebase --exec, a merge strategy that isn't git's own) or discards the
+# checkout's changes (checkout/switch --force, a restore or checkout of a whole checkout, as
+# reset --hard would) is never in it.
+GIT_LOCAL = {"add": ((), "", ""), "commit": ((), "", "mFcCt"), "stash": ((), "", "m"), "tag": ((), "", "mFu"),
+             "branch": ((), "", ""), "merge": ((), "", "mFsX"), "rebase": (("--exec",), "x", "sXC"),
+             "restore": ((), "", "s"), "switch": (("--force", "--discard-changes"), "f", "cC"),
+             "checkout": (("--force",), "f", "bB")}
+STRATEGIES = frozenset({"ort", "recursive", "resolve", "octopus", "ours", "subtree"})
+# Short options whose value is optional and only ever attached (-S, -Skey): never the next word.
+GIT_ATTACHED_VALUES = "S"
+# A package manager's install or add, into the project where it runs (and pip, from the project's
+# own environment: .venv/bin/pip, .venv/bin/python -m pip).
+INSTALLS = (("npm", "install"), ("npm", "i"), ("npm", "add"), ("pnpm", "install"), ("pnpm", "i"), ("pnpm", "add"),
+            ("yarn", "install"), ("yarn", "add"), ("uv", "add"), ("uv", "sync"), ("uv", "pip", "install"))
+# The only install options in the family: none that puts packages, a cache or a log elsewhere or
+# fetches from elsewhere. Those that take a value take a name or a path in the project.
+INSTALL_FLAGS = frozenset({"-D", "--save-dev", "-E", "--save-exact", "-O", "--save-optional", "-P", "--save-prod",
+                           "--save-peer", "-S", "--save", "--no-save", "--dev", "--exact", "--optional", "--peer",
+                           "--frozen-lockfile", "--immutable", "--prefer-offline", "--offline", "--no-audit",
+                           "--no-fund", "--legacy-peer-deps", "--ignore-scripts", "--silent", "--frozen", "--locked",
+                           "--no-dev", "--all-extras", "--all-groups", "--upgrade", "-U", "--no-deps", "--pre",
+                           "--no-install-project", "-q", "--quiet", "-v", "--verbose"})
+INSTALL_VALUES = frozenset({"--group", "--extra", "--package", "--upgrade-package", "-r", "--requirement", "-c",
+                            "--constraint", "-e", "--editable"})
+# What makes files whose links brindle doesn't follow before they exist (_part_families).
+COPIERS = frozenset({"cp", "mv", "ln", "rsync", "tar", "unzip"})
+# The files rm and rmdir delete, by the options brindle reads for each.
+REMOVE_FLAGS = {"rm": re.compile(r"-[rRfidvI]+|--(recursive|force|dir|verbose)"),
+                "rmdir": re.compile(r"-v|--verbose")}
 # pytest however it is started, with only these options: none that loads code or a config from
 # elsewhere (-p, -c, --rootdir ...) or deletes a directory (--basetemp).
 PYTEST = (("pytest",), ("python", "-m", "pytest"), ("python3", "-m", "pytest"), ("uv", "run", "pytest"),
@@ -198,33 +241,233 @@ def _dev_operation(words: list[str]) -> str | None:
     return QUERIES if started(DEV_QUERIES) is not None else None
 
 
-def _part_family(req: Request, part: permissions.ShellPart, rules: list[Rule]) -> str | None:
+def _checkouts(req: Request) -> list[str]:
+    """Where a family's change may land: ``req``'s worktree and repo, every
+    repo brindle has a workspace in or a session attached, and each of their
+    worktrees. Read from the database read-only (none yet: just ``req``'s)."""
+    from brindle.config import db_path
+
+    roots = permissions._roots(req)
+    path = db_path()
+    if path.exists():
+        try:
+            conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+            try:
+                rows = [*conn.execute("SELECT repo_root, path FROM workspaces"),
+                        *conn.execute("SELECT repo_root, '' FROM session_repos")]
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            rows = []
+        roots += [r for row in rows for r in row if r]
+    return list(dict.fromkeys(os.path.normpath(r) for r in roots))
+
+
+def _runs_in(cwd: str, roots: list[str]) -> bool:
+    real = os.path.realpath(cwd)
+    return any(real == os.path.realpath(r) or permissions._inside(real, r) for r in roots)
+
+
+def _holds_root(path: str, roots: list[str]) -> bool:
+    """``path`` is one of ``roots`` or a folder holding one, as written or resolved."""
+    return any(f(r) == f(path) or f(r).startswith(f(path).rstrip(os.sep) + os.sep)
+               for f in (os.path.normpath, os.path.realpath) for r in roots)
+
+
+def _changeable(path: str, roots: list[str]) -> bool:
+    """Whether a change to ``path`` stays in a checkout, as written and as
+    resolved: inside one of ``roots``, never a root itself or a folder
+    holding one, nor in the .git/.brindle/.agents of the root it is in."""
+    if _holds_root(path, roots):
+        return False
+    protected = {d.casefold() for d in permissions.AGY_PROTECTED_DIRS}
+    for f in (os.path.normpath, os.path.realpath):
+        p, rs = f(path), [f(r) for r in roots]
+        inside = [r for r in rs if p.startswith(r + os.sep)]
+        if not inside:
+            return False
+        if protected & {part.casefold() for part in os.path.relpath(p, max(inside, key=len)).split(os.sep)}:
+            return False
+    return True
+
+
+def _git_local(words: list[str], cwd: str, roots: list[str]) -> bool:
+    """A git command in GIT_LOCAL with none of its banned options (GIT_LOCAL),
+    no merge strategy but git's own, no global option (-C, -c), and no restore
+    or checkout of a whole checkout."""
+    if len(words) < 2 or os.path.basename(words[0]) != "git" or words[1] not in GIT_LOCAL:
+        return False
+    sub, args = words[1], words[2:]
+    longs, shorts, values = GIT_LOCAL[sub]
+    strategies = sub in ("merge", "rebase")
+    i = 0
+    while i < len(args):
+        arg, i = args[i], i + 1
+        if arg == "--":
+            break
+        if arg.startswith("--"):
+            name, eq, value = arg.partition("=")
+            if any(b.startswith(name) for b in longs):
+                return False
+            if strategies and "--strategy".startswith(name):
+                if not eq:
+                    value, i = (args[i] if i < len(args) else ""), i + 1
+                if value not in STRATEGIES:
+                    return False
+        elif arg.startswith("-"):
+            for j, c in enumerate(arg[1:], 2):    # j: where c's value starts
+                if c in shorts:
+                    return False
+                if c in GIT_ATTACHED_VALUES:
+                    break
+                if c in values:
+                    value = arg[j:] or (args[i] if i < len(args) else "")
+                    if strategies and c == "s" and value not in STRATEGIES:
+                        return False
+                    i += j == len(arg)    # its value is the next word
+                    break
+    if sub in ("restore", "checkout"):
+        names = [a for a in args if not a.startswith("-")]
+        if any(n.startswith(":") or any(c in n for c in "*?[") for n in names):
+            return False    # pathspec magic (:/ is the whole checkout), a pattern
+        if any(_holds_root(os.path.join(cwd, n), roots) for n in names):
+            return False    # a checkout's root, or a folder holding one
+    return True
+
+
+def _installs(words: list[str], cwd: str, roots: list[str]) -> bool:
+    """A package install into the project (INSTALLS, or the project's own
+    pip) with only the options in INSTALL_FLAGS and INSTALL_VALUES, and
+    every package, name or file it is given one in the project."""
+    n = next((len(p) for p in INSTALLS if tuple(words[:len(p)]) == p), None)
+    # A venv's python links to the system's: where it is written is what says whose environment it is.
+    program = os.path.normpath(os.path.join(cwd, words[0]))
+    if n is None and "/" in words[0] and any(program.startswith(os.path.normpath(r) + os.sep) for r in roots):
+        name = os.path.basename(program)
+        if name in ("pip", "pip3") and words[1:2] == ["install"]:
+            n = 2
+        elif name in ("python", "python3") and words[1:4] == ["-m", "pip", "install"]:
+            n = 4
+    if n is None:
+        return False
+
+    def in_project(word: str) -> bool:    # a registry package, or a path in the project (no URL, file: or git+)
+        return bool(word) and not word.startswith(("/", "~", "-")) and ".." not in word.split("/") and ":" not in word
+
+    args, i = words[n:], 0
+    while i < len(args):
+        arg, i = args[i], i + 1
+        name, eq, value = arg.partition("=") if arg.startswith("--") else (arg, "", "")
+        if name in INSTALL_VALUES:
+            if not eq:
+                value, i = (args[i] if i < len(args) else ""), i + 1
+            if not in_project(value):
+                return False
+        elif arg.startswith("-") and arg not in INSTALL_FLAGS or not arg.startswith("-") and not in_project(arg):
+            return False
+    return True
+
+
+def _removes(words: list[str], cwd: str, roots: list[str]) -> bool:
+    """An rm or rmdir, with only the options brindle reads, of files in a checkout."""
+    flags = REMOVE_FLAGS.get(os.path.basename(words[0]))
+    if flags is None:
+        return False
+    names, options = [], True
+    for arg in words[1:]:
+        if options and arg == "--":
+            options = False
+        elif options and arg.startswith("-"):
+            if not flags.fullmatch(arg):
+                return False
+        else:
+            names.append(arg)
+    return bool(names) and all(_changeable(os.path.join(cwd, n), roots) for n in names)
+
+
+def _file_writes(program: str, args: list[str], cwd: str, roots: list[str]) -> bool:
+    """Whether every file a FILE_WRITERS program (not ln) or ``sed -i``
+    changes stays in a checkout: each name it is given, what cp or mv makes
+    in a destination folder (a recursive copy only into a new one; no option
+    that names the destination), and no sed backup put in another folder."""
+    from brindle import permission_groups
+
+    targets = permission_groups._write_targets(program, args)
+    if not targets or program == "ln":
+        return False
+    if program == "sed" and any(re.fullmatch(r"-[nErsuz]*i.*/.*|--in-place=.*/.*", a, re.S) for a in args):
+        return False
+    paths = [os.path.join(cwd, t) for t in targets]
+    if program in ("cp", "mv"):
+        # Only the last name is the destination: no long option (--target-directory=) and no -T.
+        if any(a.startswith("--") and a != "--" or re.fullmatch(r"-[A-Za-z]*T[A-Za-z]*", a) for a in args):
+            return False
+        if len(paths) < 2:
+            return False
+        dest, sources = paths[-1], targets[:-1]
+        into = len(paths) > 2 or os.path.isdir(dest) or targets[-1].endswith("/")
+        recursive = program == "cp" and any(re.fullmatch(r"-[A-Za-z]*[rRa][A-Za-z]*", a) for a in args)
+        made = [os.path.join(dest, os.path.basename(os.path.normpath(p))) for p in paths[:-1]] if into else []
+        # A recursive copy only makes a new folder: into one that's there (or src/'s contents into dest,
+        # as BSD cp copies them) it writes below names that may lead anywhere.
+        if recursive and (any(os.path.lexists(m) for m in made) or os.path.lexists(dest) and (
+                not into or any(s.endswith(("/", "/.")) for s in sources))):
+            return False
+        paths += made
+    return all(_changeable(p, roots) for p in paths)
+
+
+def _part_family(req: Request, part: permissions.ShellPart, rules: list[Rule],
+                 roots: list[str]) -> list[str | None]:
+    """A part's family, then one for the files its redirections write (WRITES when every one is in a checkout)."""
     from brindle import permission_groups
 
     # Where it runs unknown (after a cd that may not have happened), the files it reads are too.
-    if part.cwd is None or part.unknown or part.expanded or part.assigned or part.reads or part.writes:
-        return None
-    [(group, sub)] = permission_groups.part_classes(req, part, rules, [])
+    if part.cwd is None or part.unknown or part.expanded or part.assigned or part.reads or part.redirect_glob:
+        return [None]
+    writes = [WRITES if all(os.path.isabs(p) and _changeable(p, roots) for p in part.writes) else None
+              ] if part.writes else []
+    (group, sub), *_ = permission_groups.part_classes(req, part, rules, [])
     if f"{group}/{sub}" in ("git/readonly", READ_FILTER):
-        return f"{group}/{sub}"
-    # A dev tool runs the project where it runs: one in this repo's checkout, never another's.
-    cwd = os.path.realpath(part.cwd)
-    if (f"{group}/{sub}" != "shell/dev-tools"
-            or not any(cwd == os.path.realpath(r) or permissions._inside(cwd, r) for r in permissions._roots(req))):
-        return None
-    return _dev_operation(part.words)
+        return [f"{group}/{sub}", *writes]
+    # What changes or runs the project does so where it runs: in a checkout, never elsewhere.
+    if not _runs_in(part.cwd, roots):
+        return [None]
+    words, program = part.words, os.path.basename(part.words[0])
+    if _git_local(words, part.cwd, roots):
+        found = LOCAL_GIT
+    elif _installs(words, part.cwd, roots):
+        found = INSTALL
+    elif _removes(words, part.cwd, roots):
+        found = WRITES
+    elif group == "files":
+        found = WRITES if _file_writes(program, words[1:], part.cwd, roots) else None
+    elif f"{group}/{sub}" == "shell/dev-tools":
+        found = _dev_operation(words)
+    else:
+        found = None
+    return [found, *writes]
 
 
 def _part_families(req: Request, rules: list[Rule] | None = None) -> list[str | None] | None:
-    """Each part of ``req``'s shell command's family (None: in none), or None
-    when brindle can't read what it runs. What a part is doesn't depend on the
-    ask rules that make it ask, only on the denies (a read of a denied file is no read-only command)."""
+    """Each part of ``req``'s shell command's family, and its redirections'
+    (None: in none), or None when brindle can't read what it runs. What a
+    part is doesn't depend on the ask rules that make it ask, only on the
+    denies (a read of a denied file is no read-only command). A file change
+    after a copy, move, link or extraction is in none too: what that made
+    (a symlink it copied) may lead anywhere."""
     parts = permissions.shell_parts(req) if req.kind == "bash" else None
     if not parts:
         return None
     rules = permissions.all_rules(req.repo_root or None) if rules is None else rules
     denies = [r for r in rules if r.decision == "deny"]
-    return [_part_family(req, part, denies) for part in parts]
+    roots = _checkouts(req)
+    found, copied = [], False
+    for part in parts:
+        each = _part_family(req, part, denies, roots)
+        found += [*each, None] if copied and WRITES in each else each
+        copied |= os.path.basename(part.words[0]) in COPIERS
+    return found
 
 
 def families(req: Request, rules: list[Rule] | None = None) -> list[str] | None:
