@@ -49,6 +49,9 @@
 # instead. Its role writes only release/*; GitHub must reject staff refs in
 # desktop-release even if a pushed workflow requests it (app/README.md).
 #
+# Stable gate: a pushed app-v* tag builds nothing until `stable-gate` finds its
+# commit on main (the staff channel builds main) and a desktop-release reviewer approves.
+#
 # Release candidates: an app-v<X.Y.Z>-rc<N> tag (package.json version
 # X.Y.Z-rc<N>, e.g. 0.2.0-rc.1) publishes under brindle/downloads/desktop/rc/<version>/
 # only, with its own latest.json there, and copies that manifest to
@@ -57,17 +60,18 @@
 # brindle/downloads/desktop/latest.json or the stable brindle*.dmg / AppImage /
 # .deb names. Only a final app-v<X.Y.Z> tag updates those.
 #
-# Release-branch (staff) builds: a push to the release/desktop branch builds
-# the Macs only, at that commit, once `release-gate` has found it on main with
-# the newest CI and App runs for exactly that commit passed. The build carries
+# Release-branch (staff) builds: a push to main that touches the app (the
+# paths app.yml runs for) builds the Macs only, at that commit, once
+# `release-gate` has found it on main with the newest CI and App runs for
+# exactly that commit passed. The build carries
 # the version <package.json version>+release.<run>.<sha12>, its updater
 # bundle signed with the staff key (app/src-tauri/staff-updater.pub), and
 # `release-publish` publishes it under brindle/downloads/desktop/release/
 # only (an immutable directory per build, then release/latest.json, which
 # only moves forward), from the `desktop-staff-release` environment. It never
-# touches latest.json, rc/ or the stable names; merging to main publishes
-# nothing. app/README.md, "Release-branch builds", has the contract and what
-# to do when the gate refuses.
+# touches latest.json, rc/ or the stable names. app/README.md,
+# "Release-branch builds", has the contract and what to do when the gate
+# refuses.
 #
 # Run by hand (workflow_dispatch) it builds and keeps the artifacts and never
 # publishes: a dispatch is not a pushed tag (publish_gate.sh), and it runs
@@ -95,7 +99,14 @@ name: App release
 on:
   push:
     tags: ["app-v*"]
-    branches: ["release/desktop"]
+    branches: [main]
+    # app.yml's paths: a main push builds staff only when it touches the app.
+    # GitHub never applies path filters to tag pushes.
+    paths:
+      - "app/**"
+      - "src/brindle/daemon/api-schema.json"
+      - ".github/workflows/app*.yml"
+      - ".githooks/pre-push"
   schedule:
     - cron: "23 6 * * *"
   workflow_dispatch:
@@ -120,13 +131,16 @@ env:
   AWS_MAX_ATTEMPTS: "8"
 
 jobs:
-  # A release-branch push builds only a commit main already has, whose newest
-  # CI and App runs (for exactly that commit) passed; otherwise this job
-  # fails and nothing builds. Re-run it once those checks have passed.
+  # A main push builds staff only once the newest App run (and CI's, when
+  # ci.yml ran) for exactly that commit passed. They start on the same push,
+  # so this waits for them, up to the CI_GATE_DEADLINE_MINUTES variable
+  # (default 45; keep it under this job's 60-minute limit). A failure, or
+  # still running at the deadline, fails this job and nothing builds: re-run
+  # it once those checks have passed.
   release-gate:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/release/desktop'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 60
     permissions:
       contents: read
       actions: read   # the CI and App workflow runs for this commit
@@ -150,7 +164,37 @@ jobs:
         id: gate
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          CI_GATE_DEADLINE_MINUTES: ${{ vars.CI_GATE_DEADLINE_MINUTES }}
         run: node app/scripts/release_publish.mjs ci-gate
+
+  # A pushed app-v* tag builds only a commit main already has (the staff
+  # channel builds main), and only once a desktop-release reviewer has
+  # approved this job; otherwise no tag job runs. No bypass: an emergency fix
+  # lands on main like anything else.
+  stable-gate:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment: desktop-release
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read   # this run's approvals, for the summary
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # origin/main, to check the commit is on it
+          persist-credentials: false
+      - name: On main, approved
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA ($GITHUB_REF_NAME) is not on main: land it there (the staff channel) first"
+            exit 1
+          fi
+          approvers="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            --jq '[.[] | select(.state == "approved") | .user.login] | join(", ")' || echo "unknown")"
+          echo "Stable gate: $GITHUB_REF_NAME at $GITHUB_SHA is on main; approved by ${approvers:-nobody recorded}" >> "$GITHUB_STEP_SUMMARY"
 
   # One build per Mac architecture, each on a runner of that architecture:
   # build_engine.sh builds the bundled engine for the machine it runs on only
@@ -161,9 +205,9 @@ jobs:
   # `macos-publish` job does that once both have passed (`release-publish`
   # for a release-branch build).
   macos:
-    needs: release-gate
+    needs: [release-gate, stable-gate]
     if: >-
-      !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag')
+      !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.stable-gate.result == 'success')
       || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
       || needs.release-gate.outputs.go == 'true')
     name: macos (${{ matrix.arch }})
@@ -523,8 +567,8 @@ jobs:
     # needs.macos.result: macos's own needs (release-gate) is skipped here.
     if: >-
       !cancelled() && needs.macos.result == 'success'
-      && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
-    needs: macos
+      && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.stable-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
+    needs: [stable-gate, macos]
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
     timeout-minutes: 20
@@ -708,7 +752,7 @@ jobs:
     needs: [release-gate, macos]
     if: >-
       !cancelled() && needs.macos.result == 'success' && needs.release-gate.outputs.go == 'true'
-      && github.event_name == 'push' && github.ref == 'refs/heads/release/desktop'
+      && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: desktop-staff-release
     timeout-minutes: 20
@@ -832,7 +876,9 @@ jobs:
           echo "Published brindle desktop $VERSION (release build, macOS) to $SITE_DOWNLOADS/$DEST_PATH/ and release/latest.json" >> "$GITHUB_STEP_SUMMARY"
 
   linux:
-    if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
+    needs: stable-gate
+    if: >-
+      !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.stable-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
     runs-on: ubuntu-22.04
     environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
     timeout-minutes: 60
@@ -989,7 +1035,9 @@ jobs:
           echo "Published brindle desktop $VERSION (Linux) to $SITE_DOWNLOADS/" >> "$GITHUB_STEP_SUMMARY"
 
   windows:
-    if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
+    needs: stable-gate
+    if: >-
+      !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.stable-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
     runs-on: windows-latest
     # Only a pushed app-v* tag runs in the environment that holds the secrets.
     environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}

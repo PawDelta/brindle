@@ -8,8 +8,8 @@
 # The Linux bundles (AppImage, .deb) have no OS signing to wait for. The Windows
 # installer publishes only once its Authenticode signature has verified
 # (SIGNED), with no notarization.
-# CHANNEL=release (release-publish) is the release-branch build instead: only
-# a push of the release/desktop branch (REF), signed and notarized, never a tag.
+# CHANNEL=release (release-publish) is the release-branch (staff) build instead:
+# only a push of main (REF), signed and notarized, never a tag.
 #
 # Reads PLATFORM (macos, the default, windows or linux), CHANNEL (release, or empty),
 # EVENT (github.event_name), REF_TYPE (github.ref_type), REF (github.ref;
@@ -20,8 +20,8 @@ set -euo pipefail
 
 go=true
 if [ "${CHANNEL:-}" = release ]; then
-  [ "${EVENT:-}" = push ] && [ "${REF_TYPE:-}" = branch ] && [ "${REF:-}" = refs/heads/release/desktop ] \
-    || { echo "not a pushed release/desktop (${EVENT:-?} of ${REF:-?}): not publishing"; go=false; }
+  [ "${EVENT:-}" = push ] && [ "${REF_TYPE:-}" = branch ] && [ "${REF:-}" = refs/heads/main ] \
+    || { echo "not a pushed main (${EVENT:-?} of ${REF:-?}): not publishing"; go=false; }
 else
   [ "${EVENT:-}" = push ] && [ "${REF_TYPE:-}" = tag ] \
     || { echo "not a pushed tag (${EVENT:-?} of a ${REF_TYPE:-?}): not publishing"; go=false; }
