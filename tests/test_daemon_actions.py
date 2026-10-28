@@ -1527,6 +1527,33 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     assert "--base main --head sess --title Ship it --body" in called.read_text()
 
 
+@pytest.mark.parametrize("opening,passed", [(True, False), (False, False), (False, True)])
+def test_auto_pr_checks(db, lead, monkeypatch, opening, passed):
+    from brindle import gates, git
+
+    messages, pushes = [], []
+    config.set_local(lead.repo_root, "auto_pr", True)
+    config.set_local(lead.repo_root, "checks", ["validate"])
+    monkeypatch.setattr(routes_actions.review, "require_ready", lambda *a: None)
+    monkeypatch.setattr(gates, "head", lambda ws: "verified")
+    monkeypatch.setattr(gates, "run_checked", lambda *a: (passed, "x" * gates.MAX_FAILURE_CHARS + "failure tail"))
+    monkeypatch.setattr(agents, "send_message", lambda db, to, text, **kw: messages.append((to, text)))
+    monkeypatch.setattr(git, "push", lambda path, branch, sha=None: pushes.append(sha))
+    monkeypatch.setattr(workspaces, "open_pull_request", lambda *a, **kw: pushes.append(kw["sha"]))
+    if not opening:
+        routes_actions._record_pr(db, ("lead", lead.branch), "https://github.com/o/r/pull/7", "old", True)
+    routes_actions.auto_pr(db, "lead", opening=opening)
+    row = db.conn.execute("SELECT pushed_sha FROM session_prs").fetchone()
+    if passed:
+        assert pushes == ["verified"] and row["pushed_sha"] == "verified" and messages == []
+        assert bus.tail(db, kinds=("session.pr_pushed",))[-1]["payload"]["commit"] == "verified"
+    else:
+        assert pushes == [] and (row is None if opening else row["pushed_sha"] == "old")
+        assert len(messages) == 1 and messages[0][0] == "lead"
+        assert "validate" in messages[0][1] and "failure tail" in messages[0][1]
+    assert not routes_actions._PR_WORK
+
+
 @pytest.mark.parametrize("auto_pr,org,opened", [
     (True, None, True),
     (False, None, False),
