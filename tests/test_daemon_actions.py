@@ -585,6 +585,59 @@ def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, 
     assert SECRET not in caplog.text
 
 
+@pytest.mark.parametrize("action,stored,env,provider_status,expect", [
+    ("put", False, False, 200, ("verified", True, False)),
+    ("test", True, False, 401, ("rejected", True, False)),
+    ("delete", True, False, 200, (None, False, False)),
+    ("auth", True, False, 401, ("rejected", True, False)),
+    ("import", False, True, 200, ("verified", True, False)),
+], ids=["save-verify", "test-rejected", "delete", "auth-failure", "import-env"])
+def test_api_key_lifecycle(db, world, monkeypatch, provider_http, action, stored, env, provider_status, expect):
+    from brindle import keys_cmds, keystore
+
+    name = "ANTHROPIC_API_KEY"
+    monkeypatch.delenv(name, raising=False)
+    if env:
+        monkeypatch.setenv(name, SECRET)
+    if stored:
+        keys_cmds.store(name, SECRET, None)
+    provider_http["status"] = provider_status
+    provider_http["calls"].clear()
+
+    def entry():
+        code, cfg = _send("GET", "/v1/config")
+        assert code == 200
+        return next(k for k in cfg["keys"] if k["name"] == name)
+
+    assert entry()["importable"] is env
+    if action == "put":
+        assert _send("PUT", f"/v1/keys/{name}", {"value": SECRET})[0] == 200
+    elif action == "test":
+        code, reply = _send("POST", f"/v1/keys/{name}/test")
+        assert code == 200 and reply["status"] == "rejected" and reply["checked_at"]
+    elif action == "delete":
+        assert _send("DELETE", f"/v1/keys/{name}")[0] == 200
+    elif action == "auth":
+        agents.handle_hook(db, "wk", "stop-failure", {"error": "invalid_api_key"})
+    else:
+        code, reply = _send("POST", f"/v1/keys/{name}/import")
+        assert code == 200 and reply["last4"] == SECRET[-4:]
+    got = entry()
+    assert (got["status"], got["set"], got["importable"]) == expect
+    assert got["key_page"] and got["provider"] == "claude" and got["personal_keys_denied"] is False
+    assert (keystore.get_key(name) is not None) is expect[1]
+    assert SECRET not in json.dumps(got)
+
+
+@pytest.mark.parametrize("status,expected", [(200, "verified"), (400, "rejected")])
+def test_api_key_lifecycle_checks_gemini_keys_with_a_models_call(provider_http, status, expected):
+    from brindle import key_check
+
+    provider_http["status"] = status
+    assert key_check.evaluate("GEMINI_API_KEY", "AIza-test")[0] == expected
+    assert provider_http["calls"] == ["https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"]
+
+
 @pytest.mark.parametrize("path,status,command", [
     ("/v1/providers/codex/login", 200, "login"),
     ("/v1/keys/OPENAI_API_KEY/set", 200, "OPENAI_API_KEY"),

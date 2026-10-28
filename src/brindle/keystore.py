@@ -319,6 +319,39 @@ def get_key_info(name: str) -> tuple[str | None, float]:
 
 
 
+def get_record(name: str) -> dict:
+    """The stored key's record: ``value`` plus ``status``/``checked_at`` once it has been checked."""
+    return _key_store(name).load() or {}
+
+
+def set_check(name: str, status: str, checked_at: float | None = None) -> None:
+    """Remember how the key's last check came out (verified, rejected or unchecked) and when."""
+    store = _key_store(name)
+    rec = store.load()
+    if not rec or not rec.get("value"):
+        return
+    store.save({**rec, "status": status, "checked_at": checked_at if checked_at is not None else time.time()})
+
+
+def provider_of(name: str) -> str | None:
+    """The provider whose credentials include ``name``, if any."""
+    from brindle import providers, secrets
+
+    for table in (providers._ENV_AUTH, secrets._CREDENTIALS):
+        for provider, names in table.items():
+            if name in names:
+                return provider
+    return None
+
+
+def provider_key_names(provider: str) -> list[str]:
+    """Names of the provider's credentials that could be a stored key."""
+    from brindle import providers, secrets
+
+    names = {*providers._ENV_AUTH.get(provider, ()), *secrets._CREDENTIALS.get(provider, ())}
+    return sorted(n for n in names if n not in REFUSED and not secrets.is_job_secret(n))
+
+
 def unset_key(name: str) -> None:
     _key_store(name).delete()
 

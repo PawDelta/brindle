@@ -579,6 +579,6 @@ def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     monkeypatch.setattr(keystore, "known_names", lambda repo=None: ["OPENAI_API_KEY", "UNSET_KEY"])
     monkeypatch.setattr(keystore, "get_key", lambda n: "sk-live-1234567890WXYZ" if n == "OPENAI_API_KEY" else None)
     _, body = _get("/v1/config", AUTH, f"repo={seeded['repo']}")
-    assert body["keys"] == [{"name": "OPENAI_API_KEY", "set": True, "last4": "WXYZ"},
-                            {"name": "UNSET_KEY", "set": False, "last4": ""}]
+    assert [(k["name"], k["set"], k["last4"]) for k in body["keys"]] == [("OPENAI_API_KEY", True, "WXYZ"),
+                                                                         ("UNSET_KEY", False, "")]
     assert "1234567890" not in json.dumps(body)
