@@ -1322,6 +1322,35 @@
           "title": "AskScopeDTO",
           "type": "object"
         },
+        "OrgControlViewDTO": {
+          "description": "An org control as a member sees it (permission_grants.org_control_view):\nthe org's name, what it covers in plain words, Block (deny) or Ask, and why.",
+          "properties": {
+            "decision": {
+              "default": "ask",
+              "title": "Decision",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            },
+            "what": {
+              "title": "What",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "what"
+          ],
+          "title": "OrgControlViewDTO",
+          "type": "object"
+        },
         "PermissionLimitsDTO": {
           "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
           "properties": {
@@ -1366,7 +1395,7 @@
           "type": "object"
         }
       },
-      "description": "GET /permissions/asks: one Inbox item per repo, kind and general form,\ngeneralized from its oldest request. ``policy``: the tightest limits\namong its requests (a deny blocks the whole item). ``modes``: what\nPOST /permissions/asks/decide accepts for it.",
+      "description": "GET /permissions/asks: one Inbox item per repo, kind and general form,\ngeneralized from its oldest request. ``policy``: the tightest limits\namong its requests (a deny blocks the whole item). ``modes``: what\nPOST /permissions/asks/decide accepts for it. ``org``: the org control\nthat asks for (or blocks) it, when one does.",
       "properties": {
         "blocked": {
           "default": false,
@@ -1409,6 +1438,17 @@
           },
           "title": "Modes",
           "type": "array"
+        },
+        "org": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrgControlViewDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "repo": {
           "title": "Repo",
@@ -2657,6 +2697,55 @@
     },
     "OrgApprovalPolicyDTO": {
       "$defs": {
+        "OrgControlDTO": {
+          "additionalProperties": false,
+          "description": "team_policy.OrgControl: Block (deny) or Ask for one grouping\n(permission_grants.ORG_GROUPINGS) or one pattern (\"<kind> <match_type> <match>\").",
+          "properties": {
+            "decision": {
+              "enum": [
+                "deny",
+                "ask"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "group": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Group"
+            },
+            "reason": {
+              "default": "",
+              "maxLength": 300,
+              "title": "Reason",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "decision"
+          ],
+          "title": "OrgControlDTO",
+          "type": "object"
+        },
         "OrgGrantPolicyDTO": {
           "additionalProperties": false,
           "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
@@ -2669,6 +2758,14 @@
               "default": false,
               "title": "Allow Persistent",
               "type": "boolean"
+            },
+            "controls": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/OrgControlDTO"
+              },
+              "title": "Controls",
+              "type": "array"
             },
             "deny": {
               "default": [],
@@ -2721,6 +2818,12 @@
               "minimum": 1,
               "title": "Max Uses",
               "type": "integer"
+            },
+            "org_name": {
+              "default": "",
+              "maxLength": 100,
+              "title": "Org Name",
+              "type": "string"
             },
             "overridable": {
               "items": {
@@ -2854,7 +2957,136 @@
       "title": "OrgAssignmentRequestDTO",
       "type": "object"
     },
+    "OrgControlDTO": {
+      "additionalProperties": false,
+      "description": "team_policy.OrgControl: Block (deny) or Ask for one grouping\n(permission_grants.ORG_GROUPINGS) or one pattern (\"<kind> <match_type> <match>\").",
+      "properties": {
+        "decision": {
+          "enum": [
+            "deny",
+            "ask"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "group": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group"
+        },
+        "reason": {
+          "default": "",
+          "maxLength": 300,
+          "title": "Reason",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        }
+      },
+      "required": [
+        "decision"
+      ],
+      "title": "OrgControlDTO",
+      "type": "object"
+    },
+    "OrgControlViewDTO": {
+      "description": "An org control as a member sees it (permission_grants.org_control_view):\nthe org's name, what it covers in plain words, Block (deny) or Ask, and why.",
+      "properties": {
+        "decision": {
+          "default": "ask",
+          "title": "Decision",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "what": {
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "what"
+      ],
+      "title": "OrgControlViewDTO",
+      "type": "object"
+    },
     "OrgGrantPolicyDTO": {
+      "$defs": {
+        "OrgControlDTO": {
+          "additionalProperties": false,
+          "description": "team_policy.OrgControl: Block (deny) or Ask for one grouping\n(permission_grants.ORG_GROUPINGS) or one pattern (\"<kind> <match_type> <match>\").",
+          "properties": {
+            "decision": {
+              "enum": [
+                "deny",
+                "ask"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "group": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Group"
+            },
+            "reason": {
+              "default": "",
+              "maxLength": 300,
+              "title": "Reason",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "decision"
+          ],
+          "title": "OrgControlDTO",
+          "type": "object"
+        }
+      },
       "additionalProperties": false,
       "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
       "properties": {
@@ -2866,6 +3098,14 @@
           "default": false,
           "title": "Allow Persistent",
           "type": "boolean"
+        },
+        "controls": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/OrgControlDTO"
+          },
+          "title": "Controls",
+          "type": "array"
         },
         "deny": {
           "default": [],
@@ -2918,6 +3158,12 @@
           "minimum": 1,
           "title": "Max Uses",
           "type": "integer"
+        },
+        "org_name": {
+          "default": "",
+          "maxLength": 100,
+          "title": "Org Name",
+          "type": "string"
         },
         "overridable": {
           "items": {
@@ -3075,6 +3321,55 @@
           "title": "OrgApprovalPolicyDTO",
           "type": "object"
         },
+        "OrgControlDTO": {
+          "additionalProperties": false,
+          "description": "team_policy.OrgControl: Block (deny) or Ask for one grouping\n(permission_grants.ORG_GROUPINGS) or one pattern (\"<kind> <match_type> <match>\").",
+          "properties": {
+            "decision": {
+              "enum": [
+                "deny",
+                "ask"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "group": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Group"
+            },
+            "reason": {
+              "default": "",
+              "maxLength": 300,
+              "title": "Reason",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "decision"
+          ],
+          "title": "OrgControlDTO",
+          "type": "object"
+        },
         "OrgGrantPolicyDTO": {
           "additionalProperties": false,
           "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
@@ -3087,6 +3382,14 @@
               "default": false,
               "title": "Allow Persistent",
               "type": "boolean"
+            },
+            "controls": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/OrgControlDTO"
+              },
+              "title": "Controls",
+              "type": "array"
             },
             "deny": {
               "default": [],
@@ -3139,6 +3442,12 @@
               "minimum": 1,
               "title": "Max Uses",
               "type": "integer"
+            },
+            "org_name": {
+              "default": "",
+              "maxLength": 100,
+              "title": "Org Name",
+              "type": "string"
             },
             "overridable": {
               "items": {
@@ -3369,6 +3678,55 @@
     },
     "OrgPolicyRequestDTO": {
       "$defs": {
+        "OrgControlDTO": {
+          "additionalProperties": false,
+          "description": "team_policy.OrgControl: Block (deny) or Ask for one grouping\n(permission_grants.ORG_GROUPINGS) or one pattern (\"<kind> <match_type> <match>\").",
+          "properties": {
+            "decision": {
+              "enum": [
+                "deny",
+                "ask"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "group": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Group"
+            },
+            "reason": {
+              "default": "",
+              "maxLength": 300,
+              "title": "Reason",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "decision"
+          ],
+          "title": "OrgControlDTO",
+          "type": "object"
+        },
         "OrgGrantPolicyDTO": {
           "additionalProperties": false,
           "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
@@ -3381,6 +3739,14 @@
               "default": false,
               "title": "Allow Persistent",
               "type": "boolean"
+            },
+            "controls": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/OrgControlDTO"
+              },
+              "title": "Controls",
+              "type": "array"
             },
             "deny": {
               "default": [],
@@ -3433,6 +3799,12 @@
               "minimum": 1,
               "title": "Max Uses",
               "type": "integer"
+            },
+            "org_name": {
+              "default": "",
+              "maxLength": 100,
+              "title": "Org Name",
+              "type": "string"
             },
             "overridable": {
               "items": {
@@ -3876,6 +4248,35 @@
     },
     "PermissionPolicyDTO": {
       "$defs": {
+        "OrgControlViewDTO": {
+          "description": "An org control as a member sees it (permission_grants.org_control_view):\nthe org's name, what it covers in plain words, Block (deny) or Ask, and why.",
+          "properties": {
+            "decision": {
+              "default": "ask",
+              "title": "Decision",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            },
+            "what": {
+              "title": "What",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "what"
+          ],
+          "title": "OrgControlViewDTO",
+          "type": "object"
+        },
         "PermissionExceptionDTO": {
           "description": "Requests a rule doesn't apply to (a deny's exception): matched like a rule.",
           "properties": {
@@ -4239,6 +4640,14 @@
             "$ref": "#/$defs/PermissionGroupDTO"
           },
           "title": "Groups",
+          "type": "array"
+        },
+        "org_controls": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/OrgControlViewDTO"
+          },
+          "title": "Org Controls",
           "type": "array"
         },
         "preset": {

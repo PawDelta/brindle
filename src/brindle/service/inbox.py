@@ -116,6 +116,29 @@ def _org_notices() -> list[InboxItemDTO]:
             for n in notices]
 
 
+ORG_BLOCK_WINDOW = 24 * 3600
+
+
+def _org_blocks(db: DB, repo_root: str | None, now: float | None = None) -> list[InboxItemDTO]:
+    """One calm notice per org Block that stopped an agent in the last day
+    (permission_asks), however many requests it stopped: "Blocked by <org>
+    policy: <reason>", the first line of the agent's denial."""
+    from brindle.permission_grants import ORG_BLOCKED
+
+    since = (time.time() if now is None else now) - ORG_BLOCK_WINDOW
+    rows = db.conn.execute(
+        "SELECT reason, COUNT(*) AS n, MAX(ts) AS last FROM permission_asks WHERE outcome = 'deny' AND ts >= ?"
+        " AND reason LIKE ? AND (? IS NULL OR repo_root = ?) GROUP BY reason ORDER BY last DESC",
+        (since, ORG_BLOCKED + "%", repo_root, repo_root)).fetchall()
+    counts: dict[str, int] = {}
+    for r in rows:
+        head = r["reason"].split("\n", 1)[0]
+        counts[head] = counts.get(head, 0) + r["n"]
+    return [InboxItemDTO(kind="org_blocked", reason=head,
+                         detail=f"{n} request{'s' if n != 1 else ''} stopped today. Agents were told to work around it.")
+            for head, n in counts.items()]
+
+
 def _setup_items() -> list[InboxItemDTO]:
     """Setup problems the app can repair itself (a ``fix`` names the repair)."""
     from brindle import codex_hook
@@ -199,7 +222,7 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
-    return out + _setup_items() + _org_notices()
+    return out + _setup_items() + _org_blocks(db, repo_root) + _org_notices()
 
 
 # -- permission requests ---------------------------------------------------------------------

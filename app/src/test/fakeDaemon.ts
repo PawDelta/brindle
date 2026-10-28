@@ -19,6 +19,7 @@ import type {
   AskGroupDTO,
   AskResultDTO,
   DecisionDTO,
+  OrgControlViewDTO,
   PermissionPolicyDTO,
   PermissionRuleDTO,
   SavedActionDTO,
@@ -175,7 +176,7 @@ export interface DaemonData {
   /* The person's permission store (permissions.Store, GET /permissions):
      the preset, the unmatched setting, every rule and saved action, and
      per-rule prompt counts over the last day. */
-  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }> };
+  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }>; org_controls?: OrgControlViewDTO[] };
   /* GET /permissions/asks: the requests hooks hold, grouped
      (permission_grants.groups). A decision takes its requests out of these
      and out of `inbox` (the hold's answer). */
@@ -1651,6 +1652,7 @@ export class FakeDaemon {
       saved: p.saved.map((s) => ({ ...s, expired: s.expires != null && s.expires <= now })),
       prompt_counts: { ...p.prompts },
       groups: Object.entries(p.groups ?? {}).map(([name, g]) => ({ name, ...g })),
+      org_controls: p.org_controls ?? [],
     };
   }
 

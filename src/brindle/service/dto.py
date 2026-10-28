@@ -43,6 +43,16 @@ class OrgMemberDTO(_DTO):
     policy_role: str | None = None
 
 
+class OrgControlDTO(_DTO):
+    """team_policy.OrgControl: Block (deny) or Ask for one grouping
+    (permission_grants.ORG_GROUPINGS) or one pattern ("<kind> <match_type> <match>")."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    decision: Literal["deny", "ask"]
+    reason: Annotated[str, Field(max_length=300)] = ""
+    group: str | None = None
+    rule: str | None = None
+
+
 class OrgGrantPolicyDTO(_DTO):
     """Account GrantPolicy (account-api 8fd09374); a complete replacement block."""
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -55,6 +65,8 @@ class OrgGrantPolicyDTO(_DTO):
     allow_persistent: StrictBool = False
     lifetimes: list[Literal["session", "time", "forever"]] = ["session", "time"]
     scopes: list[Literal["branch", "remote", "repo", "all"]] = ["branch"]
+    controls: list[OrgControlDTO] = []
+    org_name: Annotated[str, Field(max_length=100)] = ""
 
 
 class OrgApprovalPolicyDTO(_DTO):
@@ -607,6 +619,8 @@ class PermissionPolicyDTO(_DTO):
     saved: list[SavedActionDTO]
     prompt_counts: dict[str, int] = {}
     groups: list[PermissionGroupDTO] = []
+    # What the person's org sets over all of it (locked rows; GET /permissions?repo=).
+    org_controls: list[OrgControlViewDTO] = []
 
 
 class AskScopeDTO(_DTO):
@@ -649,11 +663,21 @@ class AskDTO(_DTO):
     escalation: str = ""
 
 
+class OrgControlViewDTO(_DTO):
+    """An org control as a member sees it (permission_grants.org_control_view):
+    the org's name, what it covers in plain words, Block (deny) or Ask, and why."""
+    name: str
+    what: str
+    decision: str = "ask"
+    reason: str = ""
+
+
 class AskGroupDTO(_DTO):
     """GET /permissions/asks: one Inbox item per repo, kind and general form,
     generalized from its oldest request. ``policy``: the tightest limits
     among its requests (a deny blocks the whole item). ``modes``: what
-    POST /permissions/asks/decide accepts for it."""
+    POST /permissions/asks/decide accepts for it. ``org``: the org control
+    that asks for (or blocks) it, when one does."""
     key: str
     repo: str
     kind: str
@@ -665,6 +689,7 @@ class AskGroupDTO(_DTO):
     rule: str | None = None
     limits: PermissionLimitsDTO | None = None
     modes: list[str] = []
+    org: OrgControlViewDTO | None = None
 
 
 class AskDecisionDTO(_DTO):

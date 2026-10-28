@@ -32,6 +32,8 @@ export interface ApiSchema {
   OrgApprovalPolicyDTO: OrgApprovalPolicyDTO;
   OrgAssignmentDTO: OrgAssignmentDTO;
   OrgAssignmentRequestDTO: OrgAssignmentRequestDTO;
+  OrgControlDTO: OrgControlDTO;
+  OrgControlViewDTO: OrgControlViewDTO;
   OrgGrantPolicyDTO: OrgGrantPolicyDTO;
   OrgIdentityDTO: OrgIdentityDTO;
   OrgMemberDTO: OrgMemberDTO;
@@ -277,7 +279,8 @@ export interface AskDecisionDTO {
  * GET /permissions/asks: one Inbox item per repo, kind and general form,
  * generalized from its oldest request. ``policy``: the tightest limits
  * among its requests (a deny blocks the whole item). ``modes``: what
- * POST /permissions/asks/decide accepts for it.
+ * POST /permissions/asks/decide accepts for it. ``org``: the org control
+ * that asks for (or blocks) it, when one does.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "AskGroupDTO".
@@ -290,10 +293,24 @@ export interface AskGroupDTO {
   kind: string;
   limits?: PermissionLimitsDTO | null;
   modes?: string[];
+  org?: OrgControlViewDTO | null;
   repo: string;
   rule?: string | null;
   scopes: AskScopeDTO[];
   title: string;
+}
+/**
+ * An org control as a member sees it (permission_grants.org_control_view):
+ * the org's name, what it covers in plain words, Block (deny) or Ask, and why.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgControlViewDTO".
+ */
+export interface OrgControlViewDTO {
+  decision?: string;
+  name: string;
+  reason?: string;
+  what: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -500,13 +517,28 @@ export interface OrgApprovalPolicyDTO {
 export interface OrgGrantPolicyDTO {
   allow: boolean;
   allow_persistent?: boolean;
+  controls?: OrgControlDTO[];
   deny?: string[];
   kinds: ("read" | "write" | "edit" | "bash" | "fetch" | "mcp" | "other")[];
   lifetimes?: ("session" | "time" | "forever")[];
   max_minutes: number;
   max_uses: number;
+  org_name?: string;
   overridable: ("git-push" | "env")[];
   scopes?: ("branch" | "remote" | "repo" | "all")[];
+}
+/**
+ * team_policy.OrgControl: Block (deny) or Ask for one grouping
+ * (permission_grants.ORG_GROUPINGS) or one pattern ("<kind> <match_type> <match>").
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgControlDTO".
+ */
+export interface OrgControlDTO {
+  decision: "deny" | "ask";
+  group?: string | null;
+  reason?: string;
+  rule?: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -619,6 +651,7 @@ export interface PermissionGroupDTO {
  */
 export interface PermissionPolicyDTO {
   groups?: PermissionGroupDTO[];
+  org_controls?: OrgControlViewDTO[];
   preset: string | null;
   presets: PermissionPresetDTO[];
   prompt_counts?: {

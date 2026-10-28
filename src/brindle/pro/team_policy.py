@@ -245,6 +245,21 @@ class AgentSetup:
 
 
 @dataclass(frozen=True)
+class OrgControl:
+    """One org control over the members' permission defaults: ``decision``
+    deny (Block) or ask (Ask) for a whole grouping (``group``, a
+    brindle.permission_grants.ORG_GROUPINGS id: a command family, network
+    fetches, deploys, package installs, unchecked commands) or for one
+    pattern (``rule``: "<kind> <match_type> <match>", a rule kind and a
+    match type or named matcher). ``reason`` is shown to the member and the
+    agent, in plain words."""
+    decision: str
+    reason: str = ""
+    group: str | None = None
+    rule: str | None = None
+
+
+@dataclass(frozen=True)
 class GrantPolicy:
     """Org policy ``permission_grants``: which one-time and time-limited
     permission grants a member may give their workers from the app
@@ -260,10 +275,17 @@ class GrantPolicy:
     allow_persistent: bool = False
     lifetimes: tuple[str, ...] = ("session", "time")
     scopes: tuple[str, ...] = ("branch",)
+    # Block or Ask over whole groupings and patterns, above every member's
+    # preset, rules and saved approvals (permission_grants.org_decision).
+    controls: tuple[OrgControl, ...] = ()
+    org_name: str = ""                   # what members see the org called ("" : "your organization")
 
 
 GRANT_KEYS = ("allow", "kinds", "overridable", "max_minutes", "max_uses", "deny", "allow_persistent",
-              "lifetimes", "scopes")
+              "lifetimes", "scopes", "controls", "org_name")
+CONTROL_DECISIONS = ("deny", "ask")
+MAX_CONTROLS = 64
+MAX_CONTROL_REASON = 300
 GRANT_ACTIONS = ("git-push", "env")
 GRANT_LIFETIMES = ("session", "time", "forever")
 GRANT_SCOPES = ("branch", "remote", "repo", "all")
@@ -506,7 +528,7 @@ def _grants(p: dict) -> dict:
     g = p.get("permission_grants")
     if g is None:
         return {"permission_grants": None}
-    required = set(GRANT_KEYS) - {"deny", "allow_persistent", "lifetimes", "scopes"}
+    required = set(GRANT_KEYS) - {"deny", "allow_persistent", "lifetimes", "scopes", "controls", "org_name"}
     if not isinstance(g, dict) or not required <= set(g) or not set(g) <= set(GRANT_KEYS):
         raise PolicyUnavailable("malformed permission_grants")
 
@@ -533,12 +555,42 @@ def _grants(p: dict) -> dict:
         raise PolicyUnavailable("malformed permission_grants.allow")
     if not isinstance(g.get("allow_persistent", False), bool):
         raise PolicyUnavailable("malformed permission_grants.allow_persistent")
+    org_name = g.get("org_name") or ""
+    if not isinstance(org_name, str) or len(org_name) > 100:
+        raise PolicyUnavailable("malformed permission_grants.org_name")
     return {"permission_grants": GrantPolicy(
         allow=g["allow"], kinds=names("kinds", KINDS), overridable=names("overridable", GRANT_ACTIONS),
         max_minutes=count("max_minutes", MAX_GRANT_MINUTES), max_uses=count("max_uses", MAX_GRANT_USES),
         deny=tuple(deny), allow_persistent=g.get("allow_persistent", False),
         lifetimes=names("lifetimes", GRANT_LIFETIMES, ["session", "time"]),
-        scopes=names("scopes", GRANT_SCOPES, ["branch"]))}
+        scopes=names("scopes", GRANT_SCOPES, ["branch"]), controls=_controls(g.get("controls") or []),
+        org_name=org_name.strip())}
+
+
+def _controls(v) -> tuple[OrgControl, ...]:
+    """``permission_grants.controls``, strictly (fail closed): each names
+    exactly one grouping or one pattern rule, with deny or ask."""
+    from brindle.permission_grants import ORG_GROUPINGS
+    from brindle.permissions import BUILTIN_MATCHERS, KINDS, MATCH_TYPES, push_pattern
+
+    if not isinstance(v, list) or len(v) > MAX_CONTROLS:
+        raise PolicyUnavailable("malformed permission_grants.controls")
+    out = []
+    for c in v:
+        if not isinstance(c, dict) or not set(c) <= {"decision", "reason", "group", "rule"}:
+            raise PolicyUnavailable("malformed permission_grants.controls")
+        group, rule, reason = c.get("group"), c.get("rule"), c.get("reason") or ""
+        if (c.get("decision") not in CONTROL_DECISIONS or (group is None) == (rule is None)
+                or not isinstance(reason, str) or len(reason) > MAX_CONTROL_REASON
+                or group is not None and group not in ORG_GROUPINGS):
+            raise PolicyUnavailable("malformed permission_grants.controls")
+        if rule is not None:
+            parts = rule.split(None, 2) if isinstance(rule, str) else []
+            if (len(parts) != 3 or parts[0] not in KINDS or parts[1] not in (*MATCH_TYPES, *BUILTIN_MATCHERS)
+                    or parts[1] == "push" and push_pattern(parts[2]) is None):
+                raise PolicyUnavailable("malformed permission_grants.controls")
+        out.append(OrgControl(c["decision"], reason.strip(), group, rule))
+    return tuple(out)
 
 
 def _org_key(pc: dict) -> tuple[str | None, tuple[str, ...] | None]:

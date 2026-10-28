@@ -33,7 +33,7 @@ import os
 import re
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlsplit
 
 from brindle import permissions
@@ -157,6 +157,30 @@ WRITES = "files/write-worktree"
 FAMILY_LABELS = {"git/readonly": "read-only git commands", READ_FILTER: "read-only shell commands",
                  TESTS: "test runs", QUERIES: "package and GitHub queries", LOCAL_GIT: "local git changes",
                  INSTALL: "package installs into the project", WRITES: "file changes in the checkout"}
+# What an org may Block or Ask for as a whole (team_policy.OrgControl.group,
+# org_decision): each family, commands brindle can't check, and three
+# groupings that cut across them.
+UNCHECKED = "shell/unchecked"
+NETWORK = "network/fetch"
+DEPLOY = "deploy/trigger"
+PACKAGES = "packages/install"
+ORG_GROUPINGS = {**FAMILY_LABELS, UNCHECKED: "unchecked commands", NETWORK: "network fetches",
+                 DEPLOY: "deploys, releases and workflow runs", PACKAGES: "package installs"}
+# program -> the words that make one of its commands a deploy or a workflow
+# trigger, wherever they come in it (aws cloudformation deploy, gcloud run
+# deploy); gh's by its first two words (DEPLOY_GH).
+DEPLOY_VERBS = {
+    "aws": {"deploy", "create-deployment", "create-stack", "update-stack", "update-service",
+            "update-function-code", "publish-version", "start-pipeline-execution"},
+    "gcloud": {"deploy"}, "az": {"deploy", "deployment"}, "terraform": {"apply", "destroy"},
+    "tofu": {"apply", "destroy"}, "pulumi": {"up", "destroy"}, "kubectl": {"apply", "rollout", "replace"},
+    "helm": {"install", "upgrade", "rollback"}, "fly": {"deploy"}, "flyctl": {"deploy"},
+    "vercel": {"deploy", "--prod"}, "netlify": {"deploy"}, "firebase": {"deploy"}, "cdk": {"deploy", "destroy"},
+    "sam": {"deploy"}, "serverless": {"deploy"}, "sls": {"deploy"}, "wrangler": {"deploy", "publish"},
+    "heroku": {"releases:rollback"}, "eb": {"deploy"},
+}
+DEPLOY_GH = (("workflow", "run"), ("run", "rerun"), ("release", "create"), ("release", "upload"),
+             ("release", "edit"), ("release", "delete"))
 # git subcommands that change only the local repository -> (long options never in the family,
 # short ones, the short options that take a value). A long option counts however git lets it be
 # abbreviated (--exe), a short one anywhere in a cluster before a value (-x"cmd", -tf). What
@@ -782,6 +806,12 @@ class OrgLimits:
     deny: tuple[Rule, ...] = ()
     why: str = ""                 # why no saved allow applies
     owner: str = "local"          # "org:<id>": whose approvals these are (_owner_now)
+    controls: tuple = ()          # team_policy.OrgControl: Block or Ask over groupings and patterns
+    org_name: str = ""
+
+    @property
+    def name(self) -> str:
+        return self.org_name or "your organization"
 
 
 def org_rule(spec: str) -> Rule:
@@ -812,13 +842,16 @@ def org_limits(repo_root: str | None) -> OrgLimits | None:
     g = p.permission_grants
     deny = tuple(org_rule(s) for s in g.deny) if g else ()
     owner = f"org:{p.org_id}"
+    controls, org_name = (tuple(g.controls), g.org_name) if g else ((), "")
     blocked = status.block_reason(p)
     if blocked:
-        return OrgLimits(False, deny=deny, why=f"org {p.org_id}: {blocked}", owner=owner)
+        return OrgLimits(False, deny=deny, why=f"org {p.org_id}: {blocked}", owner=owner, controls=controls,
+                         org_name=org_name)
     if g is None:
         return OrgLimits(False, why=f"org {p.org_id}'s policy sets no permission_grants", owner=owner)
     return OrgLimits(g.allow, tuple(g.kinds), g.max_minutes, tuple(g.lifetimes), tuple(g.scopes),
-                     g.allow_persistent, deny, "" if g.allow else f"org {p.org_id} allows no saved approvals", owner)
+                     g.allow_persistent, deny, "" if g.allow else f"org {p.org_id} allows no saved approvals", owner,
+                     controls, org_name)
 
 
 def org_denies(repo_root: str | None) -> list[Rule]:
@@ -843,6 +876,277 @@ def org_refuses(lim: OrgLimits | None, kind: str, life: str, minutes: float | No
     if ORG_SCOPES.get(level or scope, "all") not in lim.scopes:
         return "wider than the org allows"
     return None
+
+
+# -- the org's controls --------------------------------------------------------------------------
+#
+# A Team org's ``permission_grants.controls`` Block (deny) or Ask over a
+# whole grouping (ORG_GROUPINGS) or one pattern, ahead of everything a member
+# has: their preset, rules, capability groups and saved approvals
+# (permissions.decide checks org_decision first). A Block is final; an Ask
+# may be settled only by a saved approval the org's limits allow.
+
+ORG_GROUP = "org-group"          # an org grouping's rule's match_type (its match: the ORG_GROUPINGS id)
+ORG_BLOCKED = "Blocked by "      # how an org Block's reason begins (the Inbox groups them by its first line)
+
+
+# What only starts another program (env FOO=1 npm ..., sudo --user root npm ...): an org control looks past it.
+WRAPPERS = frozenset({"env", "sudo", "doas", "command", "nohup", "time", "nice", "exec", "ionice", "stdbuf"})
+
+
+def _plain(word: str) -> str:
+    """A program's plain name: .venv/bin/pip3.12 is pip, python3 is python."""
+    name = os.path.basename(word)
+    return re.sub(r"\d+(\.\d+)*$", "", name) or name
+
+
+def _after_options(words: list[str], i: int) -> list[int]:
+    """Where what follows the options from ``words[i]`` may begin: the first
+    word that isn't one, and, while the option before it may take that word
+    as its value (it has no =value), each such reading further on. Which of
+    a tool's options take a value is the tool's to say; every reading is kept."""
+    out = []
+    while True:
+        start = i
+        while i < len(words) and words[i].startswith("-") and words[i] not in ("-", "--"):
+            i += 1
+        if i < len(words) and words[i] == "--":
+            return [*out, i + 1] if i + 1 < len(words) else out
+        if i >= len(words):
+            return out
+        out.append(i)
+        before = words[i - 1] if i > start else ""
+        if not (before.startswith("-") and "=" not in before):
+            return out
+        i += 1
+
+
+def _python_module(words: list[str]) -> int | None:
+    """Where ``python [options] -m <module>`` names its module: the index of the -m, or None."""
+    for j, word in enumerate(words[1:], 1):
+        if word == "-c" or not word.startswith("-") and not words[j - 1].startswith("-"):
+            return None    # code, or a script: whatever follows is its own
+        if word.startswith("-m"):
+            return j
+    return None
+
+
+def _operations(words: list[str]) -> list[list[str]]:
+    """What a simple command may do, for an org control's sake, as every
+    reading of it: [program, *what follows], past assignments and wrappers
+    (env, sudo --user root ...), ``python [options] -m <module>`` as the
+    module, a versioned or pathed program by its plain name (_plain); first
+    with its options as written (vercel --prod), then with each way its
+    options before the subcommand may end (npm --location global install:
+    npm install). A superset of what the families read: a Block must see
+    what an allow would not, so no reading is ever dropped: each command
+    a wrapper may start is read once, however many wrappers or options
+    lead to it."""
+    out: dict[tuple, None] = {}
+    todo, seen = [tuple(words)], set()
+    while todo:
+        words = todo.pop()
+        while words and permissions._ASSIGNMENT.match(words[0]):
+            words = words[1:]
+        if not words or words in seen:
+            continue
+        seen.add(words)
+        program = _plain(words[0])
+        if program in WRAPPERS:
+            todo += [words[j:] for j in _after_options(list(words), 1)]
+        elif program == "python" and (k := _python_module(list(words))) is not None:
+            module = words[k][2:] or (words[k + 1] if k + 1 < len(words) else "")
+            if module:
+                todo.append((module, *(words[k + 1:] if words[k][2:] else words[k + 2:])))
+        else:
+            out[(program, *words[1:])] = None
+            out.update(((program, *words[j:]), None) for j in _after_options(list(words), 1))
+    return [list(r) for r in out]
+
+
+def _starts(op: list[str], prefix: tuple) -> bool:
+    return tuple(op[:len(prefix)]) == tuple(prefix)
+
+
+def _loose_families(op: list[str]) -> set[str]:
+    """The families a reading of a command (_operations) may be of, by its program and
+    subcommand alone: whatever its options or where it runs."""
+    if not op:
+        return set()
+    found = set()
+    if any(_starts(op, p) for p in INSTALLS) or _starts(op, ("pip", "install")):
+        found.add(INSTALL)
+    if op[0] == "git" and len(op) > 1:
+        found |= {LOCAL_GIT} if op[1] in GIT_LOCAL else set()
+        found |= {"git/readonly"} if op[1] in permissions.READONLY_GIT else set()
+    if any(_starts(op, p) for p in (*PYTEST, *SCRIPT_TESTS, ("pytest",))):
+        found.add(TESTS)
+    if any(_starts(op, p) for p in DEV_QUERIES):
+        found.add(QUERIES)
+    if op[0] in permissions.READONLY_PROGRAMS:
+        found.add(READ_FILTER)
+    if op[0] in {*COPIERS, *REMOVE_FLAGS, "mkdir", "touch", "tee", "truncate"} or op[0] == "sed" and any(
+            w.startswith(("-i", "--in-place")) for w in op[1:]):
+        found.add(WRITES)
+    return found
+
+
+def _installer(op: list[str]) -> bool:
+    """Any package manager's install or add (permission_groups.INSTALLERS), anywhere."""
+    from brindle import permission_groups
+
+    return bool(op) and any(op[1:1 + len(sub.split())] == sub.split()
+                            for sub in permission_groups.INSTALLERS.get(op[0], ()))
+
+
+def _deploys(op: list[str]) -> bool:
+    program = op[0] if op else ""
+    if program == "gh":
+        return tuple(op[1:3]) in DEPLOY_GH
+    return bool(DEPLOY_VERBS.get(program, set()) & set(op[1:]))
+
+
+def _command_words(req: Request) -> list[list[str]]:
+    """Each simple command ``req``'s shell command may run, read as
+    permission_groups.classify does: best effort where it can't be read, so
+    no part hides from a Block."""
+    command = (req.command or "").strip()
+    if req.kind != "bash" or not command:
+        return []
+    read = permissions.shell_parts(req)
+    if read is not None:
+        return [p.words for p in read]
+    return (permissions.compound_parts(command) or permissions._restriction_parts(command)
+            or permissions._restriction_parts(command, word_pattern=permissions.RESTRICTION_WORD)
+            or permissions._segments(command))
+
+
+def _readings(req: Request) -> list[list[str]]:
+    """Every reading (_operations) of every simple command ``req`` may run."""
+    return [op for words in _command_words(req) for op in _operations(words)]
+
+
+def _in_grouping(group: str, req: Request, rules: list[Rule], checks: list[str] | None) -> bool:
+    """Whether ``req`` is in an org grouping: as the families read it, or by
+    any reading of its commands (_operations), so an assignment, a wrapper or
+    a tool's options never take it out."""
+    from brindle import permission_groups
+
+    if group in FAMILY_LABELS:
+        if req.kind in ("write", "edit"):
+            return group == WRITES and permissions._in_worktree(req)
+        return req.kind == "bash" and (group in (_part_families(req, rules) or [])
+                                       or any(group in _loose_families(op) for op in _readings(req)))
+    if group == UNCHECKED:
+        return (req.kind == "bash" and bool(req.command) and simple_argv(req.command) is None
+                and permissions.shell_parts(req) is None)
+    if group == NETWORK:
+        return (("network", "fetch") in permission_groups.classify(req, rules, checks)
+                or any(op[0] in permission_groups.FETCHERS for op in _readings(req)))
+    if group == PACKAGES:
+        return (("shell", "install") in permission_groups.classify(req, rules, checks)
+                or any(_installer(op) for op in _readings(req)))
+    if group == DEPLOY:
+        return any(_deploys(op) for op in _readings(req))
+    return False
+
+
+def control_rule(c, kind: str) -> Rule:
+    """An org control as the rule a Decision names: its pattern's, or for a grouping one of ORG_GROUP."""
+    if c.rule is not None:
+        rkind, match_type, match = c.rule.split(None, 2)
+        return Rule(rkind, match, match_type, c.decision, "org", label=c.reason)
+    return Rule(kind, c.group, ORG_GROUP, c.decision, "org", label=c.reason)
+
+
+def control_label(c) -> str:
+    """What an org control covers, in plain words."""
+    if c.group is not None:
+        return ORG_GROUPINGS[c.group]
+    kind, match_type, match = c.rule.split(None, 2)
+    if match_type in permissions.BUILTIN_MATCHERS:
+        return match
+    how = {"exact": "that are exactly", "prefix": "starting with", "glob": "matching"}[match_type]
+    return f"{KIND_WORDS[kind]} {how} {match.strip()}"
+
+
+KIND_WORDS = {"bash": "commands", "read": "file reads", "write": "file writes", "edit": "file edits",
+              "fetch": "URL fetches", "mcp": "MCP tools", "other": "tools"}
+
+
+def _control_matches(c, req: Request, rules: list[Rule], checks: list[str] | None) -> Decision | None:
+    """The control's Decision when it covers ``req``: its own decision, or for
+    a pattern a part of a command brindle can't read may hide, an ask."""
+    if c.group is not None:
+        return Decision(c.decision, "", control_rule(c, req.kind)) if _in_grouping(c.group, req, rules, checks) else None
+    rule = control_rule(c, req.kind)
+    # Each part as written and as the operation it is (FOO=1 npm --prefix web install x: npm install x).
+    spelled = [" ".join(w) for words in _command_words(req) for w in (words, *_operations(words)) if w]
+    if permissions.rule_matches(rule, req, checks) or any(
+            permissions.rule_matches(rule, replace(req, command=command), checks) for command in spelled):
+        return Decision(c.decision, "", rule)
+    found = permissions._restriction_in_parts(req, checks=checks, rules=[rule])
+    if found is not None and found.rule == rule:
+        return Decision(c.decision, "", rule)
+    if found is not None:    # it may be in there, where brindle can't read: never let it run unasked
+        return Decision("ask", "", replace(rule, decision="ask", id=""))
+    return None
+
+
+def org_reason(lim: OrgLimits, c, decision: str) -> str:
+    what = control_label(c)
+    if decision == "deny":
+        why = c.reason or f"the organization blocks {what}"
+        return (f"{ORG_BLOCKED}{lim.name} policy: {why}\n"
+                f"Your organization's rule for {what} blocks this, and no approval lifts it. "
+                "Running it again gets the same answer: do the task another way, or tell the person an "
+                "organization admin has to change that rule.")
+    why = c.reason or f"the organization asks for approval of {what}"
+    return f"Your organization asks for approval ({lim.name} policy, {what}): {why}"
+
+
+def org_decision(req: Request, rules: list[Rule], checks: list[str] | None = None) -> Decision | None:
+    """What the org's controls say about ``req``: the first Block that covers
+    it, else the first Ask, as a Decision whose rule is the org's (source
+    "org"), or None (no Team org, no controls, or none covers it)."""
+    lim = org_limits(req.repo_root or None)
+    if lim is None or not lim.controls:
+        return None
+    asked = None
+    for c in lim.controls:
+        found = _control_matches(c, req, rules, checks)
+        if found is None:
+            continue
+        rule = found.rule
+        if found.decision == "deny":
+            return Decision("deny", org_reason(lim, c, "deny"), rule)
+        if asked is None:
+            asked = Decision("ask", org_reason(lim, c, "ask"),
+                             replace(rule, decision="ask", id="", limits=org_ask_limits(lim), person_only=True))
+    return asked
+
+
+def org_ask_limits(lim: OrgLimits) -> dict:
+    """How far a saved approval of an org Ask may reach: never until revoked
+    (a member's lasting grant never answers it), for the org's longest timed
+    approval, else the session, else once at a time (org_refuses checks the rest)."""
+    if lim.allow and "time" in lim.lifetimes:
+        return {"life": "time", "minutes": lim.max_minutes}
+    if lim.allow and "session" in lim.lifetimes:
+        return {"life": "session"}
+    return {"life": "once"}
+
+
+def org_control_view(lim: OrgLimits | None, rule: Rule | None) -> dict | None:
+    """``{"name", "reason", "what"}`` for a Decision's org rule (the Inbox's
+    label), or None when it isn't one of the org's controls."""
+    if lim is None or rule is None or rule.source != "org":
+        return None
+    for c in lim.controls:
+        if (c.group is not None and rule.match_type == ORG_GROUP and c.group == rule.match
+                or c.rule is not None and c.rule.split(None, 2) == [rule.kind, rule.match_type, rule.match]):
+            return {"name": lim.name, "reason": c.reason, "what": control_label(c)}
+    return {"name": lim.name, "reason": "", "what": rule.describe()}
 
 
 def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session: str | None = None,
@@ -1194,6 +1498,9 @@ def unblock_denied(db, repo_root: str | None = None, forever: bool = False) -> d
         req = a.request
         key = ask_key(req) if req.kind != "bash" else " ".join((req.command or "").split())
         kind = req.kind
+        if a.rule is not None and a.rule.source == "org":
+            locked.append(a)         # the org's Block: nothing a member does lifts it
+            continue
         for r in deny_rules_for(a, permissions.all_rules(a.repo_root)):
             if r.id not in store_ids:
                 locked.append(a)     # the repo's own deny, or a profile's: not the person's to narrow

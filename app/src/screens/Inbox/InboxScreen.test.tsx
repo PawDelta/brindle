@@ -12,6 +12,7 @@ import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
 import { releaseNotesUrl, type AppUpdateStatus, type AppUpdates } from "../../api/tauri";
 import { watchAppUpdates } from "../../store/appUpdates";
+import { Permissions } from "../Settings/Permissions";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
 import { watchInbox } from "./notify";
 
@@ -300,6 +301,38 @@ describe("inbox", () => {
     expect(daemon.data.policy.saved).toEqual([]);
     expect(daemon.data.policy.groups?.shell.subcategories).toEqual({ install: "allow" });
     sync.stop();
+  });
+
+  it("org policy shown to member: an org Ask is labelled with the org and its reason, saves only what the org allows; a Block is one calm notice; Settings shows locked rows", async () => {
+    const org = { name: "Acme", what: "local git changes", decision: "ask", reason: "commits are audited" };
+    const commits: AskGroupDTO = {
+      key: `${REPO}|bash|family: git/local`, repo: REPO, kind: "bash", title: "Allow local git changes?", general: scopesFor("bash", "git add -A")[0],
+      scopes: scopesFor("bash", "git add -A"), blocked: false, rule: "org-git-local", limits: { life: "time", minutes: 15 }, modes: ["once", "deny", "always-deny", "timed"], org,
+      items: [{ ...ask("w1", "req-1", "bash", "git add -A", 60, "org-git-local"), limits: { life: "time", minutes: 15 } }],
+    };
+    const blocked: InboxItemDTO = { kind: "org_blocked", reason: "Blocked by Acme policy: installs go through platform review", detail: "3 requests stopped today. Agents were told to work around it." };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, blocked], asks: [commits] });
+    daemon.data.policy.org_controls = [org, { name: "Acme", what: "package installs", decision: "deny", reason: "installs go through platform review" }];
+    const { sync } = mount(daemon);
+    const item = await screen.findByRole("article", { name: "Allow local git changes?" });
+    const why = within(item).getByTestId("org-why");
+    expect([why.dataset.org, why.dataset.reason, why.dataset.setting]).toEqual(["Acme", "commits are audited", "ask"]);
+    // Offered: what the org allows (no lasting save), and no way into the member's own rules.
+    expect(within(item).queryByRole("button", { name: /rule/ })).toBeNull();
+    fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
+    expect(within(item).getAllByRole("menuitem")).toHaveLength(1);   // a timed approval, its only save
+    expect(within(item).getByRole("button", { name: "Allow once" })).toBeTruthy();
+    // A Block: one quiet notice in the org's group, however many requests it stopped.
+    expect(document.querySelectorAll('[data-kind="org_blocked"]')).toHaveLength(1);
+    expect(screen.getByRole("region", { name: "Your org" }).contains(card("org_blocked"))).toBe(true);
+    sync.stop();
+    cleanup();
+
+    render(<Permissions client={daemon.client()} />);
+    const rows = [...(await screen.findByTestId("org-controls")).querySelectorAll<HTMLElement>("[data-locked]")];
+    expect(rows.map((r) => [r.dataset.org, r.dataset.what, r.dataset.setting, r.dataset.reason])).toEqual([
+      ["Acme", "local git changes", "ask", "commits are audited"], ["Acme", "package installs", "deny", "installs go through platform review"]]);
+    expect(rows.flatMap((r) => [...r.querySelectorAll("button, input, select")])).toEqual([]);   // locked: nothing to change
   });
 
   it("groups a closed worker's running child under its session, as the sidebar does", async () => {

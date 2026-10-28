@@ -23,8 +23,11 @@ it("reads nothing until opened", async () => {
 });
 
 it("edits and clears a constructor role without reading inherited object properties", async () => {
+  // The org's rules: a grouping, a push (the push matcher) and a pattern.
+  const controls = [{ decision: "ask", group: "git/local", reason: "audited" },
+    { decision: "deny", rule: "bash push * → main", reason: "main is protected" }, { decision: "ask", rule: "bash prefix npm publish", reason: "" }];
   const grant = { allow: true, kinds: ["bash"], overridable: [], max_minutes: 60, max_uses: 20,
-    deny: [], allow_persistent: false, lifetimes: ["session", "time"], scopes: ["branch"] };
+    deny: [], allow_persistent: false, lifetimes: ["session", "time"], scopes: ["branch"], controls, org_name: "Acme" };
   const state = { identity: { sub: "actor", org_id: "org", role: "admin", policy_role: null },
     roles: [{ name: "constructor", builtin: false, permissions: [], holders: [] }], members: [],
     policy: { version: 3, permission_grants: grant, roles: {} as Record<string, unknown> },
@@ -62,8 +65,13 @@ it("edits and clears a constructor role without reading inherited object propert
   selectRole(/^Organization default$/); click("Reload policy and keep drafts");
   await waitFor(() => expect(screen.queryByLabelText("Assignment roles")).toBeNull());
   expect(screen.getByRole("button", { name: "Save approval limits" })).toHaveProperty("disabled", false);
-  change("Maximum uses", "9"); click("Save approval limits");
+  change("Maximum uses", "9");
+  // The rule editor's own matchers: a pattern becomes a named matcher, the push and the grouping stay as they were.
+  fireEvent.change(within(screen.getAllByTestId("org-pattern")[1]).getByLabelText("Match"), { target: { value: "git-force" } });
+  click("Save approval limits");
   await waitFor(() => expect(state.policy.permission_grants.max_uses).toBe(9));
+  expect(state.policy.permission_grants.controls).toEqual([controls[0], controls[1],
+    { decision: "ask", rule: "bash git-force a git command with a force flag, or a push that forces or deletes a branch", reason: "" }]);
   // A rejected field can be corrected and saved again; a server without the
   // scoped save stops further saves until a reload.
   refusal = { code: "invalid_request", message: "The account rejected the approval limits (permission_grants)." };
