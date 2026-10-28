@@ -798,7 +798,7 @@ class _FakeCLI:
         return False
 
 
-@pytest.mark.parametrize("case", ["api_key", "bedrock", "org_refuses", "org_route_wins", "opencode_azure",
+@pytest.mark.parametrize("case", ["api_key", "bedrock", "foundry", "org_refuses", "org_route_wins", "opencode_azure",
                                   "concurrent", "options"])
 def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_org(
         db, world, tmp_path, monkeypatch, case):
@@ -843,6 +843,23 @@ def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_o
         done = [e["payload"] for e in bus.tail(db, kinds=("job.done",))]
         assert [d["result"]["result"] for d in done] == ["waiting", "signed in"] and done[-1]["job"] == job["job"]
         assert any(e["payload"]["text"].startswith("Open https://device") for e in bus.tail(db, kinds=("job.progress",)))
+    elif case == "foundry":
+        # An endpoint inherited for an older resource: the chosen resource is the only one the pane sees.
+        settings = {"ANTHROPIC_FOUNDRY_RESOURCE": "new-resource", "AZURE_TENANT_ID": "tenant-1"}
+        real_status = cloud_login.status     # not signed in to the Azure CLI yet
+        monkeypatch.setattr(cloud_login, "status", lambda *a, run=None, **kw: real_status(
+            *a, run=lambda argv, **_: subprocess.CompletedProcess(argv, 1, "", "Please run 'az login'"), **kw))
+        code, reply = _send("PUT", path, {"method": "cloud", "cloud": "foundry", "settings": settings})
+        assert code == 200 and reply["login"]["valid"] is False
+        monkeypatch.setenv("ANTHROPIC_FOUNDRY_BASE_URL", "https://old-resource.services.ai.azure.com/anthropic")
+        monkeypatch.setattr(tmux, "inherited_env", lambda *a: dict(os.environ))
+        env = agents._effective_window_env(db.get_agent("wk"), db.get_workspace("w-1"))
+        assert env["ANTHROPIC_FOUNDRY_RESOURCE"] == "new-resource" and not env.get("ANTHROPIC_FOUNDRY_BASE_URL")
+        assert cloud_login.provider_from_env(env) == "foundry"
+        monkeypatch.setattr(_FakeCLI, "on_run", staticmethod(lambda argv, env: ran.append(argv) or []))
+        assert _send("POST", "/v1/providers/claude/cloud-sign-in")[0] == 202
+        assert ran == [["az", "login", "--tenant", "tenant-1"]]
+        assert bus.tail(db, kinds=("job.done",))[-1]["payload"]["result"]["result"] == "signed in"
     elif case == "org_refuses":
         monkeypatch.setattr(managed_models, "current", lambda repo: managed_models.Managed("acme", None, True))
         code, reply = _send("PUT", path, {"method": "api_key"})
@@ -884,8 +901,24 @@ def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_o
         assert cloud_login.azure_connected({**oc.env, **cloud_login.profile_env(oc, oc.env)})
     elif case == "concurrent":
         # Codex's choice is saved while Claude's is being written: both are kept.
-        real_read, real_refusal, others = config._read_json, connections.refusal, []
+        real_read, real_refusal, others, codex = config._read_json, connections.refusal, [], []
         state = {"armed": False, "fired": False}
+        # Codex's PUT got as far as it can while Claude's is between reading and writing:
+        # waiting on the config writer's lock, or (unserialized) all the way through.
+        progressed = threading.Event()
+
+        class Writer:
+            def __init__(self):
+                self.lock = threading.Lock()
+
+            def __enter__(self):
+                if not self.lock.acquire(blocking=False):
+                    progressed.set()
+                    self.lock.acquire()
+
+            def __exit__(self, *exc):
+                self.lock.release()
+        monkeypatch.setattr(config, "_USER_WRITE", Writer())
         monkeypatch.setattr(connections, "refusal", lambda *a, **kw: state.update(armed=True) or real_refusal(*a, **kw))
 
         def read(p, *rest):
@@ -893,16 +926,16 @@ def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_o
             data = real_read(p, *rest)
             if state["armed"] and not state["fired"] and Path(p) == config.user_config_path():
                 state["fired"] = True
-                t = threading.Thread(target=lambda: _send("PUT", "/v1/providers/codex/connection",
-                                                          {"method": "sign_in"}))
+                t = threading.Thread(target=lambda: codex.append(_send(
+                    "PUT", "/v1/providers/codex/connection", {"method": "sign_in"})) or progressed.set())
                 t.start()
-                t.join(0.5)     # it must wait for Claude's write rather than be overwritten by it
+                progressed.wait()
                 others.append(t)
             return data
         monkeypatch.setattr(config, "_read_json", read)
         assert _send("PUT", path, {"method": "api_key"})[0] == 200
         others[0].join()
-        assert set(config.user_settings()[connections.KEY]) == {"claude", "codex"}
+        assert codex[0][0] == 200 and set(config.user_settings()[connections.KEY]) == {"claude", "codex"}
     else:
         aws.write_text("[profile work-sso]\nsso_session = corp\nregion = us-east-1\n[default]\nregion = eu-west-1\n")
         code, reply = _send("GET", "/v1/cloud/options")

@@ -70,15 +70,21 @@ def saved(provider: str) -> dict:
     return entry if isinstance(entry, dict) and entry.get("method") in METHODS else {}
 
 
+# Claude Code's endpoint overrides: an inherited one would send a chosen
+# route's calls elsewhere (Foundry takes a base URL or a resource, never both).
+CLAUDE_ENDPOINTS = ("ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_FOUNDRY_BASE_URL")
+
+
 def _selectors(provider: str, method: str, route: str | None) -> dict[str, str]:
-    """Blanks for the inherited variables that would pick another route than
-    the chosen one (a Claude cloud switch, a gateway under sign-in): the
-    choice, not whatever the shell or a saved company env exported, decides."""
+    """Blanks for the inherited variables that would pick another route or
+    endpoint than the chosen one (a Claude cloud switch, a cloud endpoint, a
+    gateway under sign-in or a cloud): the choice, not whatever the shell or
+    a saved company env exported, decides. An API key keeps its gateway."""
     if provider != "claude":
         return {}
     keep = ROUTES["claude"][route]["flag"] if route else {}
-    blanks = {flag: "" for flag in cloud_login._FLAGS.values() if flag not in keep}
-    if method == "sign_in":
+    blanks = {flag: "" for flag in (*cloud_login._FLAGS.values(), *CLAUDE_ENDPOINTS) if flag not in keep}
+    if method != "api_key":
         blanks["ANTHROPIC_BASE_URL"] = ""
     return blanks
 

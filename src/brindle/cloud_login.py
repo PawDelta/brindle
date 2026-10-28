@@ -191,6 +191,9 @@ def login_command(env: Mapping[str, str]) -> list[str] | None:
         project = (full.get("GOOGLE_CLOUD_PROJECT") if full.get("BRINDLE_CLOUD_ROUTE") == "vertex"
                    else full.get("ANTHROPIC_VERTEX_PROJECT_ID"))
         return ["gcloud", "auth", "application-default", "login", *(["--project", project] if project else [])]
+    if route == "foundry" and not (full.get("ANTHROPIC_FOUNDRY_API_KEY") or full.get("AZURE_FEDERATED_TOKEN_FILE")):
+        # Claude on Foundry signs in with the Azure CLI's login (in AZURE_CONFIG_DIR).
+        return azure_login_command(full)
     if route == "azure":
         from brindle import opencode
 
