@@ -8,7 +8,7 @@ import { hunksOf, newSide, splice, type FileDiff, type Hunk } from "../Branch/pa
 import { hunkMatches, type SessionDiffState } from "./review";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const refusal = (e: unknown) => (e instanceof DaemonError && (e.code === "stale" || e.code === "busy") ? `${e.code === "stale" ? "Stale" : "Busy"}: ${e.message}` : message(e));
+export const refusal = (e: unknown) => (e instanceof DaemonError && (e.code === "stale" || e.code === "busy") ? `${e.code === "stale" ? "Stale" : "Busy"}: ${e.message}` : message(e));
 
 const STATUS_MARK: Record<FileDiff["status"], string> = { added: "A", deleted: "D", renamed: "R", modified: "M" };
 
@@ -177,7 +177,10 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-s1">
           <div className="flex flex-wrap items-center gap-s2">
-            <span className={`${label} flex-1`}>{files.length} {files.length === 1 ? "file" : "files"} changed against {diff.base}</span>
+            <span className={`${label} flex-1`} data-testid="changes-summary">
+              {files.length} {files.length === 1 ? "file" : "files"} changed against {diff.base} ·{" "}
+              <span className={mono}><span className="text-pass">+{files.reduce((n, f) => n + f.added, 0)}</span> <span className="text-sap">−{files.reduce((n, f) => n + f.removed, 0)}</span></span>
+            </span>
             <div role="group" aria-label="Diff layout" className="flex gap-1">
               {[false, true].map((value) => <button key={String(value)} type="button" aria-pressed={split === value} className={`${button} text-xs ${split === value ? "bg-branch-soft text-branch" : ""}`} onClick={() => setSplit(value)}>{value ? "Split" : "Unified"}</button>)}
             </div>
@@ -256,9 +259,13 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
   );
 }
 
-function FileTree({ files, renderFile, prefix = "" }: { files: FileDiff[]; renderFile(file: FileDiff): ReactNode; prefix?: string }) {
-  const [closed, setClosed] = useState<Set<string>>(new Set());
-  const groups = new Map<string, FileDiff[]>();
+/* Files grouped by folder, each folder collapsible: the diff's here, open; the
+   whole checkout's in the Repo tab, its folders closed (`folded`) until clicked. */
+export function FileTree<F extends { path: string }>({ files, renderFile, prefix = "", folded = false }: { files: F[]; renderFile(file: F): ReactNode; prefix?: string; folded?: boolean }) {
+  // The folders toggled from how they start.
+  const [toggled, setToggled] = useState<Set<string>>(new Set());
+  const closed = { has: (name: string) => folded !== toggled.has(name) };
+  const groups = new Map<string, F[]>();
   for (const file of files) {
     const rest = file.path.slice(prefix.length);
     const directory = rest.includes("/") ? rest.slice(0, rest.indexOf("/") + 1) : "";
@@ -268,14 +275,14 @@ function FileTree({ files, renderFile, prefix = "" }: { files: FileDiff[]; rende
   return [...groups].map(([name, children]) => !name.endsWith("/") ? renderFile(children[0]) : (
     <li key={name}>
       <button type="button" aria-expanded={!closed.has(name)} className={`${mono} flex w-full items-center gap-1 px-s1 py-1 text-left text-xs text-ink-3 hover:bg-surface-2`}
-        onClick={() => setClosed((before) => {
+        onClick={() => setToggled((before) => {
           const next = new Set(before);
           if (next.has(name)) next.delete(name); else next.add(name);
           return next;
         })}>
         <span aria-hidden>{closed.has(name) ? "▸" : "▾"}</span>{name}
       </button>
-      {!closed.has(name) && <ul className="ml-2 border-l border-line"><FileTree files={children} renderFile={renderFile} prefix={prefix + name} /></ul>}
+      {!closed.has(name) && <ul className="ml-2 border-l border-line"><FileTree files={children} renderFile={renderFile} prefix={prefix + name} folded={folded} /></ul>}
     </li>
   ));
 }
@@ -463,7 +470,7 @@ function FileView({ file, split, gone, pin, editable, why, client, root, drafts,
 }
 
 /* A box and its save bar: ⌘S saves, Escape discards; the engine's refusal shows in the bar. */
-function EditBox({ ariaLabel, text, setText, busy, saveable = true, error, conflict = null, onSave, onDone, onCopy, onReload, what, testId = "hunk-editor" }: {
+export function EditBox({ ariaLabel, text, setText, busy, saveable = true, error, conflict = null, onSave, onDone, onCopy, onReload, what, testId = "hunk-editor" }: {
   ariaLabel: string;
   text: string;
   setText(v: string): void;
@@ -539,7 +546,7 @@ function EditBox({ ariaLabel, text, setText, busy, saveable = true, error, confl
   );
 }
 
-const COMMIT = "Your edit becomes a commit on the session branch.";
+export const COMMIT = "Your edit becomes a commit on the session branch.";
 
 /* Whether `lines` are what `content` has from line `start` (1-based). */
 const linesAt = (content: string, start: number, lines: string[]): boolean => {

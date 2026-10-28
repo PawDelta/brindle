@@ -412,7 +412,7 @@ const RETRY = "rounded-md border border-shell-line px-2 py-0.5 text-[12px] text-
 /* A shell's pane, once the app's pty view can show panes: until then, or
    where it can't, or when its view couldn't attach, why, with a way to try
    again (the shell's tab stays: the shell itself still runs on the daemon). */
-function ShellView({ tab, onEnded }: { tab: ShellTab; onEnded(): void }) {
+export function ShellView({ tab, onEnded }: { tab: ShellTab; onEnded(): void }) {
   const views = usePtyViews();
   const [failed, setFailed] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
