@@ -98,8 +98,10 @@ function BuildRow({
     setError(null);
     try {
       const target = await check!();
-      if (target) setAsking(target);
-      else setState({ step: "latest" });
+      if (target) {
+        setState({ step: "idle" });
+        setAsking(target);
+      } else setState({ step: "latest" });
     } catch (e) {
       setError(message(e));
     } finally {

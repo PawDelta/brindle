@@ -751,18 +751,21 @@ describe("settings screen", () => {
     fireEvent.click(within(row).getByRole("button", { name: "Return to stable" }));
     // The shell is asked which version first; nothing installs until it is confirmed, and Cancel installs nothing.
     expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check"]);
-    ipc.answers[0]("0.2.4");
+    // Nothing to return to at first (the stable is older); a later check finds one, and that version is what is shown to confirm.
+    ipc.answers[0](null);
+    fireEvent.click(await within(row).findByRole("button", { name: "Return to stable" }));
+    ipc.answers[1]("0.2.4");
     await within(row).findByRole("button", { name: "Confirm" });
     expect(row.textContent).toContain("0.2.4");
     fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
-    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check"]);
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check", "app_stable_check"]);
     fireEvent.click(within(row).getByRole("button", { name: "Return to stable" }));
-    ipc.answers[1]("0.2.4");
+    ipc.answers[2]("0.2.4");
     fireEvent.click(await within(row).findByRole("button", { name: "Confirm" }));
     // The install is pinned to the version the person confirmed.
-    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check", "app_stable_check", "app_return_to_stable"]);
-    expect(ipc.calls[2].args.version).toBe("0.2.4");
-    ipc.answers[2]("0.2.4");
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check", "app_stable_check", "app_stable_check", "app_return_to_stable"]);
+    expect(ipc.calls[3].args.version).toBe("0.2.4");
+    ipc.answers[3]("0.2.4");
     fireEvent.click(await within(row).findByRole("button", { name: "Restart" }));
     await waitFor(() => expect(ipc.calls.at(-1)?.cmd).toBe("app_restart"));
     stop();
