@@ -501,9 +501,10 @@ updating app without a tag or version bump. Each push to `main` that touches
 the app runs `app-release.yml`:
 
 1. `release-gate` (`scripts/release_publish.mjs ci-gate`) refuses unless the
-   commit is on `origin/main` and the newest run of **both** the `CI`
-   (`ci.yml`) and the `App` (`app.yml`) workflows for exactly that commit,
-   pushed or dispatched on `main`, completed with success. A pull request's
+   commit is on `origin/main` and the newest `App` (`app.yml`) run for exactly
+   that commit, pushed or dispatched on `main`, completed with success. The
+   `CI` (`ci.yml`) run must also pass when one exists; CI skips app-only
+   pushes. A pull request's
    runs, other branches' and other commits' don't count; a newer failed
    attempt outweighs an older pass. Workflows and runs come from the Actions
    API by path, all pages.
@@ -565,9 +566,14 @@ an OIDC or S3 failure. Re-running all jobs after a completed Mac build can
 still collide with that build's artifact name; use the publish job alone for
 a publishing failure. Fix build failures with a new promotion/run.
 
-Configure the `desktop-release` environment to admit `app-v*` tags and
-require owner approval. The `stable-gate` job verifies each pushed tag's
-commit is on `main` before any tag build runs.
+Configure `desktop-release` to admit only `app-v*` tags and require owner
+approval. The `stable-gate` job verifies each pushed tag's commit is on
+`main` before any tag build runs. Configure `desktop-staff-release` to admit
+`main` pushes. Provision the same Apple signing and notarization credentials
+there as in `desktop-release`, plus the separate staff updater key matching
+`src-tauri/staff-updater.pub`. Set
+`AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN` in that environment to `StaffRoleArn`
+from `deploy/aws/desktop-release.json`.
 
 ### Linux
 
@@ -651,6 +657,7 @@ and variables → Actions):
 | `AZURE_SIGNING_ACCOUNT` | secret (`desktop-release` env) | The Artifact Signing account's name (Azure portal → Artifact Signing accounts; formerly Trusted Signing). |
 | `AZURE_SIGNING_PROFILE` | secret (`desktop-release` env) | The certificate profile's name, under that account (needs identity validation done first). Signing is on when this and `AZURE_CLIENT_ID` are set. |
 | `AWS_DESKTOP_RELEASE_ROLE_ARN` | secret (`desktop-release` env) | ProductionRoleArn from the publishing stack; tags only. |
+| `AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN` | secret (`desktop-staff-release` env) | StaffRoleArn from `deploy/aws/desktop-release.json`; main pushes only. |
 | `DESKTOP_DOWNLOADS_BUCKET` | variable | The downloads bucket's name, from the same setup. |
 | `AWS_REGION` | variable | Optional; `us-east-1` when unset. |
 
@@ -658,7 +665,7 @@ Before the first release: join the Apple Developer Program, and have the site's
 infrastructure create the downloads bucket, GitHub's OIDC provider and the
 release roles and restrict their GitHub environments as described above.
 Only `app-v*` tags may enter production; staff builds come from pushes to
-`main` after the commit's App and CI runs pass.
+`main` after the commit's App run and any matching CI run pass.
 Keep the
 minisign private key safe: losing it means no installed app can take another
 update.
