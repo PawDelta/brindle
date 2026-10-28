@@ -15,7 +15,7 @@ const engineWorkflow = (name: string) => fileURLToPath(new URL(`../../.github/wo
 const prePush = fileURLToPath(new URL("../../.githooks/pre-push", import.meta.url));
 
 const ready = { SIGNED: "true", NOTARIZED: "true", ROLE: "arn:aws:iam::1:role/r", BUCKET: "b" };
-const branch = { EVENT: "push", REF_TYPE: "branch", REF: "refs/heads/release/desktop" };
+const branch = { EVENT: "push", REF_TYPE: "branch", REF: "refs/heads/main" };
 
 /** The workflow's job `name`, up to the next job. */
 function jobOf(text: string, name: string): string {
@@ -82,11 +82,11 @@ describe("app-release publish gate", () => {
     ["a pushed tag, no bucket", { EVENT: "push", REF_TYPE: "tag", ...ready, BUCKET: "" }, "go=false"],
     ["Linux: a pushed tag, nothing to sign", { PLATFORM: "linux", EVENT: "push", REF_TYPE: "tag", ROLE: "r", BUCKET: "b" }, "go=true"],
     ["Linux: a manual run on an existing tag", { PLATFORM: "linux", EVENT: "workflow_dispatch", REF_TYPE: "tag", ROLE: "r", BUCKET: "b" }, "go=false"],
-    ["release branch: a push of release/desktop", { CHANNEL: "release", ...branch, ...ready }, "go=true"],
-    ["release branch: a manual run on it", { CHANNEL: "release", ...branch, EVENT: "workflow_dispatch", ...ready }, "go=false"],
-    ["release branch: a tag", { CHANNEL: "release", EVENT: "push", REF_TYPE: "tag", REF: "refs/tags/app-v0.2.0", ...ready }, "go=false"],
-    ["release branch: another branch", { CHANNEL: "release", ...branch, REF: "refs/heads/main", ...ready }, "go=false"],
-    ["release branch: unsigned", { CHANNEL: "release", ...branch, ...ready, SIGNED: "false" }, "go=false"],
+    ["staff build: a push of main", { CHANNEL: "release", ...branch, ...ready }, "go=true"],
+    ["staff build: a manual run on it", { CHANNEL: "release", ...branch, EVENT: "workflow_dispatch", ...ready }, "go=false"],
+    ["staff build: a tag", { CHANNEL: "release", EVENT: "push", REF_TYPE: "tag", REF: "refs/tags/app-v0.2.0", ...ready }, "go=false"],
+    ["staff build: another branch (the old release/desktop)", { CHANNEL: "release", ...branch, REF: "refs/heads/release/desktop", ...ready }, "go=false"],
+    ["staff build: unsigned", { CHANNEL: "release", ...branch, ...ready, SIGNED: "false" }, "go=false"],
     ["Windows: a pushed tag, signature verified", { PLATFORM: "windows", EVENT: "push", REF_TYPE: "tag", SIGNED: "true", ROLE: "r", BUCKET: "b" }, "go=true"],
     ["Windows: a pushed tag, unsigned", { PLATFORM: "windows", EVENT: "push", REF_TYPE: "tag", SIGNED: "", ROLE: "r", BUCKET: "b" }, "go=false"],
   ])("%s: %s", (_case, env, expected) => {
@@ -111,7 +111,7 @@ describe("app-release publish gate", () => {
     expect(text).toMatch(/target: aarch64-apple-darwin\n\s+runner: macos-latest\n/);
     expect(text).toMatch(/target: x86_64-apple-darwin\n\s+runner: macos-15-intel\n/);
     const publish = text.slice(text.indexOf("\n  macos-publish:\n"), text.indexOf("\n  linux:\n"));
-    expect(publish).toContain("    needs: macos\n");
+    expect(publish).toContain("    needs: [stable-gate, macos]\n");
     expect(publish).toContain('"darwin-aarch64": {signature: $arm_sig, url: $arm_url}');
     expect(publish).toContain('"darwin-x86_64": {signature: $x64_sig, url: $x64_url}');
     const build = text.slice(text.indexOf("\n  macos:\n"), text.indexOf("\n  macos-publish:\n"));
@@ -160,11 +160,18 @@ describe("app-release publish gate", () => {
     for (const [env, staffFile, key] of keys) expect(updaterKey(env, staffFile), JSON.stringify(env)).toBe(key);
     // A scheduled run builds no release (and so signs and publishes nothing): only the nightly smoke runs.
     // A release-branch push builds the Macs only, once release-gate says so, and publishes them only from release-publish.
-    const release = "(github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)";
-    for (const name of ["macos", "macos-publish", "linux", "windows"]) expect(job(name), name).toContain(release.split(" || ")[0]);
+    // A pushed tag builds only past stable-gate: its commit on main (the staff channel's source), approved in desktop-release.
+    const release = "(github.event_name == 'push' && github.ref_type == 'tag' && needs.stable-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)";
+    for (const name of ["macos", "macos-publish", "linux", "windows"]) {
+      expect(job(name), name).toContain(release.split(" || ")[0]);
+      expect(job(name), name).toMatch(/\n {4}needs: (stable-gate|\[.*\bstable-gate\b.*\])\n/);
+    }
+    expect(job("stable-gate")).toContain("if: github.event_name == 'push' && github.ref_type == 'tag'\n");
+    expect(job("stable-gate")).toContain("environment: desktop-release\n");
+    expect(jobOf(text, "stable-gate")).toContain('git merge-base --is-ancestor "$GITHUB_SHA" origin/main');
     for (const name of ["macos-publish", "linux", "windows"]) expect(job(name), name).toContain(release);
     expect(job("macos")).toContain("|| needs.release-gate.outputs.go == 'true')");
-    expect(job("release-gate")).toContain("if: github.event_name == 'push' && github.ref == 'refs/heads/release/desktop'");
+    expect(job("release-gate")).toContain("if: github.event_name == 'push' && github.ref == 'refs/heads/main'");
     expect(job("nightly")).toContain("if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.nightly)");
     expect(text).toContain('[ "$REF_NAME" != "app-v$version" ]');
     const channel = text.match(/^\s+(case "\$version" in .*esac)$/m)?.[1] ?? "";

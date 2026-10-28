@@ -23,6 +23,10 @@
    holds come grouped, above the rest: one item per kind and general form,
    decided at once for every request in it, under the stall banner.
 
+   Above them all, the app's own item (AppUpdateItem.tsx): an update the
+   app installed by itself, with Restart to update, then "Updated to
+   brindle X" once.
+
    The same items count on the sidebar's "Inbox · N" at its top, and
    nowhere else: the Inbox is where what needs a person is read and acted
    on. */
@@ -30,6 +34,8 @@
 import { useEffect, useMemo, type ReactNode } from "react";
 import type { DaemonClient, InboxAction } from "../../api/client";
 import { useDaemon } from "../../api/context";
+import { openExternal, type OpenUrl } from "../../api/open";
+import type { AppUpdates } from "../../api/tauri";
 import type { InboxItemDTO } from "../../api/schema";
 import { PageHeader } from "../../components/PageHeader";
 import { alert, button, card, quiet } from "../../components/ui";
@@ -37,6 +43,8 @@ import { agentName, formatAge, rootOf } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
 import { useAppState } from "../../store/useStore";
 import { useJob } from "../Branch/useJob";
+import { appUpdateItem } from "../../store/appUpdates";
+import { AppUpdateCard } from "./AppUpdateItem";
 import { ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
 import { FIXES, KIND_SHORT, describeItem, fixable, forgetGone, itemKey, kindLabel, seenAt } from "./items";
@@ -54,6 +62,10 @@ export interface InboxScreenProps {
   onShowAll?(): void;
   /* Settings › Permissions with a rule's editor open (none: the unmatched setting). */
   onOpenRule?(rule?: string): void;
+  /* The app's own updates (AppUpdateItem.tsx): the shell's in the app, none in a browser tab. */
+  appUpdates?: AppUpdates;
+  /* Opens a page in the system browser (an update's What's new). */
+  openUrl?: OpenUrl;
 }
 
 interface Group {
@@ -84,7 +96,10 @@ const PLAIN = "border-line-strong bg-surface text-ink hover:bg-surface-2";
 const GHOST = "border-transparent text-ink-3 hover:text-ink";
 const LINK = "text-[11.5px] text-branch hover:underline";
 
-export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll, onOpenRule }: InboxScreenProps) {
+export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll, onOpenRule, appUpdates, openUrl = openExternal }: InboxScreenProps) {
+  const updateStatus = useAppState((s) => s.appUpdate);
+  // The app's own item belongs to no session: shown on the whole Inbox only.
+  const update = session === null && appUpdates ? appUpdateItem(updateStatus) : null;
   const inbox = useAppState((s) => s.inbox);
   const workspaces = useAppState((s) => s.workspaces);
   const synced = useAppState((s) => s.synced);
@@ -102,7 +117,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
   const inSession = (i: InboxItemDTO) => session === null || (!!i.agent_id && rootOf(agents, i.agent_id, hidden) === session);
   const here = useMemo(() => (session === null ? inbox : inbox.filter(inSession)).filter((i) => !actions.hidden.has(itemKey(i)) && !asks.held(i)), [inbox, session, agents, hidden, actions.hidden, asks.held]); // eslint-disable-line react-hooks/exhaustive-deps
   const askGroups = useMemo(() => (session === null ? asks.groups : asks.groups.map((g) => ({ ...g, items: g.items.filter((a) => a.root_id === session) })).filter((g) => g.items.length > 0)), [asks.groups, session]);
-  const waiting = here.length + askGroups.length;
+  const waiting = here.length + askGroups.length + (update ? 1 : 0);
   const sessionTitle = session === null ? null : (find(session)?.name || (find(session)?.goal ?? session));
 
   /* By session: the root each item's agent hangs under, with the session's
@@ -181,6 +196,15 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
       {!synced && !error && <p className="text-ink-3">Loading…</p>}
       {synced && waiting === 0 && <AllClear />}
       <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-[18px] overflow-y-auto pb-s3" aria-label="Queue">
+        {update && appUpdates && (
+          <section className="flex flex-col gap-s1" aria-label="This app">
+            <header className="flex items-baseline gap-[10px] px-0.5">
+              <h2 className="text-[13.5px] font-semibold">This app</h2>
+              <span className="text-[11.5px] text-ink-3">brindle on this computer</span>
+            </header>
+            <AppUpdateCard key={`${update.kind}:${update.version}`} item={update} updates={appUpdates} openUrl={openUrl} />
+          </section>
+        )}
         <PermissionAsks
           client={client}
           groups={askGroups}

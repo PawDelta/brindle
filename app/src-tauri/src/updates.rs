@@ -13,22 +13,27 @@
 //! else's app ever reads that feed. Its bundles are signed with a separate
 //! staff key (`STAFF_UPDATER_KEY`), and only that install trusts it.
 //!
-//! One check a launch, and none at all when brindle is air-gapped or the
-//! person turned them off: `"app_updates": false` or `"airgap": true` in
+//! One check a launch, in the background once the daemon answers
+//! (`wait_for_engine`), and Settings' About can check again (`app_update_check`);
+//! an update found is installed and starts with the next launch, which the
+//! Inbox says ("Restart to update", `UpdateStatus`); the app never restarts
+//! by itself. None at all when brindle is air-gapped or the person turned
+//! them off: `"app_updates": false` or `"airgap": true` in
 //! `~/.brindle/config.json`, `BRINDLE_AIRGAP` in the environment, or the
-//! engine saying so (`engine_allows`). A build without a public key (a local
+//! engine saying so (`engine_says`). A build without a public key (a local
 //! `tauri build`) never checks.
 
 use std::cmp::Ordering;
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use semver::Version;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_updater::UpdaterExt;
 
@@ -63,34 +68,77 @@ fn query_value(text: &str) -> String {
         .collect()
 }
 
-/// Whether the engine, asked through `get` (a daemon GET: status and body),
-/// lets this launch check. Air-gap can be armed by any repo's own
+/// What the engine says of updates on this machine (`engine_says`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EngineSays {
+    On,
+    /// Air-gapped: a repo's config or the daemon itself says `"airgap": true`.
+    Off,
+    /// No daemon answering yet (a launch starts it, a first run has none).
+    NoAnswer,
+}
+
+/// What the engine, asked through `get` (a daemon GET: status and body),
+/// says of updates. Air-gap can be armed by any repo's own
 /// `.brindle/config.json`, which a freshly started daemon hasn't read, so its
 /// `GET /v1/meta` alone proves nothing: every repo brindle knows
-/// (`GET /v1/repos`) has its config loaded (`GET /v1/config?repo=`, which also
-/// arms the daemon's air-gap when that config asks) and must say
-/// `"airgap": false`; then the daemon's own flag (the environment it runs
-/// with, anything armed) must be off too. Fails closed: a request that fails
-/// or answers anything but a 200 of the expected shape means no check.
-pub fn engine_allows(get: impl Fn(&str) -> Result<(u16, String), String>) -> bool {
+/// (`GET /v1/repos`) has its config loaded first (`GET /v1/config?repo=`,
+/// which also arms the daemon's air-gap when that config asks), then the
+/// daemon's own flag (the environment it runs with, anything armed) is read.
+/// Only an explicit `"airgap": true` turns updates off: a repo whose config
+/// can't be read is logged and passed over, since it can't arm the daemon
+/// either, and one such repo mustn't hold back everyone's updates. A daemon
+/// not answering `GET /v1/meta` is no answer at all (`wait_for_engine`).
+pub fn engine_says(get: impl Fn(&str) -> Result<(u16, String), String>) -> EngineSays {
     let json = |path: &str| match get(path) {
         Ok((200, body)) => serde_json::from_str::<Value>(&body).ok(),
         _ => None,
     };
-    let Some(repos) = json("/v1/repos").and_then(|v| v.as_array().cloned()) else {
-        return false;
-    };
+    if json("/v1/meta").is_none() {
+        return EngineSays::NoAnswer;
+    }
+    let repos = json("/v1/repos").and_then(|v| v.as_array().cloned()).unwrap_or_else(|| {
+        eprintln!("brindle: update check: couldn't list the repos to read their air-gap setting");
+        vec![]
+    });
     for repo in &repos {
         let Some(root) = repo.get("repo_root").and_then(Value::as_str) else {
-            return false;
+            eprintln!("brindle: update check: a repo without a root: {repo}");
+            continue;
         };
         let config = json(&format!("/v1/config?repo={}", query_value(root)));
-        if config.and_then(|c| c.pointer("/repo/airgap").cloned()) != Some(Value::Bool(false)) {
-            return false;
+        match config.and_then(|c| c.pointer("/repo/airgap").cloned()) {
+            Some(Value::Bool(true)) => return EngineSays::Off,
+            Some(Value::Bool(false)) => {}
+            _ => eprintln!("brindle: update check: couldn't read {root}'s config; passed over"),
         }
     }
-    json("/v1/meta").and_then(|meta| meta.get("airgap").cloned()) == Some(Value::Bool(false))
+    match json("/v1/meta") {
+        None => EngineSays::NoAnswer,
+        Some(meta) if meta.get("airgap") == Some(&Value::Bool(true)) => EngineSays::Off,
+        Some(_) => EngineSays::On,
+    }
 }
+
+/// `engine_says`, asked again while the daemon doesn't answer and `again`
+/// (which waits a while first) says there is still time: at launch the app
+/// starts the daemon alongside, and its first start can take a while.
+pub fn wait_for_engine(
+    get: impl Fn(&str) -> Result<(u16, String), String>,
+    mut again: impl FnMut() -> bool,
+) -> EngineSays {
+    loop {
+        match engine_says(&get) {
+            EngineSays::NoAnswer if again() => {}
+            said => return said,
+        }
+    }
+}
+
+/// How long the launch check waits for the daemon to answer, and the pause
+/// between asking it.
+const PATIENCE: Duration = Duration::from_secs(300);
+const PAUSE: Duration = Duration::from_secs(5);
 
 /// Whether `version` is a release candidate's (`X.Y.Z-rc…`, as
 /// app-release.yml tells them apart).
@@ -98,11 +146,22 @@ fn is_rc(version: &str) -> bool {
     version.split_once('-').is_some_and(|(_, pre)| pre.starts_with("rc"))
 }
 
-/// Whether a build at `version` checks for an update at launch by itself. A
-/// release candidate (a beta) never does (owner decision): staff update one
-/// from Settings (`app_update_install`), and anyone else keeps it as installed.
+/// Whether a build at `version` installs updates by itself (at launch, and
+/// from About's Check now). A release candidate (a beta) never does (owner
+/// decision): staff update one from Settings (`app_update_install`), and
+/// anyone else keeps it as installed. Nor does a staff release-branch build
+/// (`<version>+release.<run>.<sha>`): staff move it on from Settings too.
 pub fn checks_at_launch(version: &str) -> bool {
-    !is_rc(version)
+    let staff_build = Version::parse(version).ok().and_then(|v| release_run(&v)).is_some();
+    !is_rc(version) && !staff_build
+}
+
+/// The version this launch was updated to, once: the first run of `current`
+/// after `last` (the version last run, as `app-update.json` records it), when
+/// it is newer. None on the first launch ever, or the same or an older build.
+pub fn updated_to(last: Option<&str>, current: &Version) -> Option<String> {
+    let last = Version::parse(last?).ok()?;
+    newer(&last, current).then(|| current.to_string())
 }
 
 /// The manifest a build at `version` checks, given the stable one the config
@@ -231,7 +290,7 @@ fn has_pubkey<R: Runtime>(app: &AppHandle<R>) -> bool {
         .is_some_and(|key| !key.trim().is_empty())
 }
 
-/// Whether the engine, asked through `get` as in `engine_allows`, calls this
+/// Whether the engine, asked through `get` as in `engine_says`, calls this
 /// account brindle staff now: `GET /v1/debug?fresh=1`'s `staff`, the
 /// backend asked then rather than the daemon's cached answer, which can
 /// outlive a revocation by minutes. Fails closed (the engine also answers not
@@ -326,54 +385,229 @@ async fn exclusive<F: Future<Output = Result<Option<String>, String>>>(
     got
 }
 
-/// Whether this machine lets the app check at all: a public key, and neither
-/// the config, the environment nor the engine (asked off the async runtime)
-/// turning updates off.
-async fn may_check<R: Runtime>(app: &AppHandle<R>, brindle_home: &Path) -> bool {
+const UPDATES_OFF: &str = "updates are off on this machine (air-gapped or app_updates off)";
+
+/// Whether this machine lets the app check now, with the reason when not: a
+/// public key, and neither the config, the environment nor the engine (asked
+/// off the async runtime, again while it doesn't answer and `again` says so:
+/// `wait_for_engine`) turning updates off.
+async fn may_check<R: Runtime>(
+    app: &AppHandle<R>,
+    brindle_home: &Path,
+    again: impl FnMut() -> bool + Send + 'static,
+) -> Result<(), String> {
     let config = std::fs::read_to_string(brindle_home.join("config.json")).ok();
     let airgap = std::env::var(AIRGAP_ENV).ok();
-    if !has_pubkey(app) || !allowed(config.as_deref(), airgap.as_deref()) {
-        return false;
+    if !has_pubkey(app) {
+        return Err("this build has no update key (a local build)".into());
+    }
+    if !allowed(config.as_deref(), airgap.as_deref()) {
+        return Err(UPDATES_OFF.into());
     }
     let engine = app.state::<Engine>().inner().clone();
-    let asked =
-        tauri::async_runtime::spawn_blocking(move || engine_allows(|path| engine.get(path))).await;
-    matches!(asked, Ok(true))
+    let said = tauri::async_runtime::spawn_blocking(move || wait_for_engine(|p| engine.get(p), again))
+        .await
+        .map_err(|e| e.to_string())?;
+    match said {
+        EngineSays::On => Ok(()),
+        EngineSays::Off => Err(UPDATES_OFF.into()),
+        EngineSays::NoAnswer => Err("the brindle engine isn't answering, so whether updates are on isn't known".into()),
+    }
 }
 
-/// Check once, in the background; install an update found and say it starts
-/// with the next launch. A release candidate makes no check (`checks_at_launch`).
+/// What `app-update.json` in the app's data directory keeps across launches:
+/// the version last run, and when this machine last checked (seconds since
+/// the epoch).
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct Record {
+    last_version: Option<String>,
+    last_checked: Option<u64>,
+}
+
+/// What the app knows of updates beyond the install itself (app state): its
+/// record, where it lives, and the version this launch was updated to until
+/// the person dismisses it.
+#[derive(Default)]
+pub struct Seen(Mutex<SeenState>);
+
+#[derive(Default)]
+struct SeenState {
+    record: Record,
+    path: Option<PathBuf>,
+    updated: Option<String>,
+}
+
+impl Seen {
+    fn state(&self) -> std::sync::MutexGuard<'_, SeenState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+impl SeenState {
+    /// Write the record: to a file of this process's own beside it, then
+    /// renamed over it, so a reader never sees half of one.
+    fn save(&self) {
+        let Some(path) = &self.path else { return };
+        let part = path.with_extension(format!("json.{}.part", std::process::id()));
+        let written = (|| -> std::io::Result<()> {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&part, serde_json::to_vec(&self.record)?)?;
+            std::fs::rename(&part, path)
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&part);
+            eprintln!("brindle: couldn't save {}: {e}", path.display());
+        }
+    }
+}
+
+/// App updates as Settings' About and the Inbox show them (`app_update_status`,
+/// and the `app-update` event whenever they change).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct UpdateStatus {
+    version: String,
+    /// Whether this build installs updates by itself (`checks_at_launch`).
+    automatic: bool,
+    /// An update installed, waiting for the restart.
+    pending: Option<String>,
+    /// The version this launch was updated to, until dismissed.
+    updated: Option<String>,
+    last_checked: Option<u64>,
+    checking: bool,
+}
+
+const STATUS_EVENT: &str = "app-update";
+
+fn status<R: Runtime>(app: &AppHandle<R>) -> UpdateStatus {
+    let (pending, checking) = match app.state::<Installs>().state().clone() {
+        Install::Idle => (None, false),
+        Install::Busy => (None, true),
+        Install::Installed(version) => (Some(version), false),
+    };
+    let seen = app.state::<Seen>();
+    let seen = seen.state();
+    UpdateStatus {
+        version: version(app),
+        automatic: checks_at_launch(&version(app)),
+        pending,
+        updated: seen.updated.clone(),
+        last_checked: seen.record.last_checked,
+        checking,
+    }
+}
+
+fn announce<R: Runtime>(app: &AppHandle<R>) {
+    let _ = app.emit(STATUS_EVENT, status(app));
+}
+
+/// Read the record, note whether this launch is the first on a newer version
+/// (`updated_to`; only a build that updates by itself says so), and record
+/// this version as the last run.
+fn remember_launch<R: Runtime>(app: &AppHandle<R>) {
+    let path = app.path().app_data_dir().ok().map(|dir| dir.join("app-update.json"));
+    let record: Record = path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let current = app.package_info().version.clone();
+    let updated = updated_to(record.last_version.as_deref(), &current)
+        .filter(|_| checks_at_launch(&current.to_string()));
+    let seen = app.state::<Seen>();
+    let mut seen = seen.state();
+    *seen = SeenState { record, path, updated };
+    seen.record.last_version = Some(current.to_string());
+    seen.save();
+}
+
+fn window_shown<R: Runtime>(app: &AppHandle<R>) -> bool {
+    app.get_webview_window("main").is_some_and(|w| {
+        w.is_visible().unwrap_or(false) && !w.is_minimized().unwrap_or(false)
+    })
+}
+
+/// Check this build's feed and install an update found, once `may_check`
+/// allows it, as the only install (`exclusive`), answering its version;
+/// a check that reached the feed is recorded, and every change announced.
+async fn check<R: Runtime>(
+    app: &AppHandle<R>,
+    brindle_home: &Path,
+    again: impl FnMut() -> bool + Send + 'static,
+) -> Result<Option<String>, String> {
+    may_check(app, brindle_home, again).await?;
+    let got = exclusive(&app.state::<Installs>(), || async {
+        announce(app);
+        install(app).await
+    })
+    .await;
+    if got.is_ok() {
+        let seen = app.state::<Seen>();
+        let mut seen = seen.state();
+        seen.record.last_checked = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
+        seen.save();
+    }
+    announce(app);
+    got
+}
+
+/// At launch: remember it (`remember_launch`), then check once, in the
+/// background, waiting for the daemon the app starts alongside (`PATIENCE`);
+/// install an update found, which starts with the next launch. The Inbox
+/// says so (the `app-update` event); a notification only when the window
+/// isn't showing. Never restarts the app. A build that doesn't update by
+/// itself makes no check (`checks_at_launch`).
 pub fn check_in_background<R: Runtime>(app: &AppHandle<R>, brindle_home: &Path) {
+    remember_launch(app);
     if !checks_at_launch(&version(app)) {
         return;
     }
     let (app, brindle_home) = (app.clone(), brindle_home.to_path_buf());
     tauri::async_runtime::spawn(async move {
-        if !may_check(&app, &brindle_home).await {
-            return;
-        }
-        // Staff already updating from Settings, or an update waiting for the restart: leave it.
-        let installs = app.state::<Installs>();
-        let Begin::Go(installing) = installs.begin() else {
-            return;
+        let until = Instant::now() + PATIENCE;
+        let again = move || {
+            let left = until.saturating_duration_since(Instant::now());
+            std::thread::park_timeout(PAUSE.min(left));
+            !left.is_zero()
         };
-        let got = install(&app).await;
-        installing.done(got.as_ref().ok().and_then(Option::as_ref));
-        match got {
-            Ok(Some(version)) => {
+        match check(&app, &brindle_home, again).await {
+            Ok(Some(version)) if !window_shown(&app) => {
                 let _ = app
                     .notification()
                     .builder()
                     .title("brindle updated")
-                    .body(format!(
-                        "brindle {version} is installed and starts the next time you open the app."
-                    ))
+                    .body(format!("brindle {version} is installed. Restart brindle to update."))
                     .show();
             }
-            Ok(None) => {}
-            Err(e) => eprintln!("brindle: update check failed: {e}"),
+            Ok(_) => {}
+            Err(e) => eprintln!("brindle: update check: {e}"),
         }
     });
+}
+
+/// App updates now (Settings' About and the Inbox).
+#[tauri::command]
+pub fn app_update_status<R: Runtime>(app: AppHandle<R>) -> UpdateStatus {
+    status(&app)
+}
+
+/// About's Check now: the launch check, now, without waiting for a daemon
+/// that doesn't answer. Only for a build that updates by itself.
+#[tauri::command]
+pub async fn app_update_check<R: Runtime>(app: AppHandle<R>) -> Result<UpdateStatus, String> {
+    if !checks_at_launch(&version(&app)) {
+        return Err("this build doesn't update by itself".into());
+    }
+    check(&app, &crate::daemon::brindle_home(), || false).await?;
+    Ok(status(&app))
+}
+
+/// The person has read "Updated to brindle X": it goes.
+#[tauri::command]
+pub fn app_update_dismiss<R: Runtime>(app: AppHandle<R>) {
+    app.state::<Seen>().state().updated = None;
+    announce(&app);
 }
 
 /// Settings' staff-only Update (owner decision; how an rc build updates):
@@ -397,8 +631,8 @@ pub fn app_restart<R: Runtime>(app: AppHandle<R>) {
 /// Whether this machine lets staff install an update from Settings now (the
 /// Update and the release-branch install): the public key,
 /// `~/.brindle/config.json` (its text, if any), the environment's
-/// `BRINDLE_AIRGAP` and the engine (asked through `get`, as in
-/// `engine_allows`) all leave updates on, and only then, the one call that
+/// `BRINDLE_AIRGAP` and the engine (asked through `get`: `engine_says`, which
+/// must answer On) all leave updates on, and only then, the one call that
 /// leaves the machine, the backend calls the account staff
 /// (`engine_says_staff`). An air-gapped machine asks no backend. Fails
 /// closed, with the reason.
@@ -408,8 +642,8 @@ pub fn staff_gate(
     airgap_env: Option<&str>,
     pubkey: bool,
 ) -> Result<(), String> {
-    if !pubkey || !allowed(config, airgap_env) || !engine_allows(&get) {
-        return Err("updates are off on this machine (air-gapped or app_updates off)".into());
+    if !pubkey || !allowed(config, airgap_env) || engine_says(&get) != EngineSays::On {
+        return Err(UPDATES_OFF.into());
     }
     if !engine_says_staff(&get) {
         return Err("only brindle staff can update this build from here".into());
@@ -602,13 +836,20 @@ mod tests {
     }
 
     #[test]
-    fn an_rc_build_makes_no_launch_check_and_reads_the_rc_feed() {
-        let stable = "https://pawdelta.com/brindle/downloads/desktop/latest.json";
-        assert!(!checks_at_launch("0.1.0-rc.7"));
-        assert!(endpoint(stable, "0.1.0-rc.7").ends_with("/desktop/rc/latest.json"));
-        assert!(checks_at_launch("0.1.0"));
-        assert!(checks_at_launch("0.2.0-beta.1"));
-        assert_eq!(endpoint(stable, "0.1.0"), stable);
+    fn only_a_release_installs_updates_by_itself_and_says_once_it_was_updated() {
+        for (version, automatic) in [
+            ("0.1.0", true),
+            ("0.2.0-beta.1", true),
+            ("0.1.0-rc.7", false),
+            // A staff release-branch build: staff move it on from Settings.
+            ("0.6.0+release.42.0123456789ab", false),
+        ] {
+            assert_eq!(checks_at_launch(version), automatic, "{version}");
+        }
+        let now = Version::parse("0.6.1").expect("version");
+        for (last, updated) in [(Some("0.6.0"), Some("0.6.1")), (Some("0.6.1"), None), (Some("0.7.0"), None), (None, None)] {
+            assert_eq!(updated_to(last, &now).as_deref(), updated, "{last:?}");
+        }
     }
 
     #[test]
@@ -752,7 +993,7 @@ mod tests {
     fn a_cold_daemon_with_an_air_gapped_repo_allows_no_check() {
         let repos = r#"[{"repo_root": "/w/open"}, {"repo_root": "/w/closed off"}]"#;
         let fake = engine(repos, vec![("/w/open", 200, OFF), ("/w/closed%20off", 200, ON)]);
-        assert!(!engine_allows(|p| fake.get(p)));
+        assert_eq!(engine_says(|p| fake.get(p)), EngineSays::Off);
         assert!(fake.asked.borrow().contains(&"/v1/config?repo=/w/closed%20off".to_string()));
         // Nor does staff's install from Settings: the backend is never asked who the account is.
         let fresh = engine(repos, vec![("/w/open", 200, OFF), ("/w/closed%20off", 200, ON)]);
@@ -761,20 +1002,39 @@ mod tests {
     }
 
     #[test]
-    fn the_engine_allows_a_check_only_when_every_answer_says_so() {
+    fn a_daemon_not_ready_at_launch_still_gets_the_check() {
+        let fake = engine(r#"[{"repo_root": "/w/open"}]"#, vec![("/w/open", 200, OFF)]);
+        let starting = Cell::new(2);
+        let get = |p: &str| match starting.get() {
+            0 => fake.get(p),
+            n => {
+                starting.set(n - 1);
+                Err(format!("{}: still listening for the first time", crate::daemon::ENGINE_STARTING))
+            }
+        };
+        let waits = Cell::new(0);
+        let said = wait_for_engine(get, || {
+            waits.set(waits.get() + 1);
+            true
+        });
+        assert_eq!((said, waits.get()), (EngineSays::On, 2));
+        // A daemon that never answers: no check, once the patience is spent.
+        assert_eq!(wait_for_engine(|_| Err("refused".to_string()), || false), EngineSays::NoAnswer);
+    }
+
+    #[test]
+    fn only_an_explicit_air_gap_turns_the_engine_against_updates() {
         let one = r#"[{"repo_root": "/w/open"}]"#;
-        for (repos, configs, env_airgap, on) in [
-            (one, vec![("/w/open", 200, OFF)], false, true),
-            ("[]", vec![], false, true),
-            ("[]", vec![], true, false),
-            (one, vec![("/w/open", 500, OFF)], false, false),
-            (one, vec![("/w/open", 200, r#"{"user": {}}"#)], false, false),
-            (one, vec![], false, false),
-            (r#"{"error": "agent_caller"}"#, vec![], false, false),
-            (r#"[{"name": "x"}]"#, vec![], false, false),
+        for (repos, configs, env_airgap, said) in [
+            (one, vec![("/w/open", 200, OFF)], false, EngineSays::On),
+            ("[]", vec![], true, EngineSays::Off),
+            // A repo config, or the repo list, that can't be read is passed over (and logged).
+            (one, vec![("/w/open", 500, OFF)], false, EngineSays::On),
+            (r#"{"error": "agent_caller"}"#, vec![], false, EngineSays::On),
+            (r#"[{"name": "x"}]"#, vec![], false, EngineSays::On),
         ] {
             let fake = FakeEngine { env_airgap, ..engine(repos, configs.clone()) };
-            assert_eq!(engine_allows(|p| fake.get(p)), on, "{repos} {configs:?} {env_airgap}");
+            assert_eq!(engine_says(|p| fake.get(p)), said, "{repos} {configs:?} {env_airgap}");
         }
     }
 

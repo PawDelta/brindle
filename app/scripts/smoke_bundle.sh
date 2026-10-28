@@ -417,6 +417,42 @@ check_engine() {
     || fail "engine: bin/tmux links $out"
   check_minimum_macos "$app"
 
+  # What hooks and agents run from the installed engine (PR #301: python/bin/brindle
+  # had a CI-path shebang, so Codex's hook exited 126): no script's shebang
+  # leaves the bundle, python/bin/brindle runs, and so does the command
+  # codex_hook.hook_command() gives (its "_hook <event>" swapped for --version).
+  local script first interp hook suffix=" _hook codex-permission-request"
+  for script in "$ENGINE_DIR"/bin/* "$ENGINE_DIR"/python/bin/*; do
+    [ -f "$script" ] && [ ! -L "$script" ] || continue
+    # Bytes, not characters: the engine's binaries aren't valid UTF-8.
+    [ "$(LC_ALL=C head -c 2 "$script")" = "#!" ] || continue
+    first="$(LC_ALL=C head -n 1 "$script" | LC_ALL=C tr -d '\r' | LC_ALL=C cut -c1-4096)"
+    interp="${first#\#!}"; interp="${interp# }"; interp="${interp%% *}"
+    case "$interp" in
+      "$ENGINE_DIR"/*|/bin/*|/usr/bin/*) ;;
+      *) fail "engine: ${script#"$ENGINE_DIR"/} has shebang '$first', outside the bundle" ;;
+    esac
+  done
+  out="$(env -i HOME="${TMPDIR:-/tmp}" PATH=/usr/bin:/bin "$ENGINE_DIR/python/bin/brindle" --version 2>&1)" \
+    && pass "engine: python/bin/brindle --version: $out" \
+    || fail "engine: python/bin/brindle --version failed: $out"
+  hook="$(env -i HOME="${TMPDIR:-/tmp}" PATH=/usr/bin:/bin "$ENGINE_DIR/python/bin/python3" -I -c \
+    'from brindle import codex_hook; print(codex_hook.hook_command())' 2>&1 || true)"
+  case "$hook" in
+    *"$suffix") ;;
+    *) fail "engine: codex_hook.hook_command() printed '$hook'" ;;
+  esac
+  case "$hook" in
+    *"$ENGINE_DIR"*)
+      # Exactly as Codex runs it, with no agent and nothing on stdin (the hook
+      # then exits 0 at once), in a home of its own.
+      engine_home
+      out="$(isolated "$ENGINE_HOME" PATH=/usr/bin:/bin /bin/sh -c "$hook" </dev/null 2>&1)" \
+        && pass "engine: Codex's hook command runs: $out" \
+        || fail "engine: Codex's hook command failed: $out" ;;
+    *) fail "engine: Codex's hook command doesn't name the bundled engine: $hook" ;;
+  esac
+
   # Its brindle, from inside the .app, with nothing from this environment.
   engine_home
   home="$ENGINE_HOME"

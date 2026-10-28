@@ -59,7 +59,7 @@ import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorChec
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
 import type { Install } from "../../api/providersInstall";
-import type { About as AboutInfo, AppUpdater, CliLink, ReleaseBuildUpdater } from "../../api/tauri";
+import type { About as AboutInfo, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from "../../api/tauri";
 import { plain } from "../../api/wording";
 import { UpgradeCard, useEngineUpgrade } from "../../components/EngineUpgrade";
 import { PageHeader } from "../../components/PageHeader";
@@ -112,6 +112,9 @@ export interface SettingsScreenProps {
   /* About's license files (the shell's about_read, api/tauri.ts). Without
      one (a browser tab) About only names them. */
   readAbout?: () => Promise<AboutInfo>;
+  /* About's updates for a build that updates by itself: last checked, Check
+     now, Restart to update (the shell's, api/tauri.ts AppUpdates). */
+  appUpdates?: AppUpdates;
   /* The section to scroll to on opening: "providers" from the sidebar's problem line, "permissions" from the Inbox. */
   section?: "providers" | "permissions";
   /* A new value asks to scroll to `section` again, the page already open. */
@@ -780,10 +783,11 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
   );
 }
 
-export function SettingsScreen({ client, installCli, appUpdater, releaseBuildUpdater, readAbout, section, ask, rule }: SettingsScreenProps) {
+export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, section, ask, rule }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const connection = useAppState((state) => state.connection);
+  const updateStatus = useAppState((state) => state.appUpdate);
   const pick = useRepo();
   const { repo, repos } = pick;
   const [config, setConfig] = useState<Config | null>(null);
@@ -1321,7 +1325,7 @@ export function SettingsScreen({ client, installCli, appUpdater, releaseBuildUpd
 
       <AppUpdate client={client} updater={appUpdater} release={releaseBuildUpdater} />
 
-      <About read={readAbout} />
+      <About read={readAbout} updates={appUpdates} status={updateStatus} />
 
       {saved && dirty.length === 0 && (
         <p role="status" className={notice}>

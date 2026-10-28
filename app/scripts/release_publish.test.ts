@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { ciState, REQUIRED, waitForChecks } from "./release_publish.mjs";
 
 const cli = fileURLToPath(new URL("./release_publish.mjs", import.meta.url));
 
@@ -38,15 +39,17 @@ function repo() {
 
 const R = repo();
 
-describe("ci-gate: both CI and App, newest run for exactly the commit, on main", () => {
+describe("ci-gate: App (and CI when it ran), newest run for exactly the commit, on main", () => {
   const sha = R.c;
   type Run = { id: number; head_sha: string; head_branch: string; event: string; status: string; conclusion: string | null; created_at: string; run_attempt: number };
   const green = (id: number, over: Partial<Run> = {}): Run => ({
     id, head_sha: sha, head_branch: "main", event: "push", status: "completed", conclusion: "success",
     created_at: `2026-10-23T10:00:${String(id).padStart(2, "0")}Z`, run_attempt: 1, ...over,
   });
-  /** Each workflow's runs, as pages of the runs list. */
-  let pages: Record<string, Run[][]> = {};
+  /** Each workflow's runs, as pages of the runs list; a list of them answers the gate's polls in turn (the last repeats). */
+  type Runs = Record<string, Run[][]>;
+  let pages: Runs | Runs[] = {};
+  let polls: Record<string, number> = {};
   let server: Server;
   let api = "";
 
@@ -68,7 +71,10 @@ describe("ci-gate: both CI and App, newest run for exactly the commit, on main",
         res.writeHead(200, { "content-type": "application/json", ...next(page < all.length) });
         return res.end(JSON.stringify({ workflows: all[page - 1] }));
       }
-      const runs = pages[workflows[1] === "1" ? "ci" : "app"] ?? [[]];
+      const key = workflows[1] === "1" ? "ci" : "app";
+      if (page === 1) polls[key] = (polls[key] ?? -1) + 1;
+      const poll = Array.isArray(pages) ? pages[Math.min(polls[key], pages.length - 1)] : pages;
+      const runs = poll[key] ?? [[]];
       res.writeHead(200, { "content-type": "application/json", ...next(page < runs.length) });
       res.end(JSON.stringify({ workflow_runs: runs[page - 1] ?? [] }));
     });
@@ -77,17 +83,39 @@ describe("ci-gate: both CI and App, newest run for exactly the commit, on main",
   });
   afterAll(() => server.close());
 
-  it.each([
+  const running = green(2, { status: "in_progress", conclusion: null });
+  it.each<[string, Runs | Runs[], string, string | null, "fake clock"?]>([
     ["both passed", { ci: [[green(1)]], app: [[green(2)]] }, sha, null],
     ["App's run on its second page", { ci: [[green(1)]], app: [[green(9, { head_sha: R.b })], [green(2)]] }, sha, null],
-    ["no CI run (App only)", { app: [[green(2)]] }, sha, "ci.yml has no run on main"],
-    ["App still running", { ci: [[green(1)]], app: [[green(2, { status: "in_progress", conclusion: null })]] }, sha, "is in_progress"],
+    ["no CI run (an app-only push): App alone", { app: [[green(2)]] }, sha, null],
+    ["App still running at the deadline", { ci: [[green(1)]], app: [[running]] }, sha, "still waiting after 0 minutes: .github/workflows/app.yml run 2 (attempt 1) is in_progress"],
+    ["App finishes while the gate waits", [{ ci: [[green(1)]], app: [[running]] }, { ci: [[green(1)]], app: [[green(2)]] }], sha, null],
+    ["App passes only on a look past the deadline", [{ app: [[running]] }, { app: [[running]] }, { app: [[green(2)]] }], sha, "they passed only past the deadline", "fake clock"],
     ["CI's newest run failed after an older one passed", { ci: [[green(1), green(5, { conclusion: "failure", run_attempt: 2 })]], app: [[green(2)]] }, sha, "(attempt 2) ended failure"],
-    ["only a pull request's and another branch's CI passed", { ci: [[green(1, { event: "pull_request" }), green(3, { head_branch: "release/desktop" })]], app: [[green(2)]] }, sha, "ci.yml has no run on main"],
+    ["only a pull request's and another branch's App passed", { ci: [[green(1)]], app: [[green(2, { event: "pull_request" }), green(3, { head_branch: "release/desktop" })]] }, sha, "app.yml has no run on main"],
     ["a commit that is not on main", { ci: [[green(1, { head_sha: R.x })]], app: [[green(2, { head_sha: R.x })]] }, R.x, "is not on main"],
-  ])("%s", async (_case, runs, commit, refusal) => {
+  ])("%s", async (_case, runs, commit, refusal, clock) => {
+    if (clock) {
+      // A 1-minute deadline, a 30 s interval, each look taking 1 ms: the third look lands at 60.001 s.
+      let t = 0;
+      const looks = runs as Runs[];
+      const look = async () => {
+        const poll = looks[Math.min(Math.floor(t / 30_000), looks.length - 1)];
+        t += 1;
+        return ciState(REQUIRED.map((path) => ({ path, runs: (poll[path.includes("ci.yml") ? "ci" : "app"] ?? []).flat() })), commit);
+      };
+      const pause = async (ms: number) => void (t += ms);
+      expect(await waitForChecks(look, { deadlineMinutes: 1, intervalSeconds: 30, now: () => t, pause })).toContain(refusal);
+      return;
+    }
     pages = runs;
-    const env = { GITHUB_API_URL: api, GITHUB_REPOSITORY: "o/r", GITHUB_TOKEN: "t", GITHUB_SHA: commit, MAIN_REF: "main" };
+    polls = {};
+    // A gate that has to wait polls at once (interval 0); one that never sees an end gives up at its first look (deadline 0).
+    const deadline = Array.isArray(runs) ? "1" : "0";
+    const env = {
+      GITHUB_API_URL: api, GITHUB_REPOSITORY: "o/r", GITHUB_TOKEN: "t", GITHUB_SHA: commit, MAIN_REF: "main",
+      CI_GATE_DEADLINE_MINUTES: deadline, CI_GATE_INTERVAL_SECONDS: "0",
+    };
     const { status, out } = await run(["ci-gate"], env, R.dir);
     if (refusal === null) {
       expect(status, out).toBe(0);
