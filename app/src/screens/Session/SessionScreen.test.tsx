@@ -258,7 +258,7 @@ describe("SessionScreen", () => {
     await waitFor(() => expect(changes().getByRole("button", { name: /@@/ })).toHaveProperty("disabled", false));
     fireEvent.click(changes().getByRole("button", { name: /@@/ }));
     fireEvent.change(changes().getByRole("textbox"), { target: { value: "edited\ncontext\nextra" } });
-    fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+    fireEvent.click(tabs().getByRole("tab", { name: "Chat" }));
     expect(term()).toBe(terminal);
     expect(terminal.disposed).toBe(false);
     fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
@@ -279,7 +279,7 @@ describe("SessionScreen", () => {
     vi.useFakeTimers();
     try {
       await act(async () => {
-        fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+        fireEvent.click(tabs().getByRole("tab", { name: "Chat" }));
         fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
         await vi.advanceTimersByTimeAsync(0);
       });
@@ -297,7 +297,7 @@ describe("SessionScreen", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
       const pendingReads = diffReads;
       await act(async () => {
-        fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+        fireEvent.click(tabs().getByRole("tab", { name: "Chat" }));
         fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
         await vi.advanceTimersByTimeAsync(10_000);
       });
@@ -307,7 +307,7 @@ describe("SessionScreen", () => {
       expect(diffReads).toBe(pendingReads + 1);
 
       // Activating Changes reads immediately, without advancing the periodic clock.
-      fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+      fireEvent.click(tabs().getByRole("tab", { name: "Chat" }));
       daemon.data.sessionFiles.sup1["docs/readme.md"] = "on activation\n";
       await act(async () => {
         fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
@@ -327,7 +327,7 @@ describe("SessionScreen", () => {
     }
   });
 
-  it("Repo: opens a checkout file from its tree and saves it against its blob, a moved file a conflict and a busy engine inline, and a shell in the checkout in a drawer", async () => {
+  it("Repo: opens a checkout file from its tree and saves it against its blob, a moved file a conflict and a busy engine inline", async () => {
     const { daemon, sync, term } = mount({ sup1: live, w1: live }, {
       workspaces: [{ ...root, branch: "brindle/session-18" }, worker],
       sessionReview: { sup1: { ready: false, reasons: ["work in progress"], branch: "brindle/session-18", base: "main", diff: "" } },
@@ -337,6 +337,8 @@ describe("SessionScreen", () => {
     fireEvent.click(screen.getByTestId("repo-tab"));
     const repoTab = () => within(screen.getByRole("tabpanel", { name: "Repo" }));
     const files = await repoTab().findByRole("navigation", { name: "Repository files" });
+    expect(repoTab().queryByTestId("repo-shell")).toBeNull();
+    expect(repoTab().queryByTestId("repo-shell-drawer")).toBeNull();
     expect(screen.getByTestId("session-branch").textContent).toBe("brindle/session-18");
     expect(within(files).queryByTitle("src/a.ts")).toBeNull();
     fireEvent.click(within(files).getByRole("button", { name: "src/" }));
@@ -366,29 +368,17 @@ describe("SessionScreen", () => {
     expect(box().value).toBe("four\n");
     expect(daemon.sessionEdits).toHaveLength(1);
 
-    // Shell: one shell in the session checkout, in the drawer; pressed again, the same one.
-    fireEvent.click(repoTab().getByTestId("repo-shell"));
-    const drawer = await repoTab().findByTestId("repo-shell-drawer");
-    await waitFor(() => expect(daemon.shells).toEqual([{ terminal: daemon.actions[0].id, cwd: REPO }]));
-    await waitFor(() => expect(within(drawer).getByTestId("terminal").dataset.target).toBe(daemon.actions[0].target));
-    fireEvent.click(repoTab().getByTestId("repo-shell"));
-    expect(daemon.shells).toHaveLength(1);
-    fireEvent.click(within(drawer).getByRole("button", { name: "Close this shell" }));
-    await waitFor(() => expect(repoTab().queryByTestId("repo-shell-drawer")).toBeNull());
-    expect(daemon.closedTerminals).toEqual([daemon.actions[0].id]);
     sync.stop();
   });
 
-  it("Repo: a save under way stays the file's through looking at another, and a shell that starts after its drawer closed or its view went is closed", async () => {
+  it("Repo: a save under way stays the file's through looking at another", async () => {
     const held = () => {
       let release!: () => void;
       const until = new Promise<void>((resolve) => (release = resolve));
       return { until, release };
     };
     let holdPut: ReturnType<typeof held> | null = null;
-    let holdShell: ReturnType<typeof held> | null = null;
     let puts = 0;
-    let shellStarts = 0;
     const { daemon, sync, term } = mount({ sup1: live, w1: live }, {
       sessionFiles: { sup1: { "a.ts": "one\n", "b.ts": "bee\n" } },
     }, (daemon) => async (input, init) => {
@@ -399,10 +389,6 @@ describe("SessionScreen", () => {
         const applied = await daemon.fetch(input, init);
         await holdPut?.until;
         return applied;
-      }
-      if (url.endsWith("/terminals/shell")) {
-        shellStarts++;
-        await holdShell?.until;
       }
       return daemon.fetch(input, init);
     });
@@ -438,24 +424,6 @@ describe("SessionScreen", () => {
     expect(daemon.sessionEdits.map((e) => e.content)).toEqual(["two\n"]);
     expect(box("a.ts").value).toBe("two\n");
 
-    // Shell twice while the first is starting: one start. Closed before it comes: the shell it gets is closed.
-    holdShell = held();
-    fireEvent.click(repoTab().getByTestId("repo-shell"));
-    fireEvent.click(repoTab().getByTestId("repo-shell"));
-    await waitFor(() => expect(shellStarts).toBe(1));
-    fireEvent.click(within(repoTab().getByTestId("repo-shell-drawer")).getByRole("button", { name: "Close this shell" }));
-    expect(repoTab().queryByTestId("repo-shell-drawer")).toBeNull();
-    holdShell.release();
-    await waitFor(() => expect(daemon.closedTerminals).toEqual([daemon.shells[0].terminal]));
-    expect(repoTab().queryByTestId("repo-shell-drawer")).toBeNull();
-
-    // The view goes while a shell starts: that shell is closed too.
-    holdShell = held();
-    fireEvent.click(repoTab().getByTestId("repo-shell"));
-    await waitFor(() => expect(shellStarts).toBe(2));
-    cleanup();
-    holdShell.release();
-    await waitFor(() => expect(daemon.closedTerminals).toEqual([daemon.shells[0].terminal, daemon.shells[1].terminal]));
     sync.stop();
   });
 
@@ -929,7 +897,7 @@ describe("SessionScreen", () => {
     await within(screen.getByRole("tabpanel", { name: /Changes/ })).findByRole("navigation", { name: "Changed files" });
     expect(screen.getByTestId("new-file")).toHaveProperty("disabled", true);
     fireEvent.keyDown(screen.getByRole("tab", { name: /Changes/ }), { key: "Home" });
-    expect(screen.getByRole("tab", { name: "Terminal" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Chat" }).getAttribute("aria-selected")).toBe("true");
 
     // Continue, from the bar this time, is refused until Claude Code's preflight is settled: the engine's items
     // as native UI on the surface, no launch.
