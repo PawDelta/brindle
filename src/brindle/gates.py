@@ -461,7 +461,7 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     rules = rule_summary(db, ws)
     if not cfg.checks:
         return rules
-    env = workspaces.workspace_env(ws)
+    env = workspaces.workspace_env(ws, cfg)
     lines = [rules] if rules else []
     budget = MAX_FAILURE_CHARS
     with queue_place(time.time()):   # one place in the check queue for all its commands
@@ -551,7 +551,7 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
     if rules:
         r.passed.append("rules passed (" + ", ".join(rules.packs) + ")")
 
-    env = workspaces.workspace_env(ws)
+    env = workspaces.workspace_env(ws, cfg)
     with queue_place(time.time()):
         for cmd in cfg.checks:
             ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
@@ -617,7 +617,7 @@ def _pre_commit(db: DB, ws: Workspace, cfg: RepoConfig) -> str | None:
     start = git.merge_base(ws.path, git.base_ref(ws.path, base))
     ok, out = run_checked(
         db, ws, f"pre-commit run --from-ref {start} --to-ref HEAD",
-        workspaces.workspace_env(ws), cfg.check_timeout,
+        workspaces.workspace_env(ws, cfg), cfg.check_timeout,
     )
     if ok:
         return None

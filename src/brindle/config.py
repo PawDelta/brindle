@@ -274,10 +274,11 @@ def _read_shared(root: Path, branch: str | None) -> dict:
     return _read_json(path)
 
 
-def workspace_config(ws) -> RepoConfig:
+def workspace_config(ws, *, session: bool = False) -> RepoConfig:
     """``load_repo_config`` for workspace ``ws``, reading the shared file
-    from its base branch (see ``_read_shared``)."""
-    return load_repo_config(ws.repo_root, branch=ws.base_branch)
+    from its base branch (see ``_read_shared``). A session's own workspace
+    (``session``) reads its own branch; its workers' base is that branch."""
+    return load_repo_config(ws.repo_root, branch=ws.branch if session and ws.kind == "worktree" else ws.base_branch)
 
 
 def config_root(path: str | Path) -> Path:
