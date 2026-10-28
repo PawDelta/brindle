@@ -758,9 +758,8 @@ def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any
     def work(db: DB, job: Job) -> Any:
         try:
             identity_lock.ensure(root)      # again: the person signed in may have changed since
-            head = git.out(["rev-parse", "HEAD"], ws.path)
-            gates.require_pr_checks(db, ws, lambda text: bus.publish(db, "job.progress", job=job.id, text=text))
-            url = workspaces.open_pull_request(ws, title, draft, body=text)
+            with gates.pr_checked(db, ws, lambda t: bus.publish(db, "job.progress", job=job.id, text=t)) as head:
+                url = workspaces.open_pull_request(ws, title, draft, body=text, sha=head)
             if url is None and auto:
                 raise workspaces.WorkspaceError("pushed, but gh couldn't open the PR")
             if url is None:     # the person opens it from the compare page: no PR to record yet

@@ -2411,8 +2411,11 @@ def pr(
 
     db = DB()
     ws = _ws(db, workspace)
-    _run(gates.require_pr_checks, db, ws, lambda text: typer.echo(text, err=True))
-    url = _run(workspaces.pull_request, ws, title, draft)
+    def open_checked() -> str:
+        with gates.pr_checked(db, ws, lambda text: typer.echo(text, err=True)) as sha:
+            return workspaces.pull_request(ws, title, draft, sha=sha)
+
+    url = _run(open_checked)
     typer.echo(url)
     _offer_delete_on_merge(ws.repo_root)
 
