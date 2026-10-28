@@ -41,10 +41,12 @@ from brindle.service import inbox
 from brindle.service.dto import (
     AccountDTO,
     AgentDTO,
+    CloudOptionsDTO,
     DecisionDTO,
     GoalDTO,
     PreflightItemDTO,
     ProfileDTO,
+    ProviderConnectionDTO,
     RoutingDTO,
     RoutingKindDTO,
     RoutingProfileDTO,
@@ -557,6 +559,30 @@ def providers_installed(db: DB, request: Request) -> Any:
 
 
 @_json
+def provider_connection(db: DB, request: Request) -> Any:
+    """How the provider connects (brindle.connections): sign-in, API key or a
+    cloud, and for a cloud its settings and login (valid, expiry, the command
+    that renews it). ``managed`` says why the org decides it instead."""
+    from brindle import connections
+
+    try:
+        got = connections.view(request.path_params["provider"], _repo(request))
+    except connections.Invalid as e:
+        raise ServiceError("invalid", str(e)) from None
+    return ProviderConnectionDTO(**got).to_json()
+
+
+@_json
+def cloud_options(db: DB, request: Request) -> Any:
+    """The cloud choices this machine is set up for, from the cloud CLIs' own
+    files: AWS profiles (SSO or not), gcloud's application-default login and
+    default project, the Azure CLI's tenant, and the usual regions. No secrets."""
+    from brindle import connections
+
+    return CloudOptionsDTO(**connections.options()).to_json()
+
+
+@_json
 def account(db: DB, request: Request) -> Any:
     from brindle.pro import license
     from brindle.pro.account import ProAccount
@@ -678,6 +704,8 @@ ROUTES = [
     # Before the action routes' DELETE /v1/providers/{provider}.
     Route("/v1/providers/installed", providers_installed),
     Route("/v1/providers/{provider}/preflight", provider_preflight),
+    Route("/v1/providers/{provider}/connection", provider_connection),
+    Route("/v1/cloud/options", cloud_options),
     Route("/v1/account", account),
     Route("/v1/cost", get_cost),
     Route("/v1/usage", get_usage),

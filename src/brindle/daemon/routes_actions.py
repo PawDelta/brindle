@@ -1772,6 +1772,63 @@ def provider_logout(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("logout_failed", str(e), 422) from None
 
 
+def put_provider_connection(db: DB, params: dict, body: Body) -> Any:
+    """How the provider connects (brindle.connections), into
+    ~/.brindle/config.json: ``method`` auto | sign_in | api_key | cloud, and
+    for cloud ``cloud`` (the route) and ``settings`` (its non-secret
+    variables, e.g. AWS_PROFILE and AWS_REGION). A choice the org's policy
+    decides instead is refused (403) with the reason. Answers GET's shape."""
+    from brindle import connections
+    from brindle.service.dto import ProviderConnectionDTO
+
+    provider, repo = params["provider"], _get(body, "repo")
+    try:
+        connections.choose(provider, _get(body, "method", required=True), _get(body, "cloud"),
+                           _get(body, "settings", dict), repo)
+        return ProviderConnectionDTO(**connections.view(provider, repo)).to_json()
+    except connections.Invalid as e:
+        raise ServiceError("invalid", str(e)) from None
+    except connections.Refused as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+
+
+def _streamed(db: DB, job: Job):
+    """A ``run`` for a cloud CLI's sign-in: no terminal input, its output
+    (the URL or device code to confirm in the browser) as ``job.progress``."""
+    def run(argv: list[str], env=None, pass_fds=()) -> subprocess.CompletedProcess:
+        with subprocess.Popen(argv, env=env, pass_fds=pass_fds, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              start_new_session=True) as proc:
+            for line in proc.stdout:
+                bus.publish(db, "job.progress", job=job.id, text=line.rstrip("\n"))
+        return subprocess.CompletedProcess(argv, proc.returncode)
+    return run
+
+
+def provider_cloud_sign_in(db: DB, params: dict, body: Body) -> Any:
+    """The cloud sign-in for the provider's saved cloud route, a first one or
+    a renewal, as a job (202): the CLI's output arrives as ``job.progress``,
+    and the result says what happened: "signed in", "failed", "waiting" (one
+    is already running for this login) or "manual"."""
+    from brindle import connections, picker
+
+    provider = params["provider"]
+    try:
+        connections.sign_in_target(provider)
+    except connections.Invalid as e:
+        raise ServiceError("invalid", str(e)) from None
+    except connections.Refused as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+    browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
+
+    def work(db: DB, job: Job) -> Any:
+        return connections.sign_in(provider, run=_streamed(db, job),
+                                   say=lambda text: bus.publish(db, "job.progress", job=job.id, text=text),
+                                   extra_env={"BROWSER": browser["BROWSER"]} if browser else None)
+
+    return start_job("provider.cloud_sign_in", work, provider=provider)
+
+
 def terminal_input(db: DB, params: dict, body: Body) -> Any:
     """Type ``text``, one line the person typed or pasted in the app (a
     sign-in's code), into the action terminal ``id``, then Enter unless
@@ -2109,6 +2166,8 @@ ROUTES = [
     _post("/providers/{provider}/consent", provider_consent),
     _post("/providers/{provider}/install", install_provider),
     _post("/providers/{provider}/use-mine", use_provider_install),
+    Route("/v1/providers/{provider}/connection", _endpoint(put_provider_connection), methods=["PUT"]),
+    _post("/providers/{provider}/cloud-sign-in", provider_cloud_sign_in),
     Route("/v1/providers/{provider}", _endpoint(turn_off_provider), methods=["DELETE"]),
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
