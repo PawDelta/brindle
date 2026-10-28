@@ -248,7 +248,7 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     ("uv run pytest tests/test_a.py", "uv run pytest --basetemp=src", "ask"),                 # deletes src
     ("uv run pytest tests/test_a.py", "uv run pytest -k @args.txt", "ask"),                   # options from a file
     ("npm config get registry | head", "npm config set registry https://example.invalid", "ask"),   # a write
-    ("ls -la src | head", "ls && cd /tmp && cat secret.txt", "ask"),                          # where, unknown
+    ("ls -la src | head", "ls && cd $DIR && cat secret.txt", "ask"),                          # where, unknown
     ("git log --oneline -5", "git log -1 && git reset --hard", "ask"),                        # a write beside it
     ("grep -rn foo src | head", "grep -rn foo src > found.txt", "ask"),                       # a redirect writes
 ])
@@ -265,6 +265,24 @@ def test_approval_covers_its_family(db, ws, approved, sibling, decision):
     grants.decide_group(db, item.key, "general", "timed", 15)
     assert hook.done.wait(5) and hook.answer == "allow_once"
     assert decide(bash(ws, sibling)).decision == decision
+
+
+@pytest.mark.parametrize("command, found", [
+    ("cd app && npm test", ["dev/tests"]),                              # a leading cd: the rest runs in app
+    ("git status && cd {ws}/app && git log -3", ["git/readonly"]),      # a cd in the chain, inside the checkout
+    ("cd $DIR && npm test", None),                                      # where only the run knows
+    ("cd / && npm test", None),                                         # another project's
+    ("cd app ; npm test", None),                                        # the cd may have failed
+    ("cd app && npm test || npm test", None),                           # runs where the cd failed
+    ("ls | cd app && npm test", None),                                  # the cd ran in the pipeline's subshell
+    ("! cd app && npm test", None),                                     # runs only where the cd failed
+    ("cd / && ls && {{ cd {ws} && ls; }} | npm test", None),           # the group's cd ran in its own subshell
+])
+def test_cd_chain_keeps_its_family(ws, command, found):
+    """What runs after a cd it surely followed (``cd x && ...``) runs where
+    the cd led; after one that may have failed, where is unknown."""
+    (Path(ws.path) / "app").mkdir()
+    assert grants.families(bash(ws, command.format(ws=ws.path))) == found
 
 
 def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_blocks(db, ws):
