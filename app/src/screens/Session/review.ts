@@ -116,26 +116,50 @@ export interface SessionDiffState {
   reload(): void;
 }
 
-export function useSessionDiff(client: DaemonClient, root: string): SessionDiffState {
-  const [diff, setDiff] = useState<SessionDiff | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [notReady, setNotReady] = useState<string[] | null>(null);
+export function useSessionDiff(client: DaemonClient, root: string, store: AppStore): SessionDiffState {
+  const [snapshot, setSnapshot] = useState<{ root: string; diff: SessionDiff | null; error: string | null; notReady: string[] | null } | null>(null);
+  const current = snapshot?.root === root ? snapshot : null;
+  const diff = current?.diff ?? null;
+  const error = current?.error ?? null;
+  const notReady = current?.notReady ?? null;
   const [attempt, setAttempt] = useState(0);
+  const reload = useCallback(() => setAttempt((n) => n + 1), []);
+  useEffect(() => {
+    let previous = store.getState();
+    return store.subscribe(() => {
+      const next = store.getState();
+      const fresh = next.recent.filter((e) => e.id > previous.lastEventId);
+      // A git sweep replaces workspace metadata while retaining its agents.
+      // Snapshot updates following an event have already been covered by that event.
+      const swept = next.workspaces.some((ws) => {
+        const before = previous.workspaces.find((old) => old.id === ws.id);
+        return before && ws !== before && ws.agents === before.agents;
+      });
+      const changed = swept ||
+        (next.stale && !previous.stale) ||
+        fresh.some((e) => concernsReadiness(e, root));
+      previous = next;
+      if (changed) reload();
+    });
+  }, [store, root, reload]);
   useEffect(() => {
     let live = true;
     client.sessionDiff(root).then(
       (d) => {
         if (!live) return;
-        setDiff(d);
-        setError(null);
-        setNotReady(null);
+        setSnapshot({ root, diff: d, error: null, notReady: null });
       },
       (e: unknown) => {
         if (!live) return;
         // A diff already shown stays shown: the engine judging the session again (after an edit made here, say)
         // is said quietly beside it, not by taking it away.
-        if (e instanceof DaemonError && e.code === "not_ready") setNotReady(e.reasons ?? [e.message]);
-        else setError(e instanceof Error ? e.message : String(e));
+        const refused = e instanceof DaemonError && e.code === "not_ready";
+        setSnapshot((previous) => ({
+          root,
+          diff: previous?.root === root ? previous.diff : null,
+          error: refused ? null : e instanceof Error ? e.message : String(e),
+          notReady: refused ? e.reasons ?? [e.message] : null,
+        }));
       },
     );
     return () => {
@@ -143,7 +167,6 @@ export function useSessionDiff(client: DaemonClient, root: string): SessionDiffS
     };
   }, [client, root, attempt]);
   const files = useMemo(() => (diff?.files ?? []).map(toFileDiff), [diff]);
-  const reload = useCallback(() => setAttempt((n) => n + 1), []);
   return { diff, files, error, notReady, reload };
 }
 

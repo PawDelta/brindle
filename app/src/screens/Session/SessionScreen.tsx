@@ -1,23 +1,11 @@
-/* A session's view: the provider's session, front and centre and alone in
-   the main area. What the selected agent's CLI (Claude Code, Codex,
-   OpenCode ...) draws fills the surface (ProviderSurface), named by
-   provider and agent ("Claude Code · ux revamp"), never by a tmux id, and
-   never a shell: when the process isn't running the surface is a native
-   state card instead. Above it one slim bar: who this is (with its id) and
-   its state, pause / continue, and the agent's ⋯ (close / kill, a
-   worker's rewind, the supervisor's handover, and the whole session's
-   Close session, one click); nothing
-   of the session's (its goal is the sidebar's, what waits the Inbox's).
-   Continue in the bar and Continue on the card are one
-   handler (useContinue): the engine's preflight items show on the surface
-   whichever was pressed, and a success remounts the pane's socket.
-   brindle's own layer for the session (its goal and milestones, its PR
-   status) lives in the sidebar's context pane, not beside the surface:
-   there is no right-hand panel, no message box and no per-worker review
-   here. The person talks to an agent in its own terminal; what waits on
-   them is acted on from the Inbox's cards. Nothing ever pops up over the
-   surface: the one sheet, "Review & open PR" (ReviewSheet), opens only
-   from the goal panel's Ready for PR step, on purpose.
+/* A session's main area has Terminal and Changes tabs. Terminal keeps
+   the selected agent's ProviderSurface; Changes shows the whole session
+   branch against its PR base, even before readiness. Both remain mounted
+   after opening so switching tabs keeps the pane and unsaved drafts.
+   The bar always names the session branch, even when a worker is selected.
+   Continue in the bar and on the state card share useContinue.
+   The goal and PR lifecycle stay in the sidebar; Review & open PR opens
+   its sheet from there and uses the same editor as Changes.
 
    The tree is the store's snapshot (tree.ts, with the sessions feed's
    lookup of closed agents' parents). Which agent is shown and which sheet
@@ -36,8 +24,9 @@ import { useAppState } from "../../store/useStore";
 import { AgentMenu, SessionMenu, closeSessionLabel, type CloseSessionItem } from "./AgentMenu";
 import { failure, type Notice } from "./notice";
 import { ProviderSurface } from "./ProviderSurface";
-import { usePrReadiness } from "./review";
+import { usePrReadiness, useSessionDiff } from "./review";
 import { ReviewSheet } from "./ReviewSheet";
+import { SessionDiffEditor } from "./SessionDiffEditor";
 import { agentIds, sessionTree, sessionWork, since, type AgentNode } from "./tree";
 import { useContinue, type Recovery } from "./useContinue";
 
@@ -129,11 +118,16 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   const recovery = useContinue(client, root, reload);
   // The engine's word on a PR: the Review & open PR entry exists only once it says ready.
   const readiness = usePrReadiness(client, root, store);
+  const changes = useSessionDiff(client, root, store);
+  const [view, setView] = useState<{ root: string; tab: "terminal" | "changes" }>({ root, tab: "terminal" });
+  const tab = view.root === root ? view.tab : "terminal";
+  const [visited, setVisited] = useState<string | null>(null);
+  const branch = changes.diff?.branch || workspaces.find((ws) => ws.id === rootWorkspace)?.branch || "…";
 
   const host = useRef<HTMLElement>(null);
   useEffect(() => {
     const section = host.current;
-    if (!section || shownSheet) return;
+    if (!section || shownSheet || tab !== "terminal") return;
     // xterm loads asynchronously and adds its textarea after the pane mounts.
     // Focus once per navigation, never on later terminal output or store updates.
     const focus = () => {
@@ -148,7 +142,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     });
     observer.observe(section, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [root, repo, selected, shownSheet]);
+  }, [root, repo, selected, shownSheet, tab]);
 
   return (
     <section ref={host} className="relative flex min-h-0 flex-1 flex-col" aria-label="Session">
@@ -166,6 +160,14 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         onAgent={(id) => select(id, null)}
         onOpen={onOpen}
         closeSession={closeSession}
+        branch={branch}
+        tab={tab}
+        onTab={(tab) => {
+          setView({ root, tab });
+          if (tab === "changes") setVisited(root);
+        }}
+        added={changes.files.reduce((n, f) => n + f.added, 0)}
+        removed={changes.files.reduce((n, f) => n + f.removed, 0)}
       />
       {pausedUnder && (
         <div role="status" className="flex items-center gap-s2 border-b border-line px-s2 py-1 text-sm text-ink-2">
@@ -183,7 +185,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
           </button>
         </div>
       )}
-      <div className="flex min-h-0 flex-1 p-s2">
+      <div role="tabpanel" id="session-terminal" aria-labelledby="session-tab-terminal" hidden={tab !== "terminal"} className={tab === "terminal" ? "flex min-h-0 flex-1 p-s2" : "hidden"}>
         {!tree && !paused && !synced ? (
           <p className="flex-1 text-ink-3">Loading…</p>
         ) : !tree && !paused && !session ? (
@@ -203,17 +205,18 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
           </div>
         )}
       </div>
+      <div role="tabpanel" id="session-changes" aria-labelledby="session-tab-changes" hidden={tab !== "changes"} className={tab === "changes" ? "flex min-h-0 min-w-0 flex-1 flex-col p-s2" : "hidden"}>
+        {visited === root && <SessionDiffEditor key={root} client={client} root={root} state={changes} />}
+      </div>
       {/* The one thing that ever lies over a session, opened on purpose from the goal panel's Ready for PR step.
           Open, it stays through readiness being read again (an edit here, a sweep): it says so quietly instead. */}
-      {shownSheet?.kind === "review" && <ReviewSheet client={client} root={root} repo={repo} readiness={readiness} onClose={closeSheet} openUrl={openUrl} />}
+      {shownSheet?.kind === "review" && <ReviewSheet key={root} client={client} root={root} repo={repo} readiness={readiness} state={changes} onClose={closeSheet} openUrl={openUrl} />}
     </section>
   );
 }
 
-/* The session's one slim bar: the selected agent alone (provider and
-   agent, its id, its state), pause / continue, and the agent's ⋯. Nothing
-   of the session's: its goal lives in the sidebar, what waits in the Inbox. */
-function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, reload, refresh, recovery, onAgent, onOpen, closeSession }: {
+/* Tabs, session branch, and the selected agent's status and controls. */
+function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, reload, refresh, recovery, onAgent, onOpen, closeSession, branch, tab, onTab, added, removed }: {
   client: DaemonClient;
   root: string;
   repo: string;
@@ -227,6 +230,11 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
   onAgent(id: string): void;
   onOpen?(root: string, repo: string): void;
   closeSession?: CloseSessionItem;
+  branch: string;
+  tab: "terminal" | "changes";
+  onTab(tab: "terminal" | "changes"): void;
+  added: number;
+  removed: number;
 }) {
   const workspaces = useAppState((s) => s.workspaces);
   const [busy, setBusy] = useState(false);
@@ -256,6 +264,23 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
   // The bar's own notice is the pause's; a continue's shows on the surface's card, where it was asked for.
   return (
     <header className="flex flex-wrap items-center gap-x-s2 gap-y-1 border-b border-line bg-surface px-s2 py-1" data-testid="session-bar">
+      <div role="tablist" aria-label="Session views" data-testid="session-tabs" className="flex shrink-0 items-center self-stretch gap-s1 pr-s2">
+        {(["terminal", "changes"] as const).map((item) => (
+          <button key={item} id={`session-tab-${item}`} role="tab" type="button" aria-selected={tab === item} aria-controls={`session-${item}`} tabIndex={tab === item ? 0 : -1}
+            className={`border-b-2 px-s2 py-2 text-sm ${tab === item ? "border-branch text-ink" : "border-transparent text-ink-3 hover:text-ink"}`}
+            onClick={() => onTab(item)}
+            onKeyDown={(e) => {
+              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
+              e.preventDefault();
+              const next = e.key === "Home" ? "terminal" : e.key === "End" ? "changes" : item === "terminal" ? "changes" : "terminal";
+              onTab(next);
+              document.getElementById(`session-tab-${next}`)?.focus();
+            }}>
+            {item === "terminal" ? "Terminal" : <>Changes <span className={`${mono} ml-1 text-xs`}><span className="text-pass">+{added}</span> <span className="text-sap">−{removed}</span></span></>}
+          </button>
+        ))}
+      </div>
+      <span data-testid="session-branch" title={branch} className={`${mono} min-w-0 max-w-64 truncate rounded border border-line bg-surface-2 px-s1 py-0.5 text-xs text-ink-2`}>{branch}</span>
       <div className="flex min-w-0 items-center gap-s1">
         <span className="truncate text-sm font-semibold" data-testid="surface-title">
           {provider} · {who}
