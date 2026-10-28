@@ -767,10 +767,10 @@ def with_footer(body: str, repo_root: str) -> str:
 
 
 def pull_request(ws: Workspace, title: str | None = None, draft: bool = False,
-                 body: str | None = None) -> str:
+                 body: str | None = None, sha: str | None = None) -> str:
     """Push, then open a PR with ``gh`` when available, else return the
     compare URL for the browser."""
-    return open_pull_request(ws, title, draft, body) or compare_url(ws)
+    return open_pull_request(ws, title, draft, body, sha) or compare_url(ws)
 
 
 def existing_pull_request(ws: Workspace) -> str | None:
@@ -803,11 +803,12 @@ def compare_url(ws: Workspace) -> str:
 
 
 def open_pull_request(ws: Workspace, title: str | None = None, draft: bool = False,
-                      body: str | None = None) -> str | None:
-    """Push, then open a PR with ``gh``: its URL (or the one already open for
-    the branch), or None when ``gh`` isn't there or can't open one."""
+                      body: str | None = None, sha: str | None = None) -> str | None:
+    """Push (``sha``: exactly that commit), then open a PR with ``gh``: its
+    URL (or the one already open for the branch), or None when ``gh`` isn't
+    there or can't open one."""
     base = require_base(ws)
-    git.push(ws.path, ws.branch)
+    git.push(ws.path, ws.branch, sha)
     if shutil.which("gh"):
         args = ["gh", "pr", "create", "--base", base, "--head", ws.branch]
         if title or body is not None:
