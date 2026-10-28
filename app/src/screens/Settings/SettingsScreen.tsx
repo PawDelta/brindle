@@ -44,14 +44,15 @@
    tool's install is the shell's (install_cli, api/tauri.ts): App passes it
    in the app, where the row then says where the link went; in a browser
    tab there is none and the button stays disabled. Staff alone (GET
-   /v1/debug's `staff`) get a fifth section at the foot, Debug logging: one
-   switch (PUT /v1/debug) for uploading debug logs to brindle (api/debug.ts).
-   In the app staff also get App update: one Update button that checks this
-   build's feed (a release candidate's rc channel) and installs what it
-   finds, then offers a restart. It is how a release candidate updates at
-   all: an rc build never checks by itself (src-tauri/src/updates.rs).
-   Beside it, staff can install the release branch's latest build, before
-   it ships, and restart into it (ReleaseBuildUpdate).
+   /v1/debug's `staff`) get one section before About, Staff only, marked as
+   not public: Debug logging, one switch (PUT /v1/debug) for uploading debug
+   logs to brindle (api/debug.ts). In the app staff also get App update: one
+   Update button that checks this build's feed (a release candidate's rc
+   channel) and installs what it finds, then offers a restart. It is how a
+   release candidate updates at all: an rc build never checks by itself
+   (src-tauri/src/updates.rs). Beside it, staff can install the release
+   branch's latest build, before it ships, and restart into it
+   (ReleaseBuildUpdate), and go back to stable (Return to stable).
    Last, About: the app's version and its license files (About.tsx). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -134,11 +135,15 @@ const SECTIONS = [
   { id: "about", label: "About" },
 ];
 
+/* The staff section sits before About, and is in the nav only for staff. */
+const STAFF = { id: "staff", label: "Staff only" };
+
 /* The small in-page nav: one button per section, scrolling to it. */
-function SectionNav() {
+function SectionNav({ staff }: { staff: boolean }) {
+  const shown = staff ? [...SECTIONS.slice(0, -1), STAFF, ...SECTIONS.slice(-1)] : SECTIONS;
   return (
     <nav aria-label="Settings sections" className="flex flex-wrap gap-1">
-      {SECTIONS.map((s) => (
+      {shown.map((s) => (
         <button
           key={s.id}
           type="button"
@@ -153,18 +158,19 @@ function SectionNav() {
 }
 
 /* A section: its heading and one-line blurb, actions on the right, and a card of rows. */
-function Section({ id, title, blurb, actions, children, testId }: { id: string; title: string; blurb?: ReactNode; actions?: ReactNode; children: ReactNode; testId: string }) {
+function Section({ id, title, blurb, actions, children, testId, staff = false }: { id: string; title: string; blurb?: ReactNode; actions?: ReactNode; children: ReactNode; testId: string; staff?: boolean }) {
   return (
     <section id={id} aria-labelledby={`${id}-title`} className="flex scroll-mt-s2 flex-col gap-s1" data-testid={testId}>
       <header className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5">
         <h2 id={`${id}-title`} className={h2}>
           {title}
         </h2>
+        {staff && <span className={`${pill} text-sap`}>STAFF</span>}
         {blurb && <span className="text-xs text-ink-3">{blurb}</span>}
         <span className="flex-1" />
         {actions}
       </header>
-      <div className={`${card} flex flex-col divide-y divide-line`}>{children}</div>
+      <div className={`${staff ? "rounded-lg border border-sap bg-sap-soft" : card} flex flex-col divide-y divide-line`}>{children}</div>
     </section>
   );
 }
@@ -441,7 +447,7 @@ function DebugLogging({ client }: { client: DaemonClient }) {
     }
   };
   return (
-    <Section id="debug" title="Debug logging" testId="debug-logging">
+    <div className="contents" data-testid="debug-logging">
       <Row label="Upload debug logs" htmlFor="debug-logging" help="While this is on, brindle's and this app's debug logs upload to brindle." testId="debug-row">
         <Toggle id="debug-logging" label="Debug logging" checked={state.enabled} disabled={saving} onChange={(on) => void turn(on)} />
       </Row>
@@ -450,7 +456,7 @@ function DebugLogging({ client }: { client: DaemonClient }) {
           Could not save: {error}
         </p>
       )}
-    </Section>
+    </div>
   );
 }
 
@@ -520,7 +526,7 @@ function AppUpdate({ client, updater, release, readAbout }: { client: DaemonClie
         ? "This is the latest build."
         : "Checks for a newer build of this app (a beta checks the beta channel) and installs it.";
   return (
-    <Section id="app-update" title="App update" testId="app-update">
+    <div className="contents" data-testid="app-update">
       {updater && (
         <Row label="Update the app" help={help} testId="app-update-row">
           {state === "installed" || state === "restarting" ? (
@@ -540,7 +546,7 @@ function AppUpdate({ client, updater, release, readAbout }: { client: DaemonClie
           Could not update: {error}
         </p>
       )}
-    </Section>
+    </div>
   );
 }
 
@@ -814,6 +820,20 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const [loadError, setLoadError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const seq = useRef(0);
+  /* Staff alone get the Staff only section and its nav button (GET /debug's `staff`). */
+  const [staff, setStaff] = useState(false);
+  useEffect(() => {
+    let live = true;
+    client.debug().then(
+      (s) => {
+        if (live) setStaff(s.staff);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [client]);
 
   const loadConfig = useCallback(() => {
     const mine = ++seq.current;
@@ -1048,7 +1068,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       <PageHeader title="Settings" lede="Your settings apply to every project; a project can override them. Below: permissions, this project's rules, sign-ins and engine health.">
         <RepoSelect {...pick} disabled={saving} />
       </PageHeader>
-      <SectionNav />
+      <SectionNav staff={staff} />
       {repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
@@ -1336,9 +1356,12 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         )}
       </Section>
 
-      <DebugLogging client={client} />
-
-      <AppUpdate client={client} updater={appUpdater} release={releaseBuildUpdater} readAbout={readAbout} />
+      {staff && (
+        <Section id="staff" title="Staff only" blurb="Internal tools for Brindle staff. Not shown to customers." staff testId="staff-only">
+          <DebugLogging client={client} />
+          <AppUpdate client={client} updater={appUpdater} release={releaseBuildUpdater} readAbout={readAbout} />
+        </Section>
+      )}
 
       <About read={readAbout} updates={appUpdates} status={updateStatus} />
 
