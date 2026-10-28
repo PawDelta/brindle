@@ -521,15 +521,18 @@ describe("review", () => {
     sync?.stop();
     cleanup();
 
-    // The PR the person opened, with session commits made since: they wait, said with a Push that is the only
-    // way onto the PR; the diff stays editable: edits go to the branch, which is the PR's.
-    const later = mount(
-      {
-        sessionReview: { sup1: { ...READY, pr: { url: "https://github.com/example/proj/pull/7", unpushed: 2 } } },
-        goal: { ...goal, goal_phase: "pr_open", pr_url: "https://github.com/example/proj/pull/7" },
-      },
-      { ...onSession, sheet: { kind: "review" } },
-    );
+    // The PR the person opened, everything on it; then a commit in the session checkout, said only by a git
+    // sweep: it waits, the goal panel's way back into Review says so, and Push is the only way onto the PR.
+    const later = mount({
+      sessionReview: { sup1: { ...READY, pr: { url: "https://github.com/example/proj/pull/7", unpushed: 0 } } },
+      goal: { ...goal, goal_phase: "pr_open", pr_url: "https://github.com/example/proj/pull/7" },
+    });
+    const back = await within(nav()).findByTestId("goal-pr-review");
+    expect(back.textContent).not.toContain("not on the PR");
+    later.daemon.data.sessionReview.sup1.pr = { url: "https://github.com/example/proj/pull/7", unpushed: 2 };
+    later.daemon.send({ type: "git", workspace_id: root.id, status: { branch: "dev/ls", base: "main", ahead: 3, behind: 0, dirty_files: [], unpushed: 2 } });
+    await waitFor(() => expect(within(nav()).getByTestId("goal-pr-review").textContent).toContain("2 not on the PR"));
+    fireEvent.click(within(nav()).getByTestId("goal-pr-review"));
     await screen.findByRole("dialog", { name: "Review & open PR" });
     const notice = await within(sheet()).findByTestId("pr-opened");
     expect(notice.textContent).toContain("https://github.com/example/proj/pull/7");

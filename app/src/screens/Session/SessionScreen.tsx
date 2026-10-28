@@ -125,6 +125,14 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // The engine's word on a PR: the Review & open PR entry exists only once it says ready.
   const readiness = usePrReadiness(client, root, store);
   const changes = useSessionDiff(client, root, store);
+  // A new HEAD the diff's own refresh found: readiness (an open PR's unpushed count) is read again.
+  const head = changes.diff?.head;
+  const seenHead = useRef(head);
+  const reloadReadiness = readiness.reload;
+  useEffect(() => {
+    if (seenHead.current && head && head !== seenHead.current) reloadReadiness();
+    if (head) seenHead.current = head;
+  }, [head, reloadReadiness]);
   const [view, setView] = useState<{ root: string; tab: Tab }>({ root, tab: "terminal" });
   const tab = view.root === root ? view.tab : "terminal";
   const [visited, setVisited] = useState<string | null>(null);

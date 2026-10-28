@@ -58,15 +58,24 @@ export function usePrReadiness(client: DaemonClient, root: string, store: AppSto
     load();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
+    let workspaces = store.getState().workspaces;
     const unsubscribe = store.subscribe(() => {
       const s = store.getState();
+      // A git sweep (a commit in the checkout: one more not on an open PR) replaces a workspace's
+      // metadata and keeps its agents, with no bus event, as useSessionDiff reads it too.
+      const swept = s.workspaces.some((ws) => {
+        const before = workspaces.find((old) => old.id === ws.id);
+        return before && ws !== before && ws.agents === before.agents;
+      });
+      workspaces = s.workspaces;
+      let changed = swept || (s.stale && !stale);
       if (s.lastEventId !== seen) {
         const fresh = s.recent.filter((e) => e.id > seen);
         seen = s.lastEventId;
-        if (fresh.some((e) => concernsReadiness(e, root))) load();
+        changed ||= fresh.some((e) => concernsReadiness(e, root));
       }
-      if (s.stale && !stale) load();
       stale = s.stale;
+      if (changed) load();
     });
     return () => {
       live = false;
