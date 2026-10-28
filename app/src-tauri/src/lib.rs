@@ -199,6 +199,8 @@ pub fn run() {
             pty_view::pty_view_close,
             updates::app_update_install,
             updates::app_release_build_install,
+            updates::app_return_to_stable,
+            updates::app_stable_check,
             updates::app_restart,
             updates::app_update_status,
             updates::app_update_check,

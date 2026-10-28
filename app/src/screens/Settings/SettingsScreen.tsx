@@ -459,8 +459,23 @@ function DebugLogging({ client }: { client: DaemonClient }) {
    latest build (ReleaseBuildUpdate). Shown only when GET /debug says this
    account is staff and the shell gives an updater; anyone else sees nothing.
    The shell checks staff again before installing. */
-function AppUpdate({ client, updater, release }: { client: DaemonClient; updater?: AppUpdater; release?: ReleaseBuildUpdater }) {
+function AppUpdate({ client, updater, release, readAbout }: { client: DaemonClient; updater?: AppUpdater; release?: ReleaseBuildUpdater; readAbout?: () => Promise<AboutInfo> }) {
   const [staff, setStaff] = useState(false);
+  /* This build's version, for Return to stable (shown on a release-branch build only). */
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    if (release && readAbout)
+      readAbout().then(
+        (a) => {
+          if (live) setVersion(a.version);
+        },
+        () => {},
+      );
+    return () => {
+      live = false;
+    };
+  }, [release, readAbout]);
   const [state, setState] = useState<"idle" | "checking" | "latest" | "installed" | "restarting">("idle");
   const [installed, setInstalled] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -519,7 +534,7 @@ function AppUpdate({ client, updater, release }: { client: DaemonClient; updater
           )}
         </Row>
       )}
-      {release && <ReleaseBuildUpdate updater={release} />}
+      {release && <ReleaseBuildUpdate updater={release} version={version} />}
       {error && (
         <p role="alert" className={`${alert} m-s2`}>
           Could not update: {error}
@@ -1323,7 +1338,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
 
       <DebugLogging client={client} />
 
-      <AppUpdate client={client} updater={appUpdater} release={releaseBuildUpdater} />
+      <AppUpdate client={client} updater={appUpdater} release={releaseBuildUpdater} readAbout={readAbout} />
 
       <About read={readAbout} updates={appUpdates} status={updateStatus} />
 
