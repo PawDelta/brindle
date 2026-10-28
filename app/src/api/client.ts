@@ -214,7 +214,7 @@ export interface SessionReadiness {
 /* GET /sessions/{root}/diff (session_review.diff): the session branch
    against its PR base, each file with its hunks. The engine attributes each
    file and hunk to whoever wrote it (`authors`, `workers`); the app never
-   shows that. 409 "not_ready" (with `reasons`) unless the session is ready. */
+   shows that. Available independently of PR readiness. */
 export interface SessionHunk {
   header: string;
   old_start: number;
@@ -892,7 +892,7 @@ export class DaemonClient {
     return this.get<SessionReadiness>(`${this.sessionPath(root)}/pr/readiness`);
   }
 
-  /* The session branch against its PR base (throws DaemonError "not_ready" with `reasons` until it is). */
+  /* The session branch against its PR base, including work still in progress. */
   sessionDiff(root: string) {
     return this.get<SessionDiff>(`${this.sessionPath(root)}/diff`);
   }
