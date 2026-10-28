@@ -205,6 +205,12 @@ def sign_out(provider: str) -> dict[str, Any]:
     """Sign brindle's own copy of ``provider`` out (``claude auth logout``,
     ``codex logout``), run with brindle's config home and never the person's
     own CLI login. The provider's row afterwards."""
+    sign_out_only(provider)
+    return status(provider)
+
+
+def sign_out_only(provider: str) -> None:
+    """What sign_out does, without reading the provider's row back."""
     from brindle import providers
     from brindle.company_login import run_cmd
 
@@ -221,7 +227,6 @@ def sign_out(provider: str) -> dict[str, Any]:
         raise InstallError(f"{NAMES[provider]} sign-out failed: {out.strip()[-200:]}")
     provider_homes.mark_signed_out(provider)
     providers.invalidate_signed_in(provider)
-    return status(provider)
 
 
 def status(provider: str) -> dict[str, Any]:

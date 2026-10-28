@@ -1785,7 +1785,7 @@ def put_provider_connection(db: DB, params: dict, body: Body) -> Any:
     try:
         connections.choose(provider, _get(body, "method", required=True), _get(body, "cloud"),
                            _get(body, "settings", dict), repo)
-        return ProviderConnectionDTO(**connections.view(provider, repo)).to_json()
+        return ProviderConnectionDTO(**connections.view(provider, repo, db)).to_json()
     except connections.Invalid as e:
         raise ServiceError("invalid", str(e)) from None
     except connections.Refused as e:
@@ -1827,6 +1827,28 @@ def provider_cloud_sign_in(db: DB, params: dict, body: Body) -> Any:
                                    extra_env={"BROWSER": browser["BROWSER"]} if browser else None)
 
     return start_job("provider.cloud_sign_in", work, provider=provider)
+
+
+def provider_sign_out(db: DB, params: dict, body: Body) -> Any:
+    """Sign brindle's own copy of Codex out (providers_install.sign_out; the
+    person's own login is not touched), as a job (202), so that an API key
+    its ChatGPT login kept out (the connection's ``blocked_by``
+    "codex_login") is used. The result is the connection, as GET answers it."""
+    from brindle import connections, providers_install
+    from brindle.service.dto import ProviderConnectionDTO
+
+    provider, repo = params["provider"], _get(body, "repo")
+    if provider != "codex":
+        raise ServiceError("invalid", "sign-out is for codex, whose ChatGPT login keeps a key from being used")
+
+    def work(db: DB, job: Job) -> Any:
+        try:
+            providers_install.sign_out_only(provider)
+        except providers_install.InstallError as e:
+            raise ServiceError("logout_failed", str(e), 422) from None
+        return ProviderConnectionDTO(**connections.view(provider, repo, db)).to_json()
+
+    return start_job("provider.sign_out", work, provider=provider)
 
 
 def terminal_input(db: DB, params: dict, body: Body) -> Any:
@@ -1885,8 +1907,9 @@ def put_key(db: DB, params: dict, body: Body) -> Any:
 
 
 def delete_key(db: DB, params: dict, body: Body) -> Any:
-    """``brindle keys unset NAME``."""
-    from brindle import keys_cmds, keystore
+    """``brindle keys unset NAME``. GEMINI_API_KEY also gives agy back the
+    modelProvider brindle replaced for it (connections.key_removed)."""
+    from brindle import connections, keys_cmds, keystore
 
     name = params["name"]
     try:
@@ -1895,6 +1918,7 @@ def delete_key(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", str(e)) from None
     except keystore.CredentialError as e:
         raise ServiceError("not_stored", str(e), 422) from None
+    connections.key_removed(name)
     return {"name": name, "set": False}
 
 
@@ -2168,6 +2192,7 @@ ROUTES = [
     _post("/providers/{provider}/use-mine", use_provider_install),
     Route("/v1/providers/{provider}/connection", _endpoint(put_provider_connection), methods=["PUT"]),
     _post("/providers/{provider}/cloud-sign-in", provider_cloud_sign_in),
+    _post("/providers/{provider}/sign-out", provider_sign_out),
     Route("/v1/providers/{provider}", _endpoint(turn_off_provider), methods=["DELETE"]),
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
