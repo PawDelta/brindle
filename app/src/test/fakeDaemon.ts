@@ -152,8 +152,8 @@ export interface DaemonData {
      brindle judges it ready for a PR and why not, its branch and base, and
      its diff against the base as a unified patch (GET /sessions/{root}/diff
      splits it into files and hunks as the engine does; 409 not_ready until
-     ready). `pr`: the PR brindle opened itself (the engine's auto-PR,
-     branch desktop/auto-pr; stubbed here). A session with no entry reads
+     ready). `pr`: the PR the person opened, with how many session commits
+     aren't pushed to it yet (POST .../pr/push pushes them). A session with no entry reads
      as not ready. readyForPr() flips one and puts session.pr_ready on the bus. */
   sessionReview: Record<string, SessionReviewData>;
   /* Root agent id → path → the file as the session's checkout has it (GET,
@@ -239,7 +239,7 @@ export interface SessionReviewData {
   branch: string;
   base: string;
   diff: string;
-  pr?: { url: string } | null;
+  pr?: { url: string; unpushed: number } | null;
 }
 
 /* Permission rules as POST /permissions keeps them (permissions.Rule.to_dict). */
@@ -268,8 +268,6 @@ const REPO_CONFIG_TYPES: Record<string, "string" | "number" | "boolean" | "list"
   overlap: "any", coordinator: "boolean", protected_paths: "list", pool_size: "any", add_dirs: "list",
   worker_extra_read_dirs: "list", services: "list", local_models: "boolean", delete_merged_branches: "boolean",
   pr_footer: "boolean", sidebar: "string", rules: "list", learning: "string", learning_candidates: "list",
-  // Engine branch desktop/auto-pr (stubbed until it merges): brindle opens a ready session's PR itself.
-  auto_pr: "boolean",
 };
 
 /* config.load_repo_config: the command lists come from the repo's files only
@@ -667,6 +665,8 @@ export class FakeDaemon {
   readonly sessionEdits: { root: string; path: string; content: string | null }[] = [];
   /* The PRs POST /sessions/{root}/pr opened, in order, with their URLs. */
   readonly prs: { root: string; title?: string; body?: string; draft?: boolean; url: string }[] = [];
+  /* The sessions POST /sessions/{root}/pr/push pushed to their PR, in order. */
+  readonly prPushes: string[] = [];
   events: BusEvent[] = [];
   readonly requests: Request[] = [];
   readonly sockets: FakeSocket[] = [];
@@ -2526,6 +2526,21 @@ export class FakeDaemon {
         this.pendingLaunch = () => resolve(launched());
       });
     }
+    const prPush = path.match(/^\/sessions\/([^/]+)\/pr\/push$/);
+    if (prPush) {
+      // routes_actions.push_session_pr: only to the PR the person opened; its commits pushed, session.pr_pushed.
+      const root = prPush[1];
+      const review = d.sessionReview[root];
+      if (!review?.pr) return error("conflict", "the session has no PR to push to; open it first", 409);
+      const job = `job${this.nextJob++}`;
+      review.pr = { ...review.pr, unpushed: 0 };
+      this.prPushes.push(root);
+      setTimeout(() => {
+        this.publish("session.pr_pushed", { root_id: root, agent_id: root, payload: { url: review.pr?.url } });
+        this.publish("job.done", { root_id: root, agent_id: root, payload: { job, job_kind: "session.push", result: { url: review.pr?.url } } });
+      }, 0);
+      return json({ job, kind: "session.push" }, 202);
+    }
     const pr = path.match(/^\/sessions\/([^/]+)\/pr$/);
     if (pr) {
       // routes_actions.open_session_pr: refused with the reasons unless ready; a job whose result carries the URL.
@@ -2536,6 +2551,7 @@ export class FakeDaemon {
       const job = `job${this.nextJob++}`;
       const url = `https://github.com/example/proj/pull/${this.prs.length + 1}`;
       this.prs.push({ root, title: body.title as string | undefined, body: body.body as string | undefined, draft: body.draft as boolean | undefined, url });
+      review.pr = { url, unpushed: 0 };
       this.setGoalPhase(root, "pr_open", url);
       setTimeout(() => this.publish("job.done", { root_id: root, agent_id: root, payload: { job, job_kind: "session.pr", result: { url, keeps_merged_branches: true } } }), 0);
       return json({ job, kind: "session.pr" }, 202);

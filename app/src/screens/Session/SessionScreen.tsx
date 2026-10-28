@@ -222,7 +222,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
       </div>
       {/* The one thing that ever lies over a session, opened on purpose from the goal panel's Ready for PR step.
           Open, it stays through readiness being read again (an edit here, a sweep): it says so quietly instead. */}
-      {shownSheet?.kind === "review" && <ReviewSheet key={root} client={client} root={root} repo={repo} readiness={readiness} state={changes} onClose={closeSheet} openUrl={openUrl} />}
+      {shownSheet?.kind === "review" && <ReviewSheet key={root} client={client} root={root} readiness={readiness} state={changes} onClose={closeSheet} openUrl={openUrl} />}
     </section>
   );
 }

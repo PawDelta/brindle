@@ -26,8 +26,8 @@ export interface Readiness {
   /* unknown: not read yet, or the engine can't say (no route, no session). */
   state: "unknown" | "ready" | "not_ready";
   reasons: string[];
-  /* The PR brindle opened itself, when the engine's auto-PR is on. */
-  pr: { url: string } | null;
+  /* The PR the person opened, and how many session commits aren't pushed to it yet. */
+  pr: { url: string; unpushed: number } | null;
 }
 
 export const UNKNOWN: Readiness = { state: "unknown", reasons: [], pr: null };
@@ -193,24 +193,4 @@ export function useSessionDiff(client: DaemonClient, root: string, store: AppSto
   }, [client, root, store, reload]);
   const files = useMemo(() => (diff?.files ?? []).map(toFileDiff), [diff]);
   return { diff, files, error, notReady, reload };
-}
-
-/* Whether the person's settings let brindle open the session's PR on its
-   own: the repo's `auto_pr` (engine branch desktop/auto-pr; read from GET
-   /config's repo settings, false until it lands). */
-export const autoPrOn = (config: { repo?: Record<string, unknown> } | null | undefined): boolean => config?.repo?.auto_pr === true;
-
-export function useAutoPr(client: DaemonClient, repo: string): boolean {
-  const [on, setOn] = useState(false);
-  useEffect(() => {
-    let live = true;
-    client.config(repo).then(
-      (c) => live && setOn(autoPrOn(c)),
-      () => live && setOn(false),
-    );
-    return () => {
-      live = false;
-    };
-  }, [client, repo]);
-  return on;
 }

@@ -23,10 +23,12 @@
 
    Then "Open PR": the title and body pre-filled from GET .../pr/draft,
    sent with POST .../pr, a job whose job.done result carries the PR's
-   URL. When the person's settings let brindle open PRs on its own (the
-   engine's auto-PR setting, stubbed until it lands: review.ts autoPrOn)
-   and the engine says it did, the sheet says so instead, with the link,
-   and stays editable: edits go to the same branch, which is the PR's. */
+   URL. brindle never opens or pushes a PR itself: it only prepares one
+   (its checks, run once the session is ready) and asks in the Inbox.
+   Once the PR is open the sheet says so, with the link, and stays
+   editable: edits go to the same branch, which is the PR's, and wait
+   there ("N new commits not on the PR") until the person's Push (POST
+   .../pr/push, through the same checks). */
 
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { DaemonClient } from "../../api/client";
@@ -36,7 +38,7 @@ import { button, field, label, mono, primary, quiet } from "../../components/ui"
 import { useAppState } from "../../store/useStore";
 import { BUSY } from "../Branch/DiffView";
 import { useJob } from "../Branch/useJob";
-import { useAutoPr, type SessionDiffState, type Readiness } from "./review";
+import type { SessionDiffState, Readiness } from "./review";
 import { SessionDiffEditor } from "./SessionDiffEditor";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -44,7 +46,6 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export interface ReviewSheetProps {
   client: DaemonClient;
   root: string;
-  repo: string;
   readiness: Readiness;
   state: SessionDiffState;
   onClose(): void;
@@ -54,9 +55,8 @@ export interface ReviewSheetProps {
 /* How many times a diff refused while the engine says ready is read again. */
 const RETRIES = 3;
 
-export function ReviewSheet({ client, root, repo, readiness, state, onClose, openUrl = openExternal }: ReviewSheetProps) {
+export function ReviewSheet({ client, root, readiness, state, onClose, openUrl = openExternal }: ReviewSheetProps) {
   const { diff, files, error, notReady, reload } = state;
-  const autoPr = useAutoPr(client, repo);
   const supervisor = useAppState((s) => s.workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === root));
   const editable = !!supervisor && !BUSY.has(supervisor.status);
   const why = supervisor ? "supervisor busy" : "supervisor not running";
@@ -95,7 +95,8 @@ export function ReviewSheet({ client, root, repo, readiness, state, onClose, ope
 
   const added = files.reduce((n, f) => n + f.added, 0);
   const removed = files.reduce((n, f) => n + f.removed, 0);
-  const opened = readiness.pr && autoPr ? readiness.pr : null;
+  const opened = readiness.pr;
+  const push = useJob();
 
   const title = (
     <>
@@ -125,13 +126,29 @@ export function ReviewSheet({ client, root, repo, readiness, state, onClose, ope
 
   return (
     <Sheet label="Review & open PR" title={title} subtitle={subtitle} onClose={onClose} wide testId="review-sheet" footer={step === "pr" ? undefined : <DiffFooter opened={opened} canOpen={!!diff && !opened} onOpen={() => setStep("pr")} openUrl={openUrl} />}>
-      {opened && (
+      {opened && step === "diff" && (
         <p className="flex flex-wrap items-center gap-s1 rounded-md bg-pass-soft px-s2 py-s1 text-sm text-ink" data-testid="pr-opened">
-          <span className="font-medium text-pass">✓ brindle opened the PR.</span>
+          <span className="font-medium text-pass">✓ The PR is open.</span>
           <a className="text-branch underline" href={opened.url} onClick={(e) => (e.preventDefault(), void openUrl(opened.url))}>
             {opened.url}
           </a>
-          <span className="text-ink-2">Keep editing here: every edit goes onto the PR's branch.</span>
+          {opened.unpushed > 0 ? (
+            <>
+              <span className="text-ink-2" data-testid="pr-unpushed">
+                {opened.unpushed} new {opened.unpushed === 1 ? "commit" : "commits"} not on the PR
+              </span>
+              <button type="button" className={button} disabled={push.busy} onClick={() => void push.start("Pushing to the PR", () => client.pushSessionPr(root))}>
+                {push.busy ? "Pushing…" : "Push"}
+              </button>
+            </>
+          ) : (
+            <span className="text-ink-2">Keep editing here: every edit goes onto the PR's branch, and waits for your Push.</span>
+          )}
+        </p>
+      )}
+      {push.job?.status === "failed" && (
+        <p className="text-sm text-sap" role="alert">
+          {push.job.error}
         </p>
       )}
       {rechecking && (
