@@ -27,10 +27,10 @@ so a broad grant never resolves a request its policy forbids."""
 from __future__ import annotations
 
 import fnmatch
+import glob
 import hashlib
 import os
 import re
-import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -136,8 +136,8 @@ def push_scopes(keys: list[str]) -> list[dict]:
 # shell command (grep, ls, cat, cd ...), or, of a dev tool's commands, only
 # a test run or a query whose operation brindle knows (DEV_OPERATIONS; "uv
 # run" alone may run anything). Three more change files, each only in a
-# checkout (_checkouts: any repo brindle works in or a session attached, and
-# its worktrees): a local git command (GIT_LOCAL: never a push), a package
+# checkout (_checkouts: a repo of the asking agent's session, attached or its
+# own, and the session's worktrees): a local git command (GIT_LOCAL: never a push), a package
 # install into the project (INSTALLS), and a file change (a write, edit,
 # move, copy or delete, a redirection) whose every path is in one. An
 # approval at the general scope covers any command whose every part falls in
@@ -242,25 +242,29 @@ def _dev_operation(words: list[str]) -> str | None:
 
 
 def _checkouts(req: Request) -> list[str]:
-    """Where a family's change may land: ``req``'s worktree and repo, every
-    repo brindle has a workspace in or a session attached, and each of their
-    worktrees. Read from the database read-only (none yet: just ``req``'s)."""
-    from brindle.config import db_path
+    """Where a family's change may land: every checkout of ``req``'s session
+    (permissions.session_roots: its worktree and repo, each repo attached to
+    the session and the session's worktrees in them), never another session's."""
+    return permissions.session_roots(req)
 
-    roots = permissions._roots(req)
-    path = db_path()
-    if path.exists():
-        try:
-            conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
-            try:
-                rows = [*conn.execute("SELECT repo_root, path FROM workspaces"),
-                        *conn.execute("SELECT repo_root, '' FROM session_repos")]
-            finally:
-                conn.close()
-        except sqlite3.Error:
-            rows = []
-        roots += [r for row in rows for r in row if r]
-    return list(dict.fromkeys(os.path.normpath(r) for r in roots))
+
+def scratchpads(req: Request) -> list[str]:
+    """The Claude Code scratchpads of ``req``'s sessions: folders of the
+    agent's own, where its file changes are as a checkout's, under ``<tmp>/claude-<uid>/<the folder
+    the session started in, every other character a dash>/<session>/``."""
+    if not hasattr(os, "getuid"):
+        return []
+    base = os.path.join(os.environ.get("CLAUDE_CODE_TMPDIR") or "/tmp", f"claude-{os.getuid()}")
+    try:
+        if os.stat(base).st_uid != os.getuid():
+            return []    # someone else's folder, made to look like this person's
+    except OSError:
+        return []
+    found = []
+    for start in dict.fromkeys(r for r in (req.worktree, req.cwd) if r):
+        project = os.path.join(base, re.sub(r"[^A-Za-z0-9]", "-", start))
+        found += sorted(glob.glob(os.path.join(glob.escape(project), "*", "scratchpad")))
+    return [p for p in found if os.path.isdir(p) and not os.path.islink(p)]
 
 
 def _runs_in(cwd: str, roots: list[str]) -> bool:
@@ -418,31 +422,44 @@ def _file_writes(program: str, args: list[str], cwd: str, roots: list[str]) -> b
 
 
 def _part_family(req: Request, part: permissions.ShellPart, rules: list[Rule],
-                 roots: list[str]) -> list[str | None]:
-    """A part's family, then one for the files its redirections write (WRITES when every one is in a checkout)."""
+                 roots: list[str], places: list[str]) -> list[str | None]:
+    """A part's family, then one for the files its redirections write (WRITES when
+    every one is in a checkout). ``places``: where a file change is as one in a
+    checkout (``roots`` and the agent's scratchpads)."""
     from brindle import permission_groups
 
     # Where it runs unknown (after a cd that may not have happened), the files it reads are too.
-    if part.cwd is None or part.unknown or part.expanded or part.assigned or part.reads or part.redirect_glob:
+    if part.cwd is None or part.expanded or part.assigned or part.reads or part.redirect_glob:
         return [None]
-    writes = [WRITES if all(os.path.isabs(p) and _changeable(p, roots) for p in part.writes) else None
+    writes = [WRITES if all(os.path.isabs(p) and _changeable(p, places) for p in part.writes) else None
               ] if part.writes else []
+    program = os.path.basename(part.words[0])
+    if part.unknown:
+        # A word only the run knows is text to what only prints or compares, and a
+        # query's argument (gh run view "$id"): anything else may take it as a file.
+        if part.words[0] in permissions.TEXT_ONLY:    # the bare name: ./echo may be any program
+            return [READ_FILTER, *writes]
+        quoted = all(not permissions._unread(w) or re.fullmatch(r'"\$\{?\w+\}?"', w) for w in part.words)
+        query = _dev_operation(part.words) == QUERIES and _runs_in(part.cwd, roots)
+        return [QUERIES if quoted and query else None, *writes]
     (group, sub), *_ = permission_groups.part_classes(req, part, rules, [])
     if f"{group}/{sub}" in ("git/readonly", READ_FILTER):
         return [f"{group}/{sub}", *writes]
-    # What changes or runs the project does so where it runs: in a checkout, never elsewhere.
-    if not _runs_in(part.cwd, roots):
+    # What changes or runs the project does so where it runs: in a checkout, never elsewhere
+    # (a file change, in a scratchpad too).
+    checkout = _runs_in(part.cwd, roots)
+    if not checkout and not _runs_in(part.cwd, places):
         return [None]
-    words, program = part.words, os.path.basename(part.words[0])
-    if _git_local(words, part.cwd, roots):
+    words = part.words
+    if checkout and _git_local(words, part.cwd, roots):
         found = LOCAL_GIT
-    elif _installs(words, part.cwd, roots):
+    elif checkout and _installs(words, part.cwd, roots):
         found = INSTALL
-    elif _removes(words, part.cwd, roots):
+    elif _removes(words, part.cwd, places):
         found = WRITES
     elif group == "files":
-        found = WRITES if _file_writes(program, words[1:], part.cwd, roots) else None
-    elif f"{group}/{sub}" == "shell/dev-tools":
+        found = WRITES if _file_writes(program, words[1:], part.cwd, places) else None
+    elif checkout and f"{group}/{sub}" == "shell/dev-tools":
         found = _dev_operation(words)
     else:
         found = None
@@ -462,9 +479,10 @@ def _part_families(req: Request, rules: list[Rule] | None = None) -> list[str | 
     rules = permissions.all_rules(req.repo_root or None) if rules is None else rules
     denies = [r for r in rules if r.decision == "deny"]
     roots = _checkouts(req)
+    places = [*roots, *scratchpads(req)]
     found, copied = [], False
     for part in parts:
-        each = _part_family(req, part, denies, roots)
+        each = _part_family(req, part, denies, roots, places)
         found += [*each, None] if copied and WRITES in each else each
         copied |= os.path.basename(part.words[0]) in COPIERS
     return found
