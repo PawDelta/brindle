@@ -16,7 +16,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import type { AskDecide, DaemonClient } from "../../api/client";
 import { UNITS, covered, limitsText, minutesText, scopeWithin, splitMinutes, toMinutes, type Unit } from "../../api/permissions";
-import type { AskDecisionDTO, AskGroupDTO, AskResultDTO, InboxItemDTO } from "../../api/schema";
+import type { AskDecisionDTO, AskGroupDTO, AskResultDTO, InboxItemDTO, OrgControlViewDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
 import { card, field } from "../../components/ui";
 import { formatAge } from "../../store/overview";
@@ -226,6 +226,17 @@ function MenuItem({ title, hint, keep, disabled, onClick }: { title: string; hin
   );
 }
 
+/* Why an org control holds this: its name and plain reason, never a rule id. Only the org changes it. */
+function OrgWhy({ org, blocked }: { org: OrgControlViewDTO; blocked?: boolean }) {
+  return (
+    <span data-testid="org-why">
+      <span className="font-medium text-ink-2">{blocked ? `Blocked by ${org.name} policy` : "Your organization asks for approval"}</span>
+      {` · ${blocked ? "" : `${org.name}: `}${org.reason || `set for ${org.what}`}.`}
+      <span className="text-ink-3"> Only an organization admin can change this.</span>
+    </span>
+  );
+}
+
 /* A request brindle's hook holds, with the others like it. */
 function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonClient; g: AskGroupDTO; groups: AskGroupDTO[]; busy: boolean; run: Run; onOpenRule?(rule?: string): void }) {
   const fits = (value: string) => scopeWithin(g.scopes.find((s) => s.value === value)!, g.limits);
@@ -252,7 +263,7 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
 
   const decide = (mode: AskDecide["mode"], inMinutes = minutes, forScope = picked.value) => {
     if (mode === "timed" && !(inMinutes > 0)) return setHelp("Choose a valid positive duration.");
-    if (mode === "timed" && cap !== null && inMinutes > cap) return setHelp(`Your rule lets an approval last up to ${minutesText(cap)}.`);
+    if (mode === "timed" && cap !== null && inMinutes > cap) return setHelp(`${g.org ? `${g.org.name} lets` : "Your rule lets"} an approval last up to ${minutesText(cap)}.`);
     setHelp(null);
     void run(async () => decided(g, await client.decidePermissionAsks({ key: g.key, scope: forScope, mode, ...(mode === "timed" ? { minutes: inMinutes } : {}) }), duration));
   };
@@ -281,6 +292,9 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
       chip={slot?.label ?? null}
       age={`waiting ${ago(Math.min(...g.items.map((a) => a.waiting_since))).replace(/ ago$/, "")}`}
       why={
+        g.org ? (
+          <OrgWhy org={g.org} blocked={g.blocked} />
+        ) : (
         <>
           {rep.escalation && !g.blocked ? rep.escalation : g.blocked ? "A deny rule blocks this." : g.rule ?`Your rule asks: ${limitsText(g.limits).toLowerCase()}.` : slot ? `${slot.label} is set to ask.` : (rep.reason ? plain(rep.reason) : "No rule covers this, and unmatched actions ask you.")}
           {onOpenRule && (g.rule || !g.blocked) && (
@@ -289,6 +303,7 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
             </button>
           )}
         </>
+        )
       }
       details={
         <>

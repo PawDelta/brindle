@@ -90,6 +90,7 @@ const TONE: Record<string, { bar: string; ink: string }> = {
   pr_ready: { bar: "before:bg-branch", ink: "text-branch" },
   pr_failed: { bar: "before:bg-fail", ink: "text-fail" },
   org_notice: { bar: "before:bg-line-strong", ink: "text-ink-3" },
+  org_blocked: { bar: "before:bg-line-strong", ink: "text-ink-3" },
   setup: { bar: "before:bg-fail", ink: "text-fail" },
 };
 const SAP = { bar: "before:bg-sap", ink: "text-sap" };
@@ -304,6 +305,8 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo, 
     );
   } else if (item.kind === "org_notice") {
     acts = act("Mark read", "read", {}, PLAIN);
+  } else if (item.kind === "org_blocked") {
+    acts = <span className="text-[11px] text-ink-3">set by your organization</span>;
   } else if (fixable(item)) {
     acts = <SetupFix item={item} actions={actions} onDone={onDone} />;
   } else if (item.kind === "setup") {

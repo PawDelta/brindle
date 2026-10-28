@@ -344,7 +344,7 @@ def get_permissions(db: DB, request: Request) -> Any:
     """The permission policy: preset, unmatched setting, rules, saved actions, prompt counts."""
     from brindle.service import permissions as svc_permissions
 
-    return svc_permissions.policy_dto().to_json()
+    return svc_permissions.policy_dto(repo_root=_repo(request)).to_json()
 
 
 @_json

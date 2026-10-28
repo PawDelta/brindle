@@ -12,6 +12,7 @@ import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
 import { releaseNotesUrl, type AppUpdateStatus, type AppUpdates } from "../../api/tauri";
 import { watchAppUpdates } from "../../store/appUpdates";
+import { Permissions } from "../Settings/Permissions";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
 import { watchInbox } from "./notify";
 
@@ -285,6 +286,36 @@ describe("inbox", () => {
     expect(daemon.data.policy.saved).toEqual([]);
     expect(daemon.data.policy.groups?.shell.subcategories).toEqual({ install: "allow" });
     sync.stop();
+  });
+
+  it("org policy shown to member: an org Ask is labelled with the org and its reason, saves only what the org allows; a Block is one calm notice; Settings shows locked rows", async () => {
+    const org = { name: "Acme", what: "local git changes", decision: "ask", reason: "commits are audited" };
+    const commits: AskGroupDTO = {
+      key: `${REPO}|bash|family: git/local`, repo: REPO, kind: "bash", title: "Allow local git changes?", general: scopesFor("bash", "git add -A")[0],
+      scopes: scopesFor("bash", "git add -A"), blocked: false, rule: "org-git-local", limits: { life: "time", minutes: 15 }, modes: ["once", "deny", "always-deny", "timed"], org,
+      items: [{ ...ask("w1", "req-1", "bash", "git add -A", 60, "org-git-local"), limits: { life: "time", minutes: 15 } }],
+    };
+    const blocked: InboxItemDTO = { kind: "org_blocked", reason: "Blocked by Acme policy: installs go through platform review", detail: "3 requests stopped today. Agents were told to work around it." };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, blocked], asks: [commits] });
+    daemon.data.policy.org_controls = [org, { name: "Acme", what: "package installs", decision: "deny", reason: "installs go through platform review" }];
+    const { sync } = mount(daemon);
+    const item = await screen.findByRole("article", { name: "Allow local git changes?" });
+    expect(within(item).getByTestId("org-why").textContent).toBe("Your organization asks for approval · Acme: commits are audited. Only an organization admin can change this.");
+    expect(within(item).queryByRole("button", { name: /Change the rule/ })).toBeNull();
+    fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
+    expect(within(item).queryByRole("menuitem", { name: /exact request/ })).toBeNull();
+    const notice = card("org_blocked");
+    expect(notice.textContent).toContain("Blocked by Acme policy: installs go through platform review");
+    expect(notice.textContent).toContain("set by your organization");
+    expect(document.querySelectorAll('[data-kind="org_blocked"]')).toHaveLength(1);
+    sync.stop();
+    cleanup();
+
+    render(<Permissions client={daemon.client()} />);
+    const rows = await screen.findByTestId("org-controls");
+    expect([...rows.querySelectorAll("[data-locked]")].map((r) => r.textContent)).toEqual([
+      "local git changesSet by Acme · commits are auditedAsk", "package installsSet by Acme · installs go through platform reviewBlock"]);
+    expect(rows.textContent).not.toMatch(/org-|\{|git\/local/);
   });
 
   it("groups a closed worker's running child under its session, as the sidebar does", async () => {

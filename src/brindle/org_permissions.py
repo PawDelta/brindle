@@ -10,7 +10,7 @@ from urllib.parse import quote
 
 from brindle.pro import auth, credentials, license
 from brindle.service.dto import (
-    OrgApprovalPolicyDTO, OrgAssignmentDTO, OrgAssignmentRequestDTO,
+    OrgApprovalPolicyDTO, OrgAssignmentDTO, OrgAssignmentRequestDTO, OrgGrantPolicyDTO,
     OrgPermissionsDTO, OrgPolicyRequestDTO, OrgRoleDTO,
 )
 from brindle.service.errors import ServiceError
@@ -107,6 +107,26 @@ def assign(body: dict) -> dict:
     return OrgAssignmentDTO.model_validate(got).to_json()
 
 
+def _grant_block(g: OrgGrantPolicyDTO) -> dict:
+    """The block to save: each control names one grouping or one pattern
+    (team_policy._controls checks it again on every member's machine), and
+    neither ``controls`` nor ``org_name`` is sent while unset, for account
+    servers from before them."""
+    from brindle.pro.team_policy import PolicyUnavailable, _controls
+
+    out = g.to_json()
+    out["controls"] = [{k: v for k, v in c.items() if v is not None} for c in out["controls"]]
+    try:
+        _controls(out["controls"])
+    except PolicyUnavailable as e:
+        raise ServiceError("invalid", "Each organization rule needs Block or Ask and one grouping or pattern "
+                           "brindle knows.", 422) from e
+    for key in ("controls", "org_name"):
+        if not out[key]:
+            del out[key]
+    return out
+
+
 def save_policy(body: dict) -> dict:
     req = OrgPolicyRequestDTO.model_validate(body)
     account = Account(req)
@@ -121,7 +141,7 @@ def save_policy(body: dict) -> dict:
     # The supplied block replaces that block whole (null inherits); omitted
     # blocks and every other policy field stay as stored. The account's CAS
     # on if_version rejects a stale draft.
-    grant = req.permission_grants.to_json() if req.permission_grants else None
+    grant = _grant_block(req.permission_grants) if req.permission_grants else None
     scoped = {"update_scope": "permission_grants", "if_version": req.if_version}
     if req.role is None:
         scoped["permission_grants"] = grant

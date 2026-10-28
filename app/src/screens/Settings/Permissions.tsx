@@ -51,7 +51,7 @@ import {
   type RuleShape,
   type Unit,
 } from "../../api/permissions";
-import type { AskScopeDTO, PermissionPolicyDTO, PermissionRuleDTO, SavedActionDTO } from "../../api/schema";
+import type { AskScopeDTO, OrgControlViewDTO, PermissionPolicyDTO, PermissionRuleDTO, SavedActionDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
 import { Sheet } from "../../components/Sheet";
 import { alert, button, card, field, h2, mono, pill, primary, quiet } from "../../components/ui";
@@ -319,6 +319,43 @@ function Segmented({ label, value, levels, disabled, onPick }: { label: string; 
 
 /* The default view (design/permissions-settings.html): the preset, how often agents are asked, and one row per
    capability group with its baseline, expanding to the subcategories that may override it. */
+const Lock = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+    <rect x="5" y="11" width="14" height="10" rx="2" />
+    <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+  </svg>
+);
+const ORG_SETTING: Record<string, string> = { deny: "Block", ask: "Ask" };
+
+/* What the person's organization sets above their own policy: locked rows (permission_grants.org_decision). */
+function OrgControls({ controls }: { controls: OrgControlViewDTO[] }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div>
+        <h3 className="text-sm font-semibold">Set by your organization</h3>
+        <p className="text-xs text-ink-3">These come before your preset, rules and saved approvals. Only an organization admin can change them.</p>
+      </div>
+      <ul className={`${card} divide-y divide-line`} data-testid="org-controls">
+        {controls.map((c, i) => (
+          <li key={i} className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5 px-s2 py-s1" data-locked>
+            <span className="self-center text-ink-3">
+              <Lock />
+            </span>
+            <span className="min-w-0 flex-1 text-sm">
+              <span className="font-medium first-letter:uppercase">{c.what}</span>
+              <span className="block text-xs text-ink-3">
+                Set by {c.name}
+                {c.reason ? ` · ${c.reason}` : ""}
+              </span>
+            </span>
+            <span className={`${pill} ${INK[c.decision ?? "ask"]}`}>{ORG_SETTING[c.decision ?? "ask"]}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
   client: DaemonClient;
   policy: PermissionPolicyDTO;
@@ -388,6 +425,8 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
                 : `${report.asks} ask${report.asks === 1 ? "" : "s"} in the last ${report.days} days (${Math.round(report.ask_rate * 100)}% of ${report.decisions} requests)${report.causes[0] ? `; most from ${report.causes[0].reason}` : ""}.`}
         </p>
       </div>
+
+      {(policy.org_controls ?? []).length > 0 && <OrgControls controls={policy.org_controls ?? []} />}
 
       <div>
         <h3 className="text-sm font-semibold">Capabilities</h3>

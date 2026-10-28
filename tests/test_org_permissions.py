@@ -96,17 +96,25 @@ def _assignment(account):
 def _scoped_edits(account):
     # Control without org_spend edits a role block; hidden budgets survive.
     body = {"org_id": ORG, "actor_sub": "user_1", "if_version": 3, "role": "security",
-            "permission_grants": {**GRANT, "deny": [], "max_uses": 5}}
+            "permission_grants": {**GRANT, "deny": [], "max_uses": 5, "controls": [
+                {"group": "dev/install", "decision": "deny", "reason": "platform review"}, {"rule": "bash glob *prod*",
+                                                                                         "decision": "ask"}]}}
     code, result = _send("PUT", PREFIX + "/policy", body)
     assert code == 200 and result["version"] == 4 and result["roles"]["security"]["max_uses"] == 5
     policy = account.policy_body["policy"]
-    assert policy["roles"]["security"] == {"allowed_models": ["model"], "permission_grants": body["permission_grants"]}
+    # Each control as given (no null fields), the org's name left out while unset.
+    sent = {**body["permission_grants"], "controls": [
+        {"group": "dev/install", "decision": "deny", "reason": "platform review"},
+        {"rule": "bash glob *prod*", "decision": "ask", "reason": ""}]}
+    assert policy["roles"]["security"] == {"allowed_models": ["model"], "permission_grants": sent}
     assert policy["protected_paths"] == ["infra/**"] and policy["member_overrides"]["hidden"]["paused"]
     assert policy["spend_rules"] == {"preserve": True} and policy["permission_grants"] == GRANT
     from brindle.pro.team_policy import parse_policy, with_role_overrides
 
     effective = with_role_overrides(parse_policy(ORG, account.policy_body), "admin", "security").effective
     assert effective.permission_grants.deny == () and effective.permission_grants.max_uses == 5
+    assert [(c.decision, c.group, c.rule) for c in effective.permission_grants.controls] == [
+        ("deny", "dev/install", None), ("ask", None, "bash glob *prod*")]
     body.update(if_version=4, permission_grants=None)
     assert _send("PUT", PREFIX + "/policy", body)[0] == 200
     assert account.policy_body["policy"]["roles"]["security"] == {"allowed_models": ["model"]}
@@ -117,7 +125,7 @@ def _scoped_edits(account):
     puts = [call[1] for call in account.calls if call[0].startswith("PUT ")]
     assert puts == [
         {"update_scope": "permission_grants", "if_version": 3,
-         "roles": {"security": {"permission_grants": {**GRANT, "deny": [], "max_uses": 5}}}},
+         "roles": {"security": {"permission_grants": sent}}},
         {"update_scope": "permission_grants", "if_version": 4, "roles": {"security": {"permission_grants": None}}},
         {"update_scope": "permission_grants", "if_version": 5, "permission_grants": {**GRANT, "allow": False}}]
 

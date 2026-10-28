@@ -3,6 +3,7 @@ actions, prompt counts) and the pending asks, grouped, as DTOs."""
 
 from __future__ import annotations
 
+import os
 import time
 
 from brindle import permission_grants as grants
@@ -16,6 +17,7 @@ from brindle.service.dto import (
     AskGroupDTO,
     AskResultDTO,
     AskScopeDTO,
+    OrgControlViewDTO,
     PermissionExceptionDTO,
     PermissionGroupDTO,
     PermissionLimitsDTO,
@@ -44,10 +46,19 @@ def saved_dto(action: permissions.SavedAction) -> SavedActionDTO:
     return SavedActionDTO(**{**action.to_dict(), "request": action.request, "expired": action.expired()})
 
 
-def policy_dto(store: permissions.Store | None = None) -> PermissionPolicyDTO:
+def org_controls(repo_root: str | None = None) -> list[OrgControlViewDTO]:
+    """The org's controls as its members see them (Settings' locked rows). The
+    policy is the account's; a repo only adds its offline policy files."""
+    lim = grants.org_limits(repo_root or os.path.expanduser("~"))
+    return [OrgControlViewDTO(name=lim.name, what=grants.control_label(c), decision=c.decision, reason=c.reason)
+            for c in (lim.controls if lim else ())]
+
+
+def policy_dto(store: permissions.Store | None = None, repo_root: str | None = None) -> PermissionPolicyDTO:
     store = store or permissions.load_store()
     counts = permissions.prompt_counts(store)
     return PermissionPolicyDTO(
+        org_controls=org_controls(repo_root),
         preset=store.preset, unmatched=store.unmatched,
         presets=[PermissionPresetDTO(name=name, description=desc, unmatched=unmatched, current=name == store.preset)
                  for name, (_, unmatched, desc) in permissions.PRESETS.items()],
@@ -84,7 +95,10 @@ def _title(g: grants.Group) -> str:
     return f"Allow {g.rep.request.tool}?"
 
 
-def _modes(g: grants.Group) -> list[str]:
+SAVED_LIFE = {"session": "session", "timed": "time", "forever": "forever"}
+
+
+def _modes(g: grants.Group, lim: grants.OrgLimits | None = None) -> list[str]:
     if g.policy.decision == "deny":
         return []
     limits = (g.policy.rule.limits if g.policy.rule else None) or {}
@@ -98,15 +112,22 @@ def _modes(g: grants.Group) -> list[str]:
         out.append("session")
     else:
         out += ["session", "timed", "forever"]
+    if g.policy.rule is not None and g.policy.rule.source == "org":
+        # An org's Ask: only the saved approvals its limits allow are offered.
+        out = [m for m in out if m not in SAVED_LIFE or grants.org_refuses(
+            lim, g.kind, SAVED_LIFE[m], limits.get("minutes"), None, grants.GENERAL) is None]
     return out
 
 
 def group_dto(g: grants.Group) -> AskGroupDTO:
     rule = g.policy.rule
+    lim = grants.org_limits(g.repo_root) if rule is not None and rule.source == "org" else None
+    org = grants.org_control_view(lim, rule)
     return AskGroupDTO(key=g.key, repo=g.repo_root, kind=g.kind, title=_title(g), general=scope_dto(g.rep.ask.general),
                        scopes=[scope_dto(s) for s in g.rep.ask.scopes], items=[ask_dto(a) for a in g.items],
                        blocked=g.policy.decision == "deny", rule=rule.id if rule else None,
-                       limits=limits_dto(rule.limits if rule else None), modes=_modes(g))
+                       limits=limits_dto(rule.limits if rule else None), modes=_modes(g, lim),
+                       org=OrgControlViewDTO(**org, decision=g.policy.decision) if org else None)
 
 
 def asks(db: DB, repo_root: str | None) -> list[AskGroupDTO]:

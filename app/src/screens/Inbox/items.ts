@@ -34,6 +34,7 @@ export const KIND_LABEL: Record<string, string> = {
   credentials: "Credentials",
   login: "Cloud login",
   org_notice: "Org notice",
+  org_blocked: "Org policy",
   setup: "Setup",
 };
 
@@ -68,6 +69,7 @@ export const KIND_SHORT: Record<string, string> = {
   credentials: "login",
   login: "login",
   org_notice: "notice",
+  org_blocked: "org policy",
   setup: "setup",
 };
 
@@ -104,6 +106,8 @@ export function describeItem(item: InboxItemDTO): string {
     case "login":
       return "brindle's cloud sign-in expired";
     case "org_notice":
+    /* An org Block, every request it stopped in one notice (service/inbox._org_blocks): "Blocked by <org> policy: <why>". */
+    case "org_blocked":
       return item.reason;
     case "setup":
       // The engine's own words: what is wrong with brindle's setup on this computer.
@@ -177,8 +181,9 @@ export const needsDecision = (item: InboxItemDTO): boolean => ["plan", "review",
 export const actionId = (item: InboxItemDTO) => (item.kind === "org_notice" ? item.notice_id : item.agent_id) ?? "";
 
 /* Stable across snapshots, so a new item can be told from one already seen.
-   A setup item belongs to no agent: it is told by what it fixes. */
-export const itemKey = (item: InboxItemDTO) => `${item.kind}:${item.kind === "setup" ? (item.fix ?? "") : actionId(item)}:${item.workspace_id ?? ""}`;
+   A setup item belongs to no agent: it is told by what it fixes; an org Block by what it says. */
+export const itemKey = (item: InboxItemDTO) =>
+  `${item.kind}:${item.kind === "setup" ? (item.fix ?? "") : item.kind === "org_blocked" ? item.reason : actionId(item)}:${item.workspace_id ?? ""}`;
 
 /* The groups the inbox can be filtered to, by kind. */
 export const FILTERS: { key: string; label: string; kinds: string[] }[] = [
@@ -187,7 +192,7 @@ export const FILTERS: { key: string; label: string; kinds: string[] }[] = [
   { key: "plans", label: "Plans", kinds: ["plan"] },
   { key: "reviews", label: "Reviews", kinds: ["review", "merge_failed"] },
   { key: "checks", label: "Checks", kinds: ["proposed_checks"] },
-  { key: "other", label: "Other", kinds: ["credentials", "login", "org_notice", "setup"] },
+  { key: "other", label: "Other", kinds: ["credentials", "login", "org_notice", "org_blocked", "setup"] },
 ];
 
 export const filterOf = (item: InboxItemDTO) => FILTERS.find((f) => f.kinds.includes(item.kind))?.key ?? "other";

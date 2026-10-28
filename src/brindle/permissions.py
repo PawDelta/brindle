@@ -1949,6 +1949,35 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
            rules: list[Rule] | None = None, unmatched: str | None = None,
            session: str | None = None, saved: list[SavedAction] | None = None,
            spend: bool = False, groups: dict[str, dict] | None = None) -> Decision:
+    """The policy's answer for ``req`` (see _decide), under a Team org's
+    controls (permission_grants.org_decision), which come first: an org
+    Block is final, and an org Ask stands over every allow (a rule's, the
+    preset's, a capability group's) unless the member's own policy denies,
+    settled only by a saved approval within the org's limits."""
+    if req is None or req.kind not in KINDS:
+        return Decision("ask", "brindle couldn't read the request")
+    from brindle import permission_grants
+
+    rules = all_rules(req.repo_root or None) if rules is None else rules
+    org = permission_grants.org_decision(req, rules, checks)
+    if org is None:
+        return _decide(req, checks=checks, rules=rules, unmatched=unmatched, session=session, saved=saved,
+                       spend=spend, groups=groups)
+    if org.decision == "deny":
+        return org
+    own = _decide(req, checks=checks, rules=rules, unmatched=unmatched, session=session, saved=[], spend=False,
+                  groups=groups)
+    if own.decision == "deny":
+        return own
+    asks = tuple(dict.fromkeys([org.rule, *own.asks, *([own.rule] if own.decision == "ask" and own.rule else [])]))
+    settled = permission_grants.settle(req, org.rule, load_store().saved if saved is None else saved,
+                                       session=session, asks=asks, spend=spend)
+    return settled or replace(org, reason=org.reason + "; asking the user", asks=asks)
+
+
+def _decide(req: Request, *, checks: list[str] | None, rules: list[Rule], unmatched: str | None,
+            session: str | None, saved: list[SavedAction] | None, spend: bool,
+            groups: dict[str, dict] | None) -> Decision:
     """The policy's answer for ``req``: deny > ask > allow > the capability
     group's baseline (``groups``, brindle.permission_groups; the store's when
     None and ``unmatched`` is too) > ``unmatched`` (the store's setting when
