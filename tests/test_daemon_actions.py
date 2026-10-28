@@ -1474,8 +1474,10 @@ def test_session_diff_before_ready(db, repo, lead):
 
 def test_session_tree_lists_tracked_files(db, repo, lead):
     _commit(Path(lead.path), "a.py", "a\n")
+    (Path(lead.path) / " b.py").write_text("b\n")    # leading whitespace survives
+    sh("git add -A && git commit -qm space", Path(lead.path))
     code, tree = _send("GET", "/v1/sessions/lead/tree")
-    assert code == 200 and tree["branch"] == lead.branch and "a.py" in tree["files"]
+    assert code == 200 and tree["branch"] == lead.branch and {"a.py", " b.py"} <= set(tree["files"])
 
 
 @pytest.mark.parametrize("path,body,setup,status", [

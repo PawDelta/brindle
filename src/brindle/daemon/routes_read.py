@@ -192,7 +192,7 @@ def session_tree(db: DB, request: Request) -> Any:
     """The session checkout's tracked files (paths only) and its branch."""
     root, ws = session_review.session(db, request.path_params["root"])
     return {"root_id": root.id, "branch": ws.branch,
-            "files": [p for p in git.out(["ls-files", "-z"], ws.path).split("\0") if p]}
+            "files": [p for p in git.run(["ls-files", "-z"], ws.path).stdout.split("\0") if p]}
 
 
 @_json
