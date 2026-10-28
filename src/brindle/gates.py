@@ -484,6 +484,9 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     return "\n".join(lines)
 
 
+LOCK_WAIT_S = 1   # seconds a PR gate waits for the checkout before reporting it busy
+
+
 @contextmanager
 def pr_checked(db: DB, ws: Workspace, progress=None):
     """Hold ``ws``'s branch (the base and checkout locks a session edit or a
@@ -500,7 +503,7 @@ def pr_checked(db: DB, ws: Workspace, progress=None):
     with ExitStack() as held:
         try:
             held.enter_context(pipeline.base_lock(ws.repo_root, ws.branch, wait=False))
-            held.enter_context(git.checkout_lock(ws.path, timeout=1))
+            held.enter_context(git.checkout_lock(ws.path, timeout=LOCK_WAIT_S))
         except (BlockingIOError, git.GitError):
             raise workspaces.WorkspaceError(
                 f"a merge into or edit of {ws.branch} is under way; try again once it's done") from None
