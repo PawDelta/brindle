@@ -32,6 +32,7 @@ from brindle.config import (
     PORT_RANGE_START,
     RepoConfig,
     load_repo_config,
+    workspace_config,
     worktree_root,
     worktrees_dir,
 )
@@ -70,7 +71,7 @@ def workspace_env(ws: Workspace) -> dict[str, str]:
             env[key] = os.environ[key]
     if ws.kind != "main" and os.path.isdir(ws.repo_root):
         try:
-            env.update(services.env(ws, load_repo_config(ws.repo_root)))
+            env.update(services.env(ws, workspace_config(ws)))
         except ValueError:
             pass  # a broken config is reported elsewhere
     return env
@@ -340,6 +341,7 @@ def create(
     base = base or cfg.base_branch or git.default_branch(repo_root)
     if branch == base:
         raise WorkspaceError(f"branch {branch!r} is the base branch; pick a new branch name")
+    cfg = load_repo_config(repo_root, branch=base)  # setup, copy and checks as committed on the base
 
     if reuse_registered:
         existing = _reuse_registered(db, repo_root, branch, base)
@@ -640,7 +642,7 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
                 "Commit them, or pass --force to discard."
             )
 
-    cfg = load_repo_config(ws.repo_root)
+    cfg = workspace_config(ws)
     teardown = None
     if exists and cfg.teardown:
         teardown = run_commands(cfg.teardown, ws.path, workspace_env(ws))

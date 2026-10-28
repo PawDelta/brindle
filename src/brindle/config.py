@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -106,7 +107,7 @@ class RepoConfig:
     # Autopilot and merge gates.
     autopilot: bool = True             # `brindle` starts the supervisor with autopilot on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
-    scoped_checks: str | None = None   # "off" or "infer"; None: not chosen (acts as "off" this release, see brindle.check_scope.inferred)
+    scoped_checks: str | None = None   # "off" or "infer"; None: not chosen (acts as "infer", see brindle.check_scope.inferred)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
@@ -244,16 +245,39 @@ def _merge_commands(shared: list[str], local: object) -> list[str]:
     return shared
 
 
-def _read_json(path: Path) -> dict:
-    if not path.is_file():
+def _read_json(path: Path, text: str | None = None) -> dict:
+    if text is None and not path.is_file():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8") if text is None else text)
     except json.JSONDecodeError as e:
         raise ValueError(f"{path}: invalid JSON ({e})") from e
     if not isinstance(data, dict):
         raise ValueError(f"{path}: expected a JSON object")
     return data
+
+
+def _read_shared(root: Path, branch: str | None) -> dict:
+    """The shared config as committed on ``branch`` (the branch a session's
+    workers are cut from and merge into), not whatever the checkout at
+    ``root`` has checked out; the working tree's file when there's no
+    branch or it isn't committed there."""
+    path = root / CONFIG_DIR / CONFIG_FILE
+    if branch:
+        try:
+            proc = subprocess.run(["git", "show", f"{branch}:{CONFIG_DIR}/{CONFIG_FILE}"], cwd=root,
+                                  capture_output=True, text=True)
+        except OSError:
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            return _read_json(Path(f"{branch}:{CONFIG_DIR}/{CONFIG_FILE}"), proc.stdout)
+    return _read_json(path)
+
+
+def workspace_config(ws) -> RepoConfig:
+    """``load_repo_config`` for workspace ``ws``, reading the shared file
+    from its base branch (see ``_read_shared``)."""
+    return load_repo_config(ws.repo_root, branch=ws.base_branch)
 
 
 def config_root(path: str | Path) -> Path:
@@ -342,12 +366,13 @@ def kind_overrides(found: object) -> dict[str, dict[str, str]]:
     return out
 
 
-def load_repo_config(repo_root: str | Path, *, user_only: bool = False) -> RepoConfig:
+def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: str | None = None) -> RepoConfig:
     """The settings for ``repo_root``: its local file over its shared one over
     the person's ~/.brindle/config.json. ``user_only``: the person's file
-    alone, as every repo starts from it (the app's Agents tab)."""
+    alone, as every repo starts from it (the app's Agents tab). ``branch``:
+    read the shared file as committed there (see ``_read_shared``)."""
     base = config_root(repo_root) / CONFIG_DIR
-    shared = {} if user_only else _read_json(base / CONFIG_FILE)
+    shared = {} if user_only else _read_shared(base.parent, branch)
     local = {} if user_only else _read_json(base / LOCAL_CONFIG_FILE)
     user = user_settings()
 

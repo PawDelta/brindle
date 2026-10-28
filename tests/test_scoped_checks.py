@@ -46,13 +46,21 @@ NARROWED = f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
     ("infer", SELECTS, OTHER, [SELECTS]),   # names tests itself: runs in full
     ("infer", "make lint", OTHER, ["make lint"]),
     ("infer", PYTEST, {}, []),   # nothing changed: skipped
+    ("infer", PYTEST, {"app/x.tsx": "x\n"}, []),   # no Python-relevant change: skipped
+    ("infer", PYTEST, {"app/x.tsx": "x\n", "src/pkg/mod.py": MOD.replace("return 2", "return 3")},
+     [f"{PYTEST} tests/test_g.py || [ $? -eq 5 ]"]),
+    ("infer", PYTEST, {"uv.lock": "x\n"}, [PYTEST]),
+    ("unset", PYTEST, {"src/pkg/mod.py": MOD.replace("return 2", "return 3")},
+     [f"{PYTEST} tests/test_g.py || [ $? -eq 5 ]"]),
     ("off", PYTEST, OTHER, [PYTEST]),
     ("supervisor", PYTEST, OTHER, [PYTEST]),
 ], ids=["python-affected", "deleted-function", "test-helper", "lookup-failed", "fallback-unmapped", "quoted-name",
-        "fallback-conftest", "fallback-pyproject", "infer", "infer-options", "infer-selects", "other-command-changed_files_env", "empty-diff", "off",
-        "supervisor"])
+        "fallback-conftest", "fallback-pyproject", "infer", "infer-options", "infer-selects", "other-command-changed_files_env", "empty-diff",
+        "non-python-only", "non-python-plus-python", "lockfile", "unset-mode", "off", "supervisor"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran):
     config = {"checks": [cmd], "scoped_checks": "off" if where == "off" else "infer"}
+    if where == "unset":
+        del config["scoped_checks"]
     write(repo, {".brindle/config.json": json.dumps(config), "src/pkg/mod.py": MOD, "docs/guide.md": "doc\n",
                  "app/src/view.ts": "export const v = 1\n", "tests/conftest.py": "X = 1\n",
                  "tests/test_f.py": TEST_F, "tests/test_g.py": "from test_f import helper\n"})

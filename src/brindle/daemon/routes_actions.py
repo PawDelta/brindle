@@ -431,7 +431,7 @@ def review_workspace(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", "only a worker's workspace (its own branch and worktree) can be reviewed")
     # With checks, a detached helper runs them first; review.submitted ends it.
     reviewer = agents.start_review(db, None, ws, _get(body, "profile"), _get(body, "focus"),
-                                   load_repo_config(ws.repo_root))
+                                   load_repo_config(ws.repo_root, branch=ws.base_branch))
     return {"reviewer": reviewer.id if reviewer else None, "checks_running": reviewer is None}
 
 

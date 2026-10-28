@@ -120,7 +120,7 @@ def _scoped(ws: Workspace, cmd: str, diff) -> str | None:
     from brindle.config import load_repo_config
 
     try:
-        mode = load_repo_config(ws.repo_root).scoped_checks
+        mode = load_repo_config(ws.repo_root, branch=ws.base_branch).scoped_checks
     except ValueError:
         return cmd
     return check_scope.command(ws, cmd, check_scope.inferred(cmd, mode), diff)
@@ -157,7 +157,7 @@ def _concurrency(ws: Workspace) -> int:
     from brindle.config import load_repo_config
 
     try:
-        return int(load_repo_config(ws.repo_root).check_concurrency)
+        return int(load_repo_config(ws.repo_root, branch=ws.base_branch).check_concurrency)
     except (ValueError, TypeError):
         from brindle.config import host_check_concurrency
 

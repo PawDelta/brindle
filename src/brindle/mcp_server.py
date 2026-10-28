@@ -1047,7 +1047,7 @@ async def request_review(workspace: str, focus: str | None = None, profile: str 
             return str(e)
         if ws.kind != "worktree":
             return "Only a worker's workspace (its own branch and worktree) can be reviewed this way."
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
         try:
             # With checks, a detached process runs them and then starts the reviewer.
             reviewer = agents.start_review(db, caller, ws, profile, focus, cfg)

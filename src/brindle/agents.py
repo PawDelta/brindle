@@ -180,7 +180,7 @@ def worker_guidance(ws: Workspace, report_only: bool = False) -> str:
     from brindle.config import load_repo_config
 
     try:
-        checks = load_repo_config(ws.repo_root).checks
+        checks = load_repo_config(ws.repo_root, branch=ws.base_branch).checks
     except ValueError:
         checks = []
     parts = (codemap.guidance(ws), "" if report_only else test_guidance(checks),
@@ -2318,7 +2318,7 @@ def warm_checks(ws: Workspace) -> None:
     from brindle.providers import brindle_invocation
 
     try:
-        if not load_repo_config(ws.repo_root).checks or git.dirty_files(ws.path):
+        if not load_repo_config(ws.repo_root, branch=ws.base_branch).checks or git.dirty_files(ws.path):
             return
     except (ValueError, git.GitError):
         return
@@ -2906,7 +2906,7 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     from brindle.providers import brindle_invocation
 
     _review_worktree_present(ws)
-    cfg = cfg or load_repo_config(ws.repo_root)
+    cfg = cfg or load_repo_config(ws.repo_root, branch=ws.base_branch)
     if not cfg.checks:
         return request_review(db, caller, ws, profile, focus, cfg, second=second, slot=slot)
     _review_kill_switch(ws)
@@ -3026,7 +3026,7 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     from brindle import gates, pipeline
     from brindle.config import load_repo_config
 
-    cfg = cfg or load_repo_config(ws.repo_root)
+    cfg = cfg or load_repo_config(ws.repo_root, branch=ws.base_branch)
     slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
     with _review_request_run(ws.id, profile, request_id), pipeline.review_run(ws.id):
@@ -3166,7 +3166,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
 
     _review_worktree_present(ws)
     _review_kill_switch(ws)
-    cfg = cfg or load_repo_config(ws.repo_root)
+    cfg = cfg or load_repo_config(ws.repo_root, branch=ws.base_branch)
     slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
     if second and not slot:

@@ -84,8 +84,8 @@ def piped_worker(db, ws, boss, monkeypatch, cfg):
     from test_merge_order import add
 
     add(db, ws, "worker", "assign", parent=boss.id, result="done")
-    monkeypatch.setattr(pipeline, "load_repo_config", lambda _: cfg)
-    monkeypatch.setattr("brindle.config.load_repo_config", lambda _: cfg)
+    monkeypatch.setattr(pipeline, "load_repo_config", lambda _, **kw: cfg)
+    monkeypatch.setattr("brindle.config.load_repo_config", lambda _, **kw: cfg)
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     queued = []
     monkeypatch.setattr(agents, "_detach", queued.append)
@@ -118,7 +118,7 @@ def test_second_request_for_the_same_commit_reuses_the_running_reviewer(db, ws, 
         return
     cfg = RepoConfig(checks=checks, review_profile="reviewer")
     queued = piped_worker(db, ws, boss, monkeypatch, cfg)
-    monkeypatch.setattr(mcp_server, "load_repo_config", lambda _: cfg)
+    monkeypatch.setattr(mcp_server, "load_repo_config", lambda _, **kw: cfg)
     monkeypatch.setenv("BRINDLE_AGENT_ID", boss.id)
     started = fake_spawn(monkeypatch)
     now = [time.time()]

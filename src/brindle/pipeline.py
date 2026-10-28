@@ -191,7 +191,7 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
     merge or remove event from ``actor``."""
     _publish(db, ws, worker, actor, **event)
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
         worker = worker or agents.workspace_worker(db, ws)
     except Exception:
         return
@@ -265,7 +265,7 @@ def on_workspace_cleanup(db: DB, ws: Workspace) -> None:
     a verdict as ``no_verdict`` and any worker abandoned without a report as
     ``removed_unmerged`` (if not already sent)."""
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except Exception:
         cfg = RepoConfig()
     merged = bool(db.merged_sha(ws.id))
@@ -290,7 +290,7 @@ def note_removed_merged(db: DB, ws: Workspace, actor: Agent | None = None,
     bus.publish_ws(db, "pipeline.removed", ws, agent_id=worker.id if worker else None,
                    actor=actor.id if actor else None, branch=ws.branch, merged=True)
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
         worker = worker or agents.workspace_worker(db, ws)
     except Exception:
         return
@@ -360,7 +360,7 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
     """Start the review of a reported branch. Returns whether the pipeline
     took the report (so the caller doesn't forward it to the supervisor)."""
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         return False
     if not enabled(cfg, worker, ws):
@@ -466,7 +466,7 @@ def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
     if worker.review_restarted == since or review_running(ws.id):
         return False
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         return False
     parent = db.get_agent(worker.parent_id) if worker.parent_id else None
@@ -736,7 +736,7 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     ):
         return False
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         cfg = RepoConfig()
     if not os.path.isdir(ws.path):
@@ -871,7 +871,7 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
         return False, False
     parent_id = worker.parent_id
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         cfg = RepoConfig()
     if not worker.pipeline:
@@ -1048,7 +1048,7 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
     parent_id = worker.parent_id
     parent = db.get_agent(parent_id) if parent_id else None
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         cfg = RepoConfig()
     report = worker.result or ""
@@ -1381,7 +1381,7 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
     settled = _settled(db, ws)
     if settled:
         return settled
-    cfg = load_repo_config(ws.repo_root)
+    cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     pilot = autopilot.for_agent(db, caller.id) if caller else None
     review = cfg.review if cfg.review is not None else bool(pilot and pilot.enabled)
 

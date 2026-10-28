@@ -2336,7 +2336,7 @@ def setup(workspace: Optional[str] = typer.Argument(None)) -> None:
     from brindle.config import load_repo_config
 
     ws = _ws(DB(), workspace)
-    cmds = load_repo_config(ws.repo_root).setup
+    cmds = load_repo_config(ws.repo_root, branch=ws.base_branch).setup
     res = workspaces.run_commands(cmds, ws.path, workspaces.workspace_env(ws))
     typer.echo(res.log or "(no setup commands)")
     raise typer.Exit(0 if res.ok else 1)
@@ -3100,7 +3100,7 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
     if ws is None:
         return
     try:
-        agents.review_after_checks(db, caller, ws, profile, focus, load_repo_config(ws.repo_root),
+        agents.review_after_checks(db, caller, ws, profile, focus, load_repo_config(ws.repo_root, branch=ws.base_branch),
                                    request_id=request_id, second=second, slot=slot)
     except (agents.AgentError, ValueError) as e:
         from brindle import pipeline
@@ -3170,7 +3170,7 @@ def warm_checks_cmd(workspace_id: str) -> None:
     try:
         # A new commit makes this run's result useless (the review and the
         # gate want the new head), so give up and free the check slot.
-        gates.check_summary(db, ws, load_repo_config(ws.repo_root),
+        gates.check_summary(db, ws, load_repo_config(ws.repo_root, branch=ws.base_branch),
                             cancel=lambda: gates.head(ws) != sha)
     except gates.Abandoned:
         pass
