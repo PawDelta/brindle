@@ -11,6 +11,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { DaemonError, type DaemonClient } from "../../api/client";
 import type { OrgGrantPolicyDTO, OrgPermissionsDTO } from "../../api/schema";
 import { alert, button, card, field, primary, quiet } from "../../components/ui";
+import { RuleTarget, parseRule, ruleText } from "./RuleTarget";
 
 type Choice = { id: string; label: string; detail?: string };
 
@@ -91,13 +92,7 @@ const GROUPINGS: [string, string, string][] = [
   ["deploy/trigger", "Deploys, releases and workflow runs", "gh workflow run, gh release, terraform apply, cloud deploys"],
   ["packages/install", "Package installs", "any installer, anywhere"],
 ];
-const KINDS = ["bash", "read", "write", "edit", "fetch", "mcp", "other"] as const;
-const MATCHES: [string, string][] = [["prefix", "Starts with"], ["exact", "Is exactly"], ["glob", "Matches pattern"]];
 type Control = GrantDraft["controls"][number];
-const splitRule = (rule: string): [string, string, string] => {
-  const [kind = "bash", type = "prefix", ...rest] = rule.split(" ");
-  return [kind, type, rest.join(" ")];
-};
 
 /* Block or Ask, set by the organization above every member's preset, rules and saved approvals. */
 function OrgRules({ controls, onChange }: { controls: Control[]; onChange(controls: Control[]): void }) {
@@ -125,18 +120,16 @@ function OrgRules({ controls, onChange }: { controls: Control[]; onChange(contro
       })}
     </ul>
     <div className="space-y-s1" aria-label="Patterns">
-      {patterns.map((c, i) => {
-        const [kind, type, match] = splitRule(c.rule!);
-        const rule = (k: string, t: string, m: string) => setPattern(i, { ...c, rule: `${k} ${t} ${m}` });
-        return <div key={i} className="grid gap-s1 rounded-md border border-line p-s1 sm:grid-cols-[auto_auto_auto_minmax(0,1fr)_auto]">
-          <select className={field} aria-label="Pattern setting" value={c.decision} onChange={(event) => setPattern(i, { ...c, decision: event.target.value as Control["decision"] })}><option value="ask">Ask</option><option value="deny">Block</option></select>
-          <select className={field} aria-label="Pattern kind" value={kind} onChange={(event) => rule(event.target.value, type, match)}>{KINDS.map((k) => <option key={k} value={k}>{k}</option>)}</select>
-          <select className={field} aria-label="Pattern match" value={type} onChange={(event) => rule(kind, event.target.value, match)}>{MATCHES.map(([t, l]) => <option key={t} value={t}>{l}</option>)}</select>
-          <input className={`${field} font-mono`} aria-label="Pattern" required value={match} onChange={(event) => rule(kind, type, event.target.value)} />
-          <button type="button" className={quiet} onClick={() => setPattern(i, null)}>Remove</button>
-          <input className={`${field} sm:col-span-5`} aria-label="Pattern reason" placeholder="Reason members see" maxLength={300} value={c.reason ?? ""} onChange={(event) => setPattern(i, { ...c, reason: event.target.value })} />
-        </div>;
-      })}
+      {patterns.map((c, i) => (
+        <div key={i} className="grid gap-s1 rounded-md border border-line p-s1 sm:grid-cols-2" data-testid="org-pattern">
+          <RuleTarget value={parseRule(c.rule!)} offerNamed labelClass="flex min-w-0 flex-col gap-1 text-xs font-medium text-ink-3" onChange={(target) => setPattern(i, { ...c, rule: ruleText(target) })} />
+          <label className="flex flex-col gap-1 text-xs font-medium text-ink-3">Setting
+            <select className={field} aria-label="Pattern setting" value={c.decision} onChange={(event) => setPattern(i, { ...c, decision: event.target.value as Control["decision"] })}><option value="ask">Ask</option><option value="deny">Block</option></select>
+          </label>
+          <button type="button" className={`${quiet} self-end justify-self-start`} onClick={() => setPattern(i, null)}>Remove</button>
+          <input className={`${field} sm:col-span-2`} aria-label="Pattern reason" placeholder="Reason members see" maxLength={300} value={c.reason ?? ""} onChange={(event) => setPattern(i, { ...c, reason: event.target.value })} />
+        </div>
+      ))}
       <button type="button" className={button} onClick={() => onChange([...controls, { decision: "deny", rule: "bash prefix ", reason: "" }])}>Add a pattern</button>
     </div>
   </fieldset>;

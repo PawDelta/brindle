@@ -54,6 +54,7 @@ import {
 import type { AskScopeDTO, OrgControlViewDTO, PermissionPolicyDTO, PermissionRuleDTO, SavedActionDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
 import { Sheet } from "../../components/Sheet";
+import { RuleTarget, type Target } from "./RuleTarget";
 import { alert, button, card, field, h2, mono, pill, primary, quiet } from "../../components/ui";
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -87,9 +88,6 @@ interface Activity {
   at: number;
 }
 
-/* The rule editor's actions: a request kind, or a git push (a bash rule with the push matcher). */
-const ACTIONS = ["read", "write", "edit", "bash", "push", "fetch", "mcp", "other"];
-const MATCH_LABEL: Record<string, string> = { exact: "Is exactly", prefix: "Starts with", glob: "Matches pattern" };
 const TONE: Record<string, string> = { deny: "bg-sap-soft text-sap", ask: "bg-branch-soft text-branch", allow: "bg-pass-soft text-pass" };
 /* The same tones on a rule's pill: in the text only (pills are hairlines, never a fill). */
 const INK: Record<string, string> = { deny: "text-sap", ask: "text-branch", allow: "text-pass" };
@@ -337,7 +335,7 @@ function OrgControls({ controls }: { controls: OrgControlViewDTO[] }) {
       </div>
       <ul className={`${card} divide-y divide-line`} data-testid="org-controls">
         {controls.map((c, i) => (
-          <li key={i} className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5 px-s2 py-s1" data-locked>
+          <li key={i} className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5 px-s2 py-s1" data-locked data-org={c.name} data-what={c.what} data-setting={c.decision} data-reason={c.reason}>
             <span className="self-center text-ink-3">
               <Lock />
             </span>
@@ -714,22 +712,19 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const named = !PLAIN_MATCHES.includes(matchType) && matchType !== "push";
   const draft: RuleShape & { label: string } = { id: rule?.id, kind: action === "push" ? "bash" : action, match: match.trim(), match_type: matchType, decision, label: name.trim() };
   const minutes = toMinutes(Number(amount), unit);
   const ruleMinutes = toMinutes(Number(ruleAmount), ruleUnit);
   const askLimits = { life, ...(life === "time" ? { minutes } : {}), ...(maxScope.trim() ? { max_scope: maxScope.trim() } : {}) };
 
-  const pickAction = (a: string) => {
-    setAction(a);
-    if (a === "push") {
-      setMatchType("push");
-      if (!maxScope) setMaxScope("destination");
-    } else if (matchType === "push" || named) {
-      setMatchType("exact");
-      setMatch("");
+  const pickTarget = (next: Target) => {
+    if (next.action !== action) {
+      if (next.action === "push" && !maxScope) setMaxScope("destination");
+      if (next.action !== "push" && LEVELS.includes(maxScope as never)) setMaxScope("");
     }
-    if (a !== "push" && LEVELS.includes(maxScope as never)) setMaxScope("");
+    setAction(next.action);
+    setMatchType(next.matchType);
+    setMatch(next.match);
   };
 
   const invalid = (): string | null => {
@@ -795,7 +790,6 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
 
   const strongest = [draft, ...(conflicts ?? []).map((c) => c.rule)].sort((a, b) => strength(b.decision) - strength(a.decision))[0];
   const summary = `${ruleAction(draft)} · ${draft.label || draft.match || "no target yet"} · ${decisionLabel(decision)}${decision === "ask" ? ` · ${limitsText(askLimits)}` : decision === "allow" && timed ? ` · for ${ruleAmount} ${ruleUnit}` : ""}`;
-  const placeholder = action === "push" ? "* → @default" : action === "bash" ? "npm test" : action === "fetch" ? "https://docs.example.com/*" : action === "mcp" ? "mcp__github__create_issue" : "docs/**";
 
   return (
     <Sheet
@@ -858,42 +852,7 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
       ) : (
         <>
           <Step title="1. Action" blurb="The kind of request this rule covers, and which ones.">
-            <label className={fieldLabel}>
-              Action
-              <select className={field} aria-label="Action" value={action} onChange={(e) => pickAction(e.target.value)}>
-                {ACTIONS.map((a) => (
-                  <option key={a} value={a}>
-                    {kindLabel(a)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {action !== "push" && (
-              <label className={fieldLabel}>
-                Match
-                <select className={field} aria-label="Match" value={matchType} onChange={(e) => setMatchType(e.target.value)}>
-                  {named && <option value={matchType}>Built-in: {matchType}</option>}
-                  {PLAIN_MATCHES.map((m) => (
-                    <option key={m} value={m}>
-                      {MATCH_LABEL[m]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-            <label className={`${fieldLabel} sm:col-span-2`}>
-              Target
-              <input className={`${field} font-mono`} aria-label="Target" value={match} readOnly={named} placeholder={placeholder} onChange={(e) => setMatch(e.target.value)} />
-              <span className="font-normal">
-                {named
-                  ? "A built-in matcher: brindle decides what it covers. Pick another match to write your own target."
-                  : action === "push"
-                    ? "source → destination; * for any branch, @default for the repo's default branch."
-                    : matchType === "glob"
-                      ? "* matches anything; docs/** matches files in docs and its folders."
-                      : ""}
-              </span>
-            </label>
+            <RuleTarget value={{ action, matchType, match }} onChange={pickTarget} labelClass={fieldLabel} />
             <label className={`${fieldLabel} sm:col-span-2`}>
               Name (optional)
               <input className={field} aria-label="Rule name" value={name} placeholder="Shown in the rules list" onChange={(e) => setName(e.target.value)} />

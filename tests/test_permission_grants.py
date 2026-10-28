@@ -381,28 +381,39 @@ def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_b
     assert lives == {("bash", "session", None), ("push", "time", 30.0)}
 
 
+# Saved approvals allowed, at the branch's reach only.
 ORG_GRANTS = dict(allow=True, kinds=("bash",), overridable=(), max_minutes=60, max_uses=100, allow_persistent=True,
-                  lifetimes=("session", "time", "forever"), scopes=("branch", "remote", "repo", "all"))
+                  lifetimes=("session", "time", "forever"), scopes=("branch",))
+INSTALLS = {"group": "dev/install", "decision": "deny", "reason": "installs go through platform review"}
+COMMITS = {"group": "git/local", "decision": "ask", "reason": "commits are audited"}
+DEPLOYS = {"group": "deploy/trigger", "decision": "deny", "reason": "releases ship from CI"}
+PACKAGES = {"group": "packages/install", "decision": "deny"}
 
 
-@pytest.mark.parametrize("control, command, decision, said", [
-    ({"group": "dev/install", "decision": "deny", "reason": "installs go through platform review"},
-     "npm install left-pad", "deny", ["Blocked by Acme policy: installs go through platform review",
-                                      "rule for package installs into the project"]),
-    ({"group": "git/local", "decision": "ask", "reason": "commits are audited"},
-     "git add -A", "ask", ["Your organization asks for approval (Acme policy", "commits are audited"]),
-    ({"rule": "bash glob *prod*", "decision": "deny", "reason": "nothing runs against prod"},
-     "npm test -- prod", "deny", ["Blocked by Acme policy: nothing runs against prod", "commands matching *prod*"]),
-    ({"group": "deploy/trigger", "decision": "deny", "reason": "releases ship from CI"},
-     "gh workflow run release.yml", "deny", ["Blocked by Acme policy: releases ship from CI", "workflow runs"]),
-    ({"group": "network/fetch", "decision": "ask"}, "curl -s https://example.com", "ask", ["network fetches"]),
-    ({"group": "packages/install", "decision": "deny"}, "pip install requests", "deny",
-     ["Blocked by Acme policy: the organization blocks package installs"]),
-    ({"group": "shell/unchecked", "decision": "deny"}, 'eval "$X"', "deny",
-     ["Blocked by Acme policy: the organization blocks unchecked commands", "rule for unchecked commands"]),
-    (None, "npm install left-pad", "allow", ["covered by your saved action"]),
+@pytest.mark.parametrize("control, command, decision", [
+    (INSTALLS, "npm install left-pad", "deny"),
+    pytest.param(INSTALLS, "FOO=bar npm install left-pad", "deny",
+                 marks=pytest.mark.variant("an assignment takes it out of the family: a bypass attempt")),
+    (COMMITS, "git add -A", "ask"),
+    pytest.param(COMMITS, "FOO=bar git add -A", "ask",
+                 marks=pytest.mark.variant("an assignment takes it out of the family: a bypass attempt")),
+    ({"rule": "bash glob *prod*", "decision": "deny", "reason": "nothing runs against prod"}, "npm test -- prod",
+     "deny"),
+    ({"rule": "bash prefix npm install", "decision": "deny"}, "FOO=1 npm --prefix web install x", "deny"),
+    (DEPLOYS, "gh workflow run release.yml", "deny"),
+    pytest.param(DEPLOYS, "gh --repo o/r workflow run release.yml", "deny",
+                 marks=pytest.mark.variant("gh's global options before the subcommand: a bypass attempt")),
+    ({"group": "network/fetch", "decision": "ask"}, "curl -s https://example.com", "ask"),
+    (PACKAGES, "pip install requests", "deny"),
+    (PACKAGES, "python -m pip install requests", "deny"),
+    pytest.param(PACKAGES, "npm --prefix web install left-pad", "deny",
+                 marks=pytest.mark.variant("an installer's options before its subcommand: a bypass attempt")),
+    pytest.param(PACKAGES, "uv pip install httpx", "deny",
+                 marks=pytest.mark.variant("an installer behind another tool: a bypass attempt")),
+    ({"group": "shell/unchecked", "decision": "deny"}, 'eval "$X"', "deny"),
+    (None, "npm install left-pad", "allow"),
 ])
-def test_org_blocks_family(db, ws, monkeypatch, control, command, decision, said):
+def test_org_blocks_family(db, ws, monkeypatch, control, command, decision):
     """An org control wins over the member's saved grant of the command's
     family; an org Ask is labelled as the org's, and asks however the member
     saved it; with no org policy the grant applies. However often a Block
@@ -422,16 +433,25 @@ def test_org_blocks_family(db, ws, monkeypatch, control, command, decision, said
     permissions.save_action("bash", grants.family_pattern(found) if found else command, "allow",
                             scope="general" if found else "exact", life="forever")
     got = decide(req)
-    assert got.decision == decision and all(s in got.reason for s in said), got.reason
-    assert (got.rule is not None and got.rule.source == "org") == (control is not None)
+    assert got.decision == decision
+    if control is None:
+        assert got.saved is not None                      # the member's own grant applies
+        return
+    named = ("org-group", control["group"]) if "group" in control else tuple(control["rule"].split(None, 2)[1:])
+    assert (got.rule.source, got.rule.match_type, got.rule.match) == ("org", *named)
+    view = grants.org_control_view(grants.org_limits(ws.repo_root), got.rule)
+    assert (view["name"], view["reason"]) == ("Acme", control.get("reason", ""))
     if decision == "ask":
-        # In the Inbox: labelled with the org, and nothing saved past the org's longest timed approval.
+        # In the Inbox: the org's, saved no longer than its longest timed approval, never past the branch.
         [g] = grants.groups([grants.PendingAsk("w1", "w1", "r1", "d1", ws.repo_root, req, grants.generalize(req), 0.0,
                                                got)])
         item = svc.group_dto(g)
-        assert (item.org.name, item.org.decision, item.modes) == ("Acme", "ask", ["once", "deny", "always-deny", "timed"])
-        assert item.limits.minutes == 60
+        assert (item.org.name, item.org.reason, item.org.decision) == ("Acme", control.get("reason", ""), "ask")
+        assert (item.modes, item.limits.minutes) == (["once", "deny", "always-deny", "timed"], 60)
+        offered = [s.value for s in item.scopes]
+        assert offered[0] == "exact" and "repository" not in offered and item.general.value in offered
     for _ in range(2):
         permission_asks.record_decision(db, "w1", ws.repo_root, "bash", command, got.decision, got.reason)
+    # However often a Block stops agents: one notice, the denial's first line.
     notices = [(i.kind, i.reason) for i in inbox._org_blocks(db, ws.repo_root)]
-    assert notices == ([("org_blocked", said[0])] if decision == "deny" else [])
+    assert notices == ([("org_blocked", got.reason.split("\n")[0])] if decision == "deny" else [])

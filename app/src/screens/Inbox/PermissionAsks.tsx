@@ -229,7 +229,7 @@ function MenuItem({ title, hint, keep, disabled, onClick }: { title: string; hin
 /* Why an org control holds this: its name and plain reason, never a rule id. Only the org changes it. */
 function OrgWhy({ org, blocked }: { org: OrgControlViewDTO; blocked?: boolean }) {
   return (
-    <span data-testid="org-why">
+    <span data-testid="org-why" data-org={org.name} data-reason={org.reason} data-setting={blocked ? "deny" : "ask"}>
       <span className="font-medium text-ink-2">{blocked ? `Blocked by ${org.name} policy` : "Your organization asks for approval"}</span>
       {` · ${blocked ? "" : `${org.name}: `}${org.reason || `set for ${org.what}`}.`}
       <span className="text-ink-3"> Only an organization admin can change this.</span>

@@ -300,22 +300,24 @@ describe("inbox", () => {
     daemon.data.policy.org_controls = [org, { name: "Acme", what: "package installs", decision: "deny", reason: "installs go through platform review" }];
     const { sync } = mount(daemon);
     const item = await screen.findByRole("article", { name: "Allow local git changes?" });
-    expect(within(item).getByTestId("org-why").textContent).toBe("Your organization asks for approval · Acme: commits are audited. Only an organization admin can change this.");
-    expect(within(item).queryByRole("button", { name: /Change the rule/ })).toBeNull();
+    const why = within(item).getByTestId("org-why");
+    expect([why.dataset.org, why.dataset.reason, why.dataset.setting]).toEqual(["Acme", "commits are audited", "ask"]);
+    // Offered: what the org allows (no lasting save), and no way into the member's own rules.
+    expect(within(item).queryByRole("button", { name: /rule/ })).toBeNull();
     fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
-    expect(within(item).queryByRole("menuitem", { name: /exact request/ })).toBeNull();
-    const notice = card("org_blocked");
-    expect(notice.textContent).toContain("Blocked by Acme policy: installs go through platform review");
-    expect(notice.textContent).toContain("set by your organization");
+    expect(within(item).getAllByRole("menuitem")).toHaveLength(1);   // a timed approval, its only save
+    expect(within(item).getByRole("button", { name: "Allow once" })).toBeTruthy();
+    // A Block: one quiet notice in the org's group, however many requests it stopped.
     expect(document.querySelectorAll('[data-kind="org_blocked"]')).toHaveLength(1);
+    expect(screen.getByRole("region", { name: "Your org" }).contains(card("org_blocked"))).toBe(true);
     sync.stop();
     cleanup();
 
     render(<Permissions client={daemon.client()} />);
-    const rows = await screen.findByTestId("org-controls");
-    expect([...rows.querySelectorAll("[data-locked]")].map((r) => r.textContent)).toEqual([
-      "local git changesSet by Acme · commits are auditedAsk", "package installsSet by Acme · installs go through platform reviewBlock"]);
-    expect(rows.textContent).not.toMatch(/org-|\{|git\/local/);
+    const rows = [...(await screen.findByTestId("org-controls")).querySelectorAll<HTMLElement>("[data-locked]")];
+    expect(rows.map((r) => [r.dataset.org, r.dataset.what, r.dataset.setting, r.dataset.reason])).toEqual([
+      ["Acme", "local git changes", "ask", "commits are audited"], ["Acme", "package installs", "deny", "installs go through platform review"]]);
+    expect(rows.flatMap((r) => [...r.querySelectorAll("button, input, select")])).toEqual([]);   // locked: nothing to change
   });
 
   it("groups a closed worker's running child under its session, as the sidebar does", async () => {

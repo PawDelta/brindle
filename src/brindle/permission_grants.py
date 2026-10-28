@@ -872,11 +872,88 @@ ORG_GROUP = "org-group"          # an org grouping's rule's match_type (its matc
 ORG_BLOCKED = "Blocked by "      # how an org Block's reason begins (the Inbox groups them by its first line)
 
 
-def _deploys(words: list[str]) -> bool:
-    program = os.path.basename(words[0]) if words else ""
+# What only starts another program (env FOO=1 npm ..., sudo npm ...): an org control looks past it.
+WRAPPERS = {"env": "uCS", "sudo": "ugCDhpr", "command": "", "nohup": "", "time": "fo", "nice": "n", "exec": "a"}
+# A tool's options before its subcommand that take the next word as their value (npm --prefix web install).
+GLOBAL_VALUES = {"npm": {"--prefix", "-C", "--workspace", "-w", "--userconfig", "--cache", "--registry"},
+                 "pnpm": {"--dir", "-C", "--filter", "-F", "--workspace-dir"},
+                 "yarn": {"--cwd", "--cache-folder", "--modules-folder"}, "bun": {"--cwd", "-c", "--config"},
+                 "uv": {"--directory", "--project", "--python", "-p", "--config-file", "--cache-dir"},
+                 "pip": {"--python", "--cache-dir", "--log", "--proxy", "-r", "-c"},
+                 "git": {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}, "gh": {"-R", "--repo", "--hostname"},
+                 "cargo": {"--manifest-path", "-Z", "--config", "-C"}, "go": {"-C"}, "poetry": {"-C", "--directory", "-P"}}
+
+
+def _operation(words: list[str]) -> list[str]:
+    """What a simple command does, for an org control's sake: past assignments and
+    wrappers (env, sudo ...), ``python -m <module>`` as the module, a versioned or
+    pathed program as its plain name (.venv/bin/pip3.12: pip), the tool's options
+    before its subcommand dropped (npm --prefix web install: npm install). A
+    superset of what the families read: a Block must see what an allow would not."""
+    words = list(words)
+    while words:
+        while words and permissions._ASSIGNMENT.match(words[0]):
+            words = words[1:]
+        program = os.path.basename(words[0]) if words else ""
+        if program not in WRAPPERS:
+            break
+        words = words[1:]
+        while words and words[0].startswith("-") and words[0] != "--":
+            takes = len(words[0]) == 2 and words[0][1] in WRAPPERS[program]
+            words = words[2 if takes else 1:]
+        words = words[1:] if words[:1] == ["--"] else words
+    if not words:
+        return []
+    program = re.sub(r"(\d+(\.\d+)*)$", "", os.path.basename(words[0])) or os.path.basename(words[0])
+    rest = words[1:]
+    if program == "python" and rest[:1] == ["-m"] and len(rest) > 1:
+        program, rest = re.sub(r"(\d+(\.\d+)*)$", "", rest[1]), rest[2:]
+    values = GLOBAL_VALUES.get(program, set())
+    while rest and rest[0].startswith("-") and rest[0] != "--":
+        rest = rest[2 if rest[0] in values else 1:]
+    return [program, *rest]
+
+
+def _starts(op: list[str], prefix: tuple) -> bool:
+    return tuple(op[:len(prefix)]) == tuple(prefix)
+
+
+def _loose_families(op: list[str]) -> set[str]:
+    """The families an operation (_operation) may be of, by its program and
+    subcommand alone: whatever its options or where it runs."""
+    if not op:
+        return set()
+    found = set()
+    if any(_starts(op, p) for p in INSTALLS) or _starts(op, ("pip", "install")):
+        found.add(INSTALL)
+    if op[0] == "git" and len(op) > 1:
+        found |= {LOCAL_GIT} if op[1] in GIT_LOCAL else set()
+        found |= {"git/readonly"} if op[1] in permissions.READONLY_GIT else set()
+    if any(_starts(op, p) for p in (*PYTEST, *SCRIPT_TESTS, ("pytest",))):
+        found.add(TESTS)
+    if any(_starts(op, p) for p in DEV_QUERIES):
+        found.add(QUERIES)
+    if op[0] in permissions.READONLY_PROGRAMS:
+        found.add(READ_FILTER)
+    if op[0] in {*COPIERS, *REMOVE_FLAGS, "mkdir", "touch", "tee", "truncate"} or op[0] == "sed" and any(
+            w.startswith(("-i", "--in-place")) for w in op[1:]):
+        found.add(WRITES)
+    return found
+
+
+def _installer(op: list[str]) -> bool:
+    """Any package manager's install or add (permission_groups.INSTALLERS), anywhere."""
+    from brindle import permission_groups
+
+    return bool(op) and any(op[1:1 + len(sub.split())] == sub.split()
+                            for sub in permission_groups.INSTALLERS.get(op[0], ()))
+
+
+def _deploys(op: list[str]) -> bool:
+    program = op[0] if op else ""
     if program == "gh":
-        return tuple(words[1:3]) in DEPLOY_GH
-    return bool(DEPLOY_VERBS.get(program, set()) & set(words[1:]))
+        return tuple(op[1:3]) in DEPLOY_GH
+    return bool(DEPLOY_VERBS.get(program, set()) & set(op[1:]))
 
 
 def _command_words(req: Request) -> list[list[str]]:
@@ -894,22 +971,32 @@ def _command_words(req: Request) -> list[list[str]]:
             or permissions._segments(command))
 
 
+def _operations(req: Request) -> list[list[str]]:
+    return [op for words in _command_words(req) if (op := _operation(words))]
+
+
 def _in_grouping(group: str, req: Request, rules: list[Rule], checks: list[str] | None) -> bool:
+    """Whether ``req`` is in an org grouping: as the families read it, or by
+    any of its operations (_operation) however it's spelled, so an
+    assignment, a wrapper or a tool's options never take it out."""
     from brindle import permission_groups
 
     if group in FAMILY_LABELS:
         if req.kind in ("write", "edit"):
             return group == WRITES and permissions._in_worktree(req)
-        return req.kind == "bash" and group in (_part_families(req, rules) or [])
+        return req.kind == "bash" and (group in (_part_families(req, rules) or [])
+                                       or any(group in _loose_families(op) for op in _operations(req)))
     if group == UNCHECKED:
         return (req.kind == "bash" and bool(req.command) and simple_argv(req.command) is None
                 and permissions.shell_parts(req) is None)
     if group == NETWORK:
-        return ("network", "fetch") in permission_groups.classify(req, rules, checks)
+        return (("network", "fetch") in permission_groups.classify(req, rules, checks)
+                or any(op[0] in permission_groups.FETCHERS for op in _operations(req)))
     if group == PACKAGES:
-        return ("shell", "install") in permission_groups.classify(req, rules, checks)
+        return (("shell", "install") in permission_groups.classify(req, rules, checks)
+                or any(_installer(op) for op in _operations(req)))
     if group == DEPLOY:
-        return any(_deploys(words) for words in _command_words(req))
+        return any(_deploys(op) for op in _operations(req))
     return False
 
 
@@ -942,7 +1029,10 @@ def _control_matches(c, req: Request, rules: list[Rule], checks: list[str] | Non
     if c.group is not None:
         return Decision(c.decision, "", control_rule(c, req.kind)) if _in_grouping(c.group, req, rules, checks) else None
     rule = control_rule(c, req.kind)
-    if permissions.rule_matches(rule, req, checks):
+    # Each part as written and as the operation it is (FOO=1 npm --prefix web install x: npm install x).
+    spelled = [" ".join(w) for words in _command_words(req) for w in (words, _operation(words)) if w]
+    if permissions.rule_matches(rule, req, checks) or any(
+            permissions.rule_matches(rule, replace(req, command=command), checks) for command in spelled):
         return Decision(c.decision, "", rule)
     found = permissions._restriction_in_parts(req, checks=checks, rules=[rule])
     if found is not None and found.rule == rule:
@@ -958,8 +1048,8 @@ def org_reason(lim: OrgLimits, c, decision: str) -> str:
         why = c.reason or f"the organization blocks {what}"
         return (f"{ORG_BLOCKED}{lim.name} policy: {why}\n"
                 f"Your organization's rule for {what} blocks this, and no approval lifts it. "
-                "Don't retry it: do the task another way, or tell the person an organization admin "
-                "has to change that rule.")
+                "Running it again gets the same answer: do the task another way, or tell the person an "
+                "organization admin has to change that rule.")
     why = c.reason or f"the organization asks for approval of {what}"
     return f"Your organization asks for approval ({lim.name} policy, {what}): {why}"
 
@@ -1006,6 +1096,11 @@ def org_control_view(lim: OrgLimits | None, rule: Rule | None) -> dict | None:
                 or c.rule is not None and c.rule.split(None, 2) == [rule.kind, rule.match_type, rule.match]):
             return {"name": lim.name, "reason": c.reason, "what": control_label(c)}
     return {"name": lim.name, "reason": "", "what": rule.describe()}
+
+
+def org_scope_allows(lim: OrgLimits | None, scope: dict) -> bool:
+    """Whether the org lets a saved approval reach as far as ``scope`` (a rung of an ask's ladder), as org_refuses reads it."""
+    return lim is None or ORG_SCOPES.get(scope.get("level") or scope["value"], "all") in lim.scopes
 
 
 def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session: str | None = None,

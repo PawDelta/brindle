@@ -113,18 +113,29 @@ def _modes(g: grants.Group, lim: grants.OrgLimits | None = None) -> list[str]:
     else:
         out += ["session", "timed", "forever"]
     if g.policy.rule is not None and g.policy.rule.source == "org":
-        # An org's Ask: only the saved approvals its limits allow are offered.
-        out = [m for m in out if m not in SAVED_LIFE or grants.org_refuses(
-            lim, g.kind, SAVED_LIFE[m], limits.get("minutes"), None, grants.GENERAL) is None]
+        # An org's Ask: only the saved approvals its limits allow, at a reach it allows, are offered.
+        reach = _org_scopes(g, lim)
+        out = [m for m in out if m not in SAVED_LIFE or reach and grants.org_refuses(
+            lim, g.kind, SAVED_LIFE[m], limits.get("minutes"), reach[0].get("level"), reach[0]["value"]) is None]
     return out
+
+
+def _org_scopes(g: grants.Group, lim: grants.OrgLimits | None) -> list[dict]:
+    """The rungs of an org Ask's ladder a saved approval may reach under the org's limits."""
+    return [s for s in g.rep.ask.scopes if grants.org_scope_allows(lim, s)]
 
 
 def group_dto(g: grants.Group) -> AskGroupDTO:
     rule = g.policy.rule
     lim = grants.org_limits(g.repo_root) if rule is not None and rule.source == "org" else None
     org = grants.org_control_view(lim, rule)
-    return AskGroupDTO(key=g.key, repo=g.repo_root, kind=g.kind, title=_title(g), general=scope_dto(g.rep.ask.general),
-                       scopes=[scope_dto(s) for s in g.rep.ask.scopes], items=[ask_dto(a) for a in g.items],
+    scopes, general = g.rep.ask.scopes, g.rep.ask.general
+    if org:
+        # Only the reach the org allows; with none, the request's own form, for Allow once.
+        scopes = _org_scopes(g, lim) or [g.rep.ask.scope(grants.EXACT) or scopes[0]]
+        general = general if general in scopes else scopes[0]
+    return AskGroupDTO(key=g.key, repo=g.repo_root, kind=g.kind, title=_title(g), general=scope_dto(general),
+                       scopes=[scope_dto(s) for s in scopes], items=[ask_dto(a) for a in g.items],
                        blocked=g.policy.decision == "deny", rule=rule.id if rule else None,
                        limits=limits_dto(rule.limits if rule else None), modes=_modes(g, lim),
                        org=OrgControlViewDTO(**org, decision=g.policy.decision) if org else None)
