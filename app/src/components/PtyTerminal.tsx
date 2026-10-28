@@ -80,13 +80,14 @@ export function shellTheme(): { background?: string; foreground?: string; cursor
   if (typeof document === "undefined") return {};
   const style = getComputedStyle(document.documentElement);
   const token = (name: string) => style.getPropertyValue(name).trim() || undefined;
-  const accent = token("--shell-acc");
+  // The cursor is the shell ink, softened (--shell-cursor), not the green accent.
+  const cursor = token("--shell-cursor");
   return {
     background: token("--shell-bg"),
     foreground: token("--shell-ink"),
-    cursor: accent,
-    // xterm reads hex: the accent at a quarter, where the token is a six-digit hex.
-    selectionBackground: accent && /^#[0-9a-f]{6}$/i.test(accent) ? `${accent}40` : undefined,
+    cursor,
+    // xterm reads hex: the cursor colour at a quarter, where the token is a six-digit hex.
+    selectionBackground: cursor && /^#[0-9a-f]{6}$/i.test(cursor) ? `${cursor}40` : undefined,
   };
 }
 

@@ -25,6 +25,7 @@ describe("the Crisp palette", () => {
     expect(token(dark, "on-fawn")).toBe("#03160e");
     expect(token(dark, "shell-bg")).toBe("#070b09");
     expect(token(dark, "shell-acc")).toBe("#34d399");
+    expect(token(dark, "shell-cursor")).toBe("#a4aba7");
     expect(token(dark, "r-sm")).toBe("2px");
     expect(token(dark, "r")).toBe("4px");
     expect(token(dark, "r-lg")).toBe("4px");
