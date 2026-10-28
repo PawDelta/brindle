@@ -32,7 +32,7 @@
    as the accent (styles.css .side-*). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
-import type { AccountInfo, DaemonClient, ProviderUsage } from "../api/client";
+import type { DaemonClient, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
 import type { OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
@@ -104,18 +104,23 @@ function UsageReading({ provider, warning, navigate }: { provider?: ProviderUsag
 
 function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
   const client = useContext(DaemonContext);
+  const store = useStore();
   const connection = useAppState((s) => s.connection);
-  const [account, setAccount] = useState<AccountInfo | null>(null);
+  const account = useAppState((s) => s.account);
   useEffect(() => {
     let current = true;
+    const previous = store.getState().account;
     if (client && (connection === "open" || connection === "idle")) {
       void client.account().then(
-        (next) => { if (current) setAccount(next); },
+        (next) => {
+          // An Account-page reload may have superseded this initial read.
+          if (current && store.getState().account === previous) store.dispatch({ type: "account", account: next });
+        },
         () => undefined,
       );
     }
     return () => { current = false; };
-  }, [client, connection]);
+  }, [client, connection, store]);
   const name = account?.signed_in ? account.name || "Signed in" : "Guest";
   const initials = account?.signed_in && account.name ? account.name.split("@")[0].split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() : "?";
   return (

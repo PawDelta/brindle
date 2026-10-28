@@ -62,6 +62,9 @@ describe("the sidebar's weekly usage reading", () => {
     fireEvent.click(account);
     expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
     expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    await screen.findByTestId("sign-in");
+    await waitFor(() => expect(account.textContent).toBe("?"));
     fireEvent.click(within(screen.getByTestId("pages")).getByRole("button", { name: "Settings" }));
     const settings = await screen.findByRole("region", { name: "Settings" });
     const theme = within(settings).getByRole("group", { name: "Theme" });
@@ -78,6 +81,16 @@ describe("the sidebar's weekly usage reading", () => {
     expect(pages.className).toContain("flex-nowrap");
     expect(pages.className).toContain("whitespace-nowrap");
     expect(within(pages).getByRole("button", { name: "Agents" }).querySelector("[data-testid*='badge']")).toBeNull();
+    fireEvent.click(account);
+    await screen.findByTestId("sign-in");
+    expect(account.textContent).toBe("?");
+    daemon.deferLogin = true;
+    daemon.data.accountAfterLogin = { signed_in: true, name: "Sam Rivera", plan: "pro" };
+    fireEvent.click(screen.getByRole("button", { name: "Use a device code instead" }));
+    await screen.findByTestId("sign-in-state");
+    daemon.completeLogin();
+    await screen.findByTestId("plan");
+    await waitFor(() => expect(account.textContent).toBe("SR"));
     stop();
   });
 
