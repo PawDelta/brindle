@@ -137,6 +137,8 @@ if (scene === "pty") {
   const shell = params.get("shell");
   if (shell) daemon.shellPanes.push({ server: params.get("server"), target: shell });
 }
+// The fake daemon on the page, for e2e/flows.e2e.ts: what a view wrote to its pane (`views`), and `print` into one.
+Object.assign(window, { fake: daemon });
 const store = createAppStore();
 const client = daemon.client();
 const sync = startSync({ client, store, connect: daemon.connect });
