@@ -73,4 +73,8 @@ describe("the Crisp palette", () => {
     expect(pill).toContain("rounded-sm");
     expect(chip).not.toContain("inset-ring");
   });
+
+  it("keeps green for the action: the focus ring is branch, as the fields' focus and the selection", () => {
+    expect(block("  :focus-visible")).toContain("outline: 2px solid var(--branch);");
+  });
 });

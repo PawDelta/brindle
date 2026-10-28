@@ -73,7 +73,7 @@ function DecisionCard({ d }: { d: DecisionDTO }) {
     <li className={`${card} flex flex-col gap-s1 px-s2 py-s2`} data-decision={d.id} data-topic={d.topic}>
       <div className="flex flex-wrap items-baseline gap-x-s1 gap-y-0.5">
         <span className="font-semibold">{d.topic}</span>
-        <span className={`${pill} ${d.status === "accepted" ? "text-pass" : "text-ink-3"}`}>{d.status === "accepted" ? "In force" : d.status}</span>
+        <span className={`${pill} ${d.status === "accepted" ? "text-ink-2" : "text-ink-3"}`}>{d.status === "accepted" ? "In force" : d.status}</span>
         <span className="flex-1" />
         <span className="text-xs text-ink-3" title={d.id}>
           {ago(d.created_at)}

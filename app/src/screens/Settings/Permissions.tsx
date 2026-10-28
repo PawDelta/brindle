@@ -372,7 +372,7 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
                 {p.name === "autonomous" && <span className="rounded-sm bg-branch-soft px-1 text-[10px] text-branch">RECOMMENDED</span>}
               </h4>
               <p className="flex-1 text-xs text-ink-2">{p.description}</p>
-              <button type="button" className={`${p.name === "autonomous" ? primary : button} mt-1 self-start`} disabled={busy || p.current} onClick={() => usePreset(p.name)}>
+              <button type="button" className={`${p.name === "autonomous" && !p.current ? primary : button} mt-1 self-start`} disabled={busy || p.current} onClick={() => usePreset(p.name)}>
                 {p.current ? "Current" : `Use ${presetLabel(p.name)}`}
               </button>
             </div>

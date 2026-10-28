@@ -287,10 +287,10 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
   let note: ReactNode = null;
   if (learned) {
     note = (
-      <div className="flex flex-col gap-0.5 rounded-md bg-fawn-soft px-s1 py-0.5 text-sm" data-testid="learned">
+      <div className="flex flex-col gap-0.5 rounded-md bg-branch-soft px-s1 py-0.5 text-sm" data-testid="learned">
         <span>
           brindle learned <b>{learned.label}</b> does better here ·{" "}
-          <button type="button" className="text-fawn underline" disabled={busy} onClick={() => put({ locked: true })}>
+          <button type="button" className="text-branch underline" disabled={busy} onClick={() => put({ locked: true })}>
             use mine instead
           </button>
         </span>
@@ -424,7 +424,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
             <ChoiceName c={first} />
             <CostTag cost={first.cost} />
             {first.speed && <span className="text-ink-3">{first.speed}</span>}
-            {learned && <span className={`${pill} text-fawn`}>learned</span>}
+            {learned && <span className={`${pill} text-branch`}>learned</span>}
             <span className="text-ink-3" aria-hidden>
               ▾
             </span>
@@ -888,7 +888,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
             </span>
           </header>
           {policy?.applies && (
-            <p className="px-s2 pb-s1 text-sm text-sap" data-testid="policy">
+            <p className="px-s2 pb-s1 text-sm text-ink-2" data-testid="policy">
               🔒 Your org's policy applies: models it doesn't allow aren't offered.
               {frozen && ` Nothing here can change now: ${policy.reason ?? "the policy couldn't be read"}.`}
             </p>

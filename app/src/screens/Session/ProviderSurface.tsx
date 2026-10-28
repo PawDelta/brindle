@@ -205,7 +205,7 @@ export function ProviderSurface({ repo, agent, alive, sessionStatus, credentials
       {agent && left && showLeft && target && ready && (
         <>
           {leftView?.kind === "error" && (
-            <p role="status" className="shrink-0 border-b border-shell-line px-s2 py-1 text-sm text-shell-acc">
+            <p role="status" className="shrink-0 border-b border-shell-line px-s2 py-1 text-sm text-shell-dim">
               Nothing of it is left to show: {leftView.message}
             </p>
           )}

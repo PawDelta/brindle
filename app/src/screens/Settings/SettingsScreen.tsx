@@ -304,7 +304,7 @@ function SettingRow({ s, value, dirty, disabled, onChange, override }: { s: Sett
       wide={s.kind === "list"}
       badges={
         <>
-          {s.pro && <span className={`${pill} text-fawn`}>Pro</span>}
+          {s.pro && <span className={`${pill} text-branch`}>Pro</span>}
           {dirty && <Edited />}
         </>
       }
@@ -722,14 +722,14 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
       testId={`provider-${row.provider}`}
       data={{ provider: row.provider, state, install: install?.status }}
       badges={
-        <span className={`inline-flex items-center gap-1 rounded-sm bg-canvas-2 px-s1 py-0.5 text-xs font-normal ${state === "signed_in" ? "text-pass" : "text-ink-2"}`} data-testid="provider-state">
+        <span className={`inline-flex items-center gap-1 rounded-sm px-s1 py-0.5 text-xs font-normal inset-ring inset-ring-line-strong ${state === "signed_in" ? "text-pass" : "text-ink-2"}`} data-testid="provider-state">
           <span className={`size-2 rounded-full ${DOT[state]}`} aria-hidden />
           {STATE_TEXT[state]}
         </span>
       }
     >
       {!on && !install && (
-        <button type="button" className={primary} aria-label={`${installAction} ${f.name}`} disabled={busy !== null} onClick={connectNow}>
+        <button type="button" className={button} aria-label={`${installAction} ${f.name}`} disabled={busy !== null} onClick={connectNow}>
           {busy === "connecting" ? "Connecting…" : installAction}
         </button>
       )}

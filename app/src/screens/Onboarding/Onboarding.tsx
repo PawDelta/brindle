@@ -191,7 +191,7 @@ function ProviderCard({ row, picked, installed, onPick, onUndo }: { row: Provide
             </button>
           </div>
         ) : (
-          <button type="button" className={primary} onClick={onPick}>
+          <button type="button" className={button} onClick={onPick}>
             Connect
           </button>
         )}
