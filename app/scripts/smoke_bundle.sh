@@ -424,8 +424,9 @@ check_engine() {
   local script first interp hook suffix=" _hook codex-permission-request"
   for script in "$ENGINE_DIR"/bin/* "$ENGINE_DIR"/python/bin/*; do
     [ -f "$script" ] && [ ! -L "$script" ] || continue
-    first="$(head -n 1 "$script" | LC_ALL=C tr -d '\r' | cut -c1-4096)"
-    case "$first" in "#!"*) ;; *) continue ;; esac
+    # Bytes, not characters: the engine's binaries aren't valid UTF-8.
+    [ "$(LC_ALL=C head -c 2 "$script")" = "#!" ] || continue
+    first="$(LC_ALL=C head -n 1 "$script" | LC_ALL=C tr -d '\r' | LC_ALL=C cut -c1-4096)"
     interp="${first#\#!}"; interp="${interp# }"; interp="${interp%% *}"
     case "$interp" in
       "$ENGINE_DIR"/*|/bin/*|/usr/bin/*) ;;
@@ -443,7 +444,10 @@ check_engine() {
   esac
   case "$hook" in
     *"$ENGINE_DIR"*)
-      out="$(env -i HOME="${TMPDIR:-/tmp}" PATH=/usr/bin:/bin /bin/sh -c "${hook%"$suffix"} --version" 2>&1)" \
+      # Exactly as Codex runs it, with no agent and nothing on stdin (the hook
+      # then exits 0 at once), in a home of its own.
+      engine_home
+      out="$(isolated "$ENGINE_HOME" PATH=/usr/bin:/bin /bin/sh -c "$hook" </dev/null 2>&1)" \
         && pass "engine: Codex's hook command runs: $out" \
         || fail "engine: Codex's hook command failed: $out" ;;
     *) fail "engine: Codex's hook command doesn't name the bundled engine: $hook" ;;
