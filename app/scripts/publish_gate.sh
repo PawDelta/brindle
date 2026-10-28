@@ -8,8 +8,8 @@
 # The Linux bundles (AppImage, .deb) have no OS signing to wait for. The Windows
 # installer publishes only once its Authenticode signature has verified
 # (SIGNED), with no notarization.
-# CHANNEL=release (release-publish) is the release-branch (staff) build instead:
-# only a push of main (REF), signed and notarized, never a tag.
+# CHANNEL=release (release-publish) is the staff build instead: only a push
+# of main (REF), signed and notarized, never a tag.
 #
 # Reads PLATFORM (macos, the default, windows or linux), CHANNEL (release, or empty),
 # EVENT (github.event_name), REF_TYPE (github.ref_type), REF (github.ref;
@@ -19,12 +19,21 @@
 set -euo pipefail
 
 go=true
+must_publish=false
 if [ "${CHANNEL:-}" = release ]; then
-  [ "${EVENT:-}" = push ] && [ "${REF_TYPE:-}" = branch ] && [ "${REF:-}" = refs/heads/main ] \
-    || { echo "not a pushed main (${EVENT:-?} of ${REF:-?}): not publishing"; go=false; }
+  if [ "${EVENT:-}" = push ] && [ "${REF_TYPE:-}" = branch ] && [ "${REF:-}" = refs/heads/main ]; then
+    must_publish=true
+  else
+    echo "not a pushed main (${EVENT:-?} of ${REF:-?}): not publishing"
+    go=false
+  fi
 else
-  [ "${EVENT:-}" = push ] && [ "${REF_TYPE:-}" = tag ] \
-    || { echo "not a pushed tag (${EVENT:-?} of a ${REF_TYPE:-?}): not publishing"; go=false; }
+  if [ "${EVENT:-}" = push ] && [ "${REF_TYPE:-}" = tag ]; then
+    must_publish=true
+  else
+    echo "not a pushed tag (${EVENT:-?} of a ${REF_TYPE:-?}): not publishing"
+    go=false
+  fi
 fi
 case "${PLATFORM:-macos}" in
   macos)
@@ -34,7 +43,13 @@ case "${PLATFORM:-macos}" in
     [ "${SIGNED:-}" = true ] \
       || { echo "::warning::not signed (or the signature did not verify): not publishing"; go=false; } ;;
 esac
-[ -n "${ROLE:-}" ] && [ -n "${BUCKET:-}" ] \
-  || { echo "::warning::the release role secret or DESKTOP_DOWNLOADS_BUCKET variable not set: not publishing"; go=false; }
+[ -n "${ROLE:-}" ] && [ -n "${BUCKET:-}" ] || {
+  if [ "$must_publish" = true ]; then
+    echo "::error::the release role secret or DESKTOP_DOWNLOADS_BUCKET variable not set: cannot publish"
+    exit 1
+  fi
+  echo "::warning::the release role secret or DESKTOP_DOWNLOADS_BUCKET variable not set: not publishing"
+  go=false
+}
 echo "go=$go"
 [ -z "${GITHUB_OUTPUT:-}" ] || echo "go=$go" >> "$GITHUB_OUTPUT"

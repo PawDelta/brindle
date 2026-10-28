@@ -24,11 +24,10 @@ function jobOf(text: string, name: string): string {
   return text.slice(start + 1, next < 0 ? undefined : start + 1 + next);
 }
 
-function decide(env: Record<string, string>): string {
+function decide(env: Record<string, string>): { status: number | null; stdout: string } {
   const { GITHUB_OUTPUT: _, ...inherited } = process.env;
   const run = spawnSync("bash", [gate], { env: { ...inherited, ...env }, encoding: "utf8" });
-  expect(run.status).toBe(0);
-  return run.stdout.trim().split("\n").at(-1) ?? "";
+  return { status: run.status, stdout: run.stdout.trim() };
 }
 
 describe("app-release publish gate", () => {
@@ -78,19 +77,28 @@ describe("app-release publish gate", () => {
     ["the nightly job", { EVENT: "schedule", REF_TYPE: "branch", ...ready }, "go=false"],
     ["a pushed tag, unsigned", { EVENT: "push", REF_TYPE: "tag", ...ready, SIGNED: "false" }, "go=false"],
     ["a pushed tag, not notarized", { EVENT: "push", REF_TYPE: "tag", ...ready, NOTARIZED: "false" }, "go=false"],
-    ["a pushed tag, no role", { EVENT: "push", REF_TYPE: "tag", ...ready, ROLE: "" }, "go=false"],
-    ["a pushed tag, no bucket", { EVENT: "push", REF_TYPE: "tag", ...ready, BUCKET: "" }, "go=false"],
+    ["a pushed tag, no role", { EVENT: "push", REF_TYPE: "tag", ...ready, ROLE: "" }, "::error::", 1],
+    ["a pushed tag, no bucket", { EVENT: "push", REF_TYPE: "tag", ...ready, BUCKET: "" }, "::error::", 1],
     ["Linux: a pushed tag, nothing to sign", { PLATFORM: "linux", EVENT: "push", REF_TYPE: "tag", ROLE: "r", BUCKET: "b" }, "go=true"],
     ["Linux: a manual run on an existing tag", { PLATFORM: "linux", EVENT: "workflow_dispatch", REF_TYPE: "tag", ROLE: "r", BUCKET: "b" }, "go=false"],
-    ["staff build: a push of main", { CHANNEL: "release", ...branch, ...ready }, "go=true"],
+    ["staff build: a push of main", { CHANNEL: "release", ...branch, ...ready }, "go=true", 0],
+    ["staff main push missing bucket", { CHANNEL: "release", ...branch, ...ready, BUCKET: "" }, "::error::", 1],
+    ["dispatch missing both", { EVENT: "workflow_dispatch", REF_TYPE: "branch", ROLE: "", BUCKET: "" }, "go=false", 0],
     ["staff build: a manual run on it", { CHANNEL: "release", ...branch, EVENT: "workflow_dispatch", ...ready }, "go=false"],
     ["staff build: a tag", { CHANNEL: "release", EVENT: "push", REF_TYPE: "tag", REF: "refs/tags/app-v0.2.0", ...ready }, "go=false"],
     ["staff build: another branch (the old release/desktop)", { CHANNEL: "release", ...branch, REF: "refs/heads/release/desktop", ...ready }, "go=false"],
     ["staff build: unsigned", { CHANNEL: "release", ...branch, ...ready, SIGNED: "false" }, "go=false"],
     ["Windows: a pushed tag, signature verified", { PLATFORM: "windows", EVENT: "push", REF_TYPE: "tag", SIGNED: "true", ROLE: "r", BUCKET: "b" }, "go=true"],
     ["Windows: a pushed tag, unsigned", { PLATFORM: "windows", EVENT: "push", REF_TYPE: "tag", SIGNED: "", ROLE: "r", BUCKET: "b" }, "go=false"],
-  ])("%s: %s", (_case, env, expected) => {
-    expect(decide(env)).toBe(expected);
+  ])("%s: %s", (_case, env, expected, status) => {
+    const result = decide(env);
+    if (expected === "::error::") {
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain("::error::");
+    } else {
+      expect(result.status).toBe(status ?? 0);
+      expect(result.stdout.split("\n").at(-1)).toBe(expected);
+    }
   });
 
   it("guards every AWS step of the publishing jobs with the push event and the gate, and feeds each gate the event", () => {
