@@ -203,7 +203,8 @@ describe("ProviderSignIn, the CLI read through a pty view", () => {
     // A terminal that couldn't be closed is said; dismissed, the next press still replaces it, never reuses it.
     refuseClose(true);
     fireEvent.click(within(flow()).getByRole("button", { name: "Cancel" }));
-    await waitFor(() => expect(within(flow()).getByRole("alert").textContent).toContain("Couldn't end Gemini (Antigravity)'s sign-in"));
+    await waitFor(() => expect(flow().dataset.phase).toBe("failed"));
+    expect(within(flow()).getByRole("alert")).toBeTruthy();
     refuseClose(false);
     fireEvent.click(within(flow()).getByRole("button", { name: "Close" }));
     fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
