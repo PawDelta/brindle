@@ -164,7 +164,10 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         tab={tab}
         onTab={(tab) => {
           setView({ root, tab });
-          if (tab === "changes") setVisited(root);
+          if (tab === "changes") {
+            setVisited(root);
+            changes.reload();
+          }
         }}
         added={changes.files.reduce((n, f) => n + f.added, 0)}
         removed={changes.files.reduce((n, f) => n + f.removed, 0)}

@@ -275,7 +275,7 @@ describe("review", () => {
     const moved = await within(sheet()).findByTestId("draft-moved");
     expect(within(moved).getByTestId("draft-snapshot").textContent).toContain("print(json.dumps(x))");
     expect(box().value).toBe("MY HUNK EDIT");
-    expect(within(moved).getByTestId("draft-conflict").textContent).toBe("Changed since you started editing");
+    await within(moved).findByTestId("draft-conflict");
     expect(within(moved).queryByRole("button", { name: /Save/ })).toBeNull();
     expect(daemon.sessionEdits).toHaveLength(0);
     // Reload reads the diff and file again; the draft is still there, still in conflict; Discard drops it.

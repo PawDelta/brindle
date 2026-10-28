@@ -212,11 +212,19 @@ const title = () => screen.getByTestId("surface-title").textContent;
 
 describe("SessionScreen", () => {
   it("shows live session changes before PR readiness, preserves drafts across tabs, and edits hunks in either layout", async () => {
+    let holdDiff: Promise<void> | null = null;
+    let diffReads = 0;
     const { daemon, sync, term } = mount({ sup1: live, w1: live }, {
       workspaces: [{ ...root, branch: "brindle/session-18" }, worker],
       sessionReview: { sup1: { ready: false, reasons: ["work in progress"], branch: "brindle/session-18", base: "main", diff: "" } },
       sessionBase: { sup1: { "src/a.ts": "old\ncontext\n" } },
       sessionFiles: { sup1: { "src/a.ts": "new\ncontext\n", "docs/readme.md": "hello\n" } },
+    }, (daemon) => async (input, init) => {
+      if (String(input).endsWith("/sessions/sup1/diff")) {
+        diffReads++;
+        if (holdDiff) await holdDiff;
+      }
+      return daemon.fetch(input, init);
     });
     await waitFor(() => expect(term().written).toBe(drawnLive));
     const tabs = () => within(screen.getByTestId("session-tabs"));
@@ -261,7 +269,59 @@ describe("SessionScreen", () => {
     expect(changes().getByTestId("hunk").textContent).toContain("+edited");
     expect(changes().queryByTestId("split-diff")).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
-    sync.stop();
+    // An external amend can change content without changing any git-status field.
+    await waitFor(() => expect(changes().getByRole("button", { name: /@@/ })).toHaveProperty("disabled", false));
+    fireEvent.click(changes().getByRole("button", { name: /@@/ }));
+    fireEvent.change(changes().getByRole("textbox"), { target: { value: "keep this draft" } });
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+        fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      daemon.data.sessionFiles.sup1["docs/readme.md"] = "amended\nsecond\nthird\n";
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+5 −1");
+      fireEvent.click(changes().getByTitle("docs/readme.md"));
+      expect(changes().getByTestId("hunk").textContent).toContain("+amended");
+      fireEvent.click(changes().getByTitle("src/a.ts"));
+      expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
+
+      // Periodic and activation refreshes share one in-flight request and one queued refresh.
+      let release!: () => void;
+      holdDiff = new Promise<void>((resolve) => { release = resolve; });
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      const pendingReads = diffReads;
+      await act(async () => {
+        fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+        fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(diffReads).toBe(pendingReads);
+      holdDiff = null;
+      await act(async () => { release(); await vi.advanceTimersByTimeAsync(0); });
+      expect(diffReads).toBe(pendingReads + 1);
+
+      // Activating Changes reads immediately, without advancing the periodic clock.
+      fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+      daemon.data.sessionFiles.sup1["docs/readme.md"] = "on activation\n";
+      await act(async () => {
+        fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+3 −1");
+      expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
+      fireEvent.click(changes().getByTitle("docs/readme.md"));
+      expect(changes().getByTestId("hunk").textContent).toContain("+on activation");
+      cleanup();
+      const stoppedReads = diffReads;
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(diffReads).toBe(stoppedReads);
+    } finally {
+      vi.useRealTimers();
+      sync.stop();
+    }
   });
 
   it("shows the selected agent's pane, bare, named by provider and agent, through a tmux client on its window, and types into it as is", async () => {
