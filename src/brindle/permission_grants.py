@@ -3,7 +3,7 @@
 An **ask** is a request the policy left to a person. Each one carries its
 exact form and a ladder of scopes a decision may cover (``generalize``): a
 push's destination ("into main from any branch"), a file's top directory, a
-command's families (read-only git, read-only shell, a dev tool's subcommand:
+command's families (read-only git, read-only shell, test runs, tool queries:
 "Command families" below) or else its first two words, an MCP tool (or its
 whole server).
 The second rung, the general form, is what brindle proposes as the default
@@ -130,36 +130,87 @@ def push_scopes(keys: list[str]) -> list[dict]:
 # -- command families ----------------------------------------------------------------------------
 #
 # A shell command's families are what its simple commands are, as
-# permission_groups classifies them: a read-only git command, a read-only
-# shell command (grep, ls, cat, cd ...) or a dev tool's subcommand ("uv run
-# *"). An approval at the general scope covers any command whose every part
-# falls in the families it was granted for, however they are piped or
-# chained. A part of any other class (a write, a push, a delete, an install,
-# a git command that isn't read-only, a redirection to a file, a word only
-# the run knows) puts the command in no family: only its own grant covers it.
+# permission_groups classifies them: a read-only git command or a read-only
+# shell command (grep, ls, cat, cd ...), or, of a dev tool's commands, only
+# a test run or a query whose operation brindle knows (DEV_OPERATIONS; "uv
+# run" alone may run anything). An approval at the general scope covers any
+# command whose every part falls in the families it was granted for, however
+# they are piped or chained. A part of any other class (a write, a push, a
+# delete, an install, a git command that isn't read-only, a redirection to a
+# file, a word only the run knows, a cd brindle can't follow before it) puts
+# the command in no family: only its own grant covers it.
 
 FAMILY = "family: "
-READONLY_FAMILIES = {"git/readonly": "read-only git commands", "shell/readonly": "read-only shell commands"}
 READ_FILTER = "shell/readonly"
-_PROGRAM = re.compile(r"[A-Za-z0-9_\-./]+")
-_SUBCOMMAND = re.compile(r"[a-z][a-z0-9_-]*")
+TESTS = "dev/tests"
+QUERIES = "dev/queries"
+FAMILY_LABELS = {"git/readonly": "read-only git commands", READ_FILTER: "read-only shell commands",
+                 TESTS: "test runs", QUERIES: "package and GitHub queries"}
+# pytest however it is started, with only these options: none that loads code or a config from
+# elsewhere (-p, -c, --rootdir ...) or deletes a directory (--basetemp).
+PYTEST = (("pytest",), ("python", "-m", "pytest"), ("python3", "-m", "pytest"), ("uv", "run", "pytest"),
+          ("uv", "run", "python", "-m", "pytest"))
+PYTEST_FLAGS = re.compile(r"-[qvxsl]+|-r[a-zA-Z]+|-n(\d+|auto)|--(tb|maxfail|durations|color)=[a-z0-9]+"
+                          r"|--(lf|ff|last-failed|failed-first|nf|new-first|sw|stepwise|co|collect-only|no-header"
+                          r"|strict-markers|disable-warnings|quiet|verbose|exitfirst|showlocals)")
+PYTEST_VALUES = ("-k", "-m", "-n")
+# A package manager's test script, with nothing after it but test names or paths after "--".
+SCRIPT_TESTS = tuple((tool, *verb) for tool in ("npm", "pnpm", "yarn") for verb in (("test",), ("run", "test")))
+# What only reads: a package manager's listing or lookup, GitHub's view of a pull request or run.
+DEV_QUERIES = (("npm", "ls"), ("npm", "list"), ("npm", "view"), ("npm", "info"), ("npm", "outdated"),
+               ("npm", "explain"), ("npm", "config", "get"), ("npm", "config", "list"), ("pnpm", "ls"),
+               ("pnpm", "list"), ("pnpm", "why"), ("pnpm", "outdated"), ("yarn", "list"), ("yarn", "info"),
+               ("yarn", "why"), ("uv", "pip", "list"), ("uv", "pip", "show"), ("uv", "pip", "freeze"),
+               ("gh", "pr", "view"), ("gh", "pr", "list"), ("gh", "pr", "diff"), ("gh", "pr", "checks"),
+               ("gh", "pr", "status"), ("gh", "run", "list"), ("gh", "run", "view"), ("gh", "issue", "view"),
+               ("gh", "issue", "list"), ("gh", "repo", "view"))
+
+
+def _local(word: str) -> bool:
+    """A test path or name inside the checkout: nothing absolute, from home, or up a level."""
+    return not word.startswith(("/", "~", "-")) and ".." not in word.split("/")
+
+
+def _pytest_args(args: list[str]) -> bool:
+    i = 0
+    while i < len(args):
+        if args[i] in PYTEST_VALUES and i + 1 < len(args):
+            i += 2
+        elif PYTEST_FLAGS.fullmatch(args[i]) or _local(args[i]):
+            i += 1
+        else:
+            return False
+    return True
+
+
+def _dev_operation(words: list[str]) -> str | None:
+    """A dev tool command's family: a test run or a query (DEV_QUERIES), else None."""
+    def started(prefixes):
+        return next((len(p) for p in prefixes if tuple(words[:len(p)]) == p), None)
+
+    if (n := started(PYTEST)) is not None:
+        return TESTS if _pytest_args(words[n:]) else None
+    if (n := started(SCRIPT_TESTS)) is not None:
+        rest = words[n:]
+        return TESTS if not rest or rest[0] == "--" and all(_local(w) for w in rest[1:]) else None
+    return QUERIES if started(DEV_QUERIES) is not None else None
 
 
 def _part_family(req: Request, part: permissions.ShellPart, rules: list[Rule]) -> str | None:
     from brindle import permission_groups
 
-    if part.unknown or part.expanded or part.assigned or part.reads or part.writes:
+    # Where it runs unknown (after a cd that may not have happened), the files it reads are too.
+    if part.cwd is None or part.unknown or part.expanded or part.assigned or part.reads or part.writes:
         return None
     [(group, sub)] = permission_groups.part_classes(req, part, rules, [])
-    if f"{group}/{sub}" in READONLY_FAMILIES:
+    if f"{group}/{sub}" in ("git/readonly", READ_FILTER):
         return f"{group}/{sub}"
     # A dev tool runs the project where it runs: one in this repo's checkout, never another's.
-    words, cwd = part.words, os.path.realpath(part.cwd) if part.cwd else None
-    if (f"{group}/{sub}" != "shell/dev-tools" or not words or not _PROGRAM.fullmatch(words[0]) or cwd is None
+    cwd = os.path.realpath(part.cwd)
+    if (f"{group}/{sub}" != "shell/dev-tools"
             or not any(cwd == os.path.realpath(r) or permissions._inside(cwd, r) for r in permissions._roots(req))):
         return None
-    sub_word = words[1] if len(words) > 1 and _SUBCOMMAND.fullmatch(words[1]) else None
-    return " ".join([words[0], *([sub_word] if sub_word else []), "*"])
+    return _dev_operation(part.words)
 
 
 def _part_families(req: Request, rules: list[Rule] | None = None) -> list[str | None] | None:
@@ -194,7 +245,7 @@ def pattern_families(pattern: str) -> set[str] | None:
 
 
 def family_label(found: list[str]) -> str:
-    names = [READONLY_FAMILIES.get(f, f"{f.removesuffix(' *')} commands") for f in found]
+    names = [FAMILY_LABELS.get(f, f) for f in found]
     text = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
     return text[0].upper() + text[1:]
 

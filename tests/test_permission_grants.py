@@ -7,6 +7,7 @@ import json
 import threading
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -44,8 +45,9 @@ def mcp(ws, tool):
      "* → * @ *"),
     (lambda ws: write(ws, "src/auth/login.ts"), "write", "src/auth/login.ts", "src/**", "**"),
     (lambda ws: write(ws, "README.md"), "write", "README.md", "README.md", "**"),
-    (lambda ws: bash(ws, "npm test -- --watch=false auth"), "bash", "npm test -- --watch=false auth",
-     "family: npm test *", "*"),
+    (lambda ws: bash(ws, "npm test -- --watch=false auth"), "bash", "npm test -- --watch=false auth", "npm test *",
+     "*"),
+    (lambda ws: bash(ws, "npm test -- auth"), "bash", "npm test -- auth", "family: dev/tests", "*"),
     (lambda ws: bash(ws, "cat a | grep b"), "bash", "cat a | grep b", "family: shell/readonly", "*"),
     (lambda ws: bash(ws, "terraform apply dev | tee out"), "bash", "terraform apply dev | tee out",
      "terraform apply dev | tee out", "*"),
@@ -173,7 +175,7 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     items = grants.groups(grants.pending_asks(db, ws.repo_root))
     # A command pushing to two destinations is its own item, generalized to both destinations.
     assert [(g.kind, g.rep.ask.general["pattern"], len(g.items)) for g in items] == [
-        ("write", "src/**", 2), ("push", "* → main @ origin", 1), ("bash", "family: npm test *", 1),
+        ("write", "src/**", 2), ("push", "* → main @ origin", 1), ("bash", "family: dev/tests", 1),
         ("mcp", "mcp__github__create_issue", 2), ("push", "* → main @ origin, * → staging @ origin", 1),
         ("push", "* → ? @ origin", 1), ("push", "* → main @ origin, * → release/desktop @ origin", 1)]
     assert items[4].rep.ask.exact == "fix → main @ origin, fix → staging @ origin"
@@ -242,6 +244,10 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     ("uv run pytest tests/test_a.py -q 2>&1 | tail -5", "uv run pytest tests/test_b.py", "allow"),   # a test run
     ("npm ls --depth=0", "npm ls react | head -3", "allow"),                                  # a tool's query
     ("uv run pytest tests/test_a.py", "cd / && uv run pytest", "ask"),                        # another project's
+    ("uv run pytest tests/test_a.py -q 2>&1 | tail -5", "uv run rm -rf build", "ask"),        # uv run, no test
+    ("uv run pytest tests/test_a.py", "uv run pytest --basetemp=src", "ask"),                 # deletes src
+    ("npm config get registry | head", "npm config set registry https://example.invalid", "ask"),   # a write
+    ("ls -la src | head", "ls && cd /tmp && cat secret.txt", "ask"),                          # where, unknown
     ("git log --oneline -5", "git log -1 && git reset --hard", "ask"),                        # a write beside it
     ("grep -rn foo src | head", "grep -rn foo src > found.txt", "ask"),                       # a redirect writes
 ])
@@ -250,6 +256,7 @@ def test_approval_covers_its_family(db, ws, approved, sibling, decision):
     family through, however it is piped or chained; never one with any other part."""
     permissions.apply_preset("secure")
     permissions.forget("d-git-ro")                                   # a policy that asks for every command
+    (Path(ws.path) / "src").mkdir()
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
     worker(db, ws, "w1")
     hook = Hook(db, "w1", bash(ws, approved))
