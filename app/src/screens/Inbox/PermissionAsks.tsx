@@ -268,7 +268,8 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
       return `Always allowed: ${slot.label}. Saved as an override in Settings › Permissions. ${requests(resumed.length)} resumed (${workers(distinct(resumed))}).`;
     });
   };
-  const allowable = !g.blocked && (session || timed);
+  // An unchecked command is allowed once or denied, never remembered; the way out of asking is the Settings opt-in.
+  const allowable = !g.blocked && !g.unchecked && (session || timed);
 
   return (
     <PermissionCard
@@ -372,6 +373,11 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
             </AllowSplit>
           )}
         </div>
+      )}
+      {g.unchecked && onOpenRule && (
+        <button type="button" className={`${LINK} self-end`} onClick={() => onOpenRule("unchecked-commands")}>
+          Stop asking for these…
+        </button>
       )}
       {help && (
         <p role="alert" className="text-xs text-sap">

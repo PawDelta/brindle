@@ -292,6 +292,8 @@ export interface AskGroupDTO {
   rule?: string | null;
   scopes: AskScopeDTO[];
   title: string;
+  /* A command brindle can't read before it runs: only Allow once / Deny. */
+  unchecked?: boolean;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -611,6 +613,10 @@ export interface PermissionPolicyDTO {
   };
   rules: PermissionRuleDTO[];
   saved: SavedActionDTO[];
+  /* "allow": commands brindle can't read run without asking; "ask" (default) asks every time. */
+  unchecked_commands?: "ask" | "allow";
+  /* The org that forces unchecked commands to ask, or null/absent. */
+  unchecked_commands_locked_by?: string | null;
   unmatched: string;
 }
 /**

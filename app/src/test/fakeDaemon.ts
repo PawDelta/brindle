@@ -168,7 +168,7 @@ export interface DaemonData {
   /* The person's permission store (permissions.Store, GET /permissions):
      the preset, the unmatched setting, every rule and saved action, and
      per-rule prompt counts over the last day. */
-  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }> };
+  policy: { preset: string | null; unmatched: string; unchecked_commands?: "ask" | "allow"; unchecked_commands_locked_by?: string | null; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }> };
   /* GET /permissions/asks: the requests hooks hold, grouped
      (permission_grants.groups). A decision takes its requests out of these
      and out of `inbox` (the hold's answer). */
@@ -1464,6 +1464,8 @@ export class FakeDaemon {
     return {
       preset: p.preset,
       unmatched: p.unmatched,
+      unchecked_commands: p.unchecked_commands ?? "ask",
+      unchecked_commands_locked_by: p.unchecked_commands_locked_by ?? null,
       presets: Object.entries(FAKE_PRESETS).map(([name, x]) => ({ name, description: x.description, unmatched: x.unmatched, current: name === p.preset })),
       rules: p.rules.map((r) => ({ ...r, prompts: p.prompts[r.id] ?? 0, expired: r.expires != null && r.expires <= now })),
       saved: p.saved.map((s) => ({ ...s, expired: s.expires != null && s.expires <= now })),
@@ -1560,6 +1562,12 @@ export class FakeDaemon {
     let m: RegExpMatchArray | null;
     if (path === "/permissions" && method === "GET") return json(this.policyDTO());
     if (path === "/permissions" && method === "PATCH") {
+      if ("unchecked_commands" in body) {
+        if (p.unchecked_commands_locked_by) return error("forbidden", `org ${p.unchecked_commands_locked_by} requires unchecked commands to ask`, 403);
+        if (!["ask", "allow"].includes(String(body.unchecked_commands))) return error("invalid", "unchecked_commands must be ask or allow", 400);
+        p.unchecked_commands = body.unchecked_commands as "ask" | "allow";
+        return json(this.policyDTO());
+      }
       if (!["ask", "allow", "deny"].includes(String(body.unmatched))) return error("invalid", "unmatched must be one of ask, allow, deny", 400);
       p.unmatched = String(body.unmatched);
       return json(this.policyDTO());

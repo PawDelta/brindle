@@ -224,7 +224,18 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it("a hold with no group: the request is in the headline, Allow never saves a grant by itself, and a refusal shows on the card", async () => {
+  it("unchecked commands opt-in: the ask offers only Deny and Allow once, and a link to the Settings row", async () => {
+    const unchecked: AskGroupDTO = { ...pushes, key: "k-unchecked", title: "Allow this unchecked command?", unchecked: true, modes: ["once", "deny"], rule: null };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [unchecked] });
+    const { sync, onOpenRule } = mount(daemon);
+    const held = await screen.findByRole("article", { name: "Allow this unchecked command?" });
+    expect(within(held).getAllByRole("button").filter((b) => ["Deny", "Allow once", "Allow"].includes(b.textContent ?? "")).map((b) => b.textContent)).toEqual(["Deny", "Allow once"]);
+    fireEvent.click(within(held).getByRole("button", { name: "Stop asking for these…" }));
+    expect(onOpenRule).toHaveBeenCalledWith("unchecked-commands");
+    sync.stop();
+  });
+
+  it("a hold with no group:the request is in the headline, Allow never saves a grant by itself, and a refusal shows on the card", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, permissionInTerminal] });
     const { sync } = mount(daemon);
     const cards = await screen.findAllByTestId("permission-card");
