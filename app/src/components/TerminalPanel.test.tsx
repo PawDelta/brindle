@@ -71,19 +71,81 @@ function setup(views: PtyViews = standInViews) {
     failing.splice(at, 1);
     return new Response(JSON.stringify({ error: { code: "internal", message: "tmux said no" } }), { status: 500 });
   };
-  const ui = (v: PtyViews) => (
+  const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch });
+  const ui = (v: PtyViews, place = here) => (
     <PtyViewsProvider value={v}>
-      <TerminalProvider client={new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch })} here={here}>
+      <TerminalProvider client={client} here={place}>
         <TerminalToggle />
         <TerminalPanel />
       </TerminalProvider>
     </PtyViewsProvider>
   );
   const view = render(ui(views));
-  return { daemon, failing, holding, release, rerender: (v: PtyViews) => view.rerender(ui(v)) };
+  return { daemon, failing, holding, release, rerender: (v: PtyViews, place = here) => view.rerender(ui(v, place)) };
 }
 
 describe("TerminalPanel", () => {
+  it("terminal follows the session's worktree on opening and navigation, including a paused supervisor and pending starts", async () => {
+    const other = { ...workspaces[1], id: "pawdelta/session-b", path: `${REPO}/.brindle/worktrees/session-b`, agents: [] };
+    const session = { id: "sup-b", workspace_id: other.id };
+    const route = { screen: "session", root: session.id, repo: REPO } as const;
+    const places = [...workspaces, { ...other, agents: [{ id: session.id } as never] }];
+    const second = shellPlace(route, repos, places);
+    const { daemon, holding, release, rerender } = setup();
+    daemon.data.workspaces = places;
+    fireEvent.click(screen.getByTestId("terminal-toggle"));
+    await screen.findByTestId("terminal");
+    const firstTarget = daemon.actions[0].target;
+
+    // Same repo, different session: create its own shell while the panel stays open.
+    holding.push("POST /v1/terminals/shell");
+    rerender(standInViews, second);
+    expect(screen.queryByTestId("terminal")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Another shell" }));
+    // Back to A before B answers: the late shell must not take over A's panel.
+    rerender(standInViews, here);
+    expect(screen.getByTestId("terminal").dataset.target).toBe(firstTarget);
+    release();
+    await waitFor(() => expect(daemon.shells).toHaveLength(2));
+    expect(daemon.shells.map((s) => s.cwd)).toEqual([WORKTREE, other.path]);
+    expect(screen.getByTestId("terminal").dataset.target).toBe(firstTarget);
+
+    // A paused supervisor leaves the live agent list; the session row still owns its checkout.
+    const paused = shellPlace(route, repos, [...workspaces, other], session);
+    expect(paused?.cwd).toBe(other.path);
+    rerender(standInViews, paused);
+    const secondTarget = daemon.actions[1].target;
+    expect(screen.getByTestId("terminal").dataset.target).toBe(secondTarget);
+    // A selected worker that disappeared also falls back to that supervisor.
+    expect(shellPlace({ ...route, agent: "gone" }, repos, [...workspaces, other], session)?.cwd).toBe(other.path);
+
+    // Collapsed navigation is lazy; opening chooses the folder, even after selecting another tab.
+    fireEvent.click(screen.getByRole("button", { name: "Hide the Terminal" }));
+    rerender(standInViews, here);
+    fireEvent.keyDown(window, { key: "`", code: "Backquote", ctrlKey: true });
+    expect(screen.getByTestId("terminal").dataset.target).toBe(firstTarget);
+    fireEvent.click(screen.getAllByRole("tab")[1]);
+    expect(screen.getByTestId("terminal").dataset.target).toBe(secondTarget);
+    fireEvent.click(screen.getByRole("button", { name: "Hide the Terminal" }));
+    fireEvent.click(screen.getByTestId("terminal-toggle"));
+    expect(screen.getByTestId("terminal").dataset.target).toBe(firstTarget);
+    expect(daemon.shells).toHaveLength(2);
+
+    // An unresolved session must never open a shell at the repo root.
+    const unknown = shellPlace({ ...route, root: "unknown" }, repos, places);
+    expect(unknown).toBeNull();
+    rerender(standInViews, unknown);
+    expect(screen.queryByTestId("terminal")).toBeNull();
+    rerender(standInViews, paused);
+    expect(screen.getByTestId("terminal").dataset.target).toBe(secondTarget);
+    // + still opens in the screen's folder after manually viewing a different shell.
+    fireEvent.click(screen.getAllByRole("tab")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "Another shell" }));
+    await waitFor(() => expect(daemon.shells).toHaveLength(3));
+    expect(daemon.shells[2].cwd).toBe(other.path);
+    expect(screen.getByTestId("terminal").dataset.target).toBe(daemon.actions[2].target);
+  });
+
   it("starts a shell where the open session's agent works, else at the repo root", () => {
     expect(here).toEqual({ repo: REPO, name: "pawdelta", cwd: WORKTREE, why: "started in a7aaa807's worktree" });
     expect(shellPlace({ screen: "session", root: "sup-42", repo: REPO }, repos, workspaces)).toMatchObject({ cwd: REPO, why: "started at the repo root" });

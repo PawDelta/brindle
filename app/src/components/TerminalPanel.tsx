@@ -3,14 +3,15 @@
    option A). Closed, only the sidebar status line's ">_ Terminal ⌃`"
    (TerminalToggle) says it is there; ⌃` does the same. Open, a grip above
    it resizes it (its height kept per repo, about a third to start), and
-   its bar is the tab strip: one shell per repo named by the repo, + for
-   another in the same repo, then where the shell started, in words and as
+   its bar is the tab strip: shells keyed by their starting folder, + for
+   another in the same folder, then where the shell started, in words and as
    the path, then collapse and close. Nothing lies over the session: the
    session's screen gets shorter.
 
    A shell is the daemon's (POST /terminals/shell {cwd}: the person's login
    shell in a window of its own tmux session), started in the open
-   session's agent's worktree, else the repo's root, and shown as any pane
+   session's selected agent's or supervisor's worktree (the repo root
+   outside a session), and shown as any pane
    is, through PtyTerminal. Collapsing keeps the shells running (their
    views close and attach again on opening); × closes the shown one
    (DELETE /terminals/{id}), its tab kept until the daemon says it's gone,
@@ -21,7 +22,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import { DaemonError, type DaemonClient } from "../api/client";
 import { usePtyViews, type PtyViewTarget } from "../api/ptyView";
-import type { WorkspaceDTO } from "../api/schema";
+import type { SessionDTO, WorkspaceDTO } from "../api/schema";
 import { plain } from "../api/wording";
 import { readLastSession, type Route } from "../routes";
 import { PtyTerminal } from "./PtyTerminal";
@@ -35,16 +36,21 @@ export interface ShellPlace {
   why: string;
 }
 
-/* The open session's agent's worktree, else the root of the repo on screen
-   (a session's, else the last session's, else the first repo). */
-export function shellPlace(route: Route, repos: { repo_root: string; name: string }[], workspaces: WorkspaceDTO[]): ShellPlace | null {
+/* A session uses its selected agent's worktree, or its supervisor's checkout
+   even when paused. Until that folder is known, don't substitute the repo root.
+   Outside a session, use the repo on screen, last visited, or first listed. */
+export function shellPlace(route: Route, repos: { repo_root: string; name: string }[], workspaces: WorkspaceDTO[], session?: Pick<SessionDTO, "id" | "workspace_id"> | null): ShellPlace | null {
   const repo = route.screen === "session" ? route.repo : (route.screen === "new" && route.repo) || readLastSession()?.repo || repos[0]?.repo_root;
   if (!repo) return null;
   const name = repos.find((r) => r.repo_root === repo)?.name ?? repo.split("/").filter(Boolean).pop() ?? repo;
   if (route.screen === "session") {
     const agent = route.agent ?? route.root;
-    const ws = workspaces.find((w) => w.agents?.some((a) => a.id === agent));
-    if (ws && ws.path !== repo) return { repo, name, cwd: ws.path, why: `started in ${agent}'s worktree` };
+    const selected = workspaces.find((w) => w.agents?.some((a) => a.id === agent));
+    const supervisor = workspaces.find((w) => w.agents?.some((a) => a.id === route.root))
+      ?? (session?.id === route.root ? workspaces.find((w) => w.id === session.workspace_id) : undefined);
+    const ws = selected ?? supervisor;
+    if (!ws) return null;
+    return { repo, name, cwd: ws.path, why: ws.path === repo ? "started at the repo root" : `started in ${selected ? agent : route.root}'s worktree` };
   }
   return { repo, name, cwd: repo, why: "started at the repo root" };
 }
@@ -85,7 +91,7 @@ function writeHeights(heights: Record<string, number>): void {
 
 interface Terminals {
   open: boolean;
-  /* Show the panel (a shell started for the repo on screen if it has none), or collapse it. */
+  /* Show the panel (a shell started for the folder on screen if it has none), or collapse it. */
   toggle(): void;
   collapse(): void;
   /* Another shell where the open session's would start. */
@@ -113,59 +119,66 @@ interface Dock {
   open: boolean;
   tabs: ShellTab[];
   active: string | null;
-  /* A shell is being started (POST /terminals/shell is out): the panel stays open for it. */
-  starting: boolean;
+  /* The folder to select when a pending shell arrives. */
+  cwd: string | null;
+  /* Folders with a start in flight: the panel stays open for them. */
+  starting: string[];
 }
 
 type DockAction =
   | { kind: "open"; open: boolean }
-  | { kind: "starting" }
-  | { kind: "failed" }
+  | { kind: "starting"; cwd: string }
+  | { kind: "failed"; cwd: string }
   | { kind: "added"; tab: ShellTab }
   | { kind: "dropped"; terminal: string }
   | { kind: "select"; terminal: string }
-  /* The repo on screen changed, or the panel opened: its shell is shown, where it has one. */
-  | { kind: "follow"; repo: string | undefined };
+  /* The folder on screen changed, or the panel opened: show its shell. */
+  | { kind: "follow"; cwd: string | null };
 
 function dock(state: Dock, action: DockAction): Dock {
   switch (action.kind) {
     case "open":
       return state.open === action.open ? state : { ...state, open: action.open };
     case "starting":
-      return { ...state, starting: true };
+      return { ...state, starting: [...state.starting, action.cwd] };
     case "failed":
-      return { ...state, starting: false };
+      return { ...state, starting: state.starting.filter((cwd) => cwd !== action.cwd) };
     case "added":
-      return { ...state, starting: false, tabs: [...state.tabs.filter((t) => t.terminal !== action.tab.terminal), action.tab], active: action.tab.terminal };
+      return {
+        ...state,
+        starting: state.starting.filter((cwd) => cwd !== action.tab.cwd),
+        tabs: [...state.tabs.filter((t) => t.terminal !== action.tab.terminal), action.tab],
+        active: state.cwd === action.tab.cwd ? action.tab.terminal : state.active,
+      };
     case "dropped": {
       // The tab goes; the one beside it is shown, and with none left (and none on its way) the panel collapses.
       const at = state.tabs.findIndex((t) => t.terminal === action.terminal);
       if (at < 0) return state;
       const tabs = state.tabs.filter((t) => t.terminal !== action.terminal);
       const active = state.active === action.terminal ? (tabs[Math.min(at, tabs.length - 1)]?.terminal ?? null) : state.active;
-      return { ...state, open: state.open && (tabs.length > 0 || state.starting), tabs, active };
+      return { ...state, open: state.open && (tabs.length > 0 || state.starting.length > 0), tabs, active };
     }
     case "select":
-      return { ...state, active: action.terminal };
+      return { ...state, active: action.terminal, cwd: state.tabs.find((t) => t.terminal === action.terminal)?.cwd ?? null };
     case "follow": {
-      if (state.tabs.find((t) => t.terminal === state.active)?.repo === action.repo) return state;
-      const mine = state.tabs.find((t) => t.repo === action.repo);
-      return mine ? { ...state, active: mine.terminal } : state;
+      if (state.tabs.find((t) => t.terminal === state.active)?.cwd === action.cwd) return { ...state, cwd: action.cwd };
+      const mine = state.tabs.find((t) => t.cwd === action.cwd);
+      return { ...state, cwd: action.cwd, active: mine?.terminal ?? null };
     }
   }
 }
 
 export function TerminalProvider({ client, here, children }: { client: DaemonClient | null; here: ShellPlace | null; children?: ReactNode }) {
-  const [{ open, tabs, active: activeId, starting }, dispatch] = useReducer(dock, { open: false, tabs: [], active: null, starting: false });
+  const [{ open, tabs, active: activeId, starting }, dispatch] = useReducer(dock, { open: false, tabs: [], active: null, cwd: null, starting: [] });
   const [error, setError] = useState<string | null>(null);
   const [heights, setHeights] = useState(readHeights);
-  const busy = useRef(false);
+  const busy = useRef(new Set<string>());
 
   const start = useCallback(
     async (place: ShellPlace) => {
-      if (!client || busy.current) return;
-      busy.current = true;
-      dispatch({ kind: "starting" });
+      if (!client || busy.current.has(place.cwd)) return;
+      busy.current.add(place.cwd);
+      dispatch({ kind: "starting", cwd: place.cwd });
       setError(null);
       try {
         const got = await client.openShell(place.cwd);
@@ -173,25 +186,35 @@ export function TerminalProvider({ client, here, children }: { client: DaemonCli
         dispatch({ kind: "added", tab });
       } catch (e) {
         // The shell shown stays as it was; the request's failure says so beside it.
-        dispatch({ kind: "failed" });
+        dispatch({ kind: "failed", cwd: place.cwd });
         setError(`Couldn't start a shell: ${plain(e instanceof Error ? e.message : String(e))}`);
       } finally {
-        busy.current = false;
+        busy.current.delete(place.cwd);
       }
     },
     [client],
   );
 
-  // On switching repo, the tab shown follows: that repo's shell, where it has one.
+  // Follow once per opening or folder change. Updates to tabs must not override an
+  // explicit selection, recreate a closed shell, or repeat a failed start.
+  const followed = useRef<string | null | undefined>(undefined);
   const repo = here?.repo;
-  useEffect(() => dispatch({ kind: "follow", repo }), [repo]);
+  useEffect(() => {
+    if (!open) {
+      followed.current = undefined;
+      return;
+    }
+    const cwd = here?.cwd ?? null;
+    if (!client || followed.current === cwd) return;
+    followed.current = cwd;
+    dispatch({ kind: "follow", cwd });
+    setError(null);
+    if (here && !tabs.some((t) => t.cwd === cwd)) void start(here);
+  }, [open, here, tabs, start, client]);
 
   const toggle = useCallback(() => {
-    if (open) return dispatch({ kind: "open", open: false });
-    dispatch({ kind: "open", open: true });
-    if (tabs.some((t) => t.repo === here?.repo)) dispatch({ kind: "follow", repo: here?.repo });
-    else if (here) void start(here);
-  }, [open, tabs, here, start]);
+    dispatch({ kind: "open", open: !open });
+  }, [open]);
 
   const drop = useCallback((terminal: string) => dispatch({ kind: "dropped", terminal }), []);
 
@@ -241,14 +264,18 @@ export function TerminalProvider({ client, here, children }: { client: DaemonCli
       open,
       toggle,
       collapse: () => dispatch({ kind: "open", open: false }),
-      add: () => void (here && start(here)),
+      add: () => {
+        if (!here) return;
+        dispatch({ kind: "follow", cwd: here.cwd });
+        void start(here);
+      },
       close,
       select: (terminal) => dispatch({ kind: "select", terminal }),
       ended: drop,
       tabs,
       active: tabs.find((t) => t.terminal === activeId) ?? null,
       here,
-      starting,
+      starting: starting.length > 0,
       error,
       height: (repo && heights[repo]) || HEIGHT_DEFAULT,
       resize,

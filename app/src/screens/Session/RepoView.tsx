@@ -6,16 +6,12 @@
    says so in one line with Copy my edit / Discard / Reload, and the engine's
    409 busy shows in the save bar. A save under way is the file's, not its
    box's: it keeps the box locked through looking at other files, and clears
-   the edit only if it still is what was sent. Shell opens the person's own
-   shell in the session checkout (POST /terminals/shell) in a drawer at the
-   foot, shown as the Terminal's shells are; it closes with its × or when
-   the view goes, and a shell that starts after either is closed at once. */
+   the edit only if it still is what was sent. */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DaemonError, type DaemonClient, type FileContent, type SessionTree } from "../../api/client";
 import { plain } from "../../api/wording";
-import { ShellView, tilde, type ShellTab } from "../../components/TerminalPanel";
-import { button, label, mono } from "../../components/ui";
+import { label, mono } from "../../components/ui";
 import { COMMIT, CONFLICT, EditBox, FileTree, refusal } from "./SessionDiffEditor";
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -31,14 +27,11 @@ interface Edit {
   refused?: string;
 }
 
-export function RepoView({ client, root, repo, branch, cwd, active }: {
+export function RepoView({ client, root, branch, active }: {
   client: DaemonClient;
   root: string;
-  repo: string;
   /* The session branch as the view knows it until the tree names it. */
   branch: string;
-  /* The session checkout's folder, where Shell starts; null while the snapshot doesn't have it. */
-  cwd: string | null;
   /* The tab is shown: its tree is read again. */
   active: boolean;
 }) {
@@ -113,61 +106,6 @@ export function RepoView({ client, root, repo, branch, cwd, active }: {
   };
   const pin = opened ? pins[opened] : undefined;
 
-  // The drawer's shell: one at a time; Shell while one starts or runs shows that one. A start belongs to the
-  // drawer only while `starting` holds its ticket: closed or unmounted meanwhile, the shell it gets is closed.
-  const [shell, setShell] = useState<ShellTab | null>(null);
-  const [drawer, setDrawer] = useState(false);
-  const [shellError, setShellError] = useState<string | null>(null);
-  const starting = useRef<number | null>(null);
-  const tickets = useRef(0);
-  const running = useRef<string | null>(null);
-  running.current = shell?.terminal ?? null;
-  const openShell = async () => {
-    setDrawer(true);
-    if (!cwd || shell || starting.current !== null) return;
-    const ticket = ++tickets.current;
-    starting.current = ticket;
-    setShellError(null);
-    try {
-      const got = await client.openShell(cwd);
-      if (starting.current !== ticket) {
-        void client.closeTerminal(got.terminal).catch(() => undefined);
-        return;
-      }
-      const name = repo.split("/").filter(Boolean).pop() ?? repo;
-      setShell({ repo, name, cwd, why: "started in the session checkout", terminal: got.terminal, at: { server: got.server ?? null, target: got.target }, shell: got.shell || "shell" });
-    } catch (e) {
-      if (starting.current === ticket) setShellError(`Couldn't start a shell: ${message(e)}`);
-    } finally {
-      if (starting.current === ticket) starting.current = null;
-    }
-  };
-  const closeShell = async () => {
-    if (!shell) {
-      // A start under way loses its owner: its shell is closed when it comes.
-      starting.current = null;
-      setShellError(null);
-      return setDrawer(false);
-    }
-    setShellError(null);
-    try {
-      await client.closeTerminal(shell.terminal);
-    } catch (e) {
-      // Gone already: nothing is left to close.
-      if (!(e instanceof DaemonError && e.code === "not_found")) return setShellError(`Couldn't close the shell: ${message(e)}`);
-    }
-    setShell(null);
-    setDrawer(false);
-  };
-  // Leaving the session's view ends its drawer's shell, and any still starting.
-  useEffect(
-    () => () => {
-      starting.current = null;
-      if (running.current) void client.closeTerminal(running.current).catch(() => undefined);
-    },
-    [client],
-  );
-
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-s1">
       <div className="flex flex-wrap items-center gap-s2">
@@ -175,16 +113,13 @@ export function RepoView({ client, root, repo, branch, cwd, active }: {
           {shownBranch}
         </span>
         <span className={`${label} flex-1`}>{tree && `${tree.files.length} ${tree.files.length === 1 ? "file" : "files"}`}</span>
-        <button type="button" className={`${button} text-xs`} aria-pressed={drawer} disabled={!cwd} title={cwd ? `A shell in ${tilde(cwd)}` : "The session checkout isn't known yet"} onClick={() => void openShell()} data-testid="repo-shell">
-          Shell
-        </button>
       </div>
       {treeError && (
         <p className="text-sm text-sap" role="alert">
           {treeError}
         </p>
       )}
-      <div className="flex min-h-0 flex-1 overflow-hidden rounded-lg border border-line bg-surface">
+      <div className="flex min-h-0 flex-1 overflow-hidden border-t border-line">
         <nav className="flex w-40 shrink-0 flex-col overflow-auto border-r border-line py-1 md:w-64" aria-label="Repository files">
           {!tree && !treeError ? (
             <p className="px-s2 text-sm text-ink-3">Loading…</p>
@@ -253,30 +188,6 @@ export function RepoView({ client, root, repo, branch, cwd, active }: {
           </div>
         )}
       </div>
-      {drawer && (
-        <section className="flex h-[40%] min-h-[120px] flex-none flex-col overflow-hidden rounded-md border border-line bg-shell-bg" aria-label="Shell" data-testid="repo-shell-drawer">
-          <div className="flex h-8 flex-none items-center gap-1.5 border-b border-shell-line bg-shell-bg-2 px-3 text-[12px] text-shell-dim">
-            <span className="min-w-0 flex-1 truncate">
-              {shell ? (
-                <>
-                  {shell.shell}, {shell.why} <span className="font-mono text-[11px] text-shell-ink/80">{tilde(shell.cwd)}</span>
-                </>
-              ) : (
-                !shellError && "Starting a shell…"
-              )}
-            </span>
-            <button type="button" className="inline-grid h-[22px] w-[22px] flex-none place-items-center rounded-md text-[14px] text-shell-dim hover:text-shell-ink" title="Close this shell" aria-label="Close this shell" onClick={() => void closeShell()}>
-              ×
-            </button>
-          </div>
-          {shellError && (
-            <p role="alert" className="flex-none border-b border-shell-line bg-shell-bg-2 px-3 py-1 text-[11.5px] text-shell-bad">
-              {shellError}
-            </p>
-          )}
-          {shell && <ShellView key={shell.terminal} tab={shell} onEnded={() => (setShell(null), setDrawer(false))} />}
-        </section>
-      )}
     </div>
   );
 }
