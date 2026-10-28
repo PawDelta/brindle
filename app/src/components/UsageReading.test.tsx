@@ -9,7 +9,7 @@ import { createAppStore } from "../store/store";
 import { startSync } from "../store/sync";
 import { UsageProvider } from "../store/usage";
 import { StoreContext } from "../store/useStore";
-import { FakeDaemon } from "../test/fakeDaemon";
+import { FakeDaemon, type DaemonData } from "../test/fakeDaemon";
 import { REPO, root } from "../test/fixtures";
 import { PtyViewsProvider } from "../api/ptyView";
 import { standInViews } from "../test/panes";
@@ -31,8 +31,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-function app(scenario: UsageScenario) {
-  const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], usage: usageScenario(scenario) });
+function app(scenario: UsageScenario, data: Partial<DaemonData> = {}) {
+  const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], usage: usageScenario(scenario), ...data });
   const store = createAppStore();
   const client = daemon.client();
   const sync = startSync({ client, store, connect: daemon.connect });
@@ -47,19 +47,47 @@ function app(scenario: UsageScenario) {
 const statusLine = () => screen.getByTestId("status-line");
 const usageAsked = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "GET" && r.path === "/usage").length;
 
-describe("the sidebar's reading near a usage limit", () => {
-  it("says nothing about usage in the normal state, keeping the links on one line", async () => {
-    const { daemon, stop } = app("normal");
+describe("the sidebar's weekly usage reading", () => {
+  it.each(["normal", "several"] as const)("sidebar foot usage line shows the most-used weekly provider, warns near the limit, and keeps theme choices in the account menu (%s)", async (scenario) => {
+    const { daemon, stop } = app(scenario, { account: { signed_in: true, name: "Hannah Lerner", plan: "pro" } });
     await waitFor(() => expect(usageAsked(daemon)).toBeGreaterThan(0));
     await waitFor(() => expect(screen.getByTestId("pages")).toBeTruthy());
-    expect(screen.queryByTestId("usage-reading")).toBeNull();
-    expect(statusLine().textContent).not.toMatch(/%|limit/);
+    const reading = await screen.findByTestId("usage-reading");
+    expect(reading.dataset.provider).toBe("codex");
+    expect(reading.className).toContain(scenario === "normal" ? "text-ink-3" : "text-sap");
+    expect(within(statusLine()).getByRole("progressbar").getAttribute("aria-valuenow")).toBe(scenario === "normal" ? "41" : "82");
+    expect(screen.queryByRole("group", { name: "Theme" })).toBeNull();
+    const account = screen.getByRole("button", { name: "Open account menu" });
+    await waitFor(() => expect(account.textContent).toBe("HL"));
+    fireEvent.click(account);
+    const menu = screen.getByRole("dialog", { name: "Account menu" });
+    expect(within(menu).getByText(daemon.data.account.name!)).toBeTruthy();
+    expect(menu.textContent).toContain(daemon.data.account.plan!);
+    expect(menu.contains(document.activeElement)).toBe(true);
+    const theme = within(menu).getByRole("group", { name: "Theme" });
+    fireEvent.click(within(theme).getByRole("button", { name: "Dark" }));
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    fireEvent.click(within(theme).getByRole("button", { name: "Light" }));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    fireEvent.click(within(theme).getByRole("button", { name: "System" }));
+    expect(document.documentElement.dataset.theme).toBeUndefined();
+    expect(within(menu).getAllByRole("progressbar").map((bar) => bar.getAttribute("aria-valuenow"))).toEqual(scenario === "normal" ? ["9", "41"] : ["63", "82"]);
+    fireEvent.keyDown(menu, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Account menu" })).toBeNull();
+    expect(document.activeElement).toBe(account);
+    fireEvent.click(account);
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByRole("dialog", { name: "Account menu" })).toBeNull();
     expect(within(statusLine()).queryByTestId("connection")).toBeNull();
     // The footer's links never wrap, whatever the status line carries.
     const pages = screen.getByTestId("pages");
     expect(pages.className).toContain("flex-nowrap");
     expect(pages.className).toContain("whitespace-nowrap");
-    expect(within(pages).getAllByRole("button").map((b) => b.textContent)).toEqual(["Knowledge", "Agents", "Settings", "Account"]);
+    expect(within(pages).getByRole("button", { name: "Agents" }).querySelector("[data-testid*='badge']")).toBeNull();
+    fireEvent.click(account);
+    fireEvent.click(within(screen.getByRole("dialog", { name: "Account menu" })).getByRole("button", { name: /^Usage/ }));
+    await screen.findByTestId("usage");
+    expect(screen.queryByRole("dialog", { name: "Account menu" })).toBeNull();
     stop();
   });
 
@@ -68,14 +96,14 @@ describe("the sidebar's reading near a usage limit", () => {
     Element.prototype.scrollIntoView = scrolled;
     const { stop } = app("near");
     const reading = await screen.findByTestId("usage-reading");
-    expect(reading.textContent).toBe("Claude 88% · 5:10pm");
+    expect(reading.dataset.provider).toBe("claude");
+    expect(within(reading).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("63");
     expect(reading.className).toContain("text-sap");
     expect(reading.getAttribute("aria-label")).toBe("Open Account › Usage");
     expect(screen.queryByTestId("usage-more")).toBeNull();
-    // The reading sits before the terminal and theme switches, beside any provider problem.
+    // The reading is above the labelled navigation row, beside any provider problem.
     const parts = [...statusLine().children];
-    const slot = reading.parentElement!;
-    expect(parts.indexOf(slot)).toBe(0);
+    expect(parts.indexOf(reading)).toBe(0);
     expect(statusLine().className).toContain("whitespace-nowrap");
     expect(within(statusLine()).queryByTestId("connection")).toBeNull();
 
@@ -103,16 +131,6 @@ describe("the sidebar's reading near a usage limit", () => {
     stop();
   });
 
-  it("with several near reads the worst and +N for the others", async () => {
-    const { stop } = app("several");
-    const reading = await screen.findByTestId("usage-reading");
-    // Limited first (the engine's order): Antigravity refuses work until 7:18pm, Claude and Codex past 80%.
-    expect(reading.getAttribute("data-provider")).toBe("antigravity");
-    expect(within(reading).getByText("Antigravity limit · 7:18pm")).toBeTruthy();
-    expect(screen.getByTestId("usage-more").textContent).toBe("+2");
-    expect(screen.getByTestId("usage-more").className).toContain("text-ink-3");
-    stop();
-  });
 });
 
 describe("the usage feed", () => {
@@ -135,17 +153,20 @@ describe("the usage feed", () => {
     return { navigate, stop: () => sync.stop() };
   }
 
-  it("follows the engine on a gentle poll: the reading comes when a provider nears its limit and goes once it is back", async () => {
+  it("follows the engine on a gentle poll: the weekly reading changes provider and warning style as usage changes", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], usage: usageScenario("normal") });
     const { navigate, stop } = sidebar(daemon, 40);
     await waitFor(() => expect(usageAsked(daemon)).toBeGreaterThan(0));
-    expect(screen.queryByTestId("usage-reading")).toBeNull();
+    await waitFor(() => expect(screen.getByTestId("usage-reading").dataset.provider).toBe("codex"));
     daemon.data.usage = usageScenario("near");
     const reading = await screen.findByTestId("usage-reading");
+    await waitFor(() => expect(reading.dataset.provider).toBe("claude"));
+    expect(reading.className).toContain("text-sap");
     fireEvent.click(reading);
     expect(navigate).toHaveBeenLastCalledWith({ screen: "account", section: "usage", ask: expect.any(Number) });
     daemon.data.usage = usageScenario("normal");
-    await waitFor(() => expect(screen.queryByTestId("usage-reading")).toBeNull());
+    await waitFor(() => expect(reading.dataset.provider).toBe("codex"));
+    expect(reading.className).toContain("text-ink-3");
     stop();
   });
 

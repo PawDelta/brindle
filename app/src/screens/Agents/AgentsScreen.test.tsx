@@ -319,7 +319,7 @@ describe("agents tab", () => {
     again.stop();
   });
 
-  it("agents: a provider that isn't connected is skipped, and its Connect opens Settings › Providers; the footer is Knowledge · Agents · Settings · Account", async () => {
+  it("agents: a provider that isn't connected is skipped, and its Connect opens Settings › Providers", async () => {
     const offline = profiles.map((p) => (p.provider === "codex" ? { ...p, signed_in: false } : p));
     const config = data().routingConfig!;
     const daemon = new FakeDaemon(
@@ -339,7 +339,7 @@ describe("agents tab", () => {
       </PtyViewsProvider>,
     );
     const pages = await screen.findByRole("navigation", { name: "Pages" });
-    expect(within(pages).getAllByRole("button").map((x) => x.textContent)).toEqual(["Knowledge", "Agents", "Settings", "Account"]);
+    expect(within(pages).getByRole("button", { name: "Open account menu" })).toBeTruthy();
     expect(pages.className).toContain("flex-nowrap");
     fireEvent.click(within(pages).getByRole("button", { name: "Agents" }));
     await screen.findByTestId("kind-medium");

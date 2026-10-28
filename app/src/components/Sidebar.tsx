@@ -21,10 +21,10 @@
    provider session on the supervisor; clicking an agent opens the session
    on that agent. Keys, as in the CLI: ↑ ↓ (or j k) move, Enter opens, ⌘1-9
    jump to a session, ⌘N starts one. Knowledge, Agents,
-   Settings and Account as small links at the foot, on one line, with the
-   terminal and theme switches under them, and beside those,
-   only while a provider is near its limit, a few warm words that open
-   Account › Usage (design/usage/A4), and beside them only while a provider
+   and Settings as small links at the foot, on one line with an initials
+   button for the Account menu and the terminal switch. The Account menu
+   holds the name, plan, provider usage and theme choices. Above the row,
+   the most-used weekly allowance opens Account › Usage; beside it, while a provider
    has a problem (signed out, an install failed), a few more that open
    Settings › Providers (design/connect/); no providers block anywhere else
    in the sidebar. There is no right-hand panel: this is
@@ -32,7 +32,7 @@
    as the accent (styles.css .side-*). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
-import type { DaemonClient } from "../api/client";
+import type { AccountInfo, DaemonClient, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
 import type { OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
@@ -43,7 +43,7 @@ import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
 import { waitingCount } from "../store/appUpdates";
 import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
-import { nearReading, nowSeconds } from "../screens/Account/usage";
+import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
 import { providerProblems, type ProviderProblem } from "../api/providers";
 import { useProviders } from "../store/providers";
@@ -64,38 +64,135 @@ export interface SidebarProps {
   openUrl?: OpenUrl;
 }
 
-/* The status line's reading while a provider is near its limit, or null. */
-function useNearReading() {
-  const { usage } = useUsage();
-  return usage ? nearReading(usage.near, nowSeconds()) : null;
+const weeklyWindow = (provider: ProviderUsage) => (provider.known ? planWindows(provider).find((window) => window.minutes === 10080) : undefined);
+
+function WeeklyMeter({ provider }: { provider: ProviderUsage }) {
+  const window = weeklyWindow(provider);
+  if (!window) return <span className="text-ink-3">—</span>;
+  return (
+    <span className="inline-flex items-center gap-1 font-mono">
+      <span role="progressbar" aria-label={`${providerName(provider.provider)} weekly usage`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={window.used} className="flex h-[3px] w-8 overflow-hidden rounded-full bg-line">
+        <span className="h-full bg-current" style={{ width: `${Math.max(0, Math.min(100, window.used))}%` }} />
+      </span>
+      {Math.round(window.used)}%
+    </span>
+  );
 }
 
-/* A few warm words in the status line while a provider is near its limit
-   (design/usage/A4): the worst one in the fewest words, "Claude 88% ·
-   5:10pm" or "Antigravity limit · 7:18pm", "+N" in the line's dim colour
-   when others are near too, opening Account › Usage. Nothing otherwise.
-   An over-long reading ends in an ellipsis
-   rather than wrapping. */
 /* Each click is its own request, so a second one with Account open scrolls back to Usage. */
 let usageAsks = 0;
-function UsageReading({ reading, navigate }: { reading: ReturnType<typeof useNearReading> } & Pick<SidebarProps, "navigate">) {
-  if (!reading) return null;
+function UsageReading({ provider, warning, navigate }: { provider?: ProviderUsage; warning: boolean } & Pick<SidebarProps, "navigate">) {
+  const window = provider && weeklyWindow(provider);
   return (
     <button
       type="button"
-      className="group ml-auto inline-flex min-w-0 flex-[0_1_auto] items-baseline gap-1 font-mono text-[10.5px] font-medium text-sap"
+      className={`inline-flex min-w-0 items-center gap-1 truncate font-mono text-[10.5px] hover:underline ${warning ? "text-sap" : "text-ink-3"}`}
       aria-label="Open Account › Usage"
       data-testid="usage-reading"
-      data-provider={reading.provider}
+      data-provider={provider?.provider}
       onClick={() => navigate({ screen: "account", section: "usage", ask: ++usageAsks })}
     >
-      <span className="min-w-0 overflow-hidden text-ellipsis group-hover:underline group-hover:underline-offset-2">{reading.text}</span>
-      {reading.more > 0 && (
-        <span className="flex-none font-normal text-ink-3" data-testid="usage-more">
-          +{reading.more}
-        </span>
-      )}
+      {provider ? (
+        <>
+          <span>{providerName(provider.provider)}</span>
+          <WeeklyMeter provider={provider} />
+          {window?.resets_at != null && <span className="truncate">· resets {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</span>}
+        </>
+      ) : "Usage unavailable"}
     </button>
+  );
+}
+
+function AccountMenu({ navigate }: Pick<SidebarProps, "navigate">) {
+  const client = useContext(DaemonContext);
+  const connection = useAppState((s) => s.connection);
+  const { usage } = useUsage();
+  const [account, setAccount] = useState<AccountInfo | null>(null);
+  const [open, setOpen] = useState(false);
+  const container = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menu = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    let current = true;
+    if (client && (connection === "open" || connection === "idle")) {
+      void client.account().then(
+        (next) => { if (current) setAccount(next); },
+        () => undefined,
+      );
+    }
+    return () => { current = false; };
+  }, [client, connection]);
+  useEffect(() => {
+    if (!open) return;
+    menu.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    const outside = (event: globalThis.MouseEvent) => {
+      if (!container.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setOpen(false);
+        trigger.current?.focus();
+      }
+    };
+    document.addEventListener("mousedown", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+  const name = account?.signed_in ? account.name || "Signed in" : "Guest";
+  const initials = account?.signed_in && account.name ? account.name.split("@")[0].split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() : "?";
+  const go = (route: Route) => {
+    setOpen(false);
+    navigate(route);
+  };
+  return (
+    <div
+      ref={container}
+      className="relative shrink-0"
+      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false); }}
+    >
+      <button
+        ref={trigger}
+        type="button"
+        aria-label="Open account menu"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-controls={open ? "sidebar-account-menu" : undefined}
+        title={name}
+        className="flex size-7 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] text-ink-2 hover:bg-surface-2"
+        onClick={() => setOpen((value) => !value)}
+      >
+        {initials}
+      </button>
+      {open && (
+        <div ref={menu} id="sidebar-account-menu" role="dialog" aria-label="Account menu" className="absolute bottom-full left-0 z-50 mb-2 w-[252px] rounded-lg border border-line-strong bg-surface p-s1 text-[12px] shadow-lg">
+          <div className="border-b border-line px-s1 pb-s1">
+            <div className="truncate font-medium text-ink">{name}</div>
+            <div className="text-ink-3">brindle {account?.plan || "free"}</div>
+          </div>
+          <button type="button" className="w-full rounded-md px-s1 py-s1 text-left text-ink-2 hover:bg-surface-2 hover:text-ink" onClick={() => go({ screen: "account" })}>
+            Account
+          </button>
+          <button type="button" className="w-full rounded-md px-s1 py-s1 text-left text-ink-2 hover:bg-surface-2 hover:text-ink" onClick={() => go({ screen: "account", section: "usage", ask: ++usageAsks })}>
+            Usage
+            <span className="mt-1 flex flex-col gap-1 text-[11px] text-ink-3">
+              {usage?.providers.map((provider) => (
+                <span key={provider.provider} className="flex items-center justify-between gap-s1">
+                  <span>{providerName(provider.provider)}</span>
+                  <WeeklyMeter provider={provider} />
+                </span>
+              ))}
+            </span>
+          </button>
+          <div className="border-t border-line px-s1 pt-s1">
+            <ThemeToggle choices />
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -533,7 +630,9 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   const [pausedOpen, setPausedOpen] = useState(readPausedOpen);
   const list = useRef<HTMLElement>(null);
   const noRefresh = useCallback(() => Promise.resolve(), []);
-  const reading = useNearReading();
+  const { usage } = useUsage();
+  const mostUsed = usage?.providers.filter((provider) => weeklyWindow(provider)).sort((a, b) => weeklyWindow(b)!.used - weeklyWindow(a)!.used)[0];
+  const warning = !!mostUsed && (mostUsed.limited || planWindows(mostUsed).some((window) => window.used >= WARN));
   const { rows: providerRows, installs } = useProviders();
   const problems = useMemo(() => providerProblems(providerRows, installs), [providerRows, installs]);
 
@@ -737,22 +836,20 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         )}
         {repos && repos.length > 0 && live.length === 0 && <p className="px-s1 text-xs text-ink-3">Nothing running. Start a session, or continue a recent one.</p>}
       </nav>
-      <nav aria-label="Pages" className="flex flex-nowrap items-center gap-x-[10px] whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="pages">
-        {page({ screen: "knowledge" }, "Knowledge")}
-        {page({ screen: "agents" }, "Agents")}
-        {page({ screen: "settings" }, "Settings")}
-        {page({ screen: "account" }, "Account")}
-      </nav>
-      <div className="flex items-center justify-between gap-[10px] whitespace-nowrap px-s1 pt-0.5" data-testid="status-line">
-        {(problems.length > 0 || reading) && (
-          <span className="ml-auto flex min-w-0 flex-[0_1_auto] items-baseline gap-[10px]">
-            <ProviderProblemLine problems={problems} navigate={navigate} />
-            <UsageReading reading={reading} navigate={navigate} />
-          </span>
-        )}
-        <TerminalToggle />
-        <ThemeToggle className="flex flex-none items-center gap-1 rounded-md text-[11.5px] lowercase text-ink-3 hover:text-ink" />
+      <div className="flex min-h-4 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
+        <UsageReading provider={mostUsed} warning={warning} navigate={navigate} />
+        <ProviderProblemLine problems={problems} navigate={navigate} />
       </div>
+      <nav aria-label="Pages" className="flex h-10 shrink-0 flex-nowrap items-center gap-1 whitespace-nowrap px-s1" data-testid="pages">
+        <AccountMenu navigate={navigate} />
+        {page({ screen: "knowledge" }, "Knowledge")}
+        <span aria-hidden className="text-ink-3">·</span>
+        {page({ screen: "agents" }, "Agents")}
+        <span aria-hidden className="text-ink-3">·</span>
+        {page({ screen: "settings" }, "Settings")}
+        <span className="flex-1" />
+        <TerminalToggle />
+      </nav>
     </aside>
   );
 }
