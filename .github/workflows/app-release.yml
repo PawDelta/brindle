@@ -60,7 +60,7 @@
 # brindle/downloads/desktop/latest.json or the stable brindle*.dmg / AppImage /
 # .deb names. Only a final app-v<X.Y.Z> tag updates those.
 #
-# Release-branch (staff) builds: a push to main that touches the app (the
+# Staff builds: a push to main that touches the app (the
 # paths app.yml runs for) builds the Macs only, at that commit, once
 # `release-gate` has found it on main with the newest CI and App runs for
 # exactly that commit passed. The build carries
@@ -70,7 +70,7 @@
 # only (an immutable directory per build, then release/latest.json, which
 # only moves forward), from the `desktop-staff-release` environment. It never
 # touches latest.json, rc/ or the stable names. app/README.md,
-# "Release-branch builds", has the contract and what to do when the gate
+# "Staff builds", has the contract and what to do when the gate
 # refuses.
 #
 # Run by hand (workflow_dispatch) it builds and keeps the artifacts and never
