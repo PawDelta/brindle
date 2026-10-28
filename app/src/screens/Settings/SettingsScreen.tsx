@@ -139,7 +139,7 @@ function SectionNav() {
         <button
           key={s.id}
           type="button"
-          className={`${quiet} rounded-full border border-line px-s2 text-xs`}
+          className={`${quiet} rounded-sm border border-line px-s2 text-xs`}
           onClick={() => document.getElementById(s.id)?.scrollIntoView?.({ behavior: "smooth", block: "start" })}
         >
           {s.label}
@@ -194,7 +194,7 @@ function Row({ label: text, help, htmlFor, badges, wide = false, children, testI
   );
 }
 
-const Edited = () => <span className={`${pill} bg-branch-soft text-branch`}>edited</span>;
+const Edited = () => <span className={`${pill} text-branch`}>edited</span>;
 
 /* On or off, as a switch. */
 function Toggle({ id, label: name, checked, disabled, onChange }: { id: string; label: string; checked: boolean; disabled: boolean; onChange(on: boolean): void }) {
@@ -295,7 +295,7 @@ function SettingRow({ s, value, dirty, disabled, onChange, override }: { s: Sett
       wide={s.kind === "list"}
       badges={
         <>
-          {s.pro && <span className={`${pill} bg-fawn-soft text-fawn`}>Pro</span>}
+          {s.pro && <span className={`${pill} text-fawn`}>Pro</span>}
           {dirty && <Edited />}
         </>
       }
@@ -595,7 +595,7 @@ function KeyLabel({ name }: { name: string }) {
 }
 
 type RowState = "signed_in" | "signed_out" | "unknown" | "not_installed" | "off";
-const DOT: Record<RowState, string> = { signed_in: "bg-pass", signed_out: "bg-fawn", unknown: "bg-ink-3", not_installed: "bg-ink-3", off: "bg-ink-3" };
+const DOT: Record<RowState, string> = { signed_in: "bg-pass", signed_out: "bg-sap", unknown: "bg-ink-3", not_installed: "bg-ink-3", off: "bg-ink-3" };
 const STATE_TEXT: Record<RowState, string> = { signed_in: "Signed in", signed_out: "Not signed in", unknown: "Sign-in not checked", not_installed: "Not installed", off: "Removed from brindle" };
 const SIGN_IN_HELP: Record<RowState, string> = {
   signed_in: "Your account is connected.",
@@ -698,7 +698,7 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
       testId={`provider-${row.provider}`}
       data={{ provider: row.provider, state, install: install?.status }}
       badges={
-        <span className={`inline-flex items-center gap-1 rounded-full bg-canvas-2 px-s1 py-0.5 text-xs font-normal ${state === "signed_in" ? "text-pass" : "text-ink-2"}`} data-testid="provider-state">
+        <span className={`inline-flex items-center gap-1 rounded-sm bg-canvas-2 px-s1 py-0.5 text-xs font-normal ${state === "signed_in" ? "text-pass" : "text-ink-2"}`} data-testid="provider-state">
           <span className={`size-2 rounded-full ${DOT[state]}`} aria-hidden />
           {STATE_TEXT[state]}
         </span>
@@ -756,7 +756,7 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
   );
 }
 
-const TONE: Record<string, string> = { ok: "text-pass", warn: "text-fawn", fail: "text-sap" };
+const TONE: Record<string, string> = { ok: "text-pass", warn: "text-sap", fail: "text-fail" };
 
 /* A doctor line as a health row: its mark, name and words, and a fix where the app has one. */
 function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fix: Fix): void }) {
@@ -942,7 +942,7 @@ export function SettingsScreen({ client, installCli, appUpdater, releaseBuildUpd
     if (!source) return undefined;
     return (
       <span className="mt-0.5 flex flex-wrap items-center gap-x-s1" data-testid={`override-${s.key}`} data-source={source}>
-        <span className={`${pill} bg-fawn-soft text-fawn`}>
+        <span className={`${pill} text-branch`}>
           {overrideText(s, config?.repo?.[s.key])} in this project
         </span>
         <button type="button" className={`${quiet} text-xs`} disabled={saving} onClick={() => void clearOverride(s.key, source)}>
@@ -1188,7 +1188,7 @@ export function SettingsScreen({ client, installCli, appUpdater, releaseBuildUpd
                           </span>
                         ) : (
                           <span className="flex items-center gap-1 text-xs text-ink-2">
-                            <span className="size-2 rounded-full bg-fawn" aria-hidden />
+                            <span className="size-2 rounded-full bg-ink-3" aria-hidden />
                             Not set
                           </span>
                         )}
@@ -1254,7 +1254,7 @@ export function SettingsScreen({ client, installCli, appUpdater, releaseBuildUpd
           wide={upgrade.state.kind !== "idle"}
           help={
             upgradeNotice ? (
-              <span className="text-fawn" data-testid="update-notice">
+              <span className="text-sap" data-testid="update-notice">
                 {plain(upgradeNotice)}
               </span>
             ) : upgradeNotice === undefined ? (

@@ -4,8 +4,9 @@
 
 export const button =
   "inline-flex items-center gap-1 rounded-md border border-line-strong bg-surface px-s2 py-1 text-sm font-medium text-ink hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-surface";
+/* The primary action in the site's accent (--fawn, pass green). */
 export const primary =
-  "inline-flex items-center gap-1 rounded-md border border-transparent bg-branch px-s2 py-1 text-sm font-medium text-on-branch hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:opacity-50";
+  "inline-flex items-center gap-1 rounded-md border border-transparent bg-fawn px-s2 py-1 text-sm font-medium text-on-fawn hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:opacity-50";
 export const danger =
   "inline-flex items-center gap-1 rounded-md border border-transparent bg-sap px-s2 py-1 text-sm font-medium text-on-sap hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50";
 /* A small, quiet action in a row (Open, Dismiss, Cancel). */
@@ -23,5 +24,8 @@ export const h2 = "text-base font-semibold";
 export const label = "text-xs font-medium uppercase tracking-wider text-ink-3";
 /* Code and identifiers in running text. */
 export const mono = "font-mono text-[13px]";
-/* A small status pill. */
-export const pill = "inline-flex items-center rounded-full px-2 py-px text-xs font-medium";
+/* A small status pill: its tone in the text, on a hairline (inset, so it
+   takes no room), never a fill. A chip is the same shape for a pill that
+   draws its own border (a choice that can be picked). */
+export const chip = "inline-flex items-center rounded-sm px-2 py-px text-xs font-medium";
+export const pill = `${chip} inset-ring inset-ring-line-strong`;

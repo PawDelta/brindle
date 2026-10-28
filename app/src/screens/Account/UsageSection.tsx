@@ -18,7 +18,7 @@ const EDGE: Record<UsageState, string> = { none: "", ok: "", warn: "before:bg-sa
 const BAR: Record<ReturnType<typeof level>, string> = { ok: "bg-ink-3", warn: "bg-sap", stop: "bg-fail" };
 const PCT: Record<ReturnType<typeof level>, string> = { ok: "text-ink", warn: "text-sap", stop: "text-fail" };
 /* The provider's mark, in the palette's own colours. */
-const DOT: Record<string, string> = { claude: "bg-fawn", codex: "bg-ink-2", antigravity: "bg-branch", native: "bg-pass" };
+const DOT: Record<string, string> = { claude: "bg-sap", codex: "bg-ink-2", antigravity: "bg-branch", native: "bg-pass" };
 
 function Meter({ w, now }: { w: UsageWindow; now: number }) {
   const l = level(w.used);

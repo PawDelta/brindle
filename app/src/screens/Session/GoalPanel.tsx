@@ -77,11 +77,11 @@ export const GOAL_PHASE_LABEL: Record<GoalPhase, string> = {
   done: "Done",
 };
 const GOAL_PHASE_STYLE: Record<GoalPhase, string> = {
-  in_progress: "bg-branch-soft text-branch",
-  in_review: "bg-branch-soft text-branch",
-  ready_for_pr: "bg-pass-soft text-pass",
-  pr_open: "bg-branch-soft text-branch",
-  done: "bg-pass-soft text-pass",
+  in_progress: "text-branch",
+  in_review: "text-branch",
+  ready_for_pr: "text-pass",
+  pr_open: "text-branch",
+  done: "text-pass",
 };
 const isGoalPhase = (p: string | null | undefined): p is GoalPhase => !!p && p in GOAL_PHASE_LABEL;
 
@@ -117,9 +117,9 @@ const CHECK_LABEL: Record<string, string> = {
 };
 const PHASE_LABEL: Record<string, string> = { done: "Done", in_review: "In review", in_progress: "In progress" };
 const LABEL_STYLE: Record<string, string> = {
-  Done: "bg-pass-soft text-pass",
-  "In review": "bg-branch-soft text-branch",
-  "In progress": "bg-branch-soft text-branch",
+  Done: "text-pass",
+  "In review": "text-branch",
+  "In progress": "text-branch",
 };
 
 /* The label the panel shows: the engine's phase when it sends one, else the check state's. */

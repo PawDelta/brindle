@@ -33,7 +33,7 @@ import type { RoutingDTO, RoutingProfileDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
 import { PageHeader } from "../../components/PageHeader";
 import { NO_REPO } from "../../components/RepoSelect";
-import { alert, button, card, field, h2, label, mono, pill, primary, quiet } from "../../components/ui";
+import { alert, button, card, chip, field, h2, label, mono, pill, primary, quiet } from "../../components/ui";
 import { useSessions } from "../../store/sessions";
 import {
   COST_MARK,
@@ -78,7 +78,7 @@ const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e)
 /* What is open under a row: its list, its fallbacks, its More, or the builder. */
 type Panel = "pick" | "fb" | "more" | "make";
 
-const MARK: Record<string, string> = { claude: "bg-fawn text-on-fawn", codex: "bg-ink text-surface", opencode: "bg-ink-3 text-surface", antigravity: "bg-branch text-on-branch", native: "bg-pass text-surface" };
+const MARK: Record<string, string> = { claude: "bg-sap text-on-sap", codex: "bg-ink text-surface", opencode: "bg-ink-3 text-surface", antigravity: "bg-branch text-on-branch", native: "bg-pass text-surface" };
 
 /* A provider's small letter mark. */
 function Mark({ provider }: { provider: string }) {
@@ -181,7 +181,7 @@ function Choices({ name, choices, current, skip = [], fresh, onPick, onMake, mis
       >
         <span className="flex min-w-0 items-center gap-1">
           <ChoiceName c={c} />
-          {fresh === c.id && <span className={`${pill} bg-pass-soft text-pass`}>new</span>}
+          {fresh === c.id && <span className={`${pill} text-pass`}>new</span>}
         </span>
         <span className="flex items-baseline gap-1 text-xs text-ink-3">
           <CostTag cost={c.cost} />
@@ -243,7 +243,7 @@ function Problems({ c }: { c: Choice }) {
 
 const ProblemsButton = ({ c, open, onToggle }: { c: Choice; open: boolean; onToggle(): void }) =>
   c.problems.length > 0 ? (
-    <button type="button" className={`${pill} bg-sap-soft text-sap`} aria-expanded={open} data-testid="problems" onClick={onToggle}>
+    <button type="button" className={`${pill} text-sap`} aria-expanded={open} data-testid="problems" onClick={onToggle}>
       {problemCount(c.problems.length)} {open ? "▴" : "▾"}
     </button>
   ) : null;
@@ -299,7 +299,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
     );
   } else if (first && !first.ok && now) {
     note = (
-      <p className="flex flex-wrap items-baseline gap-x-1 rounded-md bg-fawn-soft px-s1 py-0.5 text-sm" data-testid="cant-run">
+      <p className="flex flex-wrap items-baseline gap-x-1 rounded-md bg-sap-soft px-s1 py-0.5 text-sm" data-testid="cant-run">
         {first.label} can't run: {first.why}. <b>{now.label}</b> runs it until then.
         {connectable(first) && <ConnectLink provider={first.provider} onNavigate={onNavigate} />}
       </p>
@@ -332,7 +332,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
               {problems(c)}
               <span className="flex-1" />
               {mine ? (
-                <span className={`${pill} bg-surface-2 text-ink-3`}>your pick</span>
+                <span className={`${pill} text-ink-3`}>your pick</span>
               ) : (
                 <span className="flex items-center">
                   <button type="button" className={quiet} aria-label={`Move ${c.label} earlier`} disabled={busy || i <= 1} onClick={() => put({ fallbacks: move(own, i, i - 1).slice(1) })}>
@@ -424,7 +424,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
             <ChoiceName c={first} />
             <CostTag cost={first.cost} />
             {first.speed && <span className="text-ink-3">{first.speed}</span>}
-            {learned && <span className={`${pill} bg-fawn-soft text-fawn`}>learned</span>}
+            {learned && <span className={`${pill} text-fawn`}>learned</span>}
             <span className="text-ink-3" aria-hidden>
               ▾
             </span>
@@ -458,7 +458,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
       <div className="flex items-start gap-s1">
         <button
           type="button"
-          className={`${pill} border ${state.locked ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2"}`}
+          className={`${chip} border ${state.locked ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2"}`}
           aria-pressed={state.locked}
           data-testid="lock"
           title={state.locked ? "Locked: learning won't change this row. Click to let it." : "Learning may run a better model here. Click to lock your choice."}
@@ -543,13 +543,13 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
           <div className="flex flex-wrap gap-1" role="group" aria-label="Provider">
             {providers.map((p) =>
               connected.has(p) ? (
-                <button key={p} type="button" aria-pressed={draft.provider === p} className={`${pill} gap-1 border py-0.5 ${draft.provider === p ? "border-branch bg-branch-soft text-branch" : "border-line text-ink"}`} onClick={() => set({ provider: p, model: null })}>
+                <button key={p} type="button" aria-pressed={draft.provider === p} className={`${chip} gap-1 border py-0.5 ${draft.provider === p ? "border-branch bg-branch-soft text-branch" : "border-line text-ink"}`} onClick={() => set({ provider: p, model: null })}>
                   <Mark provider={p} />
                   {productName(p)}
                   <span className="text-ink-3">{modelsOf(p, profiles).length} models</span>
                 </button>
               ) : (
-                <span key={p} className={`${pill} gap-1 border border-line py-0.5 text-ink-3`} data-provider-off={p}>
+                <span key={p} className={`${chip} gap-1 border border-line py-0.5 text-ink-3`} data-provider-off={p}>
                   <Mark provider={p} />
                   {productName(p)} <span>not connected</span>
                 </span>
@@ -888,7 +888,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
             </span>
           </header>
           {policy?.applies && (
-            <p className="px-s2 pb-s1 text-sm text-fawn" data-testid="policy">
+            <p className="px-s2 pb-s1 text-sm text-sap" data-testid="policy">
               🔒 Your org's policy applies: models it doesn't allow aren't offered.
               {frozen && ` Nothing here can change now: ${policy.reason ?? "the policy couldn't be read"}.`}
             </p>

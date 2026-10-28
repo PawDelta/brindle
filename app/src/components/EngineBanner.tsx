@@ -13,7 +13,7 @@ export type UpgradeProgress = "idle" | "running" | "failed";
 
 const CONNECTION: Record<AppState["connection"], { label: string; dot: string }> = {
   idle: { label: "no engine", dot: "bg-ink-3" },
-  connecting: { label: "connecting…", dot: "bg-fawn" },
+  connecting: { label: "connecting…", dot: "bg-branch" },
   open: { label: "connected", dot: "bg-pass" },
   closed: { label: "reconnecting…", dot: "bg-sap" },
   unauthorized: { label: "token refused", dot: "bg-sap" },

@@ -268,14 +268,14 @@ export function TerminalToggle() {
   return (
     <button
       type="button"
-      className={`ml-auto inline-flex h-5 flex-none items-center gap-1.5 rounded-[5px] border pl-1.5 pr-[7px] text-[11.5px] disabled:opacity-50 ${open ? "border-shell-acc bg-shell-acc/10 text-ink" : "border-line text-ink-3 hover:border-ink-3 hover:text-ink"}`}
+      className={`ml-auto inline-flex h-5 flex-none items-center gap-1.5 rounded-md border pl-1.5 pr-[7px] text-[11.5px] disabled:opacity-50 ${open ? "border-fawn bg-fawn-soft text-ink" : "border-line text-ink-3 hover:border-ink-3 hover:text-ink"}`}
       aria-pressed={open}
       disabled={!here}
       title="Show or hide the Terminal (⌃`)"
       data-testid="terminal-toggle"
       onClick={toggle}
     >
-      <span className={`font-mono text-[10.5px] font-bold tracking-[-0.04em] ${open ? "text-shell-acc" : ""}`} aria-hidden>
+      <span className={`font-mono text-[10.5px] font-bold tracking-[-0.04em] ${open ? "text-fawn" : ""}`} aria-hidden>
         &gt;_
       </span>
       Terminal
@@ -335,7 +335,7 @@ function Grip({ height, onChange }: { height: number; onChange(next: number): vo
   );
 }
 
-const BAR_BUTTON = "inline-grid h-[22px] w-[22px] flex-none self-center place-items-center rounded-[5px] text-[14px] text-shell-dim hover:bg-white/5 hover:text-shell-ink";
+const BAR_BUTTON = "inline-grid h-[22px] w-[22px] flex-none self-center place-items-center rounded-md text-[14px] text-shell-dim hover:bg-white/5 hover:text-shell-ink";
 
 /* The docked panel, under whatever the main column shows; nothing while collapsed. */
 export function TerminalPanel() {
@@ -346,12 +346,12 @@ export function TerminalPanel() {
     <>
       <Grip height={height} onChange={resize} />
       <section
-        className="mx-s2 mb-s2 flex min-h-[120px] flex-none flex-col overflow-hidden rounded-[8px] border border-line bg-shell-bg"
+        className="mx-s2 mb-s2 flex min-h-[120px] flex-none flex-col overflow-hidden rounded-md border border-line bg-shell-bg"
         style={{ height: `${height}%` }}
         aria-label="Terminal"
         data-testid="terminal-panel"
       >
-        <div className="flex h-8 flex-none items-stretch border-b border-shell-line bg-[#15151b] pr-1.5 text-[12px] text-shell-dim" role="tablist" aria-label="Shells">
+        <div className="flex h-8 flex-none items-stretch border-b border-shell-line bg-shell-bg-2 pr-1.5 text-[12px] text-shell-dim" role="tablist" aria-label="Shells">
           {tabs.map((tab) => {
             const on = tab.terminal === active?.terminal;
             return (
@@ -387,7 +387,7 @@ export function TerminalPanel() {
               starting && <span>Starting a shell…</span>
             )}
           </span>
-          <button type="button" className="mr-1 flex-none self-center rounded-[4px] border border-shell-line px-1.5 py-px font-mono text-[10.5px] leading-[1.5] text-shell-dim hover:text-shell-ink" title="Hide the Terminal (⌃`)" aria-label="Hide the Terminal" onClick={collapse}>
+          <button type="button" className="mr-1 flex-none self-center rounded-sm border border-shell-line px-1.5 py-px font-mono text-[10.5px] leading-[1.5] text-shell-dim hover:text-shell-ink" title="Hide the Terminal (⌃`)" aria-label="Hide the Terminal" onClick={collapse}>
             ⌃`
           </button>
           <button type="button" className={BAR_BUTTON} title="Close this shell" aria-label="Close this shell" disabled={!active} onClick={() => active && void close(active.terminal)}>
@@ -396,7 +396,7 @@ export function TerminalPanel() {
         </div>
         {/* A start or close that failed, whichever shell is shown: that one stays as it was. */}
         {error && (
-          <p role="alert" className="flex-none border-b border-shell-line bg-[#15151b] px-3 py-1 text-[11.5px] text-[#f08c88]" data-testid="terminal-error">
+          <p role="alert" className="flex-none border-b border-shell-line bg-shell-bg-2 px-3 py-1 text-[11.5px] text-shell-bad" data-testid="terminal-error">
             {error}
           </p>
         )}
@@ -407,7 +407,7 @@ export function TerminalPanel() {
 }
 
 const NOTE = "flex flex-1 flex-col items-start gap-s1 p-s2 text-sm text-shell-dim";
-const RETRY = "rounded-[5px] border border-shell-line px-2 py-0.5 text-[12px] text-shell-ink hover:bg-white/5";
+const RETRY = "rounded-md border border-shell-line px-2 py-0.5 text-[12px] text-shell-ink hover:bg-white/5";
 
 /* A shell's pane, once the app's pty view can show panes: until then, or
    where it can't, or when its view couldn't attach, why, with a way to try

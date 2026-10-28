@@ -257,7 +257,7 @@ export function ReviewSheet({ client, root, repo, readiness, onClose, openUrl = 
       </span>
       <span>· {rechecking ? "brindle is re-checking the session" : "brindle judges it ready: every milestone passed, nothing running or waiting"}</span>
       <span
-        className={`ml-auto inline-flex items-center gap-1 rounded-full border px-2 py-px text-xs ${editable ? "border-line bg-surface-2 text-ink-2" : "border-dashed border-line-strong text-ink-3"}`}
+        className={`ml-auto inline-flex items-center gap-1 rounded-sm border px-2 py-px text-xs ${editable ? "border-line bg-surface-2 text-ink-2" : "border-dashed border-line-strong text-ink-3"}`}
         title={editable ? "Click a hunk, Full file, + New file or a file's ✕: every edit becomes a commit on the session branch." : `Editing is off: ${why}.`}
         data-testid="review-edit-pill"
       >

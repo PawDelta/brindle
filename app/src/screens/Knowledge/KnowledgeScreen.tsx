@@ -73,7 +73,7 @@ function DecisionCard({ d }: { d: DecisionDTO }) {
     <li className={`${card} flex flex-col gap-s1 px-s2 py-s2`} data-decision={d.id} data-topic={d.topic}>
       <div className="flex flex-wrap items-baseline gap-x-s1 gap-y-0.5">
         <span className="font-semibold">{d.topic}</span>
-        <span className={`${pill} ${d.status === "accepted" ? "bg-pass-soft text-pass" : "bg-surface-2 text-ink-3"}`}>{d.status === "accepted" ? "In force" : d.status}</span>
+        <span className={`${pill} ${d.status === "accepted" ? "text-pass" : "text-ink-3"}`}>{d.status === "accepted" ? "In force" : d.status}</span>
         <span className="flex-1" />
         <span className="text-xs text-ink-3" title={d.id}>
           {ago(d.created_at)}
@@ -89,10 +89,10 @@ function DecisionCard({ d }: { d: DecisionDTO }) {
       <div className="flex flex-wrap items-center gap-1 text-xs text-ink-3">
         <span>Applies to</span>
         {d.scope.length === 0 ? (
-          <span className={`${pill} bg-surface-2 text-ink-2`}>the whole repo</span>
+          <span className={`${pill} text-ink-2`}>the whole repo</span>
         ) : (
           d.scope.map((p) => (
-            <span key={p} className={`${pill} ${mono} bg-surface-2 text-ink-2`}>
+            <span key={p} className={`${pill} ${mono} text-ink-2`}>
               {p}
             </span>
           ))
@@ -271,7 +271,7 @@ function Hit({ h }: { h: KbHit }) {
         <span className="font-medium">{h.title || h.external_id}</span>
         {h.heading_path && <span className="text-ink-3">› {h.heading_path}</span>}
         {h.updated && <span className="text-xs text-ink-3">· updated {h.updated}</span>}
-        {stale && <span className={`${pill} bg-fawn-soft text-fawn`}>not updated in {STALE_DAYS} days</span>}
+        {stale && <span className={`${pill} text-sap`}>not updated in {STALE_DAYS} days</span>}
       </div>
       <p className="line-clamp-4 whitespace-pre-wrap text-sm text-ink-2">{h.text}</p>
       {h.url && (
@@ -300,9 +300,9 @@ function Source({ s, busy, indexing, onSync, onRemove }: { s: KbSource; busy: bo
         <div className="flex flex-wrap items-baseline gap-x-s1">
           <span className="font-medium">{sourceName(s)}</span>
           <span className="text-xs text-ink-3">{s.kind === "folder" ? "Folder" : s.kind}</span>
-          {s.visibility && <span className={`${pill} bg-surface-2 text-ink-2`}>{s.visibility === "private" ? "just for me" : s.visibility}</span>}
+          {s.visibility && <span className={`${pill} text-ink-2`}>{s.visibility === "private" ? "just for me" : s.visibility}</span>}
           {s.quarantined && (
-            <span className={`${pill} bg-fawn-soft text-fawn`} title="Some of its text looked like instructions to an agent, or a secret. Agents never see those parts.">
+            <span className={`${pill} text-sap`} title="Some of its text looked like instructions to an agent, or a secret. Agents never see those parts.">
               some text held back
             </span>
           )}

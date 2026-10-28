@@ -79,7 +79,7 @@ const TONE: Record<string, { bar: string; ink: string }> = {
 const SAP = { bar: "before:bg-sap", ink: "text-sap" };
 
 const ACT = "inline-flex h-6 items-center whitespace-nowrap rounded-md border px-2 text-[11.5px] font-medium disabled:opacity-50";
-const PRIMARY = "border-sap bg-sap text-on-sap hover:opacity-90";
+const PRIMARY = "border-fawn bg-fawn text-on-fawn hover:opacity-90";
 const PLAIN = "border-line-strong bg-surface text-ink hover:bg-surface-2";
 const GHOST = "border-transparent text-ink-3 hover:text-ink";
 const LINK = "text-[11.5px] text-branch hover:underline";
