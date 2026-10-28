@@ -1296,7 +1296,9 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
             <span data-testid="health-status" data-bad={healthBad ? "true" : "false"} className={healthBad ? "text-sap" : undefined}>
               {doctorError ? "Checks didn't run" : checks === null ? "Checking…" : wrong === 0 ? "Healthy" : wrong === 1 ? "1 needs attention" : `${wrong} need attention`}
             </span>
-            <span data-testid="cli-status">{cliState === "installed" ? "CLI installed" : "CLI not installed"}</span>
+            {cliState !== "idle" && (
+              <span data-testid="cli-status">{cliState === "installing" ? "Installing CLI…" : cliState === "installed" ? "CLI installed" : "CLI install failed"}</span>
+            )}
             <span className="flex-1" />
             {upgradeNotice && upgrade.state.kind === "idle" && (
               <button type="button" className={primary} onClick={update}>
@@ -1305,10 +1307,19 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
             )}
             <More open={detailsOpen} onToggle={() => setDetails(!detailsOpen)} label="Details" />
           </div>
-          {upgrade.state.kind !== "idle" && <UpgradeCard state={upgrade.state} onDismiss={upgrade.dismiss} />}
+          {upgrade.state.kind !== "idle" && (
+            <span className="text-xs text-ink-2" data-testid="update-status">
+              {upgrade.state.kind === "done" ? "Updated" : upgrade.state.kind === "failed" ? "Update failed: see Details" : "Updating…"}
+            </span>
+          )}
         </div>
         {detailsOpen && (
           <div data-testid="engine-details">
+            {upgrade.state.kind !== "idle" && (
+              <div className="px-s2 py-1">
+                <UpgradeCard state={upgrade.state} onDismiss={upgrade.dismiss} />
+              </div>
+            )}
         <Row label="Daemon connection" help="The live connection between the app and brindle." testId="daemon-connection">
           <span className="text-xs text-ink-2" data-testid="connection">daemon · {connection === "open" ? "connected" : connection === "closed" ? "reconnecting…" : connection === "unauthorized" ? "token refused" : connection === "connecting" ? "connecting…" : "no engine"}</span>
         </Row>

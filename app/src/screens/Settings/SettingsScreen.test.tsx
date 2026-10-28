@@ -618,6 +618,9 @@ describe("settings screen", () => {
     expect(screen.queryByRole("button", { name: "Update brindle" })).toBeNull();
     daemon.completeUpgrade();
     await waitFor(() => expect(card.getAttribute("data-state")).toBe("failed"));
+    // The summary carries only the compact result; the card and its log live in Details.
+    expect(within(screen.getByTestId("engine-health-summary")).getByTestId("update-status").textContent).toContain("Update failed");
+    expect(screen.getByTestId("engine-details").contains(card)).toBe(true);
     expect(card.textContent).toContain("The update didn't finish: uv tool upgrade brindle exited 1");
     expect(screen.getByTestId("upgrade-log").textContent).toContain("network unreachable");
     expect(screen.queryByTestId("terminal")).toBeNull();
@@ -646,7 +649,7 @@ describe("settings screen", () => {
     const summary = await screen.findByTestId("engine-health-summary");
     await waitFor(() => expect(summary.textContent).toContain("Healthy"));
     expect(summary.textContent).toContain("brindle 0.5.0");
-    expect(summary.textContent).toContain("CLI not installed");
+    expect(summary.textContent).not.toContain("CLI");
     expect(screen.queryByTestId("engine-details")).toBeNull();
     fireEvent.click(within(summary).getByRole("button", { name: /Details/ }));
     expect(screen.getByTestId("engine-details")).toBeTruthy();
