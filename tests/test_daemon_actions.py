@@ -1527,6 +1527,48 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     assert "--base main --head sess --title Ship it --body" in called.read_text()
 
 
+@pytest.mark.parametrize("opening,problem", [
+    (True, "check"), (False, "check"), (False, None),
+    (True, "dirty"), (False, "moved"),
+])
+def test_auto_pr_checks(db, world, monkeypatch, opening, problem):
+    from brindle import gates, git
+
+    root, ws = db.get_agent("sup"), db.get_workspace("w-1")
+    messages, pushes = [], []
+    monkeypatch.setattr(routes_actions.review, "session", lambda *a: (root, ws))
+    monkeypatch.setattr(routes_actions.review, "require_ready", lambda *a: None)
+    monkeypatch.setattr(routes_actions.review, "draft", lambda *a: {"title": "Ship it", "body": ""})
+    monkeypatch.setattr(routes_actions.review, "auto_pr", lambda *a: True)
+    monkeypatch.setattr(routes_actions, "_PR_WORK", set())
+    monkeypatch.setattr(routes_actions, "_PR_TRIED", {})
+    heads = iter(["dispatched", "verified", "moved" if problem == "moved" else "verified"])
+    monkeypatch.setattr(git, "out", lambda *a: next(heads))
+    monkeypatch.setattr(git, "dirty_files", lambda *a, **kw: ["app.py"] if problem == "dirty" else [])
+    monkeypatch.setattr(git, "checkout_lock", lambda *a, **kw: contextlib.nullcontext())
+    monkeypatch.setattr(pipeline, "base_lock", lambda *a, **kw: contextlib.nullcontext())
+    monkeypatch.setattr(workspaces, "workspace_env", lambda *a: {})
+    monkeypatch.setattr(gates, "run_checked", lambda *a: (problem != "check", "x" * gates.MAX_FAILURE_CHARS + "failure tail"))
+    monkeypatch.setattr(agents, "send_message", lambda db, to, text, **kw: messages.append((to, text)))
+    monkeypatch.setattr(git, "push", lambda path, branch, sha=None: pushes.append(sha))
+    monkeypatch.setattr(workspaces, "open_pull_request", lambda *a, **kw: pushes.append(kw["sha"]))
+    config.set_local(ws.repo_root, "checks", ["validate"])
+    if not opening:
+        routes_actions._record_pr(db, (root.id, ws.branch), "https://github.com/o/r/pull/7", "old", True)
+    routes_actions.auto_pr(db, root.id, opening=opening)
+    row = db.conn.execute("SELECT pushed_sha FROM session_prs").fetchone()
+    if problem is None:
+        assert pushes == ["verified"] and row["pushed_sha"] == "verified" and messages == []
+        assert bus.tail(db, kinds=("session.pr_pushed",))[-1]["payload"]["commit"] == "verified"
+    else:
+        assert pushes == [] and (row is None if opening else row["pushed_sha"] == "old")
+        assert len(messages) == 1 and messages[0][0] == root.id
+        if problem == "check":
+            assert "validate" in messages[0][1] and "failure tail" in messages[0][1]
+        assert "x" * (gates.MAX_FAILURE_CHARS + 1) not in messages[0][1]
+    assert not routes_actions._PR_WORK
+
+
 @pytest.mark.parametrize("auto_pr,org,opened", [
     (True, None, True),
     (False, None, False),
