@@ -2333,11 +2333,10 @@ def open_cmd(
 @app.command()
 def setup(workspace: Optional[str] = typer.Argument(None)) -> None:
     """Re-run setup commands in a workspace."""
-    from brindle.config import load_repo_config
-
-    ws = _ws(DB(), workspace)
-    cmds = load_repo_config(ws.repo_root).setup
-    res = workspaces.run_commands(cmds, ws.path, workspaces.workspace_env(ws))
+    db = DB()
+    ws = _ws(db, workspace)
+    cfg = workspaces.config_for(db, ws)
+    res = workspaces.run_commands(cfg.setup, ws.path, workspaces.workspace_env(ws, cfg))
     typer.echo(res.log or "(no setup commands)")
     raise typer.Exit(0 if res.ok else 1)
 
@@ -2407,8 +2406,15 @@ def pr(
     draft: bool = typer.Option(False, "--draft"),
 ) -> None:
     """Push and open a pull request against the base branch."""
-    ws = _ws(DB(), workspace)
-    url = _run(workspaces.pull_request, ws, title, draft)
+    from brindle import gates
+
+    db = DB()
+    ws = _ws(db, workspace)
+    def open_checked() -> str:
+        with gates.pr_checked(db, ws, lambda text: typer.echo(text, err=True)) as sha:
+            return workspaces.pull_request(ws, title, draft, sha=sha)
+
+    url = _run(open_checked)
     typer.echo(url)
     _offer_delete_on_merge(ws.repo_root)
 
@@ -2453,12 +2459,12 @@ def services_cmd(
 ) -> None:
     """Per-worktree Docker services (brindle Pro): list, start or stop a workspace's."""
     from brindle import services as services_mod
-    from brindle.config import load_repo_config
 
     if action not in ("ls", "up", "down"):
         _fail("action must be ls, up or down")
-    ws = _ws(DB(), workspace)
-    cfg = load_repo_config(ws.repo_root)
+    db = DB()
+    ws = _ws(db, workspace)
+    cfg = workspaces.config_for(db, ws)
     if not cfg.services:
         _fail('no services configured; add a "services" list to .brindle/config.json')
     if action == "up":
@@ -3100,7 +3106,7 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
     if ws is None:
         return
     try:
-        agents.review_after_checks(db, caller, ws, profile, focus, load_repo_config(ws.repo_root),
+        agents.review_after_checks(db, caller, ws, profile, focus, workspaces.config_for(db, ws),
                                    request_id=request_id, second=second, slot=slot)
     except (agents.AgentError, ValueError) as e:
         from brindle import pipeline
@@ -3170,7 +3176,7 @@ def warm_checks_cmd(workspace_id: str) -> None:
     try:
         # A new commit makes this run's result useless (the review and the
         # gate want the new head), so give up and free the check slot.
-        gates.check_summary(db, ws, load_repo_config(ws.repo_root),
+        gates.check_summary(db, ws, workspaces.config_for(db, ws),
                             cancel=lambda: gates.head(ws) != sha)
     except gates.Abandoned:
         pass

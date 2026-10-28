@@ -1512,6 +1512,14 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     db.update_autopilot("lead", state="done", audit_sha=_commit(sess, "a.py", "a\n"), audit_ok=1)
     code, draft = _send("GET", "/v1/sessions/lead/pr/draft")
     assert code == 200 and draft["title"] == "Ship it" and "- tests pass" in draft["body"]
+    config.set_local(lead.repo_root, "checks", ["echo boom; false"])    # a failing check: nothing is pushed
+    code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": draft["title"], "body": draft["body"]})
+    assert code == 202, reply
+    failed = bus.tail(db, kinds=("job.done", "job.failed"))[-1]
+    assert failed["kind"] == "job.failed" and "checks failed: echo boom; false" in failed["payload"]["error"]["message"]
+    assert "boom" in failed["payload"]["error"]["message"] and not called.exists()
+    assert sh("git ls-remote origin sess", sess) == ""
+    config.set_local(lead.repo_root, "checks", ["true"])
     code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": draft["title"], "body": draft["body"]})
     assert code == 202, reply
     done = bus.tail(db, kinds=("job.done", "job.failed"))

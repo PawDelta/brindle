@@ -32,6 +32,7 @@ from brindle.config import (
     PORT_RANGE_START,
     RepoConfig,
     load_repo_config,
+    workspace_config,
     worktree_root,
     worktrees_dir,
 )
@@ -53,7 +54,13 @@ class SetupResult:
 # -- lookup ----------------------------------------------------------------
 
 
-def workspace_env(ws: Workspace) -> dict[str, str]:
+def config_for(db: DB, ws: Workspace) -> RepoConfig:
+    """``ws``'s config: a session's own workspace (it holds a supervisor) reads
+    its own branch, a worker's reads the session branch it was cut from."""
+    return workspace_config(ws, session=any(a.profile == "supervisor" for a in db.list_agents(ws.id)))
+
+
+def workspace_env(ws: Workspace, cfg: RepoConfig | None = None) -> dict[str, str]:
     env = {
         "BRINDLE_ROOT_PATH": ws.repo_root,
         "BRINDLE_WORKSPACE_PATH": ws.path,
@@ -70,7 +77,7 @@ def workspace_env(ws: Workspace) -> dict[str, str]:
             env[key] = os.environ[key]
     if ws.kind != "main" and os.path.isdir(ws.repo_root):
         try:
-            env.update(services.env(ws, load_repo_config(ws.repo_root)))
+            env.update(services.env(ws, cfg or workspace_config(ws)))
         except ValueError:
             pass  # a broken config is reported elsewhere
     return env
@@ -340,6 +347,7 @@ def create(
     base = base or cfg.base_branch or git.default_branch(repo_root)
     if branch == base:
         raise WorkspaceError(f"branch {branch!r} is the base branch; pick a new branch name")
+    cfg = load_repo_config(repo_root, branch=base)  # setup, copy and checks as committed on the base
 
     if reuse_registered:
         existing = _reuse_registered(db, repo_root, branch, base)
@@ -640,10 +648,10 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
                 "Commit them, or pass --force to discard."
             )
 
-    cfg = load_repo_config(ws.repo_root)
+    cfg = config_for(db, ws)
     teardown = None
     if exists and cfg.teardown:
-        teardown = run_commands(cfg.teardown, ws.path, workspace_env(ws))
+        teardown = run_commands(cfg.teardown, ws.path, workspace_env(ws, cfg))
         if not teardown.ok and not force:
             raise WorkspaceError(f"teardown failed; fix it or pass --force:\n{teardown.log}")
 
@@ -759,10 +767,10 @@ def with_footer(body: str, repo_root: str) -> str:
 
 
 def pull_request(ws: Workspace, title: str | None = None, draft: bool = False,
-                 body: str | None = None) -> str:
+                 body: str | None = None, sha: str | None = None) -> str:
     """Push, then open a PR with ``gh`` when available, else return the
     compare URL for the browser."""
-    return open_pull_request(ws, title, draft, body) or compare_url(ws)
+    return open_pull_request(ws, title, draft, body, sha) or compare_url(ws)
 
 
 def existing_pull_request(ws: Workspace) -> str | None:
@@ -795,11 +803,12 @@ def compare_url(ws: Workspace) -> str:
 
 
 def open_pull_request(ws: Workspace, title: str | None = None, draft: bool = False,
-                      body: str | None = None) -> str | None:
-    """Push, then open a PR with ``gh``: its URL (or the one already open for
-    the branch), or None when ``gh`` isn't there or can't open one."""
+                      body: str | None = None, sha: str | None = None) -> str | None:
+    """Push (``sha``: exactly that commit), then open a PR with ``gh``: its
+    URL (or the one already open for the branch), or None when ``gh`` isn't
+    there or can't open one."""
     base = require_base(ws)
-    git.push(ws.path, ws.branch)
+    git.push(ws.path, ws.branch, sha)
     if shutil.which("gh"):
         args = ["gh", "pr", "create", "--base", base, "--head", ws.branch]
         if title or body is not None:

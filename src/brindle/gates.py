@@ -23,7 +23,7 @@ import os
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 import shutil
 from dataclasses import dataclass, field
@@ -120,7 +120,7 @@ def _scoped(ws: Workspace, cmd: str, diff) -> str | None:
     from brindle.config import load_repo_config
 
     try:
-        mode = load_repo_config(ws.repo_root).scoped_checks
+        mode = load_repo_config(ws.repo_root, branch=ws.base_branch).scoped_checks
     except ValueError:
         return cmd
     return check_scope.command(ws, cmd, check_scope.inferred(cmd, mode), diff)
@@ -157,7 +157,7 @@ def _concurrency(ws: Workspace) -> int:
     from brindle.config import load_repo_config
 
     try:
-        return int(load_repo_config(ws.repo_root).check_concurrency)
+        return int(load_repo_config(ws.repo_root, branch=ws.base_branch).check_concurrency)
     except (ValueError, TypeError):
         from brindle.config import host_check_concurrency
 
@@ -461,7 +461,7 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     rules = rule_summary(db, ws)
     if not cfg.checks:
         return rules
-    env = workspaces.workspace_env(ws)
+    env = workspaces.workspace_env(ws, cfg)
     lines = [rules] if rules else []
     budget = MAX_FAILURE_CHARS
     with queue_place(time.time()):   # one place in the check queue for all its commands
@@ -482,6 +482,47 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
             budget -= len(shown)
             lines.append(f"FAIL `{cmd}`\n{shown}")
     return "\n".join(lines)
+
+
+LOCK_WAIT_S = 1   # seconds a PR gate waits for the checkout before reporting it busy
+
+
+@contextmanager
+def pr_checked(db: DB, ws: Workspace, progress=None):
+    """Hold ``ws``'s branch (the base and checkout locks a session edit or a
+    merge into it also take) while it is checked for a PR, and yield the
+    verified sha: the push inside the ``with`` must publish exactly that.
+    Every configured check runs in full on a clean checkout of that HEAD (a
+    tree that already passed counts); ``WorkspaceError`` ("checks failed:
+    <cmd>" and its output) on the first failure, or if the checkout was dirty
+    or moved meanwhile. ``progress(text)`` hears each check start."""
+    from brindle import pipeline
+    from brindle.config import load_repo_config
+
+    cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
+    with ExitStack() as held:
+        try:
+            held.enter_context(pipeline.base_lock(ws.repo_root, ws.branch, wait=False))
+            held.enter_context(git.checkout_lock(ws.path, timeout=LOCK_WAIT_S))
+        except (BlockingIOError, git.GitError):
+            raise workspaces.WorkspaceError(
+                f"a merge into or edit of {ws.branch} is under way; try again once it's done") from None
+        if dirty := git.dirty_files(ws.path, tracked_only=True):
+            raise workspaces.WorkspaceError(
+                f"{ws.branch} has uncommitted changes ({', '.join(dirty[:8])}); commit them first.")
+        sha = head(ws)
+        env = workspaces.workspace_env(ws)
+        with queue_place(time.time()):
+            for n, cmd in enumerate(cfg.checks, 1):
+                if progress:
+                    progress(f"check {n}/{len(cfg.checks)}: {cmd}")
+                ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+                if not ok:
+                    raise workspaces.WorkspaceError(f"checks failed: {cmd}\n{out[-MAX_FAILURE_CHARS:]}")
+        if head(ws) != sha or git.dirty_files(ws.path, tracked_only=True):
+            raise workspaces.WorkspaceError(
+                f"{ws.branch} changed while its checks ran; nothing was pushed. Try again.")
+        yield sha
 
 
 def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Report:
@@ -510,7 +551,7 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
     if rules:
         r.passed.append("rules passed (" + ", ".join(rules.packs) + ")")
 
-    env = workspaces.workspace_env(ws)
+    env = workspaces.workspace_env(ws, cfg)
     with queue_place(time.time()):
         for cmd in cfg.checks:
             ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
@@ -576,7 +617,7 @@ def _pre_commit(db: DB, ws: Workspace, cfg: RepoConfig) -> str | None:
     start = git.merge_base(ws.path, git.base_ref(ws.path, base))
     ok, out = run_checked(
         db, ws, f"pre-commit run --from-ref {start} --to-ref HEAD",
-        workspaces.workspace_env(ws), cfg.check_timeout,
+        workspaces.workspace_env(ws, cfg), cfg.check_timeout,
     )
     if ok:
         return None

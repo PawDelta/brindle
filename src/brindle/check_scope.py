@@ -14,7 +14,9 @@ left its base decide what runs:
 - one matches ``INFER_FULL_WHEN`` (conftest, pytest and project config, a
   lockfile) or is under ``.brindle/``, or the scope can't be worked out: the
   command runs in full;
-- otherwise the command runs on the test files the branch touched plus the
+- otherwise changed files that aren't ``.py`` are ignored (pytest can't be
+  affected by them), and if none is left the check is skipped; the command
+  runs on the test files the branch touched plus the
   tests ``graphify affected`` reaches from each changed symbol. A changed file
   the graph can't map to a test runs the full suite instead.
 
@@ -61,10 +63,9 @@ _VALUE_OPTIONS = {"-n", "-m", "-k", "-p", "-o", "-c", "--maxfail", "--tb", "--du
                   "--deselect", "--dist", "--cov", "--timeout", "--junitxml", "-W", "--basetemp"}
 INFER_FULL_WHEN = ["**/conftest.py", "**/pyproject.toml", "**/setup.cfg", "**/pytest.ini", "**/tox.ini",
                    "**/*.lock", "**/*lock.json", "**/requirements*.txt"]
-NOTICE = ("brindle can now run only the tests a branch's changes reach for a plain pytest check (`{cmd}`), "
-          "using the code graph; it will be the default next release. Try it now with "
-          '`"scoped_checks": "infer"` in .brindle/config.json (or ~/.brindle/config.json), or keep the '
-          'current behaviour with `"scoped_checks": "off"`.')
+NOTICE = ("brindle now runs only the tests a worker branch's changes reach for a plain pytest check (`{cmd}`), "
+          "using the code graph. To always run it in full, set "
+          '`"scoped_checks": "off"` in .brindle/config.json (or ~/.brindle/config.json).')
 
 
 def pytest_selectors(cmd: str) -> bool | None:
@@ -99,7 +100,7 @@ def inferred(cmd: str, mode: str | None) -> CheckScope | None:
     """The scope ``scoped_checks: "infer"`` gives ``cmd``: pytest on the
     affected tests when it is a plain pytest command that picks no tests
     itself (appending targets would not narrow it), else None."""
-    if mode == "infer" and pytest_selectors(cmd) is False:
+    if mode in (None, "infer") and pytest_selectors(cmd) is False:
         return CheckScope(INFER_FULL_WHEN)
     return None
 
@@ -176,6 +177,9 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
         return None
     if any(matches(f, ALWAYS_FULL) or matches(f, scope.full_when) for f in changed):
         return cmd
+    changed = [f for f in changed if f.endswith(".py")]   # pytest can't be affected by the rest
+    if not changed:
+        return None
     tests = pytest_targets(ws, base, changed)
     return f"{cmd} {_quoted(tests)} || [ $? -eq 5 ]" if tests else cmd   # 5: none of them selected
 

@@ -79,6 +79,34 @@ def test_rm_survives_a_missing_base_branch(db, repo, monkeypatch):
     assert db.get_workspace(ws.id) is None
 
 
+@pytest.mark.parametrize("check,pushed,said", [
+    ("echo boom; false", False, "checks failed: echo boom; false"),
+    ("git -c user.name=a -c user.email=a@a commit --allow-empty -qm moved", False, "changed while its checks ran"),
+    ("grep -q fixed app.py; r=$?; git checkout -q app.py; exit $r", False, "uncommitted changes"),   # passes only dirty
+    ("true", True, ""),
+], ids=["fails", "head-moves", "dirty-start", "passes"])
+def test_pr_runs_the_checks_before_pushing(db, repo, monkeypatch, check, pushed, said):
+    from brindle import config
+
+    ws = workspaces.create(db, str(repo), "feat/x").workspace
+    config.set_local(str(repo), "checks", [check])
+    if "dirty" in said or "fixed" in check:
+        sh("echo fixed >> app.py", ws.path)
+    verified = sh("git rev-parse HEAD", ws.path)
+    opened = []
+
+    def fake_pull_request(ws, title, draft, **kw):
+        opened.append(kw["sha"])    # a commit landing now must not be what is pushed
+        sh("git -c user.name=a -c user.email=a@a commit --allow-empty -qm late", ws.path)
+        return "https://gh.test/pr/1"
+
+    monkeypatch.setattr(workspaces, "pull_request", fake_pull_request)
+    monkeypatch.setattr(workspaces, "keeps_merged_branches", lambda root: False)
+    monkeypatch.chdir(ws.path)
+    res = CliRunner().invoke(app, ["pr"])
+    assert (opened == [verified], res.exit_code == 0) == (pushed, pushed) and said in res.output
+
+
 def test_version_flag_prints_the_installed_version():
     from typer.testing import CliRunner
 
