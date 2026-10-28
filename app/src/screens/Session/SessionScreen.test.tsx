@@ -228,16 +228,19 @@ describe("SessionScreen", () => {
     });
     await waitFor(() => expect(term().written).toBe(drawnLive));
     const tabs = () => within(screen.getByTestId("session-tabs"));
-    await waitFor(() => expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+2 −1"));
-    expect(screen.getByTestId("session-branch").textContent).toContain("brindle/session-18");
+    // The diff is read before Changes is first opened, and again on a git status event.
+    await waitFor(() => expect(diffReads).toBeGreaterThan(0));
+    expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toBe("Changes");
     pick("w1");
-    expect(screen.getByTestId("session-branch").textContent).toContain("brindle/session-18");
     const terminal = term();
+    const readsBefore = diffReads;
     daemon.data.sessionFiles.sup1["docs/readme.md"] = "hello\nworld\n";
     daemon.send({ type: "git", workspace_id: root.id, status: { branch: "brindle/session-18", base: "main", ahead: 0, behind: 0, dirty_files: ["docs/readme.md"], unpushed: 0 } });
-    await waitFor(() => expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+3 −1"));
+    await waitFor(() => expect(diffReads).toBeGreaterThan(readsBefore));
     fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
     const changes = () => within(screen.getByRole("tabpanel", { name: /Changes/ }));
+    const summary = () => changes().getByTestId("changes-summary").textContent;
+    await waitFor(() => expect(summary()).toBe("2 files changed against main · +3 −1"));
     const files = await changes().findByRole("navigation", { name: "Changed files" });
     fireEvent.click(within(files).getByRole("button", { name: "src/" }));
     expect(within(files).queryByTitle("src/a.ts")).toBeNull();
@@ -255,7 +258,7 @@ describe("SessionScreen", () => {
     await waitFor(() => expect(changes().getByRole("button", { name: /@@/ })).toHaveProperty("disabled", false));
     fireEvent.click(changes().getByRole("button", { name: /@@/ }));
     fireEvent.change(changes().getByRole("textbox"), { target: { value: "edited\ncontext\nextra" } });
-    fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+    fireEvent.click(tabs().getByRole("tab", { name: "Chat" }));
     expect(term()).toBe(terminal);
     expect(terminal.disposed).toBe(false);
     fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
@@ -263,7 +266,7 @@ describe("SessionScreen", () => {
     fireEvent.click(changes().getByRole("button", { name: /Save/ }));
     await waitFor(() => expect(daemon.sessionEdits).toHaveLength(1));
     expect(daemon.data.sessionFiles.sup1["src/a.ts"]).toBe("edited\ncontext\nextra\n");
-    await waitFor(() => expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+4 −1"));
+    await waitFor(() => expect(summary()).toContain("+4 −1"));
     fireEvent.click(changes().getByRole("button", { name: "Unified" }));
     await waitFor(() => expect(changes().queryByTestId("hunk-editor")).toBeNull());
     expect(changes().getByTestId("hunk").textContent).toContain("+edited");
@@ -276,13 +279,13 @@ describe("SessionScreen", () => {
     vi.useFakeTimers();
     try {
       await act(async () => {
-        fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+        fireEvent.click(tabs().getByRole("tab", { name: "Chat" }));
         fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
         await vi.advanceTimersByTimeAsync(0);
       });
       daemon.data.sessionFiles.sup1["docs/readme.md"] = "amended\nsecond\nthird\n";
       await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
-      expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+5 −1");
+      expect(summary()).toContain("+5 −1");
       fireEvent.click(changes().getByTitle("docs/readme.md"));
       expect(changes().getByTestId("hunk").textContent).toContain("+amended");
       fireEvent.click(changes().getByTitle("src/a.ts"));
@@ -294,7 +297,7 @@ describe("SessionScreen", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
       const pendingReads = diffReads;
       await act(async () => {
-        fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+        fireEvent.click(tabs().getByRole("tab", { name: "Chat" }));
         fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
         await vi.advanceTimersByTimeAsync(10_000);
       });
@@ -304,13 +307,13 @@ describe("SessionScreen", () => {
       expect(diffReads).toBe(pendingReads + 1);
 
       // Activating Changes reads immediately, without advancing the periodic clock.
-      fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+      fireEvent.click(tabs().getByRole("tab", { name: "Chat" }));
       daemon.data.sessionFiles.sup1["docs/readme.md"] = "on activation\n";
       await act(async () => {
         fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
         await vi.advanceTimersByTimeAsync(0);
       });
-      expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+3 −1");
+      expect(summary()).toContain("+3 −1");
       expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
       fireEvent.click(changes().getByTitle("docs/readme.md"));
       expect(changes().getByTestId("hunk").textContent).toContain("+on activation");
@@ -322,6 +325,106 @@ describe("SessionScreen", () => {
       vi.useRealTimers();
       sync.stop();
     }
+  });
+
+  it("Repo: opens a checkout file from its tree and saves it against its blob, a moved file a conflict and a busy engine inline", async () => {
+    const { daemon, sync, term } = mount({ sup1: live, w1: live }, {
+      workspaces: [{ ...root, branch: "brindle/session-18" }, worker],
+      sessionReview: { sup1: { ready: false, reasons: ["work in progress"], branch: "brindle/session-18", base: "main", diff: "" } },
+      sessionFiles: { sup1: { "src/a.ts": "one\n", "docs/readme.md": "hello\n" } },
+    });
+    await waitFor(() => expect(term().written).toBe(drawnLive));
+    fireEvent.click(screen.getByTestId("repo-tab"));
+    const repoTab = () => within(screen.getByRole("tabpanel", { name: "Repo" }));
+    const files = await repoTab().findByRole("navigation", { name: "Repository files" });
+    expect(repoTab().queryByTestId("repo-shell")).toBeNull();
+    expect(repoTab().queryByTestId("repo-shell-drawer")).toBeNull();
+    expect(screen.getByTestId("session-branch").textContent).toBe("brindle/session-18");
+    expect(within(files).queryByTitle("src/a.ts")).toBeNull();
+    fireEvent.click(within(files).getByRole("button", { name: "src/" }));
+    fireEvent.click(within(files).getByTitle("src/a.ts"));
+    const box = () => repoTab().getByLabelText("Edit src/a.ts") as HTMLTextAreaElement;
+    await waitFor(() => expect(box().value).toBe("one\n"));
+    fireEvent.change(box(), { target: { value: "two\n" } });
+    fireEvent.click(repoTab().getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(daemon.sessionEdits).toHaveLength(1));
+    expect(daemon.data.sessionFiles.sup1["src/a.ts"]).toBe("two\n");
+
+    // The file moved on under an edit: a conflict, the edit kept; Reload reads the file as it now is.
+    fireEvent.change(box(), { target: { value: "three\n" } });
+    daemon.data.sessionFiles.sup1["src/a.ts"] = "moved\n";
+    fireEvent.click(repoTab().getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(repoTab().getByTestId("draft-conflict").textContent).toBe("Changed since you started editing"));
+    expect(box().value).toBe("three\n");
+    expect(repoTab().getByRole("button", { name: "Copy my edit" })).toBeTruthy();
+    fireEvent.click(repoTab().getByRole("button", { name: "Reload" }));
+    await waitFor(() => expect(box().value).toBe("moved\n"));
+
+    // The supervisor mid-turn: the engine's 409 busy shows in the bar, the edit kept.
+    daemon.data.workspaces = daemon.data.workspaces.map((w) => ({ ...w, agents: w.agents?.map((a) => (a.id === "sup1" ? { ...a, status: "processing" } : a)) }));
+    fireEvent.change(box(), { target: { value: "four\n" } });
+    fireEvent.click(repoTab().getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(within(repoTab().getByTestId("save-bar")).getByRole("alert").textContent).toContain("Busy"));
+    expect(box().value).toBe("four\n");
+    expect(daemon.sessionEdits).toHaveLength(1);
+
+    sync.stop();
+  });
+
+  it("Repo: a save under way stays the file's through looking at another", async () => {
+    const held = () => {
+      let release!: () => void;
+      const until = new Promise<void>((resolve) => (release = resolve));
+      return { until, release };
+    };
+    let holdPut: ReturnType<typeof held> | null = null;
+    let puts = 0;
+    const { daemon, sync, term } = mount({ sup1: live, w1: live }, {
+      sessionFiles: { sup1: { "a.ts": "one\n", "b.ts": "bee\n" } },
+    }, (daemon) => async (input, init) => {
+      const url = String(input);
+      if (url.endsWith("/sessions/sup1/file") && init?.method === "PUT") {
+        // The write is applied, its answer held: a read meanwhile sees the new blob.
+        puts++;
+        const applied = await daemon.fetch(input, init);
+        await holdPut?.until;
+        return applied;
+      }
+      return daemon.fetch(input, init);
+    });
+    await waitFor(() => expect(term().written).toBe(drawnLive));
+    fireEvent.click(screen.getByTestId("repo-tab"));
+    const repoTab = () => within(screen.getByRole("tabpanel", { name: "Repo" }));
+    const files = await repoTab().findByRole("navigation", { name: "Repository files" });
+    const box = (path: string) => repoTab().getByLabelText(`Edit ${path}`) as HTMLTextAreaElement;
+    fireEvent.click(within(files).getByTitle("a.ts"));
+    await waitFor(() => expect(box("a.ts").value).toBe("one\n"));
+    fireEvent.change(box("a.ts"), { target: { value: "two\n" } });
+    holdPut = held();
+    fireEvent.click(repoTab().getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(puts).toBe(1));
+
+    // Away and back while the PUT's answer is out, the file read again at the save's own new blob: the box is
+    // still locked on what was sent, with no conflict (so no Reload to drop it), and Save sends nothing more.
+    fireEvent.click(within(files).getByTitle("b.ts"));
+    await waitFor(() => expect(box("b.ts").value).toBe("bee\n"));
+    const fileReads = () => daemon.requests.filter((r) => r.method === "GET" && r.path === "/sessions/sup1/file" && r.query.path === "a.ts").length;
+    const reads = fileReads();
+    fireEvent.click(within(files).getByTitle("a.ts"));
+    await waitFor(() => expect(fileReads()).toBe(reads + 1));
+    await act(() => flush());
+    expect(box("a.ts").value).toBe("two\n");
+    expect(box("a.ts").disabled).toBe(true);
+    expect(repoTab().queryByTestId("draft-conflict")).toBeNull();
+    expect(repoTab().queryByRole("button", { name: "Reload" })).toBeNull();
+    fireEvent.keyDown(box("a.ts"), { key: "s", metaKey: true });
+    expect(puts).toBe(1);
+    holdPut.release();
+    await waitFor(() => expect(box("a.ts").disabled).toBe(false));
+    expect(daemon.sessionEdits.map((e) => e.content)).toEqual(["two\n"]);
+    expect(box("a.ts").value).toBe("two\n");
+
+    sync.stop();
   });
 
   it("shows the selected agent's pane, bare, named by provider and agent, through a tmux client on its window, and types into it as is", async () => {
@@ -790,12 +893,11 @@ describe("SessionScreen", () => {
     expect(fake.Xterm.all).toHaveLength(0);
     expect(screen.getByTestId("session-status").textContent).toContain("paused");
     expect(screen.getByTestId("session-bar").textContent).not.toContain("Refactor the cache"); // the goal is the sidebar's
-    expect(screen.getByTestId("session-branch").textContent).toBe(root.branch);
     fireEvent.click(screen.getByRole("tab", { name: /Changes/ }));
     await within(screen.getByRole("tabpanel", { name: /Changes/ })).findByRole("navigation", { name: "Changed files" });
     expect(screen.getByTestId("new-file")).toHaveProperty("disabled", true);
     fireEvent.keyDown(screen.getByRole("tab", { name: /Changes/ }), { key: "Home" });
-    expect(screen.getByRole("tab", { name: "Terminal" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Chat" }).getAttribute("aria-selected")).toBe("true");
 
     // Continue, from the bar this time, is refused until Claude Code's preflight is settled: the engine's items
     // as native UI on the surface, no launch.

@@ -246,6 +246,14 @@ export interface SessionDiff {
   workers?: unknown[];
 }
 
+/* GET /sessions/{root}/tree (routes_read.session_tree): the session
+   checkout's tracked files, paths only, and its branch. */
+export interface SessionTree {
+  root_id: string;
+  branch: string;
+  files: string[];
+}
+
 /* GET /sessions/{root}/pr/draft (session_review.draft): the PR's title and
    body from the goal and its milestones, to edit before opening. */
 export interface PrDraft {
@@ -900,6 +908,11 @@ export class DaemonClient {
   /* The PR's title and body as brindle drafts them. */
   prDraft(root: string) {
     return this.get<PrDraft>(`${this.sessionPath(root)}/pr/draft`);
+  }
+
+  /* Every tracked file of the session's checkout. */
+  sessionTree(root: string) {
+    return this.get<SessionTree>(`${this.sessionPath(root)}/tree`);
   }
 
   /* Any file of the session's checkout, with the blob the edit below takes. */

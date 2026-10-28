@@ -1,14 +1,14 @@
 /* Shared session diff editor for the Changes tab and Review & open PR. */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { DaemonError, type DaemonClient, type FileContent } from "../../api/client";
-import { button, field, label, mono, primary, quiet } from "../../components/ui";
+import { button, field, label, mono, quiet } from "../../components/ui";
 import { useAppState } from "../../store/useStore";
 import { BUSY } from "../Branch/DiffView";
 import { hunksOf, newSide, splice, type FileDiff, type Hunk } from "../Branch/parseDiff";
 import { hunkMatches, type SessionDiffState } from "./review";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
-const refusal = (e: unknown) => (e instanceof DaemonError && (e.code === "stale" || e.code === "busy") ? `${e.code === "stale" ? "Stale" : "Busy"}: ${e.message}` : message(e));
+export const refusal = (e: unknown) => (e instanceof DaemonError && (e.code === "stale" || e.code === "busy") ? `${e.code === "stale" ? "Stale" : "Busy"}: ${e.message}` : message(e));
 
 const STATUS_MARK: Record<FileDiff["status"], string> = { added: "A", deleted: "D", renamed: "R", modified: "M" };
 
@@ -177,9 +177,12 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-s1">
           <div className="flex flex-wrap items-center gap-s2">
-            <span className={`${label} flex-1`}>{files.length} {files.length === 1 ? "file" : "files"} changed against {diff.base}</span>
+            <span className={`${label} flex-1`} data-testid="changes-summary">
+              {files.length} {files.length === 1 ? "file" : "files"} changed against {diff.base} ·{" "}
+              <span className={`${mono} text-ink-2`}>+{files.reduce((n, f) => n + f.added, 0)} −{files.reduce((n, f) => n + f.removed, 0)}</span>
+            </span>
             <div role="group" aria-label="Diff layout" className="flex gap-1">
-              {[false, true].map((value) => <button key={String(value)} type="button" aria-pressed={split === value} className={`${button} text-xs ${split === value ? "bg-branch-soft text-branch" : ""}`} onClick={() => setSplit(value)}>{value ? "Split" : "Unified"}</button>)}
+              {[false, true].map((value) => <button key={String(value)} type="button" aria-pressed={split === value} className={`rounded-md px-s1 py-1 text-xs ${split === value ? "bg-surface-2 text-ink" : "text-ink-3 hover:bg-surface-2 hover:text-ink"}`} onClick={() => setSplit(value)}>{value ? "Split" : "Unified"}</button>)}
             </div>
           </div>
           {note && (
@@ -187,9 +190,9 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
               {note}
             </p>
           )}
-          <div className="flex min-h-0 flex-1 overflow-hidden rounded-lg border border-line bg-surface">
+          <div className="flex min-h-0 flex-1 overflow-hidden border-t border-line">
             <nav className="flex w-40 shrink-0 flex-col overflow-auto border-r border-line py-1 md:w-64" aria-label="Changed files">
-              <button type="button" className="mx-1 mb-1 flex items-center gap-1 rounded-md border-b border-line px-s1 py-1 text-left text-xs text-branch hover:bg-surface-2 disabled:opacity-50" disabled={!editable && !newDraft} onClick={createFile} data-testid="new-file">
+              <button type="button" className="mx-1 mb-1 flex items-center gap-1 border-b border-line px-s1 py-1 text-left text-xs text-ink-2 hover:bg-surface-2 hover:text-ink disabled:opacity-50" disabled={!editable && !newDraft} onClick={createFile} data-testid="new-file">
                 + New file…
               </button>
               <ul>
@@ -199,7 +202,7 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
                       type="button"
                       onClick={() => setCreating(true)}
                       aria-current={creating ? "true" : undefined}
-                      className={`flex min-w-0 flex-1 items-baseline gap-s1 px-s2 py-1 text-left ${mono} ${creating ? "bg-branch-soft text-ink" : "text-ink-2 hover:bg-surface-2"}`}
+                      className={`flex min-w-0 flex-1 items-baseline gap-s1 px-s2 py-1 text-left ${mono} ${creating ? "bg-surface-2 text-ink" : "text-ink-2 hover:bg-surface-2"}`}
                       data-testid="new-file-draft"
                     >
                       <span className="w-3 text-ink-3">A</span>
@@ -216,7 +219,7 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
                       type="button"
                       onClick={() => (setSelected(f.path), setCreating(false))}
                       aria-current={f.path === file?.path && !creating ? "true" : undefined}
-                      className={`flex min-w-0 flex-1 items-baseline gap-s1 px-s2 py-1 text-left ${mono} ${f.path === file?.path && !creating ? "bg-branch-soft text-ink" : "text-ink-2 hover:bg-surface-2"}`}
+                      className={`flex min-w-0 flex-1 items-baseline gap-s1 px-s2 py-1 text-left ${mono} ${f.path === file?.path && !creating ? "bg-surface-2 text-ink" : "text-ink-2 hover:bg-surface-2"}`}
                       data-testid={gone.includes(f.path) ? "draft-orphan" : undefined}
                     >
                       <span className="w-3 text-ink-3">{gone.includes(f.path) ? "·" : STATUS_MARK[f.status]}</span>
@@ -228,8 +231,8 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
                         <span className="shrink-0 font-sans text-xs text-ink-3">{GONE}</span>
                       ) : (
                         <>
-                          <span className="text-pass">+{f.added}</span>
-                          <span className="text-sap">-{f.removed}</span>
+                          <span className="text-ink-3">+{f.added}</span>
+                          <span className="text-ink-3">-{f.removed}</span>
                         </>
                       )}
                     </button>
@@ -256,9 +259,13 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
   );
 }
 
-function FileTree({ files, renderFile, prefix = "" }: { files: FileDiff[]; renderFile(file: FileDiff): ReactNode; prefix?: string }) {
-  const [closed, setClosed] = useState<Set<string>>(new Set());
-  const groups = new Map<string, FileDiff[]>();
+/* Files grouped by folder, each folder collapsible: the diff's here, open; the
+   whole checkout's in the Repo tab, its folders closed (`folded`) until clicked. */
+export function FileTree<F extends { path: string }>({ files, renderFile, prefix = "", folded = false }: { files: F[]; renderFile(file: F): ReactNode; prefix?: string; folded?: boolean }) {
+  // The folders toggled from how they start.
+  const [toggled, setToggled] = useState<Set<string>>(new Set());
+  const closed = { has: (name: string) => folded !== toggled.has(name) };
+  const groups = new Map<string, F[]>();
   for (const file of files) {
     const rest = file.path.slice(prefix.length);
     const directory = rest.includes("/") ? rest.slice(0, rest.indexOf("/") + 1) : "";
@@ -268,14 +275,14 @@ function FileTree({ files, renderFile, prefix = "" }: { files: FileDiff[]; rende
   return [...groups].map(([name, children]) => !name.endsWith("/") ? renderFile(children[0]) : (
     <li key={name}>
       <button type="button" aria-expanded={!closed.has(name)} className={`${mono} flex w-full items-center gap-1 px-s1 py-1 text-left text-xs text-ink-3 hover:bg-surface-2`}
-        onClick={() => setClosed((before) => {
+        onClick={() => setToggled((before) => {
           const next = new Set(before);
           if (next.has(name)) next.delete(name); else next.add(name);
           return next;
         })}>
         <span aria-hidden>{closed.has(name) ? "▸" : "▾"}</span>{name}
       </button>
-      {!closed.has(name) && <ul className="ml-2 border-l border-line"><FileTree files={children} renderFile={renderFile} prefix={prefix + name} /></ul>}
+      {!closed.has(name) && <ul className="ml-2 border-l border-line"><FileTree files={children} renderFile={renderFile} prefix={prefix + name} folded={folded} /></ul>}
     </li>
   ));
 }
@@ -386,7 +393,7 @@ function FileView({ file, split, gone, pin, editable, why, client, root, drafts,
           role="switch"
           aria-checked={draft?.mode === "full"}
           aria-label="Full file"
-          className={`shrink-0 rounded-md border px-s1 py-px font-sans text-xs ${draft?.mode === "full" ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2 hover:bg-surface-2"} disabled:opacity-50`}
+          className={`shrink-0 rounded-md px-s1 py-px font-sans text-xs ${draft?.mode === "full" ? "bg-surface-2 text-ink" : "text-ink-2 hover:bg-surface-2 hover:text-ink"} disabled:opacity-50`}
           disabled={!canStart && draft?.mode !== "full"}
           title={canStart ? "Edit the whole file in a box" : draft?.mode === "full" ? "The whole file is being edited: save or discard it" : off}
           onClick={() => canStart && startFull()}
@@ -408,7 +415,7 @@ function FileView({ file, split, gone, pin, editable, why, client, root, drafts,
         <>
           {draft?.mode === "hunk" && at < 0 && (
             <section className="border-b border-line" data-testid="draft-moved" aria-label={`Your edit of ${draft.header}`}>
-              <div className={`${mono} flex items-center gap-s1 bg-branch px-s2 leading-5 text-on-branch`}>
+              <div className={`${mono} flex items-center gap-s1 bg-surface-2 px-s2 leading-5 text-ink-2`}>
                 <span className="min-w-0 flex-1 truncate">{draft.header}</span>
                 <span className="shrink-0 font-sans text-xs opacity-80">your edit · the hunk has moved or is gone; these were its lines</span>
               </div>
@@ -434,10 +441,10 @@ function FileView({ file, split, gone, pin, editable, why, client, root, drafts,
             </pre>
           ) : (
             hunks.map((hunk, h) => (
-              <section key={hunk.start} className={h === cursor ? "ring-1 ring-inset ring-branch/40" : ""} data-testid="hunk" data-editing={at === h} aria-label={hunk.header}>
+              <section key={hunk.start} className={h === cursor ? "bg-surface-2 in-focus-visible:ring-1 in-focus-visible:ring-inset in-focus-visible:ring-branch" : ""} data-testid="hunk" data-editing={at === h} aria-label={hunk.header}>
                 <button
                   type="button"
-                  className={`${mono} flex w-full items-center gap-s1 px-s2 text-left leading-5 ${at === h ? "bg-branch text-on-branch" : "bg-branch-soft text-branch"} ${canStart ? "cursor-pointer" : "cursor-default"}`}
+                  className={`${mono} flex w-full items-center gap-s1 border-t border-line px-s2 text-left leading-5 ${at === h ? "bg-surface-2 text-ink" : "bg-canvas-2 text-ink-2"} ${canStart ? "cursor-pointer" : "cursor-default"}`}
                   disabled={!canStart && at !== h}
                   title={canStart ? "Edit this hunk's new side" : at === h ? "Being edited: ⌘S saves, Discard drops it" : off}
                   onClick={() => {
@@ -463,7 +470,7 @@ function FileView({ file, split, gone, pin, editable, why, client, root, drafts,
 }
 
 /* A box and its save bar: ⌘S saves, Escape discards; the engine's refusal shows in the bar. */
-function EditBox({ ariaLabel, text, setText, busy, saveable = true, error, conflict = null, onSave, onDone, onCopy, onReload, what, testId = "hunk-editor" }: {
+export function EditBox({ ariaLabel, text, setText, busy, saveable = true, error, conflict = null, onSave, onDone, onCopy, onReload, what, testId = "hunk-editor" }: {
   ariaLabel: string;
   text: string;
   setText(v: string): void;
@@ -497,7 +504,7 @@ function EditBox({ ariaLabel, text, setText, busy, saveable = true, error, confl
   };
   return (
     <div className="flex min-h-0 flex-col" data-testid={testId}>
-      <textarea ref={box} className={`${mono} w-full resize-y border-l-2 border-branch bg-canvas px-s2 py-1 leading-5 text-ink outline-none`} aria-label={ariaLabel} rows={Math.min(40, Math.max(3, text.split("\n").length))} spellCheck={false} value={text} disabled={busy} onChange={(e) => setText(e.target.value)} onKeyDown={keys} />
+      <textarea ref={box} className={`${mono} w-full resize-y border-l-2 border-line focus:border-branch bg-canvas px-s2 py-1 leading-5 text-ink outline-none`} aria-label={ariaLabel} rows={Math.min(40, Math.max(3, text.split("\n").length))} spellCheck={false} value={text} disabled={busy} onChange={(e) => setText(e.target.value)} onKeyDown={keys} />
       <div className="flex flex-wrap items-center gap-s1 border-y border-line bg-surface-2 px-s2 py-1 font-sans text-xs text-ink-2" data-testid="save-bar">
         {conflict ? (
           <span className="font-medium text-sap" role="alert" data-testid="draft-conflict">
@@ -526,7 +533,7 @@ function EditBox({ ariaLabel, text, setText, busy, saveable = true, error, confl
           </>
         ) : (
           <>
-            <button type="button" className={`${primary} px-s1 py-0.5 text-xs`} disabled={busy || !saveable} onClick={onSave}>
+            <button type="button" className={`${button} px-s1 py-0.5 text-xs`} disabled={busy || !saveable} onClick={onSave}>
               Save <kbd className="ml-1 font-mono text-[10px] opacity-80">⌘S</kbd>
             </button>
             <button type="button" className={`${quiet} text-xs`} disabled={busy} onClick={onDone}>
@@ -539,7 +546,7 @@ function EditBox({ ariaLabel, text, setText, busy, saveable = true, error, confl
   );
 }
 
-const COMMIT = "Your edit becomes a commit on the session branch.";
+export const COMMIT = "Your edit becomes a commit on the session branch.";
 
 /* Whether `lines` are what `content` has from line `start` (1-based). */
 const linesAt = (content: string, start: number, lines: string[]): boolean => {
