@@ -1363,7 +1363,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
             # Cached by commit when the checkout is clean, so a check that
             # already passed at this HEAD (as a merge gate, say) isn't re-run.
             try:
-                ok, out = gates.run_checked(db, checkout, m.check_cmd, workspaces.workspace_env(checkout),
+                ok, out = gates.run_checked(db, checkout, m.check_cmd, workspaces.workspace_env(checkout, repo_cfg),
                                             repo_cfg.check_timeout)
             except Exception as e:
                 db.record_check(m.id, False, f"$ {m.check_cmd}\n(crashed: {e})", sha,

@@ -2452,12 +2452,12 @@ def services_cmd(
 ) -> None:
     """Per-worktree Docker services (brindle Pro): list, start or stop a workspace's."""
     from brindle import services as services_mod
-    from brindle.config import load_repo_config
 
     if action not in ("ls", "up", "down"):
         _fail("action must be ls, up or down")
-    ws = _ws(DB(), workspace)
-    cfg = load_repo_config(ws.repo_root)
+    db = DB()
+    ws = _ws(db, workspace)
+    cfg = workspaces.config_for(db, ws)
     if not cfg.services:
         _fail('no services configured; add a "services" list to .brindle/config.json')
     if action == "up":
