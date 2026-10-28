@@ -184,6 +184,8 @@ INSTALL_FLAGS = frozenset({"-D", "--save-dev", "-E", "--save-exact", "-O", "--sa
                            "--no-install-project", "-q", "--quiet", "-v", "--verbose"})
 INSTALL_VALUES = frozenset({"--group", "--extra", "--package", "--upgrade-package", "-r", "--requirement", "-c",
                             "--constraint", "-e", "--editable"})
+# What makes files whose links brindle doesn't follow before they exist (_part_families).
+COPIERS = frozenset({"cp", "mv", "ln", "rsync", "tar", "unzip"})
 # The files rm and rmdir delete, by the options brindle reads for each.
 REMOVE_FLAGS = {"rm": re.compile(r"-[rRfidvI]+|--(recursive|force|dir|verbose)"),
                 "rmdir": re.compile(r"-v|--verbose")}
@@ -451,14 +453,21 @@ def _part_families(req: Request, rules: list[Rule] | None = None) -> list[str | 
     """Each part of ``req``'s shell command's family, and its redirections'
     (None: in none), or None when brindle can't read what it runs. What a
     part is doesn't depend on the ask rules that make it ask, only on the
-    denies (a read of a denied file is no read-only command)."""
+    denies (a read of a denied file is no read-only command). A file change
+    after a copy, move, link or extraction is in none too: what that made
+    (a symlink it copied) may lead anywhere."""
     parts = permissions.shell_parts(req) if req.kind == "bash" else None
     if not parts:
         return None
     rules = permissions.all_rules(req.repo_root or None) if rules is None else rules
     denies = [r for r in rules if r.decision == "deny"]
     roots = _checkouts(req)
-    return [f for part in parts for f in _part_family(req, part, denies, roots)]
+    found, copied = [], False
+    for part in parts:
+        each = _part_family(req, part, denies, roots)
+        found += [*each, None] if copied and WRITES in each else each
+        copied |= os.path.basename(part.words[0]) in COPIERS
+    return found
 
 
 def families(req: Request, rules: list[Rule] | None = None) -> list[str] | None:
