@@ -386,11 +386,13 @@ def ready(provider: str, method: str, login: dict | None, blocked_by: str | None
 
     name = providers_install.NAMES[provider]
 
-    def no(reason: str, action: str) -> dict:
+    def no(reason: str, action: str | None) -> dict:
         return {"ok": False, "reason": reason, "action": action}
 
     if providers_install.found(provider) is None:
         return no(f"{name} isn't installed", "install")
+    if providers_install.turned_off(provider):
+        return no(f"{name} is turned off in brindle", None)
     if login is not None and not login["valid"]:
         if login["expired"]:
             return no("the cloud login has expired", "renew")
@@ -411,11 +413,31 @@ def ready(provider: str, method: str, login: dict | None, blocked_by: str | None
             where = "this Mac" if sys.platform == "darwin" else "this computer"
             return {"ok": True, "reason": f"Antigravity on {where} now uses your Gemini key", "action": None}
         return {"ok": True, "reason": None, "action": None}
-    if method == "auto" and key is not None and status != "rejected":
+    if method == "auto" and key is not None:
+        # auto runs with the key ahead of any login (pane_auth), a rejected one too.
+        if status == "rejected":
+            return no(f"{key} was rejected by {name}", "set_key")
         return {"ok": True, "reason": None, "action": None}
-    if provider != "opencode" and providers_install.signed_in(provider) is False:
+    if provider != "opencode" and _signed_out(provider, method):
         return no(f"{name} isn't signed in", "sign_in")
     return {"ok": True, "reason": None, "action": None}
+
+
+def _signed_out(provider: str, method: str) -> bool:
+    """Whether the CLI's own login is definitely missing, probed as the pane
+    would run: without the provider's API keys and, under sign_in, without
+    another route's selectors (_selectors), so an exported key can't stand in
+    for the login; a subscription token stays."""
+    from brindle import pane_auth, provider_homes, providers
+
+    pending = provider_homes.confirm_login(provider)      # a login just finished in the app
+    if pending is not None:
+        return not pending
+    if provider_homes.signed_out(provider):
+        return True
+    env = {**(_selectors(provider, method, None) if method == "sign_in" else {}),
+           **{k: "" for k in pane_auth.API_KEYS.get(provider, ())}}
+    return providers.signed_out(provider, env) is not None
 
 
 def stopped_agents(db, provider: str) -> list[dict]:
