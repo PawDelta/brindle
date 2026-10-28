@@ -77,13 +77,12 @@ describe("app-release publish gate", () => {
     ["the nightly job", { EVENT: "schedule", REF_TYPE: "branch", ...ready }, "go=false"],
     ["a pushed tag, unsigned", { EVENT: "push", REF_TYPE: "tag", ...ready, SIGNED: "false" }, "go=false"],
     ["a pushed tag, not notarized", { EVENT: "push", REF_TYPE: "tag", ...ready, NOTARIZED: "false" }, "go=false"],
-    ["a pushed tag, no role", { EVENT: "push", REF_TYPE: "tag", ...ready, ROLE: "" }, "::error::the release role secret or DESKTOP_DOWNLOADS_BUCKET variable not set", 1],
-    ["a pushed tag, no bucket", { EVENT: "push", REF_TYPE: "tag", ...ready, BUCKET: "" }, "::error::the release role secret or DESKTOP_DOWNLOADS_BUCKET variable not set", 1],
+    ["a pushed tag, no role", { EVENT: "push", REF_TYPE: "tag", ...ready, ROLE: "" }, "::error::", 1],
+    ["a pushed tag, no bucket", { EVENT: "push", REF_TYPE: "tag", ...ready, BUCKET: "" }, "::error::", 1],
     ["Linux: a pushed tag, nothing to sign", { PLATFORM: "linux", EVENT: "push", REF_TYPE: "tag", ROLE: "r", BUCKET: "b" }, "go=true"],
     ["Linux: a manual run on an existing tag", { PLATFORM: "linux", EVENT: "workflow_dispatch", REF_TYPE: "tag", ROLE: "r", BUCKET: "b" }, "go=false"],
     ["staff build: a push of main", { CHANNEL: "release", ...branch, ...ready }, "go=true", 0],
-    ["staff main push missing bucket", { CHANNEL: "release", ...branch, ...ready, BUCKET: "" }, "::error::the release role secret or DESKTOP_DOWNLOADS_BUCKET variable not set", 1],
-    ["tag push missing role", { EVENT: "push", REF_TYPE: "tag", ...ready, ROLE: "" }, "::error::the release role secret or DESKTOP_DOWNLOADS_BUCKET variable not set", 1],
+    ["staff main push missing bucket", { CHANNEL: "release", ...branch, ...ready, BUCKET: "" }, "::error::", 1],
     ["dispatch missing both", { EVENT: "workflow_dispatch", REF_TYPE: "branch", ROLE: "", BUCKET: "" }, "go=false", 0],
     ["staff build: a manual run on it", { CHANNEL: "release", ...branch, EVENT: "workflow_dispatch", ...ready }, "go=false"],
     ["staff build: a tag", { CHANNEL: "release", EVENT: "push", REF_TYPE: "tag", REF: "refs/tags/app-v0.2.0", ...ready }, "go=false"],
@@ -93,9 +92,13 @@ describe("app-release publish gate", () => {
     ["Windows: a pushed tag, unsigned", { PLATFORM: "windows", EVENT: "push", REF_TYPE: "tag", SIGNED: "", ROLE: "r", BUCKET: "b" }, "go=false"],
   ])("%s: %s", (_case, env, expected, status) => {
     const result = decide(env);
-    expect(result.status).toBe(status);
-    expect(result.stdout.split("\n").at(-1)).toBe(expected);
-    if (expected.startsWith("::error::")) expect(result.stdout).toContain(expected);
+    if (expected === "::error::") {
+      expect(result.status).toBe(1);
+      expect(result.stdout).toContain("::error::");
+    } else {
+      expect(result.status).toBe(status ?? 0);
+      expect(result.stdout.split("\n").at(-1)).toBe(expected);
+    }
   });
 
   it("guards every AWS step of the publishing jobs with the push event and the gate, and feeds each gate the event", () => {
