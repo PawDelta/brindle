@@ -54,7 +54,13 @@ class SetupResult:
 # -- lookup ----------------------------------------------------------------
 
 
-def workspace_env(ws: Workspace) -> dict[str, str]:
+def config_for(db: DB, ws: Workspace) -> RepoConfig:
+    """``ws``'s config: a session's own workspace (it holds a supervisor) reads
+    its own branch, a worker's reads the session branch it was cut from."""
+    return workspace_config(ws, session=any(a.profile == "supervisor" for a in db.list_agents(ws.id)))
+
+
+def workspace_env(ws: Workspace, cfg: RepoConfig | None = None) -> dict[str, str]:
     env = {
         "BRINDLE_ROOT_PATH": ws.repo_root,
         "BRINDLE_WORKSPACE_PATH": ws.path,
@@ -71,7 +77,7 @@ def workspace_env(ws: Workspace) -> dict[str, str]:
             env[key] = os.environ[key]
     if ws.kind != "main" and os.path.isdir(ws.repo_root):
         try:
-            env.update(services.env(ws, workspace_config(ws)))
+            env.update(services.env(ws, cfg or workspace_config(ws)))
         except ValueError:
             pass  # a broken config is reported elsewhere
     return env
@@ -642,10 +648,10 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
                 "Commit them, or pass --force to discard."
             )
 
-    cfg = workspace_config(ws)
+    cfg = config_for(db, ws)
     teardown = None
     if exists and cfg.teardown:
-        teardown = run_commands(cfg.teardown, ws.path, workspace_env(ws))
+        teardown = run_commands(cfg.teardown, ws.path, workspace_env(ws, cfg))
         if not teardown.ok and not force:
             raise WorkspaceError(f"teardown failed; fix it or pass --force:\n{teardown.log}")
 
