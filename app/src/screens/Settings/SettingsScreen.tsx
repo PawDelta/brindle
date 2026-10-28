@@ -613,14 +613,37 @@ function Health({ connection, keyInfo, keyLine = false }: { connection: Provider
 /* Change method: the three choices (Your cloud only where the engine has a
    route), and the chosen one's setup, in the row. Sign in is saved as soon
    as it is picked, over auto too, so a stored or exported key stops billing. */
-function ChangeMethod({ client, row, connection, keys, repo, onChanged, onClose }: { client: DaemonClient; row: ProviderInstalled; connection: ProviderConnection; keys: KeyInfo[] | null; repo: string | null; onChanged(): void; onClose(): void }) {
+function ChangeMethod({ client, row, connection, keys, repo, model: rowModel, onModel, onBusy, onChanged, onClose }: {
+  client: DaemonClient;
+  row: ProviderInstalled;
+  connection: ProviderConnection;
+  keys: KeyInfo[] | null;
+  repo: string | null;
+  /* OpenCode: the row's model provider, where this starts, and where a key saved here moves it. */
+  model: (typeof MODEL_PROVIDERS)[number];
+  onModel(model: (typeof MODEL_PROVIDERS)[number]): void;
+  /* A write is under way (true) or over: the row holds back closing this until it answers. */
+  onBusy(busy: boolean): void;
+  onChanged(): void;
+  onClose(): void;
+}) {
   const f = factsOf(row);
   const saved = connection.method;
   const [choice, setChoice] = useState<Method | null>(saved === "api_key" || saved === "cloud" || saved === "sign_in" ? saved : null);
   const [error, setError] = useState<string | null>(null);
   const opencode = row.provider === "opencode";
-  const [model, setModel] = useState(firstModel(keys));
+  const [model, setModel] = useState(rowModel);
   const cloud = (connection.clouds ?? []).length > 0;
+  /* Sign in being saved, or the key or cloud form saving: no other choice until it answers. */
+  const [signingIn, setSigningIn] = useState(false);
+  const [formBusy, setFormBusy] = useState(false);
+  const busy = signingIn || formBusy;
+  useEffect(() => {
+    onBusy(busy);
+    return () => {
+      if (busy) onBusy(false);
+    };
+  }, [busy, onBusy]);
   const done = () => {
     onChanged();
     onClose();
@@ -629,11 +652,14 @@ function ChangeMethod({ client, row, connection, keys, repo, onChanged, onClose 
     setChoice(m);
     setError(null);
     if (m !== "sign_in" || saved === "sign_in") return;
+    setSigningIn(true);
     try {
       await client.setProviderConnection(row.provider, { method: "sign_in", ...(repo ? { repo } : {}) });
       done();
     } catch (e) {
       setError(message(e));
+    } finally {
+      setSigningIn(false);
     }
   };
   return (
@@ -641,6 +667,7 @@ function ChangeMethod({ client, row, connection, keys, repo, onChanged, onClose 
       {opencode && (
         <ModelProviderPicker
           value={model.id}
+          disabled={busy}
           onChange={(id) => {
             const next = MODEL_PROVIDERS.find((x) => x.id === id) ?? MODEL_PROVIDERS[0];
             setModel(next);
@@ -648,14 +675,28 @@ function ChangeMethod({ client, row, connection, keys, repo, onChanged, onClose 
           }}
         />
       )}
-      <MethodChoice provider={row.provider} name={f.name} value={choice} cloud={cloud} onChange={(m) => void pick(m)} />
+      <MethodChoice provider={row.provider} name={f.name} value={choice} cloud={cloud} disabled={busy} onChange={(m) => void pick(m)} />
       {choice === "api_key" &&
         (opencode && !model.key ? (
           <p className="text-xs text-ink-3">{model.name} connects through your cloud, not a key.</p>
         ) : (
-          <ApiKeyPaste key={model.id} client={client} provider={row.provider} expect={(opencode ? model.key : undefined) ?? PROVIDER_KEYS[row.provider]?.[0] ?? "ANTHROPIC_API_KEY"} keys={keys} repo={repo} onSaved={done} onCancel={onClose} />
+          <ApiKeyPaste
+            key={model.id}
+            client={client}
+            provider={row.provider}
+            expect={(opencode ? model.key : undefined) ?? PROVIDER_KEYS[row.provider]?.[0] ?? "ANTHROPIC_API_KEY"}
+            keys={keys}
+            repo={repo}
+            onBusy={setFormBusy}
+            onSaved={() => {
+              // The row's key controls follow the model provider whose key was just saved.
+              if (opencode && model.key) onModel(model);
+              done();
+            }}
+            onCancel={onClose}
+          />
         ))}
-      {choice === "cloud" && cloud && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} repo={repo} onSignedIn={done} />}
+      {choice === "cloud" && cloud && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} repo={repo} onBusy={setFormBusy} onSignedIn={done} />}
       {error && (
         <p className={alert} role="alert">
           Couldn't change how {f.name} connects: {error}
@@ -719,6 +760,8 @@ function ProviderRowView({ client, repo, connection, keys, onChanged, row, insta
   const [actionError, setActionError] = useState<string | null>(null);
   const [changing, setChanging] = useState(false);
   const [replacing, setReplacing] = useState(false);
+  /* A key or a method being saved in the row: Change method can't open, close or switch until it answers. */
+  const [saving, setSaving] = useState(false);
   const installing = install?.status === "starting" || install?.status === "running";
   // A key or a cloud, as saved; its own sign-in (sign_in); auto, a key when one is set, else
   // its sign-in; or the org's say.
@@ -841,7 +884,7 @@ function ProviderRowView({ client, repo, connection, keys, onChanged, row, insta
           {busy === "connecting" ? "Connecting…" : installAction}
         </button>
       )}
-      {on && keyed && opencode && (
+      {on && keyed && opencode && !changing && (
         <label className="flex items-center gap-s1 text-xs text-ink-2">
           Model provider
           <select
@@ -879,7 +922,7 @@ function ProviderRowView({ client, repo, connection, keys, onChanged, row, insta
       )}
       {on && replacing && keyName && (
         <div className="w-full">
-          <ApiKeyPaste key={keyName} client={client} provider={row.provider} expect={keyName} keys={keys} repo={repo} onSaved={() => (setReplacing(false), onChanged())} onCancel={() => setReplacing(false)} />
+          <ApiKeyPaste key={keyName} client={client} provider={row.provider} expect={keyName} keys={keys} repo={repo} onBusy={setSaving} onSaved={() => (setReplacing(false), setSaving(false), onChanged())} onCancel={() => setReplacing(false)} />
         </div>
       )}
       {on && viaCloud && <RenewLogin client={client} provider={row.provider} route={connection!.cloud!} onSignedIn={onChanged} />}
@@ -890,11 +933,28 @@ function ProviderRowView({ client, repo, connection, keys, onChanged, row, insta
       )}
       {on && !viaKey && !viaCloud && (row.signed_in !== true || signing) && <ProviderSignIn provider={row.provider} check={check} onActive={setSigning} details={false} />}
       {on && connection && method !== "org" && !signing && (
-        <button type="button" className={quiet} aria-expanded={changing} onClick={() => setChanging((c) => !c)}>
+        <button type="button" className={quiet} aria-expanded={changing} disabled={saving} onClick={() => setChanging((c) => !c)}>
           Change method {changing ? "▴" : "▾"}
         </button>
       )}
-      {changing && connection && <ChangeMethod client={client} row={row} connection={connection} keys={keys} repo={repo} onChanged={onChanged} onClose={() => setChanging(false)} />}
+      {changing && connection && (
+        <ChangeMethod
+          client={client}
+          row={row}
+          connection={connection}
+          keys={keys}
+          repo={repo}
+          model={model}
+          onModel={(m) => setModel(KEY_MODELS.find((k) => k.id === m.id) ?? model)}
+          onBusy={setSaving}
+          onChanged={onChanged}
+          onClose={() => {
+            // Closed means its write answered: free the toggle in the same update, not on its later unmount.
+            setChanging(false);
+            setSaving(false);
+          }}
+        />
+      )}
       {install && (
         <div className="w-full">
           <ProgressCard
@@ -1177,18 +1237,23 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   }, [reloadProviders]);
   /* How each provider connects (GET /providers/{p}/connection), read with the rows and after a change. */
   const [connections, setConnections] = useState<Record<string, ProviderConnection>>({});
+  /* Per provider, the newest read asked for: an older one answering late is dropped. */
+  const asked = useRef<Record<string, number>>({});
   const loadConnection = useCallback(
-    (provider: string) =>
-      client.providerConnection(provider, repo ?? undefined).then(
-        (c) => setConnections((all) => ({ ...all, [provider]: c })),
+    (provider: string) => {
+      const mine = (asked.current[provider] = (asked.current[provider] ?? 0) + 1);
+      return client.providerConnection(provider, repo ?? undefined).then(
+        (c) => asked.current[provider] === mine && setConnections((all) => ({ ...all, [provider]: c })),
         () => undefined,
-      ),
+      );
+    },
     [client, repo],
   );
-  const providerNames = providers.rows?.map((r) => r.provider).join(" ") ?? "";
+  // Read again with every look at the providers: a sign-in, sign-out, install or turn-on changes whether each is ready.
+  const rows = providers.rows;
   useEffect(() => {
-    for (const p of providerNames.split(" ").filter(Boolean)) void loadConnection(p);
-  }, [providerNames, loadConnection]);
+    for (const r of rows ?? []) void loadConnection(r.provider);
+  }, [rows, loadConnection]);
   /* A key no provider reads being set or replaced (its name). */
   const [otherEditing, setOtherEditing] = useState<string | null>(null);
   const [otherError, setOtherError] = useState<string | null>(null);
@@ -1208,6 +1273,8 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
     try {
       await client.importKey(name, repo ?? undefined);
       await loadConfig();
+      // The key may make its provider ready to launch.
+      for (const r of rows ?? []) void loadConnection(r.provider);
     } catch (e) {
       setImportError(`Couldn't import ${name}: ${message(e)}`);
     }

@@ -161,7 +161,10 @@ function BrindleSignIn({ client, openUrl, onSignedIn, onSkip }: { client: Daemon
    here, or the person's cloud signed in here. Choosing one on a missing CLI
    picks it for its installer. One is open at a time (the first not yet
    connected, or the one Choose opened); the others are a line with Choose. */
-function ProviderCard({ client, row, picked, installed, method, connection, open, error, keys, openUrl, onOpen, onMethod, onUndo, onConnected }: {
+function ProviderCard({ client, row, picked, installed, method, connection, open, error, keys, openUrl, busy, onBusy, onOpen, onMethod, onUndo, onConnected }: {
+  /* A key or a cloud route is being saved here: the method can't change until it answers. */
+  busy: boolean;
+  onBusy(busy: boolean): void;
   client: DaemonClient;
   row: ProviderInstalled;
   picked: boolean;
@@ -218,7 +221,7 @@ function ProviderCard({ client, row, picked, installed, method, connection, open
           <span className="flex items-center gap-s1 text-sm" data-testid={`onb-chosen-${row.provider}`}>
             <Tick />
             <span>Runs {f.maker}'s installer</span>
-            <button type="button" className={`${quiet} ${link}`} onClick={onUndo}>
+            <button type="button" className={`${quiet} ${link}`} disabled={busy} onClick={onUndo}>
               Undo
             </button>
           </span>
@@ -238,6 +241,7 @@ function ProviderCard({ client, row, picked, installed, method, connection, open
           {opencode && (
             <ModelProviderPicker
               value={model.id}
+              disabled={busy}
               onChange={(id) => {
                 const next = MODEL_PROVIDERS.find((m) => m.id === id) ?? MODEL_PROVIDERS[0];
                 setModel(next);
@@ -245,7 +249,7 @@ function ProviderCard({ client, row, picked, installed, method, connection, open
               }}
             />
           )}
-          <MethodChoice provider={row.provider} name={f.name} value={method} cloud={cloud} onChange={onMethod} />
+          <MethodChoice provider={row.provider} name={f.name} value={method} cloud={cloud} disabled={busy} onChange={onMethod} />
           {error && (
             <p className={alert} role="alert">
               Couldn't save how {f.name} connects: {error}
@@ -268,9 +272,10 @@ function ProviderCard({ client, row, picked, installed, method, connection, open
                 keys={keys}
                 openUrl={openUrl}
                 onSaved={(_, last4, c) => onConnected("api_key", `API key ending ${last4}`, c)}
+                onBusy={onBusy}
               />
             ))}
-          {method === "cloud" && cloud && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} openUrl={openUrl} onSignedIn={(route, c) => onConnected("cloud", `through ${CLOUD_NAME[route] ?? route}`, c)} />}
+          {method === "cloud" && cloud && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} openUrl={openUrl} onSignedIn={(route, c) => onConnected("cloud", `through ${CLOUD_NAME[route] ?? route}`, c)} onBusy={onBusy} />}
         </>
       )}
     </section>
@@ -452,14 +457,18 @@ function ProviderSignInStep({ row, index, of, rest, already, check, openUrl, onL
 
 /* Each provider found, connected only when it is (installed, its method set up and the engine
    reading it ready); one set up with a key or a cloud but not ready says why, with the fix. */
-function Ready({ client, rows, installed, via, connections, done, onConnection, onSignIn, onNext }: {
+function Ready({ client, rows, installed, via, connections, done, methodOf, onConnection, onSetup, onSignIn, onNext }: {
   client: DaemonClient;
   rows: ProviderInstalled[];
   installed: string[];
   via: Record<string, { method: Method; how: string }>;
   connections: Record<string, ProviderConnection>;
   done(row: ProviderInstalled): boolean;
+  /* How it connects: chosen in this flow, else as saved (a resumed first launch has only the saved). */
+  methodOf(row: ProviderInstalled): Method | null;
   onConnection(provider: string, connection: ProviderConnection): void;
+  /* Back to its section on the cards, to set its key or cloud up again. */
+  onSetup(provider: string): void;
   onSignIn(provider: string): void;
   onNext(): void;
 }) {
@@ -473,8 +482,11 @@ function Ready({ client, rows, installed, via, connections, done, onConnection, 
           const f = factsOf(r);
           const signed = signedIn(r);
           const ok = done(r);
-          const how = via[r.provider]?.how;
           const conn = connections[r.provider];
+          const m = methodOf(r);
+          // A key or a cloud, from the saved connection; this flow's own words for it when it has them.
+          const keyed = m === "api_key" || m === "cloud";
+          const how = keyed ? (via[r.provider]?.method === m ? via[r.provider].how : m === "cloud" ? `through ${CLOUD_NAME[conn?.cloud ?? ""] ?? "your cloud"}` : "API key") : undefined;
           return (
             <div key={r.provider} className="flex flex-wrap items-center gap-s1 px-s2 py-s1" data-testid={`onb-ready-${r.provider}`} data-connected={ok}>
               <Tick on={ok} />
@@ -485,8 +497,15 @@ function Ready({ client, rows, installed, via, connections, done, onConnection, 
               <span className={fine}>
                 {how && ok ? (
                   `connected ${how.startsWith("through") ? how : `by ${how}`} · ${installed.includes(r.provider) ? `installed by ${f.maker}'s installer` : "your own copy"}`
-                ) : how && conn ? (
-                  <ReadyNote client={client} connection={conn} onChanged={(c) => onConnection(r.provider, c)} />
+                ) : keyed ? (
+                  // Not ready: the engine's fix (Renew login, Sign out of ChatGPT, Set key back on the cards), never a subscription sign-in over it.
+                  conn?.ready && !conn.ready.ok ? (
+                    <ReadyNote client={client} connection={conn} onSetKey={() => onSetup(r.provider)} onChanged={(c) => onConnection(r.provider, c)} />
+                  ) : (
+                    <button type="button" className={link} onClick={() => onSetup(r.provider)}>
+                      Finish setting it up
+                    </button>
+                  )
                 ) : signed ? (
                   `signed in · ${installed.includes(r.provider) ? `installed by ${f.maker}'s installer` : "your own copy"}, it keeps itself updated`
                 ) : (
@@ -818,9 +837,11 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
     if (!connected(row)) setPicks((all) => (all.includes(p) ? all : [...all, p]));
     return true;
   };
-  /* The open section: the one Choose opened, else the first not yet connected. */
+  /* The provider whose key or cloud route is being saved: its section stays open and its method can't change until that answers. */
+  const [saving, setSaving] = useState<string | null>(null);
+  /* The open section: one saving, else the one Choose opened, else the first not yet connected. */
   const [open, setOpen] = useState<string | null>(null);
-  const opened = open ?? rows.find((r) => !done(r))?.provider ?? null;
+  const opened = saving ?? open ?? rows.find((r) => !done(r))?.provider ?? null;
 
   const order = rows.map((r) => r.provider);
   const queue = order.filter((p) => picks.includes(p));
@@ -911,6 +932,8 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
                 error={errors[r.provider] ?? null}
                 keys={keys}
                 openUrl={openUrl}
+                busy={saving === r.provider}
+                onBusy={(b) => setSaving((s) => (b ? r.provider : s === r.provider ? null : s))}
                 onOpen={() => setOpen(r.provider)}
                 onMethod={(m) => void choose(r, m)}
                 onUndo={() => {
@@ -927,7 +950,7 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
           </div>
           {refreshProblem}
           <div className="mt-s1 flex flex-wrap items-center gap-s2">
-            <button type="button" className={big} disabled={(queue.length === 0 && found.length === 0) || !!refreshError} onClick={() => setStep("install")}>
+            <button type="button" className={big} disabled={(queue.length === 0 && found.length === 0) || !!refreshError || !!saving} onClick={() => setStep("install")}>
               {queue.length ? `Connect ${names(queue.map(label))}` : found.length ? `Continue with ${names(found.map((r) => factsOf(r).name))}` : "Connect"}
             </button>
             <p className={`${fine} min-w-0 flex-1`}>
@@ -1022,7 +1045,12 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
           via={via}
           connections={connections}
           done={done}
+          methodOf={methodOf}
           onConnection={putConnection}
+          onSetup={(p) => {
+            setOpen(p);
+            setStep("connect");
+          }}
           onSignIn={(p) => {
             const row = rows.find((r) => r.provider === p);
             if (!row) return;

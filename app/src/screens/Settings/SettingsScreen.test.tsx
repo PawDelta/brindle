@@ -389,11 +389,16 @@ describe("settings screen", () => {
     fireEvent.click(within(claude).getByRole("radio", { name: "Sign in" }));
     await waitFor(() => expect(screen.getByTestId("provider-claude").getAttribute("data-method")).toBe("sign_in"));
     expect(puts()).toEqual(["api_key", "auto", "sign_in"]);
-    // And back to an API key, chosen and pasted in the row.
+    // And back to an API key, chosen and pasted in the row; while its check is pending, nothing else can be chosen or closed.
     fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
     fireEvent.click(within(claude).getByRole("radio", { name: "API key" }));
     fireEvent.change(within(claude).getByLabelText("Paste your key"), { target: { value: "sk-ant-api03-again-Zz99" } });
+    daemon.holdKeys = true;
     fireEvent.click(within(claude).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(claude).getByRole("radio", { name: "Sign in" })).toHaveProperty("disabled", true));
+    expect(within(claude).getByRole("button", { name: "Change method ▴" })).toHaveProperty("disabled", true);
+    daemon.holdKeys = false;
+    daemon.releaseKeys();
     await waitFor(() => expect(screen.getByTestId("provider-claude").getAttribute("data-method")).toBe("api_key"));
     expect(within(screen.getByTestId("provider-claude")).getByTestId("provider-method").textContent).toContain("Zz99");
     expect(within(claude).queryByTestId("connect-method")).toBeNull();
@@ -435,11 +440,17 @@ describe("settings screen", () => {
     await waitFor(() => expect(deletes()).toEqual(["/keys/OPENAI_API_KEY"]));
     expect(daemon.requests.some((r) => r.method === "PUT" && r.path === "/providers/codex/connection")).toBe(false);
 
-    // OpenCode runs two model providers' keys: the one picked is the one shown and removed, never the other.
+    // OpenCode runs two model providers' keys: an Anthropic key saved through Change method moves the row's
+    // controls onto it, so Test and Remove reach that key, never OpenRouter's.
     const opencode = screen.getByTestId("provider-opencode");
     await waitFor(() => expect(within(opencode).getByTestId("provider-method").textContent).toContain("2222"));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Change method ▾" }));
     fireEvent.change(within(opencode).getByLabelText("Model provider"), { target: { value: "anthropic" } });
-    expect(within(opencode).getByTestId("provider-method").textContent).toContain("3333");
+    fireEvent.change(within(opencode).getByLabelText("Paste your key"), { target: { value: "sk-ant-api03-new-5555" } });
+    fireEvent.click(within(opencode).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(opencode).getByTestId("provider-method").textContent).toContain("5555"));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(posts(daemon).map((r) => r.path)).toContain("/keys/ANTHROPIC_API_KEY/test"));
     fireEvent.click(within(opencode).getByRole("button", { name: "Remove" }));
     await waitFor(() => expect(deletes()).toEqual(["/keys/OPENAI_API_KEY", "/keys/ANTHROPIC_API_KEY"]));
 
@@ -547,6 +558,8 @@ describe("settings screen", () => {
     const { daemon, stop } = setup();
     const codex = await screen.findByTestId("provider-codex");
     await waitFor(() => expect(codex.getAttribute("data-state")).toBe("signed_out"));
+    // The engine reads it not ready, wanting a sign-in.
+    expect((await within(codex).findByTestId("provider-ready")).getAttribute("data-action")).toBe("sign_in");
     fireEvent.click(within(codex).getByRole("button", { name: "Sign in to Codex" }));
     const flow = await within(codex).findByTestId("sign-in-flow");
     expect(posts(daemon).at(-1)).toEqual({ method: "POST", path: "/providers/codex/login", query: {}, body: {} });
@@ -560,6 +573,8 @@ describe("settings screen", () => {
     await waitFor(() => expect(flow.getAttribute("data-phase")).toBe("done"));
     expect(flow.textContent).toContain("Signed in to Codex ✓");
     expect(screen.getByTestId("provider-codex").getAttribute("data-state")).toBe("signed_in");
+    // Its readiness is read again with the rows, without reopening the page: nothing left to fix.
+    await waitFor(() => expect(within(screen.getByTestId("provider-codex")).queryByTestId("provider-ready")).toBeNull());
     stop();
   });
 

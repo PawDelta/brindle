@@ -144,11 +144,11 @@ export const MODEL_PROVIDERS: { id: string; name: string; key?: string; cloud?: 
   { id: "azure", name: "Azure OpenAI", cloud: "azure" },
 ];
 
-export function ModelProviderPicker({ value, onChange }: { value: string; onChange(id: string): void }) {
+export function ModelProviderPicker({ value, disabled = false, onChange }: { value: string; disabled?: boolean; onChange(id: string): void }) {
   return (
     <label className="flex flex-wrap items-center gap-s1 text-sm text-ink-2">
       Model provider
-      <select className={`${field} min-w-48`} value={value} onChange={(e) => onChange(e.target.value)}>
+      <select className={`${field} min-w-48`} value={value} disabled={disabled} onChange={(e) => onChange(e.target.value)}>
         {MODEL_PROVIDERS.map((m) => (
           <option key={m.id} value={m.id}>
             {m.name}
@@ -157,6 +157,30 @@ export function ModelProviderPicker({ value, onChange }: { value: string; onChan
       </select>
     </label>
   );
+}
+
+/* Whether the component is still on screen, for work that answers after it left. */
+function useLive() {
+  const live = useRef(true);
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+  return live;
+}
+
+/* Tells `onBusy` when work starts and ends, and that it ended when the component goes. */
+function useBusy(busy: boolean, onBusy?: (busy: boolean) => void) {
+  const report = useRef(onBusy);
+  report.current = onBusy;
+  useEffect(() => {
+    report.current?.(busy);
+    return () => {
+      if (busy) report.current?.(false);
+    };
+  }, [busy]);
 }
 
 /* "just now", "4 min ago", "2h ago", "3d ago" since `ts` (seconds). */
@@ -202,7 +226,7 @@ function KeyState({ outcome }: { outcome: KeyOutcome }) {
 /* The paste field. `expect`: the key the provider reads (OpenCode's: its
    model provider's own, nothing else); `provider` null stores a key that is
    no provider's (a profile's api_key_env) and saves no method. */
-export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = openExternal, onSaved, onCancel }: {
+export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = openExternal, onSaved, onCancel, onBusy }: {
   client: DaemonClient;
   provider: string | null;
   expect: string;
@@ -213,9 +237,13 @@ export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = op
   /* Stored, and for a provider the method saved: the connection as the engine now reads it. */
   onSaved?(name: string, last4: string, connection: ProviderConnection | null): void;
   onCancel?(): void;
+  /* A save is under way (true) or over: the caller holds back changes that would race it. */
+  onBusy?(busy: boolean): void;
 }) {
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const live = useLive();
+  useBusy(busy, onBusy);
   const [outcome, setOutcome] = useState<KeyOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refused, setRefused] = useState<string | null>(null);
@@ -231,8 +259,11 @@ export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = op
   const page = info?.key_page || f.page;
 
   /* Stored: the key's state as the engine now reads it, then the method saved as an API key. */
+  // Gone from the screen (another method chosen, the form closed): a save still answering
+  // writes no method and reports nothing.
   const stored = async (key: string, last4: string) => {
     const got = await client.config(repo ?? undefined).then((c) => c.keys.find((k) => k.name === key), () => undefined);
+    if (!live.current) return;
     setOutcome({ kind: "stored", name: key, last4: got?.last4 || last4, status: got?.status ?? "verified", checked_at: got?.checked_at ?? Date.now() / 1000 });
     if (!provider) return onSaved?.(key, last4, null);
     let now: ProviderConnection;
@@ -240,9 +271,10 @@ export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = op
       now = await client.setProviderConnection(provider, { method: "api_key", ...(repo ? { repo } : {}) });
     } catch (e) {
       // The key is stored; the org (or the engine) refuses running the provider on it.
-      setRefused(message(e));
+      if (live.current) setRefused(message(e));
       return;
     }
+    if (!live.current) return;
     setConnection(now);
     onSaved?.(key, last4, now);
   };
@@ -253,14 +285,16 @@ export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = op
     setOutcome(null);
     try {
       const done = await act();
+      if (!live.current) return;
       setValue("");
       await stored(key, done.last4);
     } catch (e) {
+      if (!live.current) return;
       // The engine checks the key with its provider first: a refusal is the key's, not the app's.
       if (e instanceof DaemonError && e.code === "not_stored") setOutcome({ kind: "rejected", name: key, why: plain(e.message.replace(new RegExp(`^${key} not stored: `), "")) });
       else setError(message(e));
     } finally {
-      setBusy(false);
+      if (live.current) setBusy(false);
     }
   };
   const save = () => {
@@ -404,8 +438,12 @@ function detected(route: string, o: CloudOptionsDTO): string {
 
 /* The cloud sign-in's job: the browser opens on the first URL it prints;
    done, its result says how it went. */
-function CloudSignIn({ client, provider, route, openUrl, save, label, onSignedIn }: { client: DaemonClient; provider: string; route: string; openUrl: OpenUrl; save(): Promise<boolean>; label?: string; onSignedIn?(): void }) {
+function CloudSignIn({ client, provider, route, openUrl, save, label, onSignedIn, onBusy }: { client: DaemonClient; provider: string; route: string; openUrl: OpenUrl; save(): Promise<boolean>; label?: string; onSignedIn?(): void; onBusy?(busy: boolean): void }) {
   const { job, busy, start, clear } = useJob();
+  const live = useLive();
+  /* The route being saved before its sign-in starts: the write that would race another choice. */
+  const [saving, setSaving] = useState(false);
+  useBusy(saving, onBusy);
   const opened = useRef<string | null>(null);
   const url = job?.status === "running" ? (job.progress.find((line) => /^https?:\/\//.test(line)) ?? null) : null;
   useEffect(() => {
@@ -422,7 +460,11 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, onSignedIn
   const begin = async () => {
     opened.current = null;
     clear();
-    if (await save()) void start(`Sign in to ${CLOUD_NAME[route] ?? route}`, () => client.cloudSignIn(provider));
+    setSaving(true);
+    const saved = await save();
+    if (!live.current) return;
+    setSaving(false);
+    if (saved) void start(`Sign in to ${CLOUD_NAME[route] ?? route}`, () => client.cloudSignIn(provider));
   };
   const failed = job?.status === "failed" || result === "failed";
   return (
@@ -441,7 +483,7 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, onSignedIn
             Signed in through {CLOUD_NAME[route] ?? route}
           </span>
         ) : (
-          <button type="button" className={button} onClick={() => void begin()}>
+          <button type="button" className={button} disabled={saving} onClick={() => void begin()}>
             {failed ? "Try again" : (label ?? cloud.signIn)}
           </button>
         )}
@@ -466,7 +508,7 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, onSignedIn
 }
 
 /* Choose the route, fill in its settings from what the machine has, then sign in. */
-export function CloudSetup({ client, provider, name, route: wanted, repo, openUrl = openExternal, onSignedIn }: {
+export function CloudSetup({ client, provider, name, route: wanted, repo, openUrl = openExternal, onSignedIn, onBusy }: {
   client: DaemonClient;
   provider: string;
   name: string;
@@ -476,16 +518,20 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
   openUrl?: OpenUrl;
   /* Signed in: the route, and the connection as the engine reads it after (its readiness). */
   onSignedIn?(route: string, connection: ProviderConnection | null): void;
+  /* The route is being saved (true) or not: the caller holds back changes that would race it. */
+  onBusy?(busy: boolean): void;
 }) {
+  const live = useLive();
   const [connection, setConnection] = useState<ProviderConnection | null>(null);
   const [after, setAfter] = useState<ProviderConnection | null>(null);
   const signedIn = (r: string) =>
     client.providerConnection(provider, repo ?? undefined).then(
       (c) => {
+        if (!live.current) return;
         setAfter(c);
         onSignedIn?.(r, c);
       },
-      () => onSignedIn?.(r, null),
+      () => live.current && onSignedIn?.(r, null),
     );
   const [options, setOptions] = useState<CloudOptionsDTO | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -538,10 +584,11 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
     setSaveError(null);
     try {
       const got = await client.setProviderConnection(provider, { method: "cloud", cloud: route, settings: Object.fromEntries(Object.entries(settings).filter(([, v]) => v.trim())), ...(repo ? { repo } : {}) });
+      if (!live.current) return false;
       setConnection(got);
       return true;
     } catch (e) {
-      setSaveError(message(e));
+      if (live.current) setSaveError(message(e));
       return false;
     }
   };
@@ -601,7 +648,7 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
           {missing.length > 0 ? (
             <p className={fine}>Fill in {missing.map((f) => f.label.toLowerCase()).join(" and ")} to sign in.</p>
           ) : (
-            <CloudSignIn key={route} client={client} provider={provider} route={route} openUrl={openUrl} save={save} onSignedIn={() => void signedIn(route)} />
+            <CloudSignIn key={route} client={client} provider={provider} route={route} openUrl={openUrl} save={save} onSignedIn={() => void signedIn(route)} onBusy={onBusy} />
           )}
           {after && (
             <ReadyNote

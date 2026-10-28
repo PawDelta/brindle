@@ -687,6 +687,12 @@ export class FakeDaemon {
   /* The cloud sign-ins POST /providers/{p}/cloud-sign-in started, by provider; held until completeCloudSignIn(). */
   readonly cloudSignIns: string[] = [];
   private pendingCloudSignIns: Array<(result: string) => void> = [];
+  /* Hold each PUT /keys/{name} (the provider's check of the key) until releaseKeys(). */
+  holdKeys = false;
+  private pendingKeys: Array<() => void> = [];
+  releaseKeys(): void {
+    for (const answer of this.pendingKeys.splice(0)) answer();
+  }
   /* Codex is signed in to ChatGPT, which wins over its API key (blocked_by "codex_login") until POST /providers/codex/sign-out. */
   codexChatGPT = false;
   codexSignOuts = 0;
@@ -2321,6 +2327,7 @@ export class FakeDaemon {
       if (connection) return this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>);
       if (path === "/routing") return this.putRouting((body ?? {}) as Record<string, unknown>);
       if (path === "/debug") return this.putDebug((body ?? {}) as Record<string, unknown>);
+      if (key && this.holdKeys) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putKey(key[1], (body ?? {}) as Record<string, unknown>))));
       if (key) return this.putKey(key[1], (body ?? {}) as Record<string, unknown>);
       const file = path.match(/^\/workspaces\/(.+)\/file$/);
       if (file) return this.editFile(file[1], (body ?? {}) as Record<string, unknown>);
