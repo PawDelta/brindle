@@ -54,7 +54,7 @@ import {
 import type { AskScopeDTO, PermissionPolicyDTO, PermissionRuleDTO, SavedActionDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
 import { Sheet } from "../../components/Sheet";
-import { alert, button, card, field, h2, mono, pill, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, h2, mono, pill, quiet } from "../../components/ui";
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
@@ -372,7 +372,7 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
                 {p.name === "autonomous" && <span className="rounded-sm bg-branch-soft px-1 text-[10px] text-branch">RECOMMENDED</span>}
               </h4>
               <p className="flex-1 text-xs text-ink-2">{p.description}</p>
-              <button type="button" className={`${p.name === "autonomous" && !p.current ? primary : button} mt-1 self-start`} disabled={busy || p.current} onClick={() => usePreset(p.name)}>
+              <button type="button" className={`${button} mt-1 self-start`} disabled={busy || p.current} onClick={() => usePreset(p.name)}>
                 {p.current ? "Current" : `Use ${presetLabel(p.name)}`}
               </button>
             </div>
@@ -511,7 +511,7 @@ function AdvancedView({ client, policy, busy, run, record, onEdit, onRemove }: {
             <h3 className="text-sm font-semibold">Rules</h3>
             <p className="text-xs text-ink-3">Each rule says whether an action runs automatically, asks you, or is blocked, and how far an approval may reach. Conflicting rules are checked when you save.</p>
           </div>
-          <button type="button" className={primary} disabled={busy} onClick={() => onEdit("new")}>
+          <button type="button" className={button} disabled={busy} onClick={() => onEdit("new")}>
             + Add rule
           </button>
         </div>
@@ -637,7 +637,7 @@ const decisionLabel = (d: string) => DECISIONS.find((x) => x.value === d)?.label
 
 function RuleCard({ rule, tag }: { rule: RuleShape & { label?: string; describe?: string }; tag: string }) {
   return (
-    <article className="rounded-md border border-line bg-surface p-s2 text-xs">
+    <article className="border-t border-line py-s2 text-xs">
       <span className="text-[11px] font-medium uppercase tracking-wider text-ink-3">{tag}</span>
       <h4 className="text-sm font-medium">
         {ruleAction(rule)} · {decisionLabel(rule.decision)}
@@ -774,7 +774,7 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
             <button type="button" className={quiet} onClick={onClose}>
               Cancel
             </button>
-            <button type="button" className={primary} disabled={saving} onClick={save}>
+            <button type="button" className={button} disabled={saving} onClick={save}>
               {saving ? "Saving…" : "Save rule"}
             </button>
           </>
@@ -807,7 +807,7 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
             <button type="button" className={button} disabled={saving} onClick={useMine}>
               Use my new rule
             </button>
-            <button type="button" className={primary} disabled={saving || !autoOk} onClick={autoResolve}>
+            <button type="button" className={button} disabled={saving || !autoOk} onClick={autoResolve}>
               Auto-resolve
             </button>
           </div>
@@ -1056,7 +1056,7 @@ function SavedEditor({ client, saved: s, onClose, onDelete, onSaved }: { client:
           <button type="button" className={quiet} onClick={onClose}>
             Cancel
           </button>
-          <button type="button" className={primary} disabled={saving} onClick={() => void save()}>
+          <button type="button" className={button} disabled={saving} onClick={() => void save()}>
             {saving ? "Saving…" : "Save changes"}
           </button>
         </>

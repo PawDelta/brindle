@@ -25,7 +25,7 @@ import type { AgentDTO, InboxItemDTO } from "../../api/schema";
 import { usePtyViews } from "../../api/ptyView";
 import { Preflight } from "../../components/Preflight";
 import { PtyTerminal, type TerminalView } from "../../components/PtyTerminal";
-import { button, card as cardClass, primary, quiet } from "../../components/ui";
+import { button, card as cardClass, main, quiet } from "../../components/ui";
 import { providerName } from "../../store/overview";
 import type { Recovery } from "./useContinue";
 
@@ -134,7 +134,7 @@ export function ProviderSurface({ repo, agent, alive, sessionStatus, credentials
   const left = agent && card && card.kind !== "starting" && !(card.kind === "ended" && card.locked) && !!target && !!ready && (alive === false || STOPPED.has(agent.status));
 
   return (
-    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md border border-shell-line bg-shell-bg" data-testid="provider-surface" data-card={card?.kind ?? "live"}>
+    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md bg-shell-bg" data-testid="provider-surface" data-card={card?.kind ?? "live"}>
       {/* A real tmux client on a pty; nothing until the shell has said it can (its status). */}
       {agent && live && ready && target && (
         <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}`} at={{ server: agent.tmux_server ?? null, target }} open={ready.open} copy={ready.copy} paste={ready.paste} onView={setView} />
@@ -160,7 +160,7 @@ export function ProviderSurface({ repo, agent, alive, sessionStatus, credentials
                   <h2 className="text-base font-semibold">Disconnected from {name}</h2>
                   <p className="text-sm text-ink-2">The app's view of its pane closed. {name} itself may well still be running.</p>
                   <div>
-                    <button type="button" className={primary} onClick={reconnect}>
+                    <button type="button" className={main} onClick={reconnect}>
                       Reconnect
                     </button>
                   </div>
@@ -176,7 +176,7 @@ export function ProviderSurface({ repo, agent, alive, sessionStatus, credentials
                     {card.kind === "failed" && card.unshowable && (
                       <button
                         type="button"
-                        className={primary}
+                        className={button}
                         onClick={() => {
                           recheck?.();
                           reconnect();
@@ -186,7 +186,7 @@ export function ProviderSurface({ repo, agent, alive, sessionStatus, credentials
                       </button>
                     )}
                     {!(card.kind === "ended" && card.locked) && !(card.kind === "failed" && card.unshowable) && (
-                      <button type="button" className={credentials && card.kind === "failed" ? button : primary} disabled={busy} onClick={() => void resume()}>
+                      <button type="button" className={credentials && card.kind === "failed" ? button : main} disabled={busy} onClick={() => void resume()}>
                         {card.kind === "failed" ? "Restart" : "Continue"}
                       </button>
                     )}

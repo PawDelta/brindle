@@ -128,8 +128,10 @@ function ProviderProblemLine({ problems, navigate }: { problems: ProviderProblem
   );
 }
 
-/* The mockup's rows: the keyboard's cursor, the repo heading, the foot's links. */
-const CURSOR = "ring-1 ring-inset ring-branch";
+/* The mockup's rows: the keyboard's cursor (a tone, not a box; the branch
+   ring comes back while the list has keyboard focus), the repo heading, the
+   foot's links. */
+const CURSOR = "bg-surface-2 in-focus-visible:ring-1 in-focus-visible:ring-inset in-focus-visible:ring-branch";
 const REPO_HEADING = "px-s1 pb-1 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3";
 const FOOT_LINK = "text-[11.5px] text-ink-3 hover:text-ink";
 
@@ -277,7 +279,7 @@ function RowClose({ root, done, onClose, list }: { root: string; done: boolean; 
       type="button"
       className={
         done
-          ? "mt-[4px] shrink-0 whitespace-nowrap rounded-sm px-1.5 py-px text-[10.5px] font-medium text-pass inset-ring inset-ring-line-strong hover:opacity-80"
+          ? "mt-[4px] shrink-0 whitespace-nowrap rounded-sm px-1.5 py-px text-[10.5px] font-medium text-ink-2 hover:text-ink"
           : "mt-[4px] w-[18px] shrink-0 rounded-sm text-center text-[12px] leading-none text-ink-3 opacity-0 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
       }
       aria-label={done ? `Done: close session ${root}` : `Close session ${root}`}
@@ -457,7 +459,7 @@ function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate"
   return (
     <button
       type="button"
-      className={`mx-1 flex items-center gap-s1 rounded-md border bg-surface px-[10px] py-[7px] text-left text-[12.5px] ${on ? "border-branch" : "border-line hover:border-line-strong"} ${total > 0 ? "font-semibold text-ink" : "font-medium text-ink-3"}`}
+      className={`mx-1 flex items-center gap-s1 rounded-md border border-transparent py-[7px] pl-2 pr-[10px] text-left text-[12.5px] ${on ? "bg-surface-2" : "hover:bg-surface-2"} ${total > 0 ? "font-semibold text-ink" : "font-medium text-ink-3"}`}
       aria-current={on ? "page" : undefined}
       data-testid="inbox-link"
       onClick={() => navigate({ screen: "inbox" })}

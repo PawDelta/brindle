@@ -90,9 +90,8 @@ const TONE: Record<string, { bar: string; ink: string }> = {
 };
 const SAP = { bar: "before:bg-sap", ink: "text-sap" };
 
-const ACT = "inline-flex h-6 items-center whitespace-nowrap rounded-md border px-2 text-[11.5px] font-medium disabled:opacity-50";
-const PRIMARY = "border-fawn bg-fawn text-on-fawn hover:opacity-90";
-const PLAIN = "border-line-strong bg-surface text-ink hover:bg-surface-2";
+const ACT = "inline-flex h-6 items-center whitespace-nowrap rounded-md border px-2 text-[13px] font-medium disabled:opacity-50";
+const PLAIN = "border-line-strong bg-transparent text-ink hover:bg-surface-2";
 const GHOST = "border-transparent text-ink-3 hover:text-ink";
 const LINK = "text-[11.5px] text-branch hover:underline";
 
@@ -275,7 +274,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
   }
 
   // One click, at once: the card goes; the engine's refusal, if any, comes back as one line.
-  const act = (label: string, action: InboxAction, body: Record<string, unknown> = {}, look = PRIMARY, title?: string) => (
+  const act = (label: string, action: InboxAction, body: Record<string, unknown> = {}, look = PLAIN, title?: string) => (
     <button key={label} type="button" className={`${ACT} ${look}`} disabled={busy} title={title} onClick={() => actions.run(item, action, body)}>
       {label}
     </button>
@@ -308,7 +307,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
   }
 
   return (
-    <article className={`${card} relative grid max-w-[960px] grid-cols-[minmax(0,1fr)_auto] items-start gap-x-s2 gap-y-1 py-[11px] pl-[18px] pr-[14px] before:absolute before:bottom-[10px] before:left-0 before:top-[10px] before:w-[3px] before:rounded-sm ${tone.bar}`} aria-label={kindLabel(item)} data-testid="inbox-card" data-kind={item.kind}>
+    <article className={`${card} relative grid max-w-[960px] grid-cols-[minmax(0,1fr)_auto] items-start gap-x-s2 gap-y-1 py-[11px] pl-[18px] pr-[14px] before:absolute before:bottom-[10px] before:left-0 before:top-[10px] before:w-[2px] before:rounded-sm before:opacity-80 ${tone.bar}`} aria-label={kindLabel(item)} data-testid="inbox-card" data-kind={item.kind}>
       <div className={`col-start-1 font-mono text-[10.5px] uppercase tracking-[0.06em] ${tone.ink}`}>
         {KIND_SHORT[item.kind] ?? item.kind}
       </div>
@@ -364,7 +363,7 @@ function SetupFix({ item, actions, onDone }: { item: InboxItemDTO; actions: Retu
       onDone();
     });
   return (
-    <button type="button" className={`${ACT} ${PRIMARY}`} disabled={job.busy} onClick={start} data-testid="setup-fix">
+    <button type="button" className={`${ACT} ${PLAIN}`} disabled={job.busy} onClick={start} data-testid="setup-fix">
       {fix.label}
     </button>
   );

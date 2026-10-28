@@ -26,7 +26,7 @@ import { plain } from "../../api/wording";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ProjectPicker } from "../../components/ProjectPicker";
 import { useProviderSignIn } from "../../components/ProviderSignIn";
-import { alert, button, card, field, mono, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, mainTone, mono, quiet } from "../../components/ui";
 import type { Route } from "../../routes";
 import { useSessions } from "../../store/sessions";
 import { useJob } from "../Branch/useJob";
@@ -49,7 +49,7 @@ export interface OnboardingProps {
 
 type Step = "loading" | "signin" | "connect" | "install" | "provider-signin" | "ready" | "permissions" | "project";
 
-const big = `${primary} px-s2 py-s1 text-[15px]`;
+const big = `inline-flex items-center gap-1 rounded-md border px-s2 py-s1 ${mainTone}`;
 const link = "text-branch underline-offset-2 hover:underline";
 const fine = "text-xs text-ink-3";
 
@@ -156,7 +156,7 @@ function ProviderCard({ row, picked, installed, onPick, onUndo }: { row: Provide
   const f = factsOf(row);
   const found = connected(row);
   return (
-    <section className={`${card} flex flex-col gap-s1 p-s2 ${picked ? "border-branch ring-1 ring-branch" : found ? "border-pass" : ""}`} aria-label={f.name} data-testid={`onb-card-${row.provider}`} data-picked={picked} data-found={found}>
+    <section className={`${card} flex flex-col gap-s1 p-s2 ${picked ? "border-branch bg-surface-2" : found ? "border-pass" : ""}`} aria-label={f.name} data-testid={`onb-card-${row.provider}`} data-picked={picked} data-found={found}>
       <div className="flex items-center gap-s1">
         <Mark provider={row.provider} name={f.name} />
         <div className="leading-tight">
@@ -329,7 +329,7 @@ function ProviderSignInStep({ row, index, of, rest, already, check, openUrl, onL
             }}
           >
             <input className={`${field} w-full font-mono`} aria-label="Code from the browser" placeholder={phase.prompt} value={code} autoFocus onChange={(e) => setCode(e.target.value)} />
-            <button type="submit" className={primary} disabled={!code.trim()}>
+            <button type="submit" className={button} disabled={!code.trim()}>
               Continue
             </button>
           </form>
@@ -574,7 +574,7 @@ function Permissions({ client, onNext }: { client: DaemonClient; onNext(): void 
           />
         ))}
       </div>
-      <p className="flex items-start gap-s1 rounded-md border border-line bg-canvas-2 px-s2 py-s1 text-[13px] text-ink-2" data-testid="onb-preset-note">
+      <p className="flex items-start gap-s1 rounded-md bg-canvas-2 px-s2 py-s1 text-[13px] text-ink-2" data-testid="onb-preset-note">
         <span aria-hidden className="text-branch">◇</span>
         {copy.note}
       </p>

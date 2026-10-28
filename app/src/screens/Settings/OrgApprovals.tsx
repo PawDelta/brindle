@@ -10,7 +10,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { DaemonError, type DaemonClient } from "../../api/client";
 import type { OrgGrantPolicyDTO, OrgPermissionsDTO } from "../../api/schema";
-import { alert, button, card, field, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, panel, quiet } from "../../components/ui";
 
 type Choice = { id: string; label: string; detail?: string };
 
@@ -44,7 +44,7 @@ function SearchPicker({ label, choices, selected, onSelect, children }: {
       }
     }}>
       <summary aria-labelledby={id} className={`${field} cursor-pointer`}>{selected.map((value) => choices.find((item) => item.id === value)?.label ?? value).join(", ") || `Choose ${label.toLowerCase()}`}</summary>
-      <div className={`${card} absolute left-0 top-full z-50 mt-1 w-full min-w-56 p-s1 shadow-lg`}>
+      <div className={`${panel} absolute left-0 top-full z-50 mt-1 w-full min-w-56 p-s1 shadow-lg`}>
         <input ref={search} type="search" className={`${field} w-full`} aria-label={`Search ${label.toLowerCase()}`} value={query} onChange={(event) => setQuery(event.target.value)} />
         <div className="mt-s1 max-h-56 overflow-auto" role="group" aria-label={`Available ${label.toLowerCase()}`}>
           {visible.map((item) => <button key={item.id} type="button" aria-pressed={selected.includes(item.id)} className={`${quiet} flex w-full flex-col items-start text-left aria-pressed:bg-branch-soft aria-pressed:text-branch`} onClick={() => {
@@ -159,7 +159,7 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
         }} />
         <SearchPicker label="Assignment roles" choices={roleChoices} selected={assignment ? [assignment] : []} onSelect={setAssignment} />
       </fieldset>
-      <button type="button" className={primary} disabled={busy || !person || !assignment || assignment === currentRole} onClick={() => void run(async () => {
+      <button type="button" className={button} disabled={busy || !person || !assignment || assignment === currentRole} onClick={() => void run(async () => {
         await client.assignOrgRole({ org_id: state.identity.org_id, actor_sub: state.identity.sub, sub: member, role: assignment });
         const loaded = await client.orgPermissions();
         // Assigning the signed-in person may change their authority. Keep any
@@ -198,7 +198,7 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
         <p className="text-xs text-ink-3">One target per line: tool kind, exact/prefix/glob, then the target. Example: bash prefix rm . Empty allowlists permit none.</p>
       </fieldset>
       <div className="flex flex-wrap gap-s1">
-        <button type="submit" className={primary} disabled={locked}>Save approval limits</button>
+        <button type="submit" className={button} disabled={locked}>Save approval limits</button>
         {role && <button type="button" className={button} disabled={locked} onClick={() => void save(true)}>Use inherited limits</button>}
         <button type="button" className={button} disabled={busy} onClick={() => void reload()}>Reload policy and keep drafts</button>
       </div>

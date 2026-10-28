@@ -71,7 +71,7 @@ import { OrgApprovals } from "./OrgApprovals";
 import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
-import { alert, button, card, field, h2, mono, notice, pill, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, h2, main, mono, notice, panel, pill, quiet } from "../../components/ui";
 import { useProviders } from "../../store/providers";
 import { StoreContext, useAppState } from "../../store/useStore";
 import {
@@ -530,7 +530,7 @@ function AppUpdate({ client, updater, release, readAbout }: { client: DaemonClie
       {updater && (
         <Row label="Update the app" help={help} testId="app-update-row">
           {state === "installed" || state === "restarting" ? (
-            <button type="button" className={primary} disabled={state === "restarting"} onClick={() => void restart(updater)}>
+            <button type="button" className={button} disabled={state === "restarting"} onClick={() => void restart(updater)}>
               Restart
             </button>
           ) : (
@@ -592,7 +592,7 @@ function KeyField({ client, name, repo, onStored, onCancel }: { client: DaemonCl
         autoFocus
         onChange={(e) => setValue(e.target.value)}
       />
-      <button type="submit" className={primary} disabled={busy || !value.trim()}>
+      <button type="submit" className={button} disabled={busy || !value.trim()}>
         {busy ? "Saving…" : "Save"}
       </button>
       <button type="button" className={quiet} disabled={busy} onClick={onCancel}>
@@ -722,7 +722,7 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
       testId={`provider-${row.provider}`}
       data={{ provider: row.provider, state, install: install?.status }}
       badges={
-        <span className={`inline-flex items-center gap-1 rounded-sm px-s1 py-0.5 text-xs font-normal inset-ring inset-ring-line-strong ${state === "signed_in" ? "text-pass" : "text-ink-2"}`} data-testid="provider-state">
+        <span className={`inline-flex items-center gap-1.5 text-xs font-normal ${state === "signed_in" ? "text-pass" : "text-ink-2"}`} data-testid="provider-state">
           <span className={`size-2 rounded-full ${DOT[state]}`} aria-hidden />
           {STATE_TEXT[state]}
         </span>
@@ -1098,7 +1098,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
                   <button type="button" className={quiet} disabled={saving} onClick={() => setUserDraft(userLoaded)}>
                     Discard
                   </button>
-                  <button type="button" className={primary} disabled={saving || userMissing.length > 0} onClick={() => void saveUser()}>
+                  <button type="button" className={button} disabled={saving || userMissing.length > 0} onClick={() => void saveUser()}>
                     {saving ? "Saving…" : "Save your settings"}
                   </button>
                 </div>
@@ -1311,7 +1311,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
             </span>
           )}
           {upgradeNotice && upgrade.state.kind === "idle" && (
-            <button type="button" className={primary} onClick={update}>
+            <button type="button" className={main} onClick={update}>
               Update brindle
             </button>
           )}
@@ -1371,14 +1371,14 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         </p>
       )}
       {repo && dirty.length > 0 && (
-        <div className={`${card} sticky bottom-0 flex flex-col gap-s1 border-branch px-s2 py-s2 shadow-lg`} data-testid="settings-save">
+        <div className={`${panel} sticky bottom-0 flex flex-col gap-s1 border-branch px-s2 py-s2 shadow-lg`} data-testid="settings-save">
           <div className="flex flex-wrap items-center gap-s2">
             <span className="text-sm font-medium">{dirty.length === 1 ? "1 change" : `${dirty.length} changes`}</span>
             <span className="flex-1" />
             <button type="button" className={quiet} disabled={saving} onClick={() => setDraft(loaded)}>
               Discard
             </button>
-            <button type="button" className={primary} disabled={saving || missing.length > 0} onClick={() => void save()}>
+            <button type="button" className={button} disabled={saving || missing.length > 0} onClick={() => void save()}>
               {saving ? "Saving…" : "Save"}
             </button>
           </div>
