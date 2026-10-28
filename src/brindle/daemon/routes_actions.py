@@ -741,9 +741,11 @@ def delete_session_file(db: DB, params: dict, body: Body) -> Any:
 _SESSION_PR = "root_id = ? AND branch = ?"
 
 
-def _checked(db: DB, ws: Workspace, job: Job, passed: str | None = None):
+def _checked(db: DB, ws: Workspace, job: Job, passed: tuple[str, list[str]] | None = None,
+             checked: list[str] | None = None):
     """The PR gate on the session checkout (gates.pr_checked), each check's start as the job's progress."""
-    return gates.pr_checked(db, ws, lambda t: bus.publish(db, "job.progress", job=job.id, text=t), passed=passed)
+    return gates.pr_checked(db, ws, lambda t: bus.publish(db, "job.progress", job=job.id, text=t),
+                            passed=passed, checked=checked)
 
 
 def open_session_pr(db: DB, params: dict, body: Body) -> Any:
@@ -763,9 +765,11 @@ def open_session_pr(db: DB, params: dict, body: Body) -> Any:
 
     def work(db: DB, job: Job) -> Any:
         identity_lock.ensure(root)      # again: the person signed in may have changed since
-        passed = db.conn.execute(f"SELECT sha FROM session_pr_prep WHERE {_SESSION_PR} AND state = 'passed'",
-                                 key).fetchone()
-        with _checked(db, ws, job, passed=passed["sha"] if passed else None) as head:
+        # The commands brindle's preparation saw pass on its sha: any check configured since still runs.
+        prep = db.conn.execute(f"SELECT sha, checks FROM session_pr_prep WHERE {_SESSION_PR} AND state = 'passed'",
+                               key).fetchone()
+        passed = (prep["sha"], json.loads(prep["checks"] or "[]")) if prep else None
+        with _checked(db, ws, job, passed=passed) as head:
             url = workspaces.open_pull_request(ws, title, draft, body=text, sha=head)
         if url is None:     # the person opens it from the compare page: no PR to record yet
             url = workspaces.compare_url(ws)
@@ -867,20 +871,23 @@ def _prepare_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str]) -> Job
         return None
     db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, title, prepared_at)"
                     " VALUES (?, ?, ?, 'checking', ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
-                    " sha = excluded.sha, state = excluded.state, title = excluded.title,"
+                    " sha = excluded.sha, state = excluded.state, title = excluded.title, checks = NULL,"
                     " check_cmd = NULL, output = NULL, prepared_at = excluded.prepared_at",
                     (*key, head, review.draft(db, root, ws)["title"], time.time()))
 
-    def settle(db: DB, state: str, sha: str, cmd: str | None = None, output: str | None = None) -> None:
+    def settle(db: DB, state: str, sha: str, cmd: str | None = None, output: str | None = None,
+               checks: list[str] | None = None) -> None:
         # Only the row this preparation wrote: one the sweep dropped meanwhile (not ready) stays gone.
-        db.conn.execute(f"UPDATE session_pr_prep SET state = ?, sha = ?, check_cmd = ?, output = ?"
-                        f" WHERE {_SESSION_PR} AND sha = ?", (state, sha, cmd, output, *key, head))
+        db.conn.execute(f"UPDATE session_pr_prep SET state = ?, sha = ?, check_cmd = ?, output = ?, checks = ?"
+                        f" WHERE {_SESSION_PR} AND sha = ?",
+                        (state, sha, cmd, output, json.dumps(checks) if checks is not None else None, *key, head))
 
     def work(db: DB, job: Job) -> Any:
+        checked: list[str] = []
         try:
             identity_lock.ensure(root)
-            with _checked(db, ws, job) as sha:
-                settle(db, "passed", sha)
+            with _checked(db, ws, job, checked=checked) as sha:
+                settle(db, "passed", sha, checks=checked)
         except gates.ChecksFailed as e:
             settle(db, "failed", head, e.cmd, str(e))
             gates.tell(db, root.id, f"[brindle PR] The pre-PR checks failed, so the session's PR waits: {e}\n"

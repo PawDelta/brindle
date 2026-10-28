@@ -493,13 +493,15 @@ CREATE TABLE IF NOT EXISTS session_prs (
 );
 -- A ready session's PR as brindle prepared it for the person's approval
 -- (routes_actions.prepare_pr): the pre-PR checks run on sha, nothing pushed.
--- state: checking | passed | failed (check_cmd and output: the failing check).
+-- state: checking | passed | failed (check_cmd and output: the failing check);
+-- checks: the JSON list of commands that passed on sha (only those are reused).
 CREATE TABLE IF NOT EXISTS session_pr_prep (
     root_id TEXT NOT NULL,
     branch TEXT NOT NULL,
     sha TEXT NOT NULL,
     state TEXT NOT NULL,
     title TEXT,
+    checks TEXT,
     check_cmd TEXT,
     output TEXT,
     prepared_at REAL NOT NULL,

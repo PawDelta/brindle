@@ -1711,10 +1711,16 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, step, passed):
     def asked() -> list[tuple]:
         return [(i.kind, i.reason) for i in inbox.items(db, None, panes={}) if i.kind.startswith("pr_")]
 
-    watch = session_review.ReadinessWatch()
+    watch, held = session_review.ReadinessWatch(), []
     watch.sweep(db)
     head = _commit(sess, "a.py", "a\n")
-    assert watch.sweep(db) == ["lead"] and watch.sweep(db) == []      # checked once per HEAD
+    # Its preparation dispatched but not yet run: the next sweep leaves that work alone.
+    monkeypatch.setattr(routes_actions, "_spawn", held.append)
+    assert watch.sweep(db) == ["lead"] and watch.sweep(db) == [] and len(held) == 1
+    assert (runs, asked(), remote()) == ([], [], "")
+    held.pop()()
+    monkeypatch.setattr(routes_actions, "_spawn", lambda target: target())
+    assert watch.sweep(db) == []        # checked once per HEAD
     assert (runs, remote(), called.exists()) == (["validate"], "", False)
     if not passed:      # the supervisor hears which check failed, and the PR waits
         assert asked() == [("pr_failed", "PR checks failed: validate")]
@@ -1723,9 +1729,11 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, step, passed):
     assert asked() == [("pr_ready", "PR ready for your approval")] and told == []
     if step == "ready":
         return
+    # A check required since brindle prepared it, the HEAD the same: that one runs, the passed one isn't run again.
+    config.set_local(lead.repo_root, "checks", ["validate", "lint"])
     assert _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})[0] == 202
-    # The sha brindle checked, its checks not run again; the Inbox item goes.
-    assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate"], 1, [])
+    # The sha brindle checked; the Inbox item goes.
+    assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1, [])
     if step == "open":
         return
     newer = _commit(sess, "a.py", "b\n")
@@ -1734,7 +1742,7 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, step, passed):
     assert (remote(), ready["pr"]) == (head, {"url": "https://github.com/o/r/pull/7", "unpushed": 1})
     assert _send("POST", "/v1/sessions/lead/pr/push")[0] == 202
     _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
-    assert (remote(), ready["pr"]["unpushed"], runs) == (newer, 0, ["validate", "validate"])
+    assert (remote(), ready["pr"]["unpushed"], runs) == (newer, 0, ["validate", "lint", "validate", "lint"])
 
 
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:

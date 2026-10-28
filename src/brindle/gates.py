@@ -496,15 +496,18 @@ class ChecksFailed(workspaces.WorkspaceError):
 
 
 @contextmanager
-def pr_checked(db: DB, ws: Workspace, progress=None, passed: str | None = None):
+def pr_checked(db: DB, ws: Workspace, progress=None, passed: tuple[str, list[str]] | None = None,
+               checked: list[str] | None = None):
     """Hold ``ws``'s branch (the base and checkout locks a session edit or a
     merge into it also take) while it is checked for a PR, and yield the
     verified sha: the push inside the ``with`` must publish exactly that.
-    Every configured check runs in full on a clean checkout of that HEAD (a
-    tree that already passed counts, as does ``passed``: a HEAD these checks
-    were recorded passing on); ``ChecksFailed`` on the first failure,
-    ``WorkspaceError`` if the checkout was dirty, busy or moved meanwhile.
-    ``progress(text)`` hears each check start."""
+    Every check configured now runs in full on a clean checkout of that HEAD
+    (a tree that already passed counts, as does a command ``passed``, (sha,
+    commands), recorded passing on this very HEAD: a check configured since
+    still runs); ``ChecksFailed`` on the first failure, ``WorkspaceError`` if
+    the checkout was dirty, busy or moved meanwhile. ``progress(text)`` hears
+    each check start; ``checked`` gets each command verified, by the time it
+    yields."""
     from brindle import pipeline
     from brindle.config import load_repo_config
 
@@ -522,12 +525,16 @@ def pr_checked(db: DB, ws: Workspace, progress=None, passed: str | None = None):
         sha = head(ws)
         env = workspaces.workspace_env(ws)
         with queue_place(time.time()):
-            for n, cmd in enumerate(cfg.checks if passed != sha else [], 1):
-                if progress:
-                    progress(f"check {n}/{len(cfg.checks)}: {cmd}")
-                ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
-                if not ok:
-                    raise ChecksFailed(cmd, out)
+            reuse = set(passed[1]) if passed and passed[0] == sha else set()
+            for n, cmd in enumerate(cfg.checks, 1):
+                if cmd not in reuse:
+                    if progress:
+                        progress(f"check {n}/{len(cfg.checks)}: {cmd}")
+                    ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+                    if not ok:
+                        raise ChecksFailed(cmd, out)
+                if checked is not None:
+                    checked.append(cmd)
         if head(ws) != sha or git.dirty_files(ws.path, tracked_only=True):
             raise workspaces.WorkspaceError(
                 f"{ws.branch} changed while its checks ran; nothing was pushed. Try again.")
