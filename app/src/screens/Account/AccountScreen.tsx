@@ -21,7 +21,7 @@ import type { OpenUrl } from "../../api/open";
 import { plain } from "../../api/wording";
 import { PageHeader } from "../../components/PageHeader";
 import { RepoSelect, useRepo } from "../../components/RepoSelect";
-import { alert, button, card, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
+import { alert, button, card, chip, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
 import { useSessions } from "../../store/sessions";
 import { useUsage } from "../../store/usage";
 import { useAppState } from "../../store/useStore";
@@ -156,7 +156,7 @@ function PlanCard({ account, client, openUrl, onChanged }: { account: AccountInf
     <section className={`${card} flex flex-col gap-s1 px-s2 py-s2`} aria-label="Plan" data-testid="plan">
       <header className="flex flex-wrap items-center gap-s1">
         <h2 className={h2}>{account.name ?? "Signed in"}</h2>
-        <span className={`${pill} ${plan === "free" ? "bg-surface-2 text-ink-2" : "bg-branch-soft text-branch"}`} data-testid="plan-pill">
+        <span className={`${pill} ${plan === "free" ? "text-ink-2" : "text-branch"}`} data-testid="plan-pill">
           brindle {PLAN_LABEL[plan]}
         </span>
         <span className="flex-1" />
@@ -292,7 +292,7 @@ function PaidPlan({ plan, features, openUrl, onUse }: { plan: Plan; features: st
     <section className={`${card} flex flex-col gap-s1 px-s2 py-s2`} aria-label="Your plan" data-testid="features">
       <header className="flex flex-wrap items-baseline gap-s1">
         <h2 className={h2}>{tier.name}</h2>
-        <span className={`${pill} bg-branch-soft text-branch`}>{tier.label}</span>
+        <span className={`${pill} text-branch`}>{tier.label}</span>
         <span className="flex-1" />
         <button type="button" className={`${quiet} text-xs`} onClick={() => open(PLAN_GUIDE_URL[plan])} data-testid="plan-guide">
           Get the most from {PLAN_LABEL[plan]} ↗
@@ -465,7 +465,7 @@ function Spend({ client, openUrl, signedIn, paying, revision }: { client: Daemon
         <>
           <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Days">
             {DAYS.map((d) => (
-              <button key={d} type="button" className={`${pill} border ${days === d ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2 hover:bg-surface-2"}`} aria-pressed={days === d} onClick={() => setDays(d)}>
+              <button key={d} type="button" className={`${chip} border ${days === d ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2 hover:bg-surface-2"}`} aria-pressed={days === d} onClick={() => setDays(d)}>
                 {d} days
               </button>
             ))}

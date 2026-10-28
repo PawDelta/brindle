@@ -36,7 +36,7 @@ export interface EditAccess {
 export function EditPill({ access }: { access: EditAccess }) {
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-full border px-2 py-px text-xs ${access.editable ? "border-line bg-surface-2 text-ink-2" : "border-dashed border-line-strong text-ink-3"}`}
+      className={`inline-flex items-center gap-1 rounded-sm border px-2 py-px text-xs ${access.editable ? "border-line bg-surface-2 text-ink-2" : "border-dashed border-line-strong text-ink-3"}`}
       title={access.editable ? "Click a hunk, or press e, to edit its new side. ⌘S saves it as your commit on the worker's branch." : `Editing is off: ${access.why ?? "the worker is busy"}.`}
       data-testid="edit-pill"
     >

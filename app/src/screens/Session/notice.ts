@@ -5,8 +5,8 @@ export const failure = (e: unknown): Notice => ({ text: e instanceof Error ? e.m
 
 /* How a session's state reads: live ones by the supervisor's live status. */
 export const STATE_PILL: Record<string, string> = {
-  failed: "bg-sap-soft text-sap",
-  paused: "bg-surface-2 text-ink-3",
-  waiting: "bg-sap-soft text-sap",
-  processing: "bg-pass-soft text-pass",
+  failed: "text-sap",
+  paused: "text-ink-3",
+  waiting: "text-sap",
+  processing: "text-pass",
 };

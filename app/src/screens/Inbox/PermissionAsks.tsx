@@ -37,7 +37,7 @@ const skippedText = (skipped: AskResultDTO[] | undefined) =>
 const BTN = "inline-flex min-h-8 items-center justify-center gap-2 whitespace-nowrap rounded-lg border px-4 text-sm font-medium disabled:opacity-50";
 const DENY = "border-transparent text-ink-2 hover:bg-fail-soft hover:text-fail";
 const PLAIN = "border-line-strong bg-surface text-ink hover:bg-surface-2";
-const PRIMARY = "border-sap bg-sap text-on-sap hover:opacity-90";
+const PRIMARY = "border-fawn bg-fawn text-on-fawn hover:opacity-90";
 const LINK = "text-xs text-branch hover:underline disabled:opacity-50";
 
 const GROUP_NAMES: Record<string, string> = { files: "Files", shell: "Shell", git: "Git", network: "Network", mcp: "MCP" };
@@ -204,12 +204,12 @@ function AllowSplit({ label, disabled, onPrimary, children }: { label: string; d
       <button type="button" className={`${BTN} ${PRIMARY} rounded-r-none`} disabled={disabled} onClick={onPrimary ?? (() => setOpen((o) => !o))}>
         {label}
       </button>
-      <button type="button" className={`${BTN} ${PRIMARY} min-w-8 rounded-l-none border-l border-l-on-sap/35 px-2.5`} disabled={disabled} aria-haspopup="menu" aria-expanded={open} aria-label="More ways to allow" onClick={() => setOpen((o) => !o)}>
+      <button type="button" className={`${BTN} ${PRIMARY} min-w-8 rounded-l-none border-l border-l-on-fawn/35 px-2.5`} disabled={disabled} aria-haspopup="menu" aria-expanded={open} aria-label="More ways to allow" onClick={() => setOpen((o) => !o)}>
         ▾
       </button>
       {open && (
         // An item closes the menu once it has run, unless it only opens more of it (`keep`).
-        <div role="menu" aria-label="Allow" className="absolute right-0 top-[calc(100%+6px)] z-20 flex min-w-72 flex-col rounded-[10px] border border-line-strong bg-surface p-1 shadow-lg" onClick={(e) => (e.target as HTMLElement).closest("[role=menuitem]:not([data-keep]), [data-close]") && close()}>
+        <div role="menu" aria-label="Allow" className="absolute right-0 top-[calc(100%+6px)] z-20 flex min-w-72 flex-col rounded-lg border border-line-strong bg-surface p-1 shadow-lg" onClick={(e) => (e.target as HTMLElement).closest("[role=menuitem]:not([data-keep]), [data-close]") && close()}>
           {children()}
         </div>
       )}

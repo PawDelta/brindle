@@ -84,7 +84,7 @@ export function tone(status: string, alive?: boolean): Tone {
 export const DOT: Record<Tone, string> = {
   attention: "bg-sap",
   busy: "bg-pass",
-  idle: "bg-fawn",
+  idle: "bg-ink-2",
   off: "bg-ink-3",
 };
 

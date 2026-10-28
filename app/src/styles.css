@@ -1,62 +1,70 @@
 /* The brindle palette, as the app wears it: the pawdelta.com site's
-   tokens, the same values in both themes, mapped onto Tailwind names
-   exactly as the site maps them, so bg-surface, text-ink-2,
-   gap-s2 or rounded-lg mean the same thing here as on the site: the site's
-   warm paper and near-black grounds, its ink, its lines, its four accents
-   (each at least 4.5:1 on canvas-2 and on its own soft pill, in both
-   themes). The app adds what the site has no word for: a fail red beside
-   the accents, and on-branch / on-sap for text on those two. The sidebar
-   sits on the same warm surfaces, with purple (branch) only as its accent
-   for what is selected or focused; the shell blocks stay dark. Every
-   colour in the app is one of these tokens. Dark is the default; light
-   under prefers-color-scheme or data-theme="light", and data-theme="dark"
-   forces dark (components/ThemeToggle.tsx). */
+   Crisp tokens, the same values in both themes, mapped onto Tailwind
+   names exactly as the site maps them, so bg-surface,
+   text-ink-2, gap-s2 or rounded-lg mean the same thing here as on the site:
+   its green-tinted near-black and cool light grounds, its ink, its lines,
+   its accents (each at least 4.5:1 on canvas-2, in both themes). --fawn
+   keeps its name but is the UI accent, pass green, as on the site (the
+   primary button, the focus ring, links); the tan it once was lives on
+   only in the logo's threads (--thread-*). Radii are crisp, 2px for pills
+   and 4px for the rest, and pills are hairlines rather than fills. The app
+   adds what the site has no word for: a fail red beside the accents,
+   on-branch / on-sap for text on those two, and for the terminal a raised
+   shell ground (its tab strip) and the shell's own fail red. The sidebar
+   sits on the same surfaces, with purple (branch) only as its accent for
+   what is selected or focused; the shell blocks stay dark. Every colour in the app is one of these tokens.
+   Dark is the default; light under prefers-color-scheme or
+   data-theme="light", and data-theme="dark" forces dark
+   (components/ThemeToggle.tsx). */
 @import "tailwindcss";
 
 :root {
-  --canvas: #09090b; --canvas-2: #121214; --surface: #16161a; --surface-2: #1c1b1f;
-  --line: rgba(63, 63, 70, 0.42); --line-strong: rgba(82, 82, 91, 0.6);
-  --ink: #eee6dc; --ink-2: #b9ab9b; --ink-3: #948677;
-  --fawn: #d7af87; --fawn-soft: rgba(215, 175, 135, 0.1);
+  --canvas: #080d0b; --canvas-2: #0d1411; --surface: #111a16; --surface-2: #16211c;
+  --line: rgba(52, 96, 74, 0.4); --line-strong: rgba(72, 124, 96, 0.55);
+  --ink: #e8f0eb; --ink-2: #afbfb6; --ink-3: #889a90;
+  --fawn: #34d399; --fawn-soft: color-mix(in srgb, var(--fawn) 10%, transparent);
   --sap: #e8875a; --sap-soft: rgba(232, 135, 90, 0.12);
   --pass: #34d399; --pass-soft: rgba(52, 211, 153, 0.12);
   --branch: #a99be0; --branch-soft: rgba(169, 155, 224, 0.12);
   --fail: #f08c88; --fail-soft: rgba(240, 140, 136, 0.12);
-  --on-fawn: #1a130c; --on-branch: #15102a; --on-sap: #1a0f08;
-  --shell-bg: #0c0c0e; --shell-ink: #eee6dc; --shell-dim: #8b7d6f; --shell-acc: #d7af87; --shell-line: rgba(63, 63, 70, 0.5);
+  --on-fawn: #03160e; --on-branch: #15102a; --on-sap: #1a0f08;
+  --thread-in: #d7af87; --thread-top: #e8875a; --thread-mid: #a99be0; --thread-out: #34d399;
+  --shell-bg: #070b09; --shell-bg-2: color-mix(in srgb, var(--shell-bg), white 5%); --shell-ink: #e8f0eb; --shell-dim: #859a8e; --shell-acc: #34d399; --shell-bad: #f08c88; --shell-line: rgba(52, 96, 74, 0.5);
   --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   --s-1: 8px; --s-2: 16px; --s-3: 24px; --s-4: 32px; --s-5: 40px; --s-6: 48px; --s-8: 64px; --s-10: 80px; --s-12: 96px;
-  --r-sm: 4px; --r: 8px; --r-lg: 12px;
+  --r-sm: 2px; --r: 4px; --r-lg: 4px;
   color-scheme: dark;
 }
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme="dark"]) {
-    --canvas: #f6f3ef; --canvas-2: #efeae4; --surface: #ffffff; --surface-2: #f8f5f1;
-    --line: rgba(120, 104, 88, 0.2); --line-strong: rgba(120, 104, 88, 0.34);
-    --ink: #211a14; --ink-2: #5a4d41; --ink-3: #75685b;
-    --fawn: #86572a; --fawn-soft: rgba(134, 87, 42, 0.09);
+    --canvas: #f1f5f5; --canvas-2: #e7eeed; --surface: #ffffff; --surface-2: #f6f9f8;
+    --line: rgba(30, 80, 70, 0.18); --line-strong: rgba(30, 80, 70, 0.34);
+    --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
+    --fawn: #046e50;
     --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
     --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
     --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
     --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
-    --on-fawn: #fffaf4; --on-branch: #ffffff; --on-sap: #ffffff;
+    --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
+    --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
     color-scheme: light;
   }
 }
 
 :root[data-theme="light"] {
-  --canvas: #f6f3ef; --canvas-2: #efeae4; --surface: #ffffff; --surface-2: #f8f5f1;
-  --line: rgba(120, 104, 88, 0.2); --line-strong: rgba(120, 104, 88, 0.34);
-  --ink: #211a14; --ink-2: #5a4d41; --ink-3: #75685b;
-  --fawn: #86572a; --fawn-soft: rgba(134, 87, 42, 0.09);
+  --canvas: #f1f5f5; --canvas-2: #e7eeed; --surface: #ffffff; --surface-2: #f6f9f8;
+  --line: rgba(30, 80, 70, 0.18); --line-strong: rgba(30, 80, 70, 0.34);
+  --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
+  --fawn: #046e50;
   --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
   --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
   --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
   --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
-  --on-fawn: #fffaf4; --on-branch: #ffffff; --on-sap: #ffffff;
+  --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
+  --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
   color-scheme: light;
 }
 
@@ -87,9 +95,11 @@
   --color-fail-soft: var(--fail-soft);
   /* Shell blocks (dark in both themes) */
   --color-shell-bg: var(--shell-bg);
+  --color-shell-bg-2: var(--shell-bg-2);
   --color-shell-ink: var(--shell-ink);
   --color-shell-dim: var(--shell-dim);
   --color-shell-acc: var(--shell-acc);
+  --color-shell-bad: var(--shell-bad);
   --color-shell-line: var(--shell-line);
   /* Type */
   --font-sans: var(--sans);
@@ -104,7 +114,7 @@
   --spacing-s8: var(--s-8);
   --spacing-s10: var(--s-10);
   --spacing-s12: var(--s-12);
-  /* Radii: rounded-sm 4px, rounded-md 8px, rounded-lg 12px */
+  /* Radii: rounded-sm 2px, rounded-md 4px, rounded-lg 4px */
   --radius-sm: var(--r-sm);
   --radius-md: var(--r);
   --radius-lg: var(--r-lg);
@@ -187,15 +197,15 @@ body {
 /* Below the last row, the shell's background, not xterm.css's black. */
 .terminal-host .xterm .xterm-viewport { background-color: transparent; }
 
-/* The lockup (site.css .logo): the threads in the site's accents, the
-   middle one branch. */
+/* The lockup (site.css .logo): the braid's own threads (--thread-*), fawn,
+   sap, branch and pass, whatever the UI accent is. */
 .logo { display: inline-flex; align-items: center; gap: 0.5em; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; line-height: 24px; }
 .logo-mark { flex: none; display: block; width: 1.98em; height: 1.375em; }
 .logo-word { letter-spacing: -0.02em; }
-.logo .lm-in { stroke: var(--fawn); } .logo .lm-top { stroke: var(--sap); } .logo .lm-mid { stroke: var(--branch); } .logo .lm-bot { stroke: var(--pass); }
+.logo .lm-in { stroke: var(--thread-in); } .logo .lm-top { stroke: var(--thread-top); } .logo .lm-mid { stroke: var(--thread-mid); } .logo .lm-bot { stroke: var(--thread-out); }
 
 /* The sidebar (components/Sidebar.tsx, SessionContext.tsx): the site's
-   warm surfaces, canvas-2 as its ground, with purple (branch) only as the
+   surfaces, canvas-2 as its ground, with purple (branch) only as the
    accent for the selected row and the current milestone; its vocabulary
    (design/options-v2/M3b-multi's layout): one dot for a status (work
    branch, wait sap, done pass, idle quiet, fail red, paused hollow), a
@@ -212,11 +222,11 @@ body {
 .side-dot[data-tone="fail"] { background: var(--fail); }
 .side-dot[data-tone="paused"] { background: transparent; border: 1.5px solid var(--ink-3); width: 7px; height: 7px; }
 .side-h { display: flex; align-items: center; gap: 8px; padding: 6px 8px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); }
-.side-nb { background: var(--sap); color: var(--on-sap); border-radius: 10px; padding: 0 6px; font-size: 11px; font-weight: 600; line-height: 20px; }
+.side-nb { background: var(--sap); color: var(--on-sap); border-radius: var(--r-sm); padding: 0 6px; font-size: 11px; font-weight: 600; line-height: 20px; }
 .side-ring { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; flex: none; }
 .side-ring::after { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--canvas-2); }
 .side-ms { display: flex; flex-direction: column; gap: 1px; }
-.side-ms .m { display: flex; align-items: flex-start; gap: 8px; padding: 4px 6px; border-radius: 5px; font-size: 12px; color: var(--ink); }
+.side-ms .m { display: flex; align-items: flex-start; gap: 8px; padding: 4px 6px; border-radius: var(--r); font-size: 12px; color: var(--ink); }
 .side-ms .m .i { width: 16px; height: 16px; border-radius: 8px; display: grid; place-items: center; font-size: 9px; flex: none; margin-top: 1px; border: 1px solid var(--line-strong); color: var(--ink-3); }
 .side-ms .m[data-state="done"] .i { background: var(--pass); border-color: var(--pass); color: var(--surface); }
 .side-ms .m[data-state="now"] { background: var(--branch-soft); }
@@ -224,6 +234,6 @@ body {
 .side-ms .m[data-state="todo"] { color: var(--ink-3); }
 .side-ms .m .t { flex: 1; min-width: 0; line-height: 1.35; }
 .side-ms .m .t small { display: block; font-family: var(--mono); font-size: 10px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.side-btn { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px; border-radius: 6px; font-size: 11px; font-weight: 500; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); white-space: nowrap; }
+.side-btn { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px; border-radius: var(--r); font-size: 11px; font-weight: 500; border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); white-space: nowrap; }
 .side-btn:hover { background: var(--surface-2); }
 .side-btn:disabled { opacity: 0.5; cursor: not-allowed; }

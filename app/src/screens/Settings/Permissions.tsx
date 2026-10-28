@@ -90,7 +90,9 @@ interface Activity {
 /* The rule editor's actions: a request kind, or a git push (a bash rule with the push matcher). */
 const ACTIONS = ["read", "write", "edit", "bash", "push", "fetch", "mcp", "other"];
 const MATCH_LABEL: Record<string, string> = { exact: "Is exactly", prefix: "Starts with", glob: "Matches pattern" };
-const TONE: Record<string, string> = { deny: "bg-sap-soft text-sap", ask: "bg-fawn-soft text-fawn", allow: "bg-pass-soft text-pass" };
+const TONE: Record<string, string> = { deny: "bg-sap-soft text-sap", ask: "bg-branch-soft text-branch", allow: "bg-pass-soft text-pass" };
+/* The same tones on a rule's pill: in the text only (pills are hairlines, never a fill). */
+const INK: Record<string, string> = { deny: "text-sap", ask: "text-branch", allow: "text-pass" };
 const fieldLabel = "flex min-w-0 flex-col gap-1 text-xs font-medium text-ink-3";
 const iconButton = `${quiet} inline-flex size-8 items-center justify-center p-0`;
 
@@ -562,7 +564,7 @@ function AdvancedView({ client, policy, busy, run, record, onEdit, onRemove }: {
                   <small className={`mt-0.5 block break-all text-xs text-ink-3 ${mono}`}>{r.label || r.describe}</small>
                 </td>
                 <td className="border-b border-line py-s1 pr-s1 align-middle">
-                  <span className={`${pill} ${TONE[r.decision] ?? ""}`}>{ruleSummary(r)}</span>
+                  <span className={`${pill} ${INK[r.decision] ?? ""}`}>{ruleSummary(r)}</span>
                   <small className="mt-0.5 block text-xs text-ink-3">{ruleLimits(r)}</small>
                   {(r.exclusions ?? []).length > 0 && <small className="mt-0.5 block break-all text-xs text-ink-3">Except: {r.exclusions!.map((x) => x.describe).join("; ")}</small>}
                 </td>

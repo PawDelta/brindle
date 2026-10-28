@@ -54,7 +54,7 @@ const link = "text-branch underline-offset-2 hover:underline";
 const fine = "text-xs text-ink-3";
 
 /* The provider's mark: its initial on its own colour (tokens only). */
-const MARKS: Record<string, string> = { claude: "bg-sap text-on-sap", codex: "bg-ink text-canvas", opencode: "bg-ink-3 text-canvas", antigravity: "bg-fawn text-on-fawn" };
+const MARKS: Record<string, string> = { claude: "bg-sap text-on-sap", codex: "bg-ink text-canvas", opencode: "bg-ink-3 text-canvas", antigravity: "bg-branch text-on-branch" };
 function Mark({ provider, name, small = false }: { provider: string; name: string; small?: boolean }) {
   return (
     <span aria-hidden className={`inline-grid shrink-0 place-items-center rounded-md font-semibold ${small ? "size-4 text-[9px]" : "size-7 text-xs"} ${MARKS[provider] ?? "bg-branch text-on-branch"}`}>
@@ -505,7 +505,7 @@ function PresetCard({ copy, on, disabled, buttonRef, onPick, onKey }: { copy: Pr
         {(
           [
             ["Runs on its own", copy.runs, "text-pass"],
-            ["Asks you", copy.asks, "text-fawn"],
+            ["Asks you", copy.asks, "text-branch"],
             ["Blocked", copy.blocked, "text-sap"],
           ] as const
         ).map(([k, v, tone]) => (

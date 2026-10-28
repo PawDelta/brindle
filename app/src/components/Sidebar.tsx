@@ -277,7 +277,7 @@ function RowClose({ root, done, onClose, list }: { root: string; done: boolean; 
       type="button"
       className={
         done
-          ? "mt-[4px] shrink-0 whitespace-nowrap rounded-full bg-pass-soft px-1.5 py-px text-[10.5px] font-medium text-pass hover:opacity-80"
+          ? "mt-[4px] shrink-0 whitespace-nowrap rounded-sm px-1.5 py-px text-[10.5px] font-medium text-pass inset-ring inset-ring-line-strong hover:opacity-80"
           : "mt-[4px] w-[18px] shrink-0 rounded-sm text-center text-[12px] leading-none text-ink-3 opacity-0 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
       }
       aria-label={done ? `Done: close session ${root}` : `Close session ${root}`}
@@ -389,7 +389,7 @@ function ResumeButton({ client, root, repo, navigate, refresh }: { client: Daemo
     <>
       <button
         type="button"
-        className="mt-[4px] shrink-0 whitespace-nowrap rounded-full border border-line-strong px-1.5 py-px text-[10.5px] font-medium text-ink-2 hover:text-ink disabled:opacity-50"
+        className="mt-[4px] shrink-0 whitespace-nowrap rounded-sm border border-line-strong px-1.5 py-px text-[10.5px] font-medium text-ink-2 hover:text-ink disabled:opacity-50"
         title="Continue the session and open its chat"
         data-testid={`session-resume-${root}`}
         disabled={recovery.busy}
@@ -457,7 +457,7 @@ function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate"
   return (
     <button
       type="button"
-      className={`mx-1 flex items-center gap-s1 rounded-[7px] border bg-surface px-[10px] py-[7px] text-left text-[12.5px] ${on ? "border-branch" : "border-line hover:border-line-strong"} ${total > 0 ? "font-semibold text-ink" : "font-medium text-ink-3"}`}
+      className={`mx-1 flex items-center gap-s1 rounded-md border bg-surface px-[10px] py-[7px] text-left text-[12.5px] ${on ? "border-branch" : "border-line hover:border-line-strong"} ${total > 0 ? "font-semibold text-ink" : "font-medium text-ink-3"}`}
       aria-current={on ? "page" : undefined}
       data-testid="inbox-link"
       onClick={() => navigate({ screen: "inbox" })}
