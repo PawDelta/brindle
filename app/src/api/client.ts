@@ -10,6 +10,7 @@ import type {
   AllowAllPlanDTO,
   AskDecisionDTO,
   AskGroupDTO,
+  CloudOptionsDTO,
   DecisionDTO,
   GoalDTO,
   InboxItemDTO,
@@ -23,6 +24,7 @@ import type {
   PermissionRuleDTO,
   PreflightItemDTO,
   ProfileDTO,
+  ProviderConnectionDTO,
   RoutingDTO,
   SavedActionDTO,
   SessionDTO,
@@ -441,6 +443,23 @@ export interface KeyInfo {
   /* Set in the daemon's environment but not stored (POST /keys/{name}/import). */
   importable?: boolean;
 }
+
+/* Whether the provider can launch the way it connects (engine branch
+   feat/connection-readiness): when not, why, and the one action that fixes it. */
+export interface ConnectionReady {
+  ok: boolean;
+  reason: string | null;
+  action: "install" | "sign_in" | "sign_out" | "renew" | "set_key" | null;
+}
+
+/* GET /providers/{p}/connection with its readiness: `blocked_by` "codex_login"
+   when Codex's ChatGPT login wins over its API key, and the agents that
+   stopped on this provider's credentials. */
+export type ProviderConnection = ProviderConnectionDTO & {
+  ready?: ConnectionReady | null;
+  blocked_by?: "codex_login" | null;
+  stopped_agents?: { id: string; name: string; profile: string }[];
+};
 
 export interface KeyTested {
   name: string;
@@ -1319,6 +1338,37 @@ export class DaemonClient {
      `codex logout`); the person's own CLI login stays. Answers the provider, not signed in. */
   signOutProvider(provider: string) {
     return this.post<ProviderInstalled>(`/providers/${encodeURIComponent(provider)}/logout`, {});
+  }
+
+  /* How the provider connects (brindle.connections): its own sign-in, an API
+     key or the person's cloud, and for a cloud its settings and login. */
+  providerConnection(provider: string, repo?: string) {
+    return this.get<ProviderConnection>(`/providers/${encodeURIComponent(provider)}/connection`, { repo });
+  }
+
+  /* Saves how the provider connects: `method` auto | sign_in | api_key | cloud,
+     and for cloud the route (`cloud`) and its non-secret `settings`. 403 when
+     the org decides instead, with why. */
+  setProviderConnection(provider: string, choice: { method: string; cloud?: string; settings?: Record<string, string>; repo?: string }) {
+    return this.put<ProviderConnection>(`/providers/${encodeURIComponent(provider)}/connection`, choice);
+  }
+
+  /* Signs Codex's ChatGPT login out so its API key is used (ready.action
+     "sign_out"), a job like cloudSignIn: job.done's result is the connection after. */
+  codexSignOut() {
+    return this.post<Job>("/providers/codex/sign-out", {});
+  }
+
+  /* What this machine's cloud CLIs are set up with: AWS profiles, gcloud, the Azure tenant, usual regions. */
+  cloudOptions() {
+    return this.get<CloudOptionsDTO>("/cloud/options");
+  }
+
+  /* The cloud sign-in (or its renewal) for the provider's saved route, a job
+     (provider.cloud_sign_in): the CLI's lines as job.progress, job.done's
+     result {result: "signed in" | "failed" | "waiting" | "manual"}. */
+  cloudSignIn(provider: string) {
+    return this.post<Job>(`/providers/${encodeURIComponent(provider)}/cloud-sign-in`, {});
   }
 
   /* Runs `path`, one of the copies found, and turns the provider back on

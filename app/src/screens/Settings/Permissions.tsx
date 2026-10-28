@@ -70,7 +70,9 @@ const GROUP_LIST: { id: string; name: string; subs: [string, string, string][] }
   { id: "network", name: "Network", subs: [["fetch", "Fetch URLs", "Web pages and APIs"], ["search", "Web search", "Search the web"]] },
   { id: "mcp", name: "MCP", subs: [["tool", "MCP tool calls", "Tools from connected MCP servers"], ["other", "Other MCP requests", "Resources and prompts"]] },
 ];
-const BASELINE_LEVELS = ["allow", "ask", "deny"] as const;
+/* The `rule` the Inbox passes to open the Dangerous row instead of a rule's editor. */
+export const UNCHECKED_ROW = "unchecked-commands";
+const BASELINE_LEVELS =["allow", "ask", "deny"] as const;
 const LEVEL_NAME: Record<string, string> = { allow: "Allow", ask: "Ask", deny: "Deny", inherit: "Inherit" };
 const BY_DEFAULT: Record<string, string> = { allow: "Allowed by default", ask: "Asks by default", deny: "Denied by default" };
 /* Which group a rule belongs to, from its kind (a push is a bash rule with the push matcher). */
@@ -160,6 +162,12 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
   useEffect(() => {
     const want = openId ? `${openId}:${ask ?? 0}` : null;
     if (!want || !policy || opened.current === want) return;
+    if (openId === UNCHECKED_ROW) {
+      opened.current = want;
+      setView("groups");
+      setReveal(true);
+      return;
+    }
     const found = policy.rules.find((r) => r.id === openId);
     if (!found) return;
     opened.current = want;
@@ -167,6 +175,14 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
     setEditing(found);
     document.getElementById("permissions")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   }, [openId, ask, policy]);
+
+  // The Inbox's "Stop asking for these…": the Dangerous row, once the groups view holding it is shown.
+  const [reveal, setReveal] = useState(false);
+  useEffect(() => {
+    if (!reveal || !policy || view !== "groups") return;
+    document.getElementById(UNCHECKED_ROW)?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    setReveal(false);
+  }, [reveal, policy, view]);
 
   const record = (kind: string, what: string, detail: string) => setLog((l) => [{ kind, what, detail, at: Date.now() / 1000 }, ...l]);
 
@@ -505,6 +521,68 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
             Open advanced view
           </button>
         </span>
+      </div>
+      <Dangerous client={client} policy={policy} busy={busy} run={run} record={record} />
+    </div>
+  );
+}
+
+/* Dangerous: the one switch that lets commands brindle can't read run without asking. Off by default; turning
+   it on is confirmed in the page; an org that forces it off locks it. */
+function Dangerous({ client, policy, busy, run, record }: {
+  client: DaemonClient;
+  policy: PermissionPolicyDTO;
+  busy: boolean;
+  run(change: () => Promise<unknown>, done: Feedback): Promise<void>;
+  record(kind: string, what: string, detail: string): void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  // The shell/unchecked entry of the groups table: "ask" (default), "allow", or "deny" (org policy's to set).
+  const level = policy.groups?.find((g) => g.name === "shell")?.subcategories?.unchecked ?? "ask";
+  const on = level === "allow";
+  const lockedBy = level === "deny" ? "your organization" : null;
+  const set = (value: "ask" | "allow") => {
+    setConfirming(false);
+    void run(async () => {
+      await client.setPermissionGroups({ shell: { subcategories: { unchecked: value } } });
+      record("Policy", "Unchecked commands changed", value === "allow" ? "Run without asking" : "Ask every time");
+    }, { text: value === "allow" ? "Unchecked commands now run without asking." : "Unchecked commands ask every time." });
+  };
+  return (
+    <div className="flex flex-col gap-s1 border-t border-line pt-s2" data-testid="dangerous">
+      <h3 className="text-sm font-semibold text-sap">Dangerous</h3>
+      <div id={UNCHECKED_ROW} className={`${card} flex flex-col gap-s1 p-s2`}>
+        <div className="flex flex-wrap items-center gap-s2">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium">Run unchecked commands without asking</div>
+            <p className="text-xs text-ink-3">Commands brindle can't read before they run, such as ones built from downloaded text or variables set elsewhere. brindle still stops force pushes, protected-branch pushes, sudo and deletes outside your repos.</p>
+            {lockedBy && <p className="text-xs text-ink-3">Set by {lockedBy}</p>}
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={on}
+            aria-label="Run unchecked commands without asking"
+            disabled={busy || !!lockedBy}
+            className={`${button} ${on ? "text-sap" : ""}`}
+            onClick={() => (on ? set("ask") : setConfirming(true))}
+          >
+            {on ? "On" : "Off"}
+          </button>
+        </div>
+        {confirming && !on && (
+          <div role="alertdialog" aria-label="Confirm unchecked commands" className="flex flex-col gap-s1 rounded-md border border-sap p-s2 text-sm">
+            <p>Agents will run commands brindle can't read without asking you first. Turn this on only if you accept that.</p>
+            <div className="flex gap-s1">
+              <button type="button" className={button} disabled={busy} onClick={() => set("allow")}>
+                Run unchecked commands
+              </button>
+              <button type="button" className={quiet} onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

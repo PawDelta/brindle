@@ -21,6 +21,7 @@ export interface ApiSchema {
   AzureOptionsDTO: AzureOptionsDTO;
   CloudLoginDTO: CloudLoginDTO;
   CloudOptionsDTO: CloudOptionsDTO;
+  ConnectionReadyDTO: ConnectionReadyDTO;
   DecisionDTO: DecisionDTO;
   GcloudOptionsDTO: GcloudOptionsDTO;
   GoalDTO: GoalDTO;
@@ -63,6 +64,7 @@ export interface ApiSchema {
   RuleDTO: RuleDTO;
   SavedActionDTO: SavedActionDTO;
   SessionDTO: SessionDTO;
+  StoppedAgentDTO: StoppedAgentDTO;
   WorkspaceDTO: WorkspaceDTO;
 }
 /**
@@ -368,6 +370,19 @@ export interface GcloudOptionsDTO {
   adc: boolean;
   project?: string | null;
   region?: string | null;
+}
+/**
+ * Whether an agent of the provider would launch with its method now
+ * (connections.ready); if not, ``reason`` and the ``action`` the app can
+ * offer: install | sign_in | sign_out | renew | set_key.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ConnectionReadyDTO".
+ */
+export interface ConnectionReadyDTO {
+  action?: ("install" | "sign_in" | "sign_out" | "renew" | "set_key") | null;
+  ok: boolean;
+  reason?: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -748,11 +763,14 @@ export interface ProviderChoiceDTO {
  * ``settings`` (variable -> value) and the ``login`` it uses. An org's route
  * wins over ``choice``, the person's saved choice; ``managed`` says why.
  * ``clouds``: the routes the person can choose for this provider.
+ * ``blocked_by`` "codex_login": Codex's ChatGPT login keeps an API key from
+ * being used until POST /providers/codex/sign-out.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "ProviderConnectionDTO".
  */
 export interface ProviderConnectionDTO {
+  blocked_by?: "codex_login" | null;
   choice?: ProviderChoiceDTO | null;
   cloud?: string | null;
   clouds?: string[];
@@ -760,9 +778,22 @@ export interface ProviderConnectionDTO {
   managed?: string | null;
   method: string;
   provider: string;
+  ready: ConnectionReadyDTO;
   settings?: {
     [k: string]: string;
   };
+  stopped_agents?: StoppedAgentDTO[];
+}
+/**
+ * An agent stopped because the provider's credentials were refused (failed_why auth).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "StoppedAgentDTO".
+ */
+export interface StoppedAgentDTO {
+  id: string;
+  name: string;
+  profile: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
