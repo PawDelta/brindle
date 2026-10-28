@@ -65,8 +65,7 @@
    Last, About: the app's version and its license files (About.tsx). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, KeyInfo, Meta, ProviderInstalled, UserSettings } from "../../api/client";
-import type { ProviderConnectionDTO } from "../../api/schema";
+import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, KeyInfo, Meta, ProviderConnection, ProviderInstalled, UserSettings } from "../../api/client";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
 import type { Install } from "../../api/providersInstall";
@@ -75,7 +74,7 @@ import { plain } from "../../api/wording";
 import { UpgradeCard, useEngineUpgrade } from "../../components/EngineUpgrade";
 import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
-import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, RenewLogin, type Method } from "../../components/ProviderConnect";
+import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, ReadyNote, RenewLogin, type Method } from "../../components/ProviderConnect";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import { About } from "./About";
@@ -562,8 +561,18 @@ function AppUpdate({ client, updater, release, readAbout }: { client: DaemonClie
   );
 }
 
-/* The key a provider runs on: the first of its keys that is stored. */
-const keyOf = (provider: string, keys: KeyInfo[] | null): KeyInfo | undefined => (PROVIDER_KEYS[provider] ?? []).map((n) => keys?.find((k) => k.name === n && k.set)).find(Boolean);
+/* The key a provider runs on: OpenCode's model provider's own (`model`),
+   any other provider's first stored one. */
+const keyOf = (provider: string, keys: KeyInfo[] | null, model?: string): KeyInfo | undefined =>
+  (model ? [model] : (PROVIDER_KEYS[provider] ?? [])).map((n) => keys?.find((k) => k.name === n && k.set)).find(Boolean);
+
+/* OpenCode's model providers that take a key: the one shown first is the first with a key stored. */
+const KEY_MODELS = MODEL_PROVIDERS.filter((m) => m.key);
+const firstModel = (keys: KeyInfo[] | null) => KEY_MODELS.find((m) => keys?.some((k) => k.name === m.key && k.set)) ?? KEY_MODELS[0];
+
+/* Keys no provider reads (a profile's api_key_env): kept, in a row of their own. */
+const PROVIDER_KEY_NAMES = new Set(Object.values(PROVIDER_KEYS).flat());
+const otherKey = (k: KeyInfo) => !k.provider && !PROVIDER_KEY_NAMES.has(k.name);
 
 /* "40 min", "3h", "2d" until `ts` (seconds). */
 function until(ts: number, now = Date.now() / 1000): string {
@@ -571,19 +580,21 @@ function until(ts: number, now = Date.now() / 1000): string {
   return m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`;
 }
 
-const stoppedOn = (n: number) => (n > 0 ? ` ${n === 1 ? "1 agent" : `${n} agents`} stopped on it.` : "");
+/* The agents that stopped on this provider's credentials (the engine's stopped_agents), by name. */
+const stoppedOn = (agents: { name: string }[]) => (agents.length ? ` Stopped ${agents.length === 1 ? "1 agent" : `${agents.length} agents`}: ${agents.map((a) => a.name).join(", ")}.` : "");
 
 /* How a key or a cloud connection is doing, in one line: verified with when,
    the cloud login's time left, or what's wrong in the fail colour, naming
-   the agents it stopped. */
-function Health({ connection, keyInfo, stopped }: { connection: ProviderConnectionDTO; keyInfo: KeyInfo | undefined; stopped: number }) {
+   the agents it stopped. `keyLine`: the key's line on a row left to auto. */
+function Health({ connection, keyInfo, keyLine = false }: { connection: ProviderConnection; keyInfo: KeyInfo | undefined; keyLine?: boolean }) {
+  const stopped = connection.stopped_agents ?? [];
   const line = (tone: "pass" | "sap" | "fail" | "ink-3", text: string) => (
-    <span className={`flex items-center gap-1 ${tone === "fail" ? "text-fail" : ""}`} data-testid="provider-health" data-tone={tone}>
+    <span className={`flex items-center gap-1 ${tone === "fail" ? "text-fail" : ""}`} data-testid="provider-health" data-tone={tone} data-stopped={stopped.length}>
       <span className={`size-2 shrink-0 rounded-full ${tone === "pass" ? "bg-pass" : tone === "sap" ? "bg-sap" : tone === "fail" ? "bg-fail" : "bg-ink-3"}`} aria-hidden />
       {text}
     </span>
   );
-  if (connection.method === "api_key") {
+  if (connection.method === "api_key" || keyLine) {
     if (!keyInfo) return line("sap", "No key stored: Replace adds one.");
     const billing = KEYS[keyInfo.name]?.billing.replace(/^B/, "b");
     if (keyInfo.status === "rejected") return line("fail", `Rejected ${ago(keyInfo.checked_at)}: ${KEYS[keyInfo.name]?.maker ?? "the provider"} refused this key.${stoppedOn(stopped)}`);
@@ -599,13 +610,17 @@ function Health({ connection, keyInfo, stopped }: { connection: ProviderConnecti
   return line("ink-3", `Not signed in to ${CLOUD_NAME[connection.cloud ?? ""] ?? "the cloud"} yet`);
 }
 
-/* Change method: the three choices, and the chosen one's setup, in the row. */
-function ChangeMethod({ client, row, current, keys, repo, onChanged, onClose }: { client: DaemonClient; row: ProviderInstalled; current: Method; keys: KeyInfo[] | null; repo: string | null; onChanged(): void; onClose(): void }) {
+/* Change method: the three choices (Your cloud only where the engine has a
+   route), and the chosen one's setup, in the row. Sign in is saved as soon
+   as it is picked, over auto too, so a stored or exported key stops billing. */
+function ChangeMethod({ client, row, connection, keys, repo, onChanged, onClose }: { client: DaemonClient; row: ProviderInstalled; connection: ProviderConnection; keys: KeyInfo[] | null; repo: string | null; onChanged(): void; onClose(): void }) {
   const f = factsOf(row);
-  const [choice, setChoice] = useState<Method>(current);
+  const saved = connection.method;
+  const [choice, setChoice] = useState<Method | null>(saved === "api_key" || saved === "cloud" || saved === "sign_in" ? saved : null);
   const [error, setError] = useState<string | null>(null);
   const opencode = row.provider === "opencode";
-  const [model, setModel] = useState(MODEL_PROVIDERS[0]);
+  const [model, setModel] = useState(firstModel(keys));
+  const cloud = (connection.clouds ?? []).length > 0;
   const done = () => {
     onChanged();
     onClose();
@@ -613,7 +628,7 @@ function ChangeMethod({ client, row, current, keys, repo, onChanged, onClose }: 
   const pick = async (m: Method) => {
     setChoice(m);
     setError(null);
-    if (m !== "sign_in" || current === "sign_in") return;
+    if (m !== "sign_in" || saved === "sign_in") return;
     try {
       await client.setProviderConnection(row.provider, { method: "sign_in", ...(repo ? { repo } : {}) });
       done();
@@ -629,15 +644,18 @@ function ChangeMethod({ client, row, current, keys, repo, onChanged, onClose }: 
           onChange={(id) => {
             const next = MODEL_PROVIDERS.find((x) => x.id === id) ?? MODEL_PROVIDERS[0];
             setModel(next);
-            if (next.cloud) setChoice("cloud");
+            if (next.cloud && cloud) setChoice("cloud");
           }}
         />
       )}
-      <MethodChoice provider={row.provider} name={f.name} value={choice} onChange={(m) => void pick(m)} />
-      {choice === "api_key" && (
-        <ApiKeyPaste client={client} provider={row.provider} expect={(opencode ? model.key : undefined) ?? PROVIDER_KEYS[row.provider]?.[0] ?? "ANTHROPIC_API_KEY"} any={opencode} keys={keys} repo={repo} onSaved={done} onCancel={onClose} />
-      )}
-      {choice === "cloud" && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} repo={repo} onSignedIn={done} />}
+      <MethodChoice provider={row.provider} name={f.name} value={choice} cloud={cloud} onChange={(m) => void pick(m)} />
+      {choice === "api_key" &&
+        (opencode && !model.key ? (
+          <p className="text-xs text-ink-3">{model.name} connects through your cloud, not a key.</p>
+        ) : (
+          <ApiKeyPaste key={model.id} client={client} provider={row.provider} expect={(opencode ? model.key : undefined) ?? PROVIDER_KEYS[row.provider]?.[0] ?? "ANTHROPIC_API_KEY"} keys={keys} repo={repo} onSaved={done} onCancel={onClose} />
+        ))}
+      {choice === "cloud" && cloud && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} repo={repo} onSignedIn={done} />}
       {error && (
         <p className={alert} role="alert">
           Couldn't change how {f.name} connects: {error}
@@ -671,15 +689,13 @@ function rowState(row: ProviderInstalled): RowState {
    own browser login (the browser-first card); Remove from brindle stops
    brindle using it and leaves it installed. No update controls: each CLI
    keeps itself up to date. */
-function ProviderRowView({ client, repo, connection, keys, stopped, onChanged, row, install, detectError, check, onInstall, onTurnOn, onDismiss, onRemove, onSignOut, onLookAgain }: {
+function ProviderRowView({ client, repo, connection, keys, onChanged, row, install, detectError, check, onInstall, onTurnOn, onDismiss, onRemove, onSignOut, onLookAgain }: {
   client: DaemonClient;
   repo: string | null;
-  /* How it connects (GET /providers/{p}/connection); null until read, or from an engine without the route. */
-  connection: ProviderConnectionDTO | null;
+  /* How it connects (GET /providers/{p}/connection: its readiness and the agents stopped on it); null until read, or from an engine without the route. */
+  connection: ProviderConnection | null;
   /* GET /config's keys. */
   keys: KeyInfo[] | null;
-  /* Its agents stopped on their credentials (status "failed"). */
-  stopped: number;
   /* The connection or a key changed here: read both again. */
   onChanged(): void;
   row: ProviderInstalled;
@@ -704,12 +720,17 @@ function ProviderRowView({ client, repo, connection, keys, stopped, onChanged, r
   const [changing, setChanging] = useState(false);
   const [replacing, setReplacing] = useState(false);
   const installing = install?.status === "starting" || install?.status === "running";
-  // A key or a cloud, as saved; its own sign-in otherwise (auto, sign_in), or the org's say.
+  // A key or a cloud, as saved; its own sign-in (sign_in); auto, a key when one is set, else
+  // its sign-in; or the org's say.
   const method = connection?.method;
   const viaKey = method === "api_key";
   const viaCloud = method === "cloud" && !!connection?.cloud;
-  const current: Method = viaKey ? "api_key" : viaCloud ? "cloud" : "sign_in";
-  const keyInfo = keyOf(row.provider, keys);
+  const auto = !!connection && method === "auto";
+  const opencode = row.provider === "opencode";
+  const [model, setModel] = useState(firstModel(keys));
+  const keyInfo = keyOf(row.provider, keys, opencode ? model.key : undefined);
+  // A stored key stays manageable whether it was chosen here, imported, or set before (auto).
+  const keyed = viaKey || (auto && (!!keyInfo || (opencode && KEY_MODELS.some((m) => keyOf(row.provider, keys, m.key)))));
   const act = async (kind: "removing" | "connecting" | "signing-out" | "testing" | "removing-key", run: () => Promise<void>, what: string) => {
     setBusy(kind);
     setActionError(null);
@@ -727,22 +748,37 @@ function ProviderRowView({ client, repo, connection, keys, stopped, onChanged, r
   // An off provider still found comes back as it is; one missing runs the maker's installer.
   const connectNow = () => (turnedOff(row) && row.path ? void act("connecting", () => onTurnOn(row.path!), "connect") : onInstall());
   const installAction = turnedOff(row) && row.path ? "Connect" : "Install";
-  const keyName = keyInfo?.name ?? PROVIDER_KEYS[row.provider]?.[0];
+  const keyName = (opencode ? model.key : undefined) ?? keyInfo?.name ?? PROVIDER_KEYS[row.provider]?.[0];
   const testKey = () => act("testing", async () => void (await client.testKey(keyInfo!.name), onChanged()), "test the key of");
-  // The key goes, and with it the method: the provider is back on its own sign-in.
+  // The key goes; chosen as the method, the method goes too and the provider is back on auto.
   const removeKey = () =>
     act(
       "removing-key",
       async () => {
         if (keyInfo) await client.deleteKey(keyInfo.name);
-        await client.setProviderConnection(row.provider, { method: "auto", ...(repo ? { repo } : {}) });
+        if (viaKey) await client.setProviderConnection(row.provider, { method: "auto", ...(repo ? { repo } : {}) });
         onChanged();
       },
       "remove the key of",
     );
+  const ready = connection?.ready;
   const help = (
     <>
-      {(viaKey || viaCloud) && connection ? <Health connection={connection} keyInfo={keyInfo} stopped={stopped} /> : method === "org" && connection?.managed ? <span className="block">{plain(connection.managed)}</span> : <span className="block">{SIGN_IN_HELP[state]}</span>}
+      {(viaKey || viaCloud) && connection ? (
+        <Health connection={connection} keyInfo={keyInfo} />
+      ) : method === "org" && connection?.managed ? (
+        <span className="block">{plain(connection.managed)}</span>
+      ) : auto ? (
+        <>
+          <span className="block" data-testid="provider-auto">
+            Uses your key if set, else {f.name}'s own sign-in.
+          </span>
+          {keyed && <Health connection={connection!} keyInfo={keyInfo} keyLine />}
+        </>
+      ) : (
+        <span className="block">{SIGN_IN_HELP[state]}</span>
+      )}
+      {on && connection && ready && !ready.ok && !(viaCloud && ready.action === "renew") && <ReadyNote client={client} connection={connection} onSetKey={() => setReplacing(true)} onChanged={onChanged} />}
       <button type="button" className="mt-1 underline underline-offset-2 hover:text-ink" aria-expanded={expanded} aria-controls={`provider-details-${row.provider}`} onClick={() => setExpanded((value) => !value)}>
         Connection details
       </button>
@@ -792,19 +828,39 @@ function ProviderRowView({ client, repo, connection, keys, stopped, onChanged, r
             {Object.values(connection!.settings ?? {}).filter(Boolean).length > 0 && <span className={mono}>· {Object.values(connection!.settings ?? {}).filter(Boolean).join(" · ")}</span>}
           </span>
         ) : (
-          <span className={`inline-flex items-center gap-1 rounded-sm bg-canvas-2 px-s1 py-0.5 text-xs font-normal ${state === "signed_in" ? "text-pass" : "text-ink-2"}`} data-testid="provider-state">
+          <span className={`inline-flex items-center gap-1 text-xs font-normal ${state === "signed_in" ? "text-pass" : "text-ink-2"}`} data-testid="provider-state">
             <span className={`size-2 rounded-full ${DOT[state]}`} aria-hidden />
             {STATE_TEXT[state]}
+            {auto && keyInfo && <span className={`${mono} text-ink-2`}>· key ••••{keyInfo.last4}</span>}
           </span>
         )
       }
     >
       {!on && !install && (
-        <button type="button" className={primary} aria-label={`${installAction} ${f.name}`} disabled={busy !== null} onClick={connectNow}>
+        <button type="button" className={button} aria-label={`${installAction} ${f.name}`} disabled={busy !== null} onClick={connectNow}>
           {busy === "connecting" ? "Connecting…" : installAction}
         </button>
       )}
-      {on && viaKey && !replacing && (
+      {on && keyed && opencode && (
+        <label className="flex items-center gap-s1 text-xs text-ink-2">
+          Model provider
+          <select
+            className={field}
+            value={model.id}
+            onChange={(e) => {
+              setModel(KEY_MODELS.find((m) => m.id === e.target.value) ?? KEY_MODELS[0]);
+              setReplacing(false);
+            }}
+          >
+            {KEY_MODELS.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {on && keyed && !replacing && (
         <>
           {keyInfo && (
             <button type="button" className={button} disabled={busy !== null} onClick={() => void testKey()}>
@@ -814,14 +870,16 @@ function ProviderRowView({ client, repo, connection, keys, stopped, onChanged, r
           <button type="button" className={button} disabled={busy !== null} onClick={() => setReplacing(true)}>
             {keyInfo ? "Replace" : "Add a key"}
           </button>
-          <button type="button" className={button} disabled={busy !== null} onClick={() => void removeKey()}>
-            {busy === "removing-key" ? "Removing…" : "Remove"}
-          </button>
+          {(keyInfo || viaKey) && (
+            <button type="button" className={button} disabled={busy !== null} onClick={() => void removeKey()}>
+              {busy === "removing-key" ? "Removing…" : "Remove"}
+            </button>
+          )}
         </>
       )}
-      {on && viaKey && replacing && keyName && (
+      {on && replacing && keyName && (
         <div className="w-full">
-          <ApiKeyPaste client={client} provider={row.provider} expect={keyName} any={row.provider === "opencode"} keys={keys} repo={repo} onSaved={() => (setReplacing(false), onChanged())} onCancel={() => setReplacing(false)} />
+          <ApiKeyPaste key={keyName} client={client} provider={row.provider} expect={keyName} keys={keys} repo={repo} onSaved={() => (setReplacing(false), onChanged())} onCancel={() => setReplacing(false)} />
         </div>
       )}
       {on && viaCloud && <RenewLogin client={client} provider={row.provider} route={connection!.cloud!} onSignedIn={onChanged} />}
@@ -836,7 +894,7 @@ function ProviderRowView({ client, repo, connection, keys, stopped, onChanged, r
           Change method {changing ? "▴" : "▾"}
         </button>
       )}
-      {changing && <ChangeMethod client={client} row={row} current={current} keys={keys} repo={repo} onChanged={onChanged} onClose={() => setChanging(false)} />}
+      {changing && connection && <ChangeMethod client={client} row={row} connection={connection} keys={keys} repo={repo} onChanged={onChanged} onClose={() => setChanging(false)} />}
       {install && (
         <div className="w-full">
           <ProgressCard
@@ -1118,7 +1176,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
     void reloadProviders();
   }, [reloadProviders]);
   /* How each provider connects (GET /providers/{p}/connection), read with the rows and after a change. */
-  const [connections, setConnections] = useState<Record<string, ProviderConnectionDTO>>({});
+  const [connections, setConnections] = useState<Record<string, ProviderConnection>>({});
   const loadConnection = useCallback(
     (provider: string) =>
       client.providerConnection(provider, repo ?? undefined).then(
@@ -1131,9 +1189,18 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   useEffect(() => {
     for (const p of providerNames.split(" ").filter(Boolean)) void loadConnection(p);
   }, [providerNames, loadConnection]);
-  /* Agents stopped on their credentials (status "failed"), by provider: a rejected key or an expired login names them. */
-  const workspaces = useAppState((state) => state.workspaces);
-  const stopped = (provider: string) => workspaces.reduce((n, ws) => n + (ws.agents ?? []).filter((a) => a.provider === provider && a.status === "failed").length, 0);
+  /* A key no provider reads being set or replaced (its name). */
+  const [otherEditing, setOtherEditing] = useState<string | null>(null);
+  const [otherError, setOtherError] = useState<string | null>(null);
+  const removeOther = async (name: string) => {
+    setOtherError(null);
+    try {
+      await client.deleteKey(name);
+      await loadConfig();
+    } catch (e) {
+      setOtherError(`Couldn't remove ${name}: ${message(e)}`);
+    }
+  };
   /* A key the shell has and brindle doesn't, imported on request (POST /keys/{name}/import). */
   const [importError, setImportError] = useState<string | null>(null);
   const importShellKey = async (name: string) => {
@@ -1313,7 +1380,6 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
                 repo={repo}
                 connection={connections[r.provider] ?? null}
                 keys={config?.keys ?? null}
-                stopped={stopped(r.provider)}
                 onChanged={() => {
                   void loadConnection(r.provider);
                   void loadConfig();
@@ -1349,6 +1415,49 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
           <p className={`${alert} mx-s2 my-s1`} role="alert">
             {importError}
           </p>
+        )}
+        {/* Keys a profile names (api_key_env) that no provider reads: stored, replaced and removed here. */}
+        {config && config.keys.some(otherKey) && (
+          <Row label="Other keys" help="Keys your profiles name that no provider reads. Stored in your keychain." wide testId="other-keys">
+            <ul className="flex w-full flex-col divide-y divide-line">
+              {config.keys.filter(otherKey).map((k) => (
+                <li key={k.name} className="flex flex-col gap-s1 py-1" data-testid={`other-key-${k.name}`} data-set={k.set}>
+                  <span className="flex flex-wrap items-center gap-s1 text-sm">
+                    <span className={mono}>{k.name}</span>
+                    <span className="text-xs text-ink-3">{k.set ? <span className={mono}>••••{k.last4}</span> : "not set"}</span>
+                    <span className="flex-1" />
+                    <button type="button" className={quiet} onClick={() => setOtherEditing(otherEditing === k.name ? null : k.name)}>
+                      {k.set ? "Replace" : "Set"}
+                    </button>
+                    {k.set && (
+                      <button type="button" className={quiet} onClick={() => void removeOther(k.name)}>
+                        Remove
+                      </button>
+                    )}
+                  </span>
+                  {otherEditing === k.name && (
+                    <ApiKeyPaste
+                      client={client}
+                      provider={null}
+                      expect={k.name}
+                      keys={config.keys}
+                      repo={repo}
+                      onSaved={() => {
+                        setOtherEditing(null);
+                        void loadConfig();
+                      }}
+                      onCancel={() => setOtherEditing(null)}
+                    />
+                  )}
+                </li>
+              ))}
+            </ul>
+            {otherError && (
+              <p className={alert} role="alert">
+                {otherError}
+              </p>
+            )}
+          </Row>
         )}
       </Section>
 

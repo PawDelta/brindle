@@ -21,9 +21,9 @@
    sign-in: the browser opens, the screen waits, Try again if it fails. */
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { DaemonError, type DaemonClient, type KeyInfo } from "../api/client";
+import { DaemonError, type DaemonClient, type KeyInfo, type ProviderConnection } from "../api/client";
 import { openExternal, type OpenUrl } from "../api/open";
-import type { CloudOptionsDTO, ProviderConnectionDTO } from "../api/schema";
+import type { CloudOptionsDTO } from "../api/schema";
 import { plain } from "../api/wording";
 import { useJob } from "../screens/Branch/useJob";
 import { alert, button, field, mono, quiet } from "./ui";
@@ -64,11 +64,14 @@ const METHODS: { method: Method; title: string }[] = [
   { method: "cloud", title: "Your cloud" },
 ];
 
-export function MethodChoice({ provider, name, value, disabled = false, onChange }: { provider: string; name: string; value: Method | null; disabled?: boolean; onChange(method: Method): void }) {
+/* `cloud`: whether the engine has a cloud route for the provider (the
+   connection's `clouds`); without one Your cloud isn't offered at all. */
+export function MethodChoice({ provider, name, value, cloud, disabled = false, onChange }: { provider: string; name: string; value: Method | null; cloud: boolean; disabled?: boolean; onChange(method: Method): void }) {
   const blurb = BLURB[provider] ?? BLURB.claude;
+  const offered = METHODS.filter((m) => cloud || m.method !== "cloud");
   return (
-    <div role="radiogroup" aria-label={`How to connect ${name}`} data-testid="connect-method" data-method={value ?? ""} className="grid gap-s1 sm:grid-cols-3">
-      {METHODS.map(({ method, title }) => (
+    <div role="radiogroup" aria-label={`How to connect ${name}`} data-testid="connect-method" data-method={value ?? ""} className={`grid gap-s1 ${offered.length === 3 ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
+      {offered.map(({ method, title }) => (
         <button
           key={method}
           type="button"
@@ -77,7 +80,7 @@ export function MethodChoice({ provider, name, value, disabled = false, onChange
           aria-labelledby={`${provider}-${method}-title`}
           aria-describedby={`${provider}-${method}-blurb`}
           disabled={disabled}
-          className="flex flex-col items-start gap-1 rounded-md border border-line-strong p-s2 text-left hover:bg-surface-2 disabled:opacity-50 aria-checked:border-branch aria-checked:bg-surface-2"
+          className="flex flex-col items-start gap-1 border-t-2 border-line px-s1 pb-s1 pt-s2 text-left hover:bg-surface-2 disabled:opacity-50 aria-checked:border-branch aria-checked:bg-surface-2"
           onClick={() => onChange(method)}
         >
           <span id={`${provider}-${method}-title`} className="text-sm font-semibold">
@@ -196,18 +199,19 @@ function KeyState({ outcome }: { outcome: KeyOutcome }) {
   );
 }
 
-/* The paste field. `expect`: the key the provider reads; `any`: a key of
-   any recognized maker goes under its own name (OpenCode). */
-export function ApiKeyPaste({ client, provider, expect, any = false, keys, repo, openUrl = openExternal, onSaved, onCancel }: {
+/* The paste field. `expect`: the key the provider reads (OpenCode's: its
+   model provider's own, nothing else); `provider` null stores a key that is
+   no provider's (a profile's api_key_env) and saves no method. */
+export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = openExternal, onSaved, onCancel }: {
   client: DaemonClient;
-  provider: string;
+  provider: string | null;
   expect: string;
-  any?: boolean;
   /* GET /config's keys: a stored key's state, where to get one, whether the shell has one. */
   keys: KeyInfo[] | null;
   repo?: string | null;
   openUrl?: OpenUrl;
-  onSaved?(name: string, last4: string): void;
+  /* Stored, and for a provider the method saved: the connection as the engine now reads it. */
+  onSaved?(name: string, last4: string, connection: ProviderConnection | null): void;
   onCancel?(): void;
 }) {
   const [value, setValue] = useState("");
@@ -215,25 +219,32 @@ export function ApiKeyPaste({ client, provider, expect, any = false, keys, repo,
   const [outcome, setOutcome] = useState<KeyOutcome | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refused, setRefused] = useState<string | null>(null);
+  const [connection, setConnection] = useState<ProviderConnection | null>(null);
   const seen = recognize(value);
-  const mismatch = !!seen && !any && seen !== expect && !(PROVIDER_KEYS[provider] ?? []).includes(seen);
-  const name = seen && !mismatch ? (any || (PROVIDER_KEYS[provider] ?? []).includes(seen) ? seen : expect) : expect;
+  // A provider reads its own keys (Codex either of its two); OpenCode only the model provider's picked.
+  const accepts = provider && provider !== "opencode" ? (PROVIDER_KEYS[provider] ?? [expect]) : [expect];
+  // A key no provider reads is stored under its own name, whatever it looks like.
+  const mismatch = !!provider && !!seen && !accepts.includes(seen);
+  const name = provider && seen && !mismatch ? seen : expect;
   const info = keys?.find((k) => k.name === name);
   const f = factsOfKey(name);
   const page = info?.key_page || f.page;
 
-  /* Stored: the method saved as an API key, and the key's state as the engine now reads it. */
+  /* Stored: the key's state as the engine now reads it, then the method saved as an API key. */
   const stored = async (key: string, last4: string) => {
     const got = await client.config(repo ?? undefined).then((c) => c.keys.find((k) => k.name === key), () => undefined);
     setOutcome({ kind: "stored", name: key, last4: got?.last4 || last4, status: got?.status ?? "verified", checked_at: got?.checked_at ?? Date.now() / 1000 });
+    if (!provider) return onSaved?.(key, last4, null);
+    let now: ProviderConnection;
     try {
-      await client.setProviderConnection(provider, { method: "api_key", ...(repo ? { repo } : {}) });
+      now = await client.setProviderConnection(provider, { method: "api_key", ...(repo ? { repo } : {}) });
     } catch (e) {
       // The key is stored; the org (or the engine) refuses running the provider on it.
       setRefused(message(e));
       return;
     }
-    onSaved?.(key, last4);
+    setConnection(now);
+    onSaved?.(key, last4, now);
   };
   const run = async (key: string, act: () => Promise<{ last4: string }>) => {
     setBusy(true);
@@ -256,26 +267,26 @@ export function ApiKeyPaste({ client, provider, expect, any = false, keys, repo,
     if (!value.trim() || busy || mismatch) return;
     void run(name, () => client.putKey(name, value.trim(), repo ?? undefined));
   };
-  const importable = (any ? (PROVIDER_KEYS[provider] ?? [expect]) : [expect]).map((n) => keys?.find((k) => k.name === n && k.importable)).find(Boolean);
+  const importable = accepts.map((n) => keys?.find((k) => k.name === n && k.importable)).find(Boolean);
   const current = info?.set ? { kind: "stored" as const, name, last4: info.last4, status: info.status, checked_at: info.checked_at } : null;
   const shown = outcome ?? current;
 
   return (
     <form
       className="flex flex-col gap-s1"
-      aria-label={`API key for ${provider}`}
+      aria-label={`API key for ${provider ?? expect}`}
       data-testid="api-key-paste"
       onSubmit={(e) => {
         e.preventDefault();
         save();
       }}
     >
-      <label htmlFor={`${provider}-key`} className="text-sm text-ink-2">
+      <label htmlFor={`${provider ?? expect}-key`} className="text-sm text-ink-2">
         Paste your key
       </label>
       <div className="flex flex-wrap items-center gap-s1">
         <input
-          id={`${provider}-key`}
+          id={`${provider ?? expect}-key`}
           className={`${field} min-w-64 flex-1 font-mono`}
           type="password"
           autoComplete="off"
@@ -294,7 +305,7 @@ export function ApiKeyPaste({ client, provider, expect, any = false, keys, repo,
         )}
       </div>
       <div className="flex flex-col gap-1 text-[13px]" role="status">
-        {value.trim() && !busy && (mismatch ? <span className="text-sap">That looks like a key for {factsOfKey(seen!).maker}; this needs one for {f.maker}.</span> : seen && !outcome && <span className="text-ink-2">{f.maker} key recognized.</span>)}
+        {value.trim() && !busy && (mismatch ? <span className="text-sap">That looks like a key for {factsOfKey(seen!).maker}; this needs one for {f.maker}.</span> : provider && seen && !outcome && <span className="text-ink-2">{f.maker} key recognized.</span>)}
         {shown && <KeyState outcome={shown} />}
         <span className="text-sap">{f.billing}</span>
         <span className={fine}>
@@ -326,6 +337,16 @@ export function ApiKeyPaste({ client, provider, expect, any = false, keys, repo,
         <p className={alert} role="alert">
           The key is stored, but it can't be used for this provider: {refused}
         </p>
+      )}
+      {connection && (
+        <ReadyNote
+          client={client}
+          connection={connection}
+          onChanged={(c) => {
+            setConnection(c);
+            if (outcome?.kind === "stored") onSaved?.(outcome.name, outcome.last4, c);
+          }}
+        />
       )}
     </form>
   );
@@ -453,9 +474,19 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
   route?: string;
   repo?: string | null;
   openUrl?: OpenUrl;
-  onSignedIn?(route: string): void;
+  /* Signed in: the route, and the connection as the engine reads it after (its readiness). */
+  onSignedIn?(route: string, connection: ProviderConnection | null): void;
 }) {
-  const [connection, setConnection] = useState<ProviderConnectionDTO | null>(null);
+  const [connection, setConnection] = useState<ProviderConnection | null>(null);
+  const [after, setAfter] = useState<ProviderConnection | null>(null);
+  const signedIn = (r: string) =>
+    client.providerConnection(provider, repo ?? undefined).then(
+      (c) => {
+        setAfter(c);
+        onSignedIn?.(r, c);
+      },
+      () => onSignedIn?.(r, null),
+    );
   const [options, setOptions] = useState<CloudOptionsDTO | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [route, setRoute] = useState<string | null>(wanted ?? null);
@@ -551,7 +582,7 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
       {connection.managed && <p className={fine}>{plain(connection.managed)}</p>}
       <div role="radiogroup" aria-label="Cloud" className="flex flex-wrap gap-s1">
         {clouds.map((c) => (
-          <button key={c} type="button" role="radio" aria-checked={route === c} className="rounded-md border border-line-strong px-s2 py-1 text-sm text-ink-2 hover:bg-surface-2 aria-checked:border-branch aria-checked:bg-surface-2 aria-checked:text-ink" onClick={() => setRoute(c)}>
+          <button key={c} type="button" role="radio" aria-checked={route === c} className="rounded-md px-s2 py-1 text-sm text-ink-2 hover:bg-surface-2 aria-checked:bg-surface-2 aria-checked:text-ink" onClick={() => setRoute(c)}>
             {CLOUD_NAME[c] ?? c}
           </button>
         ))}
@@ -570,7 +601,17 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
           {missing.length > 0 ? (
             <p className={fine}>Fill in {missing.map((f) => f.label.toLowerCase()).join(" and ")} to sign in.</p>
           ) : (
-            <CloudSignIn key={route} client={client} provider={provider} route={route} openUrl={openUrl} save={save} onSignedIn={() => onSignedIn?.(route)} />
+            <CloudSignIn key={route} client={client} provider={provider} route={route} openUrl={openUrl} save={save} onSignedIn={() => void signedIn(route)} />
+          )}
+          {after && (
+            <ReadyNote
+              client={client}
+              connection={after}
+              onChanged={(c) => {
+                setAfter(c);
+                onSignedIn?.(route, c);
+              }}
+            />
           )}
           {saveError && (
             <p className={alert} role="alert">
@@ -579,6 +620,55 @@ export function CloudSetup({ client, provider, name, route: wanted, repo, openUr
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/* Codex's ChatGPT login signed out so its API key is used: a job; done, its result is the connection after. */
+function CodexSignOut({ client, onDone }: { client: DaemonClient; onDone(connection: ProviderConnection): void }) {
+  const { job, busy, start } = useJob();
+  return (
+    <>
+      <button type="button" className={button} disabled={busy} onClick={() => void start("Sign out of ChatGPT", () => client.codexSignOut(), (result) => onDone(result as ProviderConnection))}>
+        {busy ? "Signing out…" : "Sign out of ChatGPT"}
+      </button>
+      {job?.status === "failed" && (
+        <span className="text-fail" role="alert">
+          {plain(job.error ?? "")}
+        </span>
+      )}
+    </>
+  );
+}
+
+/* What keeps the provider from launching the way it connects, and the one
+   action that fixes it (the engine's `ready`); nothing while it's ready.
+   An action the caller has no handler for shows as words only, and a
+   missing CLI not at all where its install is the flow's own business. */
+export function ReadyNote({ client, connection, onInstall, onSignIn, onSetKey, onChanged }: {
+  client: DaemonClient;
+  connection: ProviderConnection;
+  onInstall?(): void;
+  onSignIn?(): void;
+  onSetKey?(): void;
+  onChanged(connection: ProviderConnection): void;
+}) {
+  const r = connection.ready;
+  if (!r || r.ok || (r.action === "install" && !onInstall)) return null;
+  const act = (label: string, run?: () => void) =>
+    run && (
+      <button type="button" className={button} onClick={run}>
+        {label}
+      </button>
+    );
+  return (
+    <div className="flex flex-wrap items-center gap-s2 text-[13px]" data-testid="provider-ready" data-action={r.action ?? ""}>
+      <span className="text-sap">{plain(r.reason ?? "Not ready to run yet.")}</span>
+      {r.action === "install" && act("Install", onInstall)}
+      {r.action === "sign_in" && act("Sign in", onSignIn)}
+      {r.action === "set_key" && act("Set key", onSetKey)}
+      {r.action === "renew" && connection.cloud && <RenewLogin client={client} provider={connection.provider} route={connection.cloud} onSignedIn={() => void client.providerConnection(connection.provider).then(onChanged, () => undefined)} />}
+      {r.action === "sign_out" && <CodexSignOut client={client} onDone={onChanged} />}
     </div>
   );
 }

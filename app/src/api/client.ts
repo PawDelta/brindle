@@ -444,6 +444,23 @@ export interface KeyInfo {
   importable?: boolean;
 }
 
+/* Whether the provider can launch the way it connects (engine branch
+   feat/connection-readiness): when not, why, and the one action that fixes it. */
+export interface ConnectionReady {
+  ok: boolean;
+  reason: string | null;
+  action: "install" | "sign_in" | "sign_out" | "renew" | "set_key" | null;
+}
+
+/* GET /providers/{p}/connection with its readiness: `blocked_by` "codex_login"
+   when Codex's ChatGPT login wins over its API key, and the agents that
+   stopped on this provider's credentials. */
+export type ProviderConnection = ProviderConnectionDTO & {
+  ready?: ConnectionReady | null;
+  blocked_by?: "codex_login" | null;
+  stopped_agents?: { id: string; name: string; profile: string }[];
+};
+
 export interface KeyTested {
   name: string;
   status: "verified" | "rejected" | "unchecked";
@@ -1326,14 +1343,20 @@ export class DaemonClient {
   /* How the provider connects (brindle.connections): its own sign-in, an API
      key or the person's cloud, and for a cloud its settings and login. */
   providerConnection(provider: string, repo?: string) {
-    return this.get<ProviderConnectionDTO>(`/providers/${encodeURIComponent(provider)}/connection`, { repo });
+    return this.get<ProviderConnection>(`/providers/${encodeURIComponent(provider)}/connection`, { repo });
   }
 
   /* Saves how the provider connects: `method` auto | sign_in | api_key | cloud,
      and for cloud the route (`cloud`) and its non-secret `settings`. 403 when
      the org decides instead, with why. */
   setProviderConnection(provider: string, choice: { method: string; cloud?: string; settings?: Record<string, string>; repo?: string }) {
-    return this.put<ProviderConnectionDTO>(`/providers/${encodeURIComponent(provider)}/connection`, choice);
+    return this.put<ProviderConnection>(`/providers/${encodeURIComponent(provider)}/connection`, choice);
+  }
+
+  /* Signs Codex's ChatGPT login out so its API key is used (ready.action
+     "sign_out"), a job like cloudSignIn: job.done's result is the connection after. */
+  codexSignOut() {
+    return this.post<Job>("/providers/codex/sign-out", {});
   }
 
   /* What this machine's cloud CLIs are set up with: AWS profiles, gcloud, the Azure tenant, usual regions. */

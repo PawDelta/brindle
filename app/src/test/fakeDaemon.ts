@@ -35,11 +35,10 @@ import type {
   SessionDTO,
   WorkspaceDTO,
   CloudOptionsDTO,
-  ProviderConnectionDTO,
 } from "../api/schema";
 import { LOGIN_PROVIDERS } from "../api/client";
 import { hunksOf, parseDiff } from "../screens/Branch/parseDiff";
-import type { AccountInfo, Cost, DebugEntry, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
+import type { AccountInfo, ConnectionReady, Cost, DebugEntry, ProviderConnection, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
 
 export const BASE_URL = "http://127.0.0.1:47321";
 export const TOKEN = "test-token";
@@ -101,7 +100,7 @@ export interface DaemonData {
   /* GET / PUT /providers/{p}/connection (brindle.connections): how each
      provider connects. A provider with none listed connects "auto" (its own
      sign-in). `clouds` per provider follows connections.ROUTES. */
-  connections: Record<string, Partial<Omit<ProviderConnectionDTO, "provider">>>;
+  connections: Record<string, Partial<Omit<ProviderConnection, "provider">>>;
   /* GET /cloud/options: what this machine's cloud CLIs are set up with. */
   cloudOptions: CloudOptionsDTO;
   /* Every profile as GET /routing describes it (`excluded` is worked out
@@ -422,6 +421,13 @@ const KEY_PAGES: Record<string, string> = {
 };
 /* keystore.provider_of. */
 const KEY_PROVIDER: Record<string, string> = { ANTHROPIC_API_KEY: "claude", OPENAI_API_KEY: "codex", CODEX_API_KEY: "codex", GEMINI_API_KEY: "antigravity" };
+/* The keys each provider reads (pane_auth.API_KEYS; OpenCode its model providers'). */
+const FAKE_PROVIDER_KEYS: Record<string, string[]> = {
+  claude: ["ANTHROPIC_API_KEY"],
+  codex: ["OPENAI_API_KEY", "CODEX_API_KEY"],
+  antigravity: ["GEMINI_API_KEY"],
+  opencode: ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+};
 /* connections.ROUTES: the clouds each provider can go through. */
 const CLOUD_ROUTES: Record<string, string[]> = { claude: ["bedrock", "vertex", "foundry"], opencode: ["vertex", "azure"] };
 
@@ -681,6 +687,9 @@ export class FakeDaemon {
   /* The cloud sign-ins POST /providers/{p}/cloud-sign-in started, by provider; held until completeCloudSignIn(). */
   readonly cloudSignIns: string[] = [];
   private pendingCloudSignIns: Array<(result: string) => void> = [];
+  /* Codex is signed in to ChatGPT, which wins over its API key (blocked_by "codex_login") until POST /providers/codex/sign-out. */
+  codexChatGPT = false;
+  codexSignOuts = 0;
   /* The knowledge sources synced and removed, in order, and how many documents an index finds in a folder. */
   readonly kbSyncs: string[] = [];
   readonly kbRemovals: string[] = [];
@@ -1004,11 +1013,50 @@ export class FakeDaemon {
     return stored;
   }
 
-  /* routes_read.provider_connection (connections.view). */
+  /* routes_read.provider_connection (connections.view, with feat/connection-readiness's
+     ready, blocked_by and stopped_agents). Readiness follows the row, the keys and the
+     login unless a test sets `ready` itself. */
+  private connectionDto(provider: string): ProviderConnection {
+    const c = this.data.connections[provider] ?? {};
+    const method = c.method ?? "auto";
+    const row = this.data.providers.find((r) => r.provider === provider);
+    const stored = (FAKE_PROVIDER_KEYS[provider] ?? []).some((n) => this.data.config.keys.some((k) => k.name === n && k.set));
+    const blocked = provider === "codex" && method === "api_key" && this.codexChatGPT;
+    const not = (reason: string, action: ConnectionReady["action"]): ConnectionReady => ({ ok: false, reason, action });
+    const ready: ConnectionReady =
+      c.ready ??
+      (!row || row.state !== "installed" || !row.path
+        ? not(`${CLI_NAMES[provider] ?? provider} isn't installed`, "install")
+        : method === "api_key"
+          ? !stored
+            ? not("no API key is stored", "set_key")
+            : blocked
+              ? not("Codex's ChatGPT login is used instead of the API key", "sign_out")
+              : { ok: true, reason: null, action: null }
+          : method === "cloud"
+            ? c.login?.valid
+              ? { ok: true, reason: null, action: null }
+              : not("the cloud login has expired", "renew")
+            : row.signed_in === true || (method === "auto" && stored)
+              ? { ok: true, reason: null, action: null }
+              : not("not signed in", "sign_in"));
+    return { provider, method: "auto", choice: null, cloud: null, settings: {}, login: null, managed: null, stopped_agents: [], ...c, clouds: CLOUD_ROUTES[provider] ?? [], ready, blocked_by: blocked ? "codex_login" : null };
+  }
+
   private connectionOf(provider: string): Response {
     if (!(INSTALLABLE as readonly string[]).includes(provider)) return error("invalid", `provider must be one of ${INSTALLABLE.join(", ")}`, 400);
-    const c = this.data.connections[provider];
-    return json({ provider, method: "auto", choice: null, cloud: null, settings: {}, login: null, managed: null, ...c, clouds: CLOUD_ROUTES[provider] ?? [] });
+    return json(this.connectionDto(provider));
+  }
+
+  /* POST /providers/codex/sign-out (feat/connection-readiness): Codex's ChatGPT login signed out, a job; job.done's result is the connection after. */
+  private codexSignOut(): Response {
+    const job = `job${this.nextJob++}`;
+    this.codexSignOuts++;
+    setTimeout(() => {
+      this.codexChatGPT = false;
+      this.publish("job.done", { payload: { job, job_kind: "provider.sign_out", provider: "codex", result: this.connectionDto("codex") } });
+    }, 0);
+    return json({ job, kind: "provider.sign_out" }, 202);
   }
 
   /* routes_actions.put_provider_connection (connections.choose): the method, and for cloud a route the provider has and its settings. */
@@ -1026,7 +1074,8 @@ export class FakeDaemon {
       this.data.connections[provider] = { ...this.data.connections[provider], method, choice, cloud: choice.cloud, settings, login: { valid: false, expired: false } };
     } else {
       if (body.cloud != null || body.settings != null) return error("invalid", "cloud and settings go with method cloud", 400);
-      this.data.connections[provider] = method === "auto" ? {} : { method, choice: { method, settings: {} }, cloud: null, settings: {}, login: null };
+      const kept = { stopped_agents: this.data.connections[provider]?.stopped_agents ?? [] };
+      this.data.connections[provider] = method === "auto" ? kept : { ...kept, method, choice: { method, settings: {} }, cloud: null, settings: {}, login: null };
     }
     return this.connectionOf(provider);
   }
@@ -1351,6 +1400,7 @@ export class FakeDaemon {
     if ((m = path.match(/^\/providers\/([^/]+)\/use-mine$/))) return this.pickProviderInstall(m[1], body);
     if ((m = path.match(/^\/providers\/([^/]+)\/logout$/))) return this.signOutProvider(m[1]);
     if ((m = path.match(/^\/providers\/([^/]+)\/cloud-sign-in$/))) return this.cloudSignIn(m[1]);
+    if (path === "/providers/codex/sign-out") return this.codexSignOut();
     if ((m = path.match(/^\/keys\/([^/]+)\/test$/))) return this.testKey(m[1]);
     if ((m = path.match(/^\/keys\/([^/]+)\/import$/))) return this.importKey(m[1], body);
     if (path === "/repos/clone") return this.cloneRepo(body);
