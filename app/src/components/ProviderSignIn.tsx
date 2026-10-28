@@ -9,18 +9,22 @@
    which types the one line the person gave. The provider's state is read
    periodically and when the CLI exits (`check`): "Signed in to <provider> ✓",
    or what went wrong, with the terminal behind "Show details" the whole
-   time (PtyTerminal on its pane). The pane is read once the shell says
-   the pty view can run, which may come after the sign-in started; one
-   that can't run here (tmux too old or missing) fails the card with why.
+   time (PtyTerminal on its pane). A CLI that says its sign-in failed but
+   doesn't exit (it waits at its own prompt) fails the card on its words,
+   with Try again, which ends it and starts afresh; Cancel and Close end
+   the CLI's terminal too, so the next press never finds a stuck one. The
+   pane is read once the shell says the pty view can run, which may come
+   after the sign-in started; one that can't run here (tmux too old or
+   missing) fails the card with why.
    Where the app has no pty views at all (a browser tab), the card still
    checks for completed browser sign-in. The app never sees a password or a token: the browser and
    the CLI handle those. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ActionTerminal } from "../api/client";
+import { DaemonError, type ActionTerminal } from "../api/client";
 import { useDaemon } from "../api/context";
 import { openExternal } from "../api/open";
-import { keptLink, readPane, READ_SIZE, type PaneReading } from "../api/paneText";
+import { keptLink, PANE_DEAD, readPane, READ_SIZE, type PaneReading } from "../api/paneText";
 import { usePtyViews, type PtyViews, type PtyViewTarget } from "../api/ptyView";
 import { providerLabel } from "../api/providers";
 import { PtyTerminal } from "./PtyTerminal";
@@ -78,6 +82,15 @@ export function readPrompt(text: string): { kind: "choose"; question: string; ch
   return null;
 }
 
+/* The line where the CLI says its sign-in failed, if its last lines say so:
+   a CLI that fails without exiting (offers another go, waits at its own prompt)
+   never ends its pane, so this is the only word the card gets of it. */
+export function readFailure(text: string): string | null {
+  const tail = text.split("\n").map((l) => l.trim()).slice(-12);
+  const failed = /\b(log ?in|sign ?in|oauth|auth\w*|token)\b.*\b(fail\w*|error|denied|invalid|expired|timed? ?out)\b|\b(error|failed)\b.*\b(log ?in|sign ?in|oauth|auth\w*)\b/i;
+  return [...tail].reverse().find((l) => failed.test(l) && !PANE_DEAD.test(l)) ?? null;
+}
+
 /* The link the CLI printed, if any (opened in the browser by the CLI, or offered here). */
 export const readLink = (text: string): string | null => text.match(/https?:\/\/[^\s'"<>]+/g)?.at(-1) ?? null;
 
@@ -118,6 +131,9 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
   // Each attempt's number (a start, a cancel, the hook gone): only the newest one's answers are taken.
   const attempt = useRef(0);
   const pending = useRef<Promise<boolean> | null>(null);
+  // A cancelled sign-in's terminal closing: why it couldn't be (kept until a start replaces it), or null once
+  // it's gone (or was already).
+  const closing = useRef<Promise<string | null>>(Promise.resolve(null));
   const ended = useCallback(
     async (terminal: string, exited = true) => {
       if (finished.current) return;
@@ -150,7 +166,10 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
 
   /* Start the sign-in. `restart` (Try again): the daemon ends a login of the
      CLI's still running and starts a fresh one, rather than handing back
-     the same terminal. */
+     the same terminal. A start after a cancel waits for its terminal to
+     close, so it can't attach to the one that is going. One that couldn't
+     close stays stuck on the daemon: every start restarts until one has
+     replaced it, so it is never the terminal a start is handed back. */
   const start = useCallback(async (restart = false) => {
     const n = ++attempt.current;
     setPhase({ kind: "starting" });
@@ -158,13 +177,18 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
     setAction(null);
     finished.current = false;
     pending.current = null;
+    const cleanup = closing.current;
+    const unclosed = (await cleanup) !== null;
+    if (n !== attempt.current) return;
     let started: ActionTerminal;
     try {
-      started = await client.providerLogin(provider, undefined, restart, loginContext);
+      started = await client.providerLogin(provider, undefined, restart || unclosed, loginContext);
     } catch (e) {
       if (n === attempt.current) setPhase({ kind: "failed", terminal: null, message: message(e) });
       return;
     }
+    // The daemon has ended the terminal that couldn't be closed, whichever start this was.
+    if (closing.current === cleanup) closing.current = Promise.resolve(null);
     if (n !== attempt.current) return;
     setPhase({ kind: "waiting", terminal: started.terminal });
     setAction({ terminal: started.terminal, at: { server: started.server ?? null, target: started.target } });
@@ -205,8 +229,11 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
         const found = readLink(text);
         if (found) setLink((had) => keptLink(had, found));
         const prompt = readPrompt(text);
+        const failure = readFailure(text);
         setPhase((p) => {
           if (p.kind !== "waiting" && p.kind !== "choose" && p.kind !== "code") return p;
+          // Said, with Try again; the checks go on, so a sign-in the browser finishes after all still counts.
+          if (failure) return { kind: "failed", terminal, message: failure };
           if (!prompt) return p.kind === "waiting" ? p : { kind: "waiting", terminal };
           return prompt.kind === "choose" ? { kind: "choose", terminal, question: prompt.question, choices: prompt.choices } : { kind: "code", terminal, prompt: prompt.prompt };
         });
@@ -250,8 +277,20 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
       return false;
     }
   };
+  /* Cancel or Close: the CLI's terminal goes too, so a sign-in stuck where it
+     failed isn't the one the next press finds still running and attaches to.
+     One that couldn't be closed (not merely gone already) is said, with Try again. */
   const cancel = () => {
-    attempt.current++;
+    const n = ++attempt.current;
+    if (action) {
+      const closed = (closing.current = client.closeTerminal(action.terminal).then(
+        () => null,
+        (e) => (e instanceof DaemonError && e.status === 404 ? null : `Couldn't end ${name}'s sign-in: ${message(e)}`),
+      ));
+      void closed.then((why) => {
+        if (why && n === attempt.current) setPhase({ kind: "failed", terminal: null, message: why });
+      });
+    }
     setAction(null);
     finished.current = true;
     setPhase({ kind: "idle" });
