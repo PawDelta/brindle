@@ -157,23 +157,31 @@ WRITES = "files/write-worktree"
 FAMILY_LABELS = {"git/readonly": "read-only git commands", READ_FILTER: "read-only shell commands",
                  TESTS: "test runs", QUERIES: "package and GitHub queries", LOCAL_GIT: "local git changes",
                  INSTALL: "package installs into the project", WRITES: "file changes in the checkout"}
-# git subcommands that change only the local repository -> the options that discard or force
-# (a cluster's letters count: -fb forces). restore and checkout of a whole checkout discard it too.
-GIT_LOCAL = {"add": (), "commit": (), "stash": (), "merge": (), "tag": ("-d", "--delete", "-f", "--force"),
-             "branch": ("-D", "-f", "--force", "-M", "-C"), "rebase": ("-x", "--exec"), "restore": (),
-             "switch": ("-f", "--force", "--discard-changes", "-C", "--force-create"),
-             "checkout": ("-f", "--force", "-B")}
-STASH_LOCAL = ("push", "save", "pop", "apply", "list", "show", "branch")
+# git subcommands that change only the local repository -> (long options never in the family,
+# short ones, the short options that take a value). A long option counts however git lets it be
+# abbreviated (--exe), a short one anywhere in a cluster before a value (-x"cmd", -tf). What
+# runs a command (rebase --exec, a merge strategy that isn't git's own) or discards the
+# checkout's changes (checkout/switch --force, a restore or checkout of a whole checkout, as
+# reset --hard would) is never in it.
+GIT_LOCAL = {"add": ((), "", ""), "commit": ((), "", "mFcCtS"), "stash": ((), "", "m"), "tag": ((), "", "mFu"),
+             "branch": ((), "", ""), "merge": ((), "", "mFsXS"), "rebase": (("--exec",), "x", "sXCS"),
+             "restore": ((), "", "s"), "switch": (("--force", "--discard-changes"), "f", "cC"),
+             "checkout": (("--force",), "f", "bB")}
+STRATEGIES = frozenset({"ort", "recursive", "resolve", "octopus", "ours", "subtree"})
 # A package manager's install or add, into the project where it runs (and pip, from the project's
 # own environment: .venv/bin/pip, .venv/bin/python -m pip).
 INSTALLS = (("npm", "install"), ("npm", "i"), ("npm", "add"), ("pnpm", "install"), ("pnpm", "i"), ("pnpm", "add"),
             ("yarn", "install"), ("yarn", "add"), ("uv", "add"), ("uv", "sync"), ("uv", "pip", "install"))
-# Install options that put packages elsewhere or fetch them from somewhere else.
-INSTALL_ELSEWHERE = frozenset({"--global", "--location", "--prefix", "--user", "--target", "--root", "--system",
-                               "--python", "--directory", "--project", "--cwd", "--dir", "--registry", "--index",
-                               "--index-url", "--extra-index-url", "--default-index", "--find-links",
-                               "--break-system-packages", "--script"})
-INSTALL_ELSEWHERE_SHORT = "gtpCif"
+# The only install options in the family: none that puts packages, a cache or a log elsewhere or
+# fetches from elsewhere. Those that take a value take a name or a path in the project.
+INSTALL_FLAGS = frozenset({"-D", "--save-dev", "-E", "--save-exact", "-O", "--save-optional", "-P", "--save-prod",
+                           "--save-peer", "-S", "--save", "--no-save", "--dev", "--exact", "--optional", "--peer",
+                           "--frozen-lockfile", "--immutable", "--prefer-offline", "--offline", "--no-audit",
+                           "--no-fund", "--legacy-peer-deps", "--ignore-scripts", "--silent", "--frozen", "--locked",
+                           "--no-dev", "--all-extras", "--all-groups", "--upgrade", "-U", "--no-deps", "--pre",
+                           "--no-install-project", "-q", "--quiet", "-v", "--verbose"})
+INSTALL_VALUES = frozenset({"--group", "--extra", "--package", "--upgrade-package", "-r", "--requirement", "-c",
+                            "--constraint", "-e", "--editable"})
 # The files rm and rmdir delete, by the options brindle reads for each.
 REMOVE_FLAGS = {"rm": re.compile(r"-[rRfidvI]+|--(recursive|force|dir|verbose)"),
                 "rmdir": re.compile(r"-v|--verbose")}
@@ -280,20 +288,38 @@ def _changeable(path: str, roots: list[str]) -> bool:
 
 
 def _git_local(words: list[str], cwd: str, roots: list[str]) -> bool:
-    """A git command in GIT_LOCAL with none of its discarding options, no
-    global option (-C, -c), and no restore or checkout of a whole checkout."""
+    """A git command in GIT_LOCAL with none of its banned options (GIT_LOCAL),
+    no merge strategy but git's own, no global option (-C, -c), and no restore
+    or checkout of a whole checkout."""
     if len(words) < 2 or os.path.basename(words[0]) != "git" or words[1] not in GIT_LOCAL:
         return False
     sub, args = words[1], words[2:]
-    banned = GIT_LOCAL[sub]
-    letters = {b[1] for b in banned if not b.startswith("--")}
-    for arg in args:
-        if arg.startswith("--") and arg.partition("=")[0] in banned:
-            return False
-        if re.fullmatch(r"-[A-Za-z]+", arg) and letters & set(arg[1:]):
-            return False
-    if sub == "stash" and args and not args[0].startswith("-") and args[0] not in STASH_LOCAL:
-        return False    # drop, clear
+    longs, shorts, values = GIT_LOCAL[sub]
+    strategies = sub in ("merge", "rebase")
+    i = 0
+    while i < len(args):
+        arg, i = args[i], i + 1
+        if arg == "--":
+            break
+        if arg.startswith("--"):
+            name, eq, value = arg.partition("=")
+            if any(b.startswith(name) for b in longs):
+                return False
+            if strategies and "--strategy".startswith(name):
+                if not eq:
+                    value, i = (args[i] if i < len(args) else ""), i + 1
+                if value not in STRATEGIES:
+                    return False
+        elif arg.startswith("-"):
+            for j, c in enumerate(arg[1:], 2):    # j: where c's value starts
+                if c in shorts:
+                    return False
+                if c in values:
+                    value = arg[j:] or (args[i] if i < len(args) else "")
+                    if strategies and c == "s" and value not in STRATEGIES:
+                        return False
+                    i += j == len(arg)    # its value is the next word
+                    break
     if sub in ("restore", "checkout"):
         names = [a for a in args if not a.startswith("-")]
         if any(n.startswith(":") or any(c in n for c in "*?[") for n in names):
@@ -305,7 +331,8 @@ def _git_local(words: list[str], cwd: str, roots: list[str]) -> bool:
 
 def _installs(words: list[str], cwd: str, roots: list[str]) -> bool:
     """A package install into the project (INSTALLS, or the project's own
-    pip) with no option that puts it elsewhere or fetches from elsewhere."""
+    pip) with only the options in INSTALL_FLAGS and INSTALL_VALUES, and
+    every package, name or file it is given one in the project."""
     n = next((len(p) for p in INSTALLS if tuple(words[:len(p)]) == p), None)
     # A venv's python links to the system's: where it is written is what says whose environment it is.
     program = os.path.normpath(os.path.join(cwd, words[0]))
@@ -317,14 +344,20 @@ def _installs(words: list[str], cwd: str, roots: list[str]) -> bool:
             n = 4
     if n is None:
         return False
-    for arg in words[n:]:
-        if arg.startswith("--"):
-            if arg.partition("=")[0] in INSTALL_ELSEWHERE:
+
+    def in_project(word: str) -> bool:    # a registry package, or a path in the project (no URL, file: or git+)
+        return bool(word) and not word.startswith(("/", "~", "-")) and ".." not in word.split("/") and ":" not in word
+
+    args, i = words[n:], 0
+    while i < len(args):
+        arg, i = args[i], i + 1
+        name, eq, value = arg.partition("=") if arg.startswith("--") else (arg, "", "")
+        if name in INSTALL_VALUES:
+            if not eq:
+                value, i = (args[i] if i < len(args) else ""), i + 1
+            if not in_project(value):
                 return False
-        elif arg.startswith("-"):
-            if set(arg[1:]) & set(INSTALL_ELSEWHERE_SHORT):
-                return False
-        elif arg.startswith(("/", "~")) or ".." in arg.split("/") or "://" in arg:
+        elif arg.startswith("-") and arg not in INSTALL_FLAGS or not arg.startswith("-") and not in_project(arg):
             return False
     return True
 
@@ -344,6 +377,30 @@ def _removes(words: list[str], cwd: str, roots: list[str]) -> bool:
         else:
             names.append(arg)
     return bool(names) and all(_changeable(os.path.join(cwd, n), roots) for n in names)
+
+
+def _file_writes(program: str, args: list[str], cwd: str, roots: list[str]) -> bool:
+    """Whether every file a FILE_WRITERS program (not ln) or ``sed -i``
+    changes stays in a checkout: each name it is given, what cp or mv makes
+    in a destination folder (a recursive copy only into a new one), and no
+    sed backup put in another folder."""
+    from brindle import permission_groups
+
+    targets = permission_groups._write_targets(program, args)
+    if not targets or program == "ln":
+        return False
+    if program == "sed" and any(re.fullmatch(r"-[nErsuz]*i.*/.*|--in-place=.*/.*", a, re.S) for a in args):
+        return False
+    paths = [os.path.join(cwd, t) for t in targets]
+    if program in ("cp", "mv") and len(paths) >= 2 and (len(paths) > 2 or os.path.isdir(paths[-1])
+                                                        or targets[-1].endswith("/")):
+        made = [os.path.join(paths[-1], os.path.basename(os.path.normpath(p))) for p in paths[:-1]]
+        recursive = program == "cp" and any(re.fullmatch(r"-[A-Za-z]*[rRa][A-Za-z]*|--recursive|--archive", a)
+                                            for a in args)
+        if recursive and any(os.path.lexists(m) for m in made):
+            return False    # what it copies into may lead anywhere
+        paths += made
+    return all(_changeable(p, roots) for p in paths)
 
 
 def _part_family(req: Request, part: permissions.ShellPart, rules: list[Rule],
@@ -369,9 +426,8 @@ def _part_family(req: Request, part: permissions.ShellPart, rules: list[Rule],
         found = INSTALL
     elif _removes(words, part.cwd, roots):
         found = WRITES
-    elif group == "files" and program != "ln":
-        targets = permission_groups._write_targets(program, words[1:])
-        found = WRITES if targets and all(_changeable(os.path.join(part.cwd, t), roots) for t in targets) else None
+    elif group == "files":
+        found = WRITES if _file_writes(program, words[1:], part.cwd, roots) else None
     elif f"{group}/{sub}" == "shell/dev-tools":
         found = _dev_operation(words)
     else:

@@ -289,6 +289,7 @@ def test_cd_chain_keeps_its_family(ws, command, found):
 
 @pytest.mark.parametrize("approved, sibling, decision", [
     ("git add -A", "git commit -m wip && git switch -c topic && git stash pop && git rebase main", "allow"),
+    ("git add -A", "git branch -D old && git tag -d v1 && git stash drop && git merge -s ours topic", "allow"),
     ("npm install", "uv add httpx && cd {lib} && npm add -D left-pad", "allow"),     # in another attached repo
     ("mkdir -p build", "cp app.py build/ && sed -i '' s/a/b/ build/app.py && rm -rf build > out.log", "allow"),
     ("mkdir -p build", "rm -rf {lib}/dist && echo x > {other}/notes.txt", "allow"),   # another repo, its worktree
@@ -300,8 +301,14 @@ def test_cd_chain_keeps_its_family(ws, command, found):
     ("git add -A", "git checkout -- .", "ask"),                                     # the whole checkout
     ("git add -A", "git -c core.hooksPath=/x commit -m wip", "ask"),
     ("git add -A", "git rebase --exec make main", "ask"),                           # runs a command
-    ("git add -A", "git branch -D topic", "ask"),                                   # discards commits
+    *(pytest.param("git add -A", c, "ask", marks=pytest.mark.variant("bypass: an option spelled another way"))
+      for c in ["git rebase -x'touch {out}/x' main", "git rebase --exe=make main", "git merge -s evil topic"]),
     ("npm install", "npm install -g left-pad", "ask"),                             # outside the project
+    ("npm install", "npm install --cache={out} foo", "ask"),
+    pytest.param("npm install", ".venv/bin/pip install --log={out}/log httpx", "ask",
+                 marks=pytest.mark.variant("bypass: an option's value writes outside")),
+    ("mkdir -p build", "cp notes.txt build/", "ask"),                              # build/notes.txt links out
+    ("mkdir -p build", "sed -i'{out}/*' s/a/b/ app.py", "ask"),                    # its backup, outside
     ("npm install", "sudo npm install", "ask"),
     ("npm install", "npm install $(cat pkgs)", "ask"),                             # brindle can't read it
     ("npm install", "cd {out} && npm install", "ask"),
@@ -323,6 +330,7 @@ def test_approval_widens_to_change_families(db, ws, tmp_path, approved, sibling,
     lib, other, out = tmp_path / "lib", tmp_path / "other-wt", tmp_path / "elsewhere"
     for d in (lib, other, out):
         d.mkdir()
+    (Path(ws.path) / "build" / "notes.txt").symlink_to(out / "notes.txt")
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
     db.add_session_repo("boss", "lib", str(lib))
     db.add_workspace(replace(ws, id="other", path=str(other), repo_root=str(tmp_path / "other"), tmux_session="o"))
