@@ -1212,9 +1212,9 @@ def path_candidates(req: Request, resolved_only: bool = False) -> list[str]:
     given = os.path.join(os.path.realpath(os.path.dirname(os.path.abspath(req.path))),
                          os.path.basename(req.path))
     paths = [real] if resolved_only else [real, os.path.abspath(req.path), given]
-    out = list(paths)
+    out, roots = list(paths), session_roots(req)
     for p in paths:
-        for root in _roots(req):
+        for root in roots:
             rel = _inside(p, root)
             if rel:
                 out.append(rel)
@@ -1293,7 +1293,7 @@ def _is_force(arg: str) -> bool:
 
 def _readonly_git(req: Request, argv: list[str]) -> bool:
     """Whether ``argv`` is a read-only git command (READONLY_GIT, no unsafe or
-    force option), with ``-C`` only into the worktree or repo root."""
+    force option), with ``-C`` only into a checkout of the session (session_roots)."""
     if not argv or argv[0] != "git":
         return False
     args = argv[1:]
@@ -1301,7 +1301,7 @@ def _readonly_git(req: Request, argv: list[str]) -> bool:
         if len(args) < 3:
             return False
         path = os.path.realpath(os.path.join(req.cwd or req.worktree, args[1]))
-        if not any(path == os.path.realpath(root) or _inside(path, root) for root in _roots(req)):
+        if not any(path == os.path.realpath(root) or _inside(path, root) for root in session_roots(req)):
             return False
         args = args[2:]
     return bool(args and args[0] in READONLY_GIT
@@ -3951,7 +3951,7 @@ def learnable_pattern(req: Request) -> tuple[str, str] | None:
         if not req.path:
             return None
         real = os.path.realpath(req.path)
-        for root in _roots(req):
+        for root in session_roots(req):
             rel = _inside(real, root)
             if rel:
                 return req.kind, rel

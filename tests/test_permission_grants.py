@@ -350,20 +350,24 @@ def test_approval_widens_to_change_families(db, ws, tmp_path, approved, sibling,
     assert decide(replace(bash(ws, sibling), agent="w1")).decision == decision
 
 
-@pytest.mark.parametrize("agent, kind, where, sub, decision", [
-    ("w1", "write", "lib", "write-worktree", "allow"),        # a second repo attached to the session
-    ("w1", "bash", "lib", "write-worktree", "allow"),
-    ("w1", "write", "alien", "write-outside", "ask"),        # attached only to another session
-    ("w1", "bash", "alien", "write-outside", "ask"),
-    ("", "write", "lib", "write-outside", "ask"),             # no session known: its own checkout only
+@pytest.mark.parametrize("agent, kind, target, group, decision", [
+    ("w1", "write", "{lib}/x.py", ("files", "write-worktree"), "allow"),    # a second repo attached to the session
+    ("w1", "bash", "sed -i '' s/a/b/ {lib}/x.py", ("files", "write-worktree"), "allow"),
+    ("w1", "write", "{lib}/protected/x.py", ("files", "write-worktree"), "deny"),   # a relative deny reaches it
+    ("w1", "bash", "git -C {lib} status", ("git", "readonly"), "allow"),
+    ("w1", "write", "{alien}/x.py", ("files", "write-outside"), "ask"),    # attached only to another session
+    ("w1", "bash", "sed -i '' s/a/b/ {alien}/x.py", ("files", "write-outside"), "ask"),
+    ("w1", "bash", "git -C {alien} status", ("git", "other"), "ask"),
+    ("", "write", "{lib}/x.py", ("files", "write-outside"), "ask"),         # no session known: its own checkout only
 ])
-def test_session_repos_count_as_checkout(db, ws, tmp_path, agent, kind, where, sub, decision):
+def test_session_repos_count_as_checkout(db, ws, tmp_path, agent, kind, target, group, decision):
     """Every repo attached to the asking agent's session is in the checkout
-    for the worktree matcher, the write classes and the change families;
-    another session's repo is not."""
+    for the worktree matcher, relative path rules, git -C, the write classes
+    and the change families; another session's repo is not."""
     from brindle import permission_groups
 
     permissions.apply_preset("permissive")
+    permissions.add_rule("write", "protected/**", "deny", "glob")
     for name in ("lib", "alien"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "x.py").write_text("a\n")
@@ -373,12 +377,12 @@ def test_session_repos_count_as_checkout(db, ws, tmp_path, agent, kind, where, s
     db.add_session_repo("boss", "lib", str(tmp_path / "lib"))
     db.add_session_repo("boss2", "alien", str(tmp_path / "alien"))
     worker(db, ws, "w1")
-    target = tmp_path / where / "x.py"
-    req = replace(write(ws, "x.py"), path=str(target)) if kind == "write" else bash(ws, f"sed -i '' s/a/b/ {target}")
+    target = target.format(lib=tmp_path / "lib", alien=tmp_path / "alien")
+    req = replace(write(ws, "x.py"), path=target) if kind == "write" else bash(ws, target)
     req = replace(req, agent=agent)
-    assert permission_groups.classify(req, permissions.all_rules(ws.repo_root)) == [("files", sub)]
+    assert permission_groups.classify(req, permissions.all_rules(ws.repo_root)) == [group]
     if kind == "bash":
-        assert grants.families(req) == ([grants.WRITES] if sub == "write-worktree" else None)
+        assert grants.families(req) == (["/".join(group)] if decision == "allow" else None)
     assert decide(req).decision == decision
 
 
