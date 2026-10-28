@@ -128,7 +128,7 @@ RESTRICTION_WORD = re.compile(r"[A-Za-z0-9_\-./:=@%+, *?\[\]]+")
 _HEREDOC = re.compile(r"<<-?[ \t]*([\"']?)(\w+)\1[^\n]*\n.*?\n[ \t]*\2[ \t]*(?=\n|$)", re.DOTALL)
 # The operators a compound command may join its parts with ("" ends it).
 COMPOUND_SEPARATORS = ("&&", ";", "|", "")
-READONLY_GIT = ("status", "diff", "log", "show")
+READONLY_GIT = ("status", "diff", "log", "show", "rev-list")
 # Options that make an otherwise read-only git command write or read files
 # outside the repo.
 GIT_UNSAFE_OPTIONS = ("--output", "--ext-diff", "--no-index", "-O")
@@ -1425,7 +1425,7 @@ READONLY_PROGRAMS: dict[str, tuple[str, tuple[str, ...]]] = {
     "du": ("", ()),
     "df": ("", ()), "pwd": ("", ()), "echo": ("", ()), "printf": ("", ()), "which": ("", ()),
     "whereis": ("", ()), "type": ("", ()), "basename": ("", ()), "dirname": ("", ()), "realpath": ("", ()),
-    "readlink": ("", ()), "true": ("", ()), "false": ("", ()), "test": ("", ()), "whoami": ("", ()),
+    "readlink": ("", ()), "true": ("", ()), "false": ("", ()), "test": ("", ()), "[": ("", ()), "whoami": ("", ()),
     "uname": ("", ()), "printenv": ("", ()), "strings": ("", ()), "od": ("", ()), "hexdump": ("", ()),
     "md5": ("", ()), "md5sum": ("", ()), "shasum": ("", ()), "sha256sum": ("", ()), "jq": ("", ()),
     "yq": ("i", ("--inplace",)), "tree": ("o", ()), "locate": ("", ()),
@@ -1434,8 +1434,11 @@ READONLY_PROGRAMS: dict[str, tuple[str, tuple[str, ...]]] = {
 ONE_OPERAND = frozenset({"uniq"})
 # Programs that read names, never a file's contents: no read deny is checked against their arguments.
 NAME_ONLY = frozenset({"ls", "tree", "find", "du", "df", "stat", "pwd", "echo", "printf", "which", "whereis",
-                       "type", "basename", "dirname", "realpath", "readlink", "true", "false", "test", "whoami",
-                       "uname", "seq", "locate", "fd", "fdfind", "hostname"})
+                       "type", "basename", "dirname", "realpath", "readlink", "true", "false", "test", "[",
+                       "whoami", "uname", "seq", "locate", "fd", "fdfind", "hostname"})
+# Programs whose arguments are only text they print or compare: a word only the run
+# knows ("behind: $(git rev-list ...)", [ "$s" = done ]) leaves them read-only.
+TEXT_ONLY = frozenset({"echo", "test", "[", "true", "false"})
 
 # The options _reads_only_named accepts, written out in full: GNU tools
 # also take any unambiguous abbreviation of a long option (--recur is
@@ -2057,26 +2060,40 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
         if strictest is not None and strictest is not ruled.rule:
             ruled = Decision("ask", f"{VERBS['ask']} by {strictest.source} rule {strictest.id} "
                                     f"({strictest.describe()})", strictest)
+        # A command brindle can't verify is approved once at a time, whatever else asks for it.
+        if compound and not any(r.id == SHELL_SYNTAX_RULE for r in asks) and (
+                unverified or read is None and read_parts(req, rules, checks) is None):
+            asks += (_syntax_ask(req).rule,)
         ruled = replace(ruled, asks=asks)
+    # What brindle can't verify that no rule asks for: an ask no rule made (a profile's
+    # allowed_tools may still answer it), limited as the syntax ask is (once at a time).
+    unruled = (_syntax_ask(req).rule,) if ruled is None and unverified else ()
     if saved:
         settled = permission_grants.settle(req, ruled.rule if ruled else None, saved, session=session,
-                                           asks=ruled.asks if ruled else (), spend=spend)
+                                           asks=ruled.asks if ruled else unruled, spend=spend)
         if settled is not None:
             return settled
-    if (ruled is not None and ruled.rule is not None and ruled.rule.id == SHELL_SYNTAX_RULE
-            and permission_groups.unverifiable(groups, unmatched) == "deny"):
-        return Decision("deny", permission_groups.UNVERIFIABLE_GUIDANCE, ruled.rule)
+    unchecked = permission_groups.unverifiable(groups, unmatched)
+    # Unchecked: brindle can't verify it (the syntax ask is in force), alone or beside other asks.
+    asks = ruled.asks if ruled else unruled
+    syntax = any(r.id == SHELL_SYNTAX_RULE for r in (*asks, ruled.rule if ruled else None) if r)
+    if syntax and unchecked == "deny":
+        return Decision("deny", permission_groups.UNVERIFIABLE_GUIDANCE, ruled.rule if ruled else None)
+    # The opt-in runs what brindle can't read; never what it could read but a deny rule may
+    # cover a word of (read_parts: no reason in ``unread``), nor what another rule asks for.
+    alone = ruled is None or ruled.rule is not None and ruled.rule.id == SHELL_SYNTAX_RULE and not asks[1:]
+    if syntax and alone and unchecked == "allow" and unread:
+        return Decision("allow", f"brindle can't check it, and the {permission_groups.UNVERIFIABLE} setting runs "
+                                 f"such commands", ruled.rule if ruled else None)
     if ruled is not None:
         return Decision("ask", ruled.reason + "; asking the user", ruled.rule, ruled.asks)
-    if unverified and permission_groups.unverifiable(groups, unmatched) == "deny":
-        return Decision("deny", permission_groups.UNVERIFIABLE_GUIDANCE)
     if req.kind == "bash" and req.command and simple_argv(req.command) is None:
         why = "the command isn't a single simple command, so no allow rule applies"
     elif req.kind == "read" and req.path:
         why = "not a file git tracks in the worktree, and no rule allows it"
     else:
         why = "no rule allows or denies it"
-    return Decision("ask", f"{why}; asking the user")
+    return Decision("ask", f"{why}; asking the user", asks=unruled)
 
 
 def decide_in_parts(req: Request, *, checks: list[str] | None = None,
@@ -2308,8 +2325,10 @@ SHELL_SYNTAX_RULE = "d-shell-syntax"
 def _syntax_ask(req: Request) -> Decision:
     # A bound ask keeps unsupported shell syntax from falling to an allow
     # (the unmatched setting, a profile's allowed_tools or the CLI's own).
+    # An unchecked command may do anything: it is approved once at a time.
     return Decision("ask", "shell syntax cannot be checked safely",
-                    Rule("bash", req.command, "exact", "ask", "preset", id=SHELL_SYNTAX_RULE))
+                    Rule("bash", req.command, "exact", "ask", "preset", id=SHELL_SYNTAX_RULE,
+                         limits={"life": "once"}))
 
 
 # Options whose value is only data, by (program, subcommand): the one place a
@@ -2945,15 +2964,22 @@ class _Flattener:
         from brindle.native.permissions import _tokens
 
         words = [t[1] for t in tokens if t[0] == "word"]
-        if len(words) == len(tokens) and all(_ASSIGNMENT.match(w.raw) for w in words):
+        # export D=/path sets its variables as an assignment does; the export still runs as a
+        # command of its own (what it exports reaches every program after it).
+        exported = (len(words) == len(tokens) > 1 and words[0].raw == "export"
+                    and all(_ASSIGNMENT.match(w.raw) for w in words[1:]))
+        # Plain assignments expand left to right, each seeing the one before; export's
+        # words all expand before any of its assignments is made.
+        seen = dict(env) if exported else env
+        if exported or len(words) == len(tokens) and all(_ASSIGNMENT.match(w.raw) for w in words):
             self.changed = True
-            for word in words:
+            for word in words[exported:]:
                 name = _ASSIGNMENT.match(word.raw).group(1)
-                if name == "IFS":
-                    raise ValueError("IFS changes how words split")
+                if _PROGRAM_VARIABLES.fullmatch(f"{name}="):
+                    raise ValueError(f"{name} changes which program runs or how words split")
                 for inner in word.substitutions:
-                    self.substitution(inner, env)
-                text = self.text(word, env, assignment=True)[len(name) + 1:]
+                    self.substitution(inner, seen)
+                text = self.text(word, seen, assignment=True)[len(name) + 1:]
                 found = _tokens(text) if text else [(False, "")]
                 known = (definite and not word.substitutions and "~" not in text and found is not None
                          and len(found) == 1 and not found[0][0])
@@ -2961,11 +2987,12 @@ class _Flattener:
                     env[name] = ("lit", found[0][1])
                 else:
                     env.pop(name, None)
-            return
+            if not exported:
+                return
         program = next((w.raw for w in words if not _ASSIGNMENT.match(w.raw)), None)
         if program in ("eval", "source", "."):
             env.clear()
-        elif program in _VARIABLE_SETTERS:
+        elif program in _VARIABLE_SETTERS and not exported:
             for word in words:
                 if found := re.match(r"[A-Za-z_]\w*", word.raw):
                     env.pop(found.group(0), None)
@@ -2979,7 +3006,7 @@ class _Flattener:
                     raise ValueError("a heredoc on another descriptor")
                 self.changed = True    # its body is only the program's input
                 continue
-            spaced, text = (token[1].spaced, self.text(token[1], env)) if token[0] == "word" else (token[2], token[1])
+            spaced, text = (token[1].spaced, self.text(token[1], seen)) if token[0] == "word" else (token[2], token[1])
             pieces.append((" " if spaced and pieces else "") + text)
         if pieces:
             self.emit("".join(pieces), definite, chained)
@@ -3175,8 +3202,9 @@ class _PartReader:
         elif re.search(r"[=:]~", bare):
             self.expanded = self.tilde = True    # bash may expand it (path=~/x) or not
         if re.search(r"[*?]|\[.+\]", bare):    # an unclosed [ (test's) is literal
-            self.expanded = True
             names = self.expand(value)
+            # One that matches nothing stays as written (--include=*.py): the program gets it as is.
+            self.expanded |= names != []
             return ([raw], False, value) if names is None else (names or [value], True, value)
         return [value], True, None
 
