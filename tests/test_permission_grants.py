@@ -276,6 +276,7 @@ def test_approval_covers_its_family(db, ws, approved, sibling, decision):
     ("cd app && npm test || npm test", None),                           # runs where the cd failed
     ("ls | cd app && npm test", None),                                  # the cd ran in the pipeline's subshell
     ("! cd app && npm test", None),                                     # runs only where the cd failed
+    ("cd / && ls && {{ cd {ws} && ls; }} | npm test", None),           # the group's cd ran in its own subshell
 ])
 def test_cd_chain_keeps_its_family(ws, command, found):
     """What runs after a cd it surely followed (``cd x && ...``) runs where

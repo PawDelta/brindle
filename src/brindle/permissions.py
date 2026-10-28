@@ -2680,7 +2680,8 @@ def _script_tokens(command: str) -> list[tuple] | None:
 
 
 def _script_items(tokens: list[tuple]) -> list[tuple]:
-    """The script as ``("kw", word)``, ``("for", name, values or None)`` and
+    """The script as ``("kw", word)`` (``("kw", word, piped)`` for a group's
+    braces: a pipe before its { or after its }), ``("for", name, values or None)`` and
     ``("cmd", tokens, separator before, separator after, negated by !)``
     items. Raises ValueError for what _flat_script doesn't read."""
     commands: list[tuple[list, str, str]] = []
@@ -2698,7 +2699,9 @@ def _script_items(tokens: list[tuple]) -> list[tuple]:
     negated = False    # a ! before a { on a line of its own marks the group's first command
     for toks, before, after in commands:
         while toks and toks[0][0] == "word" and toks[0][1].plain() in (*_SCRIPT_OPENERS, "!"):
-            if toks[0][1].raw != "!":
+            if toks[0][1].raw == "{":
+                items.append(("kw", "{", before in ("|", "|&")))    # piped: it runs in a subshell
+            elif toks[0][1].raw != "!":
                 items.append(("kw", toks[0][1].raw))
             negated |= toks[0][1].raw == "!"
             toks = toks[1:]
@@ -2712,7 +2715,7 @@ def _script_items(tokens: list[tuple]) -> list[tuple]:
             items.append(("for", words[1].raw, words[3:] if len(words) > 2 else None))
             continue
         if first in ("done", "fi", "}"):
-            items.append(("kw", first))
+            items.append(("kw", first, after in ("|", "|&")) if first == "}" else ("kw", first))
             toks = toks[1:]
             if not toks:
                 continue
@@ -2732,9 +2735,10 @@ def _script_tree(items: list[tuple], i: int = 0, stops: tuple[str, ...] = ()) ->
     """Nodes from ``items[i:]`` up to a reserved word in ``stops``:
     ``("cmd", ...)``, ``("for", name, values, body)``, ``("maybe", body)``
     for what may run any number of times (if, while, until) and
-    ``("group", body)``. Raises ValueError for a structure left open."""
+    ``("group", body, piped)`` (a pipeline's part: in a subshell of its
+    own). Raises ValueError for a structure left open."""
     def expect(i: int, word: str) -> int:
-        if i >= len(items) or items[i] != ("kw", word):
+        if i >= len(items) or items[i][:2] != ("kw", word):
             raise ValueError(f"no {word}")
         return i + 1
 
@@ -2770,8 +2774,8 @@ def _script_tree(items: list[tuple], i: int = 0, stops: tuple[str, ...] = ()) ->
             i = expect(i, "fi")
         elif item[1] == "{":
             body, i = _script_tree(items, i + 1, ("}",))
-            nodes.append(("group", body))
             i = expect(i, "}")
+            nodes.append(("group", body, item[2] or items[i - 1][2]))
         else:
             raise ValueError(f"a stray {item[1]}")
     if stops:
@@ -2856,7 +2860,7 @@ class _Flattener:
                 continue
             self.changed = True
             if node[0] == "group":
-                self.walk(node[1], env, definite, chains)
+                self.walk(node[1], env, definite, chains and not node[2])
                 continue
             body = node[3] if node[0] == "for" else node[1]
             values = self.loop_values(node[2], env) if node[0] == "for" else []
