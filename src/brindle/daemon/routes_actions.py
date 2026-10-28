@@ -1761,6 +1761,42 @@ def provider_logout(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("logout_failed", str(e), 422) from None
 
 
+def put_provider_connection(db: DB, params: dict, body: Body) -> Any:
+    """How the provider connects (brindle.connections), into
+    ~/.brindle/config.json: ``method`` auto | sign_in | api_key | cloud, and
+    for cloud ``cloud`` (the route) and ``settings`` (its non-secret
+    variables, e.g. AWS_PROFILE and AWS_REGION). A choice the org's policy
+    decides instead is refused (403) with the reason. Answers GET's shape."""
+    from brindle import connections
+    from brindle.service.dto import ProviderConnectionDTO
+
+    provider, repo = params["provider"], _get(body, "repo")
+    try:
+        connections.choose(provider, _get(body, "method", required=True), _get(body, "cloud"),
+                           _get(body, "settings", dict), repo)
+        return ProviderConnectionDTO(**connections.view(provider, repo)).to_json()
+    except connections.Invalid as e:
+        raise ServiceError("invalid", str(e)) from None
+    except connections.Refused as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+
+
+def provider_cloud_sign_in(db: DB, params: dict, body: Body) -> Any:
+    """Open the browser sign-in the provider's saved cloud route needs
+    (cloud_login.sign_in: one tab machine-wide), as a job whose result says
+    what happened: opened, waiting (one is open), no lapse, manual, ..."""
+    from brindle import connections
+
+    provider = params["provider"]
+    if connections.saved(provider).get("method") != "cloud":
+        raise ServiceError("invalid", f"{provider} doesn't connect through a cloud: choose one first")
+
+    def work(db: DB, job: Job) -> Any:
+        return connections.sign_in(provider, now=time.time())
+
+    return start_job("provider.cloud_sign_in", work, provider=provider)
+
+
 def terminal_input(db: DB, params: dict, body: Body) -> Any:
     """Type ``text``, one line the person typed or pasted in the app (a
     sign-in's code), into the action terminal ``id``, then Enter unless
@@ -2097,6 +2133,8 @@ ROUTES = [
     _post("/providers/{provider}/consent", provider_consent),
     _post("/providers/{provider}/install", install_provider),
     _post("/providers/{provider}/use-mine", use_provider_install),
+    Route("/v1/providers/{provider}/connection", _endpoint(put_provider_connection), methods=["PUT"]),
+    _post("/providers/{provider}/cloud-sign-in", provider_cloud_sign_in),
     Route("/v1/providers/{provider}", _endpoint(turn_off_provider), methods=["DELETE"]),
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),

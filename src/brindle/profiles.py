@@ -551,7 +551,13 @@ def _resolve(name: str, repo_root: str | None, chain: tuple[str, ...] = ()) -> t
 
 def _load(name: str, repo_root: str | None) -> Profile:
     meta, body = _resolve(name, repo_root)
-    return replace(_build(meta, body, name), name=name)
+    profile = replace(_build(meta, body, name), name=name)
+    if "auth" in meta:
+        return profile
+    # No auth: of its own: how the person chose to connect its provider.
+    from brindle import connections
+
+    return connections.apply(profile)
 
 
 def load_profile(name: str, repo_root: str | None = None) -> Profile:

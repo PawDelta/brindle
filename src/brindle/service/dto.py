@@ -427,6 +427,66 @@ class PreflightItemDTO(_DTO):
     link: str | None = None
 
 
+# -- how each provider connects (brindle.connections) -------------------------------------------
+
+
+class CloudLoginDTO(_DTO):
+    """A cloud login's state (brindle.cloud_login.status): ``valid`` now,
+    ``expires_at`` (epoch seconds, None when unknown), ``expired`` when only
+    ``renew_command`` (the person) can renew it."""
+    valid: bool
+    expired: bool
+    expires_at: float | None = None
+    renew_command: str = ""
+    note: str = ""
+
+
+class ProviderConnectionDTO(_DTO):
+    """How a provider connects: ``method`` auto | sign_in | api_key | cloud,
+    and for cloud the route (``cloud``: bedrock, vertex, foundry, azure), its
+    non-secret ``settings`` (variable -> value) and its ``login``. ``saved``:
+    the person chose it (PUT /providers/{p}/connection), else what applies
+    without a choice. ``managed``: why the org decides it instead, when it does.
+    ``clouds``: the routes this provider can take."""
+    provider: str
+    method: str
+    saved: bool
+    cloud: str | None = None
+    settings: dict[str, str] = {}
+    login: CloudLoginDTO | None = None
+    managed: str | None = None
+    clouds: list[str] = []
+
+
+class AwsProfileDTO(_DTO):
+    name: str
+    sso: bool
+    region: str | None = None
+
+
+class GcloudOptionsDTO(_DTO):
+    adc: bool
+    project: str | None = None
+    region: str | None = None
+
+
+class AzureOptionsDTO(_DTO):
+    tenant_id: str
+    subscription_id: str | None = None
+    subscription_name: str | None = None
+
+
+class CloudOptionsDTO(_DTO):
+    """What this machine's cloud CLIs are set up with, read from their files
+    (never a secret): AWS profiles, gcloud's application-default login and
+    default project, the Azure CLI's signed-in tenant (None when signed out),
+    and the usual ``regions`` per route."""
+    aws_profiles: list[AwsProfileDTO]
+    gcloud: GcloudOptionsDTO
+    azure: AzureOptionsDTO | None = None
+    regions: dict[str, list[str]] = {}
+
+
 # -- permissions (brindle.permissions, brindle.permission_grants) ------------------------------
 
 

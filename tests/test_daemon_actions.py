@@ -784,6 +784,50 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     assert len(typed) == 2
 
 
+@pytest.mark.parametrize("case", ["api_key", "bedrock", "org_refuses", "options"])
+def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_org(
+        db, world, tmp_path, monkeypatch, case):
+    from brindle import cloud_login, profiles, tmux
+    from brindle.pro import managed_models
+
+    path = "/v1/providers/claude/connection"
+    if case == "api_key":
+        code, reply = _send("PUT", path, {"method": "api_key"})
+        assert code == 200 and (reply["method"], reply["saved"], reply["cloud"]) == ("api_key", True, None)
+        assert profiles.load_profile("developer", world.repo_root).auth == "api_key"
+    elif case == "bedrock":
+        settings = {"AWS_PROFILE": "work-sso", "AWS_REGION": "us-east-1"}
+        code, reply = _send("PUT", path, {"method": "cloud", "cloud": "bedrock", "settings": settings})
+        assert code == 200 and (reply["cloud"], reply["settings"]) == ("bedrock", settings)
+        assert reply["login"] is not None and reply["clouds"] == ["bedrock", "vertex", "foundry"]
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "FAKE_PERSONAL_KEY")
+        monkeypatch.setattr(tmux, "inherited_env", lambda *a: dict(os.environ))
+        env = agents._effective_window_env(db.get_agent("wk"), db.get_workspace("w-1"))
+        assert {k: env.get(k) for k in (*settings, "CLAUDE_CODE_USE_BEDROCK")} == {**settings, "CLAUDE_CODE_USE_BEDROCK": "1"}
+        assert not env.get("ANTHROPIC_API_KEY")
+        # The sign-in button opens the saved route's login, with its settings.
+        seen = []
+        monkeypatch.setattr(cloud_login, "sign_in", lambda route, env, last_input: seen.append(
+            (route, env["AWS_PROFILE"])) or "opened")
+        code, job = _send("POST", "/v1/providers/claude/cloud-sign-in")
+        assert code == 202 and seen == [("bedrock", "work-sso")]
+        done = bus.tail(db, kinds=("job.done",))[-1]["payload"]
+        assert done["job"] == job["job"] and done["result"]["result"] == "opened"
+    elif case == "org_refuses":
+        monkeypatch.setattr(managed_models, "current", lambda repo: managed_models.Managed("acme", None, True))
+        code, reply = _send("PUT", path, {"method": "api_key"})
+        assert code == 403 and "acme" in reply["error"]["message"]
+        assert _send("GET", path)[1]["saved"] is False
+    else:
+        aws = tmp_path / "no-aws" / "config"
+        aws.parent.mkdir()
+        aws.write_text("[profile work-sso]\nsso_session = corp\nregion = us-east-1\n[default]\nregion = eu-west-1\n")
+        code, reply = _send("GET", "/v1/cloud/options")
+        assert code == 200 and reply["aws_profiles"] == [
+            {"name": "work-sso", "sso": True, "region": "us-east-1"}, {"name": "default", "sso": False, "region": "eu-west-1"}]
+        assert reply["gcloud"]["adc"] is False and reply["azure"] is None and "us-east-1" in reply["regions"]["bedrock"]
+
+
 @pytest.mark.parametrize("route", ["bedrock", "vertex"])
 def test_cloud_profile_login_uses_launch_identity(db, world, tmp_path, monkeypatch, route):
     import hashlib
