@@ -66,6 +66,7 @@ import { UpgradeCard, useEngineUpgrade } from "../../components/EngineUpgrade";
 import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
+import { ThemeToggle } from "../../components/ThemeToggle";
 import { About } from "./About";
 import { OrgApprovals } from "./OrgApprovals";
 import { Permissions } from "./Permissions";
@@ -1074,6 +1075,11 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         <RepoSelect {...pick} disabled={saving} />
       </PageHeader>
       <SectionNav staff={staff} />
+      <div className="border-t border-line">
+        <Row label="Appearance">
+          <ThemeToggle choices />
+        </Row>
+      </div>
       {repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>

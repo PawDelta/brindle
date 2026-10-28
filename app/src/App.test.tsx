@@ -157,10 +157,9 @@ describe("App", () => {
       expect(await screen.findByRole("region", { name })).toBeTruthy();
       expect(link(name).getAttribute("aria-current")).toBe("page");
     }
-    fireEvent.click(link("Open account menu"));
-    fireEvent.click(within(screen.getByRole("dialog", { name: "Account menu" })).getByRole("button", { name: "Account" }));
+    fireEvent.click(link("Open Account"));
     expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
-    expect(screen.queryByRole("dialog", { name: "Account menu" })).toBeNull();
+    expect(link("Open Account").getAttribute("aria-current")).toBe("page");
 
     // ⌘1 is the first live session, back from any page; ⌘N the composer.
     fireEvent.keyDown(window, { key: "1", metaKey: true });
@@ -514,7 +513,7 @@ describe("providers in the sidebar", () => {
     expect(nav().textContent).not.toContain("Claude Code");
     expect(within(nav()).queryByRole("button", { name: /Connect|Sign in/ })).toBeNull();
     expect(within(nav()).queryByTestId("provider-problem")).toBeNull();
-    expect(within(nav()).getByRole("button", { name: "Open account menu" }).getAttribute("aria-expanded")).toBe("false");
+    expect(within(nav()).getByRole("button", { name: "Open Account" })).toBeTruthy();
     stop();
   });
 

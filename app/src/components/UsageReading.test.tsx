@@ -48,7 +48,7 @@ const statusLine = () => screen.getByTestId("status-line");
 const usageAsked = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "GET" && r.path === "/usage").length;
 
 describe("the sidebar's weekly usage reading", () => {
-  it.each(["normal", "several"] as const)("sidebar foot usage line shows the most-used weekly provider, warns near the limit, and keeps theme choices in the account menu (%s)", async (scenario) => {
+  it.each(["normal", "several"] as const)("sidebar foot usage line shows weekly usage and warnings, initials open Account, and theme choices live in Settings (%s)", async (scenario) => {
     const { daemon, stop } = app(scenario, { account: { signed_in: true, name: "Hannah Lerner", plan: "pro" } });
     await waitFor(() => expect(usageAsked(daemon)).toBeGreaterThan(0));
     await waitFor(() => expect(screen.getByTestId("pages")).toBeTruthy());
@@ -57,37 +57,27 @@ describe("the sidebar's weekly usage reading", () => {
     expect(reading.className).toContain(scenario === "normal" ? "text-ink-3" : "text-sap");
     expect(within(statusLine()).getByRole("progressbar").getAttribute("aria-valuenow")).toBe(scenario === "normal" ? "41" : "82");
     expect(screen.queryByRole("group", { name: "Theme" })).toBeNull();
-    const account = screen.getByRole("button", { name: "Open account menu" });
+    const account = screen.getByRole("button", { name: "Open Account" });
     await waitFor(() => expect(account.textContent).toBe("HL"));
     fireEvent.click(account);
-    const menu = screen.getByRole("dialog", { name: "Account menu" });
-    expect(within(menu).getByText(daemon.data.account.name!)).toBeTruthy();
-    expect(menu.textContent).toContain(daemon.data.account.plan!);
-    expect(menu.contains(document.activeElement)).toBe(true);
-    const theme = within(menu).getByRole("group", { name: "Theme" });
+    expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    fireEvent.click(within(screen.getByTestId("pages")).getByRole("button", { name: "Settings" }));
+    const settings = await screen.findByRole("region", { name: "Settings" });
+    const theme = within(settings).getByRole("group", { name: "Theme" });
     fireEvent.click(within(theme).getByRole("button", { name: "Dark" }));
     expect(document.documentElement.dataset.theme).toBe("dark");
     fireEvent.click(within(theme).getByRole("button", { name: "Light" }));
     expect(document.documentElement.dataset.theme).toBe("light");
     fireEvent.click(within(theme).getByRole("button", { name: "System" }));
     expect(document.documentElement.dataset.theme).toBeUndefined();
-    expect(within(menu).getAllByRole("progressbar").map((bar) => bar.getAttribute("aria-valuenow"))).toEqual(scenario === "normal" ? ["9", "41"] : ["63", "82"]);
-    fireEvent.keyDown(menu, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "Account menu" })).toBeNull();
-    expect(document.activeElement).toBe(account);
-    fireEvent.click(account);
-    fireEvent.mouseDown(document.body);
-    expect(screen.queryByRole("dialog", { name: "Account menu" })).toBeNull();
+    expect(within(screen.getByRole("complementary", { name: "Sidebar" })).queryByRole("group", { name: "Theme" })).toBeNull();
     expect(within(statusLine()).queryByTestId("connection")).toBeNull();
     // The footer's links never wrap, whatever the status line carries.
     const pages = screen.getByTestId("pages");
     expect(pages.className).toContain("flex-nowrap");
     expect(pages.className).toContain("whitespace-nowrap");
     expect(within(pages).getByRole("button", { name: "Agents" }).querySelector("[data-testid*='badge']")).toBeNull();
-    fireEvent.click(account);
-    fireEvent.click(within(screen.getByRole("dialog", { name: "Account menu" })).getByRole("button", { name: /^Usage/ }));
-    await screen.findByTestId("usage");
-    expect(screen.queryByRole("dialog", { name: "Account menu" })).toBeNull();
     stop();
   });
 

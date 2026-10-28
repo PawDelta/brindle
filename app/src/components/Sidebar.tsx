@@ -22,8 +22,8 @@
    on that agent. Keys, as in the CLI: ↑ ↓ (or j k) move, Enter opens, ⌘1-9
    jump to a session, ⌘N starts one. Knowledge, Agents,
    and Settings as small links at the foot, on one line with an initials
-   button for the Account menu and the terminal switch. The Account menu
-   holds the name, plan, provider usage and theme choices. Above the row,
+   button that opens Account and the terminal switch. Theme choices live
+   in Settings. Above the row,
    the most-used weekly allowance opens Account › Usage; beside it, while a provider
    has a problem (signed out, an install failed), a few more that open
    Settings › Providers (design/connect/); no providers block anywhere else
@@ -53,7 +53,6 @@ import Logo from "./Logo";
 import { Preflight } from "./Preflight";
 import { SessionContext } from "./SessionContext";
 import { TerminalToggle } from "./TerminalPanel";
-import { ThemeToggle } from "./ThemeToggle";
 
 export interface SidebarProps {
   route: Route;
@@ -103,15 +102,10 @@ function UsageReading({ provider, warning, navigate }: { provider?: ProviderUsag
   );
 }
 
-function AccountMenu({ navigate }: Pick<SidebarProps, "navigate">) {
+function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
   const client = useContext(DaemonContext);
   const connection = useAppState((s) => s.connection);
-  const { usage } = useUsage();
   const [account, setAccount] = useState<AccountInfo | null>(null);
-  const [open, setOpen] = useState(false);
-  const container = useRef<HTMLDivElement>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
-  const menu = useRef<HTMLDivElement>(null);
   useEffect(() => {
     let current = true;
     if (client && (connection === "open" || connection === "idle")) {
@@ -122,77 +116,19 @@ function AccountMenu({ navigate }: Pick<SidebarProps, "navigate">) {
     }
     return () => { current = false; };
   }, [client, connection]);
-  useEffect(() => {
-    if (!open) return;
-    menu.current?.querySelector<HTMLButtonElement>("button")?.focus();
-    const outside = (event: globalThis.MouseEvent) => {
-      if (!container.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const escape = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        setOpen(false);
-        trigger.current?.focus();
-      }
-    };
-    document.addEventListener("mousedown", outside);
-    document.addEventListener("keydown", escape);
-    return () => {
-      document.removeEventListener("mousedown", outside);
-      document.removeEventListener("keydown", escape);
-    };
-  }, [open]);
   const name = account?.signed_in ? account.name || "Signed in" : "Guest";
   const initials = account?.signed_in && account.name ? account.name.split("@")[0].split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() : "?";
-  const go = (route: Route) => {
-    setOpen(false);
-    navigate(route);
-  };
   return (
-    <div
-      ref={container}
-      className="relative shrink-0"
-      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false); }}
+    <button
+      type="button"
+      aria-label="Open Account"
+      aria-current={route.screen === "account" ? "page" : undefined}
+      title={name}
+      className="flex size-7 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] text-ink-2 hover:bg-surface-2"
+      onClick={() => navigate({ screen: "account" })}
     >
-      <button
-        ref={trigger}
-        type="button"
-        aria-label="Open account menu"
-        aria-haspopup="dialog"
-        aria-expanded={open}
-        aria-controls={open ? "sidebar-account-menu" : undefined}
-        title={name}
-        className="flex size-7 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] text-ink-2 hover:bg-surface-2"
-        onClick={() => setOpen((value) => !value)}
-      >
-        {initials}
-      </button>
-      {open && (
-        <div ref={menu} id="sidebar-account-menu" role="dialog" aria-label="Account menu" className="absolute bottom-full left-0 z-50 mb-2 w-[252px] rounded-lg border border-line-strong bg-surface p-s1 text-[12px] shadow-lg">
-          <div className="border-b border-line px-s1 pb-s1">
-            <div className="truncate font-medium text-ink">{name}</div>
-            <div className="text-ink-3">brindle {account?.plan || "free"}</div>
-          </div>
-          <button type="button" className="w-full rounded-md px-s1 py-s1 text-left text-ink-2 hover:bg-surface-2 hover:text-ink" onClick={() => go({ screen: "account" })}>
-            Account
-          </button>
-          <button type="button" className="w-full rounded-md px-s1 py-s1 text-left text-ink-2 hover:bg-surface-2 hover:text-ink" onClick={() => go({ screen: "account", section: "usage", ask: ++usageAsks })}>
-            Usage
-            <span className="mt-1 flex flex-col gap-1 text-[11px] text-ink-3">
-              {usage?.providers.map((provider) => (
-                <span key={provider.provider} className="flex items-center justify-between gap-s1">
-                  <span>{providerName(provider.provider)}</span>
-                  <WeeklyMeter provider={provider} />
-                </span>
-              ))}
-            </span>
-          </button>
-          <div className="border-t border-line px-s1 pt-s1">
-            <ThemeToggle choices />
-          </div>
-        </div>
-      )}
-    </div>
+      {initials}
+    </button>
   );
 }
 
@@ -841,7 +777,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         <ProviderProblemLine problems={problems} navigate={navigate} />
       </div>
       <nav aria-label="Pages" className="flex h-10 shrink-0 flex-nowrap items-center gap-1 whitespace-nowrap px-s1" data-testid="pages">
-        <AccountMenu navigate={navigate} />
+        <AccountButton route={route} navigate={navigate} />
         {page({ screen: "knowledge" }, "Knowledge")}
         <span aria-hidden className="text-ink-3">·</span>
         {page({ screen: "agents" }, "Agents")}

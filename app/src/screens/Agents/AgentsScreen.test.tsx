@@ -339,7 +339,7 @@ describe("agents tab", () => {
       </PtyViewsProvider>,
     );
     const pages = await screen.findByRole("navigation", { name: "Pages" });
-    expect(within(pages).getByRole("button", { name: "Open account menu" })).toBeTruthy();
+    expect(within(pages).getByRole("button", { name: "Open Account" })).toBeTruthy();
     expect(pages.className).toContain("flex-nowrap");
     fireEvent.click(within(pages).getByRole("button", { name: "Agents" }));
     await screen.findByTestId("kind-medium");
