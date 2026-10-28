@@ -1,7 +1,7 @@
-/* A session's main area has Terminal, Changes and Repo tabs. Terminal keeps
+/* A session's main area has Chat, Changes and Repo tabs. Chat keeps
    the selected agent's ProviderSurface; Changes shows the whole session
    branch against its PR base, even before readiness; Repo, the session
-   checkout's files to open and edit, and a shell there (RepoView). Each
+   checkout's files to open and edit (RepoView). Each
    remains mounted after opening so switching tabs keeps the pane and unsaved drafts.
    The session branch is named in the Repo tab, whichever agent is selected;
    the change counts, in the Changes view's own header.
@@ -218,7 +218,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         {visited === root && <SessionDiffEditor key={root} client={client} root={root} state={changes} />}
       </div>
       <div role="tabpanel" id="session-repo" aria-labelledby="session-tab-repo" hidden={tab !== "repo"} className={tab === "repo" ? "flex min-h-0 min-w-0 flex-1 flex-col p-s2" : "hidden"}>
-        {repoVisited === root && <RepoView key={root} client={client} root={root} repo={repo} branch={branch} cwd={checkout?.path ?? null} active={tab === "repo"} />}
+        {repoVisited === root && <RepoView key={root} client={client} root={root} branch={branch} active={tab === "repo"} />}
       </div>
       {/* The one thing that ever lies over a session, opened on purpose from the goal panel's Ready for PR step.
           Open, it stays through readiness being read again (an edit here, a sweep): it says so quietly instead. */}
@@ -272,11 +272,11 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
   const ago = node ? since(node.agent.status_since) : null;
   // The bar's own notice is the pause's; a continue's shows on the surface's card, where it was asked for.
   return (
-    <header className="flex flex-wrap items-center gap-x-s2 gap-y-1 border-b border-line bg-surface px-s2 py-1" data-testid="session-bar">
+    <header className="flex flex-wrap items-center gap-x-s2 gap-y-1 border-b border-line px-s2 py-1" data-testid="session-bar">
       <div role="tablist" aria-label="Session views" data-testid="session-tabs" className="flex shrink-0 items-center self-stretch gap-s1 pr-s2">
         {TABS.map((item, at) => (
           <button key={item} id={`session-tab-${item}`} role="tab" type="button" aria-selected={tab === item} aria-controls={`session-${item}`} tabIndex={tab === item ? 0 : -1} data-testid={`${item}-tab`}
-            className={`border-b-2 px-s2 py-2 text-sm ${tab === item ? "border-branch text-ink" : "border-transparent text-ink-3 hover:text-ink"}`}
+            className={`rounded-md px-s2 py-s1 text-sm ${tab === item ? "bg-surface-2 text-ink" : "text-ink-3 hover:bg-surface-2 hover:text-ink"}`}
             onClick={() => onTab(item)}
             onKeyDown={(e) => {
               if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
@@ -286,7 +286,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
               onTab(next);
               document.getElementById(`session-tab-${next}`)?.focus();
             }}>
-            {item === "terminal" ? "Terminal" : item === "repo" ? "Repo" : "Changes"}
+            {item === "terminal" ? "Chat" : item === "repo" ? "Repo" : "Changes"}
           </button>
         ))}
       </div>

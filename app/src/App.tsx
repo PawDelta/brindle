@@ -227,7 +227,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   const fills = shown.screen === "session" || shown.screen === "new" || shown.screen === "inbox";
   // Where a shell of the person's own starts: the open session's worktree, else the repo's root.
   const workspaces = useAppState((s) => s.workspaces);
-  const here = useMemo(() => shellPlace(shown, repos ?? [], workspaces), [shown, repos, workspaces]);
+  const here = useMemo(() => shellPlace(shown, repos ?? [], workspaces, shown.screen === "session" ? sessions[shown.repo]?.find((s) => s.id === shown.root) : null), [shown, repos, workspaces, sessions]);
   return (
     <TerminalProvider client={client} here={here}>
       <div className="flex h-full bg-canvas text-ink">
