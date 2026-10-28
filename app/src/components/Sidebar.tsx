@@ -22,7 +22,7 @@
    on that agent. Keys, as in the CLI: ↑ ↓ (or j k) move, Enter opens, ⌘1-9
    jump to a session, ⌘N starts one. Knowledge, Agents,
    Settings and Account as small links at the foot, on one line, with the
-   engine connection and the theme switch under them, and between those two,
+   terminal and theme switches under them, and beside those,
    only while a provider is near its limit, a few warm words that open
    Account › Usage (design/usage/A4), and beside them only while a provider
    has a problem (signed out, an install failed), a few more that open
@@ -44,7 +44,6 @@ import { useContinue } from "../screens/Session/useContinue";
 import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
 import { nearReading, nowSeconds } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
-import type { AppState } from "../store/store";
 import { providerProblems, type ProviderProblem } from "../api/providers";
 import { useProviders } from "../store/providers";
 import { useUsage } from "../store/usage";
@@ -64,28 +63,6 @@ export interface SidebarProps {
   openUrl?: OpenUrl;
 }
 
-const CONNECTION: Record<AppState["connection"], { label: string; dot: string }> = {
-  idle: { label: "no engine", dot: "bg-ink-3" },
-  connecting: { label: "connecting…", dot: "bg-fawn" },
-  open: { label: "connected", dot: "bg-pass" },
-  closed: { label: "reconnecting…", dot: "bg-sap" },
-  unauthorized: { label: "token refused", dot: "bg-sap" },
-};
-
-/* `brief`: the usage reading needs the room, so a connection that is
-   simply open says so with its dot alone (the words stay for a screen
-   reader); any other state keeps its words. */
-function ConnectionBadge({ brief = false }: { brief?: boolean }) {
-  const connection = useAppState((s) => s.connection);
-  const { label, dot } = CONNECTION[connection];
-  return (
-    <span className="flex flex-none items-center gap-1.5 text-[11.5px] text-ink-3" data-testid="connection">
-      <span className={`size-[7px] rounded-full ${dot}`} />
-      daemon<span className={brief && connection === "open" ? "sr-only" : ""}> · {label}</span>
-    </span>
-  );
-}
-
 /* The status line's reading while a provider is near its limit, or null. */
 function useNearReading() {
   const { usage } = useUsage();
@@ -96,8 +73,7 @@ function useNearReading() {
    (design/usage/A4): the worst one in the fewest words, "Claude 88% ·
    5:10pm" or "Antigravity limit · 7:18pm", "+N" in the line's dim colour
    when others are near too, opening Account › Usage. Nothing otherwise.
-   While it is there the daemon's "· connected" gives way to it (as the
-   design's uptime does), and an over-long reading ends in an ellipsis
+   An over-long reading ends in an ellipsis
    rather than wrapping. */
 /* Each click is its own request, so a second one with Account open scrolls back to Usage. */
 let usageAsks = 0;
@@ -363,7 +339,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
         >
           <Dot tone={busy > 0 ? "work" : "idle"} className="mt-[6px]" />
           <span className="min-w-0 flex-1">
-            <span className="line-clamp-2 text-[13px] leading-[1.35] text-ink">{session.goal || <span className="italic text-ink-3">No goal set</span>}</span>
+            <span className="line-clamp-2 text-[13px] leading-[1.35] text-ink">{session.name || session.goal || <span className="italic text-ink-3">No goal set</span>}</span>
             <span className="block truncate text-[11.5px] text-ink-3">
               <span className="font-mono text-[11px]">{root}</span> · {session.mode} · {agents} agent{agents === 1 ? "" : "s"}
               {busy > 0 && ` · ${busy} working`}
@@ -457,7 +433,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
       >
         <Dot tone={session.status === "failed" ? "fail" : "paused"} className="mt-[6px]" />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13px] leading-[1.35] text-ink-3">{session.goal || <span className="italic">No goal set</span>}</span>
+          <span className="block truncate text-[13px] leading-[1.35] text-ink-3">{session.name || session.goal || <span className="italic">No goal set</span>}</span>
           <span className="block truncate text-[11.5px] text-ink-3">
             <span className="font-mono text-[11px]">{root}</span> · {session.status}
             {age !== "just now" && ` ${age}`}
@@ -766,7 +742,6 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         {page({ screen: "account" }, "Account")}
       </nav>
       <div className="flex items-center justify-between gap-[10px] whitespace-nowrap px-s1 pt-0.5" data-testid="status-line">
-        <ConnectionBadge brief={reading !== null || problems.length > 0} />
         {(problems.length > 0 || reading) && (
           <span className="ml-auto flex min-w-0 flex-[0_1_auto] items-baseline gap-[10px]">
             <ProviderProblemLine problems={problems} navigate={navigate} />

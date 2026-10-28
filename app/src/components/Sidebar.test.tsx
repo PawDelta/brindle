@@ -165,15 +165,15 @@ describe("Sidebar", () => {
       { screen: "session", root: "sup1", repo: REPO, agent: "sup1" },
     );
     const context = () => screen.getByTestId("session-context");
-    // The goal as the mockup draws it: "Milestone N of T · phase" with a ring and a bar per milestone, the
-    // milestones listed, the last check (no button: the supervisor checks) and the autopilot switch (a live session).
-    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("Milestone 2 of 2 · In progress"));
+    // Completion stays visible alongside the phase; the milestone list carries the detail.
+    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete · In progress"));
     expect(context().textContent).toContain("Ship ls --json");
     expect(context().textContent).toContain("sup1 · proj · interactive · autopilot");
     const milestones = within(context()).getByRole("list", { name: "Milestones" });
     expect(milestones.textContent).toContain("Print JSON");
     expect([...milestones.querySelectorAll("li")].map((li) => li.dataset.state)).toEqual(["done", "now"]);
-    expect(within(context()).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
+    expect(within(context()).queryByRole("progressbar")).toBeNull();
+    expect(screen.queryByTestId("connection")).toBeNull();
     expect(context().textContent).toContain("Checked never");
     expect(within(context()).queryByRole("button", { name: /Check milestone|Run checks/ })).toBeNull();
     expect(within(context()).getByRole("switch").getAttribute("aria-checked")).toBe("true");
@@ -211,10 +211,38 @@ describe("Sidebar", () => {
   it("offers no autopilot for a paused session's context, and says nothing about a PR", async () => {
     const { sync } = mount({ workspaces: [root, worker], goal: { ...structuredClone(goal), root_id: "sup0", state: "paused", enabled: false } }, { screen: "session", root: "sup0", repo: REPO, agent: "sup0" });
     const context = () => screen.getByTestId("session-context");
-    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("Milestone 2 of 2 · In progress"));
+    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete · In progress"));
     expect(context().textContent).toContain("Refactor the cache");
     expect(within(context()).queryByRole("switch")).toBeNull();
     expect(context().textContent).not.toMatch(/PR/);
+    sync.stop();
+  });
+
+  it("renames a session from its context title, then lists it by that name in its row and context; an empty name goes back to the goal", async () => {
+    let refuse = true;
+    const { daemon, sync } = mount({ workspaces: [root, worker], goal: structuredClone(goal) }, { screen: "session", root: "sup1", repo: REPO, agent: "sup1" }, (d) => (input, init) =>
+      refuse && String(input).endsWith("/rename") ? Promise.resolve(new Response(JSON.stringify({ error: { code: "invalid", message: "nope" } }), { status: 400 })) : d.fetch(input, init),
+    );
+    await waitFor(() => expect(sessionRow("sup1")).toBeTruthy());
+    const rename = async (name: string) => {
+      fireEvent.click(screen.getByRole("button", { name: "Rename session" }));
+      const input = screen.getByLabelText("Session name");
+      fireEvent.change(input, { target: { value: name } });
+      fireEvent.keyDown(input, { key: "Enter" });
+    };
+    // A refused rename keeps the editor and what was typed, and says so.
+    await rename("  Login fix ");
+    await screen.findByRole("alert");
+    expect((screen.getByLabelText("Session name") as HTMLInputElement).value).toBe("  Login fix ");
+    expect(sessionRow("sup1")!.textContent).toContain("Ship ls --json");
+    refuse = false;
+    fireEvent.keyDown(screen.getByLabelText("Session name"), { key: "Enter" });
+    await waitFor(() => expect(sessionRow("sup1")!.textContent).toContain("Login fix"));
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(daemon.requests).toContainEqual(expect.objectContaining({ method: "POST", path: "/sessions/sup1/rename", body: { name: "  Login fix " } }));
+    expect(screen.getByTestId("session-context").textContent).toContain("Login fix");
+    await rename("");
+    await waitFor(() => expect(sessionRow("sup1")!.textContent).toContain("Ship ls --json"));
     sync.stop();
   });
 

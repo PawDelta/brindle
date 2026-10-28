@@ -14,7 +14,7 @@ import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
 import type { Route } from "../src/routes";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
-import { FakeDaemon } from "../src/test/fakeDaemon";
+import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
 import { ORGS, REPO, data } from "./fixtures";
 import { installProbe, probeSocket, swipe, swipeDeltas } from "./probe";
 import "../src/styles.css";
@@ -50,6 +50,7 @@ const SCENES: Record<string, Route> = {
   "session-failed": { screen: "session", root: "sup-42", repo: REPO, agent: "e9a0b6c3" },
   "settings-key": { screen: "settings" },
   "settings-signin": { screen: "settings" },
+  "settings-login": { screen: "settings" },
   "settings-health": { screen: "settings" },
   "knowledge-empty": { screen: "knowledge" },
   "knowledge-add": { screen: "knowledge" },
@@ -80,6 +81,12 @@ const SCENES: Record<string, Route> = {
 };
 
 const daemon = new FakeDaemon(structuredClone(data));
+if (scene === "settings-login" || scene === "settings-signin") {
+  daemon.data.providers = freshProviders({
+    claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" },
+    codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0", signed_in: false },
+  });
+}
 // A repo with no knowledge yet: the empty state that says how it gets there.
 if (scene === "knowledge-empty") {
   daemon.data.decisions = [];
@@ -148,7 +155,7 @@ createRoot(document.getElementById("root")!).render(
    that opens it (an inbox row's sheet, a sign-in's terminal), named by its
    text or, from "css:", a selector. */
 const OPENS: Record<string, string> = {
-  "settings-key": 'css:button[aria-label="Set GEMINI_API_KEY"]',
+  "settings-key": "API keys (optional, for advanced setups)",
   "settings-signin": "Sign in to Codex",
   "agents-make": 'css:button[aria-label="Medium runs on"]',
   "knowledge-record": "Record a decision",
@@ -164,6 +171,7 @@ const press = (label: string) => {
 
 /* Some scenes show the flow a step further: the custom agent builder opened from Medium's list. */
 const THEN: Record<string, () => void> = {
+  "settings-key": () => press('css:button[aria-label="Set GEMINI_API_KEY"]'),
   "agents-make": () => [...document.querySelectorAll("button")].find((b) => b.textContent?.startsWith("+ Make a custom agent"))?.click(),
   // The settings page scrolled to its foot: the engine's health list.
   "settings-health": () => document.getElementById("engine")?.scrollIntoView({ block: "end" }),

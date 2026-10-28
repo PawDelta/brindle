@@ -134,6 +134,7 @@ const fake = vi.hoisted(() => {
 
 vi.mock("@xterm/xterm", () => ({ Terminal: fake.Xterm }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: fake.Addon }));
+vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: fake.Addon }));
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: fake.Webgl }));
 
 beforeEach(() => {

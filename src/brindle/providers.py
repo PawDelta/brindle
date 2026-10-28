@@ -10,6 +10,8 @@ immediately rather than queued.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import os
 import re
@@ -1420,6 +1422,27 @@ def _auth_probe(argv: list[str], env: dict[str, str] | None = None) -> tuple[int
     return out.returncode, (out.stdout or "") + (out.stderr or "")
 
 
+_no_probes: contextvars.ContextVar[bool] = contextvars.ContextVar("no_sign_in_probes", default=False)
+
+
+@contextlib.contextmanager
+def no_sign_in_probes():
+    """Within this block no provider's status command runs (each can take up
+    to its timeout, and a signed-out answer is never kept): signed_out
+    answers from an earlier probe, else None, as for any sign-in that can't
+    be told. For a read that must answer at once and is read again after."""
+    token = _no_probes.set(True)
+    try:
+        yield
+    finally:
+        _no_probes.reset(token)
+
+
+def probing() -> bool:
+    """Whether a sign-in may be probed here (not inside no_sign_in_probes)."""
+    return not _no_probes.get()
+
+
 def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     """Why ``provider``'s CLI can't run an agent because it isn't signed in,
     or None when it is, or when that can't be told (a provider with no status
@@ -1439,6 +1462,8 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     seen = _SIGNED_IN.get(key)
     inv = _last_invalidated(provider)
     if seen and seen > inv and time.time() - seen < SIGNED_IN_TTL:
+        return None
+    if not probing():
         return None
     reason = None
     confirmed = False

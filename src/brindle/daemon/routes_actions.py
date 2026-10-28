@@ -227,6 +227,7 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
     sign-in or first-run screen (see brindle.preflight). Only opening a
     session that is running now launches nothing, so only that isn't checked."""
     repo, choice, session_id = _get(body, "repo", required=True), _get(body, "choice"), _get(body, "session_id")
+    name = _session_name(_get(body, "name"))     # checked with the rest, before anything launches
     opening = (choice == "o" and not _get(body, "branch") and not _get(body, "worktree")
                and any(s.root.id == session_id
                        for s in sessions_mod.live(db, workspaces.adopt_root(db, repo).repo_root)))
@@ -242,6 +243,9 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
     if isinstance(got, svc.Opened):
         return {"opened": SessionDTO.from_agent(got.root).to_json()}
     if isinstance(got, svc.Started):
+        got.agent.name = name
+        if name:
+            db.update_agent(got.agent.id, name=name)
         return {**got.to_json(), "notes": _notes(got.notes)}
     return got
 
@@ -265,6 +269,19 @@ def close_session(db: DB, params: dict, body: Body) -> Any:
     root, _ = _root(db, params["root"])
     closed = svc.close_session(db, root.id)
     return {"closed": [a.id for a, _ in closed], "stopped": [a.id for a, was in closed if was]}
+
+
+def _session_name(raw: str | None) -> str | None:
+    """A session's name as kept: whitespace collapsed, at most 80 characters, None when empty."""
+    return " ".join((raw or "").split())[:80] or None
+
+
+def rename_session(db: DB, params: dict, body: Body) -> Any:
+    """``name``: the session's new name; empty clears it (listed by its goal again)."""
+    root, _ = _root(db, params["root"])
+    name = _session_name(_get(body, "name"))
+    db.update_agent(root.id, name=name)
+    return {"id": root.id, "name": name}
 
 
 def handover_session(db: DB, params: dict, body: Body) -> Any:
@@ -935,17 +952,26 @@ def _fits(value: Any, default: Any) -> bool:
 def patch_config(db: DB, params: dict, body: Body) -> Any:
     """``values`` into ~/.brindle/config.json (scope "user") or the repo's
     .brindle/config.local.json (scope "repo"). Only the repo config's own
-    keys, each with a value of its default's type (or null)."""
+    keys, each with a value of its default's type (or null). Scope "shared"
+    is the repo's committed .brindle/config.json. ``unset`` (scope "repo" or
+    "shared") lists keys to remove from that file, clearing a project's
+    override."""
     from brindle import config
 
     scope = _get(body, "scope", default="user")
-    if scope not in ("user", "repo"):
-        raise ServiceError("invalid", "scope must be user or repo")
-    repo = _get(body, "repo", required=scope == "repo")
-    values = _get(body, "values", dict, required=True)
+    if scope not in ("user", "repo", "shared"):
+        raise ServiceError("invalid", "scope must be user, repo or shared")
+    repo = _get(body, "repo", required=scope != "user")
+    values = _get(body, "values", dict, default={})
+    unset = _get(body, "unset", list, default=[])
+    if unset and scope == "user":
+        raise ServiceError("invalid", "unset needs scope repo or shared")
+    if not values and not unset:
+        raise ServiceError("invalid", "values is required")
+    path = None
     defaults = config.RepoConfig()
     known = {f.name for f in dataclasses.fields(config.RepoConfig)}
-    if unknown := sorted(set(values) - known):
+    if unknown := sorted((set(values) | set(unset)) - known):
         raise ServiceError("invalid", f"unknown setting(s): {', '.join(unknown)}")
     for key, value in values.items():
         if not _fits(value, getattr(defaults, key)):
@@ -953,9 +979,13 @@ def patch_config(db: DB, params: dict, body: Body) -> Any:
     for key, value in values.items():
         if scope == "user":
             path = config.set_user(key, value)
+        elif scope == "shared":
+            path = config.set_repo(repo, key, value)
         else:
             path = config.set_local(repo, key, value)
-    return {"updated": sorted(values), "path": str(path)}
+    for key in unset:
+        path = config.unset_repo(repo, key) if scope == "shared" else config.unset_local(repo, key)
+    return {"updated": sorted({*values, *unset}), "path": str(path)}
 
 
 # -- knowledge sources (brindle kb add / sync / remove) -----------------------------
@@ -1093,7 +1123,8 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     lock_changes: dict[str, bool] = {}
     overrides: dict[str, dict[str, str | None]] = {}    # kind -> effort / instructions (None clears)
     extra: dict[str, Any] = {}      # supervisor and reviewer settings the kinds ask for
-    current = config.load_repo_config(repo).routing
+    # A user-scope change builds on the person's own lists and library, never this repo's.
+    current = config.load_repo_config(repo, user_only=scope == "user").routing
     for kind, spec in kinds.items():
         if kind not in config.ROUTING_KINDS or not isinstance(spec, dict):
             raise ServiceError("invalid", f"kind must be one of {', '.join(config.ROUTING_KINDS)}, not {kind!r}")
@@ -1131,7 +1162,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
                 extra["supervisor_profile"] = model
             if fallbacks is not None:
                 extra["supervisor_fallbacks"] = list(dict.fromkeys(fallbacks))
-    by_name = {p.name: p for p in profiles.list_profiles(repo)}
+    by_name = {p.name: p for p in profiles.list_profiles(None if scope == "user" else repo)}
     known = set(by_name)
     named = [reviewer] if reviewer is not None else []
     for value in extra.values():     # supervisor and reviewer choices and fallbacks are profiles too
@@ -1146,7 +1177,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", f"no such profile(s): {', '.join(unknown)}")
     if excluded is not None and (bad := sorted(set(map(str, excluded)) - set(providers.PROVIDERS))):
         raise ServiceError("invalid", f"no such provider(s): {', '.join(bad)}")
-    policy = RoutingPolicy.load(repo)
+    policy = RoutingPolicy.load(repo, user_library=scope == "user")
     if policy.applies and policy.access.error:
         raise ServiceError("forbidden", f"routing can't be changed now: {policy.access.error}", 403)
     for name in dict.fromkeys(named):
@@ -1694,6 +1725,20 @@ def turn_off_provider(db: DB, params: dict, body: Body) -> Any:
     return providers_install.turn_off(_known_provider(params))
 
 
+def provider_logout(db: DB, params: dict, body: Body) -> Any:
+    """Sign brindle's own copy of the provider out (Claude Code, Codex only);
+    the person's own CLI login is not touched. Answers the provider's row."""
+    from brindle import providers_install
+
+    provider = _known_provider(params)
+    if provider not in providers_install.SIGN_OUT:
+        raise ServiceError("invalid", f"sign out is offered for {', '.join(providers_install.SIGN_OUT)}")
+    try:
+        return providers_install.sign_out(provider)
+    except providers_install.InstallError as e:
+        raise ServiceError("logout_failed", str(e), 422) from None
+
+
 def terminal_input(db: DB, params: dict, body: Body) -> Any:
     """Type ``text``, one line the person typed or pasted in the app (a
     sign-in's code), into the action terminal ``id``, then Enter unless
@@ -1922,6 +1967,7 @@ ROUTES = [
     _post("/sessions/{root}/continue", continue_session),
     _post("/sessions/{root}/pause", pause_session),
     _post("/sessions/{root}/close", close_session),
+    _post("/sessions/{root}/rename", rename_session),
     _post("/sessions/{root}/handover", handover_session),
     _post("/sessions/{root}/transfer", transfer_session),
     # GET on the file path reads (routes_read); agent callers are refused by the guard.
@@ -1977,6 +2023,7 @@ ROUTES = [
     # Like every route, refused to agent callers by the guard.
     _post("/providers/{provider}/login", provider_login),
     _post("/providers/{provider}/preflight", profile_preflight),
+    _post("/providers/{provider}/logout", provider_logout),
     _post("/providers/{provider}/trust", provider_trust),
     _post("/providers/{provider}/consent", provider_consent),
     _post("/providers/{provider}/install", install_provider),

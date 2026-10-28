@@ -140,7 +140,7 @@ describe("agents tab", () => {
     fireEvent.click(option(list, "developer-heavy")!);
     await waitFor(() => expect(runsOn("medium").dataset.choice).toBe("developer-heavy"));
     // What ran it before is its first fallback; choosing locks the row against learning.
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { medium: { model: "developer-heavy", fallbacks: ["developer", "developer-codex"] } } });
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { medium: { model: "developer-heavy", fallbacks: ["developer", "developer-codex"] } } });
     expect(chain("medium")).toBe("Sonnet 5.5, then GPT-5.5");
     expect(lock("medium").getAttribute("aria-pressed")).toBe("true");
     stop();
@@ -157,14 +157,14 @@ describe("agents tab", () => {
 
     fireEvent.click(within(list).getByRole("button", { name: "Move Sonnet 5.5 earlier" }));
     await waitFor(() => expect(chain("light")).toBe("Sonnet 5.5, then quick-fix"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { light: { fallbacks: ["developer", "quick-fix"] } } });
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { light: { fallbacks: ["developer", "quick-fix"] } } });
 
     fireEvent.click(within(openFallbacks("light")).getByRole("button", { name: "Move Sonnet 5.5 later" }));
     await waitFor(() => expect(chain("light")).toBe("quick-fix, then Sonnet 5.5"));
 
     fireEvent.click(within(openFallbacks("light")).getByRole("button", { name: "Remove quick-fix" }));
     await waitFor(() => expect(chain("light")).toBe("Sonnet 5.5"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { light: { fallbacks: ["developer"] } } });
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { light: { fallbacks: ["developer"] } } });
 
     // "+ Add a fallback" opens the same list inline, without what's already listed.
     fireEvent.click(within(openFallbacks("light")).getByRole("button", { name: /Add a fallback/ }));
@@ -173,7 +173,7 @@ describe("agents tab", () => {
     expect(option(add, "developer-light")).toBeNull();
     fireEvent.click(option(add, "developer-codex")!);
     await waitFor(() => expect(chain("light")).toBe("Sonnet 5.5, then GPT-5.5"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { light: { fallbacks: ["developer", "developer-codex"] } } });
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { light: { fallbacks: ["developer", "developer-codex"] } } });
     noPopups();
     stop();
   });
@@ -187,12 +187,12 @@ describe("agents tab", () => {
 
     fireEvent.click(lock("advanced"));
     await waitFor(() => expect(lock("advanced").getAttribute("aria-pressed")).toBe("true"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { advanced: { locked: true } } });
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { advanced: { locked: true } } });
     expect(lock("advanced").textContent).toContain("Locked");
 
     fireEvent.click(lock("advanced"));
     await waitFor(() => expect(lock("advanced").getAttribute("aria-pressed")).toBe("false"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { advanced: { locked: false } } });
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { advanced: { locked: false } } });
     stop();
   });
 
@@ -212,7 +212,7 @@ describe("agents tab", () => {
 
     fireEvent.click(within(note).getByRole("button", { name: "use mine instead" }));
     await waitFor(() => expect(runsOn("heavy").dataset.choice).toBe("developer-heavy"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { heavy: { locked: true } } });
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { heavy: { locked: true } } });
     expect(within(row("heavy")).queryByTestId("learned")).toBeNull();
     expect(runsOn("heavy").textContent).not.toContain("learned");
     expect(lock("heavy").getAttribute("aria-pressed")).toBe("true");
@@ -273,7 +273,7 @@ describe("agents tab", () => {
       instructions: "Write the failing test first.",
       rules: ["tests-first"],
     });
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { medium: { model: "careful-dev", fallbacks: ["developer", "developer-codex", "developer-heavy"] } } });
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { medium: { model: "careful-dev", fallbacks: ["developer", "developer-codex", "developer-heavy"] } } });
     expect(chain("medium")).toBe("Sonnet 5.5, then GPT-5.5, then Opus 5.5");
     // The builder closed; the row's list is open with the new agent in it, marked new.
     expect(within(row("medium")).queryByRole("region", { name: "New custom agent" })).toBeNull();
@@ -297,17 +297,17 @@ describe("agents tab", () => {
     const before = reloads();
     fireEvent.change(box, { target: { value: "Keep each commit to one step." } });
     fireEvent.blur(box);
-    await waitFor(() => expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { medium: { instructions: "Keep each commit to one step." } } }));
+    await waitFor(() => expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { medium: { instructions: "Keep each commit to one step." } } }));
     await waitFor(() => expect(reloads()).toBeGreaterThan(before));
     await flush();
 
     // Blank text is a clear: it goes out as null, never "".
     fireEvent.change(box, { target: { value: "  " } });
     fireEvent.blur(box);
-    await waitFor(() => expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { medium: { instructions: null } } }));
+    await waitFor(() => expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { medium: { instructions: null } } }));
     // The daemon refuses blank text sent directly; only null clears.
     for (const instructions of ["", "   "]) {
-      await expect(client.putRouting({ repo: REPO, scope: "local", kinds: { medium: { instructions } } })).rejects.toThrow();
+      await expect(client.putRouting({ repo: REPO, scope: "user", kinds: { medium: { instructions } } })).rejects.toThrow();
     }
     stop();
     cleanup();
@@ -361,37 +361,46 @@ describe("agents tab", () => {
     sync.stop();
   });
 
-  it("agents: a save that ends after the page moved to another repo doesn't reload the old repo into it", async () => {
+  it("agents: one list for the person whatever the repos, up before the slow learned picks, which fill in after", async () => {
     const OTHER = "/home/u/other";
+    // What learning runs instead resolves the dispatch for every candidate (seconds): held until released.
     const held: Array<() => void> = [];
-    const hold = (daemon: FakeDaemon): typeof globalThis.fetch => (input, init) =>
-      init?.method === "PUT" ? new Promise((resolve) => held.push(() => resolve(daemon.fetch(input, init)))) : daemon.fetch(input, init);
+    const hold = (daemon: FakeDaemon): typeof globalThis.fetch => (input, init) => {
+      const url = new URL(String(input));
+      return url.pathname.endsWith("/routing") && !init?.method && url.searchParams.get("learned") !== "0"
+        ? new Promise((resolve) => held.push(() => resolve(daemon.fetch(input, init))))
+        : daemon.fetch(input, init);
+    };
     const { daemon, stop } = setup(
       {
         repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }],
-        // The other repo runs Medium on Codex.
-        routingByRepo: { [OTHER]: { local: { routing: { medium: ["developer-codex", "developer"] } } } },
+        // Each repo's own file runs Medium on Codex: the person's own list doesn't.
+        routingByRepo: { [REPO]: { local: { routing: { medium: ["developer-codex"] } } }, [OTHER]: { local: { routing: { medium: ["developer-codex"] } } } },
       },
       hold,
     );
     await screen.findByTestId("kind-medium");
-    expect(runsOn("medium").dataset.choice).toBe("developer");
-
-    // A save for proj, still in flight when the page moves to other.
-    fireEvent.click(lock("advanced"));
     await waitFor(() => expect(held.length).toBe(1));
-    fireEvent.click(within(screen.getByRole("group", { name: "Repo" })).getByRole("button", { name: "other" }));
-    await waitFor(() => expect(runsOn("medium").dataset.choice).toBe("developer-codex"));
-    const before = daemon.requests.length;
+    expect(runsOn("medium").dataset.choice).toBe("developer");
+    expect(runsOn("heavy").dataset.choice).toBe("developer-heavy");
+    expect(screen.queryByRole("group", { name: "Repo" })).toBeNull();
 
     held.splice(0).forEach((go) => go());
-    await flush();
-    await flush();
-    // proj isn't read again, and other stays on screen, editable.
-    expect(daemon.requests.slice(before).filter((r) => r.path === "/routing" && r.method === "GET" && r.query.repo === REPO)).toEqual([]);
-    expect(runsOn("medium").dataset.choice).toBe("developer-codex");
-    expect((lock("advanced") as HTMLButtonElement).disabled).toBe(false);
-    expect(screen.queryByRole("alert")).toBeNull();
+    await waitFor(() => expect(runsOn("heavy").dataset.choice).toBe("developer-fable"));
+    // One read of the person's settings and one of their library, never one per repo.
+    const gets = daemon.requests.filter((r) => r.method === "GET" && ["/routing", "/profiles"].includes(r.path));
+    expect(gets.map((r) => [r.path, r.query.scope ?? null, r.query.learned ?? null, r.query.repo ?? null])).toEqual([
+      ["/routing", "user", "0", REPO],
+      ["/profiles", null, null, null],
+      ["/routing", "user", null, REPO],
+    ]);
+
+    // A save's reload keeps what learning runs while that is read again.
+    fireEvent.click(lock("advanced"));
+    await waitFor(() => expect(held.length).toBe(1));
+    expect(lock("advanced").getAttribute("aria-pressed")).toBe("true");
+    expect(runsOn("heavy").dataset.choice).toBe("developer-fable");
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { advanced: { locked: true } } });
     stop();
   });
 
@@ -407,7 +416,7 @@ describe("agents tab", () => {
     fireEvent.click(within(openFallbacks("reviewer")).getByRole("button", { name: /Add a fallback/ }));
     fireEvent.click(option(within(row("reviewer")).getByRole("group", { name: "Choices for Reviewer fallbacks" }), "quick-fix")!);
     await waitFor(() => expect(chain("reviewer")).toBe("Opus 5.5, then quick-fix"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { reviewer: { fallbacks: ["reviewer", "quick-fix"] } } });
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { reviewer: { fallbacks: ["reviewer", "quick-fix"] } } });
     fireEvent.click(within(openFallbacks("reviewer")).getByRole("button", { name: "Move quick-fix earlier" }));
     await waitFor(() => expect(chain("reviewer")).toBe("quick-fix, then Opus 5.5"));
 
@@ -417,7 +426,7 @@ describe("agents tab", () => {
     expect(option(list, "developer-fable")!.textContent).toMatch(/Fable 5\.1.*\$\$\$slowest/);
     fireEvent.click(option(list, "developer-fable")!);
     await waitFor(() => expect(runsOn("supervisor").dataset.choice).toBe("developer-fable"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "local", kinds: { supervisor: { model: "developer-fable", fallbacks: ["developer-heavy", "developer"] } } });
+    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { supervisor: { model: "developer-fable", fallbacks: ["developer-heavy", "developer"] } } });
     expect(chain("supervisor")).toBe("Opus 5.5, then Sonnet 5.5");
 
     // A custom agent made from the supervisor's list is for the supervisor.

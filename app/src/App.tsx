@@ -160,7 +160,7 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
 /* The banner's "Upgrade the engine" runs the upgrade on the engine in the
    background, as a progress card under the banner; done, the engine is
    checked again (the new daemon answers). */
-function Banner({ status, onRetry, client, store }: { status: EngineStatus; onRetry(): void; client: DaemonClient; store: AppStore }) {
+function Banner({ status, connection, onRetry, client, store }: { status: EngineStatus; connection: AppState["connection"]; onRetry(): void; client: DaemonClient; store: AppStore }) {
   const upgrade = useEngineUpgrade(client, store);
   const done = upgrade.state.kind === "done";
   useEffect(() => {
@@ -172,6 +172,7 @@ function Banner({ status, onRetry, client, store }: { status: EngineStatus; onRe
     <>
       <EngineBanner
         status={status}
+        connection={connection}
         onRetry={onRetry}
         onUpgrade={() => void upgrade.start()}
         upgrading={kind === "starting" || kind === "running" ? "running" : kind === "failed" ? "failed" : "idle"}
@@ -230,7 +231,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
         <Sidebar route={shown} navigate={navigate} refresh={refresh ?? noop} openUrl={openUrl} />
         <div className="relative flex min-w-0 flex-1 flex-col">
           {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have. */}
-          {client ? <Banner status={bannerStatus(engine, connection)} onRetry={check} client={client} store={store} /> : <EngineBanner status={bannerStatus(engine, connection)} onRetry={check} />}
+          {client ? <Banner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} client={client} store={store} /> : <EngineBanner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} />}
           <main className={`relative flex min-h-0 flex-1 flex-col ${fills ? "overflow-hidden" : "gap-s2 overflow-auto p-s3"}`}>
             {error && <p className={`${alert} ${fills ? "m-s2 mb-0" : ""}`}>{error}</p>}
             {client ? (

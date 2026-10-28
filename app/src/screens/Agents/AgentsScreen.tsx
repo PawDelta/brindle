@@ -23,16 +23,18 @@
 
    Nothing opens over the page: lists, panels and the builder are all inline
    under the row they change. No <select>. Every change goes straight to the
-   engine (PUT /v1/routing `kinds`, into this repo's personal config) and the
-   page reads GET /v1/routing again. */
+   engine (PUT /v1/routing `kinds`, into the person's ~/.brindle/config.json:
+   agents are theirs, one list whatever the repos) and the page reads GET
+   /v1/routing again: the rows at once, what learning runs instead after. */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient, KindPut, RulePackInfo } from "../../api/client";
 import type { RoutingDTO, RoutingProfileDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
 import { PageHeader } from "../../components/PageHeader";
-import { NO_REPO, useRepo } from "../../components/RepoSelect";
+import { NO_REPO } from "../../components/RepoSelect";
 import { alert, button, card, field, h2, label, mono, pill, primary, quiet } from "../../components/ui";
+import { useSessions } from "../../store/sessions";
 import {
   COST_MARK,
   COST_WORDS,
@@ -668,8 +670,25 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
   );
 }
 
+/* Until the learned picks are read again, a kind keeps the one it had,
+   unless it's locked now (never overridden) or that is now its own pick. */
+function keepLearned(next: RoutingDTO, prev: RoutingDTO | null): RoutingDTO {
+  if (!next.kinds || !prev?.kinds) return next;
+  const kinds = Object.fromEntries(
+    Object.entries(next.kinds).map(([k, v]) => {
+      const was = prev.kinds?.[k]?.learned;
+      return [k, !v.learned && was && !v.locked && was !== v.model ? { ...v, learned: was } : v];
+    }),
+  );
+  return { ...next, kinds };
+}
+
 export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
-  const { repo, setRepo, repos } = useRepo();
+  const { repos } = useSessions();
+  /* Agents are the person's, the same in every repo (their settings and
+     library, PUT at scope "user"): one list, whatever the repos. A repo only
+     gives the engine its org policy and what learning knows. */
+  const repo = repos?.[0]?.repo_root ?? null;
   const [routing, setRouting] = useState<RoutingDTO | null>(null);
   const [describe, setDescribe] = useState<Record<string, string>>({});
   const [rules, setRules] = useState<RulePackInfo[]>([]);
@@ -684,22 +703,23 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const [createError, setCreateError] = useState<string | null>(null);
   const [fresh, setFresh] = useState<string | null>(null);
   const seq = useRef(0);
-  /* The repo on screen. A save or a load that ends after the picker moved to
-     another repo is about that one: it must not read or show anything here
-     (nor bump `seq`, which would drop this repo's own load). */
-  const shown = useRef<string | null>(repo);
-  shown.current = repo;
 
   const load = useCallback(() => {
-    if (!repo || shown.current !== repo) return Promise.resolve();
+    if (!repo) return Promise.resolve();
     const mine = ++seq.current;
-    return Promise.all([client.routing(repo), client.profiles(repo).catch(() => []), client.rulePacks(repo).catch(() => [])]).then(
+    // The rows first: what learning runs instead resolves the dispatch for
+    // every candidate (seconds), so it fills in after, and only the newest load's.
+    return Promise.all([client.routing(repo, { scope: "user", learned: false }), client.profiles().catch(() => []), client.rulePacks(repo).catch(() => [])]).then(
       ([r, ps, rs]) => {
-        if (mine !== seq.current || shown.current !== repo) return;
-        setRouting(r);
+        if (mine !== seq.current) return;
+        setRouting((prev) => keepLearned(r, prev));
         setDescribe(Object.fromEntries(ps.map((p) => [p.name, p.description])));
         setRules(rs);
         setLoadError(null);
+        client.routing(repo, { scope: "user" }).then(
+          (full) => mine === seq.current && setRouting(full),
+          () => {}, // the rows stand without what learning runs instead
+        );
       },
       (e: unknown) => {
         if (mine === seq.current) setLoadError(message(e));
@@ -734,15 +754,13 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
 
   const put = (kind: Kind, change: KindPut) => {
     if (!repo || frozen) return Promise.resolve();
-    const target = repo;
-    const here = () => shown.current === target;
     setBusy(true);
     setSaveError(null);
     return client
-      .putRouting({ repo: target, scope: "local", kinds: { [kind]: change } })
-      .then(() => (here() ? load() : undefined))
-      .catch((e: unknown) => here() && setSaveError(message(e)))
-      .finally(() => here() && setBusy(false));
+      .putRouting({ repo, scope: "user", kinds: { [kind]: change } })
+      .then(load)
+      .catch((e: unknown) => setSaveError(message(e)))
+      .finally(() => setBusy(false));
   };
 
   const panelFor = (k: Kind): Panel | null => (open?.kind === k ? open.panel : null);
@@ -758,8 +776,6 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const create = async (k: Kind) => {
     if (!repo || !draft || !kinds || !draft.provider || !draft.model) return;
     const name = cleanName(draft.name);
-    const target = repo;
-    const here = () => shown.current === target;
     setBusy(true);
     setCreateError(null);
     try {
@@ -768,19 +784,17 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
       if (draft.useFor) {
         const was = kinds[draft.useFor];
         const own = [was.model, ...was.fallbacks].filter((x): x is string => !!x);
-        await client.putRouting({ repo, scope: "local", kinds: { [draft.useFor]: { model: name, fallbacks: own } } });
+        await client.putRouting({ repo, scope: "user", kinds: { [draft.useFor]: { model: name, fallbacks: own } } });
       }
-      // The picker moved to another repo meanwhile: nothing here to show.
-      if (!here()) return;
       setFresh(name);
       setDraft(null);
       await load();
       // The builder closes; the row it went to shows its list, the new agent in it.
-      if (here()) setOpen({ kind: draft.useFor ?? k, panel: "pick" });
+      setOpen({ kind: draft.useFor ?? k, panel: "pick" });
     } catch (e) {
-      if (here()) setCreateError(message(e));
+      setCreateError(message(e));
     } finally {
-      if (here()) setBusy(false);
+      setBusy(false);
     }
   };
 
@@ -830,17 +844,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
 
   return (
     <section className="flex flex-col gap-s2" aria-label="Agents">
-      <PageHeader title="Agents" lede="Which model runs each kind of work, and what takes over at a limit.">
-        {repos && repos.length > 1 && (
-          <span role="group" aria-label="Repo" className="flex flex-wrap gap-1">
-            {repos.map((r) => (
-              <button key={r.repo_root} type="button" aria-pressed={r.repo_root === repo} className={`${pill} border py-0.5 ${mono} ${r.repo_root === repo ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2"}`} onClick={() => setRepo(r.repo_root)}>
-                {r.name}
-              </button>
-            ))}
-          </span>
-        )}
-      </PageHeader>
+      <PageHeader title="Agents" lede="Which model runs each kind of work, and what takes over at a limit." />
 
       {repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {loadError && (

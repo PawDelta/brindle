@@ -8,5 +8,8 @@
   ],
   "rules": [
     "Tests must earn their place (see .brindle/rules/learned.md): ask workers for the fewest tests that would fail without the change, and treat padded, duplicate or wording-only tests in a review as blockers."
+  ],
+  "setup": [
+    "cd app && npm ci --no-audit --no-fund"
   ]
 }

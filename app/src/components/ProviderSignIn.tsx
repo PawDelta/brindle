@@ -270,9 +270,23 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
   const { name, phase, link, pane, views, start, answer: send, cancel, fitReader } = useProviderSignIn({ provider, loginContext, check, onDone, onActive, details: offerDetails });
   const [details, setDetails] = useState(false);
   const [code, setCode] = useState("");
-  const begin = () => {
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
+  const begin = (restart = false) => {
     setDetails(false);
-    return start();
+    setCopied(false);
+    setCopyError(false);
+    return start(restart);
+  };
+  const copyLink = async () => {
+    if (!link || !views) return;
+    try {
+      await views.copy(link);
+      setCopied(true);
+      setCopyError(false);
+    } catch {
+      setCopyError(true);
+    }
   };
   const answer = async (terminal: string, line: string) => {
     if (await send(terminal, line)) setCode("");
@@ -298,22 +312,28 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
         {busy && <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />}
         {phase.kind === "starting" && <span>Starting {name}'s sign-in…</span>}
         {phase.kind === "waiting" && <span>Finish signing in to {name} in your browser…</span>}
-        {phase.kind === "checking" && <span>Checking…</span>}
+        {phase.kind === "checking" && <span>Confirming your sign-in…</span>}
         {phase.kind === "done" && <span className="font-medium text-pass">Signed in to {name} ✓</span>}
+        {phase.kind === "failed" && <span className="font-medium text-sap">Couldn't sign in to {name}</span>}
         {phase.kind === "choose" && <span>{phase.question}</span>}
         {phase.kind === "code" && <span>{phase.prompt}</span>}
         <span className="flex-1" />
         {(phase.kind === "waiting" || phase.kind === "choose" || phase.kind === "code") && link && (
-          <button type="button" className={quiet} onClick={() => void openExternal(link).catch(() => undefined)}>
-            Open the link ↗
-          </button>
+          <>
+            <button type="button" className={quiet} onClick={() => void openExternal(link).catch(() => undefined)}>
+              Open browser ↗
+            </button>
+            {views && <button type="button" className={quiet} onClick={() => void copyLink()}>
+              {copied ? "Link copied" : "Copy sign-in link"}
+            </button>}
+          </>
         )}
         {offerDetails && terminal && pane && views && phase.kind !== "done" && (
           <button type="button" className={`${quiet} text-xs`} aria-expanded={details} onClick={() => setDetails((d) => !d)}>
             {details ? "Hide details" : "Show details"}
           </button>
         )}
-        {phase.kind === "done" ? (
+        {phase.kind === "done" || phase.kind === "failed" ? (
           <button type="button" className={quiet} onClick={cancel}>
             Close
           </button>
@@ -323,6 +343,15 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
           </button>
         )}
       </div>
+      {(phase.kind === "starting" || phase.kind === "waiting") && (
+        <p className="text-xs text-ink-2">Follow the steps in your browser, then come back here. This updates automatically when you're signed in. Your password stays with {name}.</p>
+      )}
+      {copyError && link && (
+        <label className="flex flex-col gap-1 text-xs text-ink-2">
+          Couldn't copy the sign-in link. Select it below and copy it into your browser.
+          <input className={`${field} w-full`} aria-label="Sign-in link" readOnly value={link} onFocus={(e) => e.currentTarget.select()} />
+        </label>
+      )}
       {phase.kind === "choose" && (
         <div className="flex flex-wrap gap-s1" role="group" aria-label="Sign-in method">
           {phase.choices.map((c) => (
@@ -349,7 +378,7 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
       {phase.kind === "failed" && (
         <p className={alert} role="alert">
           {phase.message}{" "}
-          <button type="button" className="underline" onClick={() => void begin()}>
+          <button type="button" className={primary} onClick={() => void begin(true)}>
             Try again
           </button>
         </p>

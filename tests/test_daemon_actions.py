@@ -20,6 +20,7 @@ from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
 from brindle.pro.account import ProAccount
 from brindle.pro.team_policy import Access, AgentSetup, ClaudeSetup, ModelsSetup
+from brindle.service.dto import SessionDTO
 
 TOKEN = "t" * 43
 REAL_PREFLIGHT = preflight.check
@@ -140,6 +141,19 @@ def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(d
     assert code == 200 and "sup" not in [s["id"] for s in listed]
 
 
+def test_renaming_a_session_persists_its_name_and_empty_clears_it(db):
+    db.add_workspace(Workspace("proj/root", "/proj", "root", "main", "main", "main", "/proj", None,
+                               "brindle-root", time.time()))
+    db.add_agent(Agent("sup", "proj/root", "supervisor", "claude", None, "interactive", "idle", "%1",
+                       None, time.time()))
+    code, reply = _send("POST", "/v1/sessions/sup/rename", {"name": "  Fix   login  "})
+    assert (code, reply) == (200, {"id": "sup", "name": "Fix login"})
+    assert db.get_agent("sup").name == "Fix login"
+    assert SessionDTO.from_agent(db.get_agent("sup")).to_json()["name"] == "Fix login"
+    code, _ = _send("POST", "/v1/sessions/sup/rename", {"name": "  "})
+    assert code == 200 and db.get_agent("sup").name is None
+
+
 @pytest.mark.parametrize("path,base,setup,status", [
     ("app.py", "shown", None, 200),
     ("app.py", "read", None, 200),              # the base from GET .../file, the app's way
@@ -247,22 +261,42 @@ def test_a_running_session_comes_back_as_a_409_with_the_choices(db, world, monke
     assert [s["id"] for s in conflict["sessions"]] == ["sup"]
 
 
+def test_starting_a_session_with_a_name_keeps_it_on_the_new_root(db, world, monkeypatch):
+    from brindle.service import sessions as svc
+
+    root = db.get_agent("sup")
+    launched = []
+    monkeypatch.setattr(routes_actions, "session_blockers", lambda *a, **k: None)
+    monkeypatch.setattr(svc, "start", lambda *a, **k: launched.append(1) or svc.Started(root, world, False))
+    code, _ = _send("POST", "/v1/sessions", {"repo": world.repo_root, "name": 7})
+    assert code == 400 and launched == [] and db.get_agent("sup").name is None     # refused before any launch
+    code, reply = _send("POST", "/v1/sessions", {"repo": world.repo_root, "name": " Cache   work "})
+    assert code == 200 and reply["name"] == "Cache work"
+    assert db.get_agent("sup").name == "Cache work"
+
+
 @pytest.mark.parametrize("scope,body,peer_pid,status,written", [
     # The picker's pick for a tier is dropped too, and so is an alias of a tier, or either would still win.
     ("user", {"tiers": {"light": ["developer-codex"], "advanced": ["developer-codex"]}}, None, 200,
      {"routing": {"heavy": ["developer"], "light": ["developer-codex"], "advanced": ["developer-codex"]}}),
+    # A kind's fallbacks alone keep the person's own pick, not the one this repo's local file overrides it with.
+    ("user", {"kinds": {"medium": {"fallbacks": ["developer-codex"]}}}, None, 200,
+     {"routing": {"heavy": ["developer"], "advanced": ["developer-heavy"], "reasoning": ["developer-fable"],
+                  "medium": ["developer-sonnet", "developer-codex"]},
+      "routing_locked": {"medium": True}, "routing_light": "claude-haiku"}),
     ("local", {"reviewer": "reviewer"}, None, 200, {"reviewer": "reviewer"}),
     ("repo", {"tiers": {"light": ["developer"]}, "exclude_providers": ["claude"]}, None, 200,
      {"routing": {"light": ["developer"]}, "exclude_providers": ["claude"]}),
     ("repo", {"tiers": {"heavy": ["developer", "nope"]}}, None, 400, {}),
     pytest.param("repo", {"reviewer": "reviewer"}, 310, 403, {},
                  marks=pytest.mark.variant("an agent holding the token still can't change routing")),
-], ids=["user", "local", "repo", "bad-profile", "agent"])
+], ids=["user", "user-kind", "local", "repo", "bad-profile", "agent"])
 def test_routing_put_writes_its_scope(db, repo, world, monkeypatch, scope, body, peer_pid, status, written):
     monkeypatch.setattr(peer, "agent_caller", lambda pid: "brindle agent w1")
     config.set_user("routing", {"heavy": ["developer"], "advanced": ["developer-heavy"],
                                 "reasoning": ["developer-fable"]})
     config.set_user("routing_light", "claude-haiku")
+    config.set_local(str(repo), "routing", {"medium": ["developer-heavy"]})
     before = config._read_json(config.scope_paths(str(repo))[scope])
     code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": scope, **body}, peer_pid)
     assert code == status, reply
@@ -485,6 +519,30 @@ def test_routing_put_refuses_what_the_policy_forbids(repo, world, monkeypatch, a
                                                "tiers": {"light": [profile]}})
     assert (code, reply["error"]["code"]) == (403, "forbidden") and reply["error"]["message"]
     assert config._read_json(config.scope_paths(str(repo))["user"]) == before
+
+
+def test_user_scope_routing_judges_the_persons_profile_not_the_repos_same_named_one(repo, world, monkeypatch):
+    from brindle import doctor, providers, worker_models
+    from brindle.pro import managed_models, team_policy
+
+    for where, model in ((config.user_profiles_dir(), "user-model"), (repo / ".brindle" / "agents", "repo-model")):
+        where.mkdir(parents=True, exist_ok=True)
+        for name, provider in (("mine", "claude"), ("developer-codex", "codex")):
+            (where / f"{name}.md").write_text(f"---\nname: {name}\nprovider: {provider}\nmodel: {model}\n---\nWork.\n")
+    config.set_user("routing_light", "codex")       # the picker's pick, on the person's developer-codex
+    acc = Access(org_id="acme", allowed_providers=("claude", "codex"), allowed_models=("user-model",))
+    monkeypatch.setattr(team_policy, "access", lambda repo: acc)
+    monkeypatch.setattr(managed_models, "current", lambda repo: None)
+    monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
+    monkeypatch.setattr(doctor, "signin_providers", lambda: ["claude", "codex"])
+    monkeypatch.setattr(worker_models, "_signed_in", None)
+    code, body = _send("GET", f"/v1/routing?repo={repo}&scope=user&learned=0")
+    assert code == 200 and {p["name"]: p["allowed"] for p in body["profiles"]}["mine"] is True
+    assert body["tiers"]["light"]["values"] == ["developer-codex"]
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "user", "tiers": {"light": ["mine"]}})
+    assert code == 200, reply
+    assert [m["model"] for m in _send("GET", f"/v1/routing?repo={repo}&scope=user&learned=0")[1]["tiers"]["light"]["models"]] \
+        == ["user-model"]
 
 
 SECRET = "sk-ant-daemon-test-0123456789wxyz"
@@ -1926,3 +1984,63 @@ def test_opening_a_folder_registers_a_repo_and_offers_git_init_for_a_plain_one(d
     assert (code, reply["error"]["code"]) == (409, "not_a_repo")
     code, reply = _send("POST", "/v1/repos/open", {"path": str(plain), "init": True})
     assert (code, reply["initialized"], db.workspace_by_path(str(plain)) is not None) == (200, True, True)
+
+
+def test_config_reports_a_projects_overrides_and_unset_clears_a_local_one(db, repo):
+    config.set_user("plan_first", False)
+    config.set_local(repo, "plan_first", True)
+    config.set_repo(repo, "max_agents", 2)
+    _, cfg = _send("GET", f"/v1/config?repo={repo}")
+    assert cfg["overrides"] == {"plan_first": "local", "max_agents": "repo"}
+    code, reply = _send("PATCH", "/v1/config", {"scope": "repo", "repo": str(repo), "unset": ["plan_first"]})
+    assert (code, reply["updated"]) == (200, ["plan_first"])
+    _, cfg = _send("GET", f"/v1/config?repo={repo}")
+    assert (cfg["overrides"], cfg["repo"]["plan_first"]) == ({"max_agents": "repo"}, False)
+    # The committed file's override is cleared by the explicit "shared" scope.
+    code, reply = _send("PATCH", "/v1/config", {"scope": "shared", "repo": str(repo), "unset": ["max_agents"]})
+    assert code == 200 and reply["path"].endswith("config.json")
+    _, cfg = _send("GET", f"/v1/config?repo={repo}")
+    assert cfg["overrides"] == {}
+
+
+@pytest.mark.variant("a race: a second settings write lands between the first's read and its write")
+def test_a_local_write_made_while_another_is_reading_is_not_lost(repo, monkeypatch):
+    """Forces the interleaving: a second action starts between the first's read and write, and the
+    first waits until the second has either finished (unlocked writes: its update is then
+    overwritten) or is blocked on the write lock (locked: it applies after the first)."""
+    config.set_local(repo, "plan_first", True)
+    real_read, real_lock = config._read_json, config._REPO_WRITE
+    settled, started, errors = threading.Event(), threading.Event(), []
+
+    def run_writer():
+        try:
+            config.set_local(repo, "max_agents", 7)
+        except BaseException as e:  # noqa: BLE001 - re-raised on the test's thread below
+            errors.append(e)
+        settled.set()
+
+    writer = threading.Thread(target=run_writer)
+
+    class SpyLock:
+        def __enter__(self):
+            if threading.current_thread() is writer:
+                settled.set()   # the second action is waiting for its turn
+            return real_lock.__enter__()
+
+        def __exit__(self, *exc):
+            return real_lock.__exit__(*exc)
+
+    def read(path):
+        data = real_read(path)
+        if threading.current_thread() is not writer and not started.is_set():
+            started.set()
+            writer.start()      # another daemon action, mid-read
+            settled.wait()
+        return data
+
+    monkeypatch.setattr(config, "_REPO_WRITE", SpyLock(), raising=False)
+    monkeypatch.setattr(config, "_read_json", read)
+    config.unset_local(repo, "plan_first")
+    writer.join()
+    assert errors == []
+    assert real_read(config.scope_paths(repo)["local"]) == {"max_agents": 7}

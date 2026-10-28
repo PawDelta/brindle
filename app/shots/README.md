@@ -1,5 +1,14 @@
 # Renderings
 
+For the Settings sign-in comparison, run `node shots/settings-login.mjs before`
+before editing the UI, then `node shots/settings-login.mjs after`. An optional
+second argument selects an existing Chromium executable. This captures the
+provider overview and active browser sign-in in both themes as
+`shots/settings-login-{before,after}-{light,dark}[-signin].png`, using the
+`settings-login` scene (Claude signed in, Codex signed out, others not installed).
+The after capture also saves `settings-login-after-{light,dark}-keys.png`
+with the optional API keys expanded.
+
 A dev-only screenshot setup: the app over the in-memory fake daemon
 (`src/test/fakeDaemon.ts`) with realistic fixtures, screenshotted as
 full-page PNGs in both themes. Nothing here ships: `vite build` bundles

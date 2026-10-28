@@ -193,6 +193,40 @@ uv export --quiet --project "$WORK/brindle-src" --frozen --no-dev --no-emit-proj
 uv pip install --quiet --python "$PY" --break-system-packages -r "$WORK/requirements.txt"
 uv pip install --quiet --python "$PY" --break-system-packages --no-deps "$WORK"/wheel/brindle-*.whl
 
+# Console scripts installed by uv name the staging interpreter in their
+# shebang. A shell/Python trampoline keeps every Python entry point usable
+# after the engine moves into the app, including python/bin/brindle (Codex's
+# stable hook command). -P keeps the caller's directory out of imports.
+"$PY" -I - "$STAGE/python/bin" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+bin_dir = Path(sys.argv[1])
+header = b"""#!/bin/sh
+'''exec' "$(/usr/bin/dirname "$0")/python3" -P "$0" "$@"
+' '''
+"""
+for script in bin_dir.iterdir():
+    if script.is_symlink() or not script.is_file():
+        continue
+    with script.open("rb") as f:
+        first = f.readline(4096)
+        if not first.startswith(b"#!"):
+            continue
+        body = f.read()
+    # uv uses a shell trampoline itself for long paths or paths with spaces.
+    if first == b"#!/bin/sh\n" and body.startswith(b"'''exec' "):
+        command, end, body = body.split(b"\n", 2)
+        if end != b"' '''" or os.fsencode(str(bin_dir / "python")) not in command:
+            continue
+    else:
+        interpreter = Path(os.fsdecode(first[2:].split()[0]))
+        if interpreter.parent != bin_dir or not interpreter.name.startswith("python"):
+            continue
+    script.write_bytes(header + body)
+PY
+
 # What the engine never uses: Tk, IDLE, the bundled pip, headers, man pages.
 rm -rf "$STAGE/python/include" "$STAGE/python/share" \
   "$STAGE"/python/lib/tcl* "$STAGE"/python/lib/tk* "$STAGE"/python/lib/itcl* \
@@ -266,7 +300,13 @@ case "$got" in
 esac
 env -i PATH=/usr/bin:/bin "$STAGE/bin/tmux" -V >/dev/null || die "the staged tmux doesn't run"
 
-echo "$STAMP" > "$STAGE/.stamp"
 rm -rf "$OUT"
 mv "$STAGE" "$OUT"
+# Exercise both launch paths after relocation, from outside the engine.
+# Checking only in stage misses absolute shebangs pointing back into stage.
+for launcher in "$OUT/bin/brindle" "$OUT/python/bin/brindle"; do
+  got="$(cd "$WORK" && env -i HOME="$WORK" PATH=/usr/bin:/bin "$launcher" --version)"
+  [ "$got" = "$want" ] || die "relocated $launcher printed '$got', wanted '$want'"
+done
+echo "$STAMP" > "$OUT/.stamp"
 echo "build_engine: $OUT: $want (${COMMIT:0:10}), Python $PY_VERSION, tmux $TMUX_VERSION, $(du -sh "$OUT" | cut -f1)"

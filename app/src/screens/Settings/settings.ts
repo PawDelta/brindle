@@ -13,19 +13,6 @@
 
 import { LOGIN_PROVIDERS, type DoctorCheck, type LoginProvider } from "../../api/client";
 
-export type Scope = "repo" | "user";
-
-export interface ScopeChoice {
-  scope: Scope;
-  label: string;
-  detail: string;
-}
-
-export const SCOPES: ScopeChoice[] = [
-  { scope: "repo", label: "This repo", detail: "Just this repo, for you: .brindle/config.local.json, not committed." },
-  { scope: "user", label: "Every repo", detail: "Your default for every repo: ~/.brindle/config.json." },
-];
-
 /* The settings with a UI, in the order shown, each with what it means. */
 export interface Setting {
   key: string;
@@ -97,9 +84,20 @@ export const changed = (loaded: Draft, draft: Draft): string[] => SETTINGS.map((
 export const invalid = (draft: Draft): string[] =>
   SETTINGS.filter((s) => s.kind === "number" && (typeof draft[s.key] !== "number" || Number.isNaN(draft[s.key]))).map((s) => s.key);
 
-/* Whether the changes include a setting only the repo's own files carry. */
-export const repoOnlyChanged = (loaded: Draft, draft: Draft): string[] =>
-  changed(loaded, draft).filter((k) => SETTINGS.find((s) => s.key === k)?.repoOnly);
+/* A draft over a freshly loaded one: what was loaded, but every field with an unsaved edit keeps it. */
+export const carryEdits = (oldLoaded: Draft, oldDraft: Draft, next: Draft): Draft =>
+  ({ ...next, ...Object.fromEntries(changed(oldLoaded, oldDraft).map((k) => [k, oldDraft[k]])) });
+
+/* The settings the person's own file can carry (everything but the repo-only ones), and the ones only a repo's files do. */
+export const YOURS = SETTINGS.filter((s) => !s.repoOnly);
+export const PROJECT_RULES = SETTINGS.filter((s) => s.repoOnly);
+
+/* How a project's override reads in the marker ("Off in this project"). */
+export function overrideText(s: Setting, value: unknown): string {
+  if (s.kind === "boolean") return value === true ? "On" : "Off";
+  if (s.kind === "choice") return s.choices?.find((c) => c.value === (value ?? null))?.label ?? String(value);
+  return value === undefined || value === null ? "Default" : `${String(value)}${s.unit ? ` ${s.unit}` : ""}`;
+}
 
 /* PATCH /config's `values`: only what changed, as the engine takes it (a
    list setting's lines, a number, a bool, a choice; null only where the

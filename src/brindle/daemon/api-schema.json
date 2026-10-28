@@ -5487,6 +5487,18 @@
           "title": "Mode",
           "type": "string"
         },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
         "profile": {
           "title": "Profile",
           "type": "string"
@@ -6137,6 +6149,10 @@
       "path": "/v1/providers/{provider}/login"
     },
     {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/logout"
+    },
+    {
       "method": "GET",
       "path": "/v1/providers/{provider}/preflight"
     },
@@ -6227,6 +6243,10 @@
     {
       "method": "POST",
       "path": "/v1/sessions/{root}/pause"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root}/rename"
     },
     {
       "method": "POST",

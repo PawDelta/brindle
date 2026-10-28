@@ -711,6 +711,22 @@ def test_every_brindle_process_names_the_hook_the_same(tmp_path, monkeypatch):
     assert str(script.resolve()) in from_app
 
 
+def test_codex_hook_ignores_a_relocated_console_scripts_missing_interpreter(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "engine" / "python" / "bin"
+    bin_dir.mkdir(parents=True)
+    script = bin_dir / "brindle"
+    script.write_text(f"#!{tmp_path}/ci-build/python3\n")
+    script.chmod(0o755)
+    py = bin_dir / "python"
+    py.write_text("")
+    (bin_dir / "python3").symlink_to(py)
+    monkeypatch.setattr("brindle.providers.brindle_invocation",
+                        lambda: [str(bin_dir / "python3"), "-P", "-m", "brindle"])
+    assert codex_hook._stable_invocation() == [str(py), "-P", "-m", "brindle"]
+    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(script)])
+    assert codex_hook._stable_invocation() == [str(py), "-P", "-m", "brindle"]
+
+
 def test_codex_hook_trust_is_per_codex_home(ws, monkeypatch, tmp_path):
     """Live: brindle's own Codex home (provider_homes) came into use while the
     one trust on record (an older brindle's, a single record) was ~/.codex's.

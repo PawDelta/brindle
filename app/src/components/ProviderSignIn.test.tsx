@@ -15,9 +15,9 @@ vi.mock("../api/open", () => ({ openExternal: (url: string) => (opened.push(url)
 
 afterEach(cleanup);
 
-/* The link the card holds now: what "Open the link ↗" opens. */
+/* The link the card holds now: what "Open browser ↗" opens. */
 const link = () => {
-  fireEvent.click(within(screen.getByTestId("sign-in-flow")).getByRole("button", { name: "Open the link ↗" }));
+  fireEvent.click(within(screen.getByTestId("sign-in-flow")).getByRole("button", { name: "Open browser ↗" }));
   return opened.at(-1);
 };
 
@@ -90,7 +90,9 @@ describe("ProviderSignIn, the CLI read through a pty view", () => {
     shell({ kind: "ready", tmux: "tmux 3.8" });
     await waitFor(() => expect(daemon.views).toHaveLength(1));
     expect(daemon.views[0].at).toEqual({ server: "brindle", target: daemon.actions[0].target });
-    await waitFor(() => expect(within(flow()).getByRole("button", { name: "Open the link ↗" })).toBeTruthy());
+    await waitFor(() => expect(within(flow()).getByRole("button", { name: "Open browser ↗" })).toBeTruthy());
+    fireEvent.click(within(flow()).getByRole("button", { name: "Copy sign-in link" }));
+    await waitFor(() => expect(daemon.clipboard).toBe(LINK));
     expect(within(flow()).getByRole("button", { name: "Show details" })).toBeTruthy();
 
     // The CLI ends: the provider is read again, and the card says it is signed in.
@@ -109,7 +111,7 @@ describe("ProviderSignIn, the CLI read through a pty view", () => {
     expect(daemon.views).toEqual([]);
     release();
     await waitFor(() => expect(daemon.views).toHaveLength(1));
-    await waitFor(() => expect(within(flow()).getByRole("button", { name: "Open the link ↗" })).toBeTruthy());
+    await waitFor(() => expect(within(flow()).getByRole("button", { name: "Open browser ↗" })).toBeTruthy());
     daemon.exitAction(daemon.actions[0].id);
     await waitFor(() => expect(flow().dataset.phase).toBe("done"));
   });
@@ -128,7 +130,7 @@ describe("ProviderSignIn, the CLI read through a pty view", () => {
     const { daemon, shell, flow } = setup();
     shell({ kind: "ready", tmux: "tmux 3.8" });
     fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
-    await waitFor(() => expect(within(flow()).getByRole("button", { name: "Open the link ↗" })).toBeTruthy());
+    await waitFor(() => expect(within(flow()).getByRole("button", { name: "Open browser ↗" })).toBeTruthy());
     const [reader] = daemon.views;
     expect(reader.size).toEqual(READ_SIZE);
 
@@ -149,6 +151,23 @@ describe("ProviderSignIn, the CLI read through a pty view", () => {
     // The details close: the reader reads at its own size again.
     fireEvent.click(within(flow()).getByRole("button", { name: "Hide details" }));
     await waitFor(() => expect(reader.resizes.at(-1)).toEqual([READ_SIZE.cols, READ_SIZE.rows]));
+  });
+
+  it("starts a fresh sign-in after a failed reader leaves the old login running", async () => {
+    const { daemon, shell, flow } = setup();
+    shell({ kind: "ready", tmux: "tmux 3.8" });
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
+    await waitFor(() => expect(daemon.views).toHaveLength(1));
+    act(() => daemon.views[0].handlers.onError("Connection lost"));
+    await waitFor(() => expect(flow().dataset.phase).toBe("failed"));
+    expect(within(flow()).getByRole("alert")).toBeTruthy();
+    fireEvent.click(within(flow()).getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect(daemon.actions).toHaveLength(2));
+    expect(daemon.actions[0].alive).toBe(false);
+    expect(daemon.views[0].closed).toBe(true);
+    await waitFor(() => expect(flow().dataset.phase).toBe("waiting"));
+    daemon.exitAction(daemon.actions[1].id);
+    await waitFor(() => expect(flow().dataset.phase).toBe("done"));
   });
 
   it("closes its reader when cancelled", async () => {
