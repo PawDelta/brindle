@@ -9,6 +9,7 @@ import { tauriSetup } from "./api/setup";
 import { appUpdater, appUpdates, installCli, readAbout, releaseBuildUpdater, tauriClient, tauriSocket } from "./api/tauri";
 import { applyTheme, readTheme } from "./components/ThemeToggle";
 import type { Route } from "./routes";
+import { watchAppUpdates } from "./store/appUpdates";
 import { createAppStore } from "./store/store";
 import { startSync, type Sync } from "./store/sync";
 import { Launch } from "./screens/FirstRun";
@@ -47,6 +48,7 @@ const releaseUpdater = setup ? releaseBuildUpdater : undefined;
 const about = isTauri() ? readAbout : undefined;
 // The app's own updates (the Inbox's Restart to update, About's Check now): the shell's, whichever daemon.
 const updates = isTauri() ? appUpdates : undefined;
+if (updates) watchAppUpdates(store, updates);
 
 // The store syncs from the moment the app shows, once; and the app asks
 // then whether staff debug logging is on (api/debug.ts).

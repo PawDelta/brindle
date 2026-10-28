@@ -11,7 +11,9 @@ import { StoreContext } from "../../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
 import { releaseNotesUrl, type AppUpdateStatus, type AppUpdates } from "../../api/tauri";
+import { watchAppUpdates } from "../../store/appUpdates";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
+import { watchInbox } from "./notify";
 
 afterEach(cleanup);
 
@@ -317,29 +319,38 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it("shows the app's own update: Restart to update while one waits, then 'Updated to' once until dismissed; nothing for an rc or staff build", async () => {
+  it("shows the app's own update until restarted, then once until dismissed, counted on the badge too; a late first status never hides it; nothing for an rc or staff build", async () => {
     const idle: AppUpdateStatus = { version: "0.6.0", automatic: true, pending: null, updated: null, last_checked: null, checking: false };
     let announce: (s: AppUpdateStatus) => void = () => {};
+    let answer: ((s: AppUpdateStatus) => void) | null = null;
     const updates: AppUpdates = {
-      status: () => Promise.resolve(idle),
+      // The status now, answered only when the test says: after an announcement it predates.
+      status: () => new Promise((resolve) => (answer = resolve)),
       check: () => Promise.resolve(idle),
       restart: vi.fn(() => Promise.resolve()),
       dismiss: vi.fn(() => Promise.resolve(announce({ ...idle, version: "0.7.0" }))),
       watch: (on) => {
         announce = (s) => act(() => on(s));
-        return () => {};
+        return Promise.resolve(() => {});
       },
     };
     const openUrl = vi.fn(() => Promise.resolve());
-    const { sync } = mount(new FakeDaemon({ inbox: [] }), undefined, { appUpdates: updates, openUrl });
+    const { store, sync } = mount(new FakeDaemon({ inbox: [] }), undefined, { appUpdates: updates, openUrl });
+    const counts: number[] = [];
+    watchInbox(store, { notify: () => {}, count: (n) => counts.push(n) });
+    watchAppUpdates(store, updates);
     await waitFor(() => expect(screen.getByTestId("all-clear")).toBeTruthy());
-    expect(screen.queryByTestId("app-update-card")).toBeNull();
+    await waitFor(() => expect(answer).not.toBeNull());
+    const kind = () => screen.queryByTestId("app-update-card")?.dataset.kind ?? null;
 
-    // Installed in the background: it waits for the person's restart, never the app's own.
+    // Installed in the background, then the older first status arrives: the update still waits for
+    // the person's restart (never the app's own), on the Inbox and its badge alike.
     announce({ ...idle, pending: "0.7.0" });
-    const pending = screen.getByTestId("app-update-card");
-    expect(pending.textContent).toContain("brindle 0.7.0 is installed");
+    await act(async () => answer!(idle));
+    expect(kind()).toBe("pending");
     expect(screen.queryByTestId("all-clear")).toBeNull();
+    expect(counts.at(-1)).toBe(1);
+    const pending = screen.getByTestId("app-update-card");
     fireEvent.click(within(pending).getByRole("button", { name: "What's new" }));
     expect(openUrl).toHaveBeenCalledWith(releaseNotesUrl("0.7.0"));
     fireEvent.click(within(pending).getByRole("button", { name: "Restart to update" }));
@@ -347,14 +358,15 @@ describe("inbox", () => {
 
     // Restarted on it: once, until dismissed.
     announce({ ...idle, version: "0.7.0", updated: "0.7.0" });
-    const updated = screen.getByTestId("app-update-card");
-    expect(updated.textContent).toContain("Updated to brindle 0.7.0");
-    fireEvent.click(within(updated).getByRole("button", { name: "Dismiss" }));
-    await waitFor(() => expect(screen.queryByTestId("app-update-card")).toBeNull());
+    expect(kind()).toBe("updated");
+    fireEvent.click(within(screen.getByTestId("app-update-card")).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(kind()).toBeNull());
+    expect(counts.at(-1)).toBe(0);
 
-    // An rc or a staff build installs nothing by itself, and says nothing here.
+    // An rc or a staff build installs nothing by itself, and nothing waits for it.
     announce({ ...idle, automatic: false, pending: "0.7.1-rc.1" });
-    expect(screen.queryByTestId("app-update-card")).toBeNull();
+    expect(kind()).toBeNull();
+    expect(counts.at(-1)).toBe(0);
     sync.stop();
   });
 });

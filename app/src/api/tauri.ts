@@ -161,13 +161,13 @@ export interface AppUpdateStatus {
    `check` (Check now: check and install, answering the status after),
    `restart` into an installed update, `dismiss` "Updated to brindle X", and
    `watch` each change the shell announces (an install in the background),
-   answering a function that stops watching. */
+   resolving once it listens, to a function that stops watching. */
 export interface AppUpdates {
   status: () => Promise<AppUpdateStatus>;
   check: () => Promise<AppUpdateStatus>;
   restart: () => Promise<void>;
   dismiss: () => Promise<void>;
-  watch: (on: (status: AppUpdateStatus) => void) => () => void;
+  watch: (on: (status: AppUpdateStatus) => void) => Promise<() => void>;
 }
 
 export const appUpdates: AppUpdates = {
@@ -175,10 +175,7 @@ export const appUpdates: AppUpdates = {
   check: () => invoke<AppUpdateStatus>("app_update_check"),
   restart: () => invoke<void>("app_restart"),
   dismiss: () => invoke<void>("app_update_dismiss"),
-  watch: (on) => {
-    const stop = listen<AppUpdateStatus>("app-update", (e) => on(e.payload));
-    return () => void stop.then((unlisten) => unlisten());
-  },
+  watch: (on) => listen<AppUpdateStatus>("app-update", (e) => on(e.payload)),
 };
 
 /* What's new in brindle `version`: its release notes on the site. */

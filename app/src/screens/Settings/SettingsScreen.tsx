@@ -787,6 +787,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const connection = useAppState((state) => state.connection);
+  const updateStatus = useAppState((state) => state.appUpdate);
   const pick = useRepo();
   const { repo, repos } = pick;
   const [config, setConfig] = useState<Config | null>(null);
@@ -1324,7 +1325,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
 
       <AppUpdate client={client} updater={appUpdater} release={releaseBuildUpdater} />
 
-      <About read={readAbout} updates={appUpdates} />
+      <About read={readAbout} updates={appUpdates} status={updateStatus} />
 
       {saved && dirty.length === 0 && (
         <p role="status" className={notice}>

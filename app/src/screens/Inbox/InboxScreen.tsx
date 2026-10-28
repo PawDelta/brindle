@@ -43,7 +43,8 @@ import { agentName, formatAge, rootOf } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
 import { useAppState } from "../../store/useStore";
 import { useJob } from "../Branch/useJob";
-import { AppUpdateCard, appUpdateItem, useAppUpdateStatus } from "./AppUpdateItem";
+import { appUpdateItem } from "../../store/appUpdates";
+import { AppUpdateCard } from "./AppUpdateItem";
 import { ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
 import { FIXES, KIND_SHORT, describeItem, fixable, forgetGone, itemKey, kindLabel, seenAt } from "./items";
@@ -96,7 +97,7 @@ const GHOST = "border-transparent text-ink-3 hover:text-ink";
 const LINK = "text-[11.5px] text-branch hover:underline";
 
 export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll, onOpenRule, appUpdates, openUrl = openExternal }: InboxScreenProps) {
-  const [updateStatus] = useAppUpdateStatus(appUpdates);
+  const updateStatus = useAppState((s) => s.appUpdate);
   // The app's own item belongs to no session: shown on the whole Inbox only.
   const update = session === null && appUpdates ? appUpdateItem(updateStatus) : null;
   const inbox = useAppState((s) => s.inbox);

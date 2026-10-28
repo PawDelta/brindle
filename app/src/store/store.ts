@@ -7,6 +7,7 @@
    Any other event marks the store stale, and sync.ts fetches a fresh snapshot. */
 
 import type { InboxItemDTO, WorkspaceDTO } from "../api/schema";
+import type { AppUpdateStatus } from "../api/tauri";
 import type { BusEvent, OrgNotice, StreamMessage, StreamState } from "../api/events";
 
 export const RECENT_EVENTS = 50;
@@ -27,9 +28,12 @@ export interface AppState {
   /* The newest bus events, oldest first (for notifications). */
   recent: BusEvent[];
   error: string | null;
+  /* The app's own updates, as the shell last announced them (appUpdates.ts); null without a shell. */
+  appUpdate: AppUpdateStatus | null;
 }
 
 export type Action =
+  | { type: "app_update"; status: AppUpdateStatus }
   | { type: "connection"; state: StreamState }
   | { type: "snapshot"; workspaces: WorkspaceDTO[]; inbox: InboxItemDTO[] }
   | { type: "stream"; message: StreamMessage }
@@ -46,10 +50,13 @@ export const initialState: AppState = {
   synced: false,
   recent: [],
   error: null,
+  appUpdate: null,
 };
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
+    case "app_update":
+      return { ...state, appUpdate: action.status };
     case "connection":
       return { ...state, connection: action.state };
     case "snapshot":

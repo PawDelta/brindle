@@ -1,52 +1,14 @@
-/* The app's own Inbox item, not the engine's: an update the shell installed
-   by itself in the background (src-tauri/src/updates.rs) waits for a restart
-   ("brindle X is installed · Restart to update · What's new") until the app
-   restarts on it; then, once, "Updated to brindle X" until dismissed. The app
-   never restarts by itself. Only a build that updates by itself (a release,
-   not an rc or a staff build: `automatic`) has one. */
+/* The app's own Inbox card, not the engine's (store/appUpdates.ts): an update
+   the shell installed by itself waits for a restart ("brindle X is installed ·
+   Restart to update · What's new") until the app restarts on it; then, once,
+   "Updated to brindle X" until dismissed. The app never restarts by itself. */
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import type { OpenUrl } from "../../api/open";
-import { releaseNotesUrl, type AppUpdateStatus, type AppUpdates } from "../../api/tauri";
+import { releaseNotesUrl, type AppUpdates } from "../../api/tauri";
 import { plain } from "../../api/wording";
 import { card } from "../../components/ui";
-
-export interface AppUpdateItem {
-  kind: "pending" | "updated";
-  version: string;
-}
-
-/* The item the status calls for, if any. */
-export function appUpdateItem(status: AppUpdateStatus | null): AppUpdateItem | null {
-  if (!status?.automatic) return null;
-  if (status.pending) return { kind: "pending", version: status.pending };
-  if (status.updated) return { kind: "updated", version: status.updated };
-  return null;
-}
-
-/* The shell's update status, kept current by what it announces; null
-   until it answers, and always without a shell (a browser tab). */
-export function useAppUpdateStatus(updates?: AppUpdates): [AppUpdateStatus | null, (status: AppUpdateStatus) => void] {
-  const [status, setStatus] = useState<AppUpdateStatus | null>(null);
-  useEffect(() => {
-    if (!updates) return;
-    let live = true;
-    const stop = updates.watch((s) => {
-      if (live) setStatus(s);
-    });
-    updates.status().then(
-      (s) => {
-        if (live) setStatus(s);
-      },
-      () => {},
-    );
-    return () => {
-      live = false;
-      stop();
-    };
-  }, [updates]);
-  return [status, setStatus];
-}
+import type { AppUpdateItem } from "../../store/appUpdates";
 
 const ACT = "inline-flex h-6 items-center whitespace-nowrap rounded-md border px-2 text-[11.5px] font-medium disabled:opacity-50";
 const PRIMARY = "border-sap bg-sap text-on-sap hover:opacity-90";

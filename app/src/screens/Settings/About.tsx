@@ -10,11 +10,10 @@
    installed (the shell's, api/tauri.ts AppUpdates). */
 
 import { useEffect, useState } from "react";
-import type { About as AboutInfo, AppUpdates } from "../../api/tauri";
+import type { About as AboutInfo, AppUpdateStatus, AppUpdates } from "../../api/tauri";
 import { plain } from "../../api/wording";
 import { alert, button, card, h2, primary } from "../../components/ui";
 import { formatAge } from "../../store/overview";
-import { useAppUpdateStatus } from "../Inbox/AppUpdateItem";
 
 const TITLES: Record<string, string> = {
   LICENSE: "Brindle License",
@@ -28,11 +27,11 @@ function ago(at: number): string {
   return age === "just now" ? age : `${age} ago`;
 }
 
-export function About({ read, updates }: { read?: () => Promise<AboutInfo>; updates?: AppUpdates }) {
+/* `status`: the shell's, as the store keeps it (store/appUpdates.ts). */
+export function About({ read, updates, status = null }: { read?: () => Promise<AboutInfo>; updates?: AppUpdates; status?: AppUpdateStatus | null }) {
   const [about, setAbout] = useState<AboutInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
-  const [status, setStatus] = useAppUpdateStatus(updates);
   const [updating, setUpdating] = useState<"checking" | "restarting" | null>(null);
   const [checked, setChecked] = useState<string | null>(null);
   const run = async (what: "checking" | "restarting", work: () => Promise<void>) => {
@@ -48,8 +47,8 @@ export function About({ read, updates }: { read?: () => Promise<AboutInfo>; upda
   };
   const checkNow = (u: AppUpdates) =>
     run("checking", async () => {
+      // The shell announces the status too, which the store keeps.
       const s = await u.check();
-      setStatus(s);
       if (!s.pending) setChecked("This is the latest version.");
     });
   useEffect(() => {
