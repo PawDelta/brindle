@@ -217,30 +217,40 @@ def interactive_sign_in(*, env: Mapping[str, str] | None = None, run=None, probe
     The child also holds the lock, so losing the wrapper cannot permit another
     login while the cloud CLI still runs. An existing login is left alone.
     """
+    return requested_sign_in(env=env, run=run, probe=probe)[1]
+
+
+def requested_sign_in(*, env: Mapping[str, str] | None = None, run=None, probe=None,
+                      say=print) -> tuple[str, int]:
+    """The sign-in the person asked for, a first one or a renewal: ``(outcome,
+    exit code)``, outcome "signed in", "failed", "waiting" (one is already
+    running for this login) or "manual" (another system owns this identity).
+    ``run(argv, env=, pass_fds=)`` runs the cloud CLI, holding the lock."""
     full = {**os.environ, **(env or {})}
     command = login_command(full)
     lg = _login(None, full, None)
     if command is None or lg is None:
-        print("Refresh this identity's configured credentials directly.")
-        return 1
+        say("Refresh this identity's configured credentials directly.")
+        return "manual", 1
     lg.lock.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lg.lock, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         if not _locked(fd):
-            print("A cloud sign-in is already running. Finish it in its existing browser or terminal.")
-            return 1
+            say("A cloud sign-in is already running. Finish it in its existing browser or terminal.")
+            return "waiting", 1
         lg.write({"lapse": lg.fingerprint(), "opened_at": time.time(), "interactive": True})
         if lg.provider == "azure":
             s = status("azure", env=full, run=probe or run_bounded)
             if not s.ok:
                 code = (run or subprocess.run)(azure_login_command(full), env=full, pass_fds=(fd,)).returncode
                 if code:
-                    return code
+                    return "failed", code
                 s = status("azure", env=full, run=probe or run_bounded)
                 if not s.ok:
-                    print(s.note)
-                    return 1
-        return (run or subprocess.run)(command, env=full, pass_fds=(fd,)).returncode
+                    say(s.note)
+                    return "failed", 1
+        code = (run or subprocess.run)(command, env=full, pass_fds=(fd,)).returncode
+        return ("failed" if code else "signed in"), code
     finally:
         os.close(fd)
 

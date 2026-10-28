@@ -70,52 +70,87 @@ def saved(provider: str) -> dict:
     return entry if isinstance(entry, dict) and entry.get("method") in METHODS else {}
 
 
+def _selectors(provider: str, method: str, route: str | None) -> dict[str, str]:
+    """Blanks for the inherited variables that would pick another route than
+    the chosen one (a Claude cloud switch, a gateway under sign-in): the
+    choice, not whatever the shell or a saved company env exported, decides."""
+    if provider != "claude":
+        return {}
+    keep = ROUTES["claude"][route]["flag"] if route else {}
+    blanks = {flag: "" for flag in cloud_login._FLAGS.values() if flag not in keep}
+    if method == "sign_in":
+        blanks["ANTHROPIC_BASE_URL"] = ""
+    return blanks
+
+
 def route_env(provider: str, route: str | None, env: Mapping[str, str]) -> dict[str, str]:
-    """The variables that select ``route`` for ``provider``: its switch and settings."""
+    """The variables that select ``route`` for ``provider``: its switch and
+    settings, over blanks for any other route's switch."""
     if not route:
         return {}
     spec = ROUTES[provider][route]
-    return {**({"BRINDLE_CLOUD_ROUTE": route} if provider == "opencode" else {}), **spec["flag"], **env}
+    return {**_selectors(provider, "cloud", route),
+            "BRINDLE_CLOUD_ROUTE": route if provider == "opencode" else "claude", **spec["flag"], **env}
 
 
-def apply(profile):
+def identity_env(provider: str, route: str, env: Mapping[str, str]) -> dict[str, str]:
+    """What a pane on this route signs in with, as the launch builds it: for
+    OpenCode, also the isolated store (cloud_login.profile_env) its login goes in."""
+    from brindle.profiles import Profile
+
+    got = route_env(provider, route, env)
+    if provider != "opencode":
+        return got
+    probe = Profile(name="connection", description="", provider=provider, prompt="", auth="cloud",
+                    model=f"{ROUTES[provider][route]['model_provider']}/connection", env=dict(env))
+    return {**got, **cloud_login.profile_env(probe, env)}
+
+
+def apply(profile, repo_root: str | None = None):
     """``profile`` with the person's saved connection for its provider: the
     method as ``auth``, the route's variables under the profile's own env
-    lines. An OpenCode cloud route only for a model it serves."""
+    lines. An OpenCode cloud route only for a model it serves; nothing while
+    the org decides how the provider connects."""
     c = saved(profile.provider)
-    if not c:
+    if not c or _org(profile.provider, repo_root)[0]:
         return profile
-    env = dict(profile.env)
+    route = c.get("cloud") if c["method"] == "cloud" else None
+    extra = _selectors(profile.provider, c["method"], route)
     if c["method"] == "cloud":
-        spec = ROUTES.get(profile.provider, {}).get(c.get("cloud") or "")
+        spec = ROUTES.get(profile.provider, {}).get(route or "")
         if spec is None:
             return profile
         if "model_provider" in spec and (profile.model or "").split("/")[0] != spec["model_provider"]:
             return profile
-        env = {**spec["flag"], **(c.get("env") or {}), **env}
-    return replace(profile, auth=METHODS[c["method"]], env=env)
+        extra = {**extra, **spec["flag"], **(c.get("env") or {})}
+    return replace(profile, auth=METHODS[c["method"]], env={**extra, **profile.env})
 
 
-def org_managed(provider: str, repo: str | None = None) -> str | None:
-    """Why the org, not the person, decides how ``provider`` connects, or None."""
+def _org(provider: str, repo: str | None) -> tuple[str | None, dict[str, str]]:
+    """Why the org, not the person, decides how ``provider`` connects (None
+    when it doesn't), and the variables of the route it sets, when it sets one."""
     from brindle import company_identity, providers
     from brindle.pro import managed_models
 
     if provider == "claude":
         if what := providers.claude_org_managed():
-            return f"Claude Code's managed settings on this machine ({what}) decide how Claude connects"
-        if company_identity.enforced_route() is not None:
-            return "your org enforces its company identity for Claude Code"
+            return f"Claude Code's managed settings on this machine ({what}) decide how Claude connects", {}
+        if (enforced := company_identity.enforced_route_env()) is not None:
+            return "your org enforces its company identity for Claude Code", dict(enforced)
     try:
         m = managed_models.current(repo)
     except managed_models.ManagedUnavailable as e:
-        return str(e)
-    if m is None:
-        return None
-    route = {"claude": m.claude, "codex": m.codex, "antigravity": m.antigravity}.get(provider)
-    if route is not None:
-        return f"{m.describe()}: the org decides how {provider} connects"
-    return None
+        return str(e), {}
+    # An enforced agent_setup route or an older provider_config, as the launch applies it.
+    env = managed_models.agent_env(m, provider)
+    if env:
+        return f"{m.describe()}: the org decides how {provider} connects", env
+    return None, {}
+
+
+def org_managed(provider: str, repo: str | None = None) -> str | None:
+    """Why the org, not the person, decides how ``provider`` connects, or None."""
+    return _org(provider, repo)[0]
 
 
 def refusal(provider: str, method: str, env: Mapping[str, str], repo: str | None = None) -> str | None:
@@ -136,7 +171,7 @@ def refusal(provider: str, method: str, env: Mapping[str, str], repo: str | None
         if method == "api_key" and keys and all(k in m.denied_keys for k in keys):
             return f"org {m.org_id} doesn't allow personal API keys ({', '.join(keys)})"
         probe = Profile(name=f"{provider} connection", description="", provider=provider, prompt="",
-                        env=dict(env), auth=METHODS[method])
+                        env={k: v for k, v in env.items() if v}, auth=METHODS[method])
         if why := managed_models.refusal(m, probe):
             return why
     if repo:
@@ -185,47 +220,78 @@ def choose(provider: str, method: str, cloud: str | None = None, settings: Mappi
     if why := refusal(provider, method, route_env(provider, cloud, env), repo):
         raise Refused(why)
     entry = {"method": method, **({"cloud": cloud, "env": env} if method == "cloud" else {})}
-    current = config.user_settings().get(KEY)
-    all_ = dict(current) if isinstance(current, dict) else {}
-    if method == "auto":
-        all_.pop(provider, None)
-    else:
-        all_[provider] = entry
-    config.set_user(KEY, all_)
+
+    def change(current):
+        # Under the config writer's lock: another provider's choice saved meanwhile is kept.
+        all_ = dict(current) if isinstance(current, dict) else {}
+        if method == "auto":
+            all_.pop(provider, None)
+        else:
+            all_[provider] = entry
+        return all_
+
+    config.update_user(KEY, change)
     return entry
 
 
+def _login(route: str, env: Mapping[str, str]) -> dict:
+    s = cloud_login.status(route, env=env)
+    return {"valid": s.ok, "expired": s.expired, "expires_at": s.expires_at,
+            "renew_command": s.refresh_cmd, "note": s.note}
+
+
 def view(provider: str, repo: str | None = None) -> dict:
-    """How ``provider`` connects now: the saved choice, else what the
-    environment selects; for a cloud, its login's state."""
+    """How ``provider`` connects now: the org's route when it decides, else
+    the saved choice, else what the environment selects; for a cloud, the
+    state of the login that route uses. ``choice`` is the saved choice,
+    which an org's route overrides; method "org" when the org decides with
+    no cloud route here."""
     if provider not in PROVIDERS:
         raise Invalid(f"provider must be one of {', '.join(PROVIDERS)}")
     c = saved(provider)
-    route, env = c.get("cloud"), dict(c.get("env") or {})
-    if not c and provider == "claude":
-        route = cloud_login.provider_from_env({k: v for k, v in os.environ.items() if k != "BRINDLE_CLOUD_ROUTE"})
-        spec = ROUTES["claude"].get(route or "")
-        env = {k: os.environ[k] for k in (*spec["required"], *spec["optional"])
-               if k in os.environ} if spec else {}
+    choice = {"method": c["method"], "cloud": c.get("cloud"), "settings": dict(c.get("env") or {})} if c else None
+    managed, org_env = _org(provider, repo)
     login = None
-    if route:
-        s = cloud_login.status(route, env=route_env(provider, route, env))
-        login = {"valid": s.ok, "expired": s.expired, "expires_at": s.expires_at,
-                 "renew_command": s.refresh_cmd, "note": s.note}
-    return {"provider": provider, "method": c.get("method") or ("cloud" if route else "auto"),
-            "saved": bool(c), "cloud": route, "settings": env, "login": login,
-            "managed": org_managed(provider, repo), "clouds": list(ROUTES.get(provider, {}))}
+    if managed:
+        route = cloud_login.provider_from_env({**org_env, "BRINDLE_CLOUD_ROUTE": "claude"}) \
+            if provider == "claude" and org_env else None
+        method = "cloud" if route else "org"
+        env = {k: v for k, v in org_env.items() if k in cloud_login.IDENTITY_ENV and k not in cloud_login._FLAGS.values()}
+        if route:
+            login = _login(route, org_env)
+    else:
+        method, route, env = (c["method"], c.get("cloud"), dict(c.get("env") or {})) if c else ("auto", None, {})
+        if not c and provider == "claude":
+            route = cloud_login.provider_from_env({**os.environ, "BRINDLE_CLOUD_ROUTE": "claude"})
+            spec = ROUTES["claude"].get(route or "")
+            env = {k: os.environ[k] for k in (*spec["required"], *spec["optional"])
+                   if k in os.environ} if spec else {}
+            method = "cloud" if route else "auto"
+        if route:
+            login = _login(route, identity_env(provider, route, env))
+    return {"provider": provider, "method": method, "choice": choice, "cloud": route, "settings": env,
+            "login": login, "managed": managed, "clouds": list(ROUTES.get(provider, {}))}
 
 
-def sign_in(provider: str, *, now: float) -> dict:
-    """Open the browser sign-in the saved cloud route's login needs
-    (cloud_login.sign_in): the person pressed for it, so they are present."""
+def sign_in_target(provider: str) -> tuple[str, dict[str, str]]:
+    """The saved cloud route and the identity its sign-in is for. Raises
+    :class:`Invalid` with no cloud chosen and :class:`Refused` while the org
+    decides how ``provider`` connects."""
     c = saved(provider)
-    if c.get("method") != "cloud":
+    if c.get("method") != "cloud" or c.get("cloud") not in ROUTES.get(provider, {}):
         raise Invalid(f"{provider} doesn't connect through a cloud: choose one first")
-    route = c["cloud"]
-    result = cloud_login.sign_in(route, env=route_env(provider, route, c.get("env") or {}), last_input=now)
-    return {"provider": provider, "cloud": route, "result": result}
+    if why := org_managed(provider):
+        raise Refused(why)
+    return c["cloud"], identity_env(provider, c["cloud"], c.get("env") or {})
+
+
+def sign_in(provider: str, *, run, probe=None, say=print, extra_env: Mapping[str, str] | None = None) -> dict:
+    """The cloud sign-in the person asked for, for the saved route, a first
+    one or a renewal (cloud_login.requested_sign_in: one at a time per login).
+    For OpenCode's Azure route it also connects the pane's own OpenCode store."""
+    route, env = sign_in_target(provider)
+    outcome, code = cloud_login.requested_sign_in(env={**env, **(extra_env or {})}, run=run, probe=probe, say=say)
+    return {"provider": provider, "cloud": route, "result": outcome, "exit_code": code}
 
 
 # -- what this machine is set up with (GET /v1/cloud/options) ------------------------------------

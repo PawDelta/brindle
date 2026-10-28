@@ -784,43 +784,126 @@ def test_a_sign_in_takes_its_method_and_the_code_the_person_pastes(world, monkey
     assert len(typed) == 2
 
 
-@pytest.mark.parametrize("case", ["api_key", "bedrock", "org_refuses", "options"])
+class _FakeCLI:
+    """subprocess.Popen for a cloud CLI's sign-in: ``on_run(argv, env)`` gives its output lines."""
+    on_run = staticmethod(lambda argv, env: [])
+
+    def __init__(self, argv, env=None, **kwargs):
+        self.stdout, self.returncode = iter(self.on_run(argv, env)), 0
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.mark.parametrize("case", ["api_key", "bedrock", "org_refuses", "org_route_wins", "opencode_azure",
+                                  "concurrent", "options"])
 def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_org(
         db, world, tmp_path, monkeypatch, case):
-    from brindle import cloud_login, profiles, tmux
+    import subprocess
+
+    from brindle import cloud_login, connections, profiles, tmux
     from brindle.pro import managed_models
+    from brindle.pro.team_policy import ProviderConfig
 
     path = "/v1/providers/claude/connection"
+    aws = tmp_path / "no-aws" / "config"     # AWS_CONFIG_FILE (conftest)
+    aws.parent.mkdir()
+    ran = []
+    # The sign-in job's cloud CLI: a fake process, nothing else's.
+    monkeypatch.setattr(routes_actions, "subprocess", SimpleNamespace(
+        **{k: getattr(subprocess, k) for k in ("DEVNULL", "PIPE", "STDOUT", "CompletedProcess")}, Popen=_FakeCLI))
     if case == "api_key":
         code, reply = _send("PUT", path, {"method": "api_key"})
-        assert code == 200 and (reply["method"], reply["saved"], reply["cloud"]) == ("api_key", True, None)
+        assert code == 200 and (reply["method"], reply["choice"]["method"], reply["cloud"]) == ("api_key",) * 2 + (None,)
         assert profiles.load_profile("developer", world.repo_root).auth == "api_key"
     elif case == "bedrock":
+        aws.write_text("[profile work-sso]\nsso_session = corp\n")
         settings = {"AWS_PROFILE": "work-sso", "AWS_REGION": "us-east-1"}
         code, reply = _send("PUT", path, {"method": "cloud", "cloud": "bedrock", "settings": settings})
         assert code == 200 and (reply["cloud"], reply["settings"]) == ("bedrock", settings)
         assert reply["login"] is not None and reply["clouds"] == ["bedrock", "vertex", "foundry"]
+        # Another route inherited from the shell, and a personal key: the choice wins, the key goes.
+        monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "FAKE_PERSONAL_KEY")
         monkeypatch.setattr(tmux, "inherited_env", lambda *a: dict(os.environ))
         env = agents._effective_window_env(db.get_agent("wk"), db.get_workspace("w-1"))
-        assert {k: env.get(k) for k in (*settings, "CLAUDE_CODE_USE_BEDROCK")} == {**settings, "CLAUDE_CODE_USE_BEDROCK": "1"}
-        assert not env.get("ANTHROPIC_API_KEY")
-        # The sign-in button opens the saved route's login, with its settings.
-        seen = []
-        monkeypatch.setattr(cloud_login, "sign_in", lambda route, env, last_input: seen.append(
-            (route, env["AWS_PROFILE"])) or "opened")
+        assert {k: env.get(k) for k in settings} == settings and cloud_login.provider_from_env(env) == "bedrock"
+        assert not env.get("ANTHROPIC_API_KEY") and not env.get("CLAUDE_CODE_USE_VERTEX")
+        # A first sign-in (no SSO token yet) runs the route's login; a second press while it runs waits.
+        def first(argv, env):
+            ran.append((argv, env.get("CLAUDE_CODE_USE_VERTEX")))
+            assert _send("POST", "/v1/providers/claude/cloud-sign-in")[0] == 202
+            return ["Open https://device.sso.example/ABCD\n"]
+        monkeypatch.setattr(_FakeCLI, "on_run", staticmethod(first))
         code, job = _send("POST", "/v1/providers/claude/cloud-sign-in")
-        assert code == 202 and seen == [("bedrock", "work-sso")]
-        done = bus.tail(db, kinds=("job.done",))[-1]["payload"]
-        assert done["job"] == job["job"] and done["result"]["result"] == "opened"
+        assert code == 202 and ran == [(["aws", "sso", "login", "--profile", "work-sso"], "")]
+        done = [e["payload"] for e in bus.tail(db, kinds=("job.done",))]
+        assert [d["result"]["result"] for d in done] == ["waiting", "signed in"] and done[-1]["job"] == job["job"]
+        assert any(e["payload"]["text"].startswith("Open https://device") for e in bus.tail(db, kinds=("job.progress",)))
     elif case == "org_refuses":
         monkeypatch.setattr(managed_models, "current", lambda repo: managed_models.Managed("acme", None, True))
         code, reply = _send("PUT", path, {"method": "api_key"})
         assert code == 403 and "acme" in reply["error"]["message"]
-        assert _send("GET", path)[1]["saved"] is False
+        assert _send("GET", path)[1]["choice"] is None
+    elif case == "org_route_wins":
+        # An older provider_config: the org's Bedrock route, over a choice saved before it.
+        assert _send("PUT", path, {"method": "api_key"})[0] == 200
+        org = managed_models.Managed("acme", ProviderConfig("bedrock", region="us-west-2"), False)
+        monkeypatch.setattr(managed_models, "current", lambda repo: org)
+        code, reply = _send("PUT", path, {"method": "sign_in"})
+        assert code == 403 and "acme" in reply["error"]["message"]
+        code, reply = _send("GET", path)
+        assert (reply["method"], reply["cloud"], reply["settings"], reply["choice"]["method"]) == (
+            "cloud", "bedrock", {"AWS_REGION": "us-west-2"}, "api_key") and reply["managed"]
+        assert profiles.load_profile("developer", world.repo_root).auth == "auto"
+    elif case == "opencode_azure":
+        (Path(world.repo_root) / ".brindle" / "agents").mkdir(parents=True, exist_ok=True)
+        (Path(world.repo_root) / ".brindle" / "agents" / "oc.md").write_text(
+            "---\nname: oc\nprovider: opencode\nmodel: azure/gpt-5\n---\nWork.\n")
+        # The Azure CLI is signed in; OpenCode's own store isn't connected yet.
+        token = json.dumps({"accessToken": "FAKE", "expires_on": time.time() + 3600})
+        real_status = cloud_login.status
+        monkeypatch.setattr(cloud_login, "status", lambda *a, run=None, **kw: real_status(
+            *a, run=lambda argv, **_: subprocess.CompletedProcess(argv, 0, token, ""), **kw))
+        code, _ = _send("PUT", "/v1/providers/opencode/connection",
+                        {"method": "cloud", "cloud": "azure", "settings": {"AZURE_RESOURCE_NAME": "res"}})
+        assert code == 200
+
+        def connect(argv, env):     # OpenCode's Entra connection, written to the store it was given
+            store = Path(env["XDG_DATA_HOME"]) / "opencode"
+            store.mkdir(parents=True)
+            (store / "auth.json").write_text(json.dumps({"azure": {"type": "oauth", "accountId": "res"}}))
+            return []
+        monkeypatch.setattr(_FakeCLI, "on_run", staticmethod(connect))
+        assert _send("POST", "/v1/providers/opencode/cloud-sign-in")[0] == 202
+        assert bus.tail(db, kinds=("job.done",))[-1]["payload"]["result"]["result"] == "signed in"
+        oc = profiles.load_profile("oc", world.repo_root)
+        assert cloud_login.azure_connected({**oc.env, **cloud_login.profile_env(oc, oc.env)})
+    elif case == "concurrent":
+        # Codex's choice is saved while Claude's is being written: both are kept.
+        real_read, real_refusal, others = config._read_json, connections.refusal, []
+        state = {"armed": False, "fired": False}
+        monkeypatch.setattr(connections, "refusal", lambda *a, **kw: state.update(armed=True) or real_refusal(*a, **kw))
+
+        def read(p, *rest):
+            # Claude's first read of the config after its policy check: Codex's PUT starts there.
+            data = real_read(p, *rest)
+            if state["armed"] and not state["fired"] and Path(p) == config.user_config_path():
+                state["fired"] = True
+                t = threading.Thread(target=lambda: _send("PUT", "/v1/providers/codex/connection",
+                                                          {"method": "sign_in"}))
+                t.start()
+                t.join(0.5)     # it must wait for Claude's write rather than be overwritten by it
+                others.append(t)
+            return data
+        monkeypatch.setattr(config, "_read_json", read)
+        assert _send("PUT", path, {"method": "api_key"})[0] == 200
+        others[0].join()
+        assert set(config.user_settings()[connections.KEY]) == {"claude", "codex"}
     else:
-        aws = tmp_path / "no-aws" / "config"
-        aws.parent.mkdir()
         aws.write_text("[profile work-sso]\nsso_session = corp\nregion = us-east-1\n[default]\nregion = eu-west-1\n")
         code, reply = _send("GET", "/v1/cloud/options")
         assert code == 200 and reply["aws_profiles"] == [

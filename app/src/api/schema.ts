@@ -48,6 +48,7 @@ export interface ApiSchema {
   PreflightActionDTO: PreflightActionDTO;
   PreflightItemDTO: PreflightItemDTO;
   ProfileDTO: ProfileDTO;
+  ProviderChoiceDTO: ProviderChoiceDTO;
   ProviderConnectionDTO: ProviderConnectionDTO;
   RoutingDTO: RoutingDTO;
   RoutingKindDTO: RoutingKindDTO;
@@ -695,24 +696,37 @@ export interface ProfileDTO {
   provider: string;
 }
 /**
- * How a provider connects: ``method`` auto | sign_in | api_key | cloud,
- * and for cloud the route (``cloud``: bedrock, vertex, foundry, azure), its
- * non-secret ``settings`` (variable -> value) and its ``login``. ``saved``:
- * the person chose it (PUT /providers/{p}/connection), else what applies
- * without a choice. ``managed``: why the org decides it instead, when it does.
- * ``clouds``: the routes this provider can take.
+ * The person's saved choice (PUT /providers/{p}/connection).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ProviderChoiceDTO".
+ */
+export interface ProviderChoiceDTO {
+  cloud?: string | null;
+  method: string;
+  settings?: {
+    [k: string]: string;
+  };
+}
+/**
+ * How a provider connects now: ``method`` auto | sign_in | api_key |
+ * cloud | org (the org decides, with no cloud route here), and for cloud the
+ * route (``cloud``: bedrock, vertex, foundry, azure), its non-secret
+ * ``settings`` (variable -> value) and the ``login`` it uses. An org's route
+ * wins over ``choice``, the person's saved choice; ``managed`` says why.
+ * ``clouds``: the routes the person can choose for this provider.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "ProviderConnectionDTO".
  */
 export interface ProviderConnectionDTO {
+  choice?: ProviderChoiceDTO | null;
   cloud?: string | null;
   clouds?: string[];
   login?: CloudLoginDTO | null;
   managed?: string | null;
   method: string;
   provider: string;
-  saved: boolean;
   settings?: {
     [k: string]: string;
   };

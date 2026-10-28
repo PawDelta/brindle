@@ -557,7 +557,7 @@ def _load(name: str, repo_root: str | None) -> Profile:
     # No auth: of its own: how the person chose to connect its provider.
     from brindle import connections
 
-    return connections.apply(profile)
+    return connections.apply(profile, repo_root)
 
 
 def load_profile(name: str, repo_root: str | None = None) -> Profile:

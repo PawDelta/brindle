@@ -441,16 +441,23 @@ class CloudLoginDTO(_DTO):
     note: str = ""
 
 
+class ProviderChoiceDTO(_DTO):
+    """The person's saved choice (PUT /providers/{p}/connection)."""
+    method: str
+    cloud: str | None = None
+    settings: dict[str, str] = {}
+
+
 class ProviderConnectionDTO(_DTO):
-    """How a provider connects: ``method`` auto | sign_in | api_key | cloud,
-    and for cloud the route (``cloud``: bedrock, vertex, foundry, azure), its
-    non-secret ``settings`` (variable -> value) and its ``login``. ``saved``:
-    the person chose it (PUT /providers/{p}/connection), else what applies
-    without a choice. ``managed``: why the org decides it instead, when it does.
-    ``clouds``: the routes this provider can take."""
+    """How a provider connects now: ``method`` auto | sign_in | api_key |
+    cloud | org (the org decides, with no cloud route here), and for cloud the
+    route (``cloud``: bedrock, vertex, foundry, azure), its non-secret
+    ``settings`` (variable -> value) and the ``login`` it uses. An org's route
+    wins over ``choice``, the person's saved choice; ``managed`` says why.
+    ``clouds``: the routes the person can choose for this provider."""
     provider: str
     method: str
-    saved: bool
+    choice: ProviderChoiceDTO | None = None
     cloud: str | None = None
     settings: dict[str, str] = {}
     login: CloudLoginDTO | None = None

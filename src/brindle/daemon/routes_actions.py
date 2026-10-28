@@ -1781,18 +1781,39 @@ def put_provider_connection(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("forbidden", str(e), 403) from None
 
 
+def _streamed(db: DB, job: Job):
+    """A ``run`` for a cloud CLI's sign-in: no terminal input, its output
+    (the URL or device code to confirm in the browser) as ``job.progress``."""
+    def run(argv: list[str], env=None, pass_fds=()) -> subprocess.CompletedProcess:
+        with subprocess.Popen(argv, env=env, pass_fds=pass_fds, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              start_new_session=True) as proc:
+            for line in proc.stdout:
+                bus.publish(db, "job.progress", job=job.id, text=line.rstrip("\n"))
+        return subprocess.CompletedProcess(argv, proc.returncode)
+    return run
+
+
 def provider_cloud_sign_in(db: DB, params: dict, body: Body) -> Any:
-    """Open the browser sign-in the provider's saved cloud route needs
-    (cloud_login.sign_in: one tab machine-wide), as a job whose result says
-    what happened: opened, waiting (one is open), no lapse, manual, ..."""
-    from brindle import connections
+    """The cloud sign-in for the provider's saved cloud route, a first one or
+    a renewal, as a job (202): the CLI's output arrives as ``job.progress``,
+    and the result says what happened: "signed in", "failed", "waiting" (one
+    is already running for this login) or "manual"."""
+    from brindle import connections, picker
 
     provider = params["provider"]
-    if connections.saved(provider).get("method") != "cloud":
-        raise ServiceError("invalid", f"{provider} doesn't connect through a cloud: choose one first")
+    try:
+        connections.sign_in_target(provider)
+    except connections.Invalid as e:
+        raise ServiceError("invalid", str(e)) from None
+    except connections.Refused as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+    browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
 
     def work(db: DB, job: Job) -> Any:
-        return connections.sign_in(provider, now=time.time())
+        return connections.sign_in(provider, run=_streamed(db, job),
+                                   say=lambda text: bus.publish(db, "job.progress", job=job.id, text=text),
+                                   extra_env={"BROWSER": browser["BROWSER"]} if browser else None)
 
     return start_job("provider.cloud_sign_in", work, provider=provider)
 

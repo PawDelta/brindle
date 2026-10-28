@@ -4670,6 +4670,40 @@
       "title": "ProfileDTO",
       "type": "object"
     },
+    "ProviderChoiceDTO": {
+      "description": "The person's saved choice (PUT /providers/{p}/connection).",
+      "properties": {
+        "cloud": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cloud"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "settings": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Settings",
+          "type": "object"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "title": "ProviderChoiceDTO",
+      "type": "object"
+    },
     "ProviderConnectionDTO": {
       "$defs": {
         "CloudLoginDTO": {
@@ -4712,10 +4746,55 @@
           ],
           "title": "CloudLoginDTO",
           "type": "object"
+        },
+        "ProviderChoiceDTO": {
+          "description": "The person's saved choice (PUT /providers/{p}/connection).",
+          "properties": {
+            "cloud": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cloud"
+            },
+            "method": {
+              "title": "Method",
+              "type": "string"
+            },
+            "settings": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "title": "Settings",
+              "type": "object"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "title": "ProviderChoiceDTO",
+          "type": "object"
         }
       },
-      "description": "How a provider connects: ``method`` auto | sign_in | api_key | cloud,\nand for cloud the route (``cloud``: bedrock, vertex, foundry, azure), its\nnon-secret ``settings`` (variable -> value) and its ``login``. ``saved``:\nthe person chose it (PUT /providers/{p}/connection), else what applies\nwithout a choice. ``managed``: why the org decides it instead, when it does.\n``clouds``: the routes this provider can take.",
+      "description": "How a provider connects now: ``method`` auto | sign_in | api_key |\ncloud | org (the org decides, with no cloud route here), and for cloud the\nroute (``cloud``: bedrock, vertex, foundry, azure), its non-secret\n``settings`` (variable -> value) and the ``login`` it uses. An org's route\nwins over ``choice``, the person's saved choice; ``managed`` says why.\n``clouds``: the routes the person can choose for this provider.",
       "properties": {
+        "choice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderChoiceDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "cloud": {
           "anyOf": [
             {
@@ -4767,10 +4846,6 @@
           "title": "Provider",
           "type": "string"
         },
-        "saved": {
-          "title": "Saved",
-          "type": "boolean"
-        },
         "settings": {
           "additionalProperties": {
             "type": "string"
@@ -4782,8 +4857,7 @@
       },
       "required": [
         "provider",
-        "method",
-        "saved"
+        "method"
       ],
       "title": "ProviderConnectionDTO",
       "type": "object"
