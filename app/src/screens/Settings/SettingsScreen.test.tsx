@@ -679,15 +679,25 @@ describe("settings screen", () => {
     await flush();
     expect(screen.queryByTestId("debug-logging")).toBeNull();
     expect(screen.queryByRole("switch", { name: "Debug logging" })).toBeNull();
+    expect(screen.queryByTestId("staff-only")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Staff only" })).toBeNull();
     stop();
   });
 
-  it("gives staff one debug logging switch, which turns it on with PUT /debug", async () => {
-    const { daemon, stop } = setup({ debug: { staff: true, enabled: false } });
-    const section = await screen.findByTestId("debug-logging");
+  it("gives staff one Staff only section holding debug logging, app update and the release-branch rows, which turns debug logging on with PUT /debug", async () => {
+    const updater = { install: vi.fn(async () => "0.1.0-rc.8"), restart: vi.fn(async () => {}) };
+    const { daemon, stop } = setup({ debug: { staff: true, enabled: false } }, undefined, updater, releaseBuildUpdater, undefined, async () => ({ version: "0.2.4+release.42.0123456789ab", files: [] }));
+    // The staff section holds the staff controls, last before About, and is in the nav.
+    const staffOnly = await screen.findByTestId("staff-only");
+    await within(staffOnly).findByTestId("return-to-stable-row");
+    expect(within(staffOnly).getByTestId("app-update-row")).toBeTruthy();
+    expect(within(staffOnly).getByTestId("release-build-row")).toBeTruthy();
+    expect(staffOnly.nextElementSibling?.id).toBe("about");
+    expect(screen.getByRole("button", { name: "Staff only" })).toBeTruthy();
+    const section = within(staffOnly).getByTestId("debug-logging");
     expect(section.textContent).toContain("upload to brindle");
     const toggle = within(section).getByRole("switch", { name: "Debug logging" });
-    expect(within(section).getAllByRole("switch")).toHaveLength(1);
+    expect(within(staffOnly).getAllByRole("switch")).toHaveLength(1);
     expect(toggle.getAttribute("aria-checked")).toBe("false");
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
