@@ -229,16 +229,15 @@ pub fn release_build_wanted(current: &Version, remote: &str) -> Result<bool, Str
 
 /// Whether the stable feed's `remote` is one to install over this build at
 /// `current` for "Return to stable": only a release-branch build returns
-/// (anything else never), only to a plain release (no pre-release, no build
-/// metadata), and only one at or above this build's major.minor.patch, which
-/// build metadata doesn't change (`0.2.4+release.7.…` returns to 0.2.4, never
-/// to 0.2.3).
+/// (anything else never), and only to a plain release (no pre-release, no
+/// build metadata), whatever its version: main runs ahead of stable once its
+/// version is bumped, so `0.2.5+release.7.…` returns to stable 0.2.4.
 pub fn stable_return_wanted(current: &Version, remote: &str) -> Result<bool, String> {
-    let remote = Version::parse(remote)
+    Version::parse(remote)
         .ok()
         .filter(|v| v.pre.is_empty() && v.build.is_empty())
         .ok_or_else(|| format!("the stable feed names {remote:?}, not a stable release"))?;
-    Ok(release_run(current).is_some() && remote.cmp_precedence(current) != Ordering::Less)
+    Ok(release_run(current).is_some())
 }
 
 fn version<R: Runtime>(app: &AppHandle<R>) -> String {
@@ -1175,11 +1174,11 @@ mod tests {
     }
 
     #[test]
-    fn only_a_release_build_returns_to_a_stable_at_or_above_its_version() {
+    fn only_a_release_build_returns_to_stable_whatever_its_version() {
         for (current, remote, wanted) in [
             ("0.2.4+release.7.0123456789ab", "0.2.4", Ok(true)),
             ("0.2.4+release.7.0123456789ab", "0.2.5", Ok(true)),
-            ("0.2.4+release.7.0123456789ab", "0.2.3", Ok(false)),
+            ("0.2.5+release.7.0123456789ab", "0.2.4", Ok(true)),
             // Not a release-branch build: never.
             ("0.2.4", "0.2.4", Ok(false)),
             ("0.2.4", "0.2.5", Ok(false)),
