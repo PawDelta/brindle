@@ -211,6 +211,119 @@ const surface = () => screen.getByTestId("provider-surface");
 const title = () => screen.getByTestId("surface-title").textContent;
 
 describe("SessionScreen", () => {
+  it("shows live session changes before PR readiness, preserves drafts across tabs, and edits hunks in either layout", async () => {
+    let holdDiff: Promise<void> | null = null;
+    let diffReads = 0;
+    const { daemon, sync, term } = mount({ sup1: live, w1: live }, {
+      workspaces: [{ ...root, branch: "brindle/session-18" }, worker],
+      sessionReview: { sup1: { ready: false, reasons: ["work in progress"], branch: "brindle/session-18", base: "main", diff: "" } },
+      sessionBase: { sup1: { "src/a.ts": "old\ncontext\n" } },
+      sessionFiles: { sup1: { "src/a.ts": "new\ncontext\n", "docs/readme.md": "hello\n" } },
+    }, (daemon) => async (input, init) => {
+      if (String(input).endsWith("/sessions/sup1/diff")) {
+        diffReads++;
+        if (holdDiff) await holdDiff;
+      }
+      return daemon.fetch(input, init);
+    });
+    await waitFor(() => expect(term().written).toBe(drawnLive));
+    const tabs = () => within(screen.getByTestId("session-tabs"));
+    await waitFor(() => expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+2 −1"));
+    expect(screen.getByTestId("session-branch").textContent).toContain("brindle/session-18");
+    pick("w1");
+    expect(screen.getByTestId("session-branch").textContent).toContain("brindle/session-18");
+    const terminal = term();
+    daemon.data.sessionFiles.sup1["docs/readme.md"] = "hello\nworld\n";
+    daemon.send({ type: "git", workspace_id: root.id, status: { branch: "brindle/session-18", base: "main", ahead: 0, behind: 0, dirty_files: ["docs/readme.md"], unpushed: 0 } });
+    await waitFor(() => expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+3 −1"));
+    fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
+    const changes = () => within(screen.getByRole("tabpanel", { name: /Changes/ }));
+    const files = await changes().findByRole("navigation", { name: "Changed files" });
+    fireEvent.click(within(files).getByRole("button", { name: "src/" }));
+    expect(within(files).queryByTitle("src/a.ts")).toBeNull();
+    fireEvent.click(within(files).getByRole("button", { name: "src/" }));
+    fireEvent.click(within(files).getByTitle("src/a.ts"));
+    await waitFor(() => expect(changes().getByRole("button", { name: /@@/ })).toHaveProperty("disabled", false));
+    fireEvent.click(changes().getByRole("button", { name: "Split" }));
+    const split = changes().getByTestId("split-diff");
+    expect(within(split).getByLabelText("Old version").textContent).toContain("old");
+    expect(within(split).getByLabelText("New version").textContent).toContain("new");
+    daemon.publish("agent.status", { root_id: "sup1", agent_id: "sup1", payload: { status: "processing" } });
+    await waitFor(() => expect(changes().getByRole("button", { name: /@@/ })).toHaveProperty("disabled", true));
+    expect(changes().getByTestId("split-diff")).toBeTruthy();
+    daemon.publish("agent.status", { root_id: "sup1", agent_id: "sup1", payload: { status: "idle" } });
+    await waitFor(() => expect(changes().getByRole("button", { name: /@@/ })).toHaveProperty("disabled", false));
+    fireEvent.click(changes().getByRole("button", { name: /@@/ }));
+    fireEvent.change(changes().getByRole("textbox"), { target: { value: "edited\ncontext\nextra" } });
+    fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+    expect(term()).toBe(terminal);
+    expect(terminal.disposed).toBe(false);
+    fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
+    expect(changes().getByRole("textbox")).toHaveProperty("value", "edited\ncontext\nextra");
+    fireEvent.click(changes().getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(daemon.sessionEdits).toHaveLength(1));
+    expect(daemon.data.sessionFiles.sup1["src/a.ts"]).toBe("edited\ncontext\nextra\n");
+    await waitFor(() => expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+4 −1"));
+    fireEvent.click(changes().getByRole("button", { name: "Unified" }));
+    await waitFor(() => expect(changes().queryByTestId("hunk-editor")).toBeNull());
+    expect(changes().getByTestId("hunk").textContent).toContain("+edited");
+    expect(changes().queryByTestId("split-diff")).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+    // An external amend can change content without changing any git-status field.
+    await waitFor(() => expect(changes().getByRole("button", { name: /@@/ })).toHaveProperty("disabled", false));
+    fireEvent.click(changes().getByRole("button", { name: /@@/ }));
+    fireEvent.change(changes().getByRole("textbox"), { target: { value: "keep this draft" } });
+    vi.useFakeTimers();
+    try {
+      await act(async () => {
+        fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+        fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      daemon.data.sessionFiles.sup1["docs/readme.md"] = "amended\nsecond\nthird\n";
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+5 −1");
+      fireEvent.click(changes().getByTitle("docs/readme.md"));
+      expect(changes().getByTestId("hunk").textContent).toContain("+amended");
+      fireEvent.click(changes().getByTitle("src/a.ts"));
+      expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
+
+      // Periodic and activation refreshes share one in-flight request and one queued refresh.
+      let release!: () => void;
+      holdDiff = new Promise<void>((resolve) => { release = resolve; });
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      const pendingReads = diffReads;
+      await act(async () => {
+        fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+        fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(diffReads).toBe(pendingReads);
+      holdDiff = null;
+      await act(async () => { release(); await vi.advanceTimersByTimeAsync(0); });
+      expect(diffReads).toBe(pendingReads + 1);
+
+      // Activating Changes reads immediately, without advancing the periodic clock.
+      fireEvent.click(tabs().getByRole("tab", { name: "Terminal" }));
+      daemon.data.sessionFiles.sup1["docs/readme.md"] = "on activation\n";
+      await act(async () => {
+        fireEvent.click(tabs().getByRole("tab", { name: /Changes/ }));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(tabs().getByRole("tab", { name: /Changes/ }).textContent).toContain("+3 −1");
+      expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
+      fireEvent.click(changes().getByTitle("docs/readme.md"));
+      expect(changes().getByTestId("hunk").textContent).toContain("+on activation");
+      cleanup();
+      const stoppedReads = diffReads;
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(diffReads).toBe(stoppedReads);
+    } finally {
+      vi.useRealTimers();
+      sync.stop();
+    }
+  });
+
   it("shows the selected agent's pane, bare, named by provider and agent, through a tmux client on its window, and types into it as is", async () => {
     const { daemon, sync, term } = mount({ sup1: live, w1: { ...live, screen: "worker" } });
     await waitFor(() => expect(shownAgent()).toBe("sup1"));
@@ -677,6 +790,12 @@ describe("SessionScreen", () => {
     expect(fake.Xterm.all).toHaveLength(0);
     expect(screen.getByTestId("session-status").textContent).toContain("paused");
     expect(screen.getByTestId("session-bar").textContent).not.toContain("Refactor the cache"); // the goal is the sidebar's
+    expect(screen.getByTestId("session-branch").textContent).toBe(root.branch);
+    fireEvent.click(screen.getByRole("tab", { name: /Changes/ }));
+    await within(screen.getByRole("tabpanel", { name: /Changes/ })).findByRole("navigation", { name: "Changed files" });
+    expect(screen.getByTestId("new-file")).toHaveProperty("disabled", true);
+    fireEvent.keyDown(screen.getByRole("tab", { name: /Changes/ }), { key: "Home" });
+    expect(screen.getByRole("tab", { name: "Terminal" }).getAttribute("aria-selected")).toBe("true");
 
     // Continue, from the bar this time, is refused until Claude Code's preflight is settled: the engine's items
     // as native UI on the surface, no launch.

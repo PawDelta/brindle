@@ -741,6 +741,27 @@ def delete_session_file(db: DB, params: dict, body: Body) -> Any:
 _SESSION_PR = "root_id = ? AND branch = ?"
 
 
+@contextlib.contextmanager
+def _session_pr_checked(db: DB, root: Agent, ws: Workspace, job: Job, auto: bool):
+    """Check and hold the session checkout, waking its supervisor on an
+    automatic refusal. Manual requests report the refusal through the app.
+
+    Enter the gate separately so failures in the push or PR creation aren't
+    mistaken for check refusals. The gate's error already includes the check
+    command and the bounded tail of its output, or the checkout problem.
+    """
+    with contextlib.ExitStack() as held:
+        try:
+            head = held.enter_context(gates.pr_checked(
+                db, ws, lambda t: bus.publish(db, "job.progress", job=job.id, text=t)))
+        except workspaces.WorkspaceError as e:
+            if auto:
+                gates.tell(db, root.id, f"[brindle auto PR] Nothing was pushed: {e}\n"
+                           "Fix the problem so the session's PR can be opened or updated.")
+            raise
+        yield head
+
+
 def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any:
     """Push the session branch and open its PR (``title``, ``body``,
     ``draft``) the way ``brindle pr`` does; refused (409, with the reasons)
@@ -758,7 +779,7 @@ def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any
     def work(db: DB, job: Job) -> Any:
         try:
             identity_lock.ensure(root)      # again: the person signed in may have changed since
-            with gates.pr_checked(db, ws, lambda t: bus.publish(db, "job.progress", job=job.id, text=t)) as head:
+            with _session_pr_checked(db, root, ws, job, auto) as head:
                 url = workspaces.open_pull_request(ws, title, draft, body=text, sha=head)
             if url is None and auto:
                 raise workspaces.WorkspaceError("pushed, but gh couldn't open the PR")
@@ -848,12 +869,13 @@ def _auto_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str], opening: 
         def push(db: DB, job: Job) -> Any:
             try:
                 identity_lock.ensure(root)
-                git.push(ws.path, ws.branch)
-                db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR}", (head, *key))
+                with _session_pr_checked(db, root, ws, job, auto=True) as verified:
+                    git.push(ws.path, ws.branch, sha=verified)
+                db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR}", (verified, *key))
             finally:
                 _end_pr_work(key)
-            bus.publish_agent(db, "session.pr_pushed", root.id, url=row["url"], commit=head)
-            return {"url": row["url"], "commit": head}
+            bus.publish_agent(db, "session.pr_pushed", root.id, url=row["url"], commit=verified)
+            return {"url": row["url"], "commit": verified}
 
         return start_job("session.push", push, root_id=root.id, repo_root=ws.repo_root)
     abandoned = row is not None

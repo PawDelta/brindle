@@ -612,17 +612,29 @@ describe("settings screen", () => {
     daemon.deferUpgrade = true;
     daemon.upgradeFails = true;
     fireEvent.click(screen.getByRole("button", { name: "Update brindle" }));
-    const card = await screen.findByTestId("upgrade-card");
+    const toggleDetails = () => fireEvent.click(within(screen.getByTestId("engine-health-summary")).getByRole("button", { name: /Details|Less/ }));
+    let card = await screen.findByTestId("upgrade-card");
     expect(posts(daemon).at(-1)).toEqual({ method: "POST", path: "/engine/upgrade", query: {}, body: {} });
     await waitFor(() => expect(card.getAttribute("data-state")).toBe("running"));
     expect(screen.queryByRole("button", { name: "Update brindle" })).toBeNull();
+    // Details closed mid-update: the summary alone carries the progress and then the failure.
+    toggleDetails();
+    expect(screen.queryByTestId("upgrade-card")).toBeNull();
+    expect(screen.getByTestId("update-status").textContent).toBe("Updating…");
     daemon.completeUpgrade();
-    await waitFor(() => expect(card.getAttribute("data-state")).toBe("failed"));
+    await waitFor(() => expect(screen.getByTestId("update-status").textContent).toContain("Update failed"));
+    expect(screen.queryByTestId("upgrade-card")).toBeNull();
+    expect(screen.queryByTestId("upgrade-log")).toBeNull();
+    // Reopened, the card still holds the failure and the log.
+    toggleDetails();
+    card = screen.getByTestId("upgrade-card");
+    expect(card.getAttribute("data-state")).toBe("failed");
     expect(card.textContent).toContain("The update didn't finish: uv tool upgrade brindle exited 1");
     expect(screen.getByTestId("upgrade-log").textContent).toContain("network unreachable");
     expect(screen.queryByTestId("terminal")).toBeNull();
     fireEvent.click(within(card).getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("upgrade-card")).toBeNull();
+    expect(screen.queryByTestId("update-status")).toBeNull();
     // Done, the engine and the doctor are read again: the new version, nothing left to update.
     daemon.upgradeFails = false;
     fireEvent.click(screen.getByRole("button", { name: "Update brindle" }));
@@ -639,6 +651,23 @@ describe("settings screen", () => {
     expect(within(cli).getByRole("button", { name: "Install command-line tool" })).toHaveProperty("disabled", true);
     expect(cli.textContent).toContain("Not in this build yet");
     stop();
+  });
+
+  it("keeps Engine & health to one summary line with Details closed when healthy, and opens them when a check fails", async () => {
+    const healthy = setup({ doctor: [{ name: "git", level: "ok", detail: "git 2.45" }] });
+    const summary = await screen.findByTestId("engine-health-summary");
+    await waitFor(() => expect(summary.textContent).toContain("Healthy"));
+    expect(summary.textContent).toContain("brindle 0.5.0");
+    expect(summary.textContent).not.toContain("CLI");
+    expect(screen.queryByTestId("engine-details")).toBeNull();
+    fireEvent.click(within(summary).getByRole("button", { name: /Details/ }));
+    expect(screen.getByTestId("engine-details")).toBeTruthy();
+    healthy.stop();
+    cleanup();
+    const bad = setup();
+    await screen.findByTestId("engine-details");
+    expect(screen.getByTestId("health-status").getAttribute("data-bad")).toBe("true");
+    bad.stop();
   });
 
   it("installs the command-line tool through the shell when it offers to, and says where the link went on the row", async () => {

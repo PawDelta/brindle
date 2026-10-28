@@ -6229,6 +6229,10 @@
       "path": "/v1/sessions/{root:path}/pr/readiness"
     },
     {
+      "method": "GET",
+      "path": "/v1/sessions/{root:path}/tree"
+    },
+    {
       "method": "POST",
       "path": "/v1/sessions/{root}/close"
     },
