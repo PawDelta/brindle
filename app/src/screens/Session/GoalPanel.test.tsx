@@ -397,7 +397,7 @@ describe("GoalPanel", () => {
     ["every milestone passed, not yet ready", { state: "done", milestones: goal.milestones!.map((m) => ({ ...m, status: "passed" })) }, { state: "not_ready" }, "in_review"],
     ["every milestone passed, no PR judging at all", { state: "done", milestones: goal.milestones!.map((m) => ({ ...m, status: "passed" })) }, {}, "done"],
     ["ready", { state: "done" }, { state: "ready" }, "ready_for_pr"],
-    ["a PR brindle opened", { state: "done" }, { state: "ready", pr: { url: PR } }, "pr_open"],
+    ["an open PR", { state: "done" }, { state: "ready", pr: { url: PR, unpushed: 0 } }, "pr_open"],
   ])("falls back without goal_phase: %s", (_, fields, readiness, phase) => {
     const older: GoalDTO = { ...structuredClone(goal), goal_phase: undefined, ...fields };
     expect(goalPhase(older, { ...UNKNOWN, ...readiness }).phase).toBe(phase);

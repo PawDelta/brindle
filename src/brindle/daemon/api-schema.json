@@ -6237,6 +6237,10 @@
       "path": "/v1/sessions/{root:path}/pr/draft"
     },
     {
+      "method": "POST",
+      "path": "/v1/sessions/{root:path}/pr/push"
+    },
+    {
       "method": "GET",
       "path": "/v1/sessions/{root:path}/pr/readiness"
     },
