@@ -4,7 +4,7 @@
    override in the repo's local file), Permissions (how Claude's permission
    requests are handled, your permission rules), Project rules (the
    repo-only settings, saved to the repo), Providers (one row per
-   provider CLI and per key, each with its state and its buttons) and
+   provider CLI, with how it connects, its state and its buttons) and
    Engine & health (the engine's version and update, the command-line tool,
    and the doctor as a short health list with a fix where the app has one).
 
@@ -21,6 +21,15 @@
    Connect on a provider that is off turns it back on with the copy still
    found (POST /v1/providers/{p}/use-mine), no installer run. The rows and installs are the app's (store/providers), so a problem
    also reaches the sidebar's status line, which opens this section.
+   Each row also says how the provider connects (GET
+   /v1/providers/{p}/connection; components/ProviderConnect): its own
+   sign-in (Sign in, Sign out), an API key (••••last4, verified or rejected
+   and when, rejected in the fail colour naming the agents it stopped; Test
+   POST /v1/keys/{name}/test, Replace, Remove DELETE /v1/keys/{name}) or a
+   cloud (the route and its settings, the login's time left; Renew login
+   POST .../cloud-sign-in), and Change method offers the three choices
+   again. A key the shell exports but brindle doesn't keep is offered for
+   Import (POST /v1/keys/{name}/import).
 
    Your settings (GET /v1/config's `user`, with `overrides` saying which keys
    a project's files set) are edited as a draft and saved with PATCH /v1/config
@@ -28,8 +37,8 @@
    config.local.json. Project rules save there too, from a save bar at the
    foot. The Claude
    permission mode is the person's own (GET and PATCH /v1/user-settings) and
-   saves as soon as it is picked. Keys show as names and last four characters
-   only; setting one is typed into a password field and stored write-only
+   saves as soon as it is picked. Keys show as their last four characters
+   only; setting one is pasted into a password field and stored write-only
    (PUT /v1/keys/{name}, routes_actions.put_key): the value never comes back.
    A provider's sign-in is the browser-first card (components/ProviderSignIn,
    POST /v1/providers/{p}/login) and the engine's update the background
@@ -56,7 +65,8 @@
    Last, About: the app's version and its license files (About.tsx). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, Meta, ProviderInstalled, UserSettings } from "../../api/client";
+import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, KeyInfo, Meta, ProviderInstalled, UserSettings } from "../../api/client";
+import type { ProviderConnectionDTO } from "../../api/schema";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
 import type { Install } from "../../api/providersInstall";
@@ -65,6 +75,7 @@ import { plain } from "../../api/wording";
 import { UpgradeCard, useEngineUpgrade } from "../../components/EngineUpgrade";
 import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
+import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, RenewLogin, type Method } from "../../components/ProviderConnect";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import { About } from "./About";
@@ -551,72 +562,89 @@ function AppUpdate({ client, updater, release, readAbout }: { client: DaemonClie
   );
 }
 
-/* One key's value, typed into a password field and sent to PUT /keys/{name}
-   (write-only: the engine stores it as `brindle keys set` does and answers
-   the last four). The value lives in this field until Save and nowhere
-   after: not in the app's state, not in its logs. */
-function KeyField({ client, name, repo, onStored, onCancel }: { client: DaemonClient; name: string; repo: string | null; onStored(): void; onCancel(): void }) {
-  const [value, setValue] = useState("");
-  const [busy, setBusy] = useState(false);
+/* The key a provider runs on: the first of its keys that is stored. */
+const keyOf = (provider: string, keys: KeyInfo[] | null): KeyInfo | undefined => (PROVIDER_KEYS[provider] ?? []).map((n) => keys?.find((k) => k.name === n && k.set)).find(Boolean);
+
+/* "40 min", "3h", "2d" until `ts` (seconds). */
+function until(ts: number, now = Date.now() / 1000): string {
+  const m = Math.max(0, Math.round((ts - now) / 60));
+  return m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`;
+}
+
+const stoppedOn = (n: number) => (n > 0 ? ` ${n === 1 ? "1 agent" : `${n} agents`} stopped on it.` : "");
+
+/* How a key or a cloud connection is doing, in one line: verified with when,
+   the cloud login's time left, or what's wrong in the fail colour, naming
+   the agents it stopped. */
+function Health({ connection, keyInfo, stopped }: { connection: ProviderConnectionDTO; keyInfo: KeyInfo | undefined; stopped: number }) {
+  const line = (tone: "pass" | "sap" | "fail" | "ink-3", text: string) => (
+    <span className={`flex items-center gap-1 ${tone === "fail" ? "text-fail" : ""}`} data-testid="provider-health" data-tone={tone}>
+      <span className={`size-2 shrink-0 rounded-full ${tone === "pass" ? "bg-pass" : tone === "sap" ? "bg-sap" : tone === "fail" ? "bg-fail" : "bg-ink-3"}`} aria-hidden />
+      {text}
+    </span>
+  );
+  if (connection.method === "api_key") {
+    if (!keyInfo) return line("sap", "No key stored: Replace adds one.");
+    const billing = KEYS[keyInfo.name]?.billing.replace(/^B/, "b");
+    if (keyInfo.status === "rejected") return line("fail", `Rejected ${ago(keyInfo.checked_at)}: ${KEYS[keyInfo.name]?.maker ?? "the provider"} refused this key.${stoppedOn(stopped)}`);
+    if (keyInfo.status === "verified") return line("pass", `Verified ${ago(keyInfo.checked_at)}${billing ? ` · ${billing}` : ""}`);
+    return line("ink-3", "Saved, not checked yet");
+  }
+  const login = connection.login;
+  if (login?.valid) {
+    if (login.expires_at == null) return line("pass", "Cloud login valid");
+    return line(login.expires_at - Date.now() / 1000 < 3600 ? "sap" : "pass", `Cloud login expires in ${until(login.expires_at)}`);
+  }
+  if (login?.expired) return line("fail", `Cloud login expired.${stoppedOn(stopped)}`);
+  return line("ink-3", `Not signed in to ${CLOUD_NAME[connection.cloud ?? ""] ?? "the cloud"} yet`);
+}
+
+/* Change method: the three choices, and the chosen one's setup, in the row. */
+function ChangeMethod({ client, row, current, keys, repo, onChanged, onClose }: { client: DaemonClient; row: ProviderInstalled; current: Method; keys: KeyInfo[] | null; repo: string | null; onChanged(): void; onClose(): void }) {
+  const f = factsOf(row);
+  const [choice, setChoice] = useState<Method>(current);
   const [error, setError] = useState<string | null>(null);
-  const save = async () => {
-    if (!value.trim() || busy) return;
-    setBusy(true);
+  const opencode = row.provider === "opencode";
+  const [model, setModel] = useState(MODEL_PROVIDERS[0]);
+  const done = () => {
+    onChanged();
+    onClose();
+  };
+  const pick = async (m: Method) => {
+    setChoice(m);
     setError(null);
+    if (m !== "sign_in" || current === "sign_in") return;
     try {
-      await client.putKey(name, value, repo ?? undefined);
-      setValue("");
-      onStored();
+      await client.setProviderConnection(row.provider, { method: "sign_in", ...(repo ? { repo } : {}) });
+      done();
     } catch (e) {
       setError(message(e));
-    } finally {
-      setBusy(false);
     }
   };
   return (
-    <form
-      className="flex w-full flex-wrap items-center gap-s1"
-      aria-label={`Value for ${name}`}
-      onSubmit={(e) => {
-        e.preventDefault();
-        void save();
-      }}
-    >
-      <input
-        className={`${field} min-w-64 flex-1 font-mono`}
-        type="password"
-        autoComplete="off"
-        aria-label={`${name} value`}
-        placeholder={`Paste the ${name} value`}
-        value={value}
-        disabled={busy}
-        autoFocus
-        onChange={(e) => setValue(e.target.value)}
-      />
-      <button type="submit" className={primary} disabled={busy || !value.trim()}>
-        {busy ? "Saving…" : "Save"}
-      </button>
-      <button type="button" className={quiet} disabled={busy} onClick={onCancel}>
-        Cancel
-      </button>
+    <div className="flex w-full flex-col gap-s2 pt-s1" data-testid={`change-method-${row.provider}`}>
+      {opencode && (
+        <ModelProviderPicker
+          value={model.id}
+          onChange={(id) => {
+            const next = MODEL_PROVIDERS.find((x) => x.id === id) ?? MODEL_PROVIDERS[0];
+            setModel(next);
+            if (next.cloud) setChoice("cloud");
+          }}
+        />
+      )}
+      <MethodChoice provider={row.provider} name={f.name} value={choice} onChange={(m) => void pick(m)} />
+      {choice === "api_key" && (
+        <ApiKeyPaste client={client} provider={row.provider} expect={(opencode ? model.key : undefined) ?? PROVIDER_KEYS[row.provider]?.[0] ?? "ANTHROPIC_API_KEY"} any={opencode} keys={keys} repo={repo} onSaved={done} onCancel={onClose} />
+      )}
+      {choice === "cloud" && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} repo={repo} onSignedIn={done} />}
       {error && (
-        <p role="alert" className={`${alert} w-full`}>
-          Could not store {name}: {error}
+        <p className={alert} role="alert">
+          Couldn't change how {f.name} connects: {error}
         </p>
       )}
-    </form>
+    </div>
   );
-}
-
-const KEY_LABELS: Record<string, string> = {
-  ANTHROPIC_API_KEY: "Anthropic API key",
-  OPENAI_API_KEY: "OpenAI API key",
-  GEMINI_API_KEY: "Gemini API key",
-  GOOGLE_API_KEY: "Google API key",
-};
-
-function KeyLabel({ name }: { name: string }) {
-  return <span className="flex flex-col gap-0.5">{KEY_LABELS[name] ?? "Custom API key"}<span className={`${mono} text-xs font-normal text-ink-3`}>{name}</span></span>;
 }
 
 type RowState = "signed_in" | "signed_out" | "unknown" | "not_installed" | "off";
@@ -643,7 +671,17 @@ function rowState(row: ProviderInstalled): RowState {
    own browser login (the browser-first card); Remove from brindle stops
    brindle using it and leaves it installed. No update controls: each CLI
    keeps itself up to date. */
-function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn, onDismiss, onRemove, onSignOut, onLookAgain }: {
+function ProviderRowView({ client, repo, connection, keys, stopped, onChanged, row, install, detectError, check, onInstall, onTurnOn, onDismiss, onRemove, onSignOut, onLookAgain }: {
+  client: DaemonClient;
+  repo: string | null;
+  /* How it connects (GET /providers/{p}/connection); null until read, or from an engine without the route. */
+  connection: ProviderConnectionDTO | null;
+  /* GET /config's keys. */
+  keys: KeyInfo[] | null;
+  /* Its agents stopped on their credentials (status "failed"). */
+  stopped: number;
+  /* The connection or a key changed here: read both again. */
+  onChanged(): void;
   row: ProviderInstalled;
   install: Install | undefined;
   /* Why the rows couldn't be read again (after a finished install, its row is stale until they are). */
@@ -661,10 +699,18 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
   const on = connected(row);
   const [signing, setSigning] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  const [busy, setBusy] = useState<"removing" | "connecting" | "signing-out" | null>(null);
+  const [busy, setBusy] = useState<"removing" | "connecting" | "signing-out" | "testing" | "removing-key" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [changing, setChanging] = useState(false);
+  const [replacing, setReplacing] = useState(false);
   const installing = install?.status === "starting" || install?.status === "running";
-  const act = async (kind: "removing" | "connecting" | "signing-out", run: () => Promise<void>, what: string) => {
+  // A key or a cloud, as saved; its own sign-in otherwise (auto, sign_in), or the org's say.
+  const method = connection?.method;
+  const viaKey = method === "api_key";
+  const viaCloud = method === "cloud" && !!connection?.cloud;
+  const current: Method = viaKey ? "api_key" : viaCloud ? "cloud" : "sign_in";
+  const keyInfo = keyOf(row.provider, keys);
+  const act = async (kind: "removing" | "connecting" | "signing-out" | "testing" | "removing-key", run: () => Promise<void>, what: string) => {
     setBusy(kind);
     setActionError(null);
     try {
@@ -681,9 +727,22 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
   // An off provider still found comes back as it is; one missing runs the maker's installer.
   const connectNow = () => (turnedOff(row) && row.path ? void act("connecting", () => onTurnOn(row.path!), "connect") : onInstall());
   const installAction = turnedOff(row) && row.path ? "Connect" : "Install";
+  const keyName = keyInfo?.name ?? PROVIDER_KEYS[row.provider]?.[0];
+  const testKey = () => act("testing", async () => void (await client.testKey(keyInfo!.name), onChanged()), "test the key of");
+  // The key goes, and with it the method: the provider is back on its own sign-in.
+  const removeKey = () =>
+    act(
+      "removing-key",
+      async () => {
+        if (keyInfo) await client.deleteKey(keyInfo.name);
+        await client.setProviderConnection(row.provider, { method: "auto", ...(repo ? { repo } : {}) });
+        onChanged();
+      },
+      "remove the key of",
+    );
   const help = (
     <>
-      <span className="block">{SIGN_IN_HELP[state]}</span>
+      {(viaKey || viaCloud) && connection ? <Health connection={connection} keyInfo={keyInfo} stopped={stopped} /> : method === "org" && connection?.managed ? <span className="block">{plain(connection.managed)}</span> : <span className="block">{SIGN_IN_HELP[state]}</span>}
       <button type="button" className="mt-1 underline underline-offset-2 hover:text-ink" aria-expanded={expanded} aria-controls={`provider-details-${row.provider}`} onClick={() => setExpanded((value) => !value)}>
         Connection details
       </button>
@@ -719,14 +778,25 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
     <Row
       label={f.name}
       help={help}
-      wide={signing || !!install}
+      wide={signing || !!install || changing || replacing}
       testId={`provider-${row.provider}`}
-      data={{ provider: row.provider, state, install: install?.status }}
+      data={{ provider: row.provider, state, install: install?.status, method: method ?? "auto" }}
       badges={
-        <span className={`inline-flex items-center gap-1 rounded-sm bg-canvas-2 px-s1 py-0.5 text-xs font-normal ${state === "signed_in" ? "text-pass" : "text-ink-2"}`} data-testid="provider-state">
-          <span className={`size-2 rounded-full ${DOT[state]}`} aria-hidden />
-          {STATE_TEXT[state]}
-        </span>
+        viaKey ? (
+          <span className="inline-flex items-center gap-1 text-xs font-normal text-ink-2" data-testid="provider-method">
+            API key {keyInfo ? <span className={mono}>••••{keyInfo.last4}</span> : "· none stored"}
+          </span>
+        ) : viaCloud ? (
+          <span className="inline-flex flex-wrap items-center gap-1 text-xs font-normal text-ink-2" data-testid="provider-method">
+            {CLOUD_NAME[connection!.cloud!] ?? connection!.cloud}
+            {Object.values(connection!.settings ?? {}).filter(Boolean).length > 0 && <span className={mono}>· {Object.values(connection!.settings ?? {}).filter(Boolean).join(" · ")}</span>}
+          </span>
+        ) : (
+          <span className={`inline-flex items-center gap-1 rounded-sm bg-canvas-2 px-s1 py-0.5 text-xs font-normal ${state === "signed_in" ? "text-pass" : "text-ink-2"}`} data-testid="provider-state">
+            <span className={`size-2 rounded-full ${DOT[state]}`} aria-hidden />
+            {STATE_TEXT[state]}
+          </span>
+        )
       }
     >
       {!on && !install && (
@@ -734,12 +804,39 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
           {busy === "connecting" ? "Connecting…" : installAction}
         </button>
       )}
-      {on && canSignOut && state === "signed_in" && !signing && (
+      {on && viaKey && !replacing && (
+        <>
+          {keyInfo && (
+            <button type="button" className={button} disabled={busy !== null} onClick={() => void testKey()}>
+              {busy === "testing" ? "Testing…" : "Test"}
+            </button>
+          )}
+          <button type="button" className={button} disabled={busy !== null} onClick={() => setReplacing(true)}>
+            {keyInfo ? "Replace" : "Add a key"}
+          </button>
+          <button type="button" className={button} disabled={busy !== null} onClick={() => void removeKey()}>
+            {busy === "removing-key" ? "Removing…" : "Remove"}
+          </button>
+        </>
+      )}
+      {on && viaKey && replacing && keyName && (
+        <div className="w-full">
+          <ApiKeyPaste client={client} provider={row.provider} expect={keyName} any={row.provider === "opencode"} keys={keys} repo={repo} onSaved={() => (setReplacing(false), onChanged())} onCancel={() => setReplacing(false)} />
+        </div>
+      )}
+      {on && viaCloud && <RenewLogin client={client} provider={row.provider} route={connection!.cloud!} onSignedIn={onChanged} />}
+      {on && !viaKey && !viaCloud && canSignOut && state === "signed_in" && !signing && (
         <button type="button" className={quiet} aria-label={`Sign out of ${f.name}`} disabled={busy !== null} onClick={() => void act("signing-out", onSignOut, "sign out of")}>
           {busy === "signing-out" ? "Signing out…" : "Sign out"}
         </button>
       )}
-      {on && (row.signed_in !== true || signing) && <ProviderSignIn provider={row.provider} check={check} onActive={setSigning} details={false} />}
+      {on && !viaKey && !viaCloud && (row.signed_in !== true || signing) && <ProviderSignIn provider={row.provider} check={check} onActive={setSigning} details={false} />}
+      {on && connection && method !== "org" && !signing && (
+        <button type="button" className={quiet} aria-expanded={changing} onClick={() => setChanging((c) => !c)}>
+          Change method {changing ? "▴" : "▾"}
+        </button>
+      )}
+      {changing && <ChangeMethod client={client} row={row} current={current} keys={keys} repo={repo} onChanged={onChanged} onClose={() => setChanging(false)} />}
       {install && (
         <div className="w-full">
           <ProgressCard
@@ -995,20 +1092,10 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
     );
   };
 
-  /* A key being set (its name), by name from the list or typed; stored, the config is read again. */
-  const [editing, setEditing] = useState<string | null>(null);
-  const [keysOpen, setKeysOpen] = useState(false);
-  const [stored, setStored] = useState<string | null>(null);
-  const [keyName, setKeyName] = useState("");
   const [cliState, setCliState] = useState<"idle" | "installing" | "installed" | "failed">("idle");
   const [cliError, setCliError] = useState<string | null>(null);
   /* The link the shell made, to say where: the row's own line, never a popup. */
   const [cliLink, setCliLink] = useState<string | null>(null);
-  const keyStored = (name: string) => {
-    setEditing(null);
-    setStored(name);
-    void loadConfig();
-  };
   /* The engine's update: its job followed on the bus; done, the engine and the doctor are read again. */
   const upgrade = useEngineUpgrade(client, store);
   const upgraded = upgrade.state.kind === "done";
@@ -1030,6 +1117,34 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   useEffect(() => {
     void reloadProviders();
   }, [reloadProviders]);
+  /* How each provider connects (GET /providers/{p}/connection), read with the rows and after a change. */
+  const [connections, setConnections] = useState<Record<string, ProviderConnectionDTO>>({});
+  const loadConnection = useCallback(
+    (provider: string) =>
+      client.providerConnection(provider, repo ?? undefined).then(
+        (c) => setConnections((all) => ({ ...all, [provider]: c })),
+        () => undefined,
+      ),
+    [client, repo],
+  );
+  const providerNames = providers.rows?.map((r) => r.provider).join(" ") ?? "";
+  useEffect(() => {
+    for (const p of providerNames.split(" ").filter(Boolean)) void loadConnection(p);
+  }, [providerNames, loadConnection]);
+  /* Agents stopped on their credentials (status "failed"), by provider: a rejected key or an expired login names them. */
+  const workspaces = useAppState((state) => state.workspaces);
+  const stopped = (provider: string) => workspaces.reduce((n, ws) => n + (ws.agents ?? []).filter((a) => a.provider === provider && a.status === "failed").length, 0);
+  /* A key the shell has and brindle doesn't, imported on request (POST /keys/{name}/import). */
+  const [importError, setImportError] = useState<string | null>(null);
+  const importShellKey = async (name: string) => {
+    setImportError(null);
+    try {
+      await client.importKey(name, repo ?? undefined);
+      await loadConfig();
+    } catch (e) {
+      setImportError(`Couldn't import ${name}: ${message(e)}`);
+    }
+  };
   // Opened from the sidebar's problem line: scrolled to Providers, again once the sections above it have loaded.
   const placed = config !== null;
   useEffect(() => {
@@ -1049,7 +1164,6 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
     }
   };
 
-  const validKey = /^[A-Z][A-Z0-9_]{2,}$/.test(keyName.trim());
   const health = checks?.filter((c) => !isOptional(c) && !inSignInRows(c)) ?? [];
   const optionals = checks?.filter((c) => isOptional(c) && !inSignInRows(c)) ?? [];
   // What needs attention here: the sign-in rows show their own state in their own section.
@@ -1165,7 +1279,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       <Section
         id="providers"
         title="Providers"
-        blurb="Connect your AI accounts to use them in brindle. Each provider has its own sign-in. API keys are optional for setups that need them; they're stored in your keychain."
+        blurb="How brindle reaches each model. Each one can sign in, use an API key, or go through your cloud."
         testId="providers"
       >
         {providers.rows === null ? (
@@ -1195,6 +1309,15 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
             {providers.rows.map((r) => (
               <ProviderRowView
                 key={r.provider}
+                client={client}
+                repo={repo}
+                connection={connections[r.provider] ?? null}
+                keys={config?.keys ?? null}
+                stopped={stopped(r.provider)}
+                onChanged={() => {
+                  void loadConnection(r.provider);
+                  void loadConfig();
+                }}
                 row={r}
                 install={providers.installs[r.provider]}
                 detectError={providers.error}
@@ -1209,79 +1332,23 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
             ))}
           </>
         )}
-        {config && (
-          <div>
-            <button type="button" className={`${quiet} flex w-full items-center gap-s1 px-s2 py-s2 text-left`} aria-expanded={keysOpen} aria-controls="api-keys" onClick={() => setKeysOpen((open) => !open)}>
-              <span aria-hidden>{keysOpen ? "▾" : "▸"}</span>
-              API keys (optional, for advanced setups)
-            </button>
-            {keysOpen && (
-              <div id="api-keys" className="flex flex-col divide-y divide-line border-t border-line">
-                <p className="px-s2 py-s1 text-xs text-ink-3">Most people can use the sign-ins above. Add a key only if your setup needs one. Keys are stored in your keychain and only the last four characters are shown.</p>
-                {config.keys.map((k) => (
-                  <Row
-                    key={k.name}
-                    label={<KeyLabel name={k.name} />}
-                    help={stored === k.name && editing !== k.name ? <span role="status">{k.name} stored.</span> : undefined}
-                    wide={editing === k.name}
-                    testId={`key-${k.name}`}
-                    data={{ key: k.name, set: String(k.set) }}
-                  >
-                    {editing === k.name ? (
-                      <KeyField client={client} name={k.name} repo={repo} onStored={() => keyStored(k.name)} onCancel={() => setEditing(null)} />
-                    ) : (
-                      <>
-                        {k.set ? (
-                          <span className="flex items-center gap-1 text-xs text-ink-2">
-                            <span className="size-2 rounded-full bg-pass" aria-hidden />
-                            Set <span className={mono}>••••{k.last4}</span>
-                          </span>
-                        ) : (
-                          <span className="flex items-center gap-1 text-xs text-ink-2">
-                            <span className="size-2 rounded-full bg-ink-3" aria-hidden />
-                            Not set
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          className={button}
-                          aria-label={`${k.set ? "Change" : "Set"} ${k.name}`}
-                          onClick={() => {
-                            setStored(null);
-                            setEditing(k.name);
-                          }}
-                        >
-                          {k.set ? "Change…" : "Set…"}
-                        </button>
-                      </>
-                    )}
-                  </Row>
-                ))}
-                {editing !== null && !config.keys.some((k) => k.name === editing) && (
-                  // Keyed by the name: a field for another new key starts empty, never with the last one's value.
-                  <Row key={editing} label={<KeyLabel name={editing} />} wide testId={`key-${editing}`} data={{ key: editing, set: "false" }}>
-                    <KeyField key={editing} client={client} name={editing} repo={repo} onStored={() => keyStored(editing)} onCancel={() => setEditing(null)} />
-                  </Row>
-                )}
-                <form
-                  className="flex flex-wrap items-center gap-s1 px-s2 py-s1"
-                  aria-label="Add a key"
-                  onSubmit={(e) => {
-                    e.preventDefault();
-                    if (!validKey) return;
-                    setStored(null);
-                    setEditing(keyName.trim());
-                    setKeyName("");
-                  }}
-                >
-                  <input className={`${field} w-56 font-mono`} aria-label="Key name" placeholder="ANOTHER_API_KEY" value={keyName} onChange={(e) => setKeyName(e.target.value.toUpperCase())} />
-                  <button type="submit" className={quiet} disabled={!validKey}>
-                    Add a key…
-                  </button>
-                </form>
-              </div>
-            )}
-          </div>
+        {/* A key the shell exports and brindle doesn't keep yet: imported on request, never on its own. */}
+        {config?.keys
+          .filter((k) => k.importable)
+          .map((k) => (
+            <div key={k.name} className="flex flex-wrap items-center gap-s2 px-s2 py-s1 text-sm text-ink-2" data-testid={`key-import-${k.name}`}>
+              <span>
+                Found <span className={mono}>{k.name}</span> in your shell, not saved in brindle.
+              </span>
+              <button type="button" className={button} onClick={() => void importShellKey(k.name)}>
+                Import
+              </button>
+            </div>
+          ))}
+        {importError && (
+          <p className={`${alert} mx-s2 my-s1`} role="alert">
+            {importError}
+          </p>
         )}
       </Section>
 

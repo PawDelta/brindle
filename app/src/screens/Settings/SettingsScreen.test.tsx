@@ -9,7 +9,7 @@ import { StoreContext } from "../../store/useStore";
 import { DaemonClient } from "../../api/client";
 import { BASE_URL, FAKE_PRESETS, FakeDaemon, TOKEN, flush, freshProviders, type DaemonData } from "../../test/fakeDaemon";
 import { PtyViewsProvider } from "../../api/ptyView";
-import { REPO } from "../../test/fixtures";
+import { REPO, root } from "../../test/fixtures";
 import { releaseBuildUpdater } from "../../api/tauri";
 import { SettingsScreen } from ".";
 import type { SettingsScreenProps } from "./SettingsScreen";
@@ -339,58 +339,70 @@ describe("settings screen", () => {
     stop();
   });
 
-  it("keeps the keys in Providers: a key stored write-only from a password field, no terminal anywhere", async () => {
-    const { daemon, stop } = setup();
-    const keys = await screen.findByTestId("providers");
-    expect(within(keys).queryByRole("form", { name: "Add a key" })).toBeNull();
-    const advanced = await within(keys).findByRole("button", { name: "API keys (optional, for advanced setups)" });
-    fireEvent.click(advanced);
-    await within(keys).findByTestId("key-ANTHROPIC_API_KEY");
-    expect(keys.textContent).not.toContain("in a terminal");
-    expect(within(keys).getByTestId("key-ANTHROPIC_API_KEY").textContent).toContain("••••WXYZ");
-    expect(within(keys).getByTestId("key-OPENAI_API_KEY").textContent).toContain("Not set");
+  it("providers: each row says how it connects, an API key with its health (Test, Replace, Remove, rejected naming the agents it stopped), a cloud with its login (Renew login), Change method, and an Import for a key in the shell", async () => {
+    const now = Date.now() / 1000;
+    const failed = (id: string) => ({ ...root.agents![0], id, provider: "claude", status: "failed" });
+    const { daemon, stop } = setup({
+      providers: freshProviders({ claude: { path: "/opt/homebrew/bin/claude", version: "2.1.0" }, opencode: { path: "/home/u/.opencode/bin/opencode", version: "1.2.8" } }),
+      connections: {
+        claude: { method: "api_key" },
+        opencode: { method: "cloud", cloud: "vertex", settings: { GOOGLE_CLOUD_PROJECT: "my-project", VERTEX_LOCATION: "us-central1" }, login: { valid: true, expired: false, expires_at: now + 40 * 60 + 30 } },
+      },
+      config: { user: {}, repo: {}, local: {}, keys: [{ name: "ANTHROPIC_API_KEY", set: true, last4: "WXYZ", status: "verified", checked_at: now - 2 * 3600 - 60 }] },
+      workspaces: [{ ...root, agents: [failed("a1"), failed("a2")] }],
+    });
+    daemon.shellKeys.add("GEMINI_API_KEY");
+    const health = (p: string) => within(screen.getByTestId(`provider-${p}`)).getByTestId("provider-health");
+    const claude = await screen.findByTestId("provider-claude");
+    expect(screen.queryByRole("button", { name: "API keys (optional, for advanced setups)" })).toBeNull();
 
-    // Set a key: a password field; Save sends the value to PUT /keys/{name} and keeps nothing of it.
-    fireEvent.click(within(keys).getByRole("button", { name: "Set OPENAI_API_KEY" }));
-    const form = within(keys).getByRole("form", { name: "Value for OPENAI_API_KEY" });
-    const value = within(form).getByLabelText("OPENAI_API_KEY value") as HTMLInputElement;
-    expect(value.type).toBe("password");
-    fireEvent.change(value, { target: { value: "sk-test-0000-9xTz" } });
-    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(screen.getByTestId("key-OPENAI_API_KEY").textContent).toContain("••••9xTz"));
-    expect(daemon.requests.filter((r) => r.method === "PUT")).toEqual([{ method: "PUT", path: "/keys/OPENAI_API_KEY", query: {}, body: { value: "sk-test-0000-9xTz", repo: REPO } }]);
-    expect(daemon.keysStored).toEqual(["OPENAI_API_KEY"]);
-    expect(screen.queryByDisplayValue("sk-test-0000-9xTz")).toBeNull();
-    expect(screen.queryByRole("form", { name: "Value for OPENAI_API_KEY" })).toBeNull();
-    expect(screen.getByTestId("key-OPENAI_API_KEY").textContent).toContain("OPENAI_API_KEY stored.");
-    // A key brindle doesn't know yet, by name. A value typed for one new key never carries over to the field
-    // for another: the second starts empty, with nothing to save.
-    const add = screen.getByRole("form", { name: "Add a key" });
-    fireEvent.change(within(add).getByLabelText("Key name"), { target: { value: "review_first" } });
-    expect(within(add).getByLabelText("Key name")).toHaveProperty("value", "REVIEW_FIRST");
-    fireEvent.click(within(add).getByRole("button", { name: "Add a key…" }));
-    fireEvent.change(screen.getByLabelText("REVIEW_FIRST value"), { target: { value: "first-value-0001" } });
-    fireEvent.change(within(add).getByLabelText("Key name"), { target: { value: "REVIEW_SECOND" } });
-    fireEvent.click(within(add).getByRole("button", { name: "Add a key…" }));
-    expect(screen.queryByRole("form", { name: "Value for REVIEW_FIRST" })).toBeNull();
-    const second = screen.getByRole("form", { name: "Value for REVIEW_SECOND" });
-    expect(within(second).getByLabelText("REVIEW_SECOND value")).toHaveProperty("value", "");
-    expect(within(second).getByRole("button", { name: "Save" })).toHaveProperty("disabled", true);
-    fireEvent.click(within(second).getByRole("button", { name: "Cancel" }));
-    // Brindle's own token is refused by the engine, in its words, in the field.
-    fireEvent.change(within(add).getByLabelText("Key name"), { target: { value: "brindle_token" } });
-    expect(within(add).getByLabelText("Key name")).toHaveProperty("value", "BRINDLE_TOKEN");
-    fireEvent.click(within(add).getByRole("button", { name: "Add a key…" }));
-    const token = screen.getByRole("form", { name: "Value for BRINDLE_TOKEN" });
-    fireEvent.change(within(token).getByLabelText("BRINDLE_TOKEN value"), { target: { value: "nope" } });
-    fireEvent.click(within(token).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(within(token).getByRole("alert").textContent).toContain("Could not store BRINDLE_TOKEN: BRINDLE_TOKEN isn't a key agents can be given"));
-    expect(daemon.keysStored).toEqual(["OPENAI_API_KEY"]);
-    fireEvent.click(within(token).getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByRole("form", { name: "Value for BRINDLE_TOKEN" })).toBeNull();
+    // API key: its last four, verified and when, and what it bills.
+    await waitFor(() => expect(within(claude).getByTestId("provider-method").textContent).toBe("API key ••••WXYZ"));
+    await waitFor(() => expect(health("claude").textContent).toBe("Verified 2h ago · billed per use to your Console account, instead of a Claude plan."));
+    // Test: Anthropic refuses it now, and the row says so in the fail colour, naming the agents stopped on it.
+    daemon.rejectedKeys.add("ANTHROPIC_API_KEY");
+    fireEvent.click(within(claude).getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(health("claude").getAttribute("data-tone")).toBe("fail"));
+    expect(health("claude").textContent).toBe("Rejected just now: Anthropic refused this key. 2 agents stopped on it.");
+    // Replace: a fresh key pasted in place, verified.
+    daemon.rejectedKeys.clear();
+    fireEvent.click(within(claude).getByRole("button", { name: "Replace" }));
+    const key = within(claude).getByLabelText("Paste your key") as HTMLInputElement;
+    expect(key.type).toBe("password");
+    fireEvent.change(key, { target: { value: "sk-ant-api03-new-k7Qa" } });
+    fireEvent.click(within(claude).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(screen.getByTestId("provider-claude")).getByTestId("provider-method").textContent).toBe("API key ••••k7Qa"));
+    expect(health("claude").getAttribute("data-tone")).toBe("pass");
+    expect(screen.queryByDisplayValue("sk-ant-api03-new-k7Qa")).toBeNull();
+    // Remove: the key goes and the row is back on Claude Code's own sign-in.
+    fireEvent.click(within(claude).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(within(screen.getByTestId("provider-claude")).getByTestId("provider-state").textContent).toBe("Signed in"));
+    expect(daemon.requests.filter((r) => r.method === "DELETE").map((r) => r.path)).toEqual(["/keys/ANTHROPIC_API_KEY"]);
+    expect(daemon.requests.filter((r) => r.method === "PUT" && r.path === "/providers/claude/connection").map((r) => (r.body as { method: string }).method)).toEqual(["api_key", "auto"]);
+    // Change method: the three choices again, an API key chosen and pasted in the row.
+    fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
+    expect(within(claude).getByTestId("connect-method").getAttribute("data-method")).toBe("sign_in");
+    fireEvent.click(within(claude).getByRole("radio", { name: "API key" }));
+    fireEvent.change(within(claude).getByLabelText("Paste your key"), { target: { value: "sk-ant-api03-again-Zz99" } });
+    fireEvent.click(within(claude).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(screen.getByTestId("provider-claude")).getByTestId("provider-method").textContent).toBe("API key ••••Zz99"));
+    expect(within(claude).queryByTestId("connect-method")).toBeNull();
+
+    // Your cloud: the route and its settings, the login's time left, and Renew login runs it again.
+    const opencode = screen.getByTestId("provider-opencode");
+    expect(within(opencode).getByTestId("provider-method").textContent).toBe("Google Vertex AI· my-project · us-central1");
+    expect(health("opencode").textContent).toBe("Cloud login expires in 40 min");
+    expect(health("opencode").getAttribute("data-tone")).toBe("sap");
+    fireEvent.click(within(opencode).getByRole("button", { name: "Renew login" }));
+    await waitFor(() => expect(daemon.cloudSignIns).toEqual(["opencode"]));
+    daemon.completeCloudSignIn();
+    await waitFor(() => expect(health("opencode").textContent).toBe("Cloud login expires in 8h"));
+
+    // A key the shell has and brindle doesn't: offered, and imported on request.
+    fireEvent.click(within(await screen.findByTestId("key-import-GEMINI_API_KEY")).getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(screen.queryByTestId("key-import-GEMINI_API_KEY")).toBeNull());
+    expect(posts(daemon).map((r) => r.path)).toContain("/keys/GEMINI_API_KEY/import");
     expect(screen.queryByTestId("terminal")).toBeNull();
-    fireEvent.click(advanced);
-    expect(within(keys).queryByRole("form", { name: "Add a key" })).toBeNull();
     stop();
   });
 

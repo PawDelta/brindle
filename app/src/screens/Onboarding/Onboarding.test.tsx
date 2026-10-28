@@ -58,13 +58,13 @@ describe("Onboarding", () => {
     expect(openUrl).toHaveBeenCalledTimes(2);
     daemon.completeLogin();
 
-    // Connect your providers: a card each, Connect on every missing one; the one button names the picks.
+    // Connect your providers: a section each, choosing how a missing one connects picks it; the one button names the picks.
     await step("connect");
     const claude = screen.getByTestId("onb-card-claude");
-    expect(within(claude).getByText("by Anthropic")).toBeTruthy();
+    expect(within(claude).getByText("Anthropic")).toBeTruthy();
     // Nothing picked: the one button below the cards is off.
     expect(screen.getAllByRole("button", { name: "Connect" }).filter((b) => (b as HTMLButtonElement).disabled)).toHaveLength(1);
-    fireEvent.click(within(claude).getByRole("button", { name: "Connect" }));
+    fireEvent.click(within(claude).getByRole("radio", { name: "Sign in" }));
     expect(within(claude).getByTestId("onb-chosen-claude").textContent).toContain("Runs Anthropic's installer");
     fireEvent.click(screen.getByRole("button", { name: "Connect Claude Code" }));
 
@@ -154,13 +154,75 @@ describe("Onboarding", () => {
     expect(daemon.data.policy.preset).toBe("secure");
   });
 
+  it("onboarding's connect method choice: an API key pasted and checked, a cloud signed in, and neither waits for a browser sign-in", async () => {
+    const daemon = new FakeDaemon({
+      account: SIGNED_IN,
+      providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47", signed_in: false }, codex: { path: "/opt/homebrew/bin/codex", version: "0.46.0", signed_in: false } }),
+    });
+    daemon.rejectedKeys.add("OPENAI_API_KEY");
+    daemon.shellKeys.add("OPENAI_API_KEY");
+    const { openUrl } = launch(daemon);
+    await step("connect");
+    const puts = (path: string) => daemon.requests.filter((r) => r.method === "PUT" && r.path === path).map((r) => r.body);
+
+    // Three equal choices up front for each; a CLI found starts on Sign in.
+    const codex = screen.getByTestId("onb-card-codex");
+    expect(within(codex).getAllByRole("radio").map((r) => r.textContent)).toEqual([expect.stringMatching(/^Sign in/), expect.stringMatching(/^API key/), expect.stringMatching(/^Your cloud/)]);
+    expect(within(codex).getByTestId("connect-method").getAttribute("data-method")).toBe("sign_in");
+
+    // API key: the prefix says whose key it is; another maker's can't be saved here.
+    fireEvent.click(within(codex).getByRole("radio", { name: "API key" }));
+    const key = within(codex).getByLabelText("Paste your key");
+    fireEvent.change(key, { target: { value: "sk-ant-api03-zzzz" } });
+    expect(within(codex).getByRole("button", { name: "Save" })).toHaveProperty("disabled", true);
+    fireEvent.change(key, { target: { value: "sk-proj-abcd-x9Qa" } });
+    expect(within(codex).getByRole("status").textContent).toContain("OpenAI key recognized.");
+    // OpenAI refuses it: rejected, in its words, and nothing stored.
+    fireEvent.click(within(codex).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(codex).getByTestId("key-state").getAttribute("data-status")).toBe("rejected"));
+    expect(within(codex).getByTestId("key-state").textContent).toContain("the provider rejected this key");
+    expect(daemon.keysStored).toEqual([]);
+    // The one in the shell is good: imported, verified with its last four, and the method saved.
+    daemon.rejectedKeys.clear();
+    fireEvent.click(within(codex).getByRole("button", { name: "Use OPENAI_API_KEY from my shell" }));
+    await waitFor(() => expect(within(codex).getByTestId("key-state").textContent).toMatch(/OpenAI key recognized · verified just now · ending OPEN/));
+    expect(within(codex).getByRole("status").textContent).toContain("instead of a ChatGPT plan");
+    expect(puts("/providers/codex/connection")).toEqual([{ method: "api_key" }]);
+    fireEvent.click(within(codex).getByRole("button", { name: "Get a key in the OpenAI platform" }));
+    expect(openUrl).toHaveBeenCalledWith("https://platform.openai.com/api-keys");
+
+    // Your cloud: Bedrock, with the SSO profile and its region found on this Mac; Sign in saves the route and runs its login.
+    const claude = screen.getByTestId("onb-card-claude");
+    fireEvent.click(within(claude).getByRole("radio", { name: "Your cloud" }));
+    const setup = await within(claude).findByTestId("cloud-setup");
+    await waitFor(() => expect(within(setup).getByRole("radio", { name: "Amazon Bedrock" }).getAttribute("aria-checked")).toBe("true"));
+    expect(within(setup).getByLabelText("AWS profile")).toHaveProperty("value", "work-sso");
+    expect(within(setup).getByLabelText("Region")).toHaveProperty("value", "us-east-1");
+    fireEvent.click(within(setup).getByRole("button", { name: "Sign in with AWS" }));
+    await waitFor(() => expect(daemon.cloudSignIns).toEqual(["claude"]));
+    expect(puts("/providers/claude/connection")).toEqual([{ method: "cloud", cloud: "bedrock", settings: { AWS_PROFILE: "work-sso", AWS_REGION: "us-east-1" } }]);
+    await waitFor(() => expect(openUrl).toHaveBeenCalledWith("https://device.sso.us-east-1.amazonaws.com/?user_code=ABCD-EFGH"));
+    expect(within(setup).getByRole("status").textContent).toBe("Waiting for the browser…");
+    daemon.completeCloudSignIn();
+    await waitFor(() => expect(within(setup).getByTestId("cloud-sign-in").textContent).toContain("Signed in through Amazon Bedrock"));
+
+    // Neither waits for a browser sign-in: straight to You're ready, each saying how it connects.
+    fireEvent.click(screen.getByRole("button", { name: "Continue with Claude Code and Codex" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
+    await step("ready");
+    expect(screen.getByTestId("onb-ready-claude").textContent).toContain("connected through Amazon Bedrock");
+    expect(screen.getByTestId("onb-ready-codex").textContent).toContain("connected by API key ending OPEN");
+    expect(posts(daemon).some((p) => p.endsWith("/login"))).toBe(false);
+    expect(localStorage.getItem(ONBOARDED_KEY)).toBe("1");
+  });
+
   it("onboarding: an install that fails says what the installer said on its card, and Retry runs it again inline", async () => {
     const daemon = new FakeDaemon({ account: SIGNED_IN, providers: freshProviders() });
     daemon.installFails.claude = 1;
     launch(daemon);
 
     await step("connect");
-    fireEvent.click(within(screen.getByTestId("onb-card-claude")).getByRole("button", { name: "Connect" }));
+    fireEvent.click(within(screen.getByTestId("onb-card-claude")).getByRole("radio", { name: "Sign in" }));
     fireEvent.click(screen.getByRole("button", { name: "Connect Claude Code" }));
 
     const failed = await screen.findByTestId("onb-install-claude-failed");
@@ -182,7 +244,7 @@ describe("Onboarding", () => {
     daemon.installFails.opencode = 1;
     launch(daemon);
     await step("connect");
-    fireEvent.click(within(screen.getByTestId("onb-card-opencode")).getByRole("button", { name: "Connect" }));
+    fireEvent.click(within(screen.getByTestId("onb-card-opencode")).getByRole("radio", { name: "Sign in" }));
     fireEvent.click(screen.getByRole("button", { name: "Connect OpenCode" }));
     const failed = await screen.findByTestId("onb-install-opencode-failed");
     fireEvent.click(within(failed).getByRole("button", { name: "Skip for now" }));
@@ -299,7 +361,7 @@ describe("Onboarding", () => {
     let down = false;
     launchWith(daemon, () => (down ? refusal(503, "unavailable", "the engine is restarting") : null));
     await step("connect");
-    fireEvent.click(within(screen.getByTestId("onb-card-claude")).getByRole("button", { name: "Connect" }));
+    fireEvent.click(within(screen.getByTestId("onb-card-claude")).getByRole("radio", { name: "Sign in" }));
     fireEvent.click(screen.getByRole("button", { name: "Connect Claude Code" }));
     await step("install");
     await screen.findByTestId("onb-install-claude-lines");

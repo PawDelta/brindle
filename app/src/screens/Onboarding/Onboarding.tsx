@@ -2,10 +2,12 @@
    provider model): its own full-window screens, no sidebar, from a clean
    Mac to a first project. Starting brindle (Starting.tsx, while the app
    asks the engine) → Sign in to brindle (one button; the browser does it:
-   POST /account/login) → Connect your providers (a card each: a CLI found
-   on this Mac is used as-is and says where it was found; Connect on a
-   missing one runs its maker's official installer, as-is, into its normal
-   place) → the installs, one calm progress card each with the installer's
+   POST /account/login) → Connect your providers (a section each: a CLI
+   found on this Mac is used as-is and says where it was found; each offers
+   Sign in, API key or Your cloud up front (components/ProviderConnect: a
+   key or a cloud is set up right there), and choosing one on a missing CLI
+   runs its maker's official installer, as-is, into its normal place) →
+   the installs, one calm progress card each with the installer's
    own lines (POST /providers/{p}/install, a job; a failure is a strip on
    its card with Retry and Skip for now) → each provider's own sign-in in
    the browser (components/ProviderSignIn's workings; brindle never sees the
@@ -20,11 +22,12 @@
    button: nothing to type but a URL to clone, no popup. */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import type { DaemonClient, PermissionPreset, ProviderInstalled } from "../../api/client";
+import type { DaemonClient, KeyInfo, PermissionPreset, ProviderInstalled } from "../../api/client";
 import type { OpenUrl, PickFolder } from "../../api/open";
 import { plain } from "../../api/wording";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ProjectPicker } from "../../components/ProjectPicker";
+import { ApiKeyPaste, CLOUD_NAME, CloudSetup, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, type Method } from "../../components/ProviderConnect";
 import { useProviderSignIn } from "../../components/ProviderSignIn";
 import { alert, button, card, field, mono, primary, quiet } from "../../components/ui";
 import type { Route } from "../../routes";
@@ -152,23 +155,38 @@ function BrindleSignIn({ client, openUrl, onSignedIn, onSkip }: { client: Daemon
 
 /* ---- Step 2: connect your providers. ---- */
 
-function ProviderCard({ row, picked, installed, onPick, onUndo }: { row: ProviderInstalled; picked: boolean; installed: boolean; onPick(): void; onUndo(): void }) {
+/* A provider, as a section: where its CLI is (or that its maker's installer
+   will run), then how it connects (components/ProviderConnect): Sign in
+   (its own browser sign-in, the step after the installs), an API key pasted
+   here, or the person's cloud signed in here. Choosing one on a missing CLI
+   picks it for its installer. */
+function ProviderCard({ client, row, picked, installed, method, keys, openUrl, onMethod, onUndo, onConnected }: {
+  client: DaemonClient;
+  row: ProviderInstalled;
+  picked: boolean;
+  installed: boolean;
+  method: Method | null;
+  /* GET /config's keys: a stored key's state, and the ones the shell has. */
+  keys: KeyInfo[] | null;
+  openUrl: OpenUrl;
+  onMethod(method: Method): void;
+  onUndo(): void;
+  /* Connected here, by a key or a cloud: how, in a few words. */
+  onConnected(via: string): void;
+}) {
   const f = factsOf(row);
   const found = connected(row);
+  const opencode = row.provider === "opencode";
+  const [model, setModel] = useState(MODEL_PROVIDERS[0]);
   return (
-    <section className={`${card} flex flex-col gap-s1 p-s2 ${picked ? "border-branch ring-1 ring-branch" : found ? "border-pass" : ""}`} aria-label={f.name} data-testid={`onb-card-${row.provider}`} data-picked={picked} data-found={found}>
-      <div className="flex items-center gap-s1">
-        <Mark provider={row.provider} name={f.name} />
-        <div className="leading-tight">
-          <p className="font-semibold">{f.name}</p>
-          <p className={fine}>by {f.maker}</p>
-        </div>
-      </div>
-      {f.blurb && <p className="text-sm text-ink-2">{f.blurb}</p>}
-      {f.license.label && <p className={fine}>{f.license.label}</p>}
-      <div className="mt-auto pt-s1">
+    <section className={`${card} flex flex-col gap-s2 p-s2 ${picked ? "border-branch" : found ? "border-pass" : ""}`} aria-label={f.name} data-testid={`onb-card-${row.provider}`} data-picked={picked} data-found={found}>
+      <div className="flex flex-wrap items-center gap-x-s1 gap-y-1">
+        <Mark provider={row.provider} name={f.name} small />
+        <span className="text-[15px] font-semibold">{f.name}</span>
+        <span className="text-sm text-ink-3">{f.maker}</span>
+        <span className="flex-1" />
         {found ? (
-          <div className="flex items-start gap-s1 text-sm" data-testid={`onb-found-${row.provider}`}>
+          <span className="flex min-w-0 items-center gap-s1 text-sm" data-testid={`onb-found-${row.provider}`}>
             <Tick />
             <span className="min-w-0">
               {installed ? (
@@ -180,22 +198,47 @@ function ProviderCard({ row, picked, installed, onPick, onUndo }: { row: Provide
               )}
               {row.version && <span className="text-ink-3"> · {row.version}</span>}
             </span>
-          </div>
+          </span>
         ) : picked ? (
-          <div className="flex items-center gap-s1 text-sm" data-testid={`onb-chosen-${row.provider}`}>
+          <span className="flex items-center gap-s1 text-sm" data-testid={`onb-chosen-${row.provider}`}>
             <Tick />
             <span>Runs {f.maker}'s installer</span>
-            <span className="flex-1" />
             <button type="button" className={`${quiet} ${link}`} onClick={onUndo}>
               Undo
             </button>
-          </div>
+          </span>
         ) : (
-          <button type="button" className={primary} onClick={onPick}>
-            Connect
-          </button>
+          f.license.label && <span className={fine}>{f.license.label}</span>
         )}
       </div>
+      {opencode && (
+        <ModelProviderPicker
+          value={model.id}
+          onChange={(id) => {
+            const next = MODEL_PROVIDERS.find((m) => m.id === id) ?? MODEL_PROVIDERS[0];
+            setModel(next);
+            if (next.cloud) onMethod("cloud");
+          }}
+        />
+      )}
+      <MethodChoice provider={row.provider} name={f.name} value={method} onChange={onMethod} />
+      {method === "sign_in" && (
+        <p className={fine}>
+          {signedIn(row) ? `Signed in already: brindle uses ${f.name}'s own sign-in.` : `${f.maker}'s own sign-in opens in your browser ${found ? "next" : "once it's installed"}, using ${f.account}.`}
+        </p>
+      )}
+      {method === "api_key" && (
+        <ApiKeyPaste
+          client={client}
+          provider={row.provider}
+          expect={(opencode ? model.key : undefined) ?? PROVIDER_KEYS[row.provider]?.[0] ?? "ANTHROPIC_API_KEY"}
+          any={opencode}
+          keys={keys}
+          openUrl={openUrl}
+          onSaved={(_, last4) => onConnected(`API key ending ${last4}`)}
+        />
+      )}
+      {method === "cloud" && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} openUrl={openUrl} onSignedIn={(route) => onConnected(`through ${CLOUD_NAME[route] ?? route}`)} />}
     </section>
   );
 }
@@ -373,7 +416,7 @@ function ProviderSignInStep({ row, index, of, rest, already, check, openUrl, onL
 
 /* ---- You're ready. ---- */
 
-function Ready({ rows, installed, onSignIn, onNext }: { rows: ProviderInstalled[]; installed: string[]; onSignIn(provider: string): void; onNext(): void }) {
+function Ready({ rows, installed, via, onSignIn, onNext }: { rows: ProviderInstalled[]; installed: string[]; via: Record<string, string>; onSignIn(provider: string): void; onNext(): void }) {
   const have = rows.filter(connected);
   const others = rows.length - have.length;
   const count = ["", "one", "two", "three"][others] ?? String(others);
@@ -383,15 +426,18 @@ function Ready({ rows, installed, onSignIn, onNext }: { rows: ProviderInstalled[
         {have.map((r) => {
           const f = factsOf(r);
           const signed = signedIn(r);
+          const how = via[r.provider];
           return (
             <div key={r.provider} className="flex flex-wrap items-center gap-s1 px-s2 py-s1" data-testid={`onb-ready-${r.provider}`}>
-              <Tick on={signed} />
+              <Tick on={signed || !!how} />
               <Mark provider={r.provider} name={f.name} small />
               <span className="font-semibold">{f.name}</span>
               {r.version && <span className={`${mono} text-ink-3`}>{r.version}</span>}
               <span className="flex-1" />
               <span className={fine}>
-                {signed ? (
+                {how ? (
+                  `connected ${how.startsWith("through") ? how : `by ${how}`} · ${installed.includes(r.provider) ? `installed by ${f.maker}'s installer` : "your own copy"}`
+                ) : signed ? (
                   `signed in · ${installed.includes(r.provider) ? `installed by ${f.maker}'s installer` : "your own copy"}, it keeps itself updated`
                 ) : (
                   <>
@@ -605,6 +651,13 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
   const [picks, setPicks] = useState<string[]>([]);
   /* Sign-ins put off with "Do this later" in this flow. */
   const [later, setLater] = useState<string[]>([]);
+  /* How each provider connects, as chosen on its card (a CLI found starts on Sign in). */
+  const [methods, setMethods] = useState<Record<string, Method>>({});
+  const methodOf = (row: ProviderInstalled): Method | null => methods[row.provider] ?? (connected(row) ? "sign_in" : null);
+  /* Connected on its card, by a key or a cloud ("API key ending k7Qa"): no browser sign-in to wait for. */
+  const [via, setVia] = useState<Record<string, string>>({});
+  /* The keys as GET /config reads them, for the API key fields. */
+  const [keys, setKeys] = useState<KeyInfo[] | null>(null);
 
   /* The providers read again failed: the step stays where it is and says so, with Retry. */
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -644,10 +697,25 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
 
-  // The cards read what's on this Mac afresh.
+  // The cards read what's on this Mac afresh, and the keys stored or in the shell.
   useEffect(() => {
-    if (step === "connect") void reload().catch(() => undefined);
-  }, [step, reload]);
+    if (step !== "connect") return;
+    void reload().catch(() => undefined);
+    client.config().then(
+      (c) => setKeys(c.keys),
+      () => setKeys([]),
+    );
+  }, [step, reload, client]);
+
+  const choose = (row: ProviderInstalled, method: Method) => {
+    setMethods((m) => ({ ...m, [row.provider]: method }));
+    if (!connected(row)) setPicks((all) => (all.includes(row.provider) ? all : [...all, row.provider]));
+    // Back to its own sign-in after a key or a cloud was saved here: the saved method goes too.
+    if (method === "sign_in" && via[row.provider]) {
+      setVia(({ [row.provider]: _, ...rest }) => rest);
+      void client.setProviderConnection(row.provider, { method: "sign_in" }).catch(() => undefined);
+    }
+  };
 
   const order = rows.map((r) => r.provider);
   const queue = order.filter((p) => picks.includes(p));
@@ -671,13 +739,14 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
     if (rest.length === 0 && !rows.some(connected)) setStep("connect");
   };
 
-  // A provider confirmed connected and signed in: the first launch is done for good, whatever happens after.
-  const finished = onboarded(rows);
+  // A provider confirmed connected and signed in (or by a key or a cloud): the first launch is done for good, whatever happens after.
+  const finished = onboarded(rows) || Object.keys(via).length > 0;
   useEffect(() => {
     if (finished) markOnboarded();
   }, [finished]);
 
-  const pending = useMemo(() => rows.filter((r) => unsigned(r) && !later.includes(r.provider)), [rows, later]);
+  // The browser sign-ins still to do: a provider connected by a key or a cloud has none.
+  const pending = useMemo(() => rows.filter((r) => unsigned(r) && !later.includes(r.provider) && (methods[r.provider] ?? "sign_in") === "sign_in"), [rows, later, methods]);
   /* The sign-ins this round began with ("1 of 2"), kept as each one finishes. */
   const [round, setRound] = useState<string[]>([]);
   useEffect(() => {
@@ -716,17 +785,25 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
           step="connect"
           kicker="Step 2 of 3"
           title="Connect your providers"
-          lede="Pick the coding agents you'll run, one or more. brindle runs each maker's own installer, as it is, and uses the CLI where the installer puts it; each keeps itself up to date. One you already have, brindle simply uses."
+          lede="Pick how brindle reaches each model. You can use more than one, and change it later in Settings."
         >
-          <div className="mt-s1 grid gap-s2 sm:grid-cols-2">
+          <div className="mt-s1 flex flex-col gap-s3">
             {rows.map((r) => (
               <ProviderCard
                 key={r.provider}
+                client={client}
                 row={r}
                 picked={picks.includes(r.provider)}
                 installed={installed.includes(r.provider)}
-                onPick={() => setPicks((all) => [...all, r.provider])}
-                onUndo={() => setPicks((all) => all.filter((p) => p !== r.provider))}
+                method={methodOf(r)}
+                keys={keys}
+                openUrl={openUrl}
+                onMethod={(m) => choose(r, m)}
+                onUndo={() => {
+                  setPicks((all) => all.filter((p) => p !== r.provider));
+                  setMethods(({ [r.provider]: _, ...rest }) => rest);
+                }}
+                onConnected={(how) => setVia((v) => ({ ...v, [r.provider]: how }))}
               />
             ))}
           </div>
@@ -823,8 +900,10 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
         <Ready
           rows={rows}
           installed={installed}
+          via={via}
           onSignIn={(p) => {
             setLater((l) => l.filter((x) => x !== p));
+            setMethods((m) => ({ ...m, [p]: "sign_in" }));
             setStep("provider-signin");
           }}
           onNext={() => setStep("permissions")}

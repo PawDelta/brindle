@@ -10,6 +10,7 @@ import type {
   AllowAllPlanDTO,
   AskDecisionDTO,
   AskGroupDTO,
+  CloudOptionsDTO,
   DecisionDTO,
   GoalDTO,
   InboxItemDTO,
@@ -23,6 +24,7 @@ import type {
   PermissionRuleDTO,
   PreflightItemDTO,
   ProfileDTO,
+  ProviderConnectionDTO,
   RoutingDTO,
   SavedActionDTO,
   SessionDTO,
@@ -1319,6 +1321,31 @@ export class DaemonClient {
      `codex logout`); the person's own CLI login stays. Answers the provider, not signed in. */
   signOutProvider(provider: string) {
     return this.post<ProviderInstalled>(`/providers/${encodeURIComponent(provider)}/logout`, {});
+  }
+
+  /* How the provider connects (brindle.connections): its own sign-in, an API
+     key or the person's cloud, and for a cloud its settings and login. */
+  providerConnection(provider: string, repo?: string) {
+    return this.get<ProviderConnectionDTO>(`/providers/${encodeURIComponent(provider)}/connection`, { repo });
+  }
+
+  /* Saves how the provider connects: `method` auto | sign_in | api_key | cloud,
+     and for cloud the route (`cloud`) and its non-secret `settings`. 403 when
+     the org decides instead, with why. */
+  setProviderConnection(provider: string, choice: { method: string; cloud?: string; settings?: Record<string, string>; repo?: string }) {
+    return this.put<ProviderConnectionDTO>(`/providers/${encodeURIComponent(provider)}/connection`, choice);
+  }
+
+  /* What this machine's cloud CLIs are set up with: AWS profiles, gcloud, the Azure tenant, usual regions. */
+  cloudOptions() {
+    return this.get<CloudOptionsDTO>("/cloud/options");
+  }
+
+  /* The cloud sign-in (or its renewal) for the provider's saved route, a job
+     (provider.cloud_sign_in): the CLI's lines as job.progress, job.done's
+     result {result: "signed in" | "failed" | "waiting" | "manual"}. */
+  cloudSignIn(provider: string) {
+    return this.post<Job>(`/providers/${encodeURIComponent(provider)}/cloud-sign-in`, {});
   }
 
   /* Runs `path`, one of the copies found, and turns the provider back on
