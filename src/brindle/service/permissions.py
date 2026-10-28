@@ -98,7 +98,7 @@ def _title(g: grants.Group) -> str:
 SAVED_LIFE = {"session": "session", "timed": "time", "forever": "forever"}
 
 
-def _modes(g: grants.Group, lim: grants.OrgLimits | None = None) -> list[str]:
+def _modes(g: grants.Group) -> list[str]:
     if g.policy.decision == "deny":
         return []
     limits = (g.policy.rule.limits if g.policy.rule else None) or {}
@@ -112,32 +112,41 @@ def _modes(g: grants.Group, lim: grants.OrgLimits | None = None) -> list[str]:
         out.append("session")
     else:
         out += ["session", "timed", "forever"]
-    if g.policy.rule is not None and g.policy.rule.source == "org":
-        # An org's Ask: only the saved approvals its limits allow, at a reach it allows, are offered.
-        reach = _org_scopes(g, lim)
-        out = [m for m in out if m not in SAVED_LIFE or reach and grants.org_refuses(
-            lim, g.kind, SAVED_LIFE[m], limits.get("minutes"), reach[0].get("level"), reach[0]["value"]) is None]
     return out
 
 
-def _org_scopes(g: grants.Group, lim: grants.OrgLimits | None) -> list[dict]:
-    """The rungs of an org Ask's ladder a saved approval may reach under the org's limits."""
-    return [s for s in g.rep.ask.scopes if grants.org_scope_allows(lim, s)]
+def _org_offer(g: grants.Group) -> tuple[list[dict], list[str], dict | None]:
+    """What an org Ask's item offers: the scopes, modes and limits a saved
+    approval may take, held to the same check a decision is
+    (grants.eligible): every ask rule that applies and the org's limits.
+    Allow once always; with nothing savable, the request's own form for it."""
+    rep = g.rep
+    rules = [r for r in (*rep.policy.asks, rep.rule) if r is not None]
+    caps = [r.limits["minutes"] for r in rules if (r.limits or {}).get("life") == "time" and r.limits.get("minutes")]
+    cap = min(caps) if caps else None
+    modes = _modes(g)
+    reach = {m: [s for s in rep.ask.scopes if grants.eligible(rep, s, m, cap if m == "timed" else None) is None]
+             for m in modes if m in SAVED_LIFE}
+    modes = [m for m in modes if m not in SAVED_LIFE or reach[m]]
+    scopes = ([s for s in rep.ask.scopes if any(s in found for found in reach.values())]
+              or [rep.ask.scope(grants.EXACT) or rep.ask.scopes[0]])
+    limits = {"life": "time", "minutes": cap} if "timed" in modes else (rep.rule.limits if rep.rule else None)
+    return scopes, modes, limits
 
 
 def group_dto(g: grants.Group) -> AskGroupDTO:
     rule = g.policy.rule
     lim = grants.org_limits(g.repo_root) if rule is not None and rule.source == "org" else None
     org = grants.org_control_view(lim, rule)
-    scopes, general = g.rep.ask.scopes, g.rep.ask.general
+    scopes, general, modes = g.rep.ask.scopes, g.rep.ask.general, None
+    limits = rule.limits if rule else None
     if org:
-        # Only the reach the org allows; with none, the request's own form, for Allow once.
-        scopes = _org_scopes(g, lim) or [g.rep.ask.scope(grants.EXACT) or scopes[0]]
+        scopes, modes, limits = _org_offer(g)
         general = general if general in scopes else scopes[0]
     return AskGroupDTO(key=g.key, repo=g.repo_root, kind=g.kind, title=_title(g), general=scope_dto(general),
                        scopes=[scope_dto(s) for s in scopes], items=[ask_dto(a) for a in g.items],
                        blocked=g.policy.decision == "deny", rule=rule.id if rule else None,
-                       limits=limits_dto(rule.limits if rule else None), modes=_modes(g, lim),
+                       limits=limits_dto(limits), modes=modes if modes is not None else _modes(g),
                        org=OrgControlViewDTO(**org, decision=g.policy.decision) if org else None)
 
 

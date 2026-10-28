@@ -872,46 +872,66 @@ ORG_GROUP = "org-group"          # an org grouping's rule's match_type (its matc
 ORG_BLOCKED = "Blocked by "      # how an org Block's reason begins (the Inbox groups them by its first line)
 
 
-# What only starts another program (env FOO=1 npm ..., sudo npm ...): an org control looks past it.
-WRAPPERS = {"env": "uCS", "sudo": "ugCDhpr", "command": "", "nohup": "", "time": "fo", "nice": "n", "exec": "a"}
-# A tool's options before its subcommand that take the next word as their value (npm --prefix web install).
-GLOBAL_VALUES = {"npm": {"--prefix", "-C", "--workspace", "-w", "--userconfig", "--cache", "--registry"},
-                 "pnpm": {"--dir", "-C", "--filter", "-F", "--workspace-dir"},
-                 "yarn": {"--cwd", "--cache-folder", "--modules-folder"}, "bun": {"--cwd", "-c", "--config"},
-                 "uv": {"--directory", "--project", "--python", "-p", "--config-file", "--cache-dir"},
-                 "pip": {"--python", "--cache-dir", "--log", "--proxy", "-r", "-c"},
-                 "git": {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}, "gh": {"-R", "--repo", "--hostname"},
-                 "cargo": {"--manifest-path", "-Z", "--config", "-C"}, "go": {"-C"}, "poetry": {"-C", "--directory", "-P"}}
+# What only starts another program (env FOO=1 npm ..., sudo --user root npm ...): an org control looks past it.
+WRAPPERS = frozenset({"env", "sudo", "doas", "command", "nohup", "time", "nice", "exec", "ionice", "stdbuf"})
+MAX_READINGS = 32
 
 
-def _operation(words: list[str]) -> list[str]:
-    """What a simple command does, for an org control's sake: past assignments and
-    wrappers (env, sudo ...), ``python -m <module>`` as the module, a versioned or
-    pathed program as its plain name (.venv/bin/pip3.12: pip), the tool's options
-    before its subcommand dropped (npm --prefix web install: npm install). A
-    superset of what the families read: a Block must see what an allow would not."""
-    words = list(words)
-    while words:
-        while words and permissions._ASSIGNMENT.match(words[0]):
-            words = words[1:]
-        program = os.path.basename(words[0]) if words else ""
-        if program not in WRAPPERS:
-            break
-        words = words[1:]
-        while words and words[0].startswith("-") and words[0] != "--":
-            takes = len(words[0]) == 2 and words[0][1] in WRAPPERS[program]
-            words = words[2 if takes else 1:]
-        words = words[1:] if words[:1] == ["--"] else words
-    if not words:
+def _plain(word: str) -> str:
+    """A program's plain name: .venv/bin/pip3.12 is pip, python3 is python."""
+    name = os.path.basename(word)
+    return re.sub(r"\d+(\.\d+)*$", "", name) or name
+
+
+def _after_options(words: list[str], i: int) -> list[int]:
+    """Where what follows the options from ``words[i]`` may begin: the first
+    word that isn't one, and, while the option before it may take that word
+    as its value (it has no =value), each such reading further on. Which of
+    a tool's options take a value is the tool's to say; every reading is kept."""
+    start = i
+    while i < len(words) and words[i].startswith("-") and words[i] not in ("-", "--"):
+        i += 1
+    if i < len(words) and words[i] == "--":
+        return [i + 1] if i + 1 < len(words) else []
+    if i >= len(words):
         return []
-    program = re.sub(r"(\d+(\.\d+)*)$", "", os.path.basename(words[0])) or os.path.basename(words[0])
-    rest = words[1:]
-    if program == "python" and rest[:1] == ["-m"] and len(rest) > 1:
-        program, rest = re.sub(r"(\d+(\.\d+)*)$", "", rest[1]), rest[2:]
-    values = GLOBAL_VALUES.get(program, set())
-    while rest and rest[0].startswith("-") and rest[0] != "--":
-        rest = rest[2 if rest[0] in values else 1:]
-    return [program, *rest]
+    before = words[i - 1] if i > start else ""
+    valued = before.startswith("-") and "=" not in before
+    return [i, *(_after_options(words, i + 1) if valued else [])]
+
+
+def _python_module(words: list[str]) -> int | None:
+    """Where ``python [options] -m <module>`` names its module: the index of the -m, or None."""
+    for j, word in enumerate(words[1:], 1):
+        if word == "-c" or not word.startswith("-") and not words[j - 1].startswith("-"):
+            return None    # code, or a script: whatever follows is its own
+        if word.startswith("-m"):
+            return j
+    return None
+
+
+def _operations(words: list[str], depth: int = 0) -> list[list[str]]:
+    """What a simple command may do, for an org control's sake, as every
+    reading of it: [program, *what follows], past assignments and wrappers
+    (env, sudo --user root ...), ``python [options] -m <module>`` as the
+    module, a versioned or pathed program by its plain name (_plain); first
+    with its options as written (vercel --prod), then with each way its
+    options before the subcommand may end (npm --location global install:
+    npm install). A superset of what the families read: a Block must see
+    what an allow would not."""
+    while words and permissions._ASSIGNMENT.match(words[0]):
+        words = words[1:]
+    if not words or depth > 4:
+        return []
+    program = _plain(words[0])
+    if program in WRAPPERS:
+        return [op for j in _after_options(words, 1) for op in _operations(words[j:], depth + 1)][:MAX_READINGS]
+    if program == "python" and (k := _python_module(words)) is not None:
+        module = words[k][2:] or (words[k + 1] if k + 1 < len(words) else "")
+        rest = words[k + 1:] if words[k][2:] else words[k + 2:]
+        return _operations([module, *rest], depth + 1) if module else []
+    readings = [[program, *words[1:]], *([program, *words[j:]] for j in _after_options(words, 1))]
+    return [list(r) for r in dict.fromkeys(map(tuple, readings))][:MAX_READINGS]
 
 
 def _starts(op: list[str], prefix: tuple) -> bool:
@@ -919,7 +939,7 @@ def _starts(op: list[str], prefix: tuple) -> bool:
 
 
 def _loose_families(op: list[str]) -> set[str]:
-    """The families an operation (_operation) may be of, by its program and
+    """The families a reading of a command (_operations) may be of, by its program and
     subcommand alone: whatever its options or where it runs."""
     if not op:
         return set()
@@ -971,32 +991,33 @@ def _command_words(req: Request) -> list[list[str]]:
             or permissions._segments(command))
 
 
-def _operations(req: Request) -> list[list[str]]:
-    return [op for words in _command_words(req) if (op := _operation(words))]
+def _readings(req: Request) -> list[list[str]]:
+    """Every reading (_operations) of every simple command ``req`` may run."""
+    return [op for words in _command_words(req) for op in _operations(words)]
 
 
 def _in_grouping(group: str, req: Request, rules: list[Rule], checks: list[str] | None) -> bool:
     """Whether ``req`` is in an org grouping: as the families read it, or by
-    any of its operations (_operation) however it's spelled, so an
-    assignment, a wrapper or a tool's options never take it out."""
+    any reading of its commands (_operations), so an assignment, a wrapper or
+    a tool's options never take it out."""
     from brindle import permission_groups
 
     if group in FAMILY_LABELS:
         if req.kind in ("write", "edit"):
             return group == WRITES and permissions._in_worktree(req)
         return req.kind == "bash" and (group in (_part_families(req, rules) or [])
-                                       or any(group in _loose_families(op) for op in _operations(req)))
+                                       or any(group in _loose_families(op) for op in _readings(req)))
     if group == UNCHECKED:
         return (req.kind == "bash" and bool(req.command) and simple_argv(req.command) is None
                 and permissions.shell_parts(req) is None)
     if group == NETWORK:
         return (("network", "fetch") in permission_groups.classify(req, rules, checks)
-                or any(op[0] in permission_groups.FETCHERS for op in _operations(req)))
+                or any(op[0] in permission_groups.FETCHERS for op in _readings(req)))
     if group == PACKAGES:
         return (("shell", "install") in permission_groups.classify(req, rules, checks)
-                or any(_installer(op) for op in _operations(req)))
+                or any(_installer(op) for op in _readings(req)))
     if group == DEPLOY:
-        return any(_deploys(op) for op in _operations(req))
+        return any(_deploys(op) for op in _readings(req))
     return False
 
 
@@ -1030,7 +1051,7 @@ def _control_matches(c, req: Request, rules: list[Rule], checks: list[str] | Non
         return Decision(c.decision, "", control_rule(c, req.kind)) if _in_grouping(c.group, req, rules, checks) else None
     rule = control_rule(c, req.kind)
     # Each part as written and as the operation it is (FOO=1 npm --prefix web install x: npm install x).
-    spelled = [" ".join(w) for words in _command_words(req) for w in (words, _operation(words)) if w]
+    spelled = [" ".join(w) for words in _command_words(req) for w in (words, *_operations(words)) if w]
     if permissions.rule_matches(rule, req, checks) or any(
             permissions.rule_matches(rule, replace(req, command=command), checks) for command in spelled):
         return Decision(c.decision, "", rule)
@@ -1096,11 +1117,6 @@ def org_control_view(lim: OrgLimits | None, rule: Rule | None) -> dict | None:
                 or c.rule is not None and c.rule.split(None, 2) == [rule.kind, rule.match_type, rule.match]):
             return {"name": lim.name, "reason": c.reason, "what": control_label(c)}
     return {"name": lim.name, "reason": "", "what": rule.describe()}
-
-
-def org_scope_allows(lim: OrgLimits | None, scope: dict) -> bool:
-    """Whether the org lets a saved approval reach as far as ``scope`` (a rung of an ask's ladder), as org_refuses reads it."""
-    return lim is None or ORG_SCOPES.get(scope.get("level") or scope["value"], "all") in lim.scopes
 
 
 def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session: str | None = None,
