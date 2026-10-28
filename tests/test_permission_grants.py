@@ -415,6 +415,10 @@ BYPASS = pytest.mark.variant("spelled so the families don't read it: a bypass at
     pytest.param(PACKAGES, "npm --location global install left-pad", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "sudo --user root npm install left-pad", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "uv pip install httpx", "deny", None, marks=BYPASS),
+    # However many wrappers or options lead to it: no limit on the reading drops it.
+    pytest.param(PACKAGES, "env env env env env npm install left-pad", "deny", None, marks=BYPASS),
+    pytest.param(PACKAGES, "npm " + "--registry https://registry.npmjs.org " * 33 + "install left-pad", "deny", None,
+                 marks=BYPASS),
     ({"group": "shell/unchecked", "decision": "deny"}, 'eval "$X"', "deny", None),
     (None, "npm install left-pad", "allow", None),
 ])

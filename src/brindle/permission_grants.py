@@ -874,7 +874,6 @@ ORG_BLOCKED = "Blocked by "      # how an org Block's reason begins (the Inbox g
 
 # What only starts another program (env FOO=1 npm ..., sudo --user root npm ...): an org control looks past it.
 WRAPPERS = frozenset({"env", "sudo", "doas", "command", "nohup", "time", "nice", "exec", "ionice", "stdbuf"})
-MAX_READINGS = 32
 
 
 def _plain(word: str) -> str:
@@ -888,16 +887,20 @@ def _after_options(words: list[str], i: int) -> list[int]:
     word that isn't one, and, while the option before it may take that word
     as its value (it has no =value), each such reading further on. Which of
     a tool's options take a value is the tool's to say; every reading is kept."""
-    start = i
-    while i < len(words) and words[i].startswith("-") and words[i] not in ("-", "--"):
+    out = []
+    while True:
+        start = i
+        while i < len(words) and words[i].startswith("-") and words[i] not in ("-", "--"):
+            i += 1
+        if i < len(words) and words[i] == "--":
+            return [*out, i + 1] if i + 1 < len(words) else out
+        if i >= len(words):
+            return out
+        out.append(i)
+        before = words[i - 1] if i > start else ""
+        if not (before.startswith("-") and "=" not in before):
+            return out
         i += 1
-    if i < len(words) and words[i] == "--":
-        return [i + 1] if i + 1 < len(words) else []
-    if i >= len(words):
-        return []
-    before = words[i - 1] if i > start else ""
-    valued = before.startswith("-") and "=" not in before
-    return [i, *(_after_options(words, i + 1) if valued else [])]
 
 
 def _python_module(words: list[str]) -> int | None:
@@ -910,7 +913,7 @@ def _python_module(words: list[str]) -> int | None:
     return None
 
 
-def _operations(words: list[str], depth: int = 0) -> list[list[str]]:
+def _operations(words: list[str]) -> list[list[str]]:
     """What a simple command may do, for an org control's sake, as every
     reading of it: [program, *what follows], past assignments and wrappers
     (env, sudo --user root ...), ``python [options] -m <module>`` as the
@@ -918,20 +921,29 @@ def _operations(words: list[str], depth: int = 0) -> list[list[str]]:
     with its options as written (vercel --prod), then with each way its
     options before the subcommand may end (npm --location global install:
     npm install). A superset of what the families read: a Block must see
-    what an allow would not."""
-    while words and permissions._ASSIGNMENT.match(words[0]):
-        words = words[1:]
-    if not words or depth > 4:
-        return []
-    program = _plain(words[0])
-    if program in WRAPPERS:
-        return [op for j in _after_options(words, 1) for op in _operations(words[j:], depth + 1)][:MAX_READINGS]
-    if program == "python" and (k := _python_module(words)) is not None:
-        module = words[k][2:] or (words[k + 1] if k + 1 < len(words) else "")
-        rest = words[k + 1:] if words[k][2:] else words[k + 2:]
-        return _operations([module, *rest], depth + 1) if module else []
-    readings = [[program, *words[1:]], *([program, *words[j:]] for j in _after_options(words, 1))]
-    return [list(r) for r in dict.fromkeys(map(tuple, readings))][:MAX_READINGS]
+    what an allow would not, so no reading is ever dropped: each command
+    a wrapper may start is read once, however many wrappers or options
+    lead to it."""
+    out: dict[tuple, None] = {}
+    todo, seen = [tuple(words)], set()
+    while todo:
+        words = todo.pop()
+        while words and permissions._ASSIGNMENT.match(words[0]):
+            words = words[1:]
+        if not words or words in seen:
+            continue
+        seen.add(words)
+        program = _plain(words[0])
+        if program in WRAPPERS:
+            todo += [words[j:] for j in _after_options(list(words), 1)]
+        elif program == "python" and (k := _python_module(list(words))) is not None:
+            module = words[k][2:] or (words[k + 1] if k + 1 < len(words) else "")
+            if module:
+                todo.append((module, *(words[k + 1:] if words[k][2:] else words[k + 2:])))
+        else:
+            out[(program, *words[1:])] = None
+            out.update(((program, *words[j:]), None) for j in _after_options(list(words), 1))
+    return [list(r) for r in out]
 
 
 def _starts(op: list[str], prefix: tuple) -> bool:
