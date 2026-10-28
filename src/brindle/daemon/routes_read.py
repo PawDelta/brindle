@@ -182,10 +182,17 @@ def session_readiness(db: DB, request: Request) -> Any:
 def session_diff(db: DB, request: Request) -> Any:
     """The session branch against its PR base, each file and hunk with its
     authors (worker ids, "supervisor", "you") and the authors for filtering.
-    409 with ``reasons`` unless the session is ready."""
+    Readable at any time: readiness only gates opening the PR."""
     root, ws = session_review.session(db, request.path_params["root"])
-    session_review.require_ready(db, root, ws)
     return session_review.diff(db, root, ws)
+
+
+@_json
+def session_tree(db: DB, request: Request) -> Any:
+    """The session checkout's tracked files (paths only) and its branch."""
+    root, ws = session_review.session(db, request.path_params["root"])
+    return {"root_id": root.id, "branch": ws.branch,
+            "files": [p for p in git.run(["ls-files", "-z"], ws.path).stdout.split("\0") if p]}
 
 
 @_json
@@ -636,6 +643,7 @@ ROUTES = [
     Route("/v1/sessions/{root:path}/diff", session_diff),
     # PUT and DELETE on the same path edit (routes_actions).
     Route("/v1/sessions/{root:path}/file", session_file),
+    Route("/v1/sessions/{root:path}/tree", session_tree),
     Route("/v1/decisions", decisions),
     Route("/v1/kb/sources", kb_sources),
     Route("/v1/kb/search", kb_search),
