@@ -52,11 +52,64 @@ def store(name: str, value: str, repo_root: str | None) -> None:
     whose message never contains the value."""
     check(name, repo_root)
     value = value.strip()
+    status = key_check.UNCHECKED
     if value:
-        problem = key_check.verify(name, value)
+        status, problem = key_check.evaluate(name, value)
         if problem:
             raise keystore.CredentialError(f"{name} not stored: {problem}")
-    keystore.set_key(name, value, repo_root)
+    keystore.set_key(name, value, repo_root, status=status)
+
+
+def retest(name: str) -> str:
+    """Re-check the stored key with its provider and remember the result and when,
+    including an inconclusive one (unchecked). The result is kept only if the key
+    wasn't replaced or removed meanwhile; the reply is what is stored then.
+    Raises CredentialError when no key is stored."""
+    value = keystore.get_key(name)
+    if not value:
+        raise keystore.CredentialError(f"no {name} is stored")
+    status, _ = key_check.evaluate(name, value)
+    keystore.set_check(name, status, value)
+    return keystore.get_record(name).get("status") or key_check.UNCHECKED
+
+
+def retest_provider(provider: str) -> None:
+    """After an auth failure: re-check each stored key the provider reads, so a
+    revoked one shows as rejected. Never raises."""
+    for name in keystore.provider_key_names(provider):
+        try:
+            if keystore.get_key(name):
+                retest(name)
+        except Exception:  # noqa: BLE001 - a best-effort follow-up to a failure already handled
+            pass
+
+
+def importable(name: str) -> bool:
+    """True when ``name`` is set in the daemon's environment but not stored."""
+    return bool(os.environ.get(name, "").strip()) and not keystore.get_key(name)
+
+
+def import_env(name: str, repo_root: str | None) -> str:
+    """Store the daemon's environment value of ``name``, validated like a save.
+    Returns the stored value's last four characters."""
+    check(name, repo_root)
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise keystore.KeyNameError(f"{name} isn't set in the daemon's environment")
+    store(name, value, repo_root)
+    return value[-4:]
+
+
+def bills_instead_of_subscription(name: str) -> bool:
+    """True when storing this key makes a signed-in subscription's agents bill the key
+    (the warning `keys set` prints)."""
+    from brindle import providers
+
+    if name == "ANTHROPIC_API_KEY":
+        return bool(providers.subscription_login("claude"))
+    if name == "CODEX_API_KEY":
+        return bool(providers.codex_chatgpt_login())
+    return False
 
 
 @app.command("set")
@@ -150,7 +203,12 @@ def keys_list() -> None:
 def keys_unset(name: str = typer.Argument(..., help="The variable to forget.")) -> None:
     """Remove a stored key."""
     try:
-        keystore.unset_key(name)
+        remove(name)
     except keystore.CredentialError as e:
         _fail(str(e))
     typer.echo(f"removed {name}")
+
+
+def remove(name: str) -> None:
+    """What ``keys unset`` does."""
+    keystore.unset_key(name)

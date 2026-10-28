@@ -585,6 +585,134 @@ def test_keys_put_stores_through_keys_set_and_never_echoes_the_value(db, world, 
     assert SECRET not in caplog.text
 
 
+@pytest.mark.parametrize("action,stored,env,provider_status,expect", [
+    ("put", False, False, 200, ("verified", True, False)),
+    ("test", True, False, 401, ("rejected", True, False)),
+    ("test", True, False, 500, ("unchecked", True, False)),
+    ("delete", True, False, 200, (None, False, False)),
+    ("auth", True, False, 401, ("rejected", True, False)),
+    ("import", False, True, 200, ("verified", True, False)),
+], ids=["save-verify", "test-rejected", "test-inconclusive", "delete", "auth-failure", "import-env"])
+def test_api_key_lifecycle(db, world, monkeypatch, provider_http, action, stored, env, provider_status, expect):
+    from brindle import keys_cmds, keystore
+
+    name = "ANTHROPIC_API_KEY"
+    monkeypatch.delenv(name, raising=False)
+    if env:
+        monkeypatch.setenv(name, SECRET)
+    if stored:
+        keys_cmds.store(name, SECRET, None)
+    provider_http["status"] = provider_status
+    provider_http["calls"].clear()
+
+    def entry():
+        code, cfg = _send("GET", "/v1/config")
+        assert code == 200
+        return next(k for k in cfg["keys"] if k["name"] == name)
+
+    assert entry()["importable"] is env
+    if action == "put":
+        assert _send("PUT", f"/v1/keys/{name}", {"value": SECRET})[0] == 200
+    elif action == "test":
+        code, reply = _send("POST", f"/v1/keys/{name}/test")
+        assert code == 200 and reply["status"] == expect[0] and reply["checked_at"]
+    elif action == "delete":
+        assert _send("DELETE", f"/v1/keys/{name}")[0] == 200
+    elif action == "auth":
+        agents.handle_hook(db, "wk", "stop-failure", {"error": "invalid_api_key"})
+    else:
+        code, reply = _send("POST", f"/v1/keys/{name}/import")
+        assert code == 200 and reply["last4"] == SECRET[-4:]
+    got = entry()
+    assert (got["status"], got["set"], got["importable"]) == expect
+    assert got["key_page"] and got["provider"] == "claude" and got["personal_keys_denied"] is False
+    assert (keystore.get_key(name) is not None) is expect[1]
+    assert SECRET not in json.dumps(got)
+
+
+@pytest.mark.parametrize("during", ["replaced", "deleted"])
+def test_api_key_lifecycle_check_result_stays_with_the_key_it_checked(db, monkeypatch, provider_http, during):
+    from brindle import key_check, keys_cmds, keystore
+
+    name, newer = "ANTHROPIC_API_KEY", "sk-ant-replacement-0123456789"
+    keys_cmds.store(name, SECRET, None)
+
+    asked = []
+
+    def rejects_while_the_key_changes(url, headers):
+        if asked:                       # the replacement's own check
+            return 200, {}
+        asked.append(url)
+        if during == "replaced":
+            keys_cmds.store(name, newer, None)
+        else:
+            keys_cmds.remove(name)
+        return 401, {}
+
+    monkeypatch.setattr(key_check, "_get", rejects_while_the_key_changes)
+    keys_cmds.retest(name)
+    rec = keystore.get_record(name)
+    if during == "replaced":
+        assert rec["value"] == newer and rec["status"] == "verified"
+    else:
+        assert rec == {}
+
+
+NOFLOCK = False   # True: children skip flock, which must make the lock test below fail
+
+
+@pytest.mark.parametrize("fault", ["lock-unavailable", "delete-during-update"])
+def test_api_key_lifecycle_key_updates_hold_the_store_lock(monkeypatch, provider_http, fault):
+    import fcntl
+    import multiprocessing
+
+    import key_lock_procs
+    from brindle import keys_cmds, keystore
+
+    name = "ANTHROPIC_API_KEY"
+    keys_cmds.store(name, SECRET, None)
+    if fault == "lock-unavailable":
+        def refuse(fd, op):
+            raise OSError("no lock")
+
+        with monkeypatch.context() as m:
+            m.setattr(fcntl, "flock", refuse)
+            with pytest.raises(keystore.CredentialError):
+                keystore.set_check(name, "rejected", SECRET)
+            with pytest.raises(keystore.CredentialError):
+                keystore.unset_key(name)
+        assert keystore.get_key(name) == SECRET
+        return
+    # Another process's delete, started while the update has the record loaded, waits for it.
+    ctx = multiprocessing.get_context("spawn")
+    loaded, go, updated, trying, deleted = (ctx.Event() for _ in range(5))
+    updater = ctx.Process(target=key_lock_procs.update, args=(name, SECRET, NOFLOCK, loaded, go, updated))
+    deleter = ctx.Process(target=key_lock_procs.delete, args=(name, NOFLOCK, trying, deleted))
+    updater.start()
+    try:
+        assert loaded.wait(60)
+        deleter.start()
+        assert trying.wait(60)
+        assert not deleted.wait(2), "the delete got through while the update held the record"
+        go.set()
+        assert updated.wait(60) and deleted.wait(60)
+    finally:
+        go.set()
+        for p in (updater, deleter):
+            if p.pid is not None:
+                p.join(60)
+    assert keystore.get_key(name) is None
+
+
+@pytest.mark.parametrize("status,expected", [(200, "verified"), (400, "rejected")])
+def test_api_key_lifecycle_checks_gemini_keys_with_a_models_call(provider_http, status, expected):
+    from brindle import key_check
+
+    provider_http["status"] = status
+    assert key_check.evaluate("GEMINI_API_KEY", "AIza-test")[0] == expected
+    assert provider_http["calls"] == ["https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"]
+
+
 @pytest.mark.parametrize("path,status,command", [
     ("/v1/providers/codex/login", 200, "login"),
     ("/v1/keys/OPENAI_API_KEY/set", 200, "OPENAI_API_KEY"),
