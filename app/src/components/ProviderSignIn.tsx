@@ -13,8 +13,9 @@
    doesn't exit (it waits at its own prompt) fails the card on its words,
    with Try again, which ends it and starts afresh; Cancel and Close end
    the CLI's terminal too, so the next press never finds a stuck one. The
-   pane is read once the shell says the pty view can run, which may come after the sign-in started; one
-   that can't run here (tmux too old or missing) fails the card with why.
+   pane is read once the shell says the pty view can run, which may come
+   after the sign-in started; one that can't run here (tmux too old or
+   missing) fails the card with why.
    Where the app has no pty views at all (a browser tab), the card still
    checks for completed browser sign-in. The app never sees a password or a token: the browser and
    the CLI handle those. */
@@ -130,7 +131,8 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
   // Each attempt's number (a start, a cancel, the hook gone): only the newest one's answers are taken.
   const attempt = useRef(0);
   const pending = useRef<Promise<boolean> | null>(null);
-  // A cancelled sign-in's terminal closing: why it couldn't be, or null once it's gone (or was already).
+  // A cancelled sign-in's terminal closing: why it couldn't be (kept until a start replaces it), or null once
+  // it's gone (or was already).
   const closing = useRef<Promise<string | null>>(Promise.resolve(null));
   const ended = useCallback(
     async (terminal: string, exited = true) => {
@@ -165,8 +167,9 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
   /* Start the sign-in. `restart` (Try again): the daemon ends a login of the
      CLI's still running and starts a fresh one, rather than handing back
      the same terminal. A start after a cancel waits for its terminal to
-     close, so it can't attach to the one that is going; one that couldn't
-     close is said, unless this start ends it anyway (`restart`). */
+     close, so it can't attach to the one that is going. One that couldn't
+     close stays stuck on the daemon: every start restarts until one has
+     replaced it, so it is never the terminal a start is handed back. */
   const start = useCallback(async (restart = false) => {
     const n = ++attempt.current;
     setPhase({ kind: "starting" });
@@ -174,20 +177,18 @@ export function useProviderSignIn({ provider, loginContext, check, onDone, onAct
     setAction(null);
     finished.current = false;
     pending.current = null;
-    const unclosed = await closing.current;
-    closing.current = Promise.resolve(null);
+    const cleanup = closing.current;
+    const unclosed = (await cleanup) !== null;
     if (n !== attempt.current) return;
-    if (unclosed && !restart) {
-      setPhase({ kind: "failed", terminal: null, message: unclosed });
-      return;
-    }
     let started: ActionTerminal;
     try {
-      started = await client.providerLogin(provider, undefined, restart, loginContext);
+      started = await client.providerLogin(provider, undefined, restart || unclosed, loginContext);
     } catch (e) {
       if (n === attempt.current) setPhase({ kind: "failed", terminal: null, message: message(e) });
       return;
     }
+    // The daemon has ended the terminal that couldn't be closed, whichever start this was.
+    if (closing.current === cleanup) closing.current = Promise.resolve(null);
     if (n !== attempt.current) return;
     setPhase({ kind: "waiting", terminal: started.terminal });
     setAction({ terminal: started.terminal, at: { server: started.server ?? null, target: started.target } });

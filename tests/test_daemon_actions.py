@@ -742,7 +742,7 @@ def test_cloud_profile_login_uses_launch_identity(db, world, tmp_path, monkeypat
     monkeypatch.setattr(tmux, "kill_window", lambda pane: windows.pop(next(iter(windows))))
     code, opened = _send("POST", item.action.path, {**item.action.body, "restart": True})
     assert code == 200 and opened["started"] and opened["terminal"] != again["terminal"] and len(windows) == 1
-    shared ={**cloud, ("AWS_REGION" if route == "bedrock" else "CLOUD_ML_REGION"): "other-region"}
+    shared = {**cloud, ("AWS_REGION" if route == "bedrock" else "CLOUD_ML_REGION"): "other-region"}
     (directory / "shared.md").write_text("---\nname: shared\nprovider: claude\nauth: cloud\n" +
         "".join(f"env.{k}: {v}\n" for k, v in shared.items()) + "---\nWork.\n")
     code, same_login = _send("POST", item.action.path, {**item.action.body, "profile": "shared"})
