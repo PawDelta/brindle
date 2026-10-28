@@ -566,7 +566,7 @@ def provider_connection(db: DB, request: Request) -> Any:
     from brindle import connections
 
     try:
-        got = connections.view(request.path_params["provider"], _repo(request))
+        got = connections.view(request.path_params["provider"], _repo(request), db)
     except connections.Invalid as e:
         raise ServiceError("invalid", str(e)) from None
     return ProviderConnectionDTO(**got).to_json()
