@@ -7,6 +7,7 @@ import json
 import threading
 import time
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -44,21 +45,26 @@ def mcp(ws, tool):
      "* → * @ *"),
     (lambda ws: write(ws, "src/auth/login.ts"), "write", "src/auth/login.ts", "src/**", "**"),
     (lambda ws: write(ws, "README.md"), "write", "README.md", "README.md", "**"),
-    (lambda ws: bash(ws, "npm test -- --watch=false auth"), "bash", "npm test -- --watch=false auth", "npm test *", "*"),
-    (lambda ws: bash(ws, "cat a | grep b"), "bash", "cat a | grep b", "cat a | grep b", "*"),
+    (lambda ws: bash(ws, "npm test -- --watch=false auth"), "bash", "npm test -- --watch=false auth", "npm test *",
+     "*"),
+    (lambda ws: bash(ws, "npm test -- auth"), "bash", "npm test -- auth", "family: dev/tests", "*"),
+    (lambda ws: bash(ws, "cat a | grep b"), "bash", "cat a | grep b", "family: shell/readonly", "*"),
+    (lambda ws: bash(ws, "terraform apply dev | tee out"), "bash", "terraform apply dev | tee out",
+     "terraform apply dev | tee out", "*"),
     (lambda ws: mcp(ws, "mcp__github__create_issue"), "mcp", "mcp__github__create_issue",
      "mcp__github__create_issue", "mcp__*"),
     (lambda ws: Request("claude", "fetch", "WebFetch", ws.path, ws.path, ws.repo_root, url="https://t.example.com/a/b"),
      "fetch", "https://t.example.com/a/b", "https://t.example.com/*", "*"),
 ])
 def test_each_ask_carries_its_exact_and_general_form(ws, request_of, kind, exact, general, widest):
-    ask = grants.generalize(request_of(ws))
+    req = request_of(ws)
+    ask = grants.generalize(req)
     assert (ask.kind, ask.exact, ask.general["pattern"], ask.scopes[-1]["pattern"]) == (kind, exact, general, widest)
     if kind == "mcp":
         assert ask.scope("server")["pattern"] == "mcp__github__*"
     if kind == "push":
         assert ask.scope("remote")["pattern"] == "* → * @ origin"
-    assert all(grants.scope_matches(kind, s["pattern"], exact) for s in ask.scopes)
+    assert all(grants.scope_matches(kind, s["pattern"], exact, req=req) for s in ask.scopes)
 
 
 def test_saved_actions_settle_asks_only_within_policy_limits_and_never_past_a_deny_or_expiry(ws):
@@ -169,7 +175,7 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     items = grants.groups(grants.pending_asks(db, ws.repo_root))
     # A command pushing to two destinations is its own item, generalized to both destinations.
     assert [(g.kind, g.rep.ask.general["pattern"], len(g.items)) for g in items] == [
-        ("write", "src/**", 2), ("push", "* → main @ origin", 1), ("bash", "npm test *", 1),
+        ("write", "src/**", 2), ("push", "* → main @ origin", 1), ("bash", "family: dev/tests", 1),
         ("mcp", "mcp__github__create_issue", 2), ("push", "* → main @ origin, * → staging @ origin", 1),
         ("push", "* → ? @ origin", 1), ("push", "* → main @ origin, * → release/desktop @ origin", 1)]
     assert items[4].rep.ask.exact == "fix → main @ origin, fix → staging @ origin"
@@ -230,6 +236,35 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     assert len(out["stopped"]) == 1 and hooks[3].done.wait(5) and hooks[3].answer == "deny"
     assert decide(bash(ws, "npm test -- api")).decision == "deny"
     assert grants.pending_asks(db) == []
+
+
+@pytest.mark.parametrize("approved, sibling, decision", [
+    ("git log --oneline -5", "git diff HEAD~1 | head -50", "allow"),                          # read-only git
+    ("ls -la src | head", "cd src && grep -rn foo . | wc -l", "allow"),                       # read-only shell
+    ("uv run pytest tests/test_a.py -q 2>&1 | tail -5", "uv run pytest tests/test_b.py", "allow"),   # a test run
+    ("npm ls --depth=0", "npm ls react | head -3", "allow"),                                  # a tool's query
+    ("uv run pytest tests/test_a.py", "cd / && uv run pytest", "ask"),                        # another project's
+    ("uv run pytest tests/test_a.py -q 2>&1 | tail -5", "uv run rm -rf build", "ask"),        # uv run, no test
+    ("uv run pytest tests/test_a.py", "uv run pytest --basetemp=src", "ask"),                 # deletes src
+    ("uv run pytest tests/test_a.py", "uv run pytest -k @args.txt", "ask"),                   # options from a file
+    ("npm config get registry | head", "npm config set registry https://example.invalid", "ask"),   # a write
+    ("ls -la src | head", "ls && cd /tmp && cat secret.txt", "ask"),                          # where, unknown
+    ("git log --oneline -5", "git log -1 && git reset --hard", "ask"),                        # a write beside it
+    ("grep -rn foo src | head", "grep -rn foo src > found.txt", "ask"),                       # a redirect writes
+])
+def test_approval_covers_its_family(db, ws, approved, sibling, decision):
+    """Approving one ask at its proposed scope lets every command of the same
+    family through, however it is piped or chained; never one with any other part."""
+    permissions.apply_preset("secure")
+    permissions.forget("d-git-ro")                                   # a policy that asks for every command
+    (Path(ws.path) / "src").mkdir()
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
+    worker(db, ws, "w1")
+    hook = Hook(db, "w1", bash(ws, approved))
+    [item] = grants.groups(grants.pending_asks(db, ws.repo_root))
+    grants.decide_group(db, item.key, "general", "timed", 15)
+    assert hook.done.wait(5) and hook.answer == "allow_once"
+    assert decide(bash(ws, sibling)).decision == decision
 
 
 def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_blocks(db, ws):
