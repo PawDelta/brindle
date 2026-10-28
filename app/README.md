@@ -394,20 +394,28 @@ path) and `VITE_BRINDLE_ROOT` (a session's root agent) open it on that session.
 ## Updates
 
 The shell registers Tauri's updater plugin (`src-tauri/src/updates.rs`) and
-checks once a launch against
+checks once a launch, in the background, against
 `https://pawdelta.com/brindle/downloads/desktop/latest.json` (a release
-candidate makes no launch check; staff update it from Settings against
-`rc/latest.json`: see "The rc channel" under Releases); an update found
+candidate or a staff release-branch build makes no launch check; staff update
+those from Settings: see "The rc channel" under Releases); an update found
 is downloaded, its minisign signature checked against the public key built into
-the app, installed, and a notification says it starts with the next launch.
+the app, and installed. It starts with the next launch: the app never restarts
+by itself. The Inbox shows "brindle X is installed" with Restart to update and
+What's new until then (a notification too, only when the window isn't showing),
+and "Updated to brindle X" once after the restart. Settings › About shows when
+this machine last checked, Check now, and Restart to update once one is
+installed (`app-update.json` in the app's data directory keeps the version last
+run and the last check).
 No check is made when brindle is air-gapped or updates are off:
 `"app_updates": false` or `"airgap": true` in `~/.brindle/config.json`,
 `BRINDLE_AIRGAP=1` in the environment, or the engine: a repo's own
 `.brindle/config.json` can turn air-gap on, and a freshly started daemon hasn't
 read it yet, so the app first has the daemon load every known repo's config
-(`GET /v1/repos`, then `GET /v1/config?repo=` for each) and checks only if each
-says `"airgap": false` and `GET /v1/meta` then does too. Any failed or
-unexpected answer means no check. The public key is committed
+(`GET /v1/repos`, then `GET /v1/config?repo=` for each) and checks unless one
+says `"airgap": true` or `GET /v1/meta` then does. A repo whose config can't be
+read is logged and passed over. At launch the app waits (up to five minutes)
+for the daemon it starts alongside to answer `GET /v1/meta`; one that never
+answers means no check. The public key is committed
 (`plugins.updater.pubkey` in `tauri.conf.json`), so every build checks, a local
 `tauri build` too. Staff installs of a staff build check against a
 separate staff key instead (`src-tauri/staff-updater.pub`; see "Staff builds"). Since `bundle.createUpdaterArtifacts` is on as well, a local

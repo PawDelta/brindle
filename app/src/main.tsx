@@ -6,7 +6,7 @@ import { DaemonClient } from "./api/client";
 import { watchDebug } from "./api/debug";
 import { AppPtyViews } from "./api/ptyView";
 import { tauriSetup } from "./api/setup";
-import { appUpdater, installCli, readAbout, releaseBuildUpdater, tauriClient, tauriSocket } from "./api/tauri";
+import { appUpdater, appUpdates, installCli, readAbout, releaseBuildUpdater, tauriClient, tauriSocket } from "./api/tauri";
 import { applyTheme, readTheme } from "./components/ThemeToggle";
 import type { Route } from "./routes";
 import { createAppStore } from "./store/store";
@@ -45,6 +45,8 @@ const updater = setup ? appUpdater : undefined;
 const releaseUpdater = setup ? releaseBuildUpdater : undefined;
 // Settings' About reads the bundle's license files through the shell, whichever daemon the app talks to.
 const about = isTauri() ? readAbout : undefined;
+// The app's own updates (the Inbox's Restart to update, About's Check now): the shell's, whichever daemon.
+const updates = isTauri() ? appUpdates : undefined;
 
 // The store syncs from the moment the app shows, once; and the app asks
 // then whether staff debug logging is on (api/debug.ts).
@@ -54,7 +56,7 @@ function app() {
     sync = startSync({ client, store, connect });
     watchDebug(client);
   }
-  return <App store={store} client={client} refresh={sync?.refresh} initialRoute={initialRoute} installCli={cli} appUpdater={updater} releaseBuildUpdater={releaseUpdater} readAbout={about} />;
+  return <App store={store} client={client} refresh={sync?.refresh} initialRoute={initialRoute} installCli={cli} appUpdater={updater} appUpdates={updates} releaseBuildUpdater={releaseUpdater} readAbout={about} />;
 }
 
 // In the app, the daemon is found (or started) first; when it can't be, the

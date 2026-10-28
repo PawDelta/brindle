@@ -5,6 +5,7 @@
    `tauriSocket` carry the path to the shell, which adds the real ones. */
 
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { DaemonClient } from "./client";
 import type { WebSocketFactory, WebSocketLike } from "./events";
 
@@ -141,6 +142,47 @@ export const appUpdater: AppUpdater = {
   install: () => invoke<string | null>("app_update_install"),
   restart: () => invoke<void>("app_restart"),
 };
+
+/* App updates as the shell has them (src-tauri/src/updates.rs UpdateStatus):
+   this build's version; whether it installs updates by itself (a release;
+   not an rc or a staff build); an update installed and waiting for the
+   restart; the version this launch was updated to, until dismissed; when
+   this machine last checked (seconds since the epoch); a check under way. */
+export interface AppUpdateStatus {
+  version: string;
+  automatic: boolean;
+  pending: string | null;
+  updated: string | null;
+  last_checked: number | null;
+  checking: boolean;
+}
+
+/* The shell's own updates, for the Inbox and Settings' About: `status` now,
+   `check` (Check now: check and install, answering the status after),
+   `restart` into an installed update, `dismiss` "Updated to brindle X", and
+   `watch` each change the shell announces (an install in the background),
+   answering a function that stops watching. */
+export interface AppUpdates {
+  status: () => Promise<AppUpdateStatus>;
+  check: () => Promise<AppUpdateStatus>;
+  restart: () => Promise<void>;
+  dismiss: () => Promise<void>;
+  watch: (on: (status: AppUpdateStatus) => void) => () => void;
+}
+
+export const appUpdates: AppUpdates = {
+  status: () => invoke<AppUpdateStatus>("app_update_status"),
+  check: () => invoke<AppUpdateStatus>("app_update_check"),
+  restart: () => invoke<void>("app_restart"),
+  dismiss: () => invoke<void>("app_update_dismiss"),
+  watch: (on) => {
+    const stop = listen<AppUpdateStatus>("app-update", (e) => on(e.payload));
+    return () => void stop.then((unlisten) => unlisten());
+  },
+};
+
+/* What's new in brindle `version`: its release notes on the site. */
+export const releaseNotesUrl = (version: string) => `https://pawdelta.com/brindle/changelog/#${encodeURIComponent(version)}`;
 
 /* How the shell's release-branch install goes (src-tauri/src/updates.rs
    ReleaseProgress): the build found, the bytes downloaded so far (of

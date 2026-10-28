@@ -10,14 +10,15 @@ import { startSync } from "../../store/sync";
 import { StoreContext } from "../../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
-import { InboxScreen } from "./InboxScreen";
+import { releaseNotesUrl, type AppUpdateStatus, type AppUpdates } from "../../api/tauri";
+import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
 
 afterEach(cleanup);
 
 const notice: InboxItemDTO = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };
 const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship ls --json" };
 
-function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client()) {
+function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client(), props: Partial<InboxScreenProps> = {}) {
   const store = createAppStore();
   const sync = startSync({ client, store, connect: daemon.connect });
   const onOpen = vi.fn();
@@ -26,7 +27,7 @@ function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client()) {
     <DaemonContext.Provider value={client}>
       <StoreContext.Provider value={store}>
         <SessionsProvider client={client}>
-          <InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} onOpenRule={onOpenRule} />
+          <InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} onOpenRule={onOpenRule} {...props} />
         </SessionsProvider>
       </StoreContext.Provider>
     </DaemonContext.Provider>,
@@ -313,6 +314,47 @@ describe("inbox", () => {
     daemon.data.inbox = [];
     daemon.publish("message.queued", { agent_id: "sup1" });
     await waitFor(() => expect(screen.getByTestId("all-clear")).toBeTruthy());
+    sync.stop();
+  });
+
+  it("shows the app's own update: Restart to update while one waits, then 'Updated to' once until dismissed; nothing for an rc or staff build", async () => {
+    const idle: AppUpdateStatus = { version: "0.6.0", automatic: true, pending: null, updated: null, last_checked: null, checking: false };
+    let announce: (s: AppUpdateStatus) => void = () => {};
+    const updates: AppUpdates = {
+      status: () => Promise.resolve(idle),
+      check: () => Promise.resolve(idle),
+      restart: vi.fn(() => Promise.resolve()),
+      dismiss: vi.fn(() => Promise.resolve(announce({ ...idle, version: "0.7.0" }))),
+      watch: (on) => {
+        announce = (s) => act(() => on(s));
+        return () => {};
+      },
+    };
+    const openUrl = vi.fn(() => Promise.resolve());
+    const { sync } = mount(new FakeDaemon({ inbox: [] }), undefined, { appUpdates: updates, openUrl });
+    await waitFor(() => expect(screen.getByTestId("all-clear")).toBeTruthy());
+    expect(screen.queryByTestId("app-update-card")).toBeNull();
+
+    // Installed in the background: it waits for the person's restart, never the app's own.
+    announce({ ...idle, pending: "0.7.0" });
+    const pending = screen.getByTestId("app-update-card");
+    expect(pending.textContent).toContain("brindle 0.7.0 is installed");
+    expect(screen.queryByTestId("all-clear")).toBeNull();
+    fireEvent.click(within(pending).getByRole("button", { name: "What's new" }));
+    expect(openUrl).toHaveBeenCalledWith(releaseNotesUrl("0.7.0"));
+    fireEvent.click(within(pending).getByRole("button", { name: "Restart to update" }));
+    expect(updates.restart).toHaveBeenCalled();
+
+    // Restarted on it: once, until dismissed.
+    announce({ ...idle, version: "0.7.0", updated: "0.7.0" });
+    const updated = screen.getByTestId("app-update-card");
+    expect(updated.textContent).toContain("Updated to brindle 0.7.0");
+    fireEvent.click(within(updated).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(screen.queryByTestId("app-update-card")).toBeNull());
+
+    // An rc or a staff build installs nothing by itself, and says nothing here.
+    announce({ ...idle, automatic: false, pending: "0.7.1-rc.1" });
+    expect(screen.queryByTestId("app-update-card")).toBeNull();
     sync.stop();
   });
 });
