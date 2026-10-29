@@ -273,12 +273,6 @@ def test_depends_on_queues_then_starts_from_the_merged_base(db, repo, boss, revi
 # -- set_goal / check_milestone / get_progress --------------------------------------------
 
 
-def test_goal_tools_need_autopilot(db, repo, boss):
-    assert "Autopilot isn't on" in mcp_server.set_goal("g", [{"title": "m", "check": "true"}])
-    assert "Autopilot isn't on" in mcp_server.get_progress()
-    assert "Autopilot isn't on" in run(mcp_server.check_milestone())
-
-
 def test_set_goal_get_progress_and_check_milestone(db, repo, boss, monkeypatch):
     db.add_autopilot("boss")
     out = mcp_server.set_goal("ship it", [

@@ -89,8 +89,6 @@ def _flat(args):
     ("POST", "/v1/workspaces/proj/w-2/remove", {}, (workspaces, "remove"), SimpleNamespace(branch_note=None, teardown=None), 200, "proj/w-2"),
     ("POST", "/v1/goal/check", {"root": "sup"}, (routes_actions, "_run_helper"), {"exit": 0}, 202,
      "_check-milestones"),
-    ("POST", "/v1/goal/enabled", {"root": "sup", "enabled": False}, (autopilot, "set_enabled"), None,
-     200, "sup"),
     ("POST", "/v1/coordinator/undo", {"repo": ".", "event": "e1"}, (coordinator, "undo"), "undone",
      200, "e1"),
     ("PATCH", "/v1/config", {"values": {"delegation": "fast"}}, (config, "set_user"), "x", 200,
@@ -107,6 +105,15 @@ def test_an_action_reaches_its_engine_call(db, world, monkeypatch, method, path,
     if status == 202:
         done = bus.tail(db, kinds=("job.done", "job.failed"))
         assert [(e["kind"], e["payload"]["job"]) for e in done] == [("job.done", reply["job"])]
+
+
+def test_deprecated_disable_preserves_goal_and_open_question(db, world):
+    autopilot.set_goal(db, "sup", "Ship", [("Build", "true", None)])
+    autopilot.need_user(db, "sup", "Which database?", ask=True)
+    code, reply = _send("POST", "/v1/goal/enabled", {"root": "sup", "enabled": False})
+    assert code == 200 and reply["enabled"] is True
+    ap = db.get_autopilot("sup")
+    assert ap.enabled and ap.goal == "Ship" and ap.state == "blocked" and ap.question
 
 
 def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(db, tmp_path, monkeypatch):

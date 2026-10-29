@@ -140,7 +140,7 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
     Carries over the goal and milestones (with their last results), the
     workers (their ``parent_id``), queued and started tasks, and a handoff note
     that becomes the new supervisor's first message. The old supervisor's
-    autopilot is switched off and, with ``pause_old``, the old session paused
+    goal driver is blocked and, with ``pause_old``, the old session paused
     (not when the old supervisor itself is calling: it ends its own turn)."""
     from brindle import autopilot as pilot
 
@@ -151,9 +151,9 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
     prompt = handover_prompt(db, old, note)
     # Always a supervisor, even from a session started as something else.
     new = agents.spawn(db, dest, agents.SUPERVISOR, prompt=prompt, provider_name=old.provider,
-                       watch_pane=True, background_setup=True, autopilot=bool(ap and ap.enabled),
+                       watch_pane=True, background_setup=True, autopilot=True,
                        claim_goals=False)
-    if ap and ap.enabled and ap.goal:
+    if ap and ap.goal:
         old_ms = db.milestones(old_root_id)
         pilot.set_goal(db, new.id, ap.goal,
                        [(m.title, m.check_cmd, m.detail, m.profile, m.repo) for m in old_ms], ap.detail)
@@ -170,10 +170,11 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
         if ap.state == "done":
             # Handover changes the supervisor, not the completed goal's verdict.
             db.update_autopilot(new.id, state="done", audit_sha=ap.audit_sha, audit_ok=ap.audit_ok)
-        db.update_autopilot(old_root_id, enabled=0)   # the old session stops syncing its goal file
         if ap.state != "done":
             pilot.remove_goals_file(db, old_root_id)  # active work lives in the new session's file
         pilot.sync_goals_file(db, new.id)
+    if ap and ap.state != "done":
+        db.update_autopilot(old_root_id, state="blocked", note=f"Handed over to session {new.id}", question=None)
     with db.tx() as c:
         # Preserve only messages this supervisor sent while it still owned
         # these descendants. A sender-wide alias would also trust unrelated
@@ -201,7 +202,7 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
                   (new.id, old_root_id))
         c.execute("DELETE FROM session_repos WHERE root_id=?", (old_root_id,))
         # So does an outside job it waits on (wait_on), or the notice of one
-        # that just ended: the old session's autopilot is off, so nobody would
+        # that just ended: the old session no longer drives, so nobody would
         # be told. In this transaction, so the wait is finished once, by one side.
         if c.execute("UPDATE autopilot SET external_wait=(SELECT external_wait FROM autopilot "
                      "WHERE root_id=?) WHERE root_id=? AND external_wait IS NULL",

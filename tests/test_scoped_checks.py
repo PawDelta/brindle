@@ -26,6 +26,12 @@ def write(root: Path, files: dict[str, str]) -> None:
 
 OTHER = {"tests/test_other.py": "def test_o(): pass\n"}
 NARROWED = f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
+DYNAMIC_IMPORTS = {
+    "fromlist": "__import__('pkg', fromlist=['new'])\n",
+    "dynamic-fromlist": "__import__('pkg', fromlist=names)\n",
+    "relative-level": "__import__('new', globals(), locals(), [], 1)\n",
+    "dynamic-level": "__import__('new', level=level)\n",
+}
 
 
 @pytest.mark.parametrize("where,cmd,changes,ran", [
@@ -36,8 +42,22 @@ NARROWED = f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
      [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),
     ("infer", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1\n\n\ndef test_f", "return 2\n\n\ndef test_f")},
      [PYTEST]),   # graphify failed on unlooked()
-    ("infer", PYTEST, {"src/pkg/new.py": "def h():\n    return 0\n"}, [PYTEST]),   # not in the graph
-    pytest.param("infer", PYTEST, {"src/pkg/café.py": "X = 1\n"}, [PYTEST],
+    ("infer", PYTEST, {"src/pkg/new.py": "def h():\n    return 0\n",
+                       "tests/test_other.py": "from importlib import import_module as load\nload(name)\n"},
+     [PYTEST]),   # an unmapped module with an unresolved dynamic test import
+    ("infer", PYTEST, {"src/pkg/pro/status.py": "X = 1\n",
+                       "tests/test_other.py": "import pkg.pro.status\ndef test_new(): pass\n"},
+     [f"{PYTEST} tests/test_direct.py tests/test_from.py tests/test_member.py tests/test_other.py || [ $? -eq 5 ]"]),
+    ("fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST]),
+    pytest.param("dynamic-fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST],
+                 marks=pytest.mark.variant("review requested a nonliteral fromlist bypass")),
+    pytest.param("relative-level", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST],
+                 marks=pytest.mark.variant("review requested positional relative import arguments")),
+    pytest.param("dynamic-level", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST],
+                 marks=pytest.mark.variant("review requested a nonliteral relative import level")),
+    ("no-graph", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1", "return 2", 1)},
+     [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),
+    pytest.param("infer", PYTEST, {"src/café.py": "X = 1\n"}, [PYTEST],
                  marks=pytest.mark.variant("git C-quotes a non-ASCII name without -z; it was once skipped")),
     ("infer", PYTEST, {"tests/conftest.py": "X = 2\n"}, [PYTEST]),
     ("infer", PYTEST, {"pyproject.toml": "[x]\n"}, [PYTEST]),
@@ -54,7 +74,8 @@ NARROWED = f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
      [f"{PYTEST} tests/test_g.py || [ $? -eq 5 ]"]),
     ("off", PYTEST, OTHER, [PYTEST]),
     ("supervisor", PYTEST, OTHER, [PYTEST]),
-], ids=["python-affected", "deleted-function", "test-helper", "lookup-failed", "fallback-unmapped", "quoted-name",
+], ids=["python-affected", "deleted-function", "test-helper", "lookup-failed", "fallback-unmapped", "unmapped-importers",
+        "import-fromlist", "import-dynamic-fromlist", "import-relative-level", "import-dynamic-level", "unmapped-test-helper", "quoted-name",
         "fallback-conftest", "fallback-pyproject", "infer", "infer-options", "infer-selects", "other-command-changed_files_env", "empty-diff",
         "non-python-only", "non-python-plus-python", "lockfile", "unset-mode", "off", "supervisor"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran):
@@ -62,8 +83,15 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
     if where == "unset":
         del config["scoped_checks"]
     write(repo, {".brindle/config.json": json.dumps(config), "src/pkg/mod.py": MOD, "docs/guide.md": "doc\n",
+                 "src/pkg/__init__.py": "", "src/pkg/pro/__init__.py": "",
                  "app/src/view.ts": "export const v = 1\n", "tests/conftest.py": "X = 1\n",
+                 "tests/test_direct.py": "import pkg.pro.status\n__import__('pkg.pro.status')\n",
+                 "tests/test_from.py": "from pkg.pro import status\n",
+                 "tests/test_member.py": "from pkg.pro.status import X\n",
+                 "tests/test_unrelated.py": "from pkg.other import status\n",
                  "tests/test_f.py": TEST_F, "tests/test_g.py": "from test_f import helper\n"})
+    if where in DYNAMIC_IMPORTS:
+        write(repo, {"tests/test_dynamic.py": DYNAMIC_IMPORTS[where]})
     sh("git add -A && git commit -qm base", repo)
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"nodes": [
@@ -72,7 +100,7 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
         {"id": "tf", "label": "test_f.py", "source_file": "tests/test_f.py"},
         {"id": "tf_helper", "label": "helper()", "source_file": "tests/test_f.py"},
         {"id": "tf_unlooked", "label": "unlooked()", "source_file": "tests/test_f.py"}]}))
-    monkeypatch.setattr(codemap, "graph_path", lambda target: graph)
+    monkeypatch.setattr(codemap, "graph_path", lambda target: None if where == "no-graph" else graph)
     reach = {"mod_f": {"tests/test_f.py"}, "mod_g": {"tests/test_g.py"}, "tf": set(), "tf_helper": {"tests/test_g.py"},
              "tf_unlooked": None}
     monkeypatch.setattr(check_scope, "affected_tests", lambda g, node_id, cwd: reach[node_id])

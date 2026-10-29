@@ -43,6 +43,27 @@ def with_goal(db, checks=("test -f api.txt", "test -f ui.txt")):
                        [(f"Milestone {i}", c, None) for i, c in enumerate(checks, start=1)])
 
 
+def test_legacy_off_session_still_drives_and_cannot_be_disabled(db, root, monkeypatch):
+    agent, _ = root
+    with_goal(db)
+    db.update_autopilot(agent.id, enabled=0)
+    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
+    assert autopilot.on_stop(db, agent, {})["decision"] == "block"
+    autopilot.need_user(db, agent.id, "Which database?", ask=True)
+    autopilot.set_enabled(db, agent.id, False)
+    assert db.get_autopilot(agent.id).enabled
+    assert db.get_autopilot(agent.id).state == "blocked"
+
+    from typer.testing import CliRunner
+    from brindle import cli
+
+    monkeypatch.setattr(cli, "_session_root", lambda db: agent.id)
+    for action in ("on", "off"):
+        result = CliRunner().invoke(cli.app, ["goal", action])
+        assert result.exit_code == 0, result.output
+        assert db.get_autopilot(agent.id).state == "blocked"
+
+
 def test_enable_loads_goals_md(db, repo):
     (repo / ".brindle").mkdir()
     seed = repo / ".brindle" / "goals.md"

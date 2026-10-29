@@ -254,14 +254,10 @@ def supervisor_provider(repo_root: str, provider: str | None = None) -> str | No
 
 def launch(db: DB, ws: Workspace, *, provider: str | None = None, prompt: str | None = None,
            watch: bool = True, autopilot: bool | None = None) -> Started:
-    """Start the supervisor chat in ``ws`` (autopilot: the repo's default when None)."""
-    from brindle.config import load_repo_config
-
-    if autopilot is None:
-        autopilot = load_repo_config(ws.repo_root).autopilot
+    """Start the supervisor chat in ``ws`` with the goal driver always on."""
     a = agents.spawn(db, ws, agents.SUPERVISOR, prompt=prompt, provider_name=provider,
-                     watch_pane=watch, background_setup=True, autopilot=autopilot)
-    return Started(a, ws, bool(autopilot))
+                     watch_pane=watch, background_setup=True, autopilot=True)
+    return Started(a, ws, True)
 
 
 def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | None = None,

@@ -105,7 +105,7 @@ class RepoConfig:
     fetch: bool = True
     auto_update: bool = False          # upgrade the PyPI tool at session start
     # Autopilot and merge gates.
-    autopilot: bool = True             # `brindle` starts the supervisor with autopilot on
+    autopilot: bool = True             # deprecated; the goal driver is always on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
     scoped_checks: str | None = None   # "off" or "infer"; None: not chosen (acts as "infer", see brindle.check_scope.inferred)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
@@ -378,7 +378,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
     for key in ("setup", "teardown", "copy", "checks", "add_dirs", "worker_extra_read_dirs", "protected_paths"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
-    for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "autopilot", "review",
+    for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",

@@ -87,14 +87,10 @@ def test_crlf_and_missing_final_newline_survive(db, repo):
     assert raw.replace("\r\nstatus: passed at abc1234 (" + time.strftime("%Y-%m-%d") + ")", "").count("status") == 1
 
 
-@pytest.mark.parametrize("how", ["paused", "off"])
-def test_a_stopped_session_stops_writing(db, repo, how):
+def test_a_stopped_session_stops_writing(db, repo):
     load(db, repo)
     pass_first(db)
-    if how == "paused":
-        db.set_status("boss", "paused")
-    else:
-        autopilot.set_enabled(db, "boss", False)
+    db.set_status("boss", "paused")
     autopilot.sync_goals_file(db, "boss")
     assert goals(repo) == GOALS
 

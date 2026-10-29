@@ -28,7 +28,7 @@ def boss(db, repo, monkeypatch):
     that need `_caller` resolve without touching the real process cwd."""
     # These tests exercise overlap *warnings*; the default now refuses overlaps.
     (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text('{"overlap": "warn", "pipeline": false}')
+    (repo / ".brindle" / "config.json").write_text('{"overlap": "warn", "pipeline": false, "review": false}')
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                         "@0", None, time.time()))
@@ -126,7 +126,7 @@ def two_sessions(db, repo, monkeypatch):
     """Roots A (main checkout) and B (its own session branch) on one repo,
     overlap unset; B's worker runs on src/x.py. Returns B's worker id."""
     (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text('{"pipeline": false}')
+    (repo / ".brindle" / "config.json").write_text('{"pipeline": false, "review": false}')
     root_a = workspaces.adopt_root(db, str(repo))
     root_b = workspaces.create(db, str(repo), "session-b", run_setup=False).workspace
     for name, ws in (("rootA", root_a), ("rootB", root_b)):
@@ -501,7 +501,7 @@ def test_cancel_task_refuses_unknown_started_and_someone_elses_tasks(db, repo, b
 
 def _missing_add_dir(repo):
     (repo / ".brindle" / "config.json").write_text(
-        '{"overlap": "warn", "pipeline": false, "add_dirs": ["/no/such/cache"]}')
+        '{"overlap": "warn", "pipeline": false, "review": false, "add_dirs": ["/no/such/cache"]}')
 
 
 def test_handoff_reply_names_a_missing_add_dir(db, repo, boss, monkeypatch):

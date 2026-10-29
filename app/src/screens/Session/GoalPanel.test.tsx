@@ -85,10 +85,7 @@ describe("GoalPanel", () => {
     expect(screen.getByText("npm run build")).toBeTruthy();
     expect(daemon.requests.find((r) => r.path === "/goal")?.query).toMatchObject({ repo: REPO, root: ROOT });
 
-    fireEvent.click(screen.getByRole("switch"));
-    await waitFor(() => expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true"));
-    expect(daemon.requests.find((r) => r.path === "/goal/enabled")?.body).toEqual({ root: ROOT, enabled: true });
-    expect(daemon.data.goal?.enabled).toBe(true);
+    expect(screen.queryByRole("switch")).toBeNull();
     sync.stop();
   });
 
@@ -103,14 +100,6 @@ describe("GoalPanel", () => {
     render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} />);
     await waitFor(() => expect(screen.getByText("1 of 2 milestones complete")).toBeTruthy());
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
-  });
-
-  it("offers no autopilot switch for a paused session", async () => {
-    const daemon = new FakeDaemon({ goal: structuredClone(goal) });
-    const store = createAppStore();
-    render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} paused />);
-    await waitFor(() => expect(screen.getByText("Ship the Goal screen")).toBeTruthy());
-    expect(screen.queryByRole("switch")).toBeNull();
   });
 
   it("shows an initial load error with a retry that loads the goal", async () => {
@@ -186,35 +175,7 @@ describe("GoalPanel", () => {
     held.forEach((release) => release());
     await flush();
     expect(screen.getByText("2 of 2 milestones complete")).toBeTruthy();
-    expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("false");
     sync.stop();
-  });
-
-  it("keeps the first session on screen when an earlier session's action answers late", async () => {
-    const sessionA: GoalDTO = { ...structuredClone(goal), root_id: "A", goal: "Goal A" };
-    const sessionB: GoalDTO = { ...structuredClone(goal), root_id: "B", goal: "Goal B" };
-    const daemon = new FakeDaemon({ goal: structuredClone(sessionA) });
-    const { client, state, held } = holdingClient(daemon, "/v1/goal/enabled");
-    const store = createAppStore();
-    const { rerender } = render(<GoalPanel client={client} repo={REPO} root="A" store={store} />);
-    await waitFor(() => expect(screen.getByText("Goal A")).toBeTruthy());
-
-    // Toggling for session A: its answer is held.
-    state.hold = true;
-    fireEvent.click(screen.getByRole("switch"));
-    await waitFor(() => expect(held).toHaveLength(1));
-
-    // The panel moves to session B, which loads its own goal.
-    daemon.data.goal = structuredClone(sessionB);
-    rerender(<GoalPanel client={client} repo={REPO} root="B" store={store} />);
-    await waitFor(() => expect(screen.getByText("Goal B")).toBeTruthy());
-
-    // Session A's answer arrives last: session B stays on screen.
-    held.forEach((release) => release());
-    await flush();
-    expect(screen.getByText("Goal B")).toBeTruthy();
-    expect(screen.queryByText("Goal A")).toBeNull();
-    expect(screen.queryByText("No goal set for this session.")).toBeNull();
   });
 
   /* One row per state (and the engine's phase): the milestone under test shows its label in
