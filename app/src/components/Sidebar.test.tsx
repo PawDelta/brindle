@@ -224,7 +224,7 @@ describe("Sidebar", () => {
     // Completion stays visible alongside the phase; the milestone list carries the detail.
     await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete"));
     expect(context().textContent).toContain("Ship ls --json");
-    expect(context().textContent).toContain("sup1 · proj · interactive · autopilot");
+    expect(context().textContent).toContain("sup1 · proj · interactive");
     const milestones = within(context()).getByRole("list", { name: "Milestones" });
     expect(milestones.textContent).toContain("Print JSON");
     expect([...milestones.querySelectorAll("li")].map((li) => li.dataset.state)).toEqual(["done", "now"]);
@@ -232,8 +232,7 @@ describe("Sidebar", () => {
     expect(screen.queryByTestId("connection")).toBeNull();
     expect(context().textContent).toContain("Checked never");
     expect(within(context()).queryByRole("button", { name: /Check milestone|Run checks/ })).toBeNull();
-    expect(within(context()).getByRole("switch").getAttribute("aria-checked")).toBe("true");
-    expect(within(context()).getByRole("switch").textContent).toContain("autopilot on");
+    expect(within(context()).queryByRole("switch")).toBeNull();
     // Nothing about a PR until the engine says the session is ready (the fake's never does here).
     expect(within(context()).queryByTestId("goal-review")).toBeNull();
     expect(context().textContent).not.toMatch(/PR/);

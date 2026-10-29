@@ -65,7 +65,7 @@ function ProviderCard({ q, now }: { q: ProviderUsage; now: number }) {
           <b className="font-semibold text-fail">Limit reached</b>
           {q.limited_until != null && ` · available again ${resets(q.limited_until, now)}${soon(q.limited_until, now) ? ` (${clock(q.limited_until)})` : ""}`}
           <small className="mt-[3px] block text-[11.5px] leading-[1.4] text-ink-3">
-            Workers on {providerName(q.provider)} wait for it; autopilot routes new work to the other providers until then.
+            Workers on {providerName(q.provider)} wait for it; brindle routes new work to the other providers until then.
           </small>
         </div>
       ) : (

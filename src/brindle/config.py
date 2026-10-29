@@ -105,9 +105,10 @@ class RepoConfig:
     fetch: bool = True
     auto_update: bool = False          # upgrade the PyPI tool at session start
     # Autopilot and merge gates.
-    autopilot: bool = True             # `brindle` starts the supervisor with autopilot on
+    autopilot: bool = True             # deprecated; the goal driver is always on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
     scoped_checks: str | None = None   # "off" or "infer"; None: not chosen (acts as "infer", see brindle.check_scope.inferred)
+    scoped_checks_max_files: int = 40  # a worker branch whose scoped tests exceed this runs only its own and namesake tests (0: no cap)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
@@ -378,7 +379,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
     for key in ("setup", "teardown", "copy", "checks", "add_dirs", "worker_extra_read_dirs", "protected_paths"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
-    for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "autopilot", "review",
+    for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",
@@ -387,7 +388,8 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
-                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks", "scoped_checks"):
+                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks", "scoped_checks",
+                "scoped_checks_max_files"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])
@@ -626,6 +628,13 @@ def setting_source(repo_root: str | Path, key: str) -> str:
     ("local", then "repo", then "user"), or "default"."""
     paths = scope_paths(repo_root)
     return next((s for s in ("local", "repo", "user") if key in _read_json(paths[s])), "default")
+
+
+def local_values(repo_root: str | Path, keys: tuple[str, ...]) -> dict:
+    """What the repo's local file itself sets for ``keys``: the effective
+    config unions ``rules`` across scopes, so editing them needs the file's own list."""
+    local = _read_json(scope_paths(repo_root)["local"])
+    return {k: local[k] for k in keys if k in local}
 
 
 def write_template(repo_root: str | Path, values: dict | None = None) -> Path:

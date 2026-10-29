@@ -472,6 +472,8 @@ export interface Config {
   repo?: Record<string, unknown>;
   /* Settings this project's own files set over the person's: key -> the file's scope. */
   overrides?: Record<string, "local" | "repo">;
+  /* What the repo's local file itself sets for the keys whose effective value unions every scope's (rules). */
+  local?: Record<string, unknown>;
   keys: KeyInfo[];
 }
 
@@ -1278,8 +1280,9 @@ export class DaemonClient {
     return this.get<RulePackInfo[]>("/rules", { repo });
   }
 
-  config(repo?: string) {
-    return this.get<Config>("/config", { repo });
+  /* `keys: false`: without the stored keys, which take the engine the longest to read. */
+  config(repo?: string, opts: { keys?: boolean } = {}) {
+    return this.get<Config>("/config", { repo, keys: opts.keys === false ? 0 : undefined });
   }
 
   /* Which profiles each weight tier tries, the reviewer, the excluded

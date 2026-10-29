@@ -318,6 +318,8 @@ function effectiveConfig(files: { user: Record<string, unknown>; repo: Record<st
       }
     }
   }
+  // config.load_repo_config: rules are the union of every scope's, not the nearest one's.
+  out.rules = [...new Set([files.user, files.repo, files.local].flatMap((f) => (Array.isArray(f.rules) ? f.rules.map(String) : [])))];
   return out;
 }
 
@@ -2458,7 +2460,8 @@ export class FakeDaemon {
         return needRepo() ?? json(d.rulePacks);
       case "/config":
         // The repo's config comes only when a repo is asked for (routes_read.get_config).
-        return json(repo ? { user: d.config.user, repo: effectiveConfig(d.config), overrides: configOverrides(d.config), keys: this.keyInfos() } : { user: d.config.user, keys: this.keyInfos() });
+        // `keys=0` leaves the stored keys out, as the engine does.
+        return json(((keys) => (repo ? { user: d.config.user, repo: effectiveConfig(d.config), overrides: configOverrides(d.config), local: "rules" in d.config.local ? { rules: d.config.local.rules } : {}, keys } : { user: d.config.user, keys }))(query.keys === "0" ? [] : this.keyInfos()));
       case "/cloud/options":
         return json(d.cloudOptions);
       case "/user-settings":

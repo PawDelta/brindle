@@ -18,7 +18,8 @@ left its base decide what runs:
   affected by them), and if none is left the check is skipped; the command
   runs on the test files the branch touched plus the
   tests ``graphify affected`` reaches from each changed symbol. A changed file
-  the graph can't map to a test runs the full suite instead.
+  the graph can't map is resolved through test imports of its module path;
+  an unresolved module or import runs the full suite instead.
 
 Every check on a worker's branch also gets ``BRINDLE_CHANGED_FILES`` (see
 ``changed_files``), so a script can narrow itself.
@@ -45,7 +46,9 @@ if TYPE_CHECKING:
     from brindle.db import DB, Workspace
 
 ALWAYS_FULL = (".brindle/**",)   # the checks themselves (or the rules) changed
-MAX_SYMBOLS = 30          # more changed symbols than this: run everything
+CAP_NOTE = ("brindle: this change reaches more than {max} test files (scoped_checks_max_files); ran only the "
+            "branch's own and namesake tests ({tests}). The full suite runs on the session branch before its PR.")
+MAX_SYMBOLS = 30         # more changed symbols than this: run everything
 GRAPHIFY_SECONDS = 60
 SKIPPED = "skipped: "     # run_checked's output for a skipped check starts with this
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.M)
@@ -167,9 +170,13 @@ def changed_files(db: DB, ws: Workspace) -> tuple[str, list[str]] | None:
         return None
 
 
-def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, list[str]] | None) -> str | None:
+def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, list[str]] | None,
+            max_files: int = 0) -> str | None:
     """What to run for check ``cmd`` in ``ws`` given its ``changed_files``:
-    ``cmd`` itself, a narrower command, or None when nothing changed."""
+    ``cmd`` itself, a narrower command, or None when nothing changed.
+    ``max_files`` (0: no cap): more selected tests than this run only the
+    branch's own test files and the changed modules' namesake tests, after a
+    one-line note saying so."""
     if scope is None or diff is None:
         return cmd
     base, changed = diff
@@ -181,7 +188,30 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
     if not changed:
         return None
     tests = pytest_targets(ws, base, changed)
-    return f"{cmd} {_quoted(tests)} || [ $? -eq 5 ]" if tests else cmd   # 5: none of them selected
+    if tests is None:
+        return cmd
+    if not tests:
+        return None
+    if max_files > 0 and len(tests) > max_files:
+        tests = capped_targets(ws, changed)
+        note = shlex.quote(CAP_NOTE.format(max=max_files, tests=" ".join(tests) or "none"))
+        echo = f"printf '%s\\n' {note}"
+        # Nothing own or namesake to run: only the note, never a bare pytest.
+        return f"{echo}; {cmd} {_quoted(tests)} || [ $? -eq 5 ]" if tests else echo
+    return f"{cmd} {_quoted(tests)} || [ $? -eq 5 ]"   # 5: none of them selected
+
+
+def capped_targets(ws: Workspace, changed: list[str]) -> list[str]:
+    """The branch's own changed test files plus each changed module's
+    namesake tests (``tests/test_<module>.py``, ``tests/test_<module>_*.py``)."""
+    root = Path(ws.path)
+    tests = {f for f in changed if is_test_file(f)}
+    for f in changed:
+        if not is_test_file(f):
+            stem = PurePosixPath(f).stem
+            for pattern in (f"test_{stem}.py", f"test_{stem}_*.py"):
+                tests.update(p.relative_to(root).as_posix() for p in (root / "tests").glob(pattern))
+    return sorted(t for t in tests if (root / t).is_file())
 
 
 def _quoted(files: list[str]) -> str:
@@ -196,7 +226,7 @@ def is_test_file(path: str) -> bool:
 def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | None:
     """The test files to run for a branch that changed ``files``: the test
     files among them, and those the code graph reaches from every changed
-    symbol; None when any changed file can't be mapped.
+    symbol, or imports of an unmapped source module; None when unresolved.
 
     A change inside a test function is covered by running its own file. Any
     other change to a test file (a helper, a fixture, an import) may reach the
@@ -207,9 +237,7 @@ def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | No
     if any(not f.endswith(".py") for f in files):
         return None
     graph = codemap.graph_path(ws)
-    if graph is None:
-        return None
-    nodes = _nodes_by_file(graph)
+    nodes = _nodes_by_file(graph) if graph else {}
     tests: set[str] = set()
     must_reach: set[str] = set()    # source symbols: one that reaches no test is unresolved
     optional: set[str] = set()
@@ -217,7 +245,13 @@ def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | No
         test = is_test_file(f)
         found = _changed_nodes(ws, base, f, nodes.get(f, []), skip_tests=test)
         if found is None or (not test and not found):
-            return None
+            imported = _importing_tests(Path(ws.path), f)
+            if imported is None:
+                return None
+            tests |= imported
+            if test:
+                tests.add(f)
+            continue
         if not test:
             must_reach |= found
             continue
@@ -234,7 +268,71 @@ def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | No
         if reached is None or (not reached and node_id in must_reach):
             return None
         tests |= reached
-    return sorted(t for t in tests if (Path(ws.path) / t).is_file()) or None
+    return sorted(t for t in tests if (Path(ws.path) / t).is_file())
+
+
+def _module_path(root: Path, path: str) -> str | None:
+    """Resolve packages, or a standalone pytest test module imported by its filename."""
+    file = root / path
+    parts = [] if file.stem == "__init__" else [file.stem]
+    parent = file.parent
+    while parent != root and (parent / "__init__.py").is_file():
+        parts.insert(0, parent.name)
+        parent = parent.parent
+    if ((parent == file.parent and not is_test_file(path))
+            or not file.is_file() or not all(p.isidentifier() for p in parts)):
+        return None
+    return ".".join(parts)
+
+
+def _importing_tests(root: Path, path: str) -> set[str] | None:
+    """Find static test imports by full module path; uncertain imports require full checks."""
+    module = _module_path(root, path)
+    if module is None:
+        return None
+    tests: set[str] = set()
+    try:
+        paths = git.paths(["ls-files", "--cached", "--others", "--exclude-standard", "*.py"], str(root))
+        for test in paths:
+            if not is_test_file(test) or not (root / test).is_file():
+                continue
+            tree = ast.parse((root / test).read_text(encoding="utf-8"))
+            dynamic = {"__import__"}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "importlib":
+                    dynamic.update(n.asname or n.name for n in node.names if n.name == "import_module")
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and (
+                    isinstance(node.func, ast.Name) and node.func.id in dynamic
+                    or isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"
+                ):
+                    # fromlist, level and package arguments can change the imported module.
+                    # Only a lone absolute name is resolved here.
+                    if len(node.args) > 1 or any(kw.arg != "name" for kw in node.keywords):
+                        return None
+                    name = node.args[0] if node.args else next(
+                        (kw.value for kw in node.keywords if kw.arg == "name"), None)
+                    if not isinstance(name, ast.Constant) or not isinstance(name.value, str) or name.value.startswith("."):
+                        return None
+                    imports = [name.value]
+                elif isinstance(node, ast.Import):
+                    imports = [n.name for n in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    prefix = node.module or ""
+                    if node.level:
+                        owner = _module_path(root, test)
+                        if owner is None or node.level >= len(owner.split(".")):
+                            return None
+                        package = owner.split(".")[:-node.level]
+                        prefix = ".".join([*package, prefix]).rstrip(".")
+                    imports = [prefix, *(f"{prefix}.{n.name}" for n in node.names)]
+                else:
+                    continue
+                if any(name == module or name.startswith(module + ".") for name in imports):
+                    tests.add(test)
+    except (OSError, SyntaxError, ValueError, git.GitError):
+        return None
+    return tests
 
 
 def _nodes_by_file(graph: Path) -> dict[str, list[dict]]:

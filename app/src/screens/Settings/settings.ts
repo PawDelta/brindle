@@ -20,7 +20,7 @@ export interface Setting {
   blurb: string;
   /* A number needs a value; a boolean is on or off; a choice may be the
      engine's own null when it lists it; a list is one entry per line. */
-  kind: "number" | "boolean" | "choice" | "list";
+  kind: "number" | "boolean" | "choice" | "list" | "text";
   choices?: { value: string | null; label: string }[];
   /* The engine's default, for a field the config leaves unset. */
   fallback: unknown;
@@ -36,8 +36,10 @@ export interface Setting {
 
 export const SETTINGS: Setting[] = [
   { key: "checks", label: "Checks", kind: "list", fallback: [], repoOnly: true, common: true, blurb: "Commands a branch must pass before it merges, one per line, run from the repo root." },
+  { key: "setup", label: "Setup", kind: "list", fallback: [], repoOnly: true, blurb: "Commands run in a new worktree before a worker starts, one per line." },
+  { key: "base_branch", label: "PR branch", kind: "text", fallback: null, repoOnly: true, blurb: "The branch pull requests target. Empty: the repo's default branch." },
+  { key: "rules", label: "Project rules", kind: "list", fallback: [], repoOnly: true, blurb: "Rules every worker in this repo follows, one per line." },
   { key: "max_agents", label: "Workers at once", kind: "number", fallback: 5, common: true, blurb: "How many workers a session runs at the same time. 0 means no cap." },
-  { key: "autopilot", label: "Autopilot", kind: "boolean", fallback: true, common: true, blurb: "A new session's supervisor keeps driving toward the goal on its own." },
   { key: "plan_first", label: "Plan first", kind: "boolean", fallback: false, common: true, blurb: "Workers propose a plan and wait for your approval before they edit anything." },
   {
     key: "overlap",
@@ -92,12 +94,21 @@ export const carryEdits = (oldLoaded: Draft, oldDraft: Draft, next: Draft): Draf
 export const YOURS = SETTINGS.filter((s) => !s.repoOnly);
 export const PROJECT_RULES = SETTINGS.filter((s) => s.repoOnly);
 
-/* How a project's override reads in the marker ("Off in this project"). */
+/* A value as the status line reads it ("Off", "5 minutes"). */
 export function overrideText(s: Setting, value: unknown): string {
   if (s.kind === "boolean") return value === true ? "On" : "Off";
   if (s.kind === "choice") return s.choices?.find((c) => c.value === (value ?? null))?.label ?? String(value);
   return value === undefined || value === null ? "Default" : `${String(value)}${s.unit ? ` ${s.unit}` : ""}`;
 }
+
+/* Which layer decides a setting in a repo (GET /config's `overrides`: key -> the file that sets it). */
+export type Scope = "team" | "local" | "yours";
+export const scopeOf = (overrides: Record<string, "local" | "repo"> | undefined, key: string): Scope =>
+  overrides?.[key] === "repo" ? "team" : overrides?.[key] === "local" ? "local" : "yours";
+
+/* The one plain line under a repo-view row; yours falls back to the engine's default. */
+export const statusLine = (s: Setting, scope: Scope, yourValue: unknown): string =>
+  scope === "team" ? "Set by the team" : scope === "local" ? "Just for you" : s.repoOnly ? "Not set" : `Same as yours (${overrideText(s, yourValue ?? s.fallback)})`;
 
 /* PATCH /config's `values`: only what changed, as the engine takes it (a
    list setting's lines, a number, a bool, a choice; null only where the

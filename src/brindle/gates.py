@@ -56,7 +56,7 @@ Abandoned = autopilot.CheckCancelled   # raised when a run's ``cancel`` turns tr
 
 
 def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int,
-                cancel=None) -> tuple[bool, str]:
+                cancel=None, full: bool = False) -> tuple[bool, str]:
     """Run ``cmd`` in ``ws``, or reuse the cached PASSING result for the same
     (repo, tree sha, command) if the tree was clean when that result was
     cached: an identical tree hits in any workspace, or the supervisor's
@@ -81,7 +81,7 @@ def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     # machine: a holder that finished after we arrived still counts.
     waiting_since = time.time()
     sha = head(ws)
-    diff = check_scope.changed_files(db, ws)
+    diff = None if full else check_scope.changed_files(db, ws)   # ``full``: the pre-PR run never narrows
     if diff is not None:   # a script can narrow itself; the gate never trusts that for the cache
         env = {**env, "BRINDLE_CHANGED_FILES": "\n".join(diff[1])}
     run = _scoped(ws, cmd, diff)
@@ -120,10 +120,11 @@ def _scoped(ws: Workspace, cmd: str, diff) -> str | None:
     from brindle.config import load_repo_config
 
     try:
-        mode = load_repo_config(ws.repo_root, branch=ws.base_branch).scoped_checks
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         return cmd
-    return check_scope.command(ws, cmd, check_scope.inferred(cmd, mode), diff)
+    return check_scope.command(ws, cmd, check_scope.inferred(cmd, cfg.scoped_checks), diff,
+                               cfg.scoped_checks_max_files)
 
 
 def _read_outcome(path, since: float) -> tuple[bool, str] | None:
@@ -530,7 +531,7 @@ def pr_checked(db: DB, ws: Workspace, progress=None, passed: tuple[str, list[str
                 if cmd not in reuse:
                     if progress:
                         progress(f"check {n}/{len(cfg.checks)}: {cmd}")
-                    ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+                    ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, full=True)
                     if not ok:
                         raise ChecksFailed(cmd, out)
                 if checked is not None:
