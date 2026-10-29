@@ -630,6 +630,13 @@ def setting_source(repo_root: str | Path, key: str) -> str:
     return next((s for s in ("local", "repo", "user") if key in _read_json(paths[s])), "default")
 
 
+def local_values(repo_root: str | Path, keys: tuple[str, ...]) -> dict:
+    """What the repo's local file itself sets for ``keys``: the effective
+    config unions ``rules`` across scopes, so editing them needs the file's own list."""
+    local = _read_json(scope_paths(repo_root)["local"])
+    return {k: local[k] for k in keys if k in local}
+
+
 def write_template(repo_root: str | Path, values: dict | None = None) -> Path:
     """Write ``.brindle/config.json`` (the template, with ``values`` over it)
     unless it already exists, and the ``.gitignore`` for the local file."""
