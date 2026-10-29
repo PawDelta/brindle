@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from brindle import permission_grants, permissions
 from brindle.permissions import Request
 from brindle.plan_policy import PlanTask
 from brindle.policy import allow
@@ -62,12 +63,14 @@ def test_the_default_reads_happen_once_and_an_injected_status_replaces_the_file(
     assert calls == Counter(entitlement=1, cache=1, **({} if injected else {"status": 1}))
 
 
-def test_one_permission_decision_reads_one_policy(tmp_path, monkeypatch):
+@pytest.mark.parametrize("decide", [
+    lambda req, root: permissions.decide(req),
+    lambda req, root: permission_grants._policy(req, root),     # the Inbox's (pending_asks, unblock_denied)
+])
+def test_one_permission_decision_reads_one_policy(tmp_path, monkeypatch, decide):
     """Two policies that each block ``terraform apply`` (a control, a deny):
     a decision that read one for its denies and the other for its controls
     would let it through."""
-    from brindle import permission_grants, permissions
-
     by_control = POLICY
     by_deny = replace(POLICY, permission_grants=replace(POLICY.permission_grants, controls=(),
                                                         deny=("bash prefix terraform apply",)))
@@ -75,8 +78,8 @@ def test_one_permission_decision_reads_one_policy(tmp_path, monkeypatch):
     monkeypatch.setattr(permission_grants, "_plugin", lambda repo: SimpleNamespace(policy=lambda: next(reads)))
     root = str(tmp_path)
     req = Request("claude", "bash", "Bash", root, root, root, command="terraform apply")
-    assert permissions.decide(req).decision == "deny"
-    assert next(reads) is by_deny                        # the decision read the policy once
+    assert decide(req, root).decision == "deny"
+    assert next(reads) is by_deny                       # the decision read the policy once
 
 
 def test_the_entitlement_is_checked_at_the_contexts_time(token):

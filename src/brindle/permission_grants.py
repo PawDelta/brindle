@@ -1213,7 +1213,8 @@ def _policy(req: Request, repo_root: str) -> Decision:
     from brindle.config import load_repo_config
 
     checks = list(load_repo_config(repo_root).checks or []) if repo_root else None
-    return permissions.decide(req, checks=checks, rules=permissions.all_rules(repo_root or None), saved=[])
+    with org_check(repo_root or None):      # the rules' org denies and decide's controls: one policy
+        return permissions.decide(req, checks=checks, rules=permissions.all_rules(repo_root or None), saved=[])
 
 
 def pending_asks(db, repo_root: str | None = None) -> list[PendingAsk]:
