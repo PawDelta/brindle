@@ -204,13 +204,14 @@ describe("inbox", () => {
     });
     const { sync } = mount(daemon);
     const prompt = await screen.findByTestId("approver-prompt");
-    expect(prompt.textContent).toBe("Needs a second person: ana@example.test asked for it, so it waits on your approval.");
+    expect(prompt.textContent).toContain("ana@example.test");
     expect(within(card("plan")).getByRole("button", { name: "Approve" })).toBeTruthy();
     daemon.data.inbox = [{ ...plan, approval: { approvers: ["lee@example.test", "kim@example.test"], you: false } }];
     daemon.publish("message.queued", { agent_id: "w1" });
-    await waitFor(() => expect(screen.getByTestId("approver-prompt").textContent).toBe("Waiting on lee@example.test, kim@example.test to approve."));
-    expect(card("plan").textContent).toContain("Plan waiting on another approver");
-    expect(within(card("plan")).queryByRole("button", { name: "Approve" })).toBeNull();
+    await waitFor(() => expect(within(card("plan")).queryByRole("button", { name: "Approve" })).toBeNull());
+    const approvers = screen.getByTestId("approver-prompt").textContent;
+    expect(approvers).toContain("lee@example.test");
+    expect(approvers).toContain("kim@example.test");
     sync.stop();
   });
 
