@@ -231,8 +231,6 @@ def test_snapshot_carries_the_sessions_autopilot_and_open_question(db, repo):
     assert (entry()["autopilot"], entry()["asking"]) == (True, None)
     autopilot.need_user(db, "root01", "Which database?")
     assert (entry()["autopilot"], entry()["asking"]) == (True, "root01")
-    autopilot.set_enabled(db, "root01", False)
-    assert entry()["autopilot"] is False
 
 
 def test_watch_wheel_down_scrolls_under_ncurses_mouse_version_1(db, monkeypatch):

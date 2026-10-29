@@ -1704,7 +1704,10 @@ class DB:
 
     def get_autopilot(self, root_id: str) -> Autopilot | None:
         row = self.conn.execute("SELECT * FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
-        return _load(Autopilot, row) if row else None
+        ap = _load(Autopilot, row) if row else None
+        if ap:
+            ap.enabled = 1  # Legacy off values no longer disable the goal driver.
+        return ap
 
     def legacy_goal_owners(self) -> list[str]:
         """Sessions whose goal was loaded from a shared goals.md before each

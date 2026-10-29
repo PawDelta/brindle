@@ -78,7 +78,7 @@ export function hint(q: ProviderUsage): string | null {
   if (!w) return null;
   const name = providerName(q.provider);
   const claude = q.provider === "claude";
-  if (w.used >= STOP) return `Past ${STOP}%: autopilot has stopped starting new ${name} work${claude ? " and paused the Claude workers that were running; they resume when the window resets" : ""}.`;
+  if (w.used >= STOP) return `Past ${STOP}%: brindle has stopped starting new ${name} work${claude ? " and paused the Claude workers that were running; they resume when the window resets" : ""}.`;
   if (w.used >= WARN) return `Past ${WARN}%. Autopilot stops starting new ${name} work at ${STOP}%${claude ? " and pauses running Claude workers until the window resets" : ""}.`;
   return null;
 }

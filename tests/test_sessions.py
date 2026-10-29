@@ -64,6 +64,7 @@ def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, 
     add(db, root, "w1", mode="assign", parent="boss")
     add(db, root, "w2", mode="assign", parent="boss", status="done", result="ok")
     agents.resume(db, "boss")
+    assert db.get_autopilot("boss").enabled
     assert [a for a, _ in launched] == ["boss", "w1"]  # finished workers stay done
     assert launched[0][1]["resume"] == "sess-boss" and launched[0][1]["prompt"] is None
     assert launched[0][1]["watch_pane"] and not launched[1][1]["watch_pane"]
@@ -162,6 +163,7 @@ def test_resume_rebuilds_worker_decoration_when_the_session_cant_be_resumed(db, 
     launched = []
     monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append(kw))
     agents.resume(db, "w1")
+    assert db.get_autopilot("w1") is None
     prompt = launched[0]["prompt"]
     assert prompt.startswith("/goal Finish line: tests/test_x.py passes")
     assert "report_result" in prompt  # WORKER_FOOTER

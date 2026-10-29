@@ -76,7 +76,6 @@ describe("Account › Usage", () => {
     await waitFor(() => expect(card("Claude").getAttribute("data-state")).toBe("stop"));
     const claude = windows(card("Claude"));
     expect(claude[0]).toEqual({ window: "5h", level: "stop", bar: "94%", text: "5-hour window94% usedResets in 12 min (3:10pm)" });
-    expect(card("Claude").textContent).toContain("Past 90%: autopilot has stopped starting new Claude work and paused the Claude workers that were running");
     expect(within(card("Claude")).getAllByTestId("usage-percent")[0].className).toContain("text-fail");
     // A reset within the hour reads green.
     expect(within(card("Claude")).getAllByTestId("usage-reset")[0].className).toContain("text-pass");

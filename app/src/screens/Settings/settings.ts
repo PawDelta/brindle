@@ -37,7 +37,6 @@ export interface Setting {
 export const SETTINGS: Setting[] = [
   { key: "checks", label: "Checks", kind: "list", fallback: [], repoOnly: true, common: true, blurb: "Commands a branch must pass before it merges, one per line, run from the repo root." },
   { key: "max_agents", label: "Workers at once", kind: "number", fallback: 5, common: true, blurb: "How many workers a session runs at the same time. 0 means no cap." },
-  { key: "autopilot", label: "Autopilot", kind: "boolean", fallback: true, common: true, blurb: "A new session's supervisor keeps driving toward the goal on its own." },
   { key: "plan_first", label: "Plan first", kind: "boolean", fallback: false, common: true, blurb: "Workers propose a plan and wait for your approval before they edit anything." },
   {
     key: "overlap",
