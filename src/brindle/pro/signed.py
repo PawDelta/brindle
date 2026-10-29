@@ -4,7 +4,9 @@ Every document is a compact JWS signed with Ed25519 (``alg: EdDSA``) by one
 of the keys pinned in :mod:`brindle.pro.keys`, named by the header's ``kid``.
 A document of type ``<type>`` has the header ``typ: brindle-<type>+jwt`` and
 the claim ``token_use: <type>``; the types are :data:`TYPES`. :func:`verify`
-checks a document of one of those types end to end; :func:`verify_signed` is
+checks a document of one of those types end to end, and with ``body`` that
+the document covers exactly the response it came in (:func:`document_sha256`);
+:func:`verify_signed` is
 the shared core (signature, header, ``kid``, ``token_use``, audience and
 revocations, no expiry) that other token kinds build on.
 
@@ -26,6 +28,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import logging
 import os
@@ -112,11 +115,13 @@ def _test_signing_key(kid: str, public_key: Ed25519PublicKey):
         raise RuntimeError("a test key may not shadow a pinned kid")
     with _keys_lock:
         _test_keys[kid] = public_key
+    _forget_revoked()      # which revocations verify depends on the trusted keys
     try:
         yield
     finally:
         with _keys_lock:
             _test_keys.pop(kid, None)
+        _forget_revoked()
 
 
 # -- verification ----------------------------------------------------------------------------
@@ -204,11 +209,32 @@ def verify_signed(token: str, *, typ: str, token_use: str, what: str = "entitlem
     return claims
 
 
-def verify(token: str, typ: str, expect: dict, *, now: float | None = None) -> dict:
+def document_bytes(body) -> bytes:
+    """The canonical form a token's ``document_sha256`` covers: ``body`` (the
+    response the token came in, without its ``token`` field) as sorted,
+    compact, non-ASCII-escaped JSON in UTF-8, as the backend computes it."""
+    return json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+
+
+def document_sha256(body) -> str:
+    return hashlib.sha256(document_bytes(body)).hexdigest()
+
+
+def verify(token: str, typ: str, expect: dict, *, now: float | None = None,
+           body: dict | None = None) -> dict:
     """The claims of ``token``, a document of type ``typ`` (one of
     :data:`TYPES`), once :func:`verify_signed` accepts it, it is within its
     ``iat`` (``LEEWAY`` seconds of clock skew allowed) and ``exp``, and every
-    claim in ``expect`` has exactly the given value. Raises :class:`SignedError`."""
+    claim in ``expect`` has exactly the given value. Raises :class:`SignedError`.
+
+    With ``body`` (the response the token came in, without ``token``), the
+    token must also cover exactly that body: its ``doc_type`` claim is
+    ``typ`` and its inline ``document`` claim, or else its ``document_sha256``,
+    hashes to :func:`document_sha256` of ``body``. For a ``managed`` document
+    ``body`` is the policy sent beside it instead: its ``policy_token`` claim
+    must verify as a signed policy over ``body`` for the same ``org_id`` and
+    ``sub``, and that check's error is the result. A mismatch is
+    :class:`ClaimMismatch`."""
     if typ not in TYPES:
         raise ValueError(f"unknown signed document type {typ!r}")
     now = time.time() if now is None else now
@@ -223,6 +249,17 @@ def verify(token: str, typ: str, expect: dict, *, now: float | None = None) -> d
     for name, value in expect.items():
         if name not in claims or claims[name] != value:
             raise ClaimMismatch(f"{typ} claim {name!r} does not match")
+    if body is not None and typ == "managed":
+        verify(claims.get("policy_token"), "policy",
+               {"org_id": claims.get("org_id"), "sub": claims.get("sub")}, now=now, body=body)
+    elif body is not None:
+        try:
+            covered = document_sha256(claims["document"]) if "document" in claims else claims.get("document_sha256")
+            matches = claims.get("doc_type") == typ and covered == document_sha256(body)
+        except (TypeError, ValueError):   # a body with no canonical form (UnicodeEncodeError is a ValueError)
+            matches = False
+        if not matches:
+            raise ClaimMismatch(f"{typ} does not cover the document it came with")
     return claims
 
 
@@ -276,9 +313,40 @@ def _by_kid(tokens: list) -> dict[str, str]:
     return {k: found[k] for k in order[:MAX_REVOCATIONS]}
 
 
+_revoked_memo: tuple[tuple, frozenset[str]] | None = None   # (file stamp, kids)
+
+
+def _revocations_stamp() -> tuple:
+    """What identifies the revocation file's current contents: its path and,
+    when it exists, its mtime, size and inode."""
+    try:
+        path = _revocations_path()
+    except Exception:  # noqa: BLE001 - an unusable directory holds no revocations
+        return (None,)
+    try:
+        st = os.stat(path) if path is not None else None
+    except OSError:
+        st = None
+    return (str(path),) if st is None else (str(path), st.st_mtime_ns, st.st_size, st.st_ino)
+
+
 def revoked_kids() -> frozenset[str]:
-    """The kids revoked by the stored revocations (each re-verified)."""
-    return frozenset(_by_kid(_stored_revocations()))
+    """The kids revoked by the stored revocations (each re-verified). The file
+    is read again only when its stamp changes, so this is cheap enough to ask
+    on every cache hit; another process's additions show up at once."""
+    global _revoked_memo
+    stamp, memo = _revocations_stamp(), _revoked_memo
+    if memo is not None and memo[0] == stamp:
+        return memo[1]
+    kids = frozenset(_by_kid(_stored_revocations())) if len(stamp) > 1 else frozenset()
+    _revoked_memo = (stamp, kids)
+    return kids
+
+
+def _forget_revoked() -> None:
+    """Drop the memo: which revocations count has changed in this process."""
+    global _revoked_memo
+    _revoked_memo = None
 
 
 def save_revocations(tokens: list) -> frozenset[str]:
@@ -305,6 +373,7 @@ def save_revocations(tokens: list) -> frozenset[str]:
             with os.fdopen(tmp_fd, "w") as fh:
                 json.dump({"revocations": list(merged.values())}, fh)
             os.replace(tmp, d / REVOCATIONS_FILE)
+            _forget_revoked()
         except BaseException:
             try:
                 os.unlink(tmp)

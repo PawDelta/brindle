@@ -4,7 +4,7 @@ import base64
 import hashlib
 import json
 import time
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 
 import pytest
@@ -12,6 +12,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 
 from brindle.pro import auth, credentials, license, signed
+from brindle.pro._files import write_private
 from pro_fixtures import (  # noqa: F401 - fixtures
     BASE, TEST_KID, b64, backend, claims, pro_env, sign, signing_key,
 )
@@ -39,7 +40,7 @@ def vector_keys():
 def test_signing_vectors(vector_keys, vector):
     def check():
         return signed.verify(vector["token"], vector["token_use"], vector["expect"],
-                             now=VECTORS["now"])
+                             now=VECTORS["now"], body=vector.get("body"))
 
     assert vector["typ"] == signed.header_typ(vector["token_use"])
     want = VERDICTS[vector["verdict"]]
@@ -94,21 +95,26 @@ def test_stolen_active_key_drill(vector_keys):
     assert signed.verify(by(standby, standby_kid, "policy"), "policy", {"org_id": "org_vectors"}, now=now)
 
 
-@pytest.mark.parametrize("case", ["refresh", "held", "down"])
-def test_an_entitlement_fetch_refreshes_the_revocation_list(backend, signing_key, case):
-    """refresh: a direct refresh refuses the entitlement it fetches once the
-    served list revokes its key, and the cached one from that key is dropped.
-    held: when the refresh then fails, the stored entitlement is checked
-    against the new list. down: a failed fetch leaves the refresh working."""
+@pytest.mark.parametrize("case", ["refresh", "other", "other_in_request", "other_then_refresh",
+                                  "held", "down"])
+def test_an_entitlement_fetch_refreshes_the_revocation_list(backend, signing_key, monkeypatch, case):
+    """The backend's key is revoked while its entitlement is cached:
+    refresh: by the list a direct refresh fetches, which refuses the new
+    entitlement and drops the cached one. other: by another process, which
+    this one notices on its next cache hit (other_in_request: a hit within one
+    request), and other_then_refresh: by another process, then a local refresh
+    fails and drops the caches itself. Afterwards nothing is granted.
+    held: when a refresh fails, the stored entitlement is checked against the
+    list it fetched. down: a failed fetch leaves the refresh working."""
     old, old_kid = Ed25519PrivateKey.generate(), "test-old"
-    signer, signer_kid, revoked = ((old, old_kid, TEST_KID) if case == "refresh"
-                                   else (signing_key, TEST_KID, old_kid))
+    cached = case not in ("held", "down")
+    signer, signer_kid, revoked = (old, old_kid, TEST_KID) if cached else (signing_key, TEST_KID, old_kid)
     revocation = sign(signer, {"aud": "brindle-pro", "kid": signer_kid, "token_use": "revocation",
                                "revoked_kid": revoked}, {"typ": "brindle-revocation+jwt", "kid": signer_kid})
     backend.routes["GET /keys/revocations"] = [auth.TransportError("down") if case == "down"
                                                else (200, {"revocations": [revocation]})]
     t, now = backend.issue(), time.time()
-    held = (sign(signing_key, claims()) if case == "refresh"           # current, and cached below
+    held = (sign(signing_key, claims()) if cached                       # current, and cached below
             else sign(old, claims(kid=old_kid, iat=int(now - 3000), exp=int(now + 600))))   # due for refresh
     creds = {"access_token": t["access_token"], "refresh_token": t["refresh_token"],
              "access_expires_at": now + 900, "base_url": BASE, "entitlement": held}
@@ -118,13 +124,25 @@ def test_an_entitlement_fetch_refreshes_the_revocation_list(backend, signing_key
     store = credentials.default_store()
     store.save(creds)
     client = auth.Client(BASE, backend)
-    with signed._test_signing_key(old_kid, old.public_key()):
-        if case == "refresh":
-            assert license.current(refresh=False).plan == "pro"      # the default store, now cached
+    monkeypatch.setattr(auth, "UrllibTransport", lambda: backend)   # what features() refreshes through
+    with signed._test_signing_key(old_kid, old.public_key()), \
+            (license.reading() if case == "other_in_request" else nullcontext()):
+        if cached:
+            assert license.features()                                   # cached in memory and on disk
+        if case.startswith("other"):                                    # another process accepts it
+            write_private(signed._revocations_path(create=True),
+                          json.dumps({"revocations": [revocation]}).encode())
+        if case in ("other", "other_in_request"):
+            with pytest.raises(signed.Revoked):
+                license.current(refresh=case == "other_in_request")    # a cache hit
+        if case in ("refresh", "other_then_refresh"):
             with pytest.raises(signed.Revoked):
                 auth.refresh(client, store, creds)
+            assert not license._disk_cache_path().exists()
+        if cached:
             with pytest.raises(signed.Revoked):
                 license.current(refresh=False)
+            assert license.features() == frozenset()                    # after its own failed refresh
         elif case == "held":
             with pytest.raises(signed.Revoked):
                 license.current(store=store, client=client)

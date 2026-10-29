@@ -386,7 +386,11 @@ def _fetch_entitlement(client: Client, access: str, now: float, org_id: str | No
         raise AuthError("backend returned no entitlement", code="bad_response")
     if signed.refresh_revocations(client):    # best effort: a failure leaves the list as it was
         license.clear_cache()                  # what was cached may be signed by a newly revoked key
-    ent = license.verify(tok, issuer=client.base, now=now, grace=0)
+    try:
+        ent = license.verify(tok, issuer=client.base, now=now, grace=0)
+    except signed.Revoked:
+        license.clear_cache()                  # the cached entitlement may be from the same key
+        raise
     if org_id is not None and ent.org_id != org_id:
         raise AuthError("backend returned an entitlement for another org", code="bad_response")
     return tok, ent

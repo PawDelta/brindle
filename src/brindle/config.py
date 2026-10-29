@@ -135,7 +135,8 @@ class RepoConfig:
     auto_merge_default_branch: bool = False  # let the pipeline merge into the repo's default branch on its own
     delegation: str = "balanced"      # how readily a supervisor hands work to workers: "conservative" (save tokens), "balanced" or "fast" (save time)
     max_weight: str | None = None      # ceiling for weight routing: "light", "medium", "heavy", "advanced", or None (unlimited)
-    plan_first: bool = False           # workers propose a plan and wait for approval before editing
+    plan_first: bool = False           # legacy: "plan" below wins; load_repo_config maps it to "always"/"never"
+    plan: str = "auto"                 # plan approval before editing: "auto" (brindle.plan_policy), "always" or "never"
     # "on": brindle answers workers' permission requests by its rules (see
     # brindle.permissions). Unset, it's "on" for Pro and up and "off" on Free.
     permission_policy: str = "off"
@@ -392,6 +393,13 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             if key in source:
                 setattr(cfg, key, source[key])
                 break
+    for source in (local, shared, user):   # `plan`, or an old config's plan_first, from the first layer with either
+        if source.get("plan") in ("auto", "always", "never"):
+            cfg.plan = source["plan"]
+            break
+        if "plan_first" in source:
+            cfg.plan = "always" if source["plan_first"] else "never"
+            break
     rules: list[str] = []
     for source in (user, shared, local):
         found = source.get("rules")
