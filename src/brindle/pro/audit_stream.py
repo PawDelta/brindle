@@ -18,9 +18,11 @@ syslog header carries no host name.
 
 Records are first put in a durable per-target queue
 (``$BRINDLE_HOME/audit/stream-<id>.queue``, 0600) and then sent oldest first, so
-a target that is down loses nothing: the queue is drained, in order, on the next
-write or on :func:`flush`. A failed send stops the drain and leaves the rest
-queued. After a failure the target is left alone for ``COOLDOWN_SECONDS``
+a target that is down loses nothing. The record is queued while the chain still
+holds its append lock (so queue order is chain order), and sent from a
+background thread: the agent only ever does local file work. The queue is
+drained, in order, on the next write or on :func:`flush` (which sends in the
+caller's thread). A failed send stops the drain and leaves the rest queued. After a failure the target is left alone for ``COOLDOWN_SECONDS``
 (``flush`` ignores that), and every send is bounded by ``SEND_SECONDS``, so
 the agent never waits on a dead SIEM. Only one process drains a target's queue
 at a time (a non-blocking lock); a process that finds it taken just queues its
@@ -37,6 +39,7 @@ import json
 import logging
 import os
 import socket
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -59,16 +62,19 @@ _home: Path | None = None
 _transport = None                # (target, record) -> None, raising when it can't deliver
 _clock = time.monotonic
 _down_until: dict[str, float] = {}
+_spawn = None                    # starts a background drain; set by configure (default: a daemon thread)
 
 
-def configure(targets=None, *, home: Path | None = None, transport=None, clock=None) -> None:
+def configure(targets=None, *, home: Path | None = None, transport=None, clock=None,
+              spawn=None) -> None:
     """Set the targets (a list or a ``targets_provider`` callable); None or an
     empty list turns audit streaming off. ``transport`` replaces the real
-    network sender (tests)."""
-    global _targets, _home, _transport, _clock
+    network sender and ``spawn`` the background thread start (tests)."""
+    global _targets, _home, _transport, _clock, _spawn
     _targets = targets if targets is not None else []
     _home = home
     _transport = transport
+    _spawn = spawn or _start
     _clock = clock or time.monotonic
     _down_until.clear()
 
@@ -121,23 +127,19 @@ def _add_dropped(path: Path, delta: int) -> None:
             pass
 
 
-def _enqueue(path: Path, record: dict | None) -> list[bytes]:
-    """Add ``record`` (if any) at the end of the queue; returns the queue. A
-    full queue keeps what it has and only counts the record as dropped."""
+def _enqueue(path: Path, record: dict) -> None:
+    """Add ``record`` at the end of the queue. A full queue keeps what it has
+    and only counts the record as dropped."""
     with _locked(path):
-        queued = _read_queue(path)
-        if record is not None and len(queued) >= MAX_QUEUE:
+        if len(_read_queue(path)) >= MAX_QUEUE:
             _add_dropped(path, 1)
-        elif record is not None:
-            line = canonical(record).encode("utf-8")
-            fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
-            try:
-                os.write(fd, line + b"\n")
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            queued.append(line)
-        return queued
+            return
+        fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
+        try:
+            os.write(fd, canonical(record).encode("utf-8") + b"\n")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
 
 @contextmanager
@@ -209,57 +211,67 @@ def deliver(target: dict, record: dict) -> None:
         headers={"Content-Type": "application/json", **(target.get("headers") or {})})
     if not req.full_url.lower().startswith("https://"):
         raise ValueError("an https target needs an https:// url")
-    with urllib.request.urlopen(req, timeout=SEND_SECONDS) as resp:
+    with _opener.open(req, timeout=SEND_SECONDS) as resp:
         if resp.status >= 300:
             raise OSError(f"the SIEM answered {resp.status}")
+
+
+class _NoRedirects(urllib.request.HTTPRedirectHandler):
+    """A redirect would turn the POST into a bodiless GET and could carry the
+    configured headers to another host, so it counts as a failed send."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_opener = urllib.request.build_opener(_NoRedirects)
 
 
 # -- sending --------------------------------------------------------------------------------------
 
 
-def _drain(target: dict, record: dict | None, home: Path | None, force: bool) -> None:
+def _drain(target: dict, home: Path | None, force: bool) -> None:
+    """Deliver the target's queue, oldest first, until it is empty or a send
+    fails. Does nothing while another drainer holds the lock (it picks up
+    whatever is queued meanwhile, because it re-reads the queue)."""
     path = queue_path(target, home)
-    queued = _enqueue(path, record)
     tid = _target_id(target)
-    if not (queued or _read_dropped(path)) or (not force and _clock() < _down_until.get(tid, 0.0)):
+    if not force and _clock() < _down_until.get(tid, 0.0):
         return
+    send = _transport or deliver
     with _try_drain_lock(path) as mine:
-        if not mine:
-            return                      # another process is draining; the record is queued
-        queued = _read_queue(path)
-        send = _transport or deliver
-        sent = 0
-        try:
-            for line in queued:
-                send(target, json.loads(line))
-                sent += 1
+        while mine:
+            queued = _read_queue(path)
             with _locked(path):
                 gap = _read_dropped(path)
-            if gap:
-                send(target, {"ts": _iso(), "event": {"kind": DROPPED_KIND, "dropped": gap}})
-                with _locked(path):
-                    _add_dropped(path, -gap)
-            _down_until.pop(tid, None)
-        except Exception:  # noqa: BLE001 - an unreachable target leaves the rest queued
-            _down_until[tid] = _clock() + COOLDOWN_SECONDS
-            log.warning("brindle: audit streaming target %s is unreachable; %d record(s) queued",
-                        target["url"], len(queued) - sent)
-        finally:
-            if sent:
-                _drop_sent(path, sent)
+            if not queued and not gap:
+                return
+            sent = 0
+            try:
+                for line in queued:
+                    send(target, json.loads(line))
+                    sent += 1
+                if gap:
+                    send(target, {"ts": _iso(), "event": {"kind": DROPPED_KIND, "dropped": gap}})
+                    with _locked(path):
+                        _add_dropped(path, -gap)
+                _down_until.pop(tid, None)
+            except Exception:  # noqa: BLE001 - an unreachable target leaves the rest queued
+                _down_until[tid] = _clock() + COOLDOWN_SECONDS
+                log.warning("brindle: audit streaming target %s is unreachable; %d record(s) queued",
+                            target["url"], len(queued) - sent)
+                return
+            finally:
+                if sent:
+                    _drop_sent(path, sent)
 
 
-def send(record: dict, home: Path | None = None) -> None:
-    """Queue ``record`` for every target and deliver what the targets accept."""
-    _run(record, home, force=False)
+def _start(fn) -> None:
+    threading.Thread(target=fn, daemon=True, name="audit-streaming").start()
 
 
-def flush() -> None:
-    """Try to deliver everything queued now, ignoring the cooldown."""
-    _run(None, None, force=True)
-
-
-def _run(record: dict | None, home: Path | None, *, force: bool) -> None:
+def _each_target(action) -> None:
+    """Run ``action(target)`` for every target; a failure never leaves this module."""
     try:
         targets = _current()
     except Exception:  # noqa: BLE001 - a broken provider must not touch the agent
@@ -267,9 +279,33 @@ def _run(record: dict | None, home: Path | None, *, force: bool) -> None:
         return
     for target in targets:
         try:
-            _drain(target, record, home, force)
+            action(target)
         except Exception:  # noqa: BLE001 - never fail the operation being reported
             log.warning("brindle: audit streaming failed", exc_info=True)
 
 
-__all__ = ["configure", "deliver", "flush", "queue_path", "send", "syslog_message"]
+def enqueue(record: dict, home: Path | None = None) -> None:
+    """Put ``record`` in every target's durable queue. Local file work only (no
+    network), so the audit chain calls it while still holding its append lock,
+    which keeps queue order the same as chain order."""
+    _each_target(lambda target: _enqueue(queue_path(target, home), record))
+
+
+def kick(home: Path | None = None) -> None:
+    """Start delivering the queues in the background; returns at once."""
+    _each_target(lambda target: _spawn(lambda: _drain_quietly(target, home, False)))
+
+
+def flush() -> None:
+    """Deliver everything queued now, here, ignoring the cooldown."""
+    _each_target(lambda target: _drain(target, None, True))
+
+
+def _drain_quietly(target: dict, home: Path | None, force: bool) -> None:
+    try:
+        _drain(target, home, force)
+    except Exception:  # noqa: BLE001 - a background drain has nobody to raise to
+        log.warning("brindle: audit streaming failed", exc_info=True)
+
+
+__all__ = ["configure", "deliver", "enqueue", "flush", "kick", "queue_path", "syslog_message"]
