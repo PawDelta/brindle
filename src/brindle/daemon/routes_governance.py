@@ -134,10 +134,13 @@ def offline_policy(db: DB, params: dict, body: dict) -> dict:
     days = _get(body, "days", int, required=True)
     if not 1 <= days <= MAX_DAYS:
         raise ServiceError("invalid", f"days must be 1 to {MAX_DAYS}")
+    repo = _get(body, "repo") or params.get("repo")
+    if not repo:
+        raise ServiceError("invalid", "repo is required: the export is saved in that project's .brindle/policy.json")
     got = _org_post("/policy/offline", {"days": days}, "body")
     if not isinstance(got.get("token"), str):
         raise ServiceError("invalid_account_response", "The account's offline policy export is incomplete.", 502)
-    path = airgap.policy_path(_get(body, "repo") or params.get("repo") or None)
+    path = airgap.policy_path(repo)
     _write_json(path, {"token": got["token"], "body": got["body"]})
     return OfflinePolicyExportDTO(path=str(path), days=days).to_json()
 

@@ -148,7 +148,7 @@ describe("settings screen", () => {
     expect(screen.getByRole("button", { name: "Offline policy export" })).toHaveProperty("disabled", true);
     fireEvent.change(days, { target: { value: "14" } });
     fireEvent.click(screen.getByRole("button", { name: "Offline policy export" }));
-    expect((await within(screen.getByTestId("org-approvals")).findByRole("status")).textContent).toContain("/home/u/.brindle/policy.json");
+    expect((await within(screen.getByTestId("org-approvals")).findByRole("status")).textContent).toContain("/home/u/proj/.brindle/policy.json");
     expect(posts(daemon).find((r) => r.path === "/governance/offline-policy")?.body).toEqual({ days: 14, repo: "/home/u/proj" });
     // The device file comes back to save as managed.json.
     fireEvent.change(screen.getByRole("textbox", { name: "Device name" }), { target: { value: "build-01" } });

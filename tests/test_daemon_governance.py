@@ -68,6 +68,8 @@ def test_offline_export_and_device_file(admin, monkeypatch, signing_key, bad_sig
 
     sent = []
     repo = str(tmp_path)
+    # No repo: nothing is asked of the account or written.
+    assert _send("POST", PREFIX + "/offline-policy", {"days": 30})[0] == 400
     # A signed policy naming another org is refused, and nothing is written.
     admin.routes[f"POST /orgs/{ORG}/policy/offline"] = lambda f, h: (200, {"token": "t", "body": {"org_id": "org_other"}})
     assert _send("POST", PREFIX + "/offline-policy", {"days": 30, "repo": repo})[0] == 502

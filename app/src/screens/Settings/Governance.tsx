@@ -73,7 +73,7 @@ export function PolicyExport({ client, repo }: { client: DaemonClient; repo?: st
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const ok = Number.isInteger(days) && days >= 1 && days <= 90;
+  const ok = !!repo && Number.isInteger(days) && days >= 1 && days <= 90;
   const run = async () => {
     setBusy(true);
     setDone(null);
@@ -98,6 +98,7 @@ export function PolicyExport({ client, repo }: { client: DaemonClient; repo?: st
         <button type="button" className={button} disabled={busy || !ok} onClick={() => void run()}>
           {busy ? "Exporting…" : "Offline policy export"}
         </button>
+        {!repo && <span className="text-xs text-ink-3">Pick a project first: the export is saved in its .brindle folder.</span>}
       </div>
       {done && <p role="status" className={notice}>{done}</p>}
       {error && <p role="alert" className={alert}>Could not export: {error}</p>}

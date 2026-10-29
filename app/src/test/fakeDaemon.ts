@@ -1757,7 +1757,8 @@ export class FakeDaemon {
     if (path === "/governance/offline-policy" && method === "POST") {
       const days = body.days;
       if (typeof days !== "number" || days < 1 || days > 90) return error("invalid", "days must be 1 to 90", 400);
-      return json({ path: "/home/u/.brindle/policy.json", days });
+      if (typeof body.repo !== "string" || !body.repo) return error("invalid", "repo is required", 400);
+      return json({ path: `${body.repo}/.brindle/policy.json`, days });
     }
     if (path === "/governance/device-file" && method === "POST") {
       if (typeof body.name !== "string" || !body.name) return error("invalid", "name is required", 400);
