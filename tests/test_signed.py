@@ -40,7 +40,7 @@ def vector_keys():
 def test_signing_vectors(vector_keys, vector):
     def check():
         return signed.verify(vector["token"], vector["token_use"], vector["expect"],
-                             now=VECTORS["now"])
+                             now=VECTORS["now"], body=vector.get("body"))
 
     assert vector["typ"] == signed.header_typ(vector["token_use"])
     want = VERDICTS[vector["verdict"]]

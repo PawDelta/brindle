@@ -109,6 +109,7 @@ class Entitlement:
     role: str | None = None          # the caller's role in org_id (owner|admin|member)
     policy_version: int = 0          # the org policy version current when issued
     policy_role: str | None = None   # the caller's policy role in org_id, when one is set
+    policy_signed: bool = False      # org policy and status must be signed (policy_cache.enforced)
 
 
 # -- keys (see brindle.pro.signed) ------------------------------------------------------------
@@ -179,7 +180,7 @@ def verify(token: str, *, issuer: str | None, now: float | None = None,
         sub=claims["sub"], org_id=claims["org_id"], plan=claims["plan"], status=claims["status"],
         features=frozenset(feats), seats=claims["seats"], iat=iat, exp=exp, kid=kid,
         in_grace=in_grace, grace_until=grace_until, role=role, policy_version=policy_version,
-        policy_role=policy_role)
+        policy_role=policy_role, policy_signed=claims.get("policy_signed") is True)
 
 
 def paid(token: str | None) -> bool:
