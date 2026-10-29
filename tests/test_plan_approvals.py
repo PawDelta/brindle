@@ -239,6 +239,15 @@ def test_plan_approvals_reviewer_judged_in_callers_repo(db, tmp_path, monkeypatc
         agents.approve_plan(db, qa.id, worker.id)     # heavy plan: a reviewer may not approve it
     assert db.get_agent(worker.id).plan_approvals is None
 
+    def gone(name, repo_root):                         # the custom profile was removed meanwhile
+        raise KeyError(name)
+
+    monkeypatch.setattr(agents, "load_profile", gone)
+    with pytest.raises(agents.AgentError, match="can't verify"):
+        agents.approve_plan(db, qa.id, worker.id)     # unresolved: refused, not treated as a builder
+    assert db.get_agent(worker.id).plan_state == "proposed"
+    assert db.get_agent(worker.id).plan_approvals is None
+
 
 def test_plan_approvals_explicit_no_plan_cannot_waive_the_org(db, tmp_path, monkeypatch):
     """delegate(plan_first=False) still plans when the org requires it."""

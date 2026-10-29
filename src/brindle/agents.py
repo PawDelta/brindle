@@ -156,20 +156,27 @@ PERMISSION_GUIDANCE = (
 )
 
 
-def is_review_profile(profile_name: str, repo_root: str) -> bool:
-    """Whether ``profile_name`` is a reviewer (or extends one): it reads a
-    branch and reports, so it has nothing to commit, test or merge."""
+def review_role(profile_name: str, repo_root: str) -> bool:
+    """Whether ``profile_name`` is a reviewer (or extends one). Raises when a
+    profile in the chain can't be loaded, so a caller can refuse instead of
+    guessing that an unresolved reviewer is a builder."""
     name: str | None = profile_name
     seen: set[str] = set()
     while name and name not in seen:
         if name.startswith("reviewer"):
             return True
         seen.add(name)
-        try:
-            name = load_profile(name, repo_root).extends   # one step up the chain
-        except Exception:  # noqa: BLE001 - an unknown profile is a builder as before
-            return False
+        name = load_profile(name, repo_root).extends   # one step up the chain
     return False
+
+
+def is_review_profile(profile_name: str, repo_root: str) -> bool:
+    """Whether ``profile_name`` is a reviewer (or extends one): it reads a
+    branch and reports, so it has nothing to commit, test or merge."""
+    try:
+        return review_role(profile_name, repo_root)
+    except Exception:  # noqa: BLE001 - an unknown profile is a builder as before
+        return False
 
 
 def worker_guidance(ws: Workspace, report_only: bool = False) -> str:
@@ -3417,7 +3424,10 @@ def _org_eligibility(db: DB, caller_id: str, agent: Agent, rules):
     caller_ws = db.get_workspace(caller.workspace_id) if caller else None
     if caller and caller_ws is None:
         return None, None, "can't tell whether the caller is a reviewer agent; refusing"
-    reviewer = bool(caller) and is_review_profile(caller.profile, caller_ws.repo_root)
+    try:
+        reviewer = bool(caller) and review_role(caller.profile, caller_ws.repo_root)
+    except Exception:  # noqa: BLE001 - an unresolvable profile can't be shown to be a builder
+        return None, None, "can't verify the caller's profile is not a reviewer agent; refusing"
     member = caller.member if caller else None
     task = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == agent.id), None)
     plan = plan_policy.PlanTask(weight=agent.weight, files=json.loads(task.files) if task and task.files else None)
