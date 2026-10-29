@@ -2458,7 +2458,8 @@ export class FakeDaemon {
         return needRepo() ?? json(d.rulePacks);
       case "/config":
         // The repo's config comes only when a repo is asked for (routes_read.get_config).
-        return json(repo ? { user: d.config.user, repo: effectiveConfig(d.config), overrides: configOverrides(d.config), keys: this.keyInfos() } : { user: d.config.user, keys: this.keyInfos() });
+        // `keys=0` leaves the stored keys out, as the engine does.
+        return json(((keys) => (repo ? { user: d.config.user, repo: effectiveConfig(d.config), overrides: configOverrides(d.config), keys } : { user: d.config.user, keys }))(query.keys === "0" ? [] : this.keyInfos()));
       case "/cloud/options":
         return json(d.cloudOptions);
       case "/user-settings":

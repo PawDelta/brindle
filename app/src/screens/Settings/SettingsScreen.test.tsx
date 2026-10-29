@@ -78,7 +78,7 @@ function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps[
           <ProvidersProvider client={client}>
             {/* A sign-in's CLI read through the fake daemon's pty views, as the shell's show it. */}
             <PtyViewsProvider value={daemon.ptyViews()}>
-              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} readAbout={readAbout} rule={rule} />
+              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} readAbout={readAbout} rule={rule} onProjectSettings={() => {}} />
             </PtyViewsProvider>
           </ProvidersProvider>
         </SessionsProvider>
@@ -93,12 +93,16 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const doctorCalls = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.path === "/doctor");
 
 describe("settings screen", () => {
-  it("edits your settings and saves them to the user scope, and keeps the repo-only rules in Project rules, saved to the repo", async () => {
+  it("edits your settings and saves them to the user scope, and leaves the repo's checks and rules to Project settings", async () => {
     const { daemon, stop } = setup();
     const mine = await screen.findByTestId("your-settings");
     expect(daemon.requests.find((r) => r.path === "/config")?.query).toEqual({ repo: REPO });
     // Your settings lead; the handful people change most show, the rest behind More. Checks is not among them.
-    expect(screen.getAllByRole("region").map((s) => s.id).filter(Boolean).slice(0, 3)).toEqual(["your-settings", "you", "this-repo"]);
+    expect(screen.getAllByRole("region").map((s) => s.id).filter(Boolean).slice(0, 2)).toEqual(["your-settings", "you"]);
+    // The repo's own checks and rules are on its Project settings page, not here.
+    expect(screen.queryByTestId("repo-settings")).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Checks" })).toBeNull();
+    expect(screen.getByTestId("project-settings-link").textContent).toBe("Project settings for proj ›");
     expect(within(mine).queryByRole("textbox", { name: "Checks" })).toBeNull();
     expect(within(mine).queryByRole("combobox", { name: "Overlapping tasks" })).toBeNull();
     expect(screen.queryByTestId("user-save")).toBeNull();
@@ -121,82 +125,6 @@ describe("settings screen", () => {
     expect(screen.getByRole("switch", { name: "Coordinator" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Other settings you have/ }));
     expect(screen.getByTestId("user-rest").textContent).toContain("supervisor");
-
-    // Project rules: checks, typed a keystroke at a time (the space and the Enter stay on screen), saved to the repo.
-    const rules = screen.getByTestId("repo-settings");
-    const checks = within(rules).getByRole("textbox", { name: "Checks" });
-    expect(checks).toHaveProperty("value", "npm test");
-    for (const typed of ["npm test ", "npm test \n", "npm test \nn", "npm test \nnpm run build"]) fireEvent.change(checks, { target: { value: typed } });
-    expect(checks).toHaveProperty("value", "npm test \nnpm run build");
-    const bar = screen.getByTestId("settings-save");
-    expect(bar.textContent).toContain("1 change");
-    fireEvent.click(within(bar).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(patches(daemon)).toHaveLength(2));
-    expect(patches(daemon)[1].body).toEqual({ scope: "repo", repo: REPO, values: { checks: ["npm test", "npm run build"] } });
-    expect(daemon.data.config.local).toEqual({ checks: ["npm test", "npm run build"] });
-    await waitFor(() => expect(screen.queryByTestId("settings-save")).toBeNull());
-    fireEvent.click(within(rules).getByRole("button", { name: /Everything else/ }));
-    expect(screen.getByTestId("config-rest").textContent).toContain("default_agent");
-    stop();
-  });
-
-  it("marks a setting a project overrides, and clears an override in the local file but not the committed one", async () => {
-    const { daemon, stop } = setup({
-      config: {
-        user: { plan_first: false },
-        repo: { max_agents: 2 },
-        local: { plan_first: true },
-        keys: [],
-      },
-    });
-    const mine = await screen.findByTestId("your-settings");
-    // The row is the person's own value; the marker says what this project does instead.
-    expect(within(mine).getByRole("switch", { name: "Plan first" }).getAttribute("aria-checked")).toBe("false");
-    const marker = await within(mine).findByTestId("override-plan_first");
-    expect(marker.textContent).toContain("On in this project");
-    expect(within(mine).getByTestId("override-max_agents").textContent).toContain("2 in this project");
-    expect(within(mine).queryByTestId("override-autopilot")).toBeNull();
-    // Edits not saved yet, in both sections: a cleared override reloads the config but must not eat them.
-    fireEvent.click(within(mine).getByRole("switch", { name: "Plan first" }));
-    const checks = screen.getByRole("textbox", { name: "Checks" });
-    fireEvent.change(checks, { target: { value: "npm test\nnpm run lint" } });
-    fireEvent.click(within(marker).getByRole("button", { name: "Clear override" }));
-    await waitFor(() => expect(within(mine).queryByTestId("override-plan_first")).toBeNull());
-    expect(patches(daemon)[0].body).toEqual({ scope: "repo", repo: REPO, unset: ["plan_first"] });
-    expect(daemon.data.config.local).toEqual({});
-    expect(daemon.data.config.user).toEqual({ plan_first: false });
-    expect(within(mine).getByRole("switch", { name: "Plan first" }).getAttribute("aria-checked")).toBe("true");
-    expect(checks).toHaveProperty("value", "npm test\nnpm run lint");
-    // The committed file's override has its own explicit clear, scoped to that file; saving your settings keeps the rules' edit.
-    fireEvent.click(within(within(mine).getByTestId("override-max_agents")).getByRole("button", { name: "Clear in .brindle/config.json" }));
-    await waitFor(() => expect(within(mine).queryByTestId("override-max_agents")).toBeNull());
-    expect(patches(daemon)[1].body).toEqual({ scope: "shared", repo: REPO, unset: ["max_agents"] });
-    expect(daemon.data.config.repo).toEqual({});
-    fireEvent.click(screen.getByRole("button", { name: "Save your settings" }));
-    await waitFor(() => expect(daemon.data.config.user).toEqual({ plan_first: true }));
-    expect(screen.getByRole("textbox", { name: "Checks" })).toHaveProperty("value", "npm test\nnpm run lint");
-    expect(screen.getByTestId("settings-save")).toBeTruthy();
-    stop();
-  });
-
-  it("never saves one project's rules into another while its config has not loaded", async () => {
-    const OTHER = "/home/u/other";
-    const { daemon, failing, stop } = setup({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }] });
-    const checks = await screen.findByRole("textbox", { name: "Checks" });
-    fireEvent.change(checks, { target: { value: "npm test\nmake all" } });
-    expect(screen.getByTestId("settings-save")).toBeTruthy();
-    // The other repo's config fails to load: no rules to edit and no save bar to write this repo's edit into it.
-    failing.add("/config");
-    fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: OTHER } });
-    await screen.findByText(/Could not load settings/);
-    expect(screen.queryByTestId("settings-save")).toBeNull();
-    expect(screen.queryByRole("textbox", { name: "Checks" })).toBeNull();
-    expect(patches(daemon)).toHaveLength(0);
-    // Once it loads, the draft is that repo's own, not the edit made for the first.
-    failing.clear();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    expect(await screen.findByRole("textbox", { name: "Checks" })).toHaveProperty("value", "npm test");
-    expect(screen.queryByTestId("settings-save")).toBeNull();
     stop();
   });
 

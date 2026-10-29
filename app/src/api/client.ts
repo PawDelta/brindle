@@ -1278,8 +1278,9 @@ export class DaemonClient {
     return this.get<RulePackInfo[]>("/rules", { repo });
   }
 
-  config(repo?: string) {
-    return this.get<Config>("/config", { repo });
+  /* `keys: false`: without the stored keys, which take the engine the longest to read. */
+  config(repo?: string, opts: { keys?: boolean } = {}) {
+    return this.get<Config>("/config", { repo, keys: opts.keys === false ? 0 : undefined });
   }
 
   /* Which profiles each weight tier tries, the reviewer, the excluded
