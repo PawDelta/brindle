@@ -89,6 +89,7 @@ import { alert, button, card, field, h2, main, mono, notice, pill, quiet } from 
 import { useProviders } from "../../store/providers";
 import { StoreContext, useAppState } from "../../store/useStore";
 import {
+  HANDLED,
   MARK,
   SETTINGS,
   YOURS,
@@ -1225,9 +1226,8 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const detailsOpen = details ?? healthBad;
   const common = YOURS.filter((s) => s.common);
   const others = YOURS.filter((s) => !s.common);
-  const shown = SETTINGS.map((s) => s.key);
   // What the person set for every repo that has no row here.
-  const yourLines = userLines(config?.user ?? {}).filter(([k]) => !shown.includes(k));
+  const yourLines = userLines(config?.user ?? {}).filter(([k]) => !HANDLED.includes(k));
   const yourRow = (s: Setting) => <SettingRow key={s.key} s={s} value={userDraft[s.key]} dirty={userDirty.includes(s.key)} disabled={saving} onChange={(v) => editUser(s.key, v)} />;
   const projectName = repos?.find((r) => r.repo_root === repo)?.name;
 

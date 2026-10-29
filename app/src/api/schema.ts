@@ -497,6 +497,7 @@ export interface InboxItemDTO {
 }
 /**
  * Who may approve a plan: named approvers, or a second person (anyone but who asked).
+ * Its producer (InboxItemDTO.approval from the plan-approvals backend) is wired in integration.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanApprovalDTO".
@@ -762,6 +763,8 @@ export interface PermissionRuleDTO {
 export interface PlanSettingDTO {
   effective?: ("auto" | "always" | "never") | null;
   project?: ("auto" | "always" | "never") | null;
+  project_source?: ("local" | "shared") | null;
+  shared?: ("auto" | "always" | "never") | null;
   user: "auto" | "always" | "never";
 }
 /**

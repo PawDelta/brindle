@@ -55,7 +55,7 @@ export function OrgStatus({ status, error }: { status: GovernanceStatusDTO | nul
   if (!status) return <p className="text-sm text-ink-3">Checking your organization's policy…</p>;
   const line = statusLine(status);
   return (
-    <div className="flex flex-col gap-1" data-testid="org-status" data-status={status.status}>
+    <div className="flex flex-col gap-1" data-testid="org-status" data-status={status.status} data-verified={!!status.verified} data-source={status.source ?? undefined}>
       {line && <p className="text-sm">{line}</p>}
       {status.problem && (
         <div role="alert" className={alert}>
@@ -159,7 +159,8 @@ const PLANS: { value: Plan; label: string }[] = [
 ];
 const planLabel = (p: Plan) => PLANS.find((c) => c.value === p)?.label ?? p;
 
-/* Plan approvals: without `repo` the person's default, with one that project's override ("" = theirs). */
+/* Plan approvals: without `repo` the person's default, with one that
+   project's local override ("" = none: the shared config.json's, else theirs). */
 export function PlanChoice({ client, repo, id }: { client: DaemonClient; repo?: string; id: string }) {
   const [setting, setSetting] = useState<PlanSettingDTO | null>(null);
   const [busy, setBusy] = useState(false);
@@ -186,16 +187,23 @@ export function PlanChoice({ client, repo, id }: { client: DaemonClient; repo?: 
     }
   };
   if (!setting) return error ? <p role="alert" className={alert}>Couldn't read plan approvals: {error}</p> : <span className="text-sm text-ink-3">Loading…</span>;
+  // "" clears the local override: back to the project's shared config.json when it sets one, else yours.
+  const local = setting.project_source === "local" ? setting.project : null;
   return (
     <>
-      <select id={id} className={field} value={repo ? (setting.project ?? "") : setting.user} disabled={busy} onChange={(e) => void pick(e.target.value)}>
-        {repo && <option value="">Yours: {planLabel(setting.user)}</option>}
+      <select id={id} className={field} value={repo ? (local ?? "") : setting.user} disabled={busy} onChange={(e) => void pick(e.target.value)}>
+        {repo && <option value="">{setting.shared ? `Project's shared config: ${planLabel(setting.shared)}` : `Yours: ${planLabel(setting.user)}`}</option>}
         {PLANS.map((p) => (
           <option key={p.value} value={p.value}>
             {p.label}
           </option>
         ))}
       </select>
+      {repo && setting.project_source === "shared" && (
+        <p className="text-xs text-ink-3" data-testid="plan-shared">
+          From the project's shared .brindle/config.json, committed for everyone on the repo. Picking another saves your own override to .brindle/config.local.json.
+        </p>
+      )}
       {error && <p role="alert" className={alert}>Could not save: {error}</p>}
     </>
   );

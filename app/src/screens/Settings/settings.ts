@@ -37,7 +37,6 @@ export interface Setting {
 export const SETTINGS: Setting[] = [
   { key: "checks", label: "Checks", kind: "list", fallback: [], repoOnly: true, common: true, blurb: "Commands a branch must pass before it merges, one per line, run from the repo root." },
   { key: "max_agents", label: "Workers at once", kind: "number", fallback: 5, common: true, blurb: "How many workers a session runs at the same time. 0 means no cap." },
-  { key: "autopilot", label: "Autopilot", kind: "boolean", fallback: true, common: true, blurb: "A new session's supervisor keeps driving toward the goal on its own." },
   {
     key: "overlap",
     label: "Overlapping tasks",
@@ -65,6 +64,10 @@ export const SETTINGS: Setting[] = [
     ],
   },
 ];
+
+/* The keys the "everything else" lists leave out: those with a row above, and
+   the supervisor's goal driving, always on now (the engine keeps its key). */
+export const HANDLED = [...SETTINGS.map((s) => s.key), "autopilot"];
 
 export type Draft = Record<string, unknown>;
 

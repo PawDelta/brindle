@@ -142,8 +142,9 @@ export interface DaemonData {
   userSettings: UserSettings;
   /* GET /governance (routes_governance): who manages this device. */
   governance: GovernanceStatusDTO;
-  /* GET and PUT /governance/plan: the person's plan approvals default and each project's override. */
-  plan: { user: Plan; projects: Record<string, Plan> };
+  /* GET and PUT /governance/plan: the person's plan approvals default, each
+     project's local override and (`shared`) its committed config.json's plan. */
+  plan: { user: Plan; projects: Record<string, Plan>; shared?: Record<string, Plan> };
   /* GET and PUT /debug (staff-only debug logging): whether the account is
      staff and whether logging is on. A PUT from someone not staff is
      refused (403). POST /debug/log's entries land in `debugLog`. */
@@ -1745,7 +1746,13 @@ export class FakeDaemon {
   private governanceRoute(method: string, path: string, body: Record<string, unknown>, query: Record<string, string>): Response | null {
     if (!path.startsWith("/governance")) return null;
     const plan = this.data.plan;
-    const planDTO = (repo?: string) => (repo ? { user: plan.user, project: plan.projects[repo] ?? null, effective: plan.projects[repo] ?? plan.user } : { user: plan.user });
+    const planDTO = (repo?: string) => {
+      if (!repo) return { user: plan.user };
+      const local = plan.projects[repo] ?? null;
+      const shared = plan.shared?.[repo] ?? null;
+      const project = local ?? shared;
+      return { user: plan.user, project, project_source: local ? "local" : shared ? "shared" : null, shared, effective: project ?? plan.user };
+    };
     if (path === "/governance" && method === "GET") return json(this.data.governance);
     if (path === "/governance/offline-policy" && method === "POST") {
       const days = body.days;

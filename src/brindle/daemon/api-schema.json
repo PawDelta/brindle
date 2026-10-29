@@ -2540,7 +2540,7 @@
           "type": "object"
         },
         "PlanApprovalDTO": {
-          "description": "Who may approve a plan: named approvers, or a second person (anyone but who asked).",
+          "description": "Who may approve a plan: named approvers, or a second person (anyone but who asked).\nIts producer (InboxItemDTO.approval from the plan-approvals backend) is wired in integration.",
           "properties": {
             "approvers": {
               "default": [],
@@ -5113,7 +5113,7 @@
       "type": "object"
     },
     "PlanApprovalDTO": {
-      "description": "Who may approve a plan: named approvers, or a second person (anyone but who asked).",
+      "description": "Who may approve a plan: named approvers, or a second person (anyone but who asked).\nIts producer (InboxItemDTO.approval from the plan-approvals backend) is wired in integration.",
       "properties": {
         "approvers": {
           "default": [],
@@ -5185,6 +5185,39 @@
           ],
           "default": null,
           "title": "Project"
+        },
+        "project_source": {
+          "anyOf": [
+            {
+              "enum": [
+                "local",
+                "shared"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project Source"
+        },
+        "shared": {
+          "anyOf": [
+            {
+              "enum": [
+                "auto",
+                "always",
+                "never"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Shared"
         },
         "user": {
           "enum": [

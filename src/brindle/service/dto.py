@@ -126,6 +126,8 @@ class PlanSettingDTO(_DTO):
     """Plan approvals: Auto / Always / Never, the person's default and a project's override."""
     user: Literal["auto", "always", "never"]
     project: Literal["auto", "always", "never"] | None = None
+    project_source: Literal["local", "shared"] | None = None       # the file that sets project: config.local.json or config.json
+    shared: Literal["auto", "always", "never"] | None = None       # the shared config.json's, under a local override
     effective: Literal["auto", "always", "never"] | None = None   # the project's, with a repo
 
 
@@ -141,7 +143,8 @@ class DeviceFileDTO(_DTO):
 
 
 class PlanApprovalDTO(_DTO):
-    """Who may approve a plan: named approvers, or a second person (anyone but who asked)."""
+    """Who may approve a plan: named approvers, or a second person (anyone but who asked).
+    Its producer (InboxItemDTO.approval from the plan-approvals backend) is wired in integration."""
     approvers: list[str] = []
     second_person: bool = False
     requested_by: str | None = None

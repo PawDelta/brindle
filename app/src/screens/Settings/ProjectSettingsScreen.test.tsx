@@ -73,7 +73,7 @@ describe("project settings screen", () => {
       config: {
         user: { coordinator: false },
         repo: { max_agents: 2 },
-        local: { coordinator: true },
+        local: { coordinator: true, autopilot: false },
         keys: [],
       },
     }, REPO);
@@ -81,14 +81,17 @@ describe("project settings screen", () => {
     const marker = await within(list).findByTestId("override-coordinator");
     expect(marker.textContent).toContain("On here · yours: Off");
     expect(within(list).getByTestId("override-max_agents").textContent).toContain("2 here · yours: 5");
+    // The goal-driving key the project's file still sets is neither an override nor one of everything else.
     expect(within(list).queryByTestId("override-autopilot")).toBeNull();
+    fireEvent.click(within(screen.getByTestId("repo-settings")).getByRole("button", { name: /Everything else/ }));
+    expect(screen.getByTestId("project-settings").textContent).not.toMatch(/autopilot/i);
     // An unsaved edit to the checks survives a cleared override reloading the config.
     const checks = screen.getByRole("textbox", { name: "Checks" });
     fireEvent.change(checks, { target: { value: "npm test\nnpm run lint" } });
     fireEvent.click(within(marker).getByRole("button", { name: "Clear override" }));
     await waitFor(() => expect(within(list).queryByTestId("override-coordinator")).toBeNull());
     expect(patches(daemon)[0].body).toEqual({ scope: "repo", repo: REPO, unset: ["coordinator"] });
-    expect(daemon.data.config.local).toEqual({});
+    expect(daemon.data.config.local).toEqual({ autopilot: false });
     expect(daemon.data.config.user).toEqual({ coordinator: false });
     expect(checks).toHaveProperty("value", "npm test\nnpm run lint");
     // The committed file's override has its own explicit clear, scoped to that file.
@@ -101,16 +104,26 @@ describe("project settings screen", () => {
     stop();
   });
 
-  it("plan approvals: the project overrides your default, and Yours clears the override", async () => {
-    const { daemon, stop } = setup({ plan: { user: "never", projects: {} } }, REPO);
-    const plan = await within(screen.getByTestId("project-plan-approvals")).findByRole("combobox", { name: "Plan approvals" });
+  it.each([
+    ["your default", undefined],
+    // The project's committed config.json sets it: clearing the local override reads that, never yours.
+    ["the project's shared config", { [REPO]: "auto" as const }],
+  ])("plan approvals: a local override over %s, and clearing it", async (_, shared) => {
+    const { daemon, stop } = setup({ plan: { user: "never", projects: {}, shared } }, REPO);
+    const section = screen.getByTestId("project-plan-approvals");
+    const plan = await within(section).findByRole("combobox", { name: "Plan approvals" });
+    const unset = () => within(plan).getAllByRole("option")[0];
     expect(plan).toHaveProperty("value", "");
-    expect(within(plan).getByRole("option", { name: "Yours: Never" })).toBeTruthy();
+    expect(unset().textContent!.startsWith("Yours")).toBe(!shared);
+    expect(!!within(section).queryByTestId("plan-shared")).toBe(!!shared);
     fireEvent.change(plan, { target: { value: "always" } });
     await waitFor(() => expect(daemon.data.plan.projects).toEqual({ [REPO]: "always" }));
     await waitFor(() => expect(plan).toHaveProperty("value", "always"));
+    expect(within(section).queryByTestId("plan-shared")).toBeNull();
+    expect(unset().textContent!.startsWith("Yours")).toBe(!shared);
     fireEvent.change(plan, { target: { value: "" } });
     await waitFor(() => expect(daemon.data.plan.projects).toEqual({}));
+    await waitFor(() => expect(!!within(section).queryByTestId("plan-shared")).toBe(!!shared));
     const puts = daemon.requests.filter((r) => r.method === "PUT" && r.path === "/governance/plan").map((r) => r.body);
     expect(puts).toEqual([{ scope: "repo", repo: REPO, plan: "always" }, { scope: "repo", repo: REPO, plan: null }]);
     stop();

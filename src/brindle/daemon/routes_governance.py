@@ -155,13 +155,15 @@ def device_file(db: DB, params: dict, body: dict) -> dict:
     return DeviceFileDTO(filename="managed.json", device_id=got["device_id"], managed=got["managed"]).to_json()
 
 
-def _project_plan(repo: str) -> str | None:
-    """The plan ``repo``'s own files set (its plan, or an old plan_first that still applies), or None."""
-    plan_from = config.setting_source(repo, "plan")
-    if plan_from in ("local", "repo") or (
-            plan_from == "default" and config.setting_source(repo, "plan_first") in ("local", "repo")):
-        return config.load_repo_config(repo).plan
-    return None
+def _project_plan(repo: str) -> dict:
+    """The plan ``repo``'s own files set, by the first file with a plan or an
+    old plan_first (local over shared), whatever the person's default is;
+    which file that is; and the shared file's, which a cleared local override
+    reads through to."""
+    layers = config.plan_layers(repo)
+    source = next((s for s in ("local", "repo") if layers[s]), None)
+    return {"project": layers[source] if source else None,
+            "project_source": {"local": "local", "repo": "shared"}.get(source), "shared": layers["repo"]}
 
 
 def _user_plan() -> str:
@@ -176,8 +178,7 @@ def _user_plan() -> str:
 def plan_setting(repo: str | None) -> dict:
     if repo is None:
         return PlanSettingDTO(user=_user_plan()).to_json()
-    return PlanSettingDTO(user=_user_plan(), project=_project_plan(repo),
-                          effective=config.load_repo_config(repo).plan).to_json()
+    return PlanSettingDTO(user=_user_plan(), effective=config.load_repo_config(repo).plan, **_project_plan(repo)).to_json()
 
 
 @_json

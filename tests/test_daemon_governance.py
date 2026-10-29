@@ -91,12 +91,23 @@ def test_offline_export_and_device_file(admin, monkeypatch):
 
 def test_plan_default_and_project_override(tmp_path):
     repo = str(tmp_path)
+    plan = f"{PREFIX}/plan?repo={repo}"
     assert _send("PUT", PREFIX + "/plan", {"scope": "user", "plan": "sometimes"})[0] == 400
-    config.set_local(repo, "plan_first", False)     # an old project setting reads as its override
-    assert _send("GET", f"{PREFIX}/plan?repo={repo}")[1] == {"user": "auto", "project": "never", "effective": "never"}
-    assert _send("PUT", PREFIX + "/plan", {"scope": "user", "plan": "always"})[1] == {
-        "user": "always", "project": None, "effective": None}
-    code, got = _send("PUT", PREFIX + "/plan", {"scope": "repo", "repo": repo, "plan": "auto"})
-    assert code == 200 and got == {"user": "always", "project": "auto", "effective": "auto"}
+    assert _send("PUT", PREFIX + "/plan", {"scope": "user", "plan": "always"})[1]["user"] == "always"
+    # An old local plan_first is the project's override, whatever the person's own plan is.
+    config.set_local(repo, "plan_first", False)
+    assert _send("GET", plan)[1] == {"user": "always", "project": "never", "project_source": "local",
+                                     "shared": None, "effective": "never"}
+    # The shared config.json's plan, under that local override, then read through once it's cleared.
+    config.set_repo(repo, "plan", "auto")
+    got = _send("GET", plan)[1]
+    assert got | {"project": "never", "project_source": "local", "shared": "auto"} == got
     code, got = _send("PUT", PREFIX + "/plan", {"scope": "repo", "repo": repo, "plan": None})
-    assert got == {"user": "always", "project": None, "effective": "always"}
+    assert code == 200 and got == {"user": "always", "project": "auto", "project_source": "shared",
+                                   "shared": "auto", "effective": "auto"}
+    got = _send("PUT", PREFIX + "/plan", {"scope": "repo", "repo": repo, "plan": "always"})[1]
+    assert got | {"project": "always", "project_source": "local", "effective": "always"} == got
+    config.unset_repo(repo, "plan")
+    config.unset_local(repo, "plan")
+    assert _send("GET", plan)[1] == {"user": "always", "project": None, "project_source": None,
+                                     "shared": None, "effective": "always"}

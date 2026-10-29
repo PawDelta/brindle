@@ -18,7 +18,7 @@ import { alert, button, notice, panel, quiet } from "../../components/ui";
 import { useSessions } from "../../store/sessions";
 import { PLAN_HELP, PlanChoice } from "./Governance";
 import { More, message, RestOfConfig, Row, Section, SettingRow } from "./SettingsScreen";
-import { PROJECT_RULES, SETTINGS, YOURS, carryEdits, changed, draftOf, invalid, overrideLabel, values } from "./settings";
+import { HANDLED, PROJECT_RULES, SETTINGS, YOURS, carryEdits, changed, draftOf, invalid, overrideLabel, values } from "./settings";
 
 const CHECKS = PROJECT_RULES.filter((s) => s.key === "checks");
 const RULES = PROJECT_RULES.filter((s) => s.key !== "checks");
@@ -93,9 +93,8 @@ function Project({ client, repo }: { client: DaemonClient; repo: string }) {
     }
   };
 
-  const shown = SETTINGS.map((s) => s.key);
   const restLines: [string, string][] = Object.entries(config?.repo ?? {})
-    .filter(([k]) => !shown.includes(k))
+    .filter(([k]) => !HANDLED.includes(k))
     .map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)]);
   const overridden = YOURS.filter((s) => config?.overrides?.[s.key]);
   const row = (s: (typeof SETTINGS)[number]) => <SettingRow key={s.key} s={s} value={draft[s.key]} dirty={dirty.includes(s.key)} disabled={saving} onChange={(v) => edit(s.key, v)} />;
@@ -137,7 +136,7 @@ function Project({ client, repo }: { client: DaemonClient; repo: string }) {
         )}
       </Section>
 
-      <Section id="project-plans" title="Plan approvals" blurb="This project's own choice, saved to .brindle/config.local.json; Yours uses your default." testId="project-plan-approvals">
+      <Section id="project-plans" title="Plan approvals" blurb="This project's own choice, saved to .brindle/config.local.json." testId="project-plan-approvals">
         <Row label="Plan approvals" help={PLAN_HELP} htmlFor="plan-project">
           <PlanChoice client={client} repo={repo} id="plan-project" />
         </Row>
