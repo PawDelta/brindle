@@ -47,7 +47,7 @@ import { NewSession } from "./screens/New";
 import { Onboarding, Starting, markOnboarded, onboarded, readOnboarded } from "./screens/Onboarding";
 import { AgentsScreen } from "./screens/Agents";
 import { SessionScreen } from "./screens/Session";
-import { ProjectSettingsScreen, SettingsScreen } from "./screens/Settings";
+import { SettingsScreen } from "./screens/Settings";
 import { isPaused } from "./store/overview";
 import { SessionsProvider, useCloseSession, useSessions } from "./store/sessions";
 import { ProvidersProvider } from "./store/providers";
@@ -133,9 +133,9 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     case "settings":
-      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} section={route.section} ask={route.ask} rule={route.rule} onProjectSettings={(repo) => navigate({ screen: "project-settings", repo })} />;
+      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} section={route.section} ask={route.ask} rule={route.rule} />;
     case "project-settings":
-      return <ProjectSettingsScreen key={route.repo} client={client} repo={route.repo} onSettings={() => navigate({ screen: "settings" })} />;
+      return <SettingsScreen key={`repo:${route.repo}`} client={client} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} repo={route.repo} />;
     case "account":
       return <AccountScreen client={client} openUrl={openUrl} onNavigate={(screen) => navigate({ screen })} section={route.section} ask={route.ask} />;
     case "new":

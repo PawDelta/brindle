@@ -37,7 +37,6 @@ export interface Setting {
 export const SETTINGS: Setting[] = [
   { key: "checks", label: "Checks", kind: "list", fallback: [], repoOnly: true, common: true, blurb: "Commands a branch must pass before it merges, one per line, run from the repo root." },
   { key: "max_agents", label: "Workers at once", kind: "number", fallback: 5, common: true, blurb: "How many workers a session runs at the same time. 0 means no cap." },
-  { key: "autopilot", label: "Autopilot", kind: "boolean", fallback: true, common: true, blurb: "A new session's supervisor keeps driving toward the goal on its own." },
   { key: "plan_first", label: "Plan first", kind: "boolean", fallback: false, common: true, blurb: "Workers propose a plan and wait for your approval before they edit anything." },
   {
     key: "overlap",
@@ -92,16 +91,21 @@ export const carryEdits = (oldLoaded: Draft, oldDraft: Draft, next: Draft): Draf
 export const YOURS = SETTINGS.filter((s) => !s.repoOnly);
 export const PROJECT_RULES = SETTINGS.filter((s) => s.repoOnly);
 
-/* How a project's override reads in the marker ("Off in this project"). */
+/* A value as the status line reads it ("Off", "5 minutes"). */
 export function overrideText(s: Setting, value: unknown): string {
   if (s.kind === "boolean") return value === true ? "On" : "Off";
   if (s.kind === "choice") return s.choices?.find((c) => c.value === (value ?? null))?.label ?? String(value);
   return value === undefined || value === null ? "Default" : `${String(value)}${s.unit ? ` ${s.unit}` : ""}`;
 }
 
-/* What a project's override says next to what it overrides: "Off here · yours: On" (yours falls back to the engine's default). */
-export const overrideLabel = (s: Setting, projectValue: unknown, yourValue: unknown): string =>
-  `${overrideText(s, projectValue)} here · yours: ${overrideText(s, yourValue ?? s.fallback)}`;
+/* Which layer decides a setting in a repo (GET /config's `overrides`: key -> the file that sets it). */
+export type Scope = "team" | "local" | "yours";
+export const scopeOf = (overrides: Record<string, "local" | "repo"> | undefined, key: string): Scope =>
+  overrides?.[key] === "repo" ? "team" : overrides?.[key] === "local" ? "local" : "yours";
+
+/* The one plain line under a repo-view row; yours falls back to the engine's default. */
+export const statusLine = (s: Setting, scope: Scope, yourValue: unknown): string =>
+  scope === "team" ? "Set by the team" : scope === "local" ? "Just for you" : `Same as yours (${overrideText(s, yourValue ?? s.fallback)})`;
 
 /* PATCH /config's `values`: only what changed, as the engine takes it (a
    list setting's lines, a number, a bool, a choice; null only where the

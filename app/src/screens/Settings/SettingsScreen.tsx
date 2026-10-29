@@ -1,8 +1,9 @@
-/* Settings: this machine's brindle, in sections (About last) with a small nav at
-   the top: Your settings (editable, saved to ~/.brindle/config.json for
-   every project; the repo's checks, rules and overrides of them are on its
-   own page, ProjectSettingsScreen, reached by the "Project settings for …"
-   link), Permissions (how Claude's permission
+/* Settings: this machine's brindle, in sections (About last) with a switch at
+   the top: "You" and the repo's name (the session's, or one picked from the
+   switch's menu when there are several). The repo side is RepoSettings
+   (ProjectSettingsScreen.tsx): the same rows with where each value comes
+   from. The You side has a small nav: Your settings (editable, saved to
+   ~/.brindle/config.json for every project), Permissions (how Claude's permission
    requests are handled, your permission rules), Providers (one row per
    provider CLI, with how it connects, its state and its buttons) and
    Engine & health (the engine's version and update, the command-line tool,
@@ -79,7 +80,8 @@ import { About } from "./About";
 import { OrgApprovals } from "./OrgApprovals";
 import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
-import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
+import { NO_REPO, useRepo } from "../../components/RepoSelect";
+import { RepoSettings } from "./ProjectSettingsScreen";
 import { alert, button, card, field, h2, main, mono, notice, pill, quiet } from "../../components/ui";
 import { useProviders } from "../../store/providers";
 import { StoreContext, useAppState } from "../../store/useStore";
@@ -129,8 +131,8 @@ export interface SettingsScreenProps {
   ask?: number;
   /* A permission rule to open in its editor (the Inbox's "Open the deny rule"). */
   rule?: string;
-  /* Opens the Project settings page of a repo (the "Project settings for …" link). */
-  onProjectSettings?: (repo: string) => void;
+  /* The repo to open the switch on (the sidebar's repo header, the old project-settings route): its view, not You's. */
+  repo?: string;
 }
 
 export const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -1006,13 +1008,56 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
   );
 }
 
-export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, section, ask, rule, onProjectSettings }: SettingsScreenProps) {
+/* The switch at the top: You, or the repo (a menu to pick another when there are several). */
+function ScopeSwitch({ view, onView, repo, repos, onRepo, disabled }: { view: "you" | "repo"; onView(v: "you" | "repo"): void; repo: string | null; repos: ReturnType<typeof useRepo>["repos"]; onRepo(repo: string): void; disabled: boolean }) {
+  const name = repos?.find((r) => r.repo_root === repo)?.name ?? repo?.split("/").filter(Boolean).pop();
+  const choices: { id: "you" | "repo"; label: string }[] = [{ id: "you", label: "You" }, ...(repo ? [{ id: "repo" as const, label: name ?? repo }] : [])];
+  return (
+    <div className="flex flex-wrap items-center gap-s1">
+      <div role="radiogroup" aria-label="Settings for" className="inline-flex rounded-md border border-line p-0.5">
+        {choices.map((c) => (
+          <button
+            key={c.id}
+            type="button"
+            role="radio"
+            aria-checked={view === c.id}
+            disabled={disabled}
+            className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${view === c.id ? "bg-pass-soft font-medium text-pass" : "text-ink-2 hover:bg-surface-2"}`}
+            onClick={() => onView(c.id)}
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+      {repos && repos.length > 1 && view === "repo" && (
+        <select className={field} aria-label="Repo" value={repo ?? ""} disabled={disabled} onChange={(e) => onRepo(e.target.value)}>
+          {repos.map((r) => (
+            <option key={r.repo_root} value={r.repo_root}>
+              {r.name}
+            </option>
+          ))}
+        </select>
+      )}
+    </div>
+  );
+}
+
+export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, section, ask, rule, repo: routed }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const connection = useAppState((state) => state.connection);
   const updateStatus = useAppState((state) => state.appUpdate);
   const pick = useRepo();
-  const { repo, repos } = pick;
+  const { repos, setRepo } = pick;
+  /* The repo a route names is the one on screen from the first paint, before the repos are known. */
+  const repo = pick.repo ?? routed ?? null;
+  const [view, setView] = useState<"you" | "repo">(routed ? "repo" : "you");
+  useEffect(() => {
+    if (routed) {
+      setRepo(routed);
+      setView("repo");
+    }
+  }, [routed, setRepo]);
   const [config, setConfig] = useState<Config | null>(null);
   const [checks, setChecks] = useState<DoctorCheck[] | null>(null);
   const [doctorError, setDoctorError] = useState<string | null>(null);
@@ -1223,25 +1268,28 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   // What the person set for every repo that has no row here.
   const yourLines = userLines(config?.user ?? {}).filter(([k]) => !shown.includes(k));
   const yourRow = (s: Setting) => <SettingRow key={s.key} s={s} value={userDraft[s.key]} dirty={userDirty.includes(s.key)} disabled={saving} onChange={(v) => editUser(s.key, v)} />;
-  const projectName = repos?.find((r) => r.repo_root === repo)?.name;
+  const repoView = view === "repo" && !!repo;
 
   return (
     <section className="flex min-h-0 flex-col gap-s3" aria-label="Settings">
-      <PageHeader title="Settings" lede="Your settings apply to every project; a project can override them. Below: permissions, sign-ins and engine health.">
-        <RepoSelect {...pick} disabled={saving} />
+      <PageHeader title="Settings" lede={repoView ? "This repo's settings: what the team sets, what is just for you, and what follows your own." : "Your settings apply to every project; a project can override them. Below: permissions, sign-ins and engine health."}>
+        <ScopeSwitch view={repoView ? "repo" : "you"} onView={setView} repo={repo} repos={repos} onRepo={setRepo} disabled={saving} />
       </PageHeader>
-      {repo && onProjectSettings && (
-        <button type="button" className={`${quiet} self-start text-sm`} data-testid="project-settings-link" onClick={() => onProjectSettings(repo)}>
-          Project settings for {projectName ?? repo} ›
-        </button>
+      {repoView && (
+        <section className="flex min-h-0 flex-col gap-s3" aria-label="Project settings" data-testid="project-settings">
+          <RepoSettings key={repo} client={client} repo={repo} />
+        </section>
       )}
-      <SectionNav staff={staff} />
+      {!repoView && <SectionNav staff={staff} />}
+      {!repoView && (
       <div className="border-t border-line">
         <Row label="Appearance">
           <ThemeToggle choices />
         </Row>
       </div>
-      {repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
+      )}
+      {!repoView && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
+      {!repoView && <>
       {loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
           <span>Could not load settings: {loadError}</span>
@@ -1251,7 +1299,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         </div>
       )}
       {config && (
-        <Section id="your-settings" title="Your settings" blurb="Saved to ~/.brindle/config.json and applied to every project, unless a project overrides one." testId="your-settings">
+        <Section id="your-settings" title="Your settings" blurb="Saved to ~/.brindle/config.json and applied to every project, unless a repo sets one itself." testId="your-settings">
           {common.map(yourRow)}
           {more && others.map(yourRow)}
           <div className="flex flex-col gap-1 px-s2 py-1">
@@ -1536,7 +1584,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       )}
 
       <About read={readAbout} updates={appUpdates} status={updateStatus} />
-
+      </>}
     </section>
   );
 }
