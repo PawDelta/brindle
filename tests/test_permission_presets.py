@@ -333,6 +333,17 @@ def test_the_daemon_serves_and_edits_the_policy(ws):
     push = next(r for r in policy["rules"] if r["id"] == "d-push-default")
     assert push["decision"] == "ask" and push["limits"] == {"max_scope": "destination", "life": "time", "minutes": 30}
 
+    # #300: the Settings editor's POST must change the next matching decision.
+    req = permissions.from_claude({"tool_name": "mcp__github__create_issue", "tool_input": {}},
+                                  ws.path, ws.repo_root)
+    assert decide(req).decision == "ask"
+    code, allowed = _send("POST", "/v1/permissions/rules", {
+        "kind": "mcp", "match": req.tool, "match_type": "exact", "decision": "allow",
+        "label": "", "limits": None, "expires": None})
+    assert code == 200
+    answer = decide(req)
+    assert answer.decision == "allow" and answer.rule.id == allowed["id"]
+
     code, policy = _send("PUT", "/v1/permissions/preset", {"preset": "autonomous"})
     assert code == 200 and policy["preset"] == "autonomous" and policy["unmatched"] == "allow"
     assert _send("PUT", "/v1/permissions/preset", {"preset": "nope"})[0] == 400
