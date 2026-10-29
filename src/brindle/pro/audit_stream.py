@@ -61,7 +61,7 @@ _home: Path | None = None
 _transport = None                # (target, record) -> None, raising when it can't deliver
 _clock = time.monotonic
 _down_until: dict[str, float] = {}
-_at_empty_check = lambda: None   # noqa: E731 - test seam: runs just before a drainer looks at the queue
+_after_empty_snapshot = lambda: None   # noqa: E731 - test seam: a drainer has just read an empty queue
 _spawn = None                   # starts a background drain; set by configure (default: a daemon thread)
 
 
@@ -234,6 +234,14 @@ _opener = _build_opener()
 # -- sending --------------------------------------------------------------------------------------
 
 
+def _snapshot(path: Path) -> list[bytes]:
+    """A drainer's read of the queue; the caller holds the queue lock."""
+    queued = _read_queue(path)
+    if not queued:
+        _after_empty_snapshot()
+    return queued
+
+
 def _drain(target: dict, home: Path | None, force: bool) -> None:
     """Deliver the target's queue, oldest first, until it is empty or a send
     fails. Does nothing while another drainer holds the lock (it picks up
@@ -248,9 +256,8 @@ def _drain(target: dict, home: Path | None, force: bool) -> None:
         return
     try:
         while True:
-            _at_empty_check()
             with _locked(path):
-                queued = _read_queue(path)
+                queued = _snapshot(path)
                 gap = _read_dropped(path)
                 if not queued and not gap:
                     # Giving up the drain lock under the queue lock: a writer's record

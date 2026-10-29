@@ -122,32 +122,36 @@ def test_emit_returns_before_delivery_and_one_drainer_sends_everything(brindle_h
     assert siem.got == [1, 2]                        # the running drain also took the later record
     assert release_under_queue_lock == [True]
 
-    # A write that lands while the drainer is about to look at the (by then empty) queue:
-    # its own drain finds the lock taken, so the running drainer must pick the record up.
+    # A write that lands after the drainer has read the (by then empty) queue but before it
+    # gives up the drain lock: the writer's own drain finds that lock taken and leaves, so
+    # the write must wait for the queue lock until the drainer has let go of both.
     siem, pending = Siem(), []
     siem.up = True
     audit_stream.configure([TARGET], home=brindle_home, transport=siem, spawn=pending.append)
     chain.emit(ev())
-    looking, go, checks = threading.Event(), threading.Event(), []
+    monkeypatch.setattr(audit_stream, "_spawn", lambda fn: fn())
+    looking, go, held = threading.Event(), threading.Event(), []
 
-    def at_empty_check():
-        checks.append(True)
-        if len(checks) == 2:                         # the pass after record 1 went out
+    def after_empty_snapshot():
+        if not held:                                 # the pass after record 3 went out
+            held.append(True)
             looking.set()
             go.wait()
 
-    monkeypatch.setattr(audit_stream, "_at_empty_check", at_empty_check)
+    monkeypatch.setattr(audit_stream, "_after_empty_snapshot", after_empty_snapshot)
     drainer = threading.Thread(target=pending[0])
     drainer.start()
     looking.wait()
-    chain.emit(ev())                                 # queued while the drainer is held at its check
-    late = threading.Thread(target=pending[1])
-    late.start()
-    late.join()                                      # its drain finds the lock taken and leaves
+    writers = []
+    if lock_is_held(audit_chain._lock_path(audit_stream.queue_path(TARGET, brindle_home))):
+        writers.append(threading.Thread(target=chain.emit, args=(ev(),)))   # blocks on the queue lock
+        writers[0].start()
+    else:
+        chain.emit(ev())                             # queued at once; its drain finds the lock taken
     go.set()
     drainer.join()
-    assert siem.got == [3, 4]
-    audit_stream.flush()
+    for writer in writers:
+        writer.join()
     assert siem.got == [3, 4]
     assert not audit_stream.queue_path(TARGET, brindle_home).exists()
 
