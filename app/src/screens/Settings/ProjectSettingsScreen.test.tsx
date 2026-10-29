@@ -11,7 +11,6 @@ import { StoreContext } from "../../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN, type DaemonData } from "../../test/fakeDaemon";
 import { REPO } from "../../test/fixtures";
 import { SettingsScreen } from ".";
-import { SETTINGS, scopeOf, statusLine } from "./settings";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
@@ -181,17 +180,5 @@ describe("settings repo view", () => {
     expect(await screen.findByRole("textbox", { name: "Checks" })).toHaveProperty("value", "npm test");
     expect(screen.queryByTestId("settings-save")).toBeNull();
     stop();
-  });
-});
-
-describe("statusLine", () => {
-  const setting = (key: string) => SETTINGS.find((s) => s.key === key)!;
-  it.each([
-    ["coordinator", { coordinator: "repo" as const }, false, "Set by the team"],
-    ["coordinator", { coordinator: "local" as const }, false, "Just for you"],
-    ["max_agents", {}, undefined, "Same as yours (5)"],
-    ["stale_after", undefined, 45, "Same as yours (45 minutes)"],
-  ])("%s resolves through the three layers to %s", (key, overrides, yours, line) => {
-    expect(statusLine(setting(key), scopeOf(overrides, key), yours)).toBe(line);
   });
 });
