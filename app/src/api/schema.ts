@@ -414,6 +414,7 @@ export interface DeviceFileDTO {
   managed: {
     [k: string]: unknown;
   };
+  system_dir: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

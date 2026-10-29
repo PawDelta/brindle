@@ -4,7 +4,7 @@ GET /v1/governance: who manages this device and whether its signed policy
 verifies, and where it came from (the managed device token, the account, the
 last saved copy or an offline policy export), or the problem and what to do.
 POST /v1/governance/offline-policy: an offline policy export from the account
-(POST /orgs/{id}/policy/offline), written to ~/.brindle/policy.json.
+(POST /orgs/{id}/policy/offline), written to the repo's .brindle/policy.json.
 POST /v1/governance/device-file: a managed device file (managed.json) from the
 account (POST /orgs/{id}/managed-devices) for an Enterprise admin to save.
 GET/PUT /v1/governance/plan: plan approvals: Auto / Always / Never, the
@@ -25,7 +25,7 @@ from types import ModuleType
 from starlette.requests import Request
 from starlette.routing import Route
 
-from brindle import config
+from brindle import airgap, config
 from brindle.daemon.routes_actions import _endpoint, _get
 from brindle.daemon.routes_read import _json, _repo
 from brindle.db import DB
@@ -134,10 +134,13 @@ def offline_policy(db: DB, params: dict, body: dict) -> dict:
     days = _get(body, "days", int, required=True)
     if not 1 <= days <= MAX_DAYS:
         raise ServiceError("invalid", f"days must be 1 to {MAX_DAYS}")
+    repo = _get(body, "repo") or params.get("repo")
+    if not repo:
+        raise ServiceError("invalid", "repo is required: the export is saved in that project's .brindle/policy.json")
     got = _org_post("/policy/offline", {"days": days}, "body")
     if not isinstance(got.get("token"), str):
         raise ServiceError("invalid_account_response", "The account's offline policy export is incomplete.", 502)
-    path = config.brindle_home() / POLICY_FILE
+    path = airgap.policy_path(repo)
     _write_json(path, {"token": got["token"], "body": got["body"]})
     return OfflinePolicyExportDTO(path=str(path), days=days).to_json()
 
@@ -162,7 +165,8 @@ def device_file(db: DB, params: dict, body: dict) -> dict:
     if not isinstance(got.get("device_id"), str):
         raise ServiceError("invalid_account_response", "The account's device file is incomplete.", 502)
     document = {k: got[k] for k in ("managed", "policy_body", "device_id")}
-    return DeviceFileDTO(filename="managed.json", device_id=got["device_id"], managed=document).to_json()
+    return DeviceFileDTO(filename=managed.FILE, device_id=got["device_id"], managed=document,
+                         system_dir=str(managed.system_dir())).to_json()
 
 
 def _project_plan(repo: str) -> dict:
