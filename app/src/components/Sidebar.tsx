@@ -494,6 +494,13 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
 function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
   const total = useAppState(waitingCount);
   const on = route.screen === "inbox";
+  // A count that rose since last drawn: the pill glows once (a new key restarts the animation).
+  const last = useRef(total);
+  const [pulse, setPulse] = useState(0);
+  useEffect(() => {
+    if (total > last.current) setPulse((p) => p + 1);
+    last.current = total;
+  }, [total]);
   return (
     <button
       type="button"
@@ -504,12 +511,10 @@ function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate"
     >
       <span className="flex-1">Inbox</span>
       {total > 0 ? (
-        <span className="side-nb" data-testid="inbox-badge" aria-label={`${total} needing you`}>
+        <span key={pulse} className="side-nb" data-pulse={pulse > 0 || undefined} data-testid="inbox-badge" aria-label={`${total} needing you`}>
           {total}
         </span>
-      ) : (
-        <span className="font-mono text-[11.5px] font-medium text-ink-3">empty</span>
-      )}
+      ) : null}
     </button>
   );
 }

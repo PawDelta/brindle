@@ -209,8 +209,22 @@ export function seenAt(item: InboxItemDTO, now = Date.now()): number {
   return now;
 }
 
+/* The items the Inbox page has already shown this person, by key: what is
+   not in it is new to them, and marked on the page until they leave it. */
+const shown = new Set<string>();
+
+export const shownKeys = (): Set<string> => new Set(shown);
+
+export function markShown(inbox: InboxItemDTO[]): void {
+  for (const item of inbox) shown.add(itemKey(item));
+}
+
+/* The keys of the items not in `before` (a shownKeys() taken when the page opened). */
+export const unseenKeys = (inbox: InboxItemDTO[], before: Set<string>): Set<string> => new Set(inbox.map(itemKey).filter((k) => !before.has(k)));
+
 /* Forget items no longer in the inbox, so a returning one counts as new. */
 export function forgetGone(inbox: InboxItemDTO[]): void {
   const keys = new Set(inbox.map(itemKey));
   for (const key of firstSeen.keys()) if (!keys.has(key)) firstSeen.delete(key);
+  for (const key of shown) if (!keys.has(key)) shown.delete(key);
 }

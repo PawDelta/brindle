@@ -31,7 +31,7 @@
    nowhere else: the Inbox is where what needs a person is read and acted
    on. */
 
-import { useEffect, useMemo, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import type { DaemonClient, InboxAction } from "../../api/client";
 import { useDaemon } from "../../api/context";
 import { openExternal, type OpenUrl } from "../../api/open";
@@ -48,7 +48,7 @@ import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
 import { ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
-import { FIXES, KIND_SHORT, describeItem, fixable, forgetGone, itemKey, kindLabel, seenAt } from "./items";
+import { FIXES, KIND_SHORT, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, seenAt, shownKeys, unseenKeys } from "./items";
 import { useInboxActions } from "./useInboxActions";
 
 export interface InboxScreenProps {
@@ -113,6 +113,13 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
   const asks = usePermissionAsks(client, inbox);
 
   useEffect(() => forgetGone(inbox), [inbox]);
+
+  // What this page showed before it opened: an item not among them is marked "new" until the person leaves.
+  const before = useRef(shownKeys());
+  const latest = useRef(inbox);
+  latest.current = inbox;
+  useEffect(() => () => markShown(latest.current), []);
+  const fresh = useMemo(() => unseenKeys(inbox, before.current), [inbox]);
 
   const agents = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []), [workspaces]);
 
@@ -235,7 +242,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
               item.kind === "permission" ? (
                 <PermissionItemCard key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
               ) : (
-              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} />
+              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(itemKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} />
               ),
             )}
           </section>
@@ -246,13 +253,15 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
 }
 
 /* One banner card. */
-function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo, onReview }: {
+function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone, onGo, onReview }: {
   item: InboxItemDTO;
   actions: ReturnType<typeof useInboxActions>;
   who: string | null;
   branch: string | null;
   sessionTitle: string | null;
   repo: string | null;
+  /* Not shown on this page before: marked "new" and briefly highlighted. */
+  isNew: boolean;
   onDone(): void;
   /* The agent in its session, nothing over it. */
   onGo?(): void;
@@ -324,9 +333,10 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo, 
   }
 
   return (
-    <article className={`${card} relative grid max-w-[960px] grid-cols-[minmax(0,1fr)_auto] items-start gap-x-s2 gap-y-1 py-[11px] pl-[18px] pr-[14px] before:absolute before:bottom-[10px] before:left-0 before:top-[10px] before:w-[2px] before:rounded-sm before:opacity-80 ${tone.bar}`} aria-label={kindLabel(item)} data-testid="inbox-card" data-kind={item.kind}>
-      <div className={`col-start-1 font-mono text-[10.5px] uppercase tracking-[0.06em] ${tone.ink}`}>
+    <article className={`${card} relative grid max-w-[960px] grid-cols-[minmax(0,1fr)_auto] items-start gap-x-s2 gap-y-1 py-[11px] pl-[18px] pr-[14px] before:absolute before:bottom-[10px] before:left-0 before:top-[10px] before:w-[2px] before:rounded-sm before:opacity-80 ${tone.bar} ${isNew ? "inbox-new" : ""}`} aria-label={kindLabel(item)} data-testid="inbox-card" data-kind={item.kind} data-new={isNew || undefined}>
+      <div className={`col-start-1 flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-[0.06em] ${tone.ink}`}>
         {KIND_SHORT[item.kind] ?? item.kind}
+        {isNew && <span className="rounded-full bg-sap px-1.5 text-[10px] font-semibold leading-4 text-on-sap" data-testid="new-mark">new</span>}
       </div>
       <div className="col-start-1 text-[13.5px] font-semibold leading-[1.35]">{describeItem(item)}</div>
       {body && <div className="col-start-1 min-w-0 text-[12.5px] leading-[1.45] text-ink-2">{body}</div>}

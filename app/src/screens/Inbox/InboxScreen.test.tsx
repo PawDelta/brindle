@@ -101,6 +101,19 @@ describe("inbox", () => {
     sync.stop();
   });
 
+  it("marks an item new until the page has been left; one shown before is not marked again", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [notice] });
+    const first = mount(daemon);
+    await waitFor(() => expect(card("org_notice")).toBeTruthy());
+    expect(card("org_notice").getAttribute("data-new")).toBe("true");
+    cleanup();
+    first.sync.stop();
+    const second = mount(daemon);
+    await waitFor(() => expect(card("org_notice")).toBeTruthy());
+    expect(card("org_notice").getAttribute("data-new")).toBeNull();
+    second.sync.stop();
+  });
+
   it("starts a sign-in from its card", async () => {
     // As the engine's permission-items branch emits a lapsed sign-in: no detail, the sign-in route named on the
     // item; the worker is on Codex (its record), so the sign-in must be Codex's, never Claude's.
