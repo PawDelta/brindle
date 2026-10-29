@@ -151,11 +151,11 @@ describe("Sidebar", () => {
     expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("working");
     fireEvent.click(inbox);
     expect(navigate).toHaveBeenLastCalledWith({ screen: "inbox" });
-    // Nothing waiting: the entry says so, quietly.
+    // Nothing waiting: no pill at all.
     daemon.data.inbox = [];
     daemon.publish("message.queued", { agent_id: "sup1" });
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
-    expect(inbox.textContent).toBe("Inboxempty");
+    expect(inbox.textContent).toBe("Inbox");
     sync.stop();
   });
 

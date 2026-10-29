@@ -209,6 +209,37 @@ export function seenAt(item: InboxItemDTO, now = Date.now()): number {
   return now;
 }
 
+/* The keys (itemKey, askKey) the Inbox page has already shown this person: what is
+   not in it is new to them, and marked on the page until they leave it. */
+const shown = new Set<string>();
+
+export const shownKeys = (): Set<string> => new Set(shown);
+
+export const markShown = (keys: Iterable<string>): void => {
+  for (const key of keys) shown.add(key);
+};
+
+/* A held permission request, told apart within its group. */
+export const askKey = (a: { agent_id: string; request_id: string }) => `ask:${a.agent_id}:${a.request_id}`;
+
+/* What "new" is told by: a permission request by its own identity (the one a group holds
+   has the same), anything else by itemKey. */
+export const seenKey = (item: InboxItemDTO) => (item.kind === "permission" && item.agent_id && item.permission?.request_id ? askKey({ agent_id: item.agent_id, request_id: item.permission.request_id }) : itemKey(item));
+
+/* Forget shown keys no longer live, so a returning one counts as new. `asks`
+   picks which kind: askKey's, or the inbox items'. */
+export function pruneShown(live: Iterable<string>, asks = false): void {
+  const keep = new Set(live);
+  for (const key of shown) if (key.startsWith("ask:") === asks && !keep.has(key)) shown.delete(key);
+}
+
+/* The live keys not in `before` (a shownKeys() taken when the page opened, kept to what is still live). */
+export function unseenKeys(live: Iterable<string>, before: Set<string>): Set<string> {
+  const keys = new Set(live);
+  for (const key of before) if (!keys.has(key)) before.delete(key);
+  return new Set([...keys].filter((k) => !before.has(k)));
+}
+
 /* Forget items no longer in the inbox, so a returning one counts as new. */
 export function forgetGone(inbox: InboxItemDTO[]): void {
   const keys = new Set(inbox.map(itemKey));

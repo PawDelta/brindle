@@ -31,7 +31,7 @@
    nowhere else: the Inbox is where what needs a person is read and acted
    on. */
 
-import { useEffect, useMemo, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, type ReactNode } from "react";
 import type { DaemonClient, InboxAction } from "../../api/client";
 import { useDaemon } from "../../api/context";
 import { openExternal, type OpenUrl } from "../../api/open";
@@ -48,7 +48,7 @@ import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
 import { ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
-import { FIXES, KIND_SHORT, describeItem, fixable, forgetGone, itemKey, kindLabel, seenAt } from "./items";
+import { FIXES, KIND_SHORT, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
 import { useInboxActions } from "./useInboxActions";
 
 export interface InboxScreenProps {
@@ -122,6 +122,25 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
   const here = useMemo(() => (session === null ? inbox : inbox.filter(inSession)).filter((i) => !actions.hidden.has(itemKey(i)) && !asks.held(i)), [inbox, session, agents, hidden, actions.hidden, asks.held]); // eslint-disable-line react-hooks/exhaustive-deps
   const askGroups = useMemo(() => (session === null ? asks.groups : asks.groups.map((g) => ({ ...g, items: g.items.filter((a) => a.root_id === session) })).filter((g) => g.items.length > 0)), [asks.groups, session]);
   const waiting = here.length + askGroups.length + (update ? 1 : 0);
+
+  /* What this page showed before it opened is not new; the rest is marked "new" until the person leaves,
+     and what leaves the inbox meanwhile is forgotten, so it is new again if it returns. Only what this
+     view drew is marked shown on leaving (not other sessions' items a filter hid). */
+  const before = useRef(shownKeys());
+  const drawn = useRef<string[]>([]);
+  drawn.current = [...here.map(seenKey), ...askGroups.flatMap((g) => g.items.map(askKey))];
+  useEffect(() => () => markShown(drawn.current), []);
+  const fresh = useMemo(() => {
+    // Before the first snapshot nothing is known to be gone.
+    const inboxKeys = synced ? inbox.map(seenKey) : [...before.current].filter((k) => !k.startsWith("ask:"));
+    // Held requests not read yet are not "gone".
+    const askKeys = asks.loaded ? asks.groups.flatMap((g) => g.items.map(askKey)) : [...before.current].filter((k) => k.startsWith("ask:"));
+    return unseenKeys([...inboxKeys, ...askKeys], before.current);
+  }, [inbox, synced, asks.groups, asks.loaded]);
+  useEffect(() => {
+    if (synced) pruneShown(inbox.map(seenKey));
+    if (synced && asks.loaded) pruneShown([...inbox.map(seenKey), ...asks.groups.flatMap((g) => g.items.map(askKey))], true);
+  }, [inbox, asks.groups, asks.loaded]);
   const sessionTitle = session === null ? null : (find(session)?.name || (find(session)?.goal ?? session));
 
   /* By session: the root each item's agent hangs under, with the session's
@@ -213,6 +232,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
         <PermissionAsks
           client={client}
           groups={askGroups}
+          fresh={fresh}
           onOpenRule={onOpenRule}
           onDone={() => {
             void asks.reload();
@@ -233,9 +253,9 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
             </header>
             {group.items.map((item) =>
               item.kind === "permission" ? (
-                <PermissionItemCard key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
+                <PermissionItemCard key={itemKey(item)} item={item} isNew={fresh.has(seenKey(item))} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
               ) : (
-              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} />
+              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(seenKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} />
               ),
             )}
           </section>
@@ -246,13 +266,15 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
 }
 
 /* One banner card. */
-function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo, onReview }: {
+function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone, onGo, onReview }: {
   item: InboxItemDTO;
   actions: ReturnType<typeof useInboxActions>;
   who: string | null;
   branch: string | null;
   sessionTitle: string | null;
   repo: string | null;
+  /* Not shown on this page before: marked "new" and briefly highlighted. */
+  isNew: boolean;
   onDone(): void;
   /* The agent in its session, nothing over it. */
   onGo?(): void;
@@ -324,9 +346,10 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo, 
   }
 
   return (
-    <article className={`${card} relative grid max-w-[960px] grid-cols-[minmax(0,1fr)_auto] items-start gap-x-s2 gap-y-1 py-[11px] pl-[18px] pr-[14px] before:absolute before:bottom-[10px] before:left-0 before:top-[10px] before:w-[2px] before:rounded-sm before:opacity-80 ${tone.bar}`} aria-label={kindLabel(item)} data-testid="inbox-card" data-kind={item.kind}>
-      <div className={`col-start-1 font-mono text-[10.5px] uppercase tracking-[0.06em] ${tone.ink}`}>
+    <article className={`${card} relative grid max-w-[960px] grid-cols-[minmax(0,1fr)_auto] items-start gap-x-s2 gap-y-1 py-[11px] pl-[18px] pr-[14px] before:absolute before:bottom-[10px] before:left-0 before:top-[10px] before:w-[2px] before:rounded-sm before:opacity-80 ${tone.bar} ${isNew ? "inbox-new" : ""}`} aria-label={kindLabel(item)} data-testid="inbox-card" data-kind={item.kind} data-new={isNew || undefined}>
+      <div className={`col-start-1 flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-[0.06em] ${tone.ink}`}>
         {KIND_SHORT[item.kind] ?? item.kind}
+        {isNew && <span className="rounded-full bg-sap px-1.5 text-[10px] font-semibold leading-4 text-on-sap" data-testid="new-mark">new</span>}
       </div>
       <div className="col-start-1 text-[13.5px] font-semibold leading-[1.35]">{describeItem(item)}</div>
       {body && <div className="col-start-1 min-w-0 text-[12.5px] leading-[1.45] text-ink-2">{body}</div>}

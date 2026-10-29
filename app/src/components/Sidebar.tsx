@@ -37,6 +37,7 @@ import { DaemonContext } from "../api/context";
 import type { OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
 import { readLastSession, routeSession, sameRoute, type Route, type SessionRef } from "../routes";
+import { pruneShown, seenKey } from "../screens/Inbox/items";
 import { goalPhase, useGoal } from "../screens/Session/GoalPanel";
 import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
@@ -494,6 +495,19 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
 function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
   const total = useAppState(waitingCount);
   const on = route.screen === "inbox";
+  // A count that rose since last drawn: the pill glows once (a new key restarts the animation).
+  // The sidebar is always there: an item that leaves the inbox while the page is closed is new when it returns.
+  const inbox = useAppState((s) => s.inbox);
+  const synced = useAppState((s) => s.synced);
+  useEffect(() => {
+    if (synced) pruneShown(inbox.map(seenKey));
+  }, [inbox, synced]);
+  const last = useRef(total);
+  const [pulse, setPulse] = useState(0);
+  useEffect(() => {
+    if (total > last.current) setPulse((p) => p + 1);
+    last.current = total;
+  }, [total]);
   return (
     <button
       type="button"
@@ -504,12 +518,10 @@ function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate"
     >
       <span className="flex-1">Inbox</span>
       {total > 0 ? (
-        <span className="side-nb" data-testid="inbox-badge" aria-label={`${total} needing you`}>
+        <span key={pulse} className="side-nb" data-pulse={pulse > 0 || undefined} data-testid="inbox-badge" aria-label={`${total} needing you`}>
           {total}
         </span>
-      ) : (
-        <span className="font-mono text-[11.5px] font-medium text-ink-3">empty</span>
-      )}
+      ) : null}
     </button>
   );
 }
