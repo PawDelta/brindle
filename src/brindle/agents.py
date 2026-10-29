@@ -3622,7 +3622,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                         # Nobody watches this pane: a prompt would stall the agent.
                         decision = permissions.Decision(
                             "deny", f"{decision.reason.removesuffix('; asking the user')}, and this profile "
-                            "never asks (permission_mode dontAsk). Don't retry it: do without it, or ask "
+                            "never asks (permission_mode dontAsk). Don't attempt it again: do without it, or ask "
                             "your supervisor with the send_message tool (brindle MCP server)")
             if review_only and decision.decision != "allow":
                 return None  # as Codex would without brindle: its own prompt or refusal
