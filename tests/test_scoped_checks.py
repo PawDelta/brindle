@@ -36,8 +36,13 @@ NARROWED = f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
      [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),
     ("infer", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1\n\n\ndef test_f", "return 2\n\n\ndef test_f")},
      [PYTEST]),   # graphify failed on unlooked()
-    ("infer", PYTEST, {"src/pkg/new.py": "def h():\n    return 0\n"}, [PYTEST]),   # not in the graph
-    pytest.param("infer", PYTEST, {"src/pkg/café.py": "X = 1\n"}, [PYTEST],
+    ("infer", PYTEST, {"src/pkg/new.py": "def h():\n    return 0\n",
+                       "tests/test_other.py": "from importlib import import_module as load\nload(name)\n"},
+     [PYTEST]),   # an unmapped module with an unresolved dynamic test import
+    ("infer", PYTEST, {"src/pkg/pro/status.py": "X = 1\n",
+                       "tests/test_other.py": "import pkg.pro.status\ndef test_new(): pass\n"},
+     [f"{PYTEST} tests/test_direct.py tests/test_from.py tests/test_member.py tests/test_other.py || [ $? -eq 5 ]"]),
+    pytest.param("infer", PYTEST, {"src/café.py": "X = 1\n"}, [PYTEST],
                  marks=pytest.mark.variant("git C-quotes a non-ASCII name without -z; it was once skipped")),
     ("infer", PYTEST, {"tests/conftest.py": "X = 2\n"}, [PYTEST]),
     ("infer", PYTEST, {"pyproject.toml": "[x]\n"}, [PYTEST]),
@@ -54,7 +59,7 @@ NARROWED = f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
      [f"{PYTEST} tests/test_g.py || [ $? -eq 5 ]"]),
     ("off", PYTEST, OTHER, [PYTEST]),
     ("supervisor", PYTEST, OTHER, [PYTEST]),
-], ids=["python-affected", "deleted-function", "test-helper", "lookup-failed", "fallback-unmapped", "quoted-name",
+], ids=["python-affected", "deleted-function", "test-helper", "lookup-failed", "fallback-unmapped", "unmapped-importers", "quoted-name",
         "fallback-conftest", "fallback-pyproject", "infer", "infer-options", "infer-selects", "other-command-changed_files_env", "empty-diff",
         "non-python-only", "non-python-plus-python", "lockfile", "unset-mode", "off", "supervisor"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran):
@@ -62,7 +67,12 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
     if where == "unset":
         del config["scoped_checks"]
     write(repo, {".brindle/config.json": json.dumps(config), "src/pkg/mod.py": MOD, "docs/guide.md": "doc\n",
+                 "src/pkg/__init__.py": "", "src/pkg/pro/__init__.py": "",
                  "app/src/view.ts": "export const v = 1\n", "tests/conftest.py": "X = 1\n",
+                 "tests/test_direct.py": "import pkg.pro.status\n__import__('pkg.pro.status')\n",
+                 "tests/test_from.py": "from pkg.pro import status\n",
+                 "tests/test_member.py": "from pkg.pro.status import X\n",
+                 "tests/test_unrelated.py": "from pkg.other import status\n",
                  "tests/test_f.py": TEST_F, "tests/test_g.py": "from test_f import helper\n"})
     sh("git add -A && git commit -qm base", repo)
     graph = tmp_path / "graph.json"

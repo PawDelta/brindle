@@ -18,7 +18,8 @@ left its base decide what runs:
   affected by them), and if none is left the check is skipped; the command
   runs on the test files the branch touched plus the
   tests ``graphify affected`` reaches from each changed symbol. A changed file
-  the graph can't map to a test runs the full suite instead.
+  the graph can't map is resolved through test imports of its module path;
+  an unresolved module or import runs the full suite instead.
 
 Every check on a worker's branch also gets ``BRINDLE_CHANGED_FILES`` (see
 ``changed_files``), so a script can narrow itself.
@@ -181,7 +182,9 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
     if not changed:
         return None
     tests = pytest_targets(ws, base, changed)
-    return f"{cmd} {_quoted(tests)} || [ $? -eq 5 ]" if tests else cmd   # 5: none of them selected
+    if tests is None:
+        return cmd
+    return f"{cmd} {_quoted(tests)} || [ $? -eq 5 ]" if tests else None   # 5: none of them selected
 
 
 def _quoted(files: list[str]) -> str:
@@ -196,7 +199,7 @@ def is_test_file(path: str) -> bool:
 def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | None:
     """The test files to run for a branch that changed ``files``: the test
     files among them, and those the code graph reaches from every changed
-    symbol; None when any changed file can't be mapped.
+    symbol, or imports of an unmapped source module; None when unresolved.
 
     A change inside a test function is covered by running its own file. Any
     other change to a test file (a helper, a fixture, an import) may reach the
@@ -207,17 +210,24 @@ def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | No
     if any(not f.endswith(".py") for f in files):
         return None
     graph = codemap.graph_path(ws)
-    if graph is None:
-        return None
-    nodes = _nodes_by_file(graph)
+    nodes = _nodes_by_file(graph) if graph else {}
     tests: set[str] = set()
     must_reach: set[str] = set()    # source symbols: one that reaches no test is unresolved
     optional: set[str] = set()
     for f in files:
         test = is_test_file(f)
         found = _changed_nodes(ws, base, f, nodes.get(f, []), skip_tests=test)
+        if test and not nodes.get(f):
+            tests.add(f)
+            continue
         if found is None or (not test and not found):
-            return None
+            imported = _importing_tests(Path(ws.path), f)
+            if imported is None:
+                return None
+            tests |= imported
+            if test:
+                tests.add(f)
+            continue
         if not test:
             must_reach |= found
             continue
@@ -234,7 +244,66 @@ def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | No
         if reached is None or (not reached and node_id in must_reach):
             return None
         tests |= reached
-    return sorted(t for t in tests if (Path(ws.path) / t).is_file()) or None
+    return sorted(t for t in tests if (Path(ws.path) / t).is_file())
+
+
+def _module_path(root: Path, path: str) -> str | None:
+    """Resolve a Python file through its package directories, independent of src layout."""
+    file = root / path
+    parts = [] if file.stem == "__init__" else [file.stem]
+    parent = file.parent
+    while parent != root and (parent / "__init__.py").is_file():
+        parts.insert(0, parent.name)
+        parent = parent.parent
+    if parent == file.parent or not file.is_file() or not all(p.isidentifier() for p in parts):
+        return None
+    return ".".join(parts)
+
+
+def _importing_tests(root: Path, path: str) -> set[str] | None:
+    """Find static test imports by full module path; uncertain imports require full checks."""
+    module = _module_path(root, path)
+    if module is None:
+        return None
+    tests: set[str] = set()
+    try:
+        paths = git.paths(["ls-files", "--cached", "--others", "--exclude-standard", "*.py"], str(root))
+        for test in paths:
+            if not is_test_file(test) or not (root / test).is_file():
+                continue
+            tree = ast.parse((root / test).read_text(encoding="utf-8"))
+            dynamic = {"__import__"}
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom) and node.module == "importlib":
+                    dynamic.update(n.asname or n.name for n in node.names if n.name == "import_module")
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and (
+                    isinstance(node.func, ast.Name) and node.func.id in dynamic
+                    or isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"
+                ):
+                    name = node.args[0] if node.args else next(
+                        (kw.value for kw in node.keywords if kw.arg == "name"), None)
+                    if not isinstance(name, ast.Constant) or not isinstance(name.value, str) or name.value.startswith("."):
+                        return None
+                    imports = [name.value]
+                elif isinstance(node, ast.Import):
+                    imports = [n.name for n in node.names]
+                elif isinstance(node, ast.ImportFrom):
+                    prefix = node.module or ""
+                    if node.level:
+                        owner = _module_path(root, test)
+                        if owner is None or node.level >= len(owner.split(".")):
+                            return None
+                        package = owner.split(".")[:-node.level]
+                        prefix = ".".join([*package, prefix]).rstrip(".")
+                    imports = [prefix, *(f"{prefix}.{n.name}" for n in node.names)]
+                else:
+                    continue
+                if any(name == module or name.startswith(module + ".") for name in imports):
+                    tests.add(test)
+    except (OSError, SyntaxError, ValueError, git.GitError):
+        return None
+    return tests
 
 
 def _nodes_by_file(graph: Path) -> dict[str, list[dict]]:
