@@ -1150,8 +1150,6 @@ class ProPolicy(PolicyPlugin):
         ent = self._team_entitlement()
         if ent is None:
             return allow()
-        from brindle import airgap
-
         try:
             from brindle.pro import status
 
@@ -1159,12 +1157,9 @@ class ProPolicy(PolicyPlugin):
             return status.narrow(current_policy(ent, self._client, self._store,
                                                 self.repo_root).enforced)
         except PolicyUnavailable as e:
-            if airgap.enabled():
-                return deny(f"air-gap mode: no usable offline team policy for org {ent.org_id} "
-                            f"({e}); put the org's policy (the schema `brindle account org policy` "
-                            f"shows, as JSON) at .brindle/{airgap.POLICY_FILE}")
-            return deny(f"brindle Pro team policy for org {ent.org_id} has never been fetched "
-                        f"({e}); connect to the network and run `brindle account org policy`")
+            from brindle.pro import org_context
+
+            return org_context.unavailable(ent.org_id, e)
 
     def org_budgets(self) -> OrgPolicy | Decision | None:
         """The org policy whose budgets and protected paths apply here: None
@@ -1207,12 +1202,14 @@ class ProPolicy(PolicyPlugin):
         p = self.policy()
         if isinstance(p, Decision):
             return p
-        from brindle.pro import rollout, status
+        from brindle.pro import rollout
+        from brindle.pro.org_context import OrgContext, Providers
 
         why = rollout.refusal(p) if rollout.entitled() else None
         if why:
             return deny(why)
-        why = status.block_reason(p)       # paused, or shut down remotely
+        ctx = OrgContext.resolve(repo_root=self.repo_root, providers=Providers(policy=lambda: p))
+        why = ctx.blocked_reason()       # paused, or shut down remotely
         if why:
             return deny(f"org {p.org_id}: {why}")
         who = f"profile {info.profile!r}" if info.profile else "this delegation"

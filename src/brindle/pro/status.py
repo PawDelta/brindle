@@ -224,20 +224,10 @@ def shutdown_control(now: float | None = None, saved: Saved | None = None) -> di
 
 
 def pause_reason(saved: Saved | None = None) -> str | None:
-    saved = saved or load()
-    why = saved.status.paused_reason
-    if not saved.status.paused:
-        # The cached effective policy says so too (it follows policy_version).
-        try:
-            from brindle.pro import team_policy
+    """brindle.pro.org_context.pause_reason for ``saved`` (default: the saved status)."""
+    from brindle.pro import org_context
 
-            cached = team_policy.load_cached(saved.org_id) if saved.org_id else None
-        except Exception:  # noqa: BLE001
-            cached = None
-        if cached is None or not cached.enforced.paused:
-            return None
-        why = cached.enforced.paused_reason
-    return f"paused by your org{': ' + why if why else ''} (ask an org admin to resume you)"
+    return org_context.pause_reason(saved or load())
 
 
 def shutdown_reason(c: dict) -> str:
@@ -247,19 +237,11 @@ def shutdown_reason(c: dict) -> str:
 def block_reason(p=None, now: float | None = None) -> str | None:
     """Why no new worker or reviewer may start: the member is paused or their
     org shut brindle down remotely. ``p`` is the policy being enforced (its
-    ``paused`` counts too). None when nothing blocks."""
-    try:
-        saved = load()
-        if p is not None and getattr(p, "paused", False):
-            why = getattr(p, "paused_reason", None)
-            return f"paused by your org{': ' + why if why else ''} (ask an org admin to resume you)"
-        c = shutdown_control(now, saved)
-        if c:
-            return shutdown_reason(c)
-        return pause_reason(saved)
-    except Exception:  # noqa: BLE001 - a broken status file must not stop all work
-        log.warning("brindle: couldn't read the org status", exc_info=True)
-        return None
+    ``paused`` counts too). None when nothing blocks
+    (brindle.pro.org_context.blocked)."""
+    from brindle.pro import org_context
+
+    return org_context.blocked(p, load, now)
 
 
 def _tighter(a, b):
