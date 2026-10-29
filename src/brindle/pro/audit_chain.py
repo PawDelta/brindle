@@ -584,10 +584,14 @@ class AuditChain(EventsPlugin):
         try:
             if not self.entitled():
                 return
-            append(event.repo_root or self.repo_root, event_record(event), home=self.home)
+            rec = append(event.repo_root or self.repo_root, event_record(event), home=self.home)
         except Exception:  # noqa: BLE001 - never fail the operation being reported
             self.dropped += 1
             log.warning("brindle: couldn't append to the audit chain", exc_info=True)
+            return
+        from brindle.pro import audit_stream
+
+        audit_stream.send(rec, self.home)         # audit streaming; never raises
 
 
 def make(repo_root: str) -> AuditChain:
