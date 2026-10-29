@@ -22,7 +22,6 @@ from __future__ import annotations
 import base64
 import contextlib
 import contextvars
-import hashlib
 import json
 import os
 import re
@@ -310,10 +309,6 @@ def _locked():
                 os.close(fd)     # closing drops the flock
 
 
-def value_digest(value: str) -> str:
-    return hashlib.sha256(value.encode()).hexdigest()
-
-
 def set_key(name: str, value: str, repo_root: str | None = None, status: str | None = None) -> None:
     """Keep ``value``; with ``status``, its check result is saved in the same write."""
     check_name(name, repo_root)
@@ -323,7 +318,7 @@ def set_key(name: str, value: str, repo_root: str | None = None, status: str | N
     now = time.time()
     rec = {"value": value, "updated_at": now}
     if status:
-        rec.update(status=status, checked_at=now, checked_for=value_digest(value))
+        rec.update(status=status, checked_at=now)
     with _locked():
         _key_store(name).save(rec)
 
@@ -379,7 +374,7 @@ def set_check(name: str, status: str, value: str) -> bool:
         rec = store.load()
         if not rec or rec.get("value") != value:
             return False
-        store.save({**rec, "status": status, "checked_at": time.time(), "checked_for": value_digest(value)})
+        store.save({**rec, "status": status, "checked_at": time.time()})
         return True
 
 
