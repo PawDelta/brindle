@@ -55,7 +55,7 @@ export const TIERS: Tier[] = [
     audience: "No account needed.",
     lead: "All of brindle",
     features: [
-      { what: "Parallel agents and autopilot" },
+      { what: "Parallel agents and verified goals" },
       { what: "Merges only after review and checks pass" },
       { what: "Claude Code, Codex, Antigravity and open-weight models" },
       { what: "No limit on agents, workers or sessions" },

@@ -26,6 +26,26 @@ def root(db, repo):
     return workspaces.adopt_root(db, str(repo))
 
 
+@pytest.mark.variant("live legacy --no-autopilot sessions have no driver row")
+def test_continue_backfills_a_live_legacy_root_without_enabling_workers(db, root, monkeypatch):
+    from brindle import autopilot
+    from brindle.service import sessions as service
+
+    boss = add(db, root, "boss", status="idle")
+    add(db, root, "w1", mode="assign", parent="boss", status="idle")
+    monkeypatch.setattr(agents, "find_running", lambda *a, **k: boss)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    assert db.conn.execute("SELECT root_id FROM autopilot").fetchall() == []
+
+    continued = service.continue_(db, root)
+
+    assert continued.root.id == boss.id
+    assert [r[0] for r in db.conn.execute("SELECT root_id FROM autopilot")] == [boss.id]
+    assert db.get_autopilot(boss.id).state == "running"
+    assert autopilot.goal_reminder(db, boss.id) is not None
+    assert db.get_autopilot("w1") is None
+
+
 @pytest.mark.parametrize("own_dirty", [False, True])
 def test_forget_removes_clean_worktrees_keeps_dirty_ones_and_all_branches_and_own_worktree(
     db, root, repo, own_dirty
@@ -64,6 +84,7 @@ def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, 
     add(db, root, "w1", mode="assign", parent="boss")
     add(db, root, "w2", mode="assign", parent="boss", status="done", result="ok")
     agents.resume(db, "boss")
+    assert db.get_autopilot("boss").enabled
     assert [a for a, _ in launched] == ["boss", "w1"]  # finished workers stay done
     assert launched[0][1]["resume"] == "sess-boss" and launched[0][1]["prompt"] is None
     assert launched[0][1]["watch_pane"] and not launched[1][1]["watch_pane"]
@@ -166,6 +187,7 @@ def test_resume_rebuilds_worker_decoration_when_the_session_cant_be_resumed(db, 
     launched = []
     monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append(kw))
     agents.resume(db, "w1")
+    assert db.get_autopilot("w1") is None
     prompt = launched[0]["prompt"]
     assert prompt.startswith("/goal Finish line: tests/test_x.py passes")
     assert "report_result" in prompt  # WORKER_FOOTER

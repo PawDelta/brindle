@@ -32,6 +32,8 @@ export interface Readiness {
 
 export const UNKNOWN: Readiness = { state: "unknown", reasons: [], pr: null };
 
+export const isGoalActivity = (e: BusEvent): boolean => e.kind.startsWith("autopilot.");
+
 /* A bus event after which the session's readiness is read again. */
 export function concernsReadiness(e: BusEvent, root: string): boolean {
   if (e.root_id !== null && e.root_id !== root && e.agent_id !== root) return false;
