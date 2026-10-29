@@ -117,8 +117,11 @@ In short, an operator:
 
 1. creates a second Ed25519 key in KMS;
 2. sets `BRINDLE_KMS_STANDBY_KEY_ID` on the server;
-3. takes the key's public key (raw 32 bytes) and its RFC 7638 thumbprint, which
-   is the `kid`, and puts them in `STANDBY_KID` and `STANDBY_KEY`;
+3. takes the key's raw 32-byte public key, base64url-encoded, and computes its
+   RFC 7638 thumbprint from that value. It then sets:
+   - `STANDBY_KID` to the thumbprint;
+   - `STANDBY_KEY` to the same 32 public-key bytes, hex-encoded (the form
+     `keys.py` and the verifier read);
 4. ships that in a release before the key is ever needed.
 
 A revocation is issued by the standby key: a `brindle-revocation+jwt` token

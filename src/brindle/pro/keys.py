@@ -28,9 +28,7 @@ Pinning the standby key (an operator, before any release that needs it):
    thumbprint of that value is the ``kid``. Set ``STANDBY_KID`` to the
    thumbprint and ``STANDBY_KEY`` to the same 32 bytes hex-encoded, as the
    verifier reads them.
-4. Ship that in a release before the key is ever needed. A client only trusts
-   a ``kid`` it was built with, so a key pinned later does not help clients
-   already in the field.
+4. Ship that in a release before the key is ever needed.
 
 Revoking the active key: the standby key signs a ``brindle-revocation+jwt``
 token naming the active ``kid`` in ``revoked_kid``. The backend serves
