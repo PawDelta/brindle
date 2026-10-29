@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { DaemonClient } from "../api/client";
 import { DaemonContext } from "../api/context";
 import type { GoalDTO, InboxItemDTO, SessionDTO } from "../api/schema";
@@ -11,6 +11,7 @@ import { StoreContext } from "../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN, type DaemonData } from "../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../test/fixtures";
 import { PAUSED_KEY, SPLIT_KEY, Sidebar } from "./Sidebar";
+import { sidebarChanges } from "./SessionContext";
 
 beforeEach(() => localStorage.clear());
 afterEach(cleanup);
@@ -182,6 +183,10 @@ describe("Sidebar", () => {
   });
 
   it("shows the session's changes in one coloured line that toggles them in the chat's place", async () => {
+    sidebarChanges.shown = true;
+    onTestFinished(() => {
+      sidebarChanges.shown = false;
+    });
     const onSession: Route = { screen: "session", root: "sup1", repo: REPO, agent: "w1" };
     const changed = {
       workspaces: [root, worker],
