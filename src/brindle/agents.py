@@ -648,29 +648,39 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     from brindle import inbox
 
     argv = inbox.without_launcher_inbox(argv)
-    tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
-    env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
-    with secrets.org_key(org_env):
-        target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
-                                 tag=(AGENT_TAG, agent.id),
-                                 keep=credentials,
-                                 **({"allow": allow} if allow is not None else {}),
-                                 **({"deny": deny} if deny else {}))
-    agent.__dict__.pop("_pane_environment", None)
-    # The pane id only means anything on the server that issued it (a
-    # resumed agent may come back on a different one), so record both.
-    server = tmux.current_server()
-    db.update_agent(agent.id, tmux_window=target, tmux_server=server)
-    agent.tmux_window, agent.tmux_server = target, server
-    if get_provider(agent.provider).startup_prompts and not agent.headless:
-        from brindle import prompt_answer
-
-        prompt_answer.launched(db, agent)
+    # The sidebar splits the window after the CLI's pane exists: hold the CLI
+    # until then, or a resumed chat drew its conversation at the full width
+    # and was resized under it, which Claude Code shows as a blank screen (#264).
+    gate = None
     if watch_pane:
-        try:
-            _ensure_sidebar(db, root_of(db, agent.id), ws, target)
-        except Exception:
-            pass
+        argv, gate = tmux.gated(argv)
+    tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
+    try:
+        env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
+        with secrets.org_key(org_env):
+            target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
+                                     tag=(AGENT_TAG, agent.id),
+                                     keep=credentials,
+                                     **({"allow": allow} if allow is not None else {}),
+                                     **({"deny": deny} if deny else {}))
+        agent.__dict__.pop("_pane_environment", None)
+        # The pane id only means anything on the server that issued it (a
+        # resumed agent may come back on a different one), so record both.
+        server = tmux.current_server()
+        db.update_agent(agent.id, tmux_window=target, tmux_server=server)
+        agent.tmux_window, agent.tmux_server = target, server
+        if get_provider(agent.provider).startup_prompts and not agent.headless:
+            from brindle import prompt_answer
+
+            prompt_answer.launched(db, agent)
+        if watch_pane:
+            try:
+                _ensure_sidebar(db, root_of(db, agent.id), ws, target)
+            except Exception:
+                pass
+    finally:
+        if gate:
+            tmux.open_gate(gate)
     tmux.apply_theme(ws.tmux_session)
     return target
 

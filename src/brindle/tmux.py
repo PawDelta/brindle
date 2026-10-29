@@ -7,6 +7,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -121,14 +122,47 @@ def has_session(session: str) -> bool:
     return _tmux("has-session", "-t", f"={session}", check=False).returncode == 0
 
 
+def terminal_size() -> tuple[int, int] | None:
+    """This process's terminal (columns, rows), the size a client attached
+    from it has. None without a terminal (the daemon, a helper, the MCP
+    server), or from inside tmux, where the terminal is a pane and not the
+    client's size."""
+    if os.environ.get("TMUX"):
+        return None
+    try:
+        cols, rows = os.get_terminal_size(sys.__stdout__.fileno())
+    except (AttributeError, OSError, ValueError):
+        return None
+    return (cols, rows) if cols > 0 and rows > 0 else None
+
+
+def status_lines(session: str) -> int:
+    """How many rows ``session``'s status line takes from a client's: its
+    ``status`` option as it applies there (the person's config can turn it
+    off or make it taller)."""
+    status = _tmux("display-message", "-p", "-t", f"={session}:", "#{status}", check=False).stdout.strip()
+    return 0 if status == "off" else int(status) if status.isdigit() else 1
+
+
 def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
-    """Create a detached session whose first window is a plain shell."""
+    """Create a detached session whose first window is a plain shell, sized
+    for the terminal that will attach to it (see terminal_size): its new
+    windows start at the size that terminal shows them at, its rows less
+    the session's status line, so a chat draws once at the size it's seen
+    at. Detached sessions are otherwise 80x24, and attaching resized a chat
+    that had already drawn: Claude Code resuming a conversation went blank."""
     if has_session(session):
         for k, v in env.items():
             _tmux("set-environment", "-t", f"={session}", k, v, check=False)
         return
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
-    _tmux("new-session", "-d", "-s", session, "-n", "shell", "-c", cwd, *env_args)
+    size = terminal_size()
+    size_args = ["-x", str(size[0]), "-y", str(size[1])] if size else []
+    _tmux("new-session", "-d", "-s", session, "-n", "shell", "-c", cwd, *size_args, *env_args)
+    if size:
+        # Known only now: the server (and the person's config) may have just started.
+        rows = max(size[1] - status_lines(session), 1)
+        _tmux("set-option", "-t", session, "default-size", f"{size[0]}x{rows}", check=False)
 
 
 # tmux refuses a command over its message size (about 16 KB) with "command
@@ -249,6 +283,20 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     # Keep the agent's pane around after it exits so its output can be read.
     _tmux("set-option", "-p", "-t", target, "remain-on-exit", "on", check=False)
     return target
+
+
+def gated(command: list[str]) -> tuple[list[str], str]:
+    """``command`` held back until open_gate is called with the channel
+    returned alongside it: a window's layout (the sidebar split beside it)
+    is settled first, so the program draws once, at the size it stays.
+    tmux remembers a signal sent before the wait, so the order never hangs."""
+    channel = f"brindle-layout-{uuid.uuid4().hex}"
+    wait = shlex.join([shutil.which(_bin()) or _bin(), *_base()[1:], "wait-for"])
+    return ["/bin/sh", "-c", f'{wait} "$0" 2>/dev/null; exec "$@"', channel, *command], channel
+
+
+def open_gate(channel: str) -> None:
+    _tmux("wait-for", "-S", channel, check=False)
 
 
 def windows(session: str) -> list[str]:
