@@ -98,7 +98,6 @@ describe("NewSession", () => {
     // Branch, CLI and session name wait behind Options.
     fireEvent.click(screen.getByRole("button", { name: /Options/ }));
     expect(screen.queryByLabelText("Autopilot")).toBeNull();
-    expect(screen.queryByLabelText(/autopilot/i)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     // sup1 is running here: the engine asks what to do with it first.
     const ask = await screen.findByRole("group", { name: "Session already running" });

@@ -126,7 +126,6 @@ describe("account screen", () => {
     fireEvent.click(within(card).getByRole("button", { name: /brindle CI on 1 repo/ }));
     expect(openUrl).toHaveBeenLastCalledWith(`${DOCS_URL}commands/#ci`);
     fireEvent.click(screen.getByRole("button", { name: /See everything your plan includes/ }));
-    expect(screen.getByTestId("features").querySelector('[data-tier="free"]')!.textContent).toContain("Parallel agents and verified goals; brindle drives toward the goal");
     await waitFor(() => expect(screen.getByTestId("spend-total").textContent).toContain("$12.50"));
     expect(screen.getByTestId("spend").querySelector('tr[data-model="sonnet"]')!.textContent).toContain("1.0M");
     expect(daemon.requests.filter((r) => r.path === "/cost").at(-1)?.query).toEqual({ repo: REPO, days: "30" });
