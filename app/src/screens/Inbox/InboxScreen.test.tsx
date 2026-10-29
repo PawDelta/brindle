@@ -205,7 +205,11 @@ describe("inbox", () => {
     const { sync } = mount(daemon);
     const prompt = await screen.findByTestId("approver-prompt");
     expect(prompt.textContent).toContain("ana@example.test");
-    expect(within(card("plan")).getByRole("button", { name: "Approve" })).toBeTruthy();
+    const approve = await within(card("plan")).findByRole("button", { name: "Approve" });
+    expect(approve).toBeTruthy();
+    fireEvent.click(approve);
+    await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/w1/approve", query: {}, body: { feedback: "" } }]));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Approve" })).toBeNull());
     daemon.data.inbox = [{ ...plan, approval: { approvers: ["lee@example.test", "kim@example.test"], you: false } }];
     daemon.publish("message.queued", { agent_id: "w1" });
     await waitFor(() => expect(within(card("plan")).queryByRole("button", { name: "Approve" })).toBeNull());
