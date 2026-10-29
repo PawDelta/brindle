@@ -222,6 +222,10 @@ export const markShown = (keys: Iterable<string>): void => {
 /* A held permission request, told apart within its group. */
 export const askKey = (a: { agent_id: string; request_id: string }) => `ask:${a.agent_id}:${a.request_id}`;
 
+/* What "new" is told by: a permission request by its own identity (the one a group holds
+   has the same), anything else by itemKey. */
+export const seenKey = (item: InboxItemDTO) => (item.kind === "permission" && item.agent_id && item.permission?.request_id ? askKey({ agent_id: item.agent_id, request_id: item.permission.request_id }) : itemKey(item));
+
 /* Forget shown keys no longer live, so a returning one counts as new. `asks`
    picks which kind: askKey's, or the inbox items'. */
 export function pruneShown(live: Iterable<string>, asks = false): void {

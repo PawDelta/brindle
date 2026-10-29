@@ -48,7 +48,7 @@ import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
 import { ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
-import { FIXES, KIND_SHORT, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, pruneShown, seenAt, shownKeys, unseenKeys } from "./items";
+import { FIXES, KIND_SHORT, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
 import { useInboxActions } from "./useInboxActions";
 
 export interface InboxScreenProps {
@@ -128,18 +128,18 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
      view drew is marked shown on leaving (not other sessions' items a filter hid). */
   const before = useRef(shownKeys());
   const drawn = useRef<string[]>([]);
-  drawn.current = [...here.map(itemKey), ...askGroups.flatMap((g) => g.items.map(askKey))];
+  drawn.current = [...here.map(seenKey), ...askGroups.flatMap((g) => g.items.map(askKey))];
   useEffect(() => () => markShown(drawn.current), []);
   const fresh = useMemo(() => {
     // Before the first snapshot nothing is known to be gone.
-    const inboxKeys = synced ? inbox.map(itemKey) : [...before.current].filter((k) => !k.startsWith("ask:"));
+    const inboxKeys = synced ? inbox.map(seenKey) : [...before.current].filter((k) => !k.startsWith("ask:"));
     // Held requests not read yet are not "gone".
     const askKeys = asks.loaded ? asks.groups.flatMap((g) => g.items.map(askKey)) : [...before.current].filter((k) => k.startsWith("ask:"));
     return unseenKeys([...inboxKeys, ...askKeys], before.current);
   }, [inbox, synced, asks.groups, asks.loaded]);
   useEffect(() => {
-    if (synced) pruneShown(inbox.map(itemKey));
-    if (asks.loaded) pruneShown(asks.groups.flatMap((g) => g.items.map(askKey)), true);
+    if (synced) pruneShown(inbox.map(seenKey));
+    if (synced && asks.loaded) pruneShown([...inbox.map(seenKey), ...asks.groups.flatMap((g) => g.items.map(askKey))], true);
   }, [inbox, asks.groups, asks.loaded]);
   const sessionTitle = session === null ? null : (find(session)?.name || (find(session)?.goal ?? session));
 
@@ -253,9 +253,9 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
             </header>
             {group.items.map((item) =>
               item.kind === "permission" ? (
-                <PermissionItemCard key={itemKey(item)} item={item} isNew={fresh.has(itemKey(item))} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
+                <PermissionItemCard key={itemKey(item)} item={item} isNew={fresh.has(seenKey(item))} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
               ) : (
-              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(itemKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} />
+              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(seenKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} />
               ),
             )}
           </section>

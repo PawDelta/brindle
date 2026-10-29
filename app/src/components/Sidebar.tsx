@@ -37,7 +37,7 @@ import { DaemonContext } from "../api/context";
 import type { OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
 import { readLastSession, routeSession, sameRoute, type Route, type SessionRef } from "../routes";
-import { itemKey, pruneShown } from "../screens/Inbox/items";
+import { pruneShown, seenKey } from "../screens/Inbox/items";
 import { goalPhase, useGoal } from "../screens/Session/GoalPanel";
 import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
@@ -500,7 +500,7 @@ function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate"
   const inbox = useAppState((s) => s.inbox);
   const synced = useAppState((s) => s.synced);
   useEffect(() => {
-    if (synced) pruneShown(inbox.map(itemKey));
+    if (synced) pruneShown(inbox.map(seenKey));
   }, [inbox, synced]);
   const last = useRef(total);
   const [pulse, setPulse] = useState(0);
