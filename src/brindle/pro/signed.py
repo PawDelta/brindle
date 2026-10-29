@@ -251,8 +251,12 @@ def verify(token: str, typ: str, expect: dict, *, now: float | None = None,
         verify(claims.get("policy_token"), "policy",
                {"org_id": claims.get("org_id"), "sub": claims.get("sub")}, now=now, body=body)
     elif body is not None:
-        covered = document_sha256(claims["document"]) if "document" in claims else claims.get("document_sha256")
-        if claims.get("doc_type") != typ or covered != document_sha256(body):
+        try:
+            covered = document_sha256(claims["document"]) if "document" in claims else claims.get("document_sha256")
+            matches = claims.get("doc_type") == typ and covered == document_sha256(body)
+        except (TypeError, ValueError):   # a body with no canonical form (UnicodeEncodeError is a ValueError)
+            matches = False
+        if not matches:
             raise ClaimMismatch(f"{typ} does not cover the document it came with")
     return claims
 

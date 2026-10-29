@@ -28,6 +28,7 @@ import json
 import os
 import stat
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -147,23 +148,38 @@ def _check(kind: str, response, binding: Binding, now: float, floor: tuple | Non
     return claims, body, mark
 
 
-def _keep(d: Path, kind: str, org_id: str, response: dict, mark: tuple) -> None:
-    """Store ``response`` and raise the org's floor to ``mark``, unless a
-    newer copy was stored meanwhile."""
+@contextmanager
+def _locked(d: Path):
+    """Every read and write of a kind's copy and the floors, across processes
+    and threads. Never held while fetching."""
     fd = os.open(d / ".lock", os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        floors = _floors(d)
-        current = _floor(floors, org_id, kind)
-        if current is not None and mark < current:
-            return
-        write_private(d / f"{kind}.json", json.dumps(response).encode())
-        if not isinstance(floors.get(org_id), dict):
-            floors[org_id] = {}
-        floors[org_id][kind] = list(mark)
-        write_private(d / FLOORS_FILE, json.dumps(floors).encode())
+        yield
     finally:
         os.close(fd)   # releases the lock
+
+
+def _raise_floor(d: Path, floors: dict, org_id: str, kind: str, mark: tuple) -> None:
+    if not isinstance(floors.get(org_id), dict):
+        floors[org_id] = {}
+    floors[org_id][kind] = list(mark)
+    write_private(d / FLOORS_FILE, json.dumps(floors).encode())
+
+
+def _stored(d: Path, kind: str, binding: Binding, now: float) -> VerifiedCopy | None:
+    """The stored copy once it verifies, raising the org's floor to it; None
+    when there is none. Raises :class:`signed.Expired` or :class:`_Unusable`.
+    Call under :func:`_locked`."""
+    floors = _floors(d)
+    floor = _floor(floors, binding.org_id, kind)
+    cached = _read_json(d / f"{kind}.json")
+    if cached is None:
+        return None
+    claims, body, mark = _check(kind, cached, binding, now, floor)
+    if floor is None or mark > floor:
+        _raise_floor(d, floors, binding.org_id, kind, mark)
+    return VerifiedCopy(kind, claims, body, "cache")
 
 
 def get_verified(kind: str, *, binding: Binding, fetch: Callable[[str], dict],
@@ -172,18 +188,19 @@ def get_verified(kind: str, *, binding: Binding, fetch: Callable[[str], dict],
     verified now. The stored copy is used when it verifies; otherwise
     ``fetch(kind)`` (the decoded answer of ``GET /orgs/{org_id}/<kind>``,
     raising when brindle Pro can't be reached) is called once, and its answer
-    is stored and used when it verifies. ``home`` is brindle's home."""
+    is stored and used when it verifies and nothing newer was verified while
+    it was fetched (then the newer stored copy is used). ``home`` is
+    brindle's home."""
     if kind not in KINDS:
         raise ValueError(f"unknown signed document kind {kind!r}")
     now = time.time() if now is None else now
     what, org = f"signed {kind}", binding.org_id
     d = _dir(home)
-    floor = _floor(_floors(d), org, kind)
     try:
-        cached = _read_json(d / f"{kind}.json")
-        if cached is not None:
-            claims, body, _ = _check(kind, cached, binding, now, floor)
-            return VerifiedCopy(kind, claims, body, "cache")
+        with _locked(d):
+            copy = _stored(d, kind, binding, now)
+        if copy is not None:
+            return copy
         problem = None
     except signed.Expired:
         problem = "it has expired"
@@ -197,12 +214,24 @@ def get_verified(kind: str, *, binding: Binding, fetch: Callable[[str], dict],
         return Unavailable(f"{saved} and brindle Pro couldn't be reached for a fresh one. "
                            "Connect to the network and run the command again.")
     try:
-        claims, body, mark = _check(kind, response, binding, now, floor)
+        claims, body, mark = _check(kind, response, binding, now, None)
     except signed.Expired:
         return Unavailable(f"brindle Pro sent a {what} for org {org} that has already expired. "
                            "Check this machine's clock, then run the command again.")
     except _Unusable as e:
         return Unavailable(f"brindle Pro sent a {what} for org {org} that brindle can't use ({e}). "
                            "Log in again with `brindle account login`, then run the command again.")
-    _keep(d, kind, org, response, mark)
+    with _locked(d):
+        floors = _floors(d)
+        floor = _floor(floors, org, kind)
+        if floor is not None and mark < floor:
+            try:
+                copy = _stored(d, kind, binding, now)
+            except (signed.Expired, _Unusable):
+                copy = None
+            return copy or Unavailable(
+                f"brindle Pro sent a {what} for org {org} older than the one brindle last verified. "
+                "Run the command again in a minute.")
+        write_private(d / f"{kind}.json", json.dumps(response).encode())
+        _raise_floor(d, floors, org, kind, mark)
     return VerifiedCopy(kind, claims, body, "server")
