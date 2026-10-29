@@ -349,7 +349,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     <article className={`${card} relative grid max-w-[960px] grid-cols-[minmax(0,1fr)_auto] items-start gap-x-s2 gap-y-1 py-[11px] pl-[18px] pr-[14px] before:absolute before:bottom-[10px] before:left-0 before:top-[10px] before:w-[2px] before:rounded-sm before:opacity-80 ${tone.bar} ${isNew ? "inbox-new" : ""}`} aria-label={kindLabel(item)} data-testid="inbox-card" data-kind={item.kind} data-new={isNew || undefined}>
       <div className={`col-start-1 flex items-center gap-1.5 font-mono text-[10.5px] uppercase tracking-[0.06em] ${tone.ink}`}>
         {KIND_SHORT[item.kind] ?? item.kind}
-        {isNew && <span className="rounded-full bg-sap px-1.5 text-[10px] font-semibold leading-4 text-on-sap" data-testid="new-mark">new</span>}
+        {isNew && <span className="rounded-full bg-sap px-1.5 text-[10px] normal-case tracking-normal font-semibold leading-4 text-on-sap" data-testid="new-mark">new</span>}
       </div>
       <div className="col-start-1 text-[13.5px] font-semibold leading-[1.35]">{describeItem(item)}</div>
       {body && <div className="col-start-1 min-w-0 text-[12.5px] leading-[1.45] text-ink-2">{body}</div>}
