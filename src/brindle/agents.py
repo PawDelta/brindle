@@ -2690,10 +2690,13 @@ def delegate(
         raise AgentError(str(e)) from e
     from brindle import plan_policy
     from brindle import tasks as task_mod
-    from brindle.plan_policy import PlanTask, needs_plan
+    from brindle.plan_policy import PlanTask
+    from brindle.pro.org_context import OrgContext, Providers
 
+    ctx = OrgContext.resolve(repo_root=caller_ws.repo_root, providers=Providers(
+        plan_rules=lambda: plan_policy.load_org_rules(caller_ws.repo_root)))
     try:
-        org_rules = plan_policy.load_org_rules(caller_ws.repo_root)
+        org_rules = ctx.plan_rules
     except plan_policy.OrgRulesUnavailable as e:
         raise AgentError(str(e)) from e
     own = repos.own_root(db, pilot.root_of(db, caller.id)) if caller else None
@@ -2703,7 +2706,7 @@ def delegate(
                          cross_repo=(bool(own) and own != caller_ws.repo_root)
                          or any(r != caller_ws.repo_root for r in dep_repos))
     if plan_first is None:
-        plan_first = needs_plan(plan_task, config=load_repo_config(caller_ws.repo_root), org_rules=org_rules)
+        plan_first = ctx.needs_plan(plan_task, config=load_repo_config(caller_ws.repo_root))
     elif not plan_first:
         plan_first = plan_policy.org_requires_plan(plan_task, org_rules)  # an explicit False can't waive the org's
     from brindle import identity_lock

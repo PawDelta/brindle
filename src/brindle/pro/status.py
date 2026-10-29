@@ -214,7 +214,7 @@ def _context(now: float | None = None, saved: Saved | None = None):
     """An org context at ``now`` whose status is ``saved`` (default: :func:`load`)."""
     from brindle.pro.org_context import OrgContext, Providers
 
-    return OrgContext.resolve(now=now, providers=Providers(status=(lambda: saved) if saved else load))
+    return OrgContext.resolve(now=now, providers=Providers(status=(lambda: saved) if saved else None))
 
 
 def shutdown_control(now: float | None = None, saved: Saved | None = None) -> dict | None:
@@ -237,7 +237,8 @@ def block_reason(p=None, now: float | None = None) -> str | None:
     org shut brindle down remotely. ``p`` is the policy being enforced (its
     ``paused`` counts too). None when nothing blocks
     (brindle.pro.org_context.OrgContext.blocked_reason)."""
-    return _context(now).blocked_reason(p)
+    ctx = _context(now)
+    return ctx.blocked_reason(p) if p is not None else ctx.blocked_reason()
 
 
 def narrow(p, now: float | None = None):

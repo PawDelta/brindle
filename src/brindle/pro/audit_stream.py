@@ -190,6 +190,9 @@ def otlp_body(record: dict) -> dict:
 
 def deliver(target: dict, record: dict) -> None:
     """Send one record over the real network; raises when it can't."""
+    from brindle import airgap
+
+    airgap.guard(target.get("url"), "audit stream")
     if target["kind"] == "syslog":
         url = urllib.parse.urlsplit(target["url"])
         if url.scheme not in ("udp", "tcp") or not url.hostname:

@@ -86,7 +86,7 @@ def governance_status() -> GovernanceStatusDTO:
              "enterprise_admin": admin}
     if blocked := ctx.blocked_reason():
         return GovernanceStatusDTO(status="problem", problem=blocked, action=_FIX.get(source, _FIX_OTHER), **found)
-    if org_id is None or policy_cache.get_verified(org_id) is None:
+    if org_id is None or not ctx.verified:
         return GovernanceStatusDTO(status="problem", problem=_UNVERIFIED[0], action=_UNVERIFIED[1], **found)
     return GovernanceStatusDTO(status="managed", verified=True, **found)
 

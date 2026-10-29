@@ -23,7 +23,8 @@ class Invalid:
 
 def fake_org(monkeypatch, *, source, blocked=None, managed=None, verified=True):
     """brindle.pro.org_context, .managed and .policy_cache as they will answer."""
-    ctx = SimpleNamespace(source=lambda: source, blocked_reason=lambda: blocked, org_name="Acme", org_id=ORG)
+    ctx = SimpleNamespace(source=lambda: source, blocked_reason=lambda: blocked, org_name="Acme", org_id=ORG,
+                          verified=verified)
     modules = {"org_context": SimpleNamespace(OrgContext=SimpleNamespace(resolve=lambda: ctx)),
                "managed": SimpleNamespace(load=lambda: managed, Invalid=Invalid),
                "policy_cache": SimpleNamespace(get_verified=lambda org_id: {"org_id": org_id} if verified else None)}

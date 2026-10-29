@@ -1155,18 +1155,25 @@ def load_offline(repo_root: str | None, org_id: str) -> OrgPolicy:
         body = json.loads(raw)
     except ValueError as e:
         raise PolicyUnavailable(f"{path} is not valid JSON") from e
-    if isinstance(body, dict) and "token" in body:
+    airgap.check_local_policy(signed=isinstance(body, dict) and "token" in body)
+    export = body if isinstance(body, dict) and "token" in body else None
+    if export is not None:
         token, body = body.get("token"), body.get("body")
         if not isinstance(token, str) or not isinstance(body, dict):
             raise PolicyUnavailable(f"{path} is a malformed offline policy export")
         try:
-            signed.verify(token, "offline-policy", {"org_id": org_id}, body=body)
+            from brindle.pro.org_context import active
+
+            ctx = active()
+            signed.verify(token, "offline-policy", {"org_id": org_id}, body=body,
+                          now=ctx.now if ctx is not None else None)
         except signed.SignedError as e:
             raise PolicyUnavailable(f"the offline policy export at {path} doesn't verify: {e}") from e
     else:
         log.warning("the offline policy at %s is unsigned; `brindle account org policy --export` "
                     "writes a signed one", path)
-    return parse_policy(org_id, body, time.time())
+    p = parse_policy(org_id, body, time.time())
+    return replace(p, raw_body=export) if export is not None else p
 
 
 def current_policy(ent, client=None, store=None, repo_root: str | None = None, cached=None) -> OrgPolicy:
@@ -1215,18 +1222,19 @@ class ProPolicy(PolicyPlugin):
         from brindle.pro import org_context
 
         ctx = org_context.active() or org_context.OrgContext.resolve(repo_root=self.repo_root)
-        return ctx.read_policy(self.repo_root, store=self._store, client=self._client,
-                               entitlement=self._entitlement)
+        with ctx.activated():
+            return ctx.read_policy(self.repo_root, store=self._store, client=self._client,
+                                   entitlement=self._entitlement)
 
     def org_budgets(self) -> OrgPolicy | Decision | None:
         """The org policy whose budgets and protected paths apply here: None
         when the org_budgets feature isn't entitled (:func:`license.has`,
         fail closed) or there is no team org, a denial when it is but the
         policy can't be had (the caller must not go on without it)."""
-        from brindle.pro import license
+        from brindle.pro.org_context import OrgContext, active
 
         try:
-            entitled = license.has(BUDGETS_FEATURE)
+            entitled = (active() or OrgContext.resolve()).entitled(BUDGETS_FEATURE)
         except Exception:  # noqa: BLE001 - no verified entitlement: no org budgets
             entitled = False
         if not entitled:
@@ -1242,10 +1250,10 @@ class ProPolicy(PolicyPlugin):
         (brindle.pro.managed_models): None when managed_models isn't entitled
         (:func:`license.has`, fail closed) or there is no team org, a denial
         when it is but the policy can't be had."""
-        from brindle.pro import license
+        from brindle.pro.org_context import OrgContext, active
 
         try:
-            entitled = license.has(MANAGED_FEATURE)
+            entitled = (active() or OrgContext.resolve()).entitled(MANAGED_FEATURE)
         except Exception:  # noqa: BLE001 - no verified entitlement: nothing managed
             entitled = False
         if not entitled:

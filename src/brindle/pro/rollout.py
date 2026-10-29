@@ -10,16 +10,14 @@ An org's policy (``brindle.pro.team_policy``) can carry four rollout fields:
 * ``kill_switch``: no new worker starts anywhere in the org, and the cull pass
   (``sweep``) stops the running ones, telling their supervisors why.
 
-Without the ``managed_rollout`` entitlement (:func:`license.has`, so anything
-that stops the license from verifying counts) none of this applies.
+These rules apply through an account's ``managed_rollout`` entitlement or
+the signed managed-device file.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-
-from brindle.pro import license
 
 log = logging.getLogger(__name__)
 
@@ -69,8 +67,10 @@ def version_tuple(s: str) -> tuple[int, ...] | None:
 
 
 def entitled() -> bool:
+    from brindle.pro.org_context import OrgContext, active
+
     try:
-        return license.has(FEATURE)
+        return (active() or OrgContext.resolve()).entitled(FEATURE)
     except Exception:  # noqa: BLE001 - no verified entitlement: no managed rollout
         return False
 
@@ -131,9 +131,9 @@ def kill_switch_reason(repo_root: str | None = None) -> str | None:
     """Why no new agent (a reviewer, say) may be spawned under the org's kill
     switch, a remote shutdown or the member's pause (``pro.status``), else None.
     Fails closed: entitled but no readable policy refuses."""
-    from brindle.pro import status
+    from brindle.pro.org_context import OrgContext
 
-    why = status.block_reason()
+    why = OrgContext.resolve(repo_root=repo_root).blocked_reason()
     if why:
         return why
     try:
@@ -176,15 +176,16 @@ def sweep(db, now: float | None = None) -> list[str]:
     acknowledged to the backend once, with how many workers it stopped.
     Returns what it did, one line each."""
     from brindle import agents
-    from brindle.pro import status
+    from brindle.pro import org_context, status
 
     done: list[str] = []
     try:
         on = entitled()
-        saved = status.load()
-        shutdown = status.shutdown_control(now, saved) if on else None
+        ctx = org_context.OrgContext.resolve(now=now)
+        saved = ctx.status
+        shutdown = ctx.shutdown_control() if on else None
         in_force = status.control_in_force(saved.status, now) if on else None
-        paused = status.pause_reason(saved)
+        paused = ctx.pause_reason()
         if not on and not paused:
             return done
         stopped = 0

@@ -2,11 +2,10 @@
 import io
 import json
 import time
-from dataclasses import replace
 
 import pytest
 
-from brindle.pro import credentials, managed, org_cli, team_policy
+from brindle.pro import credentials, managed, org_cli, policy_cache, team_policy
 from brindle.pro.account import ProAccount
 from pro_fixtures import BASE, ISS, TEST_KID, FakeTransport, pro_env, sign, signing_key, token  # noqa: F401 - fixtures
 from test_managed_device import NOW, ORG, answer, managed_file, member_policy, signed_answer
@@ -39,7 +38,14 @@ def test_policy_on_managed_device_is_the_org_contexts(signing_key, token, monkey
     device = managed.verify_file(managed_file(signing_key, answer(version=7), policy_exp=NOW - 1), now=NOW)
     assert device.snapshot is None and device.snapshot_expired
     if cached:
-        team_policy.save_cached(replace(member_policy(max_parallel_workers=1), cached_for=("member", None)))
+        body = member_policy(max_parallel_workers=1).raw_body
+        claims = {"iss": ISS, "aud": "brindle-pro", "sub": "user_1", "org_id": member_org,
+                  "role": "member", "policy_role": None, "policy_version": 9, "iat": NOW - 60,
+                  "exp": NOW + 3600, "kid": TEST_KID, "token_use": "policy", "doc_type": "policy",
+                  "document_sha256": managed.document_sha256(body)}
+        policy_cache.get_verified("policy", binding=policy_cache.Binding("user_1", member_org, "member", None),
+                                  fetch=lambda k: {**body, "token": sign(signing_key, claims,
+                                                                         {"typ": "brindle-policy+jwt"})}, now=NOW)
     credentials.default_store().save({"base_url": BASE, "entitlement": token(
         org_id=member_org, features=[team_policy.FEATURE], role="member", policy_version=10,
         iat=NOW - 60, exp=NOW + 3600)})
