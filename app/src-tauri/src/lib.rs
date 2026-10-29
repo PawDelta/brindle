@@ -179,6 +179,7 @@ pub fn run() {
             set_inbox_count,
             open_url,
             daemon::daemon_connect,
+            daemon::daemon_start_step,
             daemon::daemon_request,
             daemon::daemon_stream_open,
             daemon::daemon_stream_send,
