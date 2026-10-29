@@ -195,9 +195,6 @@ class RepoConfig:
     local_models: bool = True
     delete_merged_branches: bool = True  # removing a worktree deletes its branch once fully merged into its base
     pr_footer: bool = True             # `brindle pr` ends the PR body with one "built with brindle" line
-    # Open a session's PR on its own once it is ready (never where the org's policy
-    # requires a human review; see brindle.daemon.session_review.auto_pr).
-    auto_pr: bool = False
     sidebar: str = "left"              # where the dashboard sits: "left" of the chat or "bottom"
     # Standing rules for the supervisor ("fix review findings without asking", ...):
     # ~/.brindle/config.json's, then the repo's, then config.local.json's, all kept.
@@ -386,7 +383,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",
                 "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
-                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "auto_pr", "plan_first", "learning",
+                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
@@ -500,6 +497,13 @@ _USER_WRITE = threading.Lock()
 
 def set_user(key: str, value: object) -> Path:
     """Set one key in ``~/.brindle/config.json`` (other keys are kept)."""
+    return update_user(key, lambda _: value)
+
+
+def update_user(key: str, change) -> Path:
+    """Set one key in ``~/.brindle/config.json`` to ``change(its value now)``,
+    read and written under the one writer lock, so a change to part of a
+    nested setting never loses another made at the same time."""
     path = user_config_path()
     if os.environ.get("BRINDLE_AGENT_ID"):
         # A brindle agent's CLI call must not change the person's own settings.
@@ -508,7 +512,7 @@ def set_user(key: str, value: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with _USER_WRITE:   # daemon actions run in threads: one read-modify-replace at a time
         data = _read_json(path)
-        data[key] = value
+        data[key] = change(data.get(key))
         # A unique temp file replaced into place, so a reader never sees half a file.
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
         try:

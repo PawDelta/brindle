@@ -17,7 +17,13 @@ export interface ApiSchema {
   AskGroupDTO: AskGroupDTO;
   AskResultDTO: AskResultDTO;
   AskScopeDTO: AskScopeDTO;
+  AwsProfileDTO: AwsProfileDTO;
+  AzureOptionsDTO: AzureOptionsDTO;
+  CloudLoginDTO: CloudLoginDTO;
+  CloudOptionsDTO: CloudOptionsDTO;
+  ConnectionReadyDTO: ConnectionReadyDTO;
   DecisionDTO: DecisionDTO;
+  GcloudOptionsDTO: GcloudOptionsDTO;
   GoalDTO: GoalDTO;
   InboxActionDTO: InboxActionDTO;
   InboxItemDTO: InboxItemDTO;
@@ -26,6 +32,8 @@ export interface ApiSchema {
   OrgApprovalPolicyDTO: OrgApprovalPolicyDTO;
   OrgAssignmentDTO: OrgAssignmentDTO;
   OrgAssignmentRequestDTO: OrgAssignmentRequestDTO;
+  OrgControlDTO: OrgControlDTO;
+  OrgControlViewDTO: OrgControlViewDTO;
   OrgGrantPolicyDTO: OrgGrantPolicyDTO;
   OrgIdentityDTO: OrgIdentityDTO;
   OrgMemberDTO: OrgMemberDTO;
@@ -43,6 +51,8 @@ export interface ApiSchema {
   PreflightActionDTO: PreflightActionDTO;
   PreflightItemDTO: PreflightItemDTO;
   ProfileDTO: ProfileDTO;
+  ProviderChoiceDTO: ProviderChoiceDTO;
+  ProviderConnectionDTO: ProviderConnectionDTO;
   RoutingDTO: RoutingDTO;
   RoutingKindDTO: RoutingKindDTO;
   RoutingLockDTO: RoutingLockDTO;
@@ -54,6 +64,7 @@ export interface ApiSchema {
   RuleDTO: RuleDTO;
   SavedActionDTO: SavedActionDTO;
   SessionDTO: SessionDTO;
+  StoppedAgentDTO: StoppedAgentDTO;
   WorkspaceDTO: WorkspaceDTO;
 }
 /**
@@ -268,7 +279,8 @@ export interface AskDecisionDTO {
  * GET /permissions/asks: one Inbox item per repo, kind and general form,
  * generalized from its oldest request. ``policy``: the tightest limits
  * among its requests (a deny blocks the whole item). ``modes``: what
- * POST /permissions/asks/decide accepts for it.
+ * POST /permissions/asks/decide accepts for it. ``org``: the org control
+ * that asks for (or blocks) it, when one does.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "AskGroupDTO".
@@ -281,10 +293,96 @@ export interface AskGroupDTO {
   kind: string;
   limits?: PermissionLimitsDTO | null;
   modes?: string[];
+  org?: OrgControlViewDTO | null;
   repo: string;
   rule?: string | null;
   scopes: AskScopeDTO[];
   title: string;
+}
+/**
+ * An org control as a member sees it (permission_grants.org_control_view):
+ * the org's name, what it covers in plain words, Block (deny) or Ask, and why.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgControlViewDTO".
+ */
+export interface OrgControlViewDTO {
+  decision?: string;
+  name: string;
+  reason?: string;
+  what: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AwsProfileDTO".
+ */
+export interface AwsProfileDTO {
+  name: string;
+  region?: string | null;
+  sso: boolean;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AzureOptionsDTO".
+ */
+export interface AzureOptionsDTO {
+  subscription_id?: string | null;
+  subscription_name?: string | null;
+  tenant_id: string;
+}
+/**
+ * A cloud login's state (brindle.cloud_login.status): ``valid`` now,
+ * ``expires_at`` (epoch seconds, None when unknown), ``expired`` when only
+ * ``renew_command`` (the person) can renew it.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "CloudLoginDTO".
+ */
+export interface CloudLoginDTO {
+  expired: boolean;
+  expires_at?: number | null;
+  note?: string;
+  renew_command?: string;
+  valid: boolean;
+}
+/**
+ * What this machine's cloud CLIs are set up with, read from their files
+ * (never a secret): AWS profiles, gcloud's application-default login and
+ * default project, the Azure CLI's signed-in tenant (None when signed out),
+ * and the usual ``regions`` per route.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "CloudOptionsDTO".
+ */
+export interface CloudOptionsDTO {
+  aws_profiles: AwsProfileDTO[];
+  azure?: AzureOptionsDTO | null;
+  gcloud: GcloudOptionsDTO;
+  regions?: {
+    [k: string]: string[];
+  };
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "GcloudOptionsDTO".
+ */
+export interface GcloudOptionsDTO {
+  adc: boolean;
+  project?: string | null;
+  region?: string | null;
+}
+/**
+ * Whether an agent of the provider would launch with its method now
+ * (connections.ready); if not, ``reason`` and the ``action`` the app can
+ * offer: install | sign_in | sign_out | renew | set_key.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ConnectionReadyDTO".
+ */
+export interface ConnectionReadyDTO {
+  action?: ("install" | "sign_in" | "sign_out" | "renew" | "set_key") | null;
+  ok: boolean;
+  reason?: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -419,13 +517,28 @@ export interface OrgApprovalPolicyDTO {
 export interface OrgGrantPolicyDTO {
   allow: boolean;
   allow_persistent?: boolean;
+  controls?: OrgControlDTO[];
   deny?: string[];
   kinds: ("read" | "write" | "edit" | "bash" | "fetch" | "mcp" | "other")[];
   lifetimes?: ("session" | "time" | "forever")[];
   max_minutes: number;
   max_uses: number;
+  org_name?: string;
   overridable: ("git-push" | "env")[];
   scopes?: ("branch" | "remote" | "repo" | "all")[];
+}
+/**
+ * team_policy.OrgControl: Block (deny) or Ask for one grouping
+ * (permission_grants.ORG_GROUPINGS) or one pattern ("<kind> <match_type> <match>").
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgControlDTO".
+ */
+export interface OrgControlDTO {
+  decision: "deny" | "ask";
+  group?: string | null;
+  reason?: string;
+  rule?: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -538,6 +651,7 @@ export interface PermissionGroupDTO {
  */
 export interface PermissionPolicyDTO {
   groups?: PermissionGroupDTO[];
+  org_controls?: OrgControlViewDTO[];
   preset: string | null;
   presets: PermissionPresetDTO[];
   prompt_counts?: {
@@ -628,6 +742,58 @@ export interface ProfileDTO {
   name: string;
   permission_mode?: string | null;
   provider: string;
+}
+/**
+ * The person's saved choice (PUT /providers/{p}/connection).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ProviderChoiceDTO".
+ */
+export interface ProviderChoiceDTO {
+  cloud?: string | null;
+  method: string;
+  settings?: {
+    [k: string]: string;
+  };
+}
+/**
+ * How a provider connects now: ``method`` auto | sign_in | api_key |
+ * cloud | org (the org decides, with no cloud route here), and for cloud the
+ * route (``cloud``: bedrock, vertex, foundry, azure), its non-secret
+ * ``settings`` (variable -> value) and the ``login`` it uses. An org's route
+ * wins over ``choice``, the person's saved choice; ``managed`` says why.
+ * ``clouds``: the routes the person can choose for this provider.
+ * ``blocked_by`` "codex_login": Codex's ChatGPT login keeps an API key from
+ * being used until POST /providers/codex/sign-out.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ProviderConnectionDTO".
+ */
+export interface ProviderConnectionDTO {
+  blocked_by?: "codex_login" | null;
+  choice?: ProviderChoiceDTO | null;
+  cloud?: string | null;
+  clouds?: string[];
+  login?: CloudLoginDTO | null;
+  managed?: string | null;
+  method: string;
+  provider: string;
+  ready: ConnectionReadyDTO;
+  settings?: {
+    [k: string]: string;
+  };
+  stopped_agents?: StoppedAgentDTO[];
+}
+/**
+ * An agent stopped because the provider's credentials were refused (failed_why auth).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "StoppedAgentDTO".
+ */
+export interface StoppedAgentDTO {
+  id: string;
+  name: string;
+  profile: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

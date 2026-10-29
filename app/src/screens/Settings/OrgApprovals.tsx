@@ -11,6 +11,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { DaemonError, type DaemonClient } from "../../api/client";
 import type { OrgGrantPolicyDTO, OrgPermissionsDTO } from "../../api/schema";
 import { alert, button, card, field, panel, quiet } from "../../components/ui";
+import { RuleTarget, parseRule, ruleText } from "./RuleTarget";
 
 type Choice = { id: string; label: string; detail?: string };
 
@@ -74,8 +75,65 @@ export function OrgApprovals({ client }: { client: DaemonClient }) {
 type GrantDraft = Required<OrgGrantPolicyDTO>;
 const grantDraft = (grant?: OrgGrantPolicyDTO | null): GrantDraft => ({
   allow: false, kinds: [], overridable: [], max_minutes: 60, max_uses: 20,
-  deny: [], allow_persistent: false, lifetimes: ["session", "time"], scopes: ["branch"], ...grant,
+  deny: [], allow_persistent: false, lifetimes: ["session", "time"], scopes: ["branch"], controls: [], org_name: "", ...grant,
 });
+
+/* brindle.permission_grants.ORG_GROUPINGS: what an organization may Block or Ask for as a whole. */
+const GROUPINGS: [string, string, string][] = [
+  ["git/readonly", "Read-only git commands", "status, diff, log, show"],
+  ["shell/readonly", "Read-only shell commands", "grep, ls, cat, head"],
+  ["dev/tests", "Test runs", "pytest, npm test"],
+  ["dev/queries", "Package and GitHub queries", "npm ls, gh pr view"],
+  ["git/local", "Local git changes", "add, commit, branch, stash"],
+  ["dev/install", "Package installs into the project", "npm install, uv add in a checkout"],
+  ["files/write-worktree", "File changes in the checkout", "writes, edits, moves, deletes"],
+  ["shell/unchecked", "Unchecked commands", "commands brindle can't verify"],
+  ["network/fetch", "Network fetches", "curl, wget, web fetches"],
+  ["deploy/trigger", "Deploys, releases and workflow runs", "gh workflow run, gh release, terraform apply, cloud deploys"],
+  ["packages/install", "Package installs", "any installer, anywhere"],
+];
+type Control = GrantDraft["controls"][number];
+
+/* Block or Ask, set by the organization above every member's preset, rules and saved approvals. */
+function OrgRules({ controls, onChange }: { controls: Control[]; onChange(controls: Control[]): void }) {
+  const grouped = new Map(controls.filter((c) => c.group).map((c) => [c.group!, c]));
+  const patterns = controls.filter((c) => c.rule != null);
+  const setGroup = (id: string, next: Control | null) => onChange([...controls.filter((c) => c.group !== id), ...(next ? [next] : [])]);
+  const setPattern = (i: number, next: Control | null) => {
+    const rest = patterns.filter((_, j) => j !== i);
+    if (next) rest.splice(i, 0, next);
+    onChange([...controls.filter((c) => c.group), ...rest]);
+  };
+  return <fieldset className="space-y-s2">
+    <legend className="text-sm font-semibold">Organization rules</legend>
+    <p className="text-xs text-ink-3">Block or Ask over a whole kind of action, or one pattern. These win over every member’s preset, rules and saved approvals; members see the reason.</p>
+    <ul className={`${card} divide-y divide-line`} aria-label="Groupings">
+      {GROUPINGS.map(([id, label, hint]) => {
+        const c = grouped.get(id);
+        return <li key={id} className="grid gap-s1 px-s2 py-s1 sm:grid-cols-[minmax(0,1fr)_auto]">
+          <span className="text-sm">{label} <small className="block text-xs text-ink-3">{hint}</small></span>
+          <select className={field} aria-label={`${label} setting`} value={c?.decision ?? ""} onChange={(event) => setGroup(id, event.target.value ? { decision: event.target.value as Control["decision"], group: id, reason: c?.reason ?? "" } : null)}>
+            <option value="">Members decide</option><option value="ask">Ask</option><option value="deny">Block</option>
+          </select>
+          {c && <input className={`${field} sm:col-span-2`} aria-label={`${label} reason`} placeholder="Reason members see" maxLength={300} value={c.reason ?? ""} onChange={(event) => setGroup(id, { ...c, reason: event.target.value })} />}
+        </li>;
+      })}
+    </ul>
+    <div className="space-y-s1" aria-label="Patterns">
+      {patterns.map((c, i) => (
+        <div key={i} className={`${card} grid gap-s1 p-s1 sm:grid-cols-2`} data-testid="org-pattern">
+          <RuleTarget value={parseRule(c.rule!)} offerNamed labelClass="flex min-w-0 flex-col gap-1 text-xs font-medium text-ink-3" onChange={(target) => setPattern(i, { ...c, rule: ruleText(target) })} />
+          <label className="flex flex-col gap-1 text-xs font-medium text-ink-3">Setting
+            <select className={field} aria-label="Pattern setting" value={c.decision} onChange={(event) => setPattern(i, { ...c, decision: event.target.value as Control["decision"] })}><option value="ask">Ask</option><option value="deny">Block</option></select>
+          </label>
+          <button type="button" className={`${quiet} self-end justify-self-start`} onClick={() => setPattern(i, null)}>Remove</button>
+          <input className={`${field} sm:col-span-2`} aria-label="Pattern reason" placeholder="Reason members see" maxLength={300} value={c.reason ?? ""} onChange={(event) => setPattern(i, { ...c, reason: event.target.value })} />
+        </div>
+      ))}
+      <button type="button" className={button} onClick={() => onChange([...controls, { decision: "deny", rule: "bash prefix ", reason: "" }])}>Add a pattern</button>
+    </div>
+  </fieldset>;
+}
 
 function GrantChoices<T extends string>({ label, choices, selected, onChange }: {
   label: string; choices: readonly T[]; selected: T[]; onChange(values: T[]): void;
@@ -196,6 +254,8 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
         </div>
         <label className="flex flex-col gap-1 text-xs text-ink-3">Denied targets<textarea className={`${field} font-mono`} rows={4} value={draft.deny.join("\n")} onChange={(event) => update("deny", event.target.value ? event.target.value.split("\n") : [])} /></label>
         <p className="text-xs text-ink-3">One target per line: tool kind, exact/prefix/glob, then the target. Example: bash prefix rm . Empty allowlists permit none.</p>
+        <label className="flex flex-col gap-1 text-xs text-ink-3">Name members see<input className={field} maxLength={100} placeholder="your organization" value={draft.org_name} onChange={(event) => update("org_name", event.target.value)} /></label>
+        <OrgRules controls={draft.controls} onChange={(controls) => update("controls", controls)} />
       </fieldset>
       <div className="flex flex-wrap gap-s1">
         <button type="submit" className={button} disabled={locked}>Save approval limits</button>

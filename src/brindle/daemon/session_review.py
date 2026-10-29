@@ -205,23 +205,19 @@ def require_ready(db: DB, root: Agent, ws: Workspace) -> None:
         raise NotReady(why)
 
 
-def auto_pr_forbidden(repo_root: str) -> str | None:
-    """Why the org's policy keeps brindle from opening a PR on its own in
-    ``repo_root``, or None: one that requires a human review forbids it, as
-    does one that applies but can't be read."""
-    from brindle.policy import Decision
-    from brindle.pro import team_policy
-
-    p = team_policy.ProPolicy(repo_root).policy()
-    if isinstance(p, Decision):
-        return None if p.allowed else p.reason
-    return f"org {p.org_id} requires a human review" if p.require_human_review else None
-
-
-def auto_pr(repo_root: str) -> bool:
-    """Whether brindle opens a session's PR on its own here: the person's
-    ``auto_pr``, unless the org's policy forbids it."""
-    return load_repo_config(repo_root).auto_pr and auto_pr_forbidden(repo_root) is None
+def open_pr(db: DB, root: Agent, ws: Workspace) -> dict[str, Any] | None:
+    """The PR the person opened for the session's branch: its ``url`` and
+    ``unpushed``, how many session commits aren't on it yet (brindle never
+    pushes them on its own: the person's Push does, POST .../pr/push)."""
+    row = db.conn.execute("SELECT url, pushed_sha FROM session_prs WHERE root_id = ? AND branch = ?"
+                          " AND url IS NOT NULL", (root.id, ws.branch)).fetchone()
+    if row is None:
+        return None
+    try:
+        unpushed = int(git.out(["rev-list", "--count", f"{row['pushed_sha']}..HEAD"], ws.path)) if row["pushed_sha"] else 0
+    except git.GitError:     # the pushed commit is gone (a rewrite): nothing to count against
+        unpushed = 0
+    return {"url": row["url"], "unpushed": unpushed}
 
 
 # -- the diff ----------------------------------------------------------------
@@ -424,9 +420,10 @@ def draft(db: DB, root: Agent, ws: Workspace) -> dict[str, Any]:
 
 class ReadinessWatch:
     """Remembers which sessions are ready for a PR and publishes
-    ``session.pr_ready`` when one becomes ready; with ``auto_pr``, opens its
-    PR then, and pushes a ready session's later commits to the PR it has
-    (routes_actions.auto_pr). The first sweep only looks."""
+    ``session.pr_ready`` when one becomes ready; prepares a ready session's
+    PR for the person's approval (routes_actions.prepare_pr: its checks, no
+    push), and forgets what it prepared for one no longer ready. brindle
+    never opens or pushes a PR itself. The first sweep only looks."""
 
     def __init__(self) -> None:
         self.ready: dict[str, bool] | None = None
@@ -453,11 +450,14 @@ class ReadinessWatch:
             bus.publish_agent(db, "session.pr_ready", r)
         from brindle.daemon import routes_actions
 
-        for r in (r for r, ok in now.items() if ok):
+        for r, ok in now.items():
+            if not ok:      # its Inbox item goes: what was checked may no longer be what a PR would carry
+                db.conn.execute("DELETE FROM session_pr_prep WHERE root_id = ?", (r,))
+                continue
             try:
-                routes_actions.auto_pr(db, r, opening=r in flipped)
+                routes_actions.prepare_pr(db, r)
             except Exception:  # noqa: BLE001 - one session's PR never stops the others'
-                log.exception("brindle: couldn't open or push %s's PR", r)
+                log.exception("brindle: couldn't prepare %s's PR", r)
         return flipped
 
     def sweep_safely(self) -> None:

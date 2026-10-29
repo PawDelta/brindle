@@ -9,8 +9,9 @@ first, then an explicit rule, then the subcategory, then the group's
 baseline. A shell command is classified part by part (a file it writes is
 files/write-*, a fetch network/fetch, a push git/push-*): deny if any part
 denies, allow if every part allows, otherwise the strictest part's answer.
-shell/unverifiable answers, ask or deny but never allow, for a command
-brindle can't verify where it would otherwise ask.
+shell/unchecked answers for a command brindle can't verify where it would
+otherwise ask: ask (approvable once at a time) unless set to deny, or to
+allow, the dangerous opt-in that lets such commands run unasked.
 
 The table lives in the store (Store.groups): {group: {"baseline": ...,
 "subcategories": {sub: ...}}}. Each preset seeds its own (PRESET_OVERRIDES
@@ -29,7 +30,7 @@ from brindle.permissions import Request, Rule
 
 GROUPS: dict[str, tuple[str, ...]] = {
     "files": ("read", "write-worktree", "write-outside"),
-    "shell": ("readonly", "dev-tools", "install", "destructive", "other", "unverifiable"),
+    "shell": ("readonly", "dev-tools", "install", "destructive", "other", "unchecked"),
     "git": ("readonly", "commit", "push-feature", "push-protected", "other"),
     "network": ("fetch", "search"),
     "mcp": ("tool", "other"),
@@ -38,17 +39,19 @@ BASELINES = ("allow", "ask", "deny")
 INHERIT = "inherit"
 STRICTNESS = {"allow": 0, "ask": 1, "deny": 2}
 
-# A command brindle can't verify (a $(...) whose output it can't know, eval,
-# a heredoc run as code) where it would otherwise ask: "ask", or "deny" with
-# guidance the agent can act on. Never allow: inherit (or none) is ask.
-UNVERIFIABLE = "shell/unverifiable"
+# An unchecked command (one brindle can't verify: a program only the run
+# knows, syntax it doesn't read, eval) where it would otherwise ask: inherit
+# (or none) asks, approvable only once; "deny" refuses it with guidance the
+# agent can act on; "allow" is the dangerous opt-in that runs it unasked.
+# Whatever it says, a deny or ask rule a part of the command is seen to match wins.
+UNVERIFIABLE = "shell/unchecked"
 UNVERIFIABLE_GUIDANCE = ("brindle can't verify this command; run it as separate simple commands "
                          "or drop the $(…)")
 # preset -> {"group/subcategory": decision} over a baseline of the preset's unmatched setting.
 PRESET_OVERRIDES: dict[str, dict[str, str]] = {
-    "autonomous": {"git/push-protected": "ask", UNVERIFIABLE: "deny"},
+    "autonomous": {"git/push-protected": "ask"},
     "permissive": {"files/write-worktree": "allow", "shell/readonly": "allow", "shell/dev-tools": "allow",
-                   "git/readonly": "allow", "git/commit": "allow", UNVERIFIABLE: "deny"},
+                   "git/readonly": "allow", "git/commit": "allow"},
     "standard": {"shell/readonly": "allow", "git/readonly": "allow"},
     "secure": {},
 }
@@ -129,8 +132,6 @@ def merged(groups: dict[str, dict], changes: object) -> dict[str, dict]:
                 raise ValueError(f"unknown {g} subcategory {s!r}: one of {', '.join(GROUPS[g])}")
             if value not in (INHERIT, *BASELINES):
                 raise ValueError(f"a subcategory must be one of {INHERIT}, {', '.join(BASELINES)}")
-            if f"{g}/{s}" == UNVERIFIABLE and value == "allow":
-                raise ValueError("a command brindle can't verify is never allowed: ask or deny")
             out[g]["subcategories"][s] = value
     return out
 
@@ -336,7 +337,9 @@ def _shell_part(req: Request, words: list[str], rules: list[Rule], checks: list[
         return ("shell", "destructive")
     if _installs(program, words):
         return ("shell", "install")
-    if program == "cd" or not unknown and permissions.readonly_pipeline(replace(req, command=command), rules, checks):
+    # Only the bare name is the builtin: ./echo or /tmp/test may be any program.
+    if program == "cd" or words[0] in permissions.TEXT_ONLY or not unknown and permissions.readonly_pipeline(
+            replace(req, command=command), rules, checks):
         return ("shell", "readonly")
     if program in FILE_WRITERS or program == "sed" and any(w.startswith(("-i", "--in-place")) or
                                                            re.fullmatch(r"-[nErsuz]*i.*", w) for w in words[1:]):
@@ -397,16 +400,16 @@ def answer(groups: dict[str, dict], group: str, sub: str) -> str:
     entry = groups[group]
     override = entry["subcategories"].get(sub, INHERIT)
     if f"{group}/{sub}" == UNVERIFIABLE:
-        return "deny" if override == "deny" else "ask"
+        return "ask" if override == INHERIT else override    # never the group's baseline
     return entry["baseline"] if override == INHERIT else override
 
 
 def unverifiable(groups: dict[str, dict], unmatched: str) -> str:
     """What a command brindle can't verify gets where it would ask: the
-    table's answer, or with none, deny where unmatched actions run."""
+    table's answer, or with none, ask."""
     if groups:
         return answer(groups, *UNVERIFIABLE.split("/"))
-    return "deny" if unmatched == "allow" else "ask"
+    return "ask"
 
 
 def baseline(req: Request, groups: dict[str, dict], rules: list[Rule], checks: list[str] | None = None,

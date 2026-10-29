@@ -152,11 +152,14 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
 
     // The pages behind the sidebar's foot, each for the repo in view.
-    for (const name of ["Knowledge", "Agents", "Settings", "Account"]) {
+    for (const name of ["Knowledge", "Agents", "Settings"]) {
       fireEvent.click(link(name));
       expect(await screen.findByRole("region", { name })).toBeTruthy();
       expect(link(name).getAttribute("aria-current")).toBe("page");
     }
+    fireEvent.click(link("Open Account"));
+    expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
+    expect(link("Open Account").getAttribute("aria-current")).toBe("page");
 
     // ⌘1 is the first live session, back from any page; ⌘N the composer.
     fireEvent.keyDown(window, { key: "1", metaKey: true });
@@ -376,6 +379,7 @@ describe("App", () => {
     const sync = startSync({ client, store, connect: daemon.connect });
     const installCli = vi.fn(() => Promise.resolve({ path: "/home/sam/.local/bin/brindle", target: "/Applications/brindle.app/Contents/Resources/engine/bin/brindle" }));
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "settings" }} installCli={installCli} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Details/ }));
     const cli = await screen.findByTestId("install-cli");
     const btn = within(cli).getByRole("button", { name: "Install command-line tool" });
     expect(btn).toHaveProperty("disabled", false);
@@ -415,6 +419,7 @@ describe("App", () => {
     fireEvent.click(link("Settings"));
     await screen.findByRole("region", { name: "Settings" });
     const engineSection = screen.getByTestId("engine");
+    fireEvent.click(within(engineSection).getByRole("button", { name: /Details/ }));
     expect(within(engineSection).getByTestId("connection").textContent).toBe("daemon · connected");
     expect(screen.queryByTestId("engine-health")).toBeNull();
     expect(within(nav()).queryByTestId("connection")).toBeNull();
@@ -441,6 +446,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
     fireEvent.click(link("Settings"));
     await screen.findByRole("region", { name: "Settings" });
+    fireEvent.click(within(screen.getByTestId("engine")).getByRole("button", { name: /Details/ }));
     expect(within(screen.getByTestId("engine")).getByTestId("connection").textContent).toBe("daemon · connected");
     const after = daemon.requests.slice(before).filter((r) => r.method === "GET").map((r) => r.path);
     expect(after).toContain("/snapshot");
@@ -507,8 +513,7 @@ describe("providers in the sidebar", () => {
     expect(nav().textContent).not.toContain("Claude Code");
     expect(within(nav()).queryByRole("button", { name: /Connect|Sign in/ })).toBeNull();
     expect(within(nav()).queryByTestId("provider-problem")).toBeNull();
-    // The footer's links stay the four pages, on one line.
-    expect(within(screen.getByRole("navigation", { name: "Pages" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["Knowledge", "Agents", "Settings", "Account"]);
+    expect(within(nav()).getByRole("button", { name: "Open Account" })).toBeTruthy();
     stop();
   });
 
@@ -521,6 +526,8 @@ describe("providers in the sidebar", () => {
     );
     await waitFor(() => expect(treeAgent("sup1")).toBeTruthy());
     const problem = await within(nav()).findByTestId("provider-problem");
+    expect(statusLine().lastElementChild).toBe(problem);
+    expect(within(statusLine()).getByTestId("usage-reading")).toBeTruthy();
     expect(problem.textContent).toBe("Codex signed out");
     expect(problem.getAttribute("data-kind")).toBe("signed_out");
     expect(problem.className).toContain("text-sap");

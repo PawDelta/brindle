@@ -12,6 +12,8 @@ KEY_PAGES = {
     "ANTHROPIC_API_KEY": "https://console.anthropic.com/settings/keys",
     "OPENAI_API_KEY": "https://platform.openai.com/api-keys",
     "OPENROUTER_API_KEY": "https://openrouter.ai/keys",
+    "GEMINI_API_KEY": "https://aistudio.google.com/apikey",
+    "GOOGLE_API_KEY": "https://aistudio.google.com/apikey",
 }
 
 
@@ -36,9 +38,14 @@ def _get(url: str, headers: dict[str, str]) -> tuple[int, dict]:
         return e.code, {}
 
 
-def verify(name: str, value: str) -> str | None:
-    """None when the provider accepts the key, else a message saying why not.
-    Names without a check are accepted unchecked."""
+VERIFIED, REJECTED, UNCHECKED = "verified", "rejected", "unchecked"
+
+
+def evaluate(name: str, value: str) -> tuple[str, str | None]:
+    """(status, problem): VERIFIED when the provider accepts the key, REJECTED
+    when it refuses it (or it has no credit), else UNCHECKED, with a message
+    when the provider couldn't be asked. Names without a check are UNCHECKED."""
+    gemini = name in ("GEMINI_API_KEY", "GOOGLE_API_KEY")
     if name == "OPENROUTER_API_KEY":
         url, headers = "https://openrouter.ai/api/v1/key", {"Authorization": f"Bearer {value}"}
     elif name == "ANTHROPIC_API_KEY":
@@ -46,22 +53,32 @@ def verify(name: str, value: str) -> str | None:
         headers = {"x-api-key": value, "anthropic-version": "2023-06-01"}
     elif name == "OPENAI_API_KEY":
         url, headers = "https://api.openai.com/v1/models", {"Authorization": f"Bearer {value}"}
+    elif gemini:
+        url = "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"
+        headers = {"x-goog-api-key": value}
     else:
-        return None
+        return UNCHECKED, None
     try:
         status, body = _get(url, headers)
     except (OSError, ValueError) as e:
         # Never the exception's text: http.client quotes a header it refuses, the key included.
-        return f"couldn't reach the provider to check the key ({type(e).__name__})"
-    if status == 401:
-        return "the provider rejected this key (401 unauthorized); check that you copied all of it"
+        return UNCHECKED, f"couldn't reach the provider to check the key ({type(e).__name__})"
+    # Google answers a malformed or unknown key with 400 ("API key not valid"), not 401.
+    if status == 401 or (gemini and status in (400, 403)):
+        return REJECTED, f"the provider rejected this key ({status} unauthorized); check that you copied all of it"
     if status != 200:
-        return f"the provider answered {status} when checking the key"
+        return UNCHECKED, f"the provider answered {status} when checking the key"
     if name == "OPENROUTER_API_KEY":
         data = (body.get("data") if isinstance(body, dict) else None) or {}
         if not isinstance(data, dict):
             data = {}
         left = data.get("limit_remaining")
         if left is not None and left <= 0:
-            return "this OpenRouter key has no credit left"
-    return None
+            return REJECTED, "this OpenRouter key has no credit left"
+    return VERIFIED, None
+
+
+def verify(name: str, value: str) -> str | None:
+    """None when the provider accepts the key, else a message saying why not.
+    Names without a check are accepted unchecked."""
+    return evaluate(name, value)[1]

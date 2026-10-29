@@ -1,6 +1,7 @@
 """What needs a person across a repo's sessions: the "needs you" rules the
-sidebar uses, plus plans, proposed checks, failed merges, cloud logins,
-permission requests and org notices as ``InboxItemDTO`` rows.
+sidebar uses, plus plans, proposed checks, failed merges, PRs brindle
+prepared for approval, cloud logins, permission requests and org notices as
+``InboxItemDTO`` rows.
 
 A permission request is answered from the app (``answer_permission``) only
 while brindle's hook holds it (agents._hold_for_app), for its answer window.
@@ -115,6 +116,29 @@ def _org_notices() -> list[InboxItemDTO]:
             for n in notices]
 
 
+ORG_BLOCK_WINDOW = 24 * 3600
+
+
+def _org_blocks(db: DB, repo_root: str | None, now: float | None = None) -> list[InboxItemDTO]:
+    """One calm notice per org Block that stopped an agent in the last day
+    (permission_asks), however many requests it stopped: "Blocked by <org>
+    policy: <reason>", the first line of the agent's denial."""
+    from brindle.permission_grants import ORG_BLOCKED
+
+    since = (time.time() if now is None else now) - ORG_BLOCK_WINDOW
+    rows = db.conn.execute(
+        "SELECT reason, COUNT(*) AS n, MAX(ts) AS last FROM permission_asks WHERE outcome = 'deny' AND ts >= ?"
+        " AND reason LIKE ? AND (? IS NULL OR repo_root = ?) GROUP BY reason ORDER BY last DESC",
+        (since, ORG_BLOCKED + "%", repo_root, repo_root)).fetchall()
+    counts: dict[str, int] = {}
+    for r in rows:
+        head = r["reason"].split("\n", 1)[0]
+        counts[head] = counts.get(head, 0) + r["n"]
+    return [InboxItemDTO(kind="org_blocked", reason=head,
+                         detail=f"{n} request{'s' if n != 1 else ''} stopped today. Agents were told to work around it.")
+            for head, n in counts.items()]
+
+
 def _setup_items() -> list[InboxItemDTO]:
     """Setup problems the app can repair itself (a ``fix`` names the repair)."""
     from brindle import codex_hook
@@ -136,6 +160,19 @@ def _sign_in(provider: str) -> InboxActionDTO | None:
     from brindle.pro.team_policy import CLI_NAMES
 
     return InboxActionDTO(method="POST", path=f"/v1/providers/{provider}/login") if provider in CLI_NAMES else None
+
+
+def _pr_items(db: DB, root_id: str, branch: str, link: dict) -> list[InboxItemDTO]:
+    """The session's PR as brindle prepared it (routes_actions.prepare_pr),
+    until the person opens it: ready for their approval, or its checks failed."""
+    rows = db.conn.execute(
+        "SELECT state, title, check_cmd, output FROM session_pr_prep p WHERE root_id = ? AND branch = ?"
+        " AND state IN ('passed', 'failed') AND NOT EXISTS (SELECT 1 FROM session_prs s WHERE"
+        " s.root_id = p.root_id AND s.branch = p.branch AND s.url IS NOT NULL)", (root_id, branch)).fetchall()
+    return [InboxItemDTO(kind="pr_ready", reason="PR ready for your approval", detail=r["title"], **link)
+            if r["state"] == "passed" else
+            InboxItemDTO(kind="pr_failed", reason=f"PR checks failed: {r['check_cmd']}", detail=r["output"], **link)
+            for r in rows]
 
 
 def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[InboxItemDTO]:
@@ -179,12 +216,13 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 checks = json.loads(ap.proposal).get("checks") or []
                 out.append(InboxItemDTO(kind="proposed_checks", reason="checks proposed", **link,
                                         detail="\n".join(checks)))
+            out += _pr_items(db, row.id, ws["branch"], link)
             login = db.get_login_state(row.id)
             if login and login.state == "auth_paused":
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
-    return out + _setup_items() + _org_notices()
+    return out + _setup_items() + _org_blocks(db, repo_root) + _org_notices()
 
 
 # -- permission requests ---------------------------------------------------------------------

@@ -3462,7 +3462,7 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, 
         cfg = load_repo_config(ws.repo_root)
         if cfg.permission_policy != "on":
             return None
-        req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
+        req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
         if req is None:
             return None
         try:
@@ -3546,7 +3546,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         if provider == "codex":
             # No tool_use_id in Codex's payload: nothing to pair an approval
             # with, so nothing is kept for learning.
-            reqs = permissions.from_codex(payload, worktree=ws.path, repo_root=ws.repo_root)
+            reqs = permissions.from_codex(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
@@ -3629,7 +3629,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         if provider == "opencode":
             # Asked before every tool call, not only those OpenCode would prompt
             # for, so only a deny is answered (and recorded): the rest is OpenCode's own.
-            reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root)
+            reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
@@ -3650,7 +3650,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             _record_permission(db, agent, ws, req.summary(), f"deny: {decision.reason}")
             _note_decision(db, agent, ws, req.kind, req.summary(), decision)
             return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
-        req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
+        req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
         if req is None:
             return None
         if policy:
@@ -4000,6 +4000,13 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
     return None
 
 
+def _retest_keys(provider: str) -> None:
+    """An auth failure may mean a stored key was revoked: check the provider's stored keys again."""
+    from brindle import keys_cmds
+
+    keys_cmds.retest_provider(provider)
+
+
 def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
     """Called from ``brindle _hook <event>`` inside the agent's own process tree.
     Returns JSON for Claude Code to read on stdout, or None."""
@@ -4233,6 +4240,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             from brindle import providers, autopilot as pilot
             if is_auth:
                 providers.invalidate_signed_in(agent.provider)
+                _retest_keys(agent.provider)
                 err_desc = payload.get("error_details") or payload.get("error") or payload.get("error_type") or "401/403"
                 msg = (
                     f"[brindle] Agent {agent_id} encountered an authentication failure "

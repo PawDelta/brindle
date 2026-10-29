@@ -43,6 +43,16 @@ class OrgMemberDTO(_DTO):
     policy_role: str | None = None
 
 
+class OrgControlDTO(_DTO):
+    """team_policy.OrgControl: Block (deny) or Ask for one grouping
+    (permission_grants.ORG_GROUPINGS) or one pattern ("<kind> <match_type> <match>")."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    decision: Literal["deny", "ask"]
+    reason: Annotated[str, Field(max_length=300)] = ""
+    group: str | None = None
+    rule: str | None = None
+
+
 class OrgGrantPolicyDTO(_DTO):
     """Account GrantPolicy (account-api 8fd09374); a complete replacement block."""
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -55,6 +65,8 @@ class OrgGrantPolicyDTO(_DTO):
     allow_persistent: StrictBool = False
     lifetimes: list[Literal["session", "time", "forever"]] = ["session", "time"]
     scopes: list[Literal["branch", "remote", "repo", "all"]] = ["branch"]
+    controls: list[OrgControlDTO] = []
+    org_name: Annotated[str, Field(max_length=100)] = ""
 
 
 class OrgApprovalPolicyDTO(_DTO):
@@ -427,6 +439,94 @@ class PreflightItemDTO(_DTO):
     link: str | None = None
 
 
+# -- how each provider connects (brindle.connections) -------------------------------------------
+
+
+class CloudLoginDTO(_DTO):
+    """A cloud login's state (brindle.cloud_login.status): ``valid`` now,
+    ``expires_at`` (epoch seconds, None when unknown), ``expired`` when only
+    ``renew_command`` (the person) can renew it."""
+    valid: bool
+    expired: bool
+    expires_at: float | None = None
+    renew_command: str = ""
+    note: str = ""
+
+
+class ProviderChoiceDTO(_DTO):
+    """The person's saved choice (PUT /providers/{p}/connection)."""
+    method: str
+    cloud: str | None = None
+    settings: dict[str, str] = {}
+
+
+class ConnectionReadyDTO(_DTO):
+    """Whether an agent of the provider would launch with its method now
+    (connections.ready); if not, ``reason`` and the ``action`` the app can
+    offer: install | sign_in | sign_out | renew | set_key."""
+    ok: bool
+    reason: str | None = None
+    action: Literal["install", "sign_in", "sign_out", "renew", "set_key"] | None = None
+
+
+class StoppedAgentDTO(_DTO):
+    """An agent stopped because the provider's credentials were refused (failed_why auth)."""
+    id: str
+    name: str
+    profile: str
+
+
+class ProviderConnectionDTO(_DTO):
+    """How a provider connects now: ``method`` auto | sign_in | api_key |
+    cloud | org (the org decides, with no cloud route here), and for cloud the
+    route (``cloud``: bedrock, vertex, foundry, azure), its non-secret
+    ``settings`` (variable -> value) and the ``login`` it uses. An org's route
+    wins over ``choice``, the person's saved choice; ``managed`` says why.
+    ``clouds``: the routes the person can choose for this provider.
+    ``blocked_by`` "codex_login": Codex's ChatGPT login keeps an API key from
+    being used until POST /providers/codex/sign-out."""
+    provider: str
+    method: str
+    choice: ProviderChoiceDTO | None = None
+    cloud: str | None = None
+    settings: dict[str, str] = {}
+    login: CloudLoginDTO | None = None
+    managed: str | None = None
+    clouds: list[str] = []
+    ready: ConnectionReadyDTO
+    blocked_by: Literal["codex_login"] | None = None
+    stopped_agents: list[StoppedAgentDTO] = []
+
+
+class AwsProfileDTO(_DTO):
+    name: str
+    sso: bool
+    region: str | None = None
+
+
+class GcloudOptionsDTO(_DTO):
+    adc: bool
+    project: str | None = None
+    region: str | None = None
+
+
+class AzureOptionsDTO(_DTO):
+    tenant_id: str
+    subscription_id: str | None = None
+    subscription_name: str | None = None
+
+
+class CloudOptionsDTO(_DTO):
+    """What this machine's cloud CLIs are set up with, read from their files
+    (never a secret): AWS profiles, gcloud's application-default login and
+    default project, the Azure CLI's signed-in tenant (None when signed out),
+    and the usual ``regions`` per route."""
+    aws_profiles: list[AwsProfileDTO]
+    gcloud: GcloudOptionsDTO
+    azure: AzureOptionsDTO | None = None
+    regions: dict[str, list[str]] = {}
+
+
 # -- permissions (brindle.permissions, brindle.permission_grants) ------------------------------
 
 
@@ -519,6 +619,8 @@ class PermissionPolicyDTO(_DTO):
     saved: list[SavedActionDTO]
     prompt_counts: dict[str, int] = {}
     groups: list[PermissionGroupDTO] = []
+    # What the person's org sets over all of it (locked rows; GET /permissions?repo=).
+    org_controls: list[OrgControlViewDTO] = []
 
 
 class AskScopeDTO(_DTO):
@@ -561,11 +663,21 @@ class AskDTO(_DTO):
     escalation: str = ""
 
 
+class OrgControlViewDTO(_DTO):
+    """An org control as a member sees it (permission_grants.org_control_view):
+    the org's name, what it covers in plain words, Block (deny) or Ask, and why."""
+    name: str
+    what: str
+    decision: str = "ask"
+    reason: str = ""
+
+
 class AskGroupDTO(_DTO):
     """GET /permissions/asks: one Inbox item per repo, kind and general form,
     generalized from its oldest request. ``policy``: the tightest limits
     among its requests (a deny blocks the whole item). ``modes``: what
-    POST /permissions/asks/decide accepts for it."""
+    POST /permissions/asks/decide accepts for it. ``org``: the org control
+    that asks for (or blocks) it, when one does."""
     key: str
     repo: str
     kind: str
@@ -577,6 +689,7 @@ class AskGroupDTO(_DTO):
     rule: str | None = None
     limits: PermissionLimitsDTO | None = None
     modes: list[str] = []
+    org: OrgControlViewDTO | None = None
 
 
 class AskDecisionDTO(_DTO):

@@ -38,6 +38,7 @@ import { openExternal, type OpenUrl } from "../../api/open";
 import type { AppUpdates } from "../../api/tauri";
 import type { InboxItemDTO } from "../../api/schema";
 import { PageHeader } from "../../components/PageHeader";
+import type { SheetRef } from "../../routes";
 import { alert, button, card, quiet } from "../../components/ui";
 import { agentName, formatAge, rootOf } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
@@ -54,8 +55,9 @@ export interface InboxScreenProps {
   client: DaemonClient;
   /* Fetch the snapshot and inbox again (Sync.refresh). */
   refresh: () => Promise<void>;
-  /* Open an item's agent in its session: its provider screen, nothing over it. */
-  onOpen?(root: string, repo: string, agent?: string): void;
+  /* Open an item's agent in its session: its provider screen, nothing over it unless `sheet` says
+     (a prepared PR's item opens Review & open PR). */
+  onOpen?(root: string, repo: string, agent?: string, sheet?: SheetRef): void;
   /* Only what waits in this session (its root agent id), from its bar's count; null for everything. */
   session?: string | null;
   /* Back to everything. */
@@ -85,7 +87,10 @@ const TONE: Record<string, { bar: string; ink: string }> = {
   plan: { bar: "before:bg-branch", ink: "text-branch" },
   proposed_checks: { bar: "before:bg-branch", ink: "text-branch" },
   review: { bar: "before:bg-branch", ink: "text-branch" },
+  pr_ready: { bar: "before:bg-branch", ink: "text-branch" },
+  pr_failed: { bar: "before:bg-fail", ink: "text-fail" },
   org_notice: { bar: "before:bg-line-strong", ink: "text-ink-3" },
+  org_blocked: { bar: "before:bg-line-strong", ink: "text-ink-3" },
   setup: { bar: "before:bg-fail", ink: "text-fail" },
 };
 const SAP = { bar: "before:bg-sap", ink: "text-sap" };
@@ -152,10 +157,11 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
     const repo = root ? repoOf(root) : null;
     return root && repo ? { root, repo } : null;
   };
-  /* Go to session: the item's agent in its session, its provider screen and nothing over it. */
-  const goTo = (item: InboxItemDTO) => {
+  /* Go to session: the item's agent in its session, its provider screen and nothing over it
+     (`sheet`: Review & open PR over it, for a prepared PR's item). */
+  const goTo = (item: InboxItemDTO, sheet?: SheetRef) => {
     const where = sessionOf(item);
-    if (where && onOpen) onOpen(where.root, where.repo, item.agent_id ?? undefined);
+    if (where && onOpen) onOpen(where.root, where.repo, item.agent_id ?? undefined, ...(sheet ? [sheet] : []));
   };
 
   const withSession = groups.filter((g) => g.root).length;
@@ -229,7 +235,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
               item.kind === "permission" ? (
                 <PermissionItemCard key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
               ) : (
-              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
+              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} />
               ),
             )}
           </section>
@@ -240,7 +246,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
 }
 
 /* One banner card. */
-function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }: {
+function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo, onReview }: {
   item: InboxItemDTO;
   actions: ReturnType<typeof useInboxActions>;
   who: string | null;
@@ -250,6 +256,8 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
   onDone(): void;
   /* The agent in its session, nothing over it. */
   onGo?(): void;
+  /* Its session with Review & open PR over it. */
+  onReview?(): void;
 }) {
   const key = itemKey(item);
   const busy = actions.busy.has(key);
@@ -296,12 +304,21 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
     );
   } else if (item.kind === "org_notice") {
     acts = act("Mark read", "read", {}, PLAIN);
+  } else if (item.kind === "org_blocked") {
+    acts = <span className="text-[11px] text-ink-3">set by your organization</span>;
   } else if (fixable(item)) {
     acts = <SetupFix item={item} actions={actions} onDone={onDone} />;
   } else if (item.kind === "setup") {
     acts = <span className="text-[11px] text-ink-3">fixed from a terminal: brindle doctor says how</span>;
   } else if (item.kind === "credentials" || item.kind === "login") {
     acts = <ItemActions item={item} actions={actions} repo={repo} onDone={onDone} compact />;
+  } else if ((item.kind === "pr_ready" || item.kind === "pr_failed") && onReview) {
+    // Nothing is pushed until the person's Open PR in the sheet.
+    acts = (
+      <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
+        Review &amp; open PR
+      </button>
+    );
   } else {
     acts = <span className="text-[11px] text-ink-3">{item.kind === "review" || item.kind === "merge_failed" ? "handled in its session" : "answered in its session"}</span>;
   }

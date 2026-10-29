@@ -1376,18 +1376,40 @@ def offer_agy_gemini(confirm, say) -> None:
     say(f"set \"modelProvider\": \"gemini\" in {path}")
 
 
+def agy_model_provider() -> str | None:
+    """agy's ``modelProvider`` setting, or None when it has none (or the file
+    can't be read)."""
+    try:
+        data = _read_json(agy_settings_path())
+    except (OSError, ValueError):
+        return None
+    value = data.get("modelProvider") if isinstance(data, dict) else None
+    return value if isinstance(value, str) else None
+
+
 def set_agy_gemini() -> None:
     """Set ``"modelProvider": "gemini"`` in agy's settings, keeping every other
     key; the file is created (0600, in a 0700 directory) when absent. Raises
     OSError/ValueError when the file can't be read or written."""
+    set_agy_model_provider("gemini")
+
+
+def set_agy_model_provider(value: str | None) -> None:
+    """Set agy's ``modelProvider`` to ``value`` (None: take it out), keeping
+    every other key, as set_agy_gemini does."""
     path = agy_settings_path()
     try:
         data = _read_json(path)
     except FileNotFoundError:
+        if value is None:
+            return
         data = {}
     if not isinstance(data, dict):
         raise ValueError(f"{path} isn't a JSON object")
-    data["modelProvider"] = "gemini"
+    if value is None:
+        data.pop("modelProvider", None)
+    else:
+        data["modelProvider"] = value
     parent = os.path.dirname(path)
     if parent and not os.path.isdir(parent):
         os.makedirs(parent, mode=0o700, exist_ok=True)
