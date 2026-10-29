@@ -192,6 +192,30 @@ describe("App", () => {
     sync.stop();
   });
 
+  it("project settings: opens from a repo's sidebar heading and from Settings' link, and a shell opened there starts in that repo", async () => {
+    const OTHER = "/home/u/other";
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }],
+      sessions: [session, { ...session, id: "sup2", workspace_id: "other" }],
+      workspaces: [root],
+    });
+    const store = createAppStore();
+    const client = daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "new" }} />);
+    // The second repo's heading: its Project settings, and a shell from the status line starts at that repo.
+    await screen.findByRole("complementary", { name: "Sidebar" });
+    fireEvent.click(await within(nav()).findByRole("button", { name: "Project settings for other" }));
+    expect((await screen.findByRole("region", { name: "Project settings" })).textContent).toContain("Project settings: other");
+    fireEvent.click(screen.getByTestId("terminal-toggle"));
+    await waitFor(() => expect(daemon.shells.map((s) => s.cwd)).toEqual([OTHER]));
+    // Settings' link opens the page of the repo Settings is showing.
+    fireEvent.click(link("Settings"));
+    fireEvent.click(await screen.findByTestId("project-settings-link"));
+    expect((await screen.findByRole("region", { name: "Project settings" })).textContent).toContain("Project settings: proj");
+    sync.stop();
+  });
+
   it("inbox: a plan is approved and a notice marked read right on their cards, at once; Go to session opens the session with nothing over it", async () => {
     const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan.\n2. Ship it." };
     const notice = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };

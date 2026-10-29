@@ -9,6 +9,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache, wraps
 from typing import Any
 
@@ -307,21 +308,35 @@ def get_profile(db: DB, request: Request) -> Any:
 
 @_json
 def get_config(db: DB, request: Request) -> Any:
+    from brindle import providers
+
     repo = _repo(request)
     settings = {"user": config.user_settings()}
     if repo:
-        settings["repo"] = dataclasses.asdict(config.load_repo_config(repo))
+        # Saved model choices are checked for readiness while the config loads (worker_models.apply):
+        # no sign-in probe or keychain read for that here, as for GET /routing?learned=0.
+        with providers.no_sign_in_probes():
+            settings["repo"] = dataclasses.asdict(config.load_repo_config(repo))
         # Settings this project's own files set (over the person's): key -> "local" or "repo".
         settings["overrides"] = {k: s for k in settings["repo"] if (s := config.setting_source(repo, k)) in ("local", "repo")}
+    # `keys=0`: the page doesn't show the stored keys, and reading them is the slow part
+    # (one keychain read per name), so it skips them.
+    if request.query_params.get("keys") in ("0", "false"):
+        return {**settings, "keys": []}
+    return {**settings, "keys": _key_rows(repo)}
+
+
+def _key_rows(repo: str | None) -> list[dict]:
     try:
         denied = key_check.personal_keys_denied(repo)
     except Exception:  # noqa: BLE001 - policy unreadable: fail closed, as storing does
         denied = True
-    keys = []
-    for name in keystore.known_names(repo):
-        value = keystore.get_key(name)
-        rec = keystore.get_record(name) if value else {}
-        keys.append({
+
+    def row(name: str) -> dict:
+        rec = keystore.get_record(name)    # the one read of this key (on macOS a `security` call)
+        raw = rec.get("value")
+        value = raw if isinstance(raw, str) and raw else None
+        return {
             "name": name, "set": value is not None, "last4": _last4(value or ""),
             "provider": keystore.provider_of(name),
             "status": (rec.get("status") or "unchecked") if value else None,
@@ -330,9 +345,12 @@ def get_config(db: DB, request: Request) -> Any:
             "bills": keys_cmds.bills_instead_of_subscription(name),
             "personal_keys_denied": denied,
             # Set in the daemon's environment but not stored; the value is never returned.
-            "importable": value is None and keys_cmds.importable(name),
-        })
-    return {**settings, "keys": keys}
+            "importable": value is None and bool(os.environ.get(name, "").strip()),
+        }
+
+    names = keystore.known_names(repo)
+    with ThreadPoolExecutor(max_workers=8) as pool:    # the reads wait on subprocesses, not the CPU
+        return list(pool.map(row, names))
 
 
 @_json
