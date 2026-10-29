@@ -2000,9 +2000,20 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     controls (permission_grants.org_decision), which come first: an org
     Block is final, and an org Ask stands over every allow (a rule's, the
     preset's, a capability group's) unless the member's own policy denies,
-    settled only by a saved approval within the org's limits."""
+    settled only by a saved approval within the org's limits. The whole
+    decision reads one org context (permission_grants.org_check)."""
     if req is None or req.kind not in KINDS:
         return Decision("ask", "brindle couldn't read the request")
+    from brindle import permission_grants
+
+    with permission_grants.org_check(req.repo_root or None):
+        return _decide_under_org(req, checks=checks, rules=rules, unmatched=unmatched, session=session,
+                                 saved=saved, spend=spend, groups=groups)
+
+
+def _decide_under_org(req: Request, *, checks: list[str] | None, rules: list[Rule] | None,
+                      unmatched: str | None, session: str | None, saved: list[SavedAction] | None,
+                      spend: bool, groups: dict[str, dict] | None) -> Decision:
     from brindle import permission_grants
 
     rules = all_rules(req.repo_root or None) if rules is None else rules

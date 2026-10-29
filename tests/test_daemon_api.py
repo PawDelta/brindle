@@ -167,6 +167,36 @@ def test_tcp_daemon_needs_the_token_on_requests_and_as_the_ws_first_frame(tmp_pa
         lifecycle.cleanup(info)
 
 
+@pytest.mark.variant("real incident: a staff build's first start after an update waited on the old "
+                     "daemon finishing requests its quit app had left")
+def test_a_stopping_daemon_waits_only_briefly_for_a_request_still_running(monkeypatch):
+    # An app that quits for its update leaves its slow requests (a provider's sign-in probe) running,
+    # and the next app waits on this daemon's exit to start its own (daemon.rs stop_daemon).
+    monkeypatch.setattr(lifecycle, "SHUTDOWN_GRACE", 0.05)
+    asked = threading.Event()
+
+    async def never_answers(scope, receive, send):
+        asked.set()
+        await asyncio.Event().wait()
+
+    sock = lifecycle.bind_tcp()
+    sock.listen()
+    server = lifecycle.make_server(never_answers)
+    thread = threading.Thread(target=asyncio.run, args=(server.serve(sockets=[sock]),))
+    thread.start()
+    try:
+        with socket.create_connection(sock.getsockname()) as s:
+            s.sendall(b"GET /v1/meta HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            assert asked.wait(10)
+            server.should_exit = True
+            thread.join(10)
+            assert not thread.is_alive(), "still waiting on the request"
+    finally:
+        server.force_exit = True
+        thread.join(10)
+        sock.close()
+
+
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
@@ -608,8 +638,19 @@ def test_profiles_detail_lints_a_broken_profile(seeded):
 @pytest.mark.variant("a secret is shown only as its name and last four characters, never whole")
 def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     monkeypatch.setattr(keystore, "known_names", lambda repo=None: ["OPENAI_API_KEY", "UNSET_KEY"])
-    monkeypatch.setattr(keystore, "get_key", lambda n: "sk-live-1234567890WXYZ" if n == "OPENAI_API_KEY" else None)
+    reads: list[str] = []
+
+    def record(name):
+        reads.append(name)
+        return {"value": "sk-live-1234567890WXYZ"} if name == "OPENAI_API_KEY" else {}
+
+    monkeypatch.setattr(keystore, "get_record", record)
     _, body = _get("/v1/config", AUTH, f"repo={seeded['repo']}")
     assert [(k["name"], k["set"], k["last4"]) for k in body["keys"]] == [("OPENAI_API_KEY", True, "WXYZ"),
                                                                          ("UNSET_KEY", False, "")]
     assert "1234567890" not in json.dumps(body)
+    # One read per key, and none at all when the page asks without the keys (the project page).
+    assert sorted(reads) == ["OPENAI_API_KEY", "UNSET_KEY"]
+    reads.clear()
+    _, bare = _get("/v1/config", AUTH, f"repo={seeded['repo']}&keys=0")
+    assert bare["keys"] == [] and "repo" in bare and reads == []

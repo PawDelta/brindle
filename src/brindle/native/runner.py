@@ -268,6 +268,7 @@ def permission_decision(db: DB, agent_id: str, ws: Workspace, tool: str, args: d
     from brindle import permissions
     from brindle.antigravity import tool_names
     from brindle.config import load_repo_config
+    from brindle.permission_grants import org_check
     from brindle.profiles import profile_rules_for
 
     cfg = load_repo_config(ws.repo_root)
@@ -282,9 +283,10 @@ def permission_decision(db: DB, agent_id: str, ws: Workspace, tool: str, args: d
     if req is None:
         return "deny"
     req = dataclasses.replace(req, provider="native")
-    rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
-    decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=agents._session_of(db, agent),
-                                  spend=True)
+    with org_check(ws.repo_root):    # the rules' org denies and decide's controls: one policy
+        rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+        decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=agents._session_of(db, agent),
+                                      spend=True)
     rule = decision.rule
     if decision.decision == "deny" or rule is not None and (
             decision.decision == "ask" or rule.decision == "ask" or rule.source in ("user", "learned")):

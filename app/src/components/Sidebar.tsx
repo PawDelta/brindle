@@ -750,9 +750,15 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
             if (here.length === 0 && rested.length === 0) return null;
             return (
               <div key={repo.repo_root} className="flex flex-col" data-testid={`repo-${repo.name}`}>
-                <div className={`${REPO_HEADING} truncate`} title={repo.repo_root}>
+                <button
+                  type="button"
+                  className={`${REPO_HEADING} truncate text-left hover:text-ink`}
+                  title={`${repo.repo_root}: project settings`}
+                  aria-label={`Project settings for ${repo.name}`}
+                  onClick={() => navigate({ screen: "project-settings", repo: repo.repo_root })}
+                >
                   {repo.name}
-                </div>
+                </button>
                 <ul className="flex flex-col gap-px">
                   {here.map(({ session }) => (
                     <SessionRows

@@ -37,8 +37,6 @@ export interface Setting {
 export const SETTINGS: Setting[] = [
   { key: "checks", label: "Checks", kind: "list", fallback: [], repoOnly: true, common: true, blurb: "Commands a branch must pass before it merges, one per line, run from the repo root." },
   { key: "max_agents", label: "Workers at once", kind: "number", fallback: 5, common: true, blurb: "How many workers a session runs at the same time. 0 means no cap." },
-  { key: "autopilot", label: "Autopilot", kind: "boolean", fallback: true, common: true, blurb: "A new session's supervisor keeps driving toward the goal on its own." },
-  { key: "plan_first", label: "Plan first", kind: "boolean", fallback: false, common: true, blurb: "Workers propose a plan and wait for your approval before they edit anything." },
   {
     key: "overlap",
     label: "Overlapping tasks",
@@ -66,6 +64,10 @@ export const SETTINGS: Setting[] = [
     ],
   },
 ];
+
+/* The keys the "everything else" lists leave out: those with a row above, and
+   the supervisor's goal driving, always on now (the engine keeps its key). */
+export const HANDLED = [...SETTINGS.map((s) => s.key), "autopilot"];
 
 export type Draft = Record<string, unknown>;
 
@@ -98,6 +100,10 @@ export function overrideText(s: Setting, value: unknown): string {
   if (s.kind === "choice") return s.choices?.find((c) => c.value === (value ?? null))?.label ?? String(value);
   return value === undefined || value === null ? "Default" : `${String(value)}${s.unit ? ` ${s.unit}` : ""}`;
 }
+
+/* What a project's override says next to what it overrides: "Off here · yours: On" (yours falls back to the engine's default). */
+export const overrideLabel = (s: Setting, projectValue: unknown, yourValue: unknown): string =>
+  `${overrideText(s, projectValue)} here · yours: ${overrideText(s, yourValue ?? s.fallback)}`;
 
 /* PATCH /config's `values`: only what changed, as the engine takes it (a
    list setting's lines, a number, a bool, a choice; null only where the

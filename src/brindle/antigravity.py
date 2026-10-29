@@ -414,7 +414,7 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
     if cfg.permission_policy != "on" and not strict:
         return output(None)
     req = permissions.from_agy(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
-    rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+    own = [*profile_rules_for(agent.profile, ws.repo_root)]   # after the repo's rules (all_rules, below)
     escalate = False
     if strict:
         # What a Claude Code worker on this profile runs without asking
@@ -423,16 +423,20 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
 
         try:
             profile = load_profile(agent.profile, ws.repo_root)
-            rules += permissions.profile_bash_allows(profile)
+            own += permissions.profile_bash_allows(profile)
             # What a Claude worker's prompt would leave to the person goes to
             # its supervisor; a dontAsk profile asked for refusals instead.
             escalate = bool(agent.parent_id) and profile.permission_mode != "dontAsk"
         except KeyError:
             pass
     from brindle.agents import _session_of
+    from brindle.permission_grants import org_check
 
     # Only strict mode runs a call on brindle's allow (agy ignores a hook's allow otherwise).
-    decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent), spend=strict)
+    with org_check(ws.repo_root):    # the rules' org denies and decide's controls: one policy
+        rules = [*permissions.all_rules(ws.repo_root), *own]
+        decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent),
+                                      spend=strict)
     if decision.decision == "ask":
         permissions.note_prompt(decision)
     if strict and decision.decision == "ask":

@@ -1,9 +1,9 @@
 /* Settings: this machine's brindle, in sections (About last) with a small nav at
    the top: Your settings (editable, saved to ~/.brindle/config.json for
-   every project; a row a project overrides says so, with Clear for the
-   override in the repo's local file), Permissions (how Claude's permission
-   requests are handled, your permission rules), Project rules (the
-   repo-only settings, saved to the repo), Providers (one row per
+   every project; the repo's checks, rules and overrides of them are on its
+   own page, ProjectSettingsScreen, reached by the "Project settings for …"
+   link), Permissions (how Claude's permission
+   requests are handled, your permission rules), Providers (one row per
    provider CLI, with how it connects, its state and its buttons) and
    Engine & health (the engine's version and update, the command-line tool,
    and the doctor as a short health list with a fix where the app has one).
@@ -33,9 +33,7 @@
 
    Your settings (GET /v1/config's `user`, with `overrides` saying which keys
    a project's files set) are edited as a draft and saved with PATCH /v1/config
-   (scope user); Clear override is the same PATCH with `unset` for the repo's
-   config.local.json. Project rules save there too, from a save bar at the
-   foot. The Claude
+   (scope user). The Claude
    permission mode is the person's own (GET and PATCH /v1/user-settings) and
    saves as soon as it is picked. Keys show as their last four characters
    only; setting one is pasted into a password field and stored write-only
@@ -49,7 +47,11 @@
    its update line feeds the engine row (its sign-in lines stay out of the
    health list: the provider rows say that).
    Organization (OrgApprovals.tsx, read only when opened): the organization's
-   members, roles and approval limits (/v1/org-permissions). The command-line
+   members, roles and approval limits (/v1/org-permissions); above it who
+   manages this device, the offline policy export and, for an Enterprise
+   admin, the managed device file (Governance.tsx). Plan approvals: the
+   person's default (Governance.tsx; a project's override is on Project
+   settings). The command-line
    tool's install is the shell's (install_cli, api/tauri.ts): App passes it
    in the app, where the row then says where the link went; in a browser
    tab there is none and the button stays disabled. Staff alone (GET
@@ -78,16 +80,17 @@ import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PRO
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import { About } from "./About";
+import { DeviceFile, OrgStatus, PLAN_HELP, PlanChoice, PolicyExport, useGovernance } from "./Governance";
 import { OrgApprovals } from "./OrgApprovals";
 import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
-import { alert, button, card, field, h2, main, mono, notice, panel, pill, quiet } from "../../components/ui";
+import { alert, button, card, field, h2, main, mono, notice, pill, quiet } from "../../components/ui";
 import { useProviders } from "../../store/providers";
 import { StoreContext, useAppState } from "../../store/useStore";
 import {
+  HANDLED,
   MARK,
-  PROJECT_RULES,
   SETTINGS,
   YOURS,
   carryEdits,
@@ -99,7 +102,6 @@ import {
   isOptional,
   listOf,
   listText,
-  overrideText,
   updateNotice,
   userLines,
   values,
@@ -133,13 +135,14 @@ export interface SettingsScreenProps {
   ask?: number;
   /* A permission rule to open in its editor (the Inbox's "Open the deny rule"). */
   rule?: string;
+  /* Opens the Project settings page of a repo (the "Project settings for …" link). */
+  onProjectSettings?: (repo: string) => void;
 }
 
-const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
+export const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
 const SECTIONS = [
   { id: "your-settings", label: "Your settings" },
-  { id: "this-repo", label: "Project rules" },
   { id: "permissions", label: "Permissions" },
   { id: "providers", label: "Providers" },
   { id: "engine", label: "Engine & health" },
@@ -169,7 +172,7 @@ function SectionNav({ staff }: { staff: boolean }) {
 }
 
 /* A section: its heading and one-line blurb, actions on the right, and a card of rows. */
-function Section({ id, title, blurb, actions, children, testId, staff = false }: { id: string; title: string; blurb?: ReactNode; actions?: ReactNode; children: ReactNode; testId: string; staff?: boolean }) {
+export function Section({ id, title, blurb, actions, children, testId, staff = false }: { id: string; title: string; blurb?: ReactNode; actions?: ReactNode; children: ReactNode; testId: string; staff?: boolean }) {
   return (
     <section id={id} aria-labelledby={`${id}-title`} className="flex scroll-mt-s2 flex-col gap-s1" data-testid={testId}>
       <header className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5">
@@ -189,7 +192,7 @@ function Section({ id, title, blurb, actions, children, testId, staff = false }:
 /* One row of a section: a label with its one-line help on the left, the
    control (or the state and one button) on the right; `wide` puts the
    control under the label, for a list. */
-function Row({ label: text, help, htmlFor, badges, wide = false, children, testId, data }: { label: ReactNode; help?: ReactNode; htmlFor?: string; badges?: ReactNode; wide?: boolean; children?: ReactNode; testId?: string; data?: Record<string, string | undefined> }) {
+export function Row({ label: text, help, htmlFor, badges, wide = false, children, testId, data }: { label: ReactNode; help?: ReactNode; htmlFor?: string; badges?: ReactNode; wide?: boolean; children?: ReactNode; testId?: string; data?: Record<string, string | undefined> }) {
   const heading = (
     <>
       {text}
@@ -297,7 +300,7 @@ function Field({ s, value, disabled, onChange }: { s: Setting; value: unknown; d
   }
 }
 
-function SettingRow({ s, value, dirty, disabled, onChange, override }: { s: Setting; value: unknown; dirty: boolean; disabled: boolean; onChange(value: unknown): void; override?: ReactNode }) {
+export function SettingRow({ s, value, dirty, disabled, onChange, override }: { s: Setting; value: unknown; dirty: boolean; disabled: boolean; onChange(value: unknown): void; override?: ReactNode }) {
   return (
     <Row
       label={s.label}
@@ -327,7 +330,7 @@ function SettingRow({ s, value, dirty, disabled, onChange, override }: { s: Sett
 }
 
 /* A disclosure under a card's rows: More / Less. */
-function More({ open, onToggle, label: text = "More", count }: { open: boolean; onToggle(): void; label?: string; count?: number }) {
+export function More({ open, onToggle, label: text = "More", count }: { open: boolean; onToggle(): void; label?: string; count?: number }) {
   return (
     <button type="button" className={`${quiet} self-start text-xs`} aria-expanded={open} onClick={onToggle}>
       {open ? "Less" : text}
@@ -337,7 +340,7 @@ function More({ open, onToggle, label: text = "More", count }: { open: boolean; 
 }
 
 /* The settings from the config the screen doesn't edit, as key: value lines. */
-function RestOfConfig({ lines, testId, note }: { lines: [string, string][]; testId: string; note: string }) {
+export function RestOfConfig({ lines, testId, note }: { lines: [string, string][]; testId: string; note: string }) {
   return (
     <div className="flex flex-col gap-1">
       <dl className="grid grid-cols-[auto_1fr] gap-x-s2 gap-y-0.5 text-xs" data-testid={testId}>
@@ -1009,7 +1012,7 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
   );
 }
 
-export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, section, ask, rule }: SettingsScreenProps) {
+export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, section, ask, rule, onProjectSettings }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const connection = useAppState((state) => state.connection);
@@ -1017,8 +1020,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const pick = useRepo();
   const { repo, repos } = pick;
   const [config, setConfig] = useState<Config | null>(null);
-  /* The repo the loaded config was read for: another repo's config is not this one's to edit or save over. */
-  const [configRepo, setConfigRepo] = useState<string | null>(null);
+  const governance = useGovernance(client);
   const [checks, setChecks] = useState<DoctorCheck[] | null>(null);
   const [doctorError, setDoctorError] = useState<string | null>(null);
   const [meta, setMeta] = useState<Meta | null>(null);
@@ -1046,7 +1048,6 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       (c) => {
         if (mine !== seq.current) return;
         setConfig(c);
-        setConfigRepo(repo);
         setLoadError(null);
       },
       (e: unknown) => {
@@ -1089,19 +1090,6 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
     void loadMeta();
   }, [loadMeta]);
 
-  /* The repo's settings as a draft, saved where the person says. */
-  const loaded = useMemo(() => draftOf(config?.repo ?? {}), [config]);
-  const [base, setBase] = useState<Draft>(loaded);
-  const [draft, setDraft] = useState<Draft>(loaded);
-  const [draftRepo, setDraftRepo] = useState(repo);
-  // A config read anew follows in the same render, but a field with an unsaved edit keeps it
-  // (a save or a cleared override elsewhere on the page must not eat it); another repo starts over.
-  const ready = config !== null && repo !== null && configRepo === repo;
-  if (ready && (base !== loaded || draftRepo !== repo)) {
-    setBase(loaded);
-    setDraftRepo(repo);
-    setDraft(draftRepo === repo ? carryEdits(base, draft, loaded) : loaded);
-  }
   /* The person's own settings (~/.brindle/config.json) as a second draft, for every project. */
   const userLoaded = useMemo(() => draftOf(config?.user ?? {}), [config]);
   const [userBase, setUserBase] = useState<Draft>(userLoaded);
@@ -1111,47 +1099,18 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
     setUserDraft(carryEdits(userBase, userDraft, userLoaded));
   }
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
   const [userSaved, setUserSaved] = useState<string | null>(null);
   const [userError, setUserError] = useState<string | null>(null);
   const [more, setMore] = useState(false);
-  const [rest, setRest] = useState(false);
   const [yours, setYours] = useState(false);
   const [optional, setOptional] = useState(false);
   /* Engine & health's Details: null follows the health (open when bad), a click decides. */
   const [details, setDetails] = useState<boolean | null>(null);
-  useEffect(() => {
-    setSaved(null);
-    setSaveError(null);
-  }, [repo]);
-  // Until this repo's own config is loaded the draft is another repo's (or defaults): nothing to save.
-  const dirty = ready && draftRepo === repo ? changed(loaded, draft) : [];
-  const missing = invalid(draft);
   const userDirty = changed(userLoaded, userDraft);
   const userMissing = invalid(userDraft);
-  const edit = (key: string, v: unknown) => {
-    setSaved(null);
-    setDraft((d) => ({ ...d, [key]: v }));
-  };
   const editUser = (key: string, v: unknown) => {
     setUserSaved(null);
     setUserDraft((d) => ({ ...d, [key]: v }));
-  };
-  /* The project rules: saved to this repo's config.local.json (the engine reads them from a repo's files only). */
-  const save = async () => {
-    if (!repo || !ready || dirty.length === 0 || saving || missing.length > 0) return;
-    setSaving(true);
-    setSaveError(null);
-    try {
-      const ack = await client.patchConfig({ scope: "repo", repo, values: values(loaded, draft) });
-      setSaved(`Saved ${ack.updated.join(", ")} to ${ack.path}`);
-      await loadConfig();
-    } catch (e) {
-      setSaveError(message(e));
-    } finally {
-      setSaving(false);
-    }
   };
   /* Your settings: saved to the person's own file, so they apply to every project. */
   const saveUser = async () => {
@@ -1167,36 +1126,6 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
     } finally {
       setSaving(false);
     }
-  };
-  /* A project's override of one of your settings, removed from the repo's local file. */
-  const clearOverride = async (key: string, source: "local" | "repo") => {
-    if (!repo || saving) return;
-    setSaving(true);
-    setUserError(null);
-    try {
-      await client.patchConfig({ scope: source === "repo" ? "shared" : "repo", repo, unset: [key] });
-      await loadConfig();
-    } catch (e) {
-      setUserError(message(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-  /* "Off in this project", with Clear where this person's own local file sets it (the committed file is the repo's to edit). */
-  const marker = (s: Setting): ReactNode => {
-    const source = ready ? config?.overrides?.[s.key] : undefined;
-    if (!source) return undefined;
-    return (
-      <span className="mt-0.5 flex flex-wrap items-center gap-x-s1" data-testid={`override-${s.key}`} data-source={source}>
-        <span className={`${pill} text-ink-2`}>
-          {overrideText(s, config?.repo?.[s.key])} in this project
-        </span>
-        <button type="button" className={`${quiet} text-xs`} disabled={saving} onClick={() => void clearOverride(s.key, source)}>
-          {source === "local" ? "Clear override" : "Clear in .brindle/config.json"}
-        </button>
-        {source === "repo" && <span className="text-xs text-ink-3">Committed: this changes the file for everyone on the repo.</span>}
-      </span>
-    );
   };
 
   const [cliState, setCliState] = useState<"idle" | "installing" | "installed" | "failed">("idle");
@@ -1297,20 +1226,21 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const detailsOpen = details ?? healthBad;
   const common = YOURS.filter((s) => s.common);
   const others = YOURS.filter((s) => !s.common);
-  const shown = SETTINGS.map((s) => s.key);
-  const restLines: [string, string][] = Object.entries(config?.repo ?? {})
-    .filter(([k]) => !shown.includes(k))
-    .map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)]);
   // What the person set for every repo that has no row here.
-  const yourLines = userLines(config?.user ?? {}).filter(([k]) => !shown.includes(k));
-  const yourRow = (s: Setting) => <SettingRow key={s.key} s={s} value={userDraft[s.key]} dirty={userDirty.includes(s.key)} disabled={saving} onChange={(v) => editUser(s.key, v)} override={marker(s)} />;
+  const yourLines = userLines(config?.user ?? {}).filter(([k]) => !HANDLED.includes(k));
+  const yourRow = (s: Setting) => <SettingRow key={s.key} s={s} value={userDraft[s.key]} dirty={userDirty.includes(s.key)} disabled={saving} onChange={(v) => editUser(s.key, v)} />;
+  const projectName = repos?.find((r) => r.repo_root === repo)?.name;
 
   return (
-    // Room at the foot for the save bar, which sticks there while there are changes.
-    <section className={`flex min-h-0 flex-col gap-s3 ${dirty.length > 0 ? "pb-s12" : ""}`} aria-label="Settings">
-      <PageHeader title="Settings" lede="Your settings apply to every project; a project can override them. Below: permissions, this project's rules, sign-ins and engine health.">
+    <section className="flex min-h-0 flex-col gap-s3" aria-label="Settings">
+      <PageHeader title="Settings" lede="Your settings apply to every project; a project can override them. Below: permissions, sign-ins and engine health.">
         <RepoSelect {...pick} disabled={saving} />
       </PageHeader>
+      {repo && onProjectSettings && (
+        <button type="button" className={`${quiet} self-start text-sm`} data-testid="project-settings-link" onClick={() => onProjectSettings(repo)}>
+          Project settings for {projectName ?? repo} ›
+        </button>
+      )}
       <SectionNav staff={staff} />
       <div className="border-t border-line">
         <Row label="Appearance">
@@ -1377,26 +1307,29 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         </Section>
       )}
 
-      {config && ready && (
-        <Section id="this-repo" title="Project rules" blurb="Only a repo's own files carry these, so they save to this repo." testId="repo-settings">
-          {PROJECT_RULES.map((s) => (
-            <SettingRow key={s.key} s={s} value={draft[s.key]} dirty={dirty.includes(s.key)} disabled={saving} onChange={(v) => edit(s.key, v)} />
-          ))}
-          {restLines.length > 0 && (
-            <div className="flex flex-col gap-1 px-s2 py-1">
-              <More open={rest} onToggle={() => setRest((r) => !r)} label="Everything else" count={restLines.length} />
-              {rest && <RestOfConfig lines={restLines} testId="config-rest" note="Edit these in .brindle/config.json (the repo's, committed) or .brindle/config.local.json (yours)." />}
-            </div>
-          )}
-        </Section>
-      )}
-
       <Permissions client={client} rule={rule} ask={ask} />
 
-      <Section id="organization" title="Organization" blurb="Your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
+      <Section id="plans" title="Plan approvals" blurb="Whether workers propose a plan and wait for approval before they edit. A project can set its own." testId="plan-approvals">
+        <Row label="Plan approvals" help={PLAN_HELP} htmlFor="plan-user">
+          <PlanChoice client={client} id="plan-user" />
+        </Row>
+      </Section>
+
+      <Section id="organization" title="Organization" blurb="Who manages this device, your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
+        <Row label="Organization">
+          <OrgStatus status={governance.status} error={governance.error} />
+        </Row>
         <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
           <OrgApprovals client={client} />
         </Row>
+        <Row label="Offline policy export" help="The signed policy for a device that can't reach your organization, saved to ~/.brindle/policy.json." wide>
+          <PolicyExport client={client} />
+        </Row>
+        {governance.status?.enterprise_admin && (
+          <Row label="Managed device" help="A device file that puts one device under your organization's signed policy, with its own device token." wide>
+            <DeviceFile client={client} />
+          </Row>
+        )}
       </Section>
 
       <Section
@@ -1626,37 +1559,6 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       )}
 
       <About read={readAbout} updates={appUpdates} status={updateStatus} />
-
-      {saved && dirty.length === 0 && (
-        <p role="status" className={notice}>
-          {saved}
-        </p>
-      )}
-      {repo && dirty.length > 0 && (
-        <div className={`${panel} sticky bottom-0 flex flex-col gap-s1 border-pass/55 px-s2 py-s2 shadow-lg`} data-testid="settings-save">
-          <div className="flex flex-wrap items-center gap-s2">
-            <span className="text-sm font-medium">{dirty.length === 1 ? "1 change" : `${dirty.length} changes`}</span>
-            <span className="flex-1" />
-            <button type="button" className={quiet} disabled={saving} onClick={() => setDraft(loaded)}>
-              Discard
-            </button>
-            <button type="button" className={button} disabled={saving || missing.length > 0} onClick={() => void save()}>
-              {saving ? "Saving…" : "Save"}
-            </button>
-          </div>
-          <p className="text-xs text-ink-3">Project rules save to this repo: .brindle/config.local.json, not committed.</p>
-          {missing.length > 0 && (
-            <p className={alert} data-testid="settings-invalid">
-              {missing.map((k) => SETTINGS.find((s) => s.key === k)?.label ?? k).join(", ")} needs a number: the engine keeps what is saved as it is, and an empty value would break it.
-            </p>
-          )}
-          {saveError && (
-            <p role="alert" className={alert}>
-              Could not save: {saveError}
-            </p>
-          )}
-        </div>
-      )}
 
     </section>
   );

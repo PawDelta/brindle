@@ -32,9 +32,9 @@ class SecretServiceStore(keystore.SecretServiceStore):
 class FileStore(keystore.FileStore):
     def __init__(self, directory: Path | None = None, account: str = ACCOUNT) -> None:
         if directory is None:
-            from brindle.config import brindle_home
+            from brindle.pro._files import pro_home
 
-            directory = brindle_home() / "pro"
+            directory = pro_home() / "pro"
         super().__init__(directory, "credentials" if account == ACCOUNT else account)
 
 

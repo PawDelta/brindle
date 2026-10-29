@@ -91,10 +91,11 @@ def source(cfg=None) -> str:
 
 def licensed() -> bool:
     """Whether the entitlement (the offline license, in air-gap mode) includes
-    the ``airgap`` feature. Offline check; fails closed."""
-    from brindle.pro import license
+    the ``airgap`` feature (brindle.pro.org_context.OrgContext.entitled).
+    Offline check; fails closed."""
+    from brindle.pro.org_context import OrgContext
 
-    return license.has(FEATURE)
+    return OrgContext.resolve().entitled(FEATURE)
 
 
 def warning() -> str | None:
