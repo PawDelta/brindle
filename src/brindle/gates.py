@@ -120,10 +120,11 @@ def _scoped(ws: Workspace, cmd: str, diff) -> str | None:
     from brindle.config import load_repo_config
 
     try:
-        mode = load_repo_config(ws.repo_root, branch=ws.base_branch).scoped_checks
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         return cmd
-    return check_scope.command(ws, cmd, check_scope.inferred(cmd, mode), diff)
+    return check_scope.command(ws, cmd, check_scope.inferred(cmd, cfg.scoped_checks), diff,
+                               cfg.scoped_checks_max_files)
 
 
 def _read_outcome(path, since: float) -> tuple[bool, str] | None:

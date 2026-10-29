@@ -46,7 +46,9 @@ if TYPE_CHECKING:
     from brindle.db import DB, Workspace
 
 ALWAYS_FULL = (".brindle/**",)   # the checks themselves (or the rules) changed
-MAX_SYMBOLS = 30          # more changed symbols than this: run everything
+CAP_NOTE = ("brindle: this change reaches more than {max} test files (scoped_checks_max_files); ran only the "
+            "branch's own and namesake tests ({tests}). The full suite runs on the session branch before its PR.")
+MAX_SYMBOLS = 30         # more changed symbols than this: run everything
 GRAPHIFY_SECONDS = 60
 SKIPPED = "skipped: "     # run_checked's output for a skipped check starts with this
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.M)
@@ -168,9 +170,13 @@ def changed_files(db: DB, ws: Workspace) -> tuple[str, list[str]] | None:
         return None
 
 
-def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, list[str]] | None) -> str | None:
+def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, list[str]] | None,
+            max_files: int = 0) -> str | None:
     """What to run for check ``cmd`` in ``ws`` given its ``changed_files``:
-    ``cmd`` itself, a narrower command, or None when nothing changed."""
+    ``cmd`` itself, a narrower command, or None when nothing changed.
+    ``max_files`` (0: no cap): more selected tests than this run only the
+    branch's own test files and the changed modules' namesake tests, after a
+    one-line note saying so."""
     if scope is None or diff is None:
         return cmd
     base, changed = diff
@@ -184,7 +190,29 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
     tests = pytest_targets(ws, base, changed)
     if tests is None:
         return cmd
-    return f"{cmd} {_quoted(tests)} || [ $? -eq 5 ]" if tests else None   # 5: none of them selected
+    if not tests:
+        return None
+    note = ""
+    if max_files > 0 and len(tests) > max_files:
+        tests = capped_targets(ws, changed)
+        if not tests:
+            return None
+        note = shlex.quote(CAP_NOTE.format(max=max_files, tests=" ".join(tests)))
+        note = f"printf '%s\\n' {note}; "
+    return f"{note}{cmd} {_quoted(tests)} || [ $? -eq 5 ]"   # 5: none of them selected
+
+
+def capped_targets(ws: Workspace, changed: list[str]) -> list[str]:
+    """The branch's own changed test files plus each changed module's
+    namesake tests (``tests/test_<module>.py``, ``tests/test_<module>_*.py``)."""
+    root = Path(ws.path)
+    tests = {f for f in changed if is_test_file(f)}
+    for f in changed:
+        if not is_test_file(f):
+            stem = PurePosixPath(f).stem
+            for pattern in (f"test_{stem}.py", f"test_{stem}_*.py"):
+                tests.update(p.relative_to(root).as_posix() for p in (root / "tests").glob(pattern))
+    return sorted(t for t in tests if (root / t).is_file())
 
 
 def _quoted(files: list[str]) -> str:

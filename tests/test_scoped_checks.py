@@ -1,6 +1,7 @@
 """A worker's branch runs only the checks (and tests) its changes reach;
 the supervisor's checkout always runs them in full."""
 import json
+import shlex
 import time
 from pathlib import Path
 
@@ -25,7 +26,8 @@ def write(root: Path, files: dict[str, str]) -> None:
 
 
 OTHER = {"tests/test_other.py": "def test_o(): pass\n"}
-NARROWED = f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
+CAPPED_NOTE = check_scope.CAP_NOTE.format(max=1, tests="tests/test_other.py")
+NARROWED =f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
 DYNAMIC_IMPORTS = {
     "fromlist": "__import__('pkg', fromlist=['new'])\n",
     "dynamic-fromlist": "__import__('pkg', fromlist=names)\n",
@@ -74,14 +76,20 @@ DYNAMIC_IMPORTS = {
      [f"{PYTEST} tests/test_g.py || [ $? -eq 5 ]"]),
     ("off", PYTEST, OTHER, [PYTEST]),
     ("supervisor", PYTEST, OTHER, [PYTEST]),
+    ("cap", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER},
+     [f"printf '%s\\n' {shlex.quote(CAPPED_NOTE)}; {PYTEST} tests/test_other.py || [ $? -eq 5 ]"]),
+    ("cap-none", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER},
+     [f"{PYTEST} tests/test_f.py tests/test_other.py || [ $? -eq 5 ]"]),
 ], ids=["python-affected", "deleted-function", "test-helper", "lookup-failed", "fallback-unmapped", "unmapped-importers",
         "import-fromlist", "import-dynamic-fromlist", "import-relative-level", "import-dynamic-level", "unmapped-test-helper", "quoted-name",
         "fallback-conftest", "fallback-pyproject", "infer", "infer-options", "infer-selects", "other-command-changed_files_env", "empty-diff",
-        "non-python-only", "non-python-plus-python", "lockfile", "unset-mode", "off", "supervisor"])
+        "non-python-only", "non-python-plus-python", "lockfile", "unset-mode", "off", "supervisor", "cap", "cap-none"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran):
     config = {"checks": [cmd], "scoped_checks": "off" if where == "off" else "infer"}
     if where == "unset":
         del config["scoped_checks"]
+    if where in ("cap", "cap-none"):
+        config["scoped_checks_max_files"] = 1 if where == "cap" else 0
     write(repo, {".brindle/config.json": json.dumps(config), "src/pkg/mod.py": MOD, "docs/guide.md": "doc\n",
                  "src/pkg/__init__.py": "", "src/pkg/pro/__init__.py": "",
                  "app/src/view.ts": "export const v = 1\n", "tests/conftest.py": "X = 1\n",
