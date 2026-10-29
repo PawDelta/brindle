@@ -204,14 +204,18 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
             version=4, plan="auto", plan_paths=["infra/**"], plan_approvers=["u_dev"],
             plan_reviewer_may_approve_low_risk=True)), now=NOW)
         assert (device.plan, device.plan_paths, device.plan_approvers) == ("auto", ("infra/**",), ("u_dev",))
+        assert device.plan_approver_groups == (("u_dev",),)
         always = member_policy(plan="always", plan_paths=["db/**"], plan_approvers=["u_other"],
                                plan_two_person=True, plan_reviewer_may_approve_low_risk=False)
         for s, a in both_orders(device, always):
             assert (s.plan, s.plan_two_person, s.plan_reviewer_may_approve_low_risk) == ("always", True, False)
-            assert set(s.plan_paths) == {"infra/**", "db/**"} and set(s.plan_approvers) == {"u_dev", "u_other"}
-            assert s.plan_paths[0] in a.plan_paths
-        for s, _ in both_orders(device, member_policy(plan="never", plan_reviewer_may_approve_low_risk=True)):
+            assert set(s.plan_paths) == {"infra/**", "db/**"} and s.plan_paths[0] in a.plan_paths
+            # Both orgs' approver lists stay separate groups; neither widens the other.
+            assert set(s.plan_approver_groups) == {("u_dev",), ("u_other",)} and s.plan_approvers == a.plan_approvers
+        none = member_policy(plan="never", plan_reviewer_may_approve_low_risk=True)
+        for s, _ in both_orders(device, none):
             assert (s.plan, s.plan_two_person, s.plan_reviewer_may_approve_low_risk) == ("auto", False, True)
+            assert s.plan_approver_groups == (("u_dev",),)
     elif case == "unsigned_airgap_file":
         assert not managed.local_policy_allowed(m, signed=False)
         assert managed.local_policy_allowed(m, signed=True)

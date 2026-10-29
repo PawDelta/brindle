@@ -354,6 +354,12 @@ class OrgPolicy:
     plan_approvers: tuple[str, ...] = ()
     plan_two_person: bool = False
     plan_reviewer_may_approve_low_risk: bool = False
+    # Who may approve a plan, for enforcement: one group per org whose policy
+    # applies, each that org's approver list, and an approval needs an eligible
+    # person from EVERY group. One org's policy is one group (none when its
+    # list is empty); merging two policies keeps both groups, so neither org's
+    # approvers are widened by the other's (see brindle.pro.managed.stricter).
+    plan_approver_groups: tuple[tuple[str, ...], ...] = ()
     # Keep the server answer separate from the interpreted policy: newer
     # servers may send fields this client cannot model yet. Do not serialize
     # the interpreted policy back over those fields when caching it.
@@ -522,7 +528,8 @@ def _plan_rules(p: dict) -> dict:
         if not isinstance(v, bool):
             raise PolicyUnavailable(f"malformed {name}")
         flags[name] = v
-    return {"plan": mode, "plan_paths": tuple(paths), "plan_approvers": tuple(approvers), **flags}
+    return {"plan": mode, "plan_paths": tuple(paths), "plan_approvers": tuple(approvers),
+            "plan_approver_groups": (tuple(approvers),) if approvers else (), **flags}
 
 
 def _rollout(p: dict) -> dict:

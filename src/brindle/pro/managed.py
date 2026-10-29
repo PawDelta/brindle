@@ -392,8 +392,9 @@ def stricter(a: OrgPolicy, b: OrgPolicy) -> OrgPolicy:
     """One policy from two (each one's effective policy, overrides applied)
     where every rule takes the stricter side: allowed lists intersect (a
     missing list allows everything, so the other side's rules), budgets and
-    the worker limit take the lower value, protected paths, plan paths, plan
-    approvers, required items and permission denies and controls accumulate,
+    the worker limit take the lower value, protected paths, plan paths,
+    required items and permission denies and controls accumulate, a plan
+    needs an approver from each side's list (``plan_approver_groups``),
     flags (human review, paused, kill switch, two-person plans, no personal
     keys by either side's effective rule) are on if either side has them,
     a reviewer may approve a low-risk plan only when both sides let them,
@@ -434,7 +435,11 @@ def stricter(a: OrgPolicy, b: OrgPolicy) -> OrgPolicy:
         agent_setup=_stricter_setup(x.agent_setup, y.agent_setup, deny_keys),
         permission_grants=_stricter_grants(x.permission_grants, y.permission_grants),
         plan=_stricter_plan(x.plan, y.plan), plan_paths=_union(x.plan_paths, y.plan_paths),
-        plan_approvers=_union(x.plan_approvers, y.plan_approvers),
+        # Approval is enforced through the groups: one eligible person from
+        # each org's list, so neither org widens the other's approvers.
+        # ``plan_approvers`` stays ``a``'s list, for display only.
+        plan_approvers=x.plan_approvers,
+        plan_approver_groups=tuple(g for g in (*x.plan_approver_groups, *y.plan_approver_groups) if g),
         plan_two_person=x.plan_two_person or y.plan_two_person,
         plan_reviewer_may_approve_low_risk=(x.plan_reviewer_may_approve_low_risk
                                             and y.plan_reviewer_may_approve_low_risk),
