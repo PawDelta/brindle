@@ -282,10 +282,12 @@ or put the goal in `.brindle/goals.md`, and it works like a project manager:
    reviewer agent has approved that exact commit, your pre-commit hooks pass,
    and your `checks` pass. brindle runs these itself before `merge_workspace`,
    and caches a clean commit's passing result so it isn't re-run for every
-   review and merge attempt at the same sha. `request_review` starts the
-   reviewer immediately and runs `checks` in the background, delivering a
-   pass/fail summary (output only for failures) as a message once they
-   finish, instead of asking the reviewer to run the whole suite itself.
+   review and merge attempt at the same sha. `request_review` returns at
+   once. With `checks` configured, brindle runs them first, in the
+   background, and starts the reviewer when they finish, with a pass/fail
+   summary (output only for failures) in its prompt, instead of asking the
+   reviewer to run the whole suite itself. With no `checks`, the reviewer
+   starts right away.
    `request_review` picks the reviewer profile itself unless you pass one: an
    explicit `profile` argument, else `review_profile` in the repo config,
    else `reviewer` (the repo's `reviewer` setting). brindle never picks a
@@ -1472,8 +1474,10 @@ removes stale locks and empty worktree folders.
 **The pipeline.** The slow part of delegating isn't the workers, it's the supervisor's
 turns between the stages: report, review, merge, remove, each waiting on a model turn
 that carries the whole session's context. So brindle runs those stages itself. When a
-worker reports, brindle starts the review at once and runs the checks in the
-background; when the reviewer approves and the checks pass, brindle merges the branch,
+worker reports, brindle gets the branch reviewed at once: with `checks` configured it
+runs them first, in the background, and starts the reviewer when they finish, with
+their results in its prompt (with no `checks`, the reviewer starts right away). When
+the reviewer approves and the checks pass, brindle merges the branch,
 removes the worktree, and sends the supervisor one message with the worker's report
 and the review. Findings go straight back to the worker to fix (`review_rounds`
 times) before they reach the supervisor, and anything the pipeline can't settle (a
@@ -1496,11 +1500,13 @@ merges. Conflicts in `protected_paths` (migrations, lockfiles, generated code) a
 never handed to a worker: the supervisor gets them as "needs you".
 
 **The completion audit.** A milestone's check can pass without the milestone being
-done: the test asserts too little, or checks the wrong thing. So when every milestone
-passes, brindle doesn't call the goal reached yet. A read-only reviewer audits everything since the goal was set
-against the goal and each milestone, looking for what's missing, stubbed or weakly
-tested. Only its approval of that commit finishes the goal. If it finds gaps, the
-supervisor gets them as a message and keeps working until a fresh audit approves.
+done: the check tests the wrong thing, or the deliverable was never built. So when
+every milestone passes, brindle doesn't call the goal reached yet. A read-only
+reviewer audits everything since the goal was set against the goal and each
+milestone, looking for deliverables that are missing, stubbed out or unhandled. It
+trusts the passing checks and doesn't debate how deep the tests go. Only its
+approval of that commit finishes the goal. If it finds gaps, the supervisor gets
+them as a message and keeps working until a fresh audit approves.
 `"goal_audit": false` turns it off.
 
 **Spending fewer tokens.** Workers run only the tests that cover their change while
@@ -2031,9 +2037,9 @@ about 20 GB of GPU memory, so set `"local_models": false` if you don't want brin
 to start or preload one. When `brindle` (or `brindle continue`)
 starts and a native profile points at Ollama on this machine that isn't answering,
 brindle starts it in the background with `OLLAMA_CONTEXT_LENGTH` set to the largest
-`context_tokens` any profile asks of it plus room for the reply (40960 for the
-built-ins), then loads each profile's model so the first task doesn't wait on the
-read from disk. Its output goes to `~/.brindle/ollama.log`. Only Ollama on a
+`context_tokens` any profile asks of it plus room for the reply (40192 for the
+built-ins: `32k` is 32000, plus 8192), then loads each profile's model so the
+first task doesn't wait on the read from disk. Its output goes to `~/.brindle/ollama.log`. Only Ollama on a
 loopback address is started; a remote endpoint is yours to run. A server you
 started yourself (with whatever settings) is left alone.
 
