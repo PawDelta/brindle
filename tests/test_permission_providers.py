@@ -55,6 +55,30 @@ def test_codex_bash_mcp_and_other(ws):
     assert r.command == "git log -1"
 
 
+@pytest.mark.parametrize("provider", ["claude", "codex"])
+@pytest.mark.variant("#298: attached-repo MCP calls from supervisors and workers prompted on every call")
+def test_attached_repo_mcp_calls_do_not_prompt(db, ws, tmp_path, monkeypatch, provider):
+    turn_on(ws)
+    boss = Agent("boss", ws.id, "supervisor", provider, None, "interactive", "processing", "%b", None, time.time())
+    db.add_agent(boss)
+    db.add_session_repo(boss.id, "lib", str(tmp_path / "lib"))
+    child = worker(db, ws, provider)
+    monkeypatch.setattr(agents, "_hold_for_app", lambda *args, **kwargs: None)
+    for caller in (boss, child):
+        for tool in ("assign", "handoff", "workspace_diff", "merge_workspace", "request_review", "remove_workspace"):
+            payload = codex_payload(f"mcp__brindle__{tool}", {"repo": "lib", "workspace": "feature"}, ws.path)
+            answer = agents.permission_request_decision(db, caller, payload, provider)
+            assert answer is not None
+            assert answer["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    for name in ("mcp__brindle_x__assign", "mcp__brindle__not_a_tool", "mcp__github__create_issue"):
+        req = permissions.Request(provider, "mcp", name, ws.path, ws.path, ws.repo_root)
+        assert permissions.decide(req).decision == "ask"
+    req = permissions.Request(provider, "mcp", "mcp__brindle__assign", ws.path, ws.path, ws.repo_root)
+    for decision in ("ask", "deny"):
+        permissions.add_rule("mcp", req.tool, decision)
+        assert permissions.decide(req).decision == decision
+
+
 @pytest.mark.parametrize("patch,kind", [
     ("*** Begin Patch\n*** Update File: secret.py\n*** Move to: public.py\n@@\n-old\n+new\n*** End Patch\n", "edit"),
 ])

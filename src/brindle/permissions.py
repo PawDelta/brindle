@@ -933,8 +933,8 @@ def _agy_protected(literal: str, real: str, roots: list[str]) -> bool:
 
 
 def _brindle_tools() -> set[str]:
-    """brindle's MCP tools by both names agy gives them: mcp_brindle_<tool>
-    and, through call_mcp_tool, mcp__brindle__<tool>. Exact names, so another
+    """brindle's MCP tools by their provider names: mcp_brindle_<tool>
+    and mcp__brindle__<tool>. Exact names, so another
     server's tools (say a server named brindle_x) never count."""
     from brindle.antigravity import tool_names
 
@@ -2067,6 +2067,14 @@ def _decide(req: Request, *, checks: list[str] | None, rules: list[Rule], unmatc
             return stopped
     if ruled is not None and ruled.decision == "allow":
         return ruled
+    # Providers preapprove brindle's own server, including delegation and
+    # workspace calls into attached repos. The generic MCP baseline must not
+    # turn those calls back into prompts. The server enforces session repo
+    # access and role restrictions; explicit ask/deny rules, saved denies and
+    # org controls still take precedence. Match registered names exactly.
+    if (ruled is None and req.kind == "mcp"
+            and req.tool.startswith(("mcp__brindle__", "mcp_brindle_")) and req.tool in _brindle_tools()):
+        return Decision("allow", "brindle's own MCP tool")
     from brindle import permission_groups
 
     # The parts of a command no rule covers: a capability group answers for
