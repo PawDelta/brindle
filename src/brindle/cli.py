@@ -2109,6 +2109,24 @@ def org_messages(
         status.mark_read([n["id"] for n in notes])
 
 
+@org_app.command("device-file")
+def org_device_file(
+    name: Optional[str] = typer.Option(None, "--name", help="A name for this managed device."),
+    allow_airgap: bool = typer.Option(False, "--allow-airgap", help="Let this managed device run in air-gap mode."),
+    audit_sink: Optional[str] = typer.Option(None, "--audit-sink", metavar="URL", help="Where the managed device sends its audit events: an https:// URL or a udp://, tcp://, tls:// syslog collector."),
+    out: Optional[str] = typer.Option(None, "-o", "--output", metavar="PATH", help="Write the managed device file here (a directory or a file; default: ./managed.json). Your MDM installs it; brindle does not."),
+    list_: bool = typer.Option(False, "--list", help="List the org's managed devices and their device tokens' status."),
+    revoke: Optional[str] = typer.Option(None, "--revoke", metavar="DEVICE_ID", help="Revoke a managed device's device token."),
+    org: Optional[str] = typer.Option(None, "--org", help="The Enterprise org (default: the current one)."),
+) -> None:
+    """Create a managed device file (a device token and signed policy) for MDM install (Enterprise admins)."""
+    from brindle.pro import org_cli
+
+    raise typer.Exit(org_cli.run_device_file(
+        _audit_repo(None), org=org, name=name, allow_airgap=allow_airgap, sink=audit_sink, out=out,
+        list_=list_, revoke=revoke, echo=typer.echo))
+
+
 @audit_app.command("verify")
 def audit_verify(
     repo: Optional[str] = typer.Option(None, "--repo", help="The repo whose log to verify (default: here)."),

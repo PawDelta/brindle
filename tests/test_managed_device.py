@@ -111,7 +111,8 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
         (tmp_path / managed.FILE).write_bytes(managed_file(signing_key, body, exp=NOW - 1))
         assert isinstance(managed.load(tmp_path, now=NOW), managed.Invalid)
         doc = json.loads(managed_file(signing_key, body))
-        doc["managed"] = doc["managed"][:-1] + ("A" if doc["managed"][-1] != "A" else "B")
+        # A middle character: the last one of a signature carries unused bits, so changing it can be a no-op.
+        doc["managed"] = doc["managed"][:-5] + ("A" if doc["managed"][-5] != "A" else "B") + doc["managed"][-4:]
         (tmp_path / managed.FILE).write_bytes(json.dumps(doc).encode())
         m = managed.load(tmp_path, now=NOW)
         assert isinstance(m, managed.Invalid) and DEVICE_TOKEN not in m.reason

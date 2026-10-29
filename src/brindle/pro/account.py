@@ -82,7 +82,11 @@ USAGE = """usage: brindle account [<command>] [--base-url URL]
   org join <code>   accept an invite code and join that org
   org use <org_id>  work as a member of <org_id> (`personal` for your own)
   org policy        show the current org's policy, its per-role overrides and the
-                    policy that applies to you (and refresh the cached copy)
+                    policy that applies to you (and refresh the cached copy), with the
+                    source of the verified policy (device, account, snapshot or offline)
+  org policy --export [--days N] [--org ORG]
+                    write the signed policy as an offline policy export to
+                    .brindle/policy.json, valid N days (1-90; default 30); Enterprise admins
   org profiles [list] [--org ORG]
             list the org's shared profiles and rule packs (and refresh the cached copy)
   org profiles push <file> [--pack] [--pinned] [--name NAME] [--org ORG]
@@ -382,8 +386,16 @@ class _OrgCommands:
         self._company_login(client)
         return 0
 
-    def cmd_org_policy(self, base: str | None) -> int:
-        from brindle.pro import team_policy
+    def cmd_org_policy(self, base: str | None, org: str | None = None, export: bool = False,
+                       days: int | None = None) -> int:
+        from brindle.pro import org_cli, team_policy
+
+        if export:
+            return org_cli.run_export(self.repo_root, org=org, days=days, base=base,
+                                      transport=self.transport, echo=self._say)
+        source = org_cli.policy_source()
+        if source:
+            self._say(f"Verified policy source: {source}")
 
         client = self._client(base)
         ent = license.current(store=self.store, client=client)
@@ -493,8 +505,10 @@ class ProAccount(_OrgCommands):
                     "device": _take(args, "--device", value=False),
                     "pack": _take(args, "--pack", value=False),
                     "pinned": _take(args, "--pinned", value=False), "name": _take(args, "--name"),
-                    "reset": _take(args, "--reset", value=False)}
+                    "reset": _take(args, "--reset", value=False),
+                    "export": _take(args, "--export", value=False), "days": _take(args, "--days")}
             seats = int(opts["seats"]) if opts["seats"] is not None else None
+            days = int(opts["days"]) if opts["days"] is not None else None
         except ValueError:
             print(USAGE, file=self.err)
             return 2
@@ -534,7 +548,10 @@ class ProAccount(_OrgCommands):
                     else ("org", "pack", "pinned", "name") if sub == "profiles" and rest[1:2] == ["push"]
                     else ("org", "pack") if sub == "profiles" and rest[1:2] == ["rm"]
                     else ("org",) if sub == "profiles"
+                    else ("org", "export", "days") if sub == "policy"
                     else ()}.get(cmd, ())
+        if opts["days"] is not None and not opts["export"]:
+            ok = False
         if not ok or any(v is not None and k not in flags_ok for k, v in opts.items()):
             print(USAGE, file=self.err)
             return 2
@@ -552,6 +569,8 @@ class ProAccount(_OrgCommands):
                     return self.cmd_org_profiles(base, *rest[1:], org=opts["org"],
                                                  pack=bool(opts["pack"]), pinned=bool(opts["pinned"]),
                                                  name=opts["name"])
+                if sub == "policy":
+                    return self.cmd_org_policy(base, org=opts["org"], export=bool(opts["export"]), days=days)
                 if sub in ("company", "member"):
                     return getattr(self, "cmd_org_" + sub)(base, *rest[1:], org=opts["org"])
                 return getattr(self, "cmd_org_" + sub)(base, *rest[1:])
