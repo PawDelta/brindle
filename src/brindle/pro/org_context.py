@@ -200,10 +200,9 @@ class OrgContext:
         from brindle.pro import managed, policy_cache, status
 
         ent = self.__dict__.get("_policy_entitlement", self.entitlement)
-        other_org = isinstance(self.managed, managed.Managed) and ent is not None and ent.org_id != self.managed.org_id
         if airgap.enabled() and managed.airgap_allowed(self.managed):
             return status.Saved()
-        if ent is not None and (policy_cache.enforced(ent) or other_org):
+        if ent is not None and (policy_cache.enforced(ent) or isinstance(self.managed, managed.Managed)):
             copy = self._signed("status", ent)
             if isinstance(copy, policy_cache.Unavailable):
                 self._unavailable = copy.reason
@@ -575,6 +574,12 @@ class OrgContext:
     @property
     def org_id(self) -> str | None:
         return getattr(self.managed, "org_id", None) or getattr(self.entitlement, "org_id", None)
+
+    @property
+    def org_name(self) -> str | None:
+        p = self._enforced()
+        grants = p.permission_grants if p is not None else None
+        return (grants.org_name if grants else None) or self.org_id
 
     @property
     def verified(self) -> bool:

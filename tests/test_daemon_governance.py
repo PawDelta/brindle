@@ -62,7 +62,10 @@ def admin(team, pro_env, monkeypatch):
     return team
 
 
-def test_offline_export_and_device_file(admin, monkeypatch):
+@pytest.mark.parametrize("bad_signature", [False, True])
+def test_offline_export_and_device_file(admin, monkeypatch, signing_key, bad_signature):
+    from test_managed_device import NOW, ORG as DEVICE_ORG, answer, managed_file
+
     sent = []
     # A signed policy naming another org is refused, and nothing is written.
     admin.routes[f"POST /orgs/{ORG}/policy/offline"] = lambda f, h: (200, {"token": "t", "body": {"org_id": "org_other"}})
@@ -77,14 +80,22 @@ def test_offline_export_and_device_file(admin, monkeypatch):
     assert got["path"] == str(config.brindle_home() / "policy.json")
     assert written == {"token": "signed.token", "body": {"org_id": ORG, "exp": 99}}
 
-    admin.routes[f"POST /orgs/{ORG}/managed-devices"] = lambda f, h: (
-        sent.append(dict(f)) or (200, {"managed": {"org_id": ORG, "device_token": "dt"},
-                                       "policy_body": {}, "device_id": "dev_1"}))
+    monkeypatch.setattr("time.time", lambda: NOW)
+    login(admin, team_claims(plan="enterprise", role="admin", org_id=DEVICE_ORG))
+    doc = json.loads(managed_file(signing_key, answer()))
+    if bad_signature:
+        parts = doc["managed"].split(".")
+        parts[2] = ("A" if parts[2][0] != "A" else "B") + parts[2][1:]
+        doc["managed"] = ".".join(parts)
+    admin.routes[f"POST /orgs/{DEVICE_ORG}/managed-devices"] = lambda f, h: (
+        sent.append(dict(f)) or (200, doc))
     code, got = _send("POST", PREFIX + "/device-file", {"name": "build-01", "allow_airgap": True,
                                                        "audit_sink": "https://siem.example.test"})
-    assert code == 200
+    assert code == (502 if bad_signature else 200)
+    if bad_signature:
+        return
     assert sent[-1] == {"name": "build-01", "allow_airgap": True, "audit_sink": "https://siem.example.test"}
-    assert got == {"filename": "managed.json", "device_id": "dev_1", "managed": {"org_id": ORG, "device_token": "dt"}}
+    assert got == {"filename": "managed.json", "device_id": doc["device_id"], "managed": doc}
     # The signed-in Enterprise admin may hand out device files.
     fake_org(monkeypatch, source="account")
     assert _send("GET", PREFIX)[1]["enterprise_admin"] is True

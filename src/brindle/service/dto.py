@@ -143,8 +143,7 @@ class DeviceFileDTO(_DTO):
 
 
 class PlanApprovalDTO(_DTO):
-    """Who may approve a plan: named approvers, or a second person (anyone but who asked).
-    Its producer (InboxItemDTO.approval from the plan-approvals backend) is wired in integration."""
+    """Who may approve a plan, from the org rules and votes already recorded."""
     approvers: list[str] = []
     second_person: bool = False
     requested_by: str | None = None

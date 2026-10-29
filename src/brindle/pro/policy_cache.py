@@ -183,14 +183,16 @@ def _stored(d: Path, kind: str, binding: Binding, now: float) -> VerifiedCopy | 
 
 
 def get_verified(kind: str, *, binding: Binding, fetch: Callable[[str], dict],
-                 now: float | None = None, home: Path | None = None) -> VerifiedCopy | Unavailable:
+                 now: float | None = None, home: Path | None = None,
+                 refresh: bool = False) -> VerifiedCopy | Unavailable:
     """The org's signed ``kind`` ("policy" or "status") for ``binding``,
     verified now. The stored copy is used when it verifies; otherwise
     ``fetch(kind)`` (the decoded answer of ``GET /orgs/{org_id}/<kind>``,
     raising when brindle Pro can't be reached) is called once, and its answer
     is stored and used when it verifies and nothing newer was verified while
     it was fetched (then the newer stored copy is used). ``home`` is
-    brindle's home."""
+    brindle's home. ``refresh`` checks a fresh server answer even while the
+    stored copy is valid, for status polling; a failed refresh leaves it intact."""
     if kind not in KINDS:
         raise ValueError(f"unknown signed document kind {kind!r}")
     now = time.time() if now is None else now
@@ -199,7 +201,7 @@ def get_verified(kind: str, *, binding: Binding, fetch: Callable[[str], dict],
     try:
         with _locked(d):
             copy = _stored(d, kind, binding, now)
-        if copy is not None:
+        if copy is not None and not refresh:
             return copy
         problem = None
     except signed.Expired:

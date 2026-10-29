@@ -79,10 +79,10 @@ def governance_status() -> GovernanceStatusDTO:
                                    action="Ask your organization's admin for a new device file.", enterprise_admin=admin)
     ctx = org_context.OrgContext.resolve()
     source = ctx.source()
-    org_id = getattr(managed, "org_id", None) or getattr(ctx, "org_id", None)
+    org_id = ctx.org_id
     if source is None and managed is None:
         return GovernanceStatusDTO(status="unmanaged", enterprise_admin=admin)
-    found = {"org_id": org_id, "org_name": getattr(ctx, "org_name", None) or org_id, "source": source,
+    found = {"org_id": org_id, "org_name": ctx.org_name, "source": source,
              "enterprise_admin": admin}
     if blocked := ctx.blocked_reason():
         return GovernanceStatusDTO(status="problem", problem=blocked, action=_FIX.get(source, _FIX_OTHER), **found)
@@ -109,7 +109,7 @@ def _write_json(path: Path, data: dict) -> None:
         raise
 
 
-def _org_post(path: str, form: dict, signed: str) -> dict:
+def _org_post(path: str, form: dict, signed: str, *, verify=None) -> dict:
     """POST to this org's account ``path`` (org_permissions.Account: the signed-in
     org member, checked as for every org admin request). These responses carry
     no top-level org_id, so the ``signed`` document in them must name ours."""
@@ -124,7 +124,7 @@ def _org_post(path: str, form: dict, signed: str) -> dict:
     if status != 200:
         error = auth._error(status, got)
         raise ServiceError(error.code, str(error), status)
-    doc = got.get(signed)
+    doc = verify(got) if verify else got.get(signed)
     if not isinstance(doc, dict) or doc.get("org_id") != account.ent.org_id:
         raise ServiceError("invalid_account_response", "Account response belongs to another organization.", 502)
     return got
@@ -143,16 +143,26 @@ def offline_policy(db: DB, params: dict, body: dict) -> dict:
 
 
 def device_file(db: DB, params: dict, body: dict) -> dict:
+    from brindle.pro import managed, signed, team_policy
+
+    def verify(got):
+        try:
+            device = managed.verify_file(json.dumps(got).encode())
+        except (managed.ManagedError, signed.SignedError, team_policy.PolicyUnavailable) as e:
+            raise ServiceError("invalid_account_response", f"The account's device file did not verify: {e}", 502) from e
+        return {"org_id": device.org_id}
+
     name = (_get(body, "name", required=True) or "").strip()
     if not name or len(name) > 100:
         raise ServiceError("invalid", "name must be 1 to 100 characters")
     form = {"name": name, "allow_airgap": _get(body, "allow_airgap", bool, default=False)}
     if (sink := _get(body, "audit_sink", (str, dict))) is not None:
         form["audit_sink"] = sink
-    got = _org_post("/managed-devices", form, "managed")
+    got = _org_post("/managed-devices", form, "managed", verify=verify)
     if not isinstance(got.get("device_id"), str):
         raise ServiceError("invalid_account_response", "The account's device file is incomplete.", 502)
-    return DeviceFileDTO(filename="managed.json", device_id=got["device_id"], managed=got["managed"]).to_json()
+    document = {k: got[k] for k in ("managed", "policy_body", "device_id")}
+    return DeviceFileDTO(filename="managed.json", device_id=got["device_id"], managed=document).to_json()
 
 
 def _project_plan(repo: str) -> dict:

@@ -156,6 +156,7 @@ def test_governance_wiring(tmp_path, monkeypatch, signing_key, seam):
     ctx = context()
     if seam == "policy_source":
         assert ctx.policy.max_parallel_workers == 1 and ctx.source() == "account"
+        assert (ctx.org_id, ctx.org_name) == (ent.org_id, "Acme")
         assert ctx.status.org_id == ent.org_id and ctx.blocked_reason() is None
         from brindle.daemon.routes_governance import governance_status
 
@@ -169,6 +170,7 @@ def test_governance_wiring(tmp_path, monkeypatch, signing_key, seam):
         monkeypatch.setattr(managed, "load", lambda **kw: device)
         ent = None
         assert context().source() == "snapshot"
+        assert context().org_name == device.org_id
         with context().activated():
             plugin = team_policy.ProPolicy(str(tmp_path))
             assert plugin.org_budgets().budget_seat_month_usd == 50
@@ -203,6 +205,10 @@ def test_governance_wiring(tmp_path, monkeypatch, signing_key, seam):
                       command="terraform apply")
         assert ctx.org_decision(req).decision == "deny"
         assert ctx.policy.max_parallel_workers == 1 and ctx.policy.allowed_models == ("opus",)
+        with ctx.activated():
+            assert team_policy.access(str(tmp_path)).allowed_models == ("opus",)
+            assert team_policy.org_budgets(str(tmp_path)).budget_seat_month_usd == 50
+            assert team_policy.managed_models(str(tmp_path)).max_parallel_workers == 1
         # An unsigned local file never substitutes for a managed device's policy.
         path = airgap.policy_path(str(tmp_path))
         path.parent.mkdir(exist_ok=True)
@@ -255,3 +261,40 @@ def test_unavailable_signed_governance_blocks_launch_and_preserves_running_worke
     assert why in str(exc.value)
     assert rollout.sweep(db) == [] and worker[0] == []
     assert db.get_agent("w1").status == "processing"
+
+
+@pytest.mark.parametrize("path", ["read", "poll"])
+def test_signed_status_uses_verified_cache(tmp_path, monkeypatch, signing_key, path):
+    from brindle.pro import auth, policy_cache
+    from test_policy_cache import BODIES, ME, NOW, answer
+
+    ent = SimpleNamespace(**vars(ME), features={"team"}, policy_signed=True)
+    monkeypatch.setattr("time.time", lambda: NOW)
+    monkeypatch.setattr(license, "current", lambda **kw: ent)
+    with at_home(tmp_path):
+        monkeypatch.setitem(BODIES, "status", {**BODIES["status"], "notices": [
+            {"id": "n1", "text": "notice", "from_role": "admin"}]})
+        policy_cache.get_verified("status", binding=ME, fetch=lambda kind: answer(signing_key, kind), now=NOW)
+        status.save(status.Saved(org_id=ent.org_id, status=status.Status(paused=False), delivered=["n1"]))
+        if path == "read":
+            saved = status.load()
+            assert saved.status.paused and saved.delivered == ["n1"]
+            assert not status.load("another_org").status.paused
+            monkeypatch.setattr(auth, "authed", lambda *a, **kw: (204, {}))
+            assert status.mark_read(["n1"]) == ["n1"]
+            assert status.load().status.notices == []
+        else:
+            monkeypatch.setitem(BODIES, "status", {**BODIES["status"], "paused": False, "policy_version": 4})
+            response = answer(signing_key, "status", policy_version=4, iat=NOW)
+            policy_response = answer(signing_key, "policy", policy_version=4, iat=NOW)
+            monkeypatch.setattr(auth, "authed", lambda client, store, method, url:
+                                (200, response if url.endswith("/status") else policy_response))
+            poller = status.Poller(entitlement=lambda: ent, clock=lambda: NOW)
+            assert not poller.poll_once().paused
+            copy = policy_cache.get_verified("status", binding=ME, fetch=lambda kind: None, now=NOW)
+            assert copy.claims["policy_version"] == 4 and not copy.body["paused"]
+            policy = policy_cache.get_verified("policy", binding=ME, fetch=lambda kind: None, now=NOW)
+            assert policy.claims["policy_version"] == 4
+            response = {"policy_version": 5, "paused": True}
+            assert poller.poll_once() is None
+            assert not status.load().status.paused

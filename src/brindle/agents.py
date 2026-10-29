@@ -3438,8 +3438,8 @@ def _org_eligibility(db: DB, caller_id: str, agent: Agent, rules):
         return None, plan, ("your org's plan rules need an approver started while signed in to the org "
                             "(this agent has no team member bound)")
     who = plan_approvals.Approver(member, reviewer)
-    return who, plan, (None if plan_approvals.eligible(rules, who, plan).allowed
-                       else plan_approvals.eligible(rules, who, plan).reason)
+    decision = plan_approvals.eligible(rules, who, plan)
+    return who, plan, None if decision.allowed else decision.reason
 
 
 def _org_plan_refusal(db: DB, caller_id: str, agent: Agent, rules, so_far: list[str]) -> str | None:

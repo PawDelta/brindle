@@ -67,20 +67,26 @@ class OrgPlanRules:
     ``plan_approvers``, ``plan_two_person``, ``plan_reviewer_may_approve_low_risk``)."""
     plan: str = "auto"                  # auto | always | never
     paths: tuple[str, ...] = ()
-    approvers: tuple[str, ...] = ()     # member ids; empty: any member may approve
+    approvers: tuple[str, ...] = ()     # member ids for display
     two_person: bool = False
     reviewer_low_risk: bool = False
+    approver_groups: tuple[tuple[str, ...], ...] = ()
 
     @classmethod
     def from_policy(cls, policy: dict | None) -> "OrgPlanRules":
+        groups = getattr(policy, "plan_approver_groups", None)
         if callable(getattr(policy, "plan_rules", None)):
             policy = policy.plan_rules()
         p = policy if isinstance(policy, dict) else {}
+        approvers = tuple(s for s in p.get("plan_approvers") or () if isinstance(s, str))
+        if groups is None:
+            groups = p.get("plan_approver_groups", (approvers,) if approvers else ())
         plan = p.get("plan")
         return cls(
             plan=plan if plan in ("auto", "always", "never") else "auto",
             paths=tuple(s for s in p.get("plan_paths") or () if isinstance(s, str)),
-            approvers=tuple(s for s in p.get("plan_approvers") or () if isinstance(s, str)),
+            approvers=approvers,
+            approver_groups=tuple(tuple(g) for g in groups if g),
             two_person=p.get("plan_two_person") is True,
             reviewer_low_risk=p.get("plan_reviewer_may_approve_low_risk") is True,
         )
