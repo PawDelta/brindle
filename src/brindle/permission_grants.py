@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from urllib.parse import urlsplit
 
@@ -826,32 +827,33 @@ def _plugin(repo_root: str):
     return ProPolicy(repo_root)
 
 
-def org_limits(repo_root: str | None) -> OrgLimits | None:
-    """The Team org's limits in ``repo_root`` now, or None without a Team org."""
-    from brindle.policy import Decision as PolicyDecision
-    from brindle.pro import status
+def _context(repo_root: str | None):
+    """The org context for ``repo_root``: the one this check is under
+    (:func:`org_check`), else a new one whose policy is read through :func:`_plugin`."""
+    from brindle.pro import org_context
 
+    ctx = org_context.active()
+    if ctx is not None and ctx.repo_root == repo_root:
+        return ctx
+    return org_context.OrgContext.resolve(
+        repo_root=repo_root, providers=org_context.Providers(policy=lambda: _plugin(repo_root).policy()))
+
+
+@contextmanager
+def org_check(repo_root: str | None):
+    """One org context for everything inside (a whole permission decision:
+    the org's denies, its controls and the saved approvals it settles), so
+    each reads the same policy, status and entitlement."""
+    with _context(repo_root).activated():
+        yield
+
+
+def org_limits(repo_root: str | None) -> OrgLimits | None:
+    """The Team org's limits in ``repo_root`` now, or None without a Team org
+    (brindle.pro.org_context.OrgContext.limits)."""
     if not repo_root:
         return None
-    try:
-        p = _plugin(repo_root).policy()
-    except Exception as e:  # noqa: BLE001 - fail closed
-        return OrgLimits(False, why=f"the org policy can't be read ({e})")
-    if isinstance(p, PolicyDecision):
-        return None if p.allowed else OrgLimits(False, why=p.reason)
-    g = p.permission_grants
-    deny = tuple(org_rule(s) for s in g.deny) if g else ()
-    owner = f"org:{p.org_id}"
-    controls, org_name = (tuple(g.controls), g.org_name) if g else ((), "")
-    blocked = status.block_reason(p)
-    if blocked:
-        return OrgLimits(False, deny=deny, why=f"org {p.org_id}: {blocked}", owner=owner, controls=controls,
-                         org_name=org_name)
-    if g is None:
-        return OrgLimits(False, why=f"org {p.org_id}'s policy sets no permission_grants", owner=owner)
-    return OrgLimits(g.allow, tuple(g.kinds), g.max_minutes, tuple(g.lifetimes), tuple(g.scopes),
-                     g.allow_persistent, deny, "" if g.allow else f"org {p.org_id} allows no saved approvals", owner,
-                     controls, org_name)
+    return _context(repo_root).limits()
 
 
 def org_denies(repo_root: str | None) -> list[Rule]:
@@ -1108,22 +1110,11 @@ def org_reason(lim: OrgLimits, c, decision: str) -> str:
 def org_decision(req: Request, rules: list[Rule], checks: list[str] | None = None) -> Decision | None:
     """What the org's controls say about ``req``: the first Block that covers
     it, else the first Ask, as a Decision whose rule is the org's (source
-    "org"), or None (no Team org, no controls, or none covers it)."""
-    lim = org_limits(req.repo_root or None)
-    if lim is None or not lim.controls:
+    "org"), or None (no Team org, no controls, or none covers it)
+    (brindle.pro.org_context.OrgContext.org_decision)."""
+    if not req.repo_root:
         return None
-    asked = None
-    for c in lim.controls:
-        found = _control_matches(c, req, rules, checks)
-        if found is None:
-            continue
-        rule = found.rule
-        if found.decision == "deny":
-            return Decision("deny", org_reason(lim, c, "deny"), rule)
-        if asked is None:
-            asked = Decision("ask", org_reason(lim, c, "ask"),
-                             replace(rule, decision="ask", id="", limits=org_ask_limits(lim), person_only=True))
-    return asked
+    return _context(req.repo_root).org_decision(req, rules, checks)
 
 
 def org_ask_limits(lim: OrgLimits) -> dict:
@@ -1222,7 +1213,8 @@ def _policy(req: Request, repo_root: str) -> Decision:
     from brindle.config import load_repo_config
 
     checks = list(load_repo_config(repo_root).checks or []) if repo_root else None
-    return permissions.decide(req, checks=checks, rules=permissions.all_rules(repo_root or None), saved=[])
+    with org_check(repo_root or None):      # the rules' org denies and decide's controls: one policy
+        return permissions.decide(req, checks=checks, rules=permissions.all_rules(repo_root or None), saved=[])
 
 
 def pending_asks(db, repo_root: str | None = None) -> list[PendingAsk]:

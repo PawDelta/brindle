@@ -35,7 +35,7 @@ import socket
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from brindle import airgap
 from brindle.pro._files import private_dir, read_private, write_private
@@ -210,34 +210,22 @@ def control_in_force(st: Status, now: float | None = None) -> dict | None:
     return c
 
 
-def _rollout_entitled() -> bool:
-    from brindle.pro import rollout
+def _context(now: float | None = None, saved: Saved | None = None):
+    """An org context at ``now`` whose status is ``saved`` (default: :func:`load`)."""
+    from brindle.pro.org_context import OrgContext, Providers
 
-    return rollout.entitled()
+    return OrgContext.resolve(now=now, providers=Providers(status=(lambda: saved) if saved else load))
 
 
 def shutdown_control(now: float | None = None, saved: Saved | None = None) -> dict | None:
-    """A shutdown in force, for an org with ``managed_rollout``."""
-    saved = saved or load()
-    c = control_in_force(saved.status, now)
-    return c if c and c["action"] == "shutdown" and _rollout_entitled() else None
+    """A shutdown in force, for an org with ``managed_rollout``
+    (brindle.pro.org_context.OrgContext.shutdown_control)."""
+    return _context(now, saved).shutdown_control()
 
 
 def pause_reason(saved: Saved | None = None) -> str | None:
-    saved = saved or load()
-    why = saved.status.paused_reason
-    if not saved.status.paused:
-        # The cached effective policy says so too (it follows policy_version).
-        try:
-            from brindle.pro import team_policy
-
-            cached = team_policy.load_cached(saved.org_id) if saved.org_id else None
-        except Exception:  # noqa: BLE001
-            cached = None
-        if cached is None or not cached.enforced.paused:
-            return None
-        why = cached.enforced.paused_reason
-    return f"paused by your org{': ' + why if why else ''} (ask an org admin to resume you)"
+    """Why the member is paused (brindle.pro.org_context.OrgContext.pause_reason)."""
+    return _context(saved=saved).pause_reason()
 
 
 def shutdown_reason(c: dict) -> str:
@@ -247,46 +235,15 @@ def shutdown_reason(c: dict) -> str:
 def block_reason(p=None, now: float | None = None) -> str | None:
     """Why no new worker or reviewer may start: the member is paused or their
     org shut brindle down remotely. ``p`` is the policy being enforced (its
-    ``paused`` counts too). None when nothing blocks."""
-    try:
-        saved = load()
-        if p is not None and getattr(p, "paused", False):
-            why = getattr(p, "paused_reason", None)
-            return f"paused by your org{': ' + why if why else ''} (ask an org admin to resume you)"
-        c = shutdown_control(now, saved)
-        if c:
-            return shutdown_reason(c)
-        return pause_reason(saved)
-    except Exception:  # noqa: BLE001 - a broken status file must not stop all work
-        log.warning("brindle: couldn't read the org status", exc_info=True)
-        return None
-
-
-def _tighter(a, b):
-    return b if a is None else a if b is None else min(a, b)
+    ``paused`` counts too). None when nothing blocks
+    (brindle.pro.org_context.OrgContext.blocked_reason)."""
+    return _context(now).blocked_reason(p)
 
 
 def narrow(p, now: float | None = None):
     """``p`` (an enforced :class:`OrgPolicy`) narrowed by a throttle control in
-    force: cheaper models only (the intersection with the policy's), fewer
-    parallel workers, a lower budget. Never widens anything."""
-    try:
-        saved = load()
-        c = control_in_force(saved.status, now)
-        t = c.get("throttle") if c and c["action"] == "throttle" else None
-        if not t or not _rollout_entitled():
-            return p
-        models = p.allowed_models
-        if t.get("allowed_models") is not None:
-            models = (tuple(t["allowed_models"]) if models is None
-                      else tuple(m for m in models if m in t["allowed_models"]))
-        return replace(
-            p, allowed_models=models,
-            max_parallel_workers=_tighter(p.max_parallel_workers, t.get("max_parallel_workers")),
-            budget_seat_month_usd=_tighter(p.budget_seat_month_usd, t.get("seat_month_usd")))
-    except Exception:  # noqa: BLE001
-        log.warning("brindle: couldn't apply the org throttle", exc_info=True)
-        return p
+    force (brindle.pro.org_context.OrgContext.narrow). Never widens anything."""
+    return _context(now).narrow(p)
 
 
 def ack(control: dict, stopped: int, client=None, store=None) -> bool:
@@ -586,7 +543,7 @@ def bar_text(saved: Saved | None, now: float | None = None) -> tuple[str, str] |
 
     st = saved.status
     c = control_in_force(st, now)
-    if c and c["action"] == "shutdown" and _rollout_entitled():
+    if shutdown_control(now, saved):
         return shutdown_reason(c), BAR_ALERT
     if st.paused:
         return f"paused: {st.paused_reason or 'by your org'}", BAR_ALERT
