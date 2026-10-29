@@ -2,6 +2,7 @@
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -59,11 +60,14 @@ def _notice(db, root, worker, mp):
 
 def _plan_approval(db, root, worker, mp):
     from brindle import plan_policy
+    from brindle.pro import license
 
-    db.update_agent(worker, plan_state="proposed", plan_approvals=json.dumps(["alice"]))
+    db.update_agent(worker, plan_first=1, plan_state="proposed", plan_approvals=json.dumps(["alice"]))
+    db.update_agent(root, member="alice")
     rules = plan_policy.OrgPlanRules.from_policy({"plan_approvers": ["alice", "bob"], "plan_two_person": True})
     mp.setattr(plan_policy, "load_org_rules", lambda repo: rules)
-    mp.setattr(plan_policy, "current_member", lambda repo: "bob")
+    mp.setattr(license, "current", lambda **kw: SimpleNamespace(
+        sub="bob", org_id="org1", features={"team"}, role="member", policy_role=None))
 
 
 @pytest.mark.parametrize("kind, setup, expected", [
@@ -95,6 +99,8 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, se
            if i.kind == kind]
     assert sorted((i.agent_id, i.detail) for i in got) == expected
     if setup is _plan_approval:
+        from brindle import agents
+        from brindle.pro import license
         from brindle.tmux import PaneSnapshot
         from test_daemon_actions import _send
 
@@ -103,6 +109,20 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, se
         assert code == 200
         assert next(i["approval"] for i in rows if i["kind"] == "plan") == {
             "approvers": ["alice", "bob"], "second_person": True, "requested_by": "alice", "you": True}
+        ent = license.current()
+        monkeypatch.setattr(license, "current", lambda **kw: ent)
+        monkeypatch.setattr(agents, "send_message", lambda *a, **kw: None)
+        db.update_agent("w1", plan_approvals=None)
+        for member, expected_code in [("alice", 409), ("alice", 409), ("bob", 200)]:
+            ent.sub = member
+            assert _send("POST", "/v1/inbox/w1/approve")[0] == expected_code
+            worker = db.get_agent("w1")
+            assert worker.plan_state == ("approved" if member == "bob" else "proposed")
+            assert json.loads(worker.plan_approvals or "[]") == ([] if member == "bob" else ["alice"])
+        db.update_agent("w1", plan_state="proposed")
+        ent = None
+        assert _send("POST", "/v1/inbox/w1/approve")[0] == 403
+        assert db.get_agent("w1").plan_approvals is None
     # Each agent's item links into its session; a sign-in carries the login the app can start.
     assert all(i.root_id == {"r2": "r2"}.get(i.agent_id, "r1") for i in got if i.agent_id)
     assert all(i.action.path == "/v1/providers/claude/login" for i in got if kind == "credentials")

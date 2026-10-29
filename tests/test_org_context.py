@@ -262,12 +262,17 @@ def test_unavailable_signed_governance_blocks_launch_and_preserves_running_worke
     assert db.get_agent("w1").status == "processing"
 
 
-@pytest.mark.parametrize("path", ["read", "poll"])
+@pytest.mark.parametrize("path", ["read", "poll", "managed_poll"])
 def test_signed_status_uses_verified_cache(tmp_path, monkeypatch, signing_key, path):
-    from brindle.pro import auth, policy_cache
+    from brindle.pro import auth, managed, policy_cache
     from test_policy_cache import BODIES, ME, NOW, answer
 
-    ent = SimpleNamespace(**vars(ME), features={"team"}, policy_signed=True)
+    ent = SimpleNamespace(**vars(ME), features={"team"}, policy_signed=path != "managed_poll")
+    if path == "managed_poll":
+        device = managed.Managed("org_device", "d1", "t", False, None, None, False, NOW + 86400)
+        monkeypatch.setattr(managed, "load", lambda **kw: device)
+        monkeypatch.setattr(managed, "device_policy", lambda *a, **kw: team_policy.parse_policy(
+            device.org_id, {"version": 1, "policy": {}}))
     monkeypatch.setattr("time.time", lambda: NOW)
     monkeypatch.setattr(license, "current", lambda **kw: ent)
     with at_home(tmp_path):
@@ -283,7 +288,10 @@ def test_signed_status_uses_verified_cache(tmp_path, monkeypatch, signing_key, p
             assert status.mark_read(["n1"]) == ["n1"]
             assert status.load().status.notices == []
         else:
+            policy_cache.get_verified("policy", binding=ME, fetch=lambda kind: answer(signing_key, kind), now=NOW)
+            team_policy.save_cached(team_policy.parse_policy(ent.org_id, {"version": 4, "policy": {}}))
             monkeypatch.setitem(BODIES, "status", {**BODIES["status"], "paused": False, "policy_version": 4})
+            monkeypatch.setitem(BODIES, "policy", {**BODIES["policy"], "version": 4})
             response = answer(signing_key, "status", policy_version=4, iat=NOW)
             policy_response = answer(signing_key, "policy", policy_version=4, iat=NOW)
             monkeypatch.setattr(auth, "authed", lambda client, store, method, url:
@@ -294,6 +302,7 @@ def test_signed_status_uses_verified_cache(tmp_path, monkeypatch, signing_key, p
             assert copy.claims["policy_version"] == 4 and not copy.body["paused"]
             policy = policy_cache.get_verified("policy", binding=ME, fetch=lambda kind: None, now=NOW)
             assert policy.claims["policy_version"] == 4
+            assert OrgContext.resolve().policy.version == 4
             response = {"policy_version": 5, "paused": True}
             assert poller.poll_once() is None
             assert not status.load().status.paused

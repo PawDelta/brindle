@@ -341,9 +341,13 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         return {"read": status.mark_read([item])}
     a = _agent(db, item)
     if action in ("approve", "reject"):
-        # The person decides as the worker's supervisor would.
-        text = agents.approve_plan(db, a.parent_id, a.id, _get(body, "feedback", default=""),
-                                   action == "approve")
+        from brindle import plan_policy
+
+        member = plan_policy.current_member(_workspace(db, a.workspace_id).repo_root)
+        if not member:
+            raise ServiceError("forbidden", "Sign in to approve or revise a plan in the Inbox", 403)
+        text = agents.approve_plan(db, None, a.id, _get(body, "feedback", default=""),
+                                   action == "approve", human_member=member)
         return {"message": text}
     if action in ("accept", "decline"):
         ap = db.get_autopilot(a.id)

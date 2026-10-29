@@ -403,9 +403,11 @@ class Poller:
             self.disabled = True
             return None
         now = self._clock()
-        if code == 200 and (policy_cache.enforced(ent) or isinstance(managed.load(now=now), managed.Managed)):
-            copy = policy_cache.get_verified("status", binding=policy_cache.Binding(
-                ent.sub, ent.org_id, ent.role, ent.policy_role), fetch=lambda kind: body, now=now, refresh=True)
+        signed_required = policy_cache.enforced(ent) or isinstance(managed.load(now=now), managed.Managed)
+        if code == 200 and signed_required:
+            binding = policy_cache.Binding(ent.sub, ent.org_id, ent.role, ent.policy_role)
+            copy = policy_cache.get_verified("status", binding=binding,
+                                             fetch=lambda kind: body, now=now, refresh=True)
             if isinstance(copy, policy_cache.Unavailable):
                 return None
             body = copy.body
@@ -422,8 +424,13 @@ class Poller:
                 log.warning("brindle: couldn't save the org status", exc_info=True)
         self.saved = saved
         try:
-            cached = team_policy.load_cached(ent.org_id)
-            if st.policy_version is not None and (cached is None or st.policy_version > cached.version):
+            if signed_required:
+                cached = policy_cache.get_verified("policy", binding=binding, fetch=lambda kind: None, now=now)
+                version = cached.claims["policy_version"] if isinstance(cached, policy_cache.VerifiedCopy) else None
+            else:
+                cached = team_policy.load_cached(ent.org_id)
+                version = cached.version if cached else None
+            if st.policy_version is not None and (version is None or st.policy_version > version):
                 self._refetch(ent)
         except Exception:  # noqa: BLE001 - the old policy stays; the next poll tries again
             log.debug("brindle: policy refetch failed", exc_info=True)
