@@ -226,7 +226,21 @@ body {
 .side-dot[data-tone="fail"] { background: var(--fail); }
 .side-dot[data-tone="paused"] { background: transparent; border: 1.5px solid var(--ink-3); width: 7px; height: 7px; }
 .side-h { display: flex; align-items: center; gap: 8px; padding: 6px 8px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); }
-.side-nb { color: var(--sap); font-family: var(--mono); font-size: 11px; font-weight: 600; line-height: 20px; }
+.side-nb { color: var(--on-sap); background: var(--sap); border-radius: 999px; min-width: 20px; padding: 0 6px; text-align: center; font-family: var(--mono); font-size: 11px; font-weight: 700; line-height: 20px; }
+/* A new inbox item: the pill (sidebar) or the card (Inbox page) glows once. */
+@keyframes inbox-pulse {
+  0% { box-shadow: 0 0 0 0 var(--sap); }
+  100% { box-shadow: 0 0 0 10px transparent; }
+}
+@keyframes inbox-fade {
+  from { background-color: var(--sap-soft); }
+  to { background-color: transparent; }
+}
+.side-nb[data-pulse] { animation: inbox-pulse 900ms var(--ease) 2; }
+.inbox-new { animation: inbox-fade 2400ms var(--ease); }
+@media (prefers-reduced-motion: reduce) {
+  .side-nb[data-pulse], .inbox-new { animation: none; }
+}
 .side-ring { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; flex: none; }
 .side-ring::after { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--canvas-2); }
 .side-ms { display: flex; flex-direction: column; gap: 1px; }

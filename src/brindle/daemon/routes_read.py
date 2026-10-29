@@ -9,7 +9,7 @@ import logging
 import os
 import time
 from collections.abc import Callable
-from functools import wraps
+from functools import lru_cache, wraps
 from typing import Any
 
 from starlette.requests import Request
@@ -37,6 +37,7 @@ from brindle import (
 from brindle.daemon import session_review
 from brindle.daemon.routes_actions import read_edit_target
 from brindle.db import DB
+from brindle.pro import license
 from brindle.service import inbox
 from brindle.service.dto import (
     AccountDTO,
@@ -582,21 +583,39 @@ def cloud_options(db: DB, request: Request) -> Any:
     return CloudOptionsDTO(**connections.options()).to_json()
 
 
-@_json
-def account(db: DB, request: Request) -> Any:
-    from brindle.pro import license
+@lru_cache(maxsize=1)
+def _account_details(ent: license.Entitlement, generation: int | None, period: int) -> AccountDTO:
+    """Identity and orgs share a read, including offline misses. Entitlement,
+    credential generation and a bounded period keep it scoped to this login.
+    Repo-specific learning state is resolved separately on every request."""
+    from brindle.pro import auth
     from brindle.pro.account import ProAccount
 
+    account = ProAccount()
+    who = {}
+    try:
+        who = auth.me(account._client(None), account.store)
+    except Exception:  # noqa: BLE001 - identity is optional while offline
+        log.debug("brindle: daemon couldn't read the account's identity", exc_info=True)
+    try:
+        # For the app's org picker; the plan still shows when the org list can't be had.
+        orgs = account.orgs(None)
+    except Exception:  # noqa: BLE001 - offline, or the backend refused
+        log.debug("brindle: daemon couldn't list the account's orgs", exc_info=True)
+        orgs = []
+    return AccountDTO(signed_in=True, name=who.get("name"), email=who.get("email"), plan=ent.plan, orgs=orgs)
+
+
+license._clear_hooks.append(_account_details.cache_clear)
+
+
+@_json
+def account(db: DB, request: Request) -> Any:
     try:
         ent = license.current(refresh=False)
     except license.LicenseError:
         return AccountDTO(signed_in=False).to_json()
-    try:
-        # For the app's org picker; the plan still shows when the org list can't be had.
-        orgs = ProAccount().orgs(None)
-    except Exception:  # noqa: BLE001 - offline, or the backend refused
-        log.debug("brindle: daemon couldn't list the account's orgs", exc_info=True)
-        orgs = []
+    details = _account_details(ent, license._disk_cache_generation(), int(time.monotonic() // license.CACHE_SECONDS))
     # Signed in, the DTO carries more: the org, status, features, seats, role,
     # expiry and grace; whether hosted learning is entitled, whether it is
     # effectively on for `repo` (its setting resolved as the engine does), and
@@ -608,7 +627,7 @@ def account(db: DB, request: Request) -> Any:
     cfg = config.load_repo_config(repo) if repo else config.RepoConfig()
     on = available and plugins.learning_name(cfg) == plugins.CLOUD
     note = learning.kept_note(cfg, repo) if on and repo else None
-    return {**AccountDTO(signed_in=True, plan=ent.plan, orgs=orgs).to_json(),
+    return {**details.to_json(),
             "org_id": ent.org_id, "status": ent.status, "features": sorted(ent.features),
             "seats": ent.seats, "role": ent.role, "expires_at": ent.exp,
             "in_grace": ent.in_grace, "grace_until": ent.grace_until,

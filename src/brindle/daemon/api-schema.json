@@ -43,6 +43,18 @@
         }
       },
       "properties": {
+        "email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Email"
+        },
         "name": {
           "anyOf": [
             {
