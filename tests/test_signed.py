@@ -97,9 +97,9 @@ def test_stolen_active_key_drill(vector_keys):
 @pytest.mark.parametrize("case", ["refresh", "held", "down"])
 def test_an_entitlement_fetch_refreshes_the_revocation_list(backend, signing_key, case):
     """refresh: a direct refresh refuses the entitlement it fetches once the
-    served list revokes its key. held: when the refresh then fails, the stored
-    entitlement is checked against the new list. down: a failed fetch leaves
-    the refresh working."""
+    served list revokes its key, and the cached one from that key is dropped.
+    held: when the refresh then fails, the stored entitlement is checked
+    against the new list. down: a failed fetch leaves the refresh working."""
     old, old_kid = Ed25519PrivateKey.generate(), "test-old"
     signer, signer_kid, revoked = ((old, old_kid, TEST_KID) if case == "refresh"
                                    else (signing_key, TEST_KID, old_kid))
@@ -108,9 +108,10 @@ def test_an_entitlement_fetch_refreshes_the_revocation_list(backend, signing_key
     backend.routes["GET /keys/revocations"] = [auth.TransportError("down") if case == "down"
                                                else (200, {"revocations": [revocation]})]
     t, now = backend.issue(), time.time()
+    held = (sign(signing_key, claims()) if case == "refresh"           # current, and cached below
+            else sign(old, claims(kid=old_kid, iat=int(now - 3000), exp=int(now + 600))))   # due for refresh
     creds = {"access_token": t["access_token"], "refresh_token": t["refresh_token"],
-             "access_expires_at": now + 900, "base_url": BASE,      # held by the old key, due for refresh
-             "entitlement": sign(old, claims(kid=old_kid, iat=int(now - 3000), exp=int(now + 600)))}
+             "access_expires_at": now + 900, "base_url": BASE, "entitlement": held}
     if case == "held":
         creds["org_id"] = "org_2"                                 # the backend answers for org_1: refused
         backend.routes["GET /entitlement?org_id=org_2"] = backend._entitlement
@@ -119,8 +120,11 @@ def test_an_entitlement_fetch_refreshes_the_revocation_list(backend, signing_key
     client = auth.Client(BASE, backend)
     with signed._test_signing_key(old_kid, old.public_key()):
         if case == "refresh":
+            assert license.current(refresh=False).plan == "pro"      # the default store, now cached
             with pytest.raises(signed.Revoked):
                 auth.refresh(client, store, creds)
+            with pytest.raises(signed.Revoked):
+                license.current(refresh=False)
         elif case == "held":
             with pytest.raises(signed.Revoked):
                 license.current(store=store, client=client)
