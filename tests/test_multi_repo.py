@@ -54,7 +54,7 @@ def web(tmp_path):
     """A second repo with its own config: its check leaves a marker under
     the brindle home, so a test can tell whose checks ran."""
     return git_repo(tmp_path, "web", {
-        "pipeline": False, "overlap": "warn",
+        "pipeline": False, "overlap": "warn", "review": False,
         "checks": ['test -f app.py && touch "$BRINDLE_HOME/web-checked"'],
     })
 
@@ -65,7 +65,7 @@ def boss(db, repo, monkeypatch):
     its own marker."""
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text(json.dumps({
-        "pipeline": False, "overlap": "warn",
+        "pipeline": False, "overlap": "warn", "review": False,
         "checks": ['touch "$BRINDLE_HOME/main-checked"'],
     }))
     sh("git add -A && git commit -qm config", repo)   # a clean checkout records check shas

@@ -23,6 +23,7 @@ def write_config(repo, **cfg):
 def boss(db, repo, monkeypatch):
     """A supervisor caller adopted on the main checkout, so mcp_server tools
     that need `_caller` resolve without touching the real process cwd."""
+    write_config(repo, review=False)  # Review-specific tests opt in explicitly.
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                         "@0", None, time.time()))
