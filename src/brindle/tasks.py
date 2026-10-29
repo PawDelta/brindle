@@ -347,6 +347,19 @@ def _session_repos(db: DB, caller_ws: Workspace, caller_id: str | None = None) -
     return roots
 
 
+def dependency_repos(db: DB, caller_ws: Workspace, depends_on: list[str] | None,
+                     caller_id: str | None = None) -> set[str]:
+    """The repos ``depends_on`` entries live in; one that can't be resolved is skipped."""
+    roots = _session_repos(db, caller_ws, caller_id)
+    out: set[str] = set()
+    for dep in depends_on or ():
+        try:
+            out.add(_resolve_dependency(db, caller_ws, dep, roots)[0])
+        except agents.AgentError:
+            continue
+    return out
+
+
 def _resolve_dependency(
     db: DB, caller_ws: Workspace, dep: str, session_roots: list[str],
     *, dependent_task_id: str | None = None,
@@ -690,7 +703,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         isolate=bool(task.isolate), branch=task.branch, done_when=task.done_when,
         plan_first=None if task.plan_first is None else bool(task.plan_first),
         start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
-        weight=launch_weight,
+        weight=launch_weight, **({"depends_on": _loads(task.depends_on)} if task.depends_on else {}),
     )
     db.update_task(task.id, agent_id=worker.id, state="started", started_at=time.time())
     bus.publish_agent(db, "task.started", worker.id, task_id=task.id)
