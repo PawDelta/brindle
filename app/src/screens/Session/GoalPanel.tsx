@@ -15,7 +15,8 @@
    the goal and every milestone, all checked, as the engine serves them
    (it keeps a reached goal until a new one replaces it), and beside it a
    button Close session (POST /sessions/{root}/close, one click, nothing
-   asked: the session goes, its branches stay). An older engine sends no
+   asked: the session goes, its branches stay; in the sidebar it sits under
+   the milestones). An older engine sends no
    goal_phase: the PR readiness (review.ts) and the milestones stand in for
    it. Nothing here ever says "failed".
 
@@ -346,6 +347,8 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
   // The milestone being worked on: the running one, else the first not yet passed; none once the goal is done.
   const current = finished ? undefined : (milestones.find((m) => m.status === "running") ?? milestones.find((m) => m.status !== "passed"));
   const phaseLabel = GOAL_PHASE_LABEL[phase];
+  // The sidebar's count line names only the steps after In progress; Done is the green count itself.
+  const showPhase = phase !== "in_progress" && phase !== "done";
   /* The lifecycle's own step, where it has one: Ready for PR's Review & open PR, PR open's link and the
      way back into Review, where the session's commits not on the PR yet wait for the person's Push. */
   const unpushed = readiness.pr?.unpushed ?? 0;
@@ -377,12 +380,17 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
         )}
       </div>
     ) : null;
-  /* Done's step, beside the Done status: close the session, one click, nothing asked. */
+  /* Done's step: close the session, one click, nothing asked. Beside the status in the full view; in the sidebar
+     a quiet text button under the milestones, aligned with their names. */
   const closeSession =
     finished && onCloseSession ? (
       <button
         type="button"
-        className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-md border px-s1 py-0.5 ${mainTone}`}
+        className={
+          compact
+            ? "self-start pl-[30px] text-[11.5px] text-ink-3 hover:text-ink hover:underline"
+            : `inline-flex shrink-0 items-center whitespace-nowrap rounded-md border px-s1 py-0.5 ${mainTone}`
+        }
         data-testid="goal-close"
         title="Stop and hide the whole session; its branches stay"
         onClick={onCloseSession}
@@ -402,13 +410,18 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
       <section className={frame} aria-label="Goal" data-phase={phase}>
         <div className="flex items-center gap-s1 px-0.5 text-xs font-medium text-ink">
           <span className="side-ring" style={{ background: `conic-gradient(var(--pass) 0 ${donePct}%, var(--branch) ${donePct}% ${nowPct}%, var(--line) ${nowPct}% 100%)` }} aria-hidden />
-          <span data-testid="goal-line">
-            {total > 0 ? `${passed} of ${total} milestones complete · ` : ""}
-            <span data-testid="goal-phase" className={finished || phase === "ready_for_pr" ? "text-pass" : undefined}>
-              {phaseLabel}
-            </span>
+          {/* The count is green once the goal is finished; In progress and Done need no label of their own. */}
+          <span data-testid="goal-line" className={finished ? "text-pass" : undefined}>
+            {total > 0 ? `${passed} of ${total} milestones complete` : ""}
+            {showPhase && (
+              <>
+                {total > 0 && " · "}
+                <span data-testid="goal-phase" className={phase === "ready_for_pr" ? "text-pass" : undefined}>
+                  {phaseLabel}
+                </span>
+              </>
+            )}
           </span>
-          {closeSession}
           <span className="flex-1" />
         </div>
         {total > 0 ? (
@@ -434,6 +447,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
         ) : (
           <p className="px-0.5 text-[11px] text-ink-3">{finished ? "brindle finished this goal." : "No milestones yet."}</p>
         )}
+        {closeSession}
         {step}
         <div className="flex items-center gap-1.5 whitespace-nowrap px-1.5 pt-0.5 text-[11px] text-ink-3" title={goal.detail ?? undefined}>
           <span className="min-w-0 truncate">Checked {lastCheck > 0 ? formatAgo(lastCheck) : "never"}</span>
