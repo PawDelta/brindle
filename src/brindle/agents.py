@@ -3413,7 +3413,11 @@ def _org_eligibility(db: DB, caller_id: str, agent: Agent, rules):
 
     ws = db.get_workspace(agent.workspace_id)
     caller = db.get_agent(caller_id)
-    reviewer = bool(caller) and is_review_profile(caller.profile, ws.repo_root)   # whoever the caller is
+    # the caller's profile is judged in the caller's own repo: a custom profile may exist only there
+    caller_ws = db.get_workspace(caller.workspace_id) if caller else None
+    if caller and caller_ws is None:
+        return None, None, "can't tell whether the caller is a reviewer agent; refusing"
+    reviewer = bool(caller) and is_review_profile(caller.profile, caller_ws.repo_root)
     member = caller.member if caller else None
     task = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == agent.id), None)
     plan = plan_policy.PlanTask(weight=agent.weight, files=json.loads(task.files) if task and task.files else None)

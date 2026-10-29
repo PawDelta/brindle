@@ -44,7 +44,9 @@ def may_approve(rules: OrgPlanRules | None, approver: Approver, plan: PlanTask,
     d = eligible(rules, approver, plan)
     if not d.allowed or rules is None:
         return d
-    if rules.two_person and len({*approvals_so_far, approver.id}) < 2:
+    # an earlier vote counts only while its member may still approve under the current rules
+    still_allowed = {m for m in approvals_so_far if not rules.approvers or m in rules.approvers}
+    if rules.two_person and len({*still_allowed, approver.id}) < 2:
         return deny("your org requires two different people to approve a plan; "
                     "this approval is recorded, a second person must approve too. " + _who(rules))
     return allow()

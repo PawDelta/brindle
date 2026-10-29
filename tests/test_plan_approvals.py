@@ -2,6 +2,7 @@
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -74,13 +75,15 @@ def _rules(**kw):
      True),
     (_rules(two_person=True, reviewer_may_approve_low_risk=True), Approver("bob", reviewer=True), LIGHT, ["r1"],
      False),
+    # alice's vote was cast under the old allowlist; once she's off it, carol must approve
+    (_rules(two_person=True, approvers=["bob", "carol"]), Approver("bob"), LIGHT, ["alice"], False),
     (None, Approver("anyone"), PlanTask(weight="heavy"), [], True),
 ])
 def test_plan_approvals_may_approve(rules, approver, plan, so_far, allowed):
     d = may_approve(rules, approver, plan, so_far)
     assert d.allowed is allowed
     if not allowed and rules.approvers:
-        assert "alice" in d.reason
+        assert all(m in d.reason for m in rules.approvers)
 
 
 @pytest.mark.parametrize("how", ["immediate", "queued", "queued_same_branch"])
@@ -211,6 +214,30 @@ def test_plan_approvals_org_rules_gate_approve_plan(db, tmp_path, monkeypatch):
     monkeypatch.setattr("brindle.plan_policy.load_org_rules", unreadable)
     assert "down" in attempt("alice")
     assert db.get_agent(worker.id).plan_state == "proposed"
+
+
+def test_plan_approvals_reviewer_judged_in_callers_repo(db, tmp_path, monkeypatch):
+    """A custom reviewer profile that exists only in the caller's repo still counts as a reviewer."""
+    ws, boss, worker, _make, _state = _org_setup(
+        db, tmp_path, monkeypatch, _rules(reviewer_may_approve_low_risk=True))
+    other = Workspace("other", str(tmp_path / "other"), "other", "main", "main", "main",
+                      str(tmp_path / "other"), None, "", 1)
+    db.add_workspace(other)
+    qa = Agent(agents.new_id(), other.id, "qa", "claude", boss.id, "assign", "processing", "", None, time.time())
+    db.add_agent(qa)
+    db.update_agent(qa.id, member="alice")
+    db.update_agent(worker.id, parent_id=qa.id)
+    real_load = agents.load_profile
+
+    def load(name, repo_root):
+        if name == "qa" and repo_root == other.repo_root:
+            return SimpleNamespace(extends="reviewer")
+        return real_load(name, repo_root)
+
+    monkeypatch.setattr(agents, "load_profile", load)
+    with pytest.raises(agents.AgentError, match="low-risk"):
+        agents.approve_plan(db, qa.id, worker.id)     # heavy plan: a reviewer may not approve it
+    assert db.get_agent(worker.id).plan_approvals is None
 
 
 def test_plan_approvals_explicit_no_plan_cannot_waive_the_org(db, tmp_path, monkeypatch):
