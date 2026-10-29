@@ -170,7 +170,7 @@ function Section({ id, title, blurb, actions, children, testId, staff = false }:
         <span className="flex-1" />
         {actions}
       </header>
-      <div className={`${staff ? "rounded-lg border border-sap bg-sap-soft" : card} flex flex-col divide-y divide-line`}>{children}</div>
+      <div className={`${card} flex flex-col divide-y divide-line`}>{children}</div>
     </section>
   );
 }
@@ -385,7 +385,7 @@ function PermissionMode({ client }: { client: DaemonClient }) {
       data={{ mode: current }}
     >
       {!unavailable && (
-        <div role="radiogroup" aria-label="Claude permission mode" className="inline-flex rounded-md border border-line-strong bg-surface p-0.5">
+        <div role="radiogroup" aria-label="Claude permission mode" className="inline-flex rounded-md border border-line p-0.5">
           {MODES.map((m) => (
             <button
               key={m.value}
@@ -394,7 +394,7 @@ function PermissionMode({ client }: { client: DaemonClient }) {
               aria-checked={current === m.value}
               disabled={saving || !settings}
               title={m.blurb}
-              className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${current === m.value ? "bg-branch text-on-branch" : "text-ink-2 hover:bg-surface-2"}`}
+              className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${current === m.value ? "bg-surface-2 font-medium text-ink" : "text-ink-2 hover:bg-surface-2"}`}
               onClick={() => void pick(m.value)}
             >
               {m.label}

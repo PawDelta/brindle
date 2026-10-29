@@ -90,7 +90,6 @@ interface Activity {
 /* The rule editor's actions: a request kind, or a git push (a bash rule with the push matcher). */
 const ACTIONS = ["read", "write", "edit", "bash", "push", "fetch", "mcp", "other"];
 const MATCH_LABEL: Record<string, string> = { exact: "Is exactly", prefix: "Starts with", glob: "Matches pattern" };
-const TONE: Record<string, string> = { deny: "bg-sap-soft text-sap", ask: "bg-branch-soft text-branch", allow: "bg-pass-soft text-pass" };
 /* The same tones on a rule's pill: in the text only (pills are hairlines, never a fill). */
 const INK: Record<string, string> = { deny: "text-sap", ask: "text-branch", allow: "text-pass" };
 const fieldLabel = "flex min-w-0 flex-col gap-1 text-xs font-medium text-ink-3";
@@ -300,14 +299,14 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
 /* A segmented Allow / Ask / Deny (and Inherit) control: the pressed one is the current answer. */
 function Segmented({ label, value, levels, disabled, onPick }: { label: string; value: string; levels: readonly string[]; disabled: boolean; onPick(level: string): void }) {
   return (
-    <div role="group" aria-label={label} className="inline-flex overflow-hidden rounded-md border border-line bg-canvas-2">
+    <div role="group" aria-label={label} className="inline-flex overflow-hidden rounded-md border border-line">
       {levels.map((l) => (
         <button
           key={l}
           type="button"
           aria-pressed={value === l}
           disabled={disabled}
-          className={`border-l border-line px-s2 py-0.5 text-sm first:border-l-0 ${value === l ? (l === "inherit" ? "bg-surface-2 text-ink" : TONE[l]) : "text-ink-2 hover:bg-surface-2"}`}
+          className={`border-l border-line px-s2 py-0.5 text-sm first:border-l-0 ${value === l ? `bg-surface-2 font-medium ${l === "inherit" ? "text-ink" : INK[l]}` : "text-ink-2 hover:bg-surface-2"}`}
           onClick={() => onPick(l)}
         >
           {LEVEL_NAME[l]}
@@ -364,15 +363,15 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
             {customized && <span className="text-ink-3"> · customized</span>}
           </span>
         </div>
-        <div className="grid gap-s2 sm:grid-cols-2 xl:grid-cols-4" data-testid="presets">
+        <div className="flex flex-col divide-y divide-line border-y border-line" data-testid="presets">
           {policy.presets.map((p) => (
-            <div key={p.name} className={`flex flex-col gap-1 rounded-md border p-s2 ${p.current ? "border-branch bg-branch-soft" : "border-line bg-canvas-2"}`} data-preset={p.name}>
-              <h4 className="flex items-center gap-1 text-sm font-medium">
+            <div key={p.name} className={`flex flex-wrap items-center gap-x-s2 gap-y-1 px-s1 py-s1 ${p.current ? "bg-surface-2" : ""}`} data-preset={p.name}>
+              <h4 className="flex w-40 shrink-0 items-center gap-1.5 text-sm font-medium">
                 {presetLabel(p.name)}
-                {p.name === "autonomous" && <span className="rounded-sm bg-branch-soft px-1 text-[10px] text-branch">RECOMMENDED</span>}
+                {p.name === "autonomous" && <span className="font-mono text-[10px] tracking-wider text-branch">RECOMMENDED</span>}
               </h4>
-              <p className="flex-1 text-xs text-ink-2">{p.description}</p>
-              <button type="button" className={`${button} mt-1 self-start`} disabled={busy || p.current} onClick={() => usePreset(p.name)}>
+              <p className="min-w-0 flex-1 text-xs text-ink-2">{p.description}</p>
+              <button type="button" className={`${button} shrink-0`} disabled={busy || p.current} onClick={() => usePreset(p.name)}>
                 {p.current ? "Current" : `Use ${presetLabel(p.name)}`}
               </button>
             </div>
@@ -419,14 +418,14 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
                   {g.subs.map(([sub, name, hint]) => {
                     const o = overrideOf(g.id, sub);
                     return (
-                      <div key={sub} data-sub={sub} className={`flex flex-wrap items-center gap-s2 border-b border-line border-l-2 py-s1 pl-s1 text-sm last:border-b-0 ${o === "inherit" ? "border-l-transparent" : "border-l-branch bg-branch-soft"}`}>
+                      <div key={sub} data-sub={sub} className={`flex flex-wrap items-center gap-s2 border-b border-line border-l-2 py-s1 pl-s1 text-sm last:border-b-0 ${o === "inherit" ? "border-l-transparent" : "border-l-branch"}`}>
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-1">
                             {name}
                             {o === "inherit" ? (
                               <span className="text-[11px] text-ink-3">Inherits {LEVEL_NAME[base]}</span>
                             ) : (
-                              <span className="rounded-sm border border-branch bg-surface px-1 text-[11px] text-branch" data-testid="override-marker">
+                              <span className="text-[11px] text-branch" data-testid="override-marker">
                                 {o === base ? `Pinned to ${LEVEL_NAME[o]} (same as group)` : `Overrides ${g.name}: ${LEVEL_NAME[base]} → ${LEVEL_NAME[o]}`}
                               </span>
                             )}
@@ -783,7 +782,7 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
     >
       {conflicts ? (
         <div className="flex flex-col gap-s2" data-testid="conflict-review">
-          <div className="rounded-md border border-sap p-s2 text-sm">
+          <div className="border-l-2 border-sap px-s2 py-s1 text-sm">
             <span className="text-[11px] font-medium uppercase tracking-wider text-ink-3">
               {conflicts.length} {conflicts.every((c) => c.certain) ? `conflict${conflicts.length === 1 ? "" : "s"}` : "possible overlap"} found
             </span>
@@ -970,7 +969,7 @@ function SavedTab({ saved, busy, onEdit, onDelete }: { saved: SavedActionDTO[]; 
                 </small>
               </td>
               <td className="border-b border-line py-s1 pr-s1">
-                <span className={`${pill} ${s.decision === "deny" ? TONE.deny : TONE.allow}`}>{s.decision === "deny" ? "Denied" : "Allowed"}</span>
+                <span className={`${pill} ${s.decision === "deny" ? INK.deny : INK.allow}`}>{s.decision === "deny" ? "Denied" : "Allowed"}</span>
               </td>
               <td className="border-b border-line py-s1 pr-s1 text-xs">{savedLasts(s)}</td>
               <td className="whitespace-nowrap border-b border-line py-s1 text-right">
@@ -1114,7 +1113,7 @@ function SavedEditor({ client, saved: s, onClose, onDelete, onSaved }: { client:
           {life === "session" ? "Ends when the session it was saved in closes." : life === "forever" ? "Stays until you delete it here." : "Expires after this time, counted from when you save."}
         </p>
       </Step>
-      <p className="rounded-md bg-branch-soft px-s2 py-s1 text-xs text-ink-2" aria-live="polite" data-testid="saved-summary">
+      <p className="border-l-2 border-branch px-s1 py-1 text-xs text-ink-2" aria-live="polite" data-testid="saved-summary">
         {decision === "deny" ? "Deny" : "Allow"} without asking · {kindLabel(s.kind)} · {covers} · {life === "session" ? "this session" : life === "forever" ? "until deleted" : `${amount} ${unit}`}
       </p>
       {error && (
