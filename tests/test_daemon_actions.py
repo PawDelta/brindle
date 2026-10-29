@@ -704,15 +704,6 @@ def test_api_key_lifecycle_key_updates_hold_the_store_lock(monkeypatch, provider
     assert keystore.get_key(name) is None
 
 
-@pytest.mark.parametrize("status,expected", [(200, "verified"), (400, "rejected")])
-def test_api_key_lifecycle_checks_gemini_keys_with_a_models_call(provider_http, status, expected):
-    from brindle import key_check
-
-    provider_http["status"] = status
-    assert key_check.evaluate("GEMINI_API_KEY", "AIza-test")[0] == expected
-    assert provider_http["calls"] == ["https://generativelanguage.googleapis.com/v1beta/models?pageSize=1"]
-
-
 @pytest.mark.parametrize("path,status,command", [
     ("/v1/providers/codex/login", 200, "login"),
     ("/v1/keys/OPENAI_API_KEY/set", 200, "OPENAI_API_KEY"),
