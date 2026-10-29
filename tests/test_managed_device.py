@@ -37,14 +37,33 @@ def signed_answer(key, body, *, sub=SUB, exp=NOW + 3600, iat=NOW - 60):
     return {**body, "token": sign(key, claims, {"typ": "brindle-policy+jwt"})}
 
 
-def managed_file(key, body, *, allow_airgap=False, install=None) -> bytes:
+def managed_file(key, body, *, allow_airgap=False, install=None, policy_sub=SUB, policy_exp=NOW + 3600,
+                 exp=NOW + 86400) -> bytes:
     claims = {"iss": ISS, "aud": "brindle-pro", "sub": SUB, "org_id": ORG, "device_id": DEVICE,
               "device_token": DEVICE_TOKEN, "allow_airgap": allow_airgap,
-              "policy_token": signed_answer(key, body)["token"], "iat": NOW - 60, "exp": NOW + 86400,
-              "jti": "m1", "kid": TEST_KID, "token_use": "managed"}
+              "policy_token": signed_answer(key, body, sub=policy_sub, exp=policy_exp)["token"],
+              "iat": NOW - 60, "exp": exp, "jti": "m1", "kid": TEST_KID, "token_use": "managed"}
     doc = {"managed": sign(key, claims, {"typ": "brindle-managed+jwt"}),
            "policy_body": install if install is not None else body, "device_id": DEVICE}
     return json.dumps(doc).encode()
+
+
+def member_policy(spend=None, **rules):
+    """A signed-in member's policy for another org, as the client parsed it."""
+    body = {"version": 9, "policy": {"allowed_models": ["opus", "sonnet"], **rules},
+            "role": "member", "policy_role": None}
+    if spend is not None:
+        body["spend"] = {"month": "2026-10", "seat_usd": spend}
+    return parse_policy("org_other", body)
+
+
+def both_orders(a, b):
+    return [(managed.stricter(a, b), a) for a, b in ((a, b), (b, a))]
+
+
+GRANTS = {"allow": True, "kinds": ["bash"], "overridable": [], "max_minutes": 60, "max_uses": 5,
+          "deny": ["bash prefix rm"], "allow_persistent": False, "lifetimes": ["session"], "scopes": ["branch"],
+          "controls": [{"decision": "deny", "group": "deploy/trigger", "reason": "no deploys"}], "org_name": "Other"}
 
 
 def refused(m):
@@ -54,6 +73,8 @@ def refused(m):
 @pytest.mark.parametrize("case", [
     "signed_out", "airgap_switch", "other_org_signed_in", "unsigned_airgap_file",
     "revoked_device_token", "tampered_policy_body", "no_file",
+    "one_sided_grants", "deny_personal_keys", "exhausted_member_budget", "plan_rules",
+    "expired_snapshot", "bad_outer_token",
     "vector:managed_with_policy_ok", "vector:managed_with_policy_tampered_body",
 ])
 def test_managed_device(signing_key, tmp_path, monkeypatch, case):
@@ -78,16 +99,40 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
         assert managed.airgap_allowed(None) and managed.local_policy_allowed(None, signed=False)
         return
     body = answer()
+    if case == "bad_outer_token":
+        # The managed document itself is judged at the current clock.
+        (tmp_path / managed.FILE).write_bytes(managed_file(signing_key, body, exp=NOW - 1))
+        assert isinstance(managed.load(tmp_path, now=NOW), managed.Invalid)
+        doc = json.loads(managed_file(signing_key, body))
+        doc["managed"] = doc["managed"][:-1] + ("A" if doc["managed"][-1] != "A" else "B")
+        (tmp_path / managed.FILE).write_bytes(json.dumps(doc).encode())
+        m = managed.load(tmp_path, now=NOW)
+        assert isinstance(m, managed.Invalid) and DEVICE_TOKEN not in m.reason
+        assert not managed.airgap_allowed(m) and not managed.local_policy_allowed(m, signed=False)
+        return
+    if case == "expired_snapshot":
+        # A snapshot that is sound but lapsed leaves the file valid without a
+        # usable snapshot; one bound to another device is the file's fault.
+        other = "device:md_" + "2" * 32
+        (tmp_path / managed.FILE).write_bytes(managed_file(signing_key, body, policy_sub=other, policy_exp=NOW - 1))
+        assert isinstance(managed.load(tmp_path, now=NOW), managed.Invalid)
+        (tmp_path / managed.FILE).write_bytes(managed_file(signing_key, body, policy_exp=NOW - 1))
+        m = managed.load(tmp_path, now=NOW)
+        assert isinstance(m, managed.Managed) and m.snapshot is None and m.snapshot_expired
+        assert managed.device_policy(m, fetch=refused, now=NOW) is None
+        fresh = signed_answer(signing_key, answer(version=4))
+        assert managed.device_policy(m, fetch=lambda dev: fresh, now=NOW).version == 4
+        return
     tampered = answer(version=4) if case == "tampered_policy_body" else None
     (tmp_path / managed.FILE).write_bytes(managed_file(
         signing_key, body, allow_airgap=case == "airgap_switch", install=tampered))
     m = managed.load(tmp_path, now=NOW)
     if case == "tampered_policy_body":
-        assert isinstance(m, managed.Invalid) and "cover" in m.reason and DEVICE_TOKEN not in m.reason
+        assert isinstance(m, managed.Invalid) and DEVICE_TOKEN not in m.reason
         assert not managed.airgap_allowed(m) and not managed.local_policy_allowed(m, signed=False)
         return
     assert isinstance(m, managed.Managed) and m.device_token == DEVICE_TOKEN
-    assert DEVICE_TOKEN not in repr(m)
+    assert DEVICE_TOKEN not in repr(m) and not m.snapshot_expired
     if case == "signed_out":
         seen = []
 
@@ -125,6 +170,48 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
                                                              *b.enforced.protected_paths)))
             assert s.require_human_review and s.kill_switch and s.min_version == "2.0"
             assert s.permission_grants is None and s.allowed_providers is None
+    elif case == "one_sided_grants":
+        # The device grants nothing; the member's org denies and controls still stand.
+        device = managed.device_policy(m, fetch=refused, now=NOW)
+        assert device.permission_grants is None
+        for s, _ in both_orders(device, member_policy(permission_grants=GRANTS)):
+            g = s.permission_grants
+            assert g is not None and not g.allow and g.kinds == () and g.lifetimes == ()
+            assert g.deny == ("bash prefix rm",) and [c.group for c in g.controls] == ["deploy/trigger"]
+        open_grants = {**GRANTS, "deny": [], "controls": []}
+        for s, _ in both_orders(device, member_policy(permission_grants=open_grants)):
+            assert s.permission_grants is None
+    elif case == "deny_personal_keys":
+        # Each side's effective rule (agent_setup over the top-level field), then either side's wins,
+        # written where managed_models reads it: the merged agent_setup and the top-level field.
+        device = managed.device_policy(m, fetch=refused, now=NOW)
+        lenient = member_policy(deny_personal_keys=True, agent_setup={"deny_personal_keys": False})
+        for s, _ in both_orders(device, lenient):
+            assert not s.deny_personal_keys and s.agent_setup.deny_personal_keys is False
+        strict = member_policy(agent_setup={"deny_personal_keys": True})
+        for s, _ in both_orders(device, strict):
+            assert s.deny_personal_keys and s.agent_setup.deny_personal_keys is True
+    elif case == "exhausted_member_budget":
+        # The lower cap with the larger spend: the guard can't count less than either side.
+        device = managed.device_policy(m, fetch=refused, cached=signed_answer(
+            signing_key, {**answer(version=4), "spend": {"month": "2026-10", "seat_usd": 5.0}}), now=NOW)
+        assert (device.budget_seat_month_usd, device.spend_seat_usd) == (50.0, 5.0)
+        exhausted = member_policy(spend=20.0, budget={"seat_month_usd": 20.0})
+        for s, _ in both_orders(device, exhausted):
+            assert (s.budget_seat_month_usd, s.spend_seat_usd, s.spend_month) == (20.0, 20.0, "2026-10")
+    elif case == "plan_rules":
+        device = managed.device_policy(m, fetch=refused, cached=signed_answer(signing_key, answer(
+            version=4, plan="auto", plan_paths=["infra/**"], plan_approvers=["u_dev"],
+            plan_reviewer_may_approve_low_risk=True)), now=NOW)
+        assert (device.plan, device.plan_paths, device.plan_approvers) == ("auto", ("infra/**",), ("u_dev",))
+        always = member_policy(plan="always", plan_paths=["db/**"], plan_approvers=["u_other"],
+                               plan_two_person=True, plan_reviewer_may_approve_low_risk=False)
+        for s, a in both_orders(device, always):
+            assert (s.plan, s.plan_two_person, s.plan_reviewer_may_approve_low_risk) == ("always", True, False)
+            assert set(s.plan_paths) == {"infra/**", "db/**"} and set(s.plan_approvers) == {"u_dev", "u_other"}
+            assert s.plan_paths[0] in a.plan_paths
+        for s, _ in both_orders(device, member_policy(plan="never", plan_reviewer_may_approve_low_risk=True)):
+            assert (s.plan, s.plan_two_person, s.plan_reviewer_may_approve_low_risk) == ("auto", False, True)
     elif case == "unsigned_airgap_file":
         assert not managed.local_policy_allowed(m, signed=False)
         assert managed.local_policy_allowed(m, signed=True)

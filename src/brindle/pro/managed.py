@@ -86,10 +86,11 @@ class Managed:
     audit_sink: dict | None
     # The signed policy the file carries, parsed; its ``raw_body`` holds the
     # answer with its token, which :func:`device_policy` re-verifies at its own
-    # clock (a snapshot outlives its policy token's expiry; see verify_file).
-    snapshot: OrgPolicy = field(repr=False)
+    # clock. None when the snapshot's policy token has lapsed (see verify_file):
+    # ``snapshot_expired`` says so, and the device must fetch a fresh copy.
+    snapshot: OrgPolicy | None = field(repr=False)
+    snapshot_expired: bool
     expires_at: int                   # the managed document's exp
-    snapshot_expires_at: int          # the policy snapshot's exp
 
     @property
     def sub(self) -> str:
@@ -137,13 +138,15 @@ def verify_file(data: bytes, *, now: float | None = None) -> Managed:
     key; its ``exp``), and its ``policy_token`` must verify as a policy
     document over ``policy_body``, bound to the managed document's ``org_id``
     and ``sub``: the server's rule for a managed document, with its verdicts
-    (a tampered ``policy_body`` is a claim mismatch).
+    (a tampered ``policy_body`` is a claim mismatch). Both are checked at
+    ``now``.
 
-    One exception to that rule: a policy snapshot past its own expiry is kept
-    (``snapshot_expires_at`` says when it lapsed) while the managed document
-    itself is current, since the file is installed once and lives longer than
-    its snapshot. :func:`device_policy` never enforces a lapsed snapshot; it
-    fetches with the device token instead."""
+    One exception to that rule: a policy snapshot whose only fault is that
+    its token has lapsed leaves the file valid, with ``snapshot`` None and
+    ``snapshot_expired`` True, while the managed document itself is current:
+    the file is installed once and lives longer than its snapshot, and the
+    device fetches a fresh copy with its device token instead. Any other
+    fault in the snapshot (signature, binding, digest) is the file's fault."""
     now = time.time() if now is None else now
     if len(data) > MAX_FILE_BYTES:
         raise ManagedError("managed file is too large")
@@ -174,16 +177,20 @@ def verify_file(data: bytes, *, now: float | None = None) -> Managed:
                                  and isinstance(sink.get("url"), str) and sink["url"]):
         raise signed.ClaimMismatch("managed document has a malformed audit_sink")
     sub = claims["sub"]
+    token = claims["policy_token"]
     try:
-        policy = verify_policy_answer(claims["policy_token"], body, org_id=org_id, sub=sub, now=now)
+        verify_policy_answer(token, body, org_id=org_id, sub=sub, now=now)
     except signed.Expired:
-        # Verified in every other respect: see the docstring.
-        policy = verify_policy_answer(claims["policy_token"], body, org_id=org_id, sub=sub,
-                                      now=claims["iat"])
-    snapshot = parse_policy(org_id, {**body, "token": claims["policy_token"]}, float(claims["iat"]))
+        # Lapsed, but sound in every other respect (checked without its
+        # expiry): the file stays valid without a usable snapshot.
+        _verify_answer(token, "policy", body, org_id=org_id, sub=sub, now=None, lapsed_ok=True)
+        snapshot, expired = None, True
+    else:
+        snapshot = parse_policy(org_id, {**body, "token": token}, float(claims["iat"]))
+        expired = False
     return Managed(org_id=org_id, device_id=device_id, device_token=claims["device_token"],
                    allow_airgap=claims["allow_airgap"], audit_sink=dict(sink) if sink else None,
-                   snapshot=snapshot, expires_at=claims["exp"], snapshot_expires_at=policy["exp"])
+                   snapshot=snapshot, snapshot_expired=expired, expires_at=claims["exp"])
 
 
 # -- signed answers --------------------------------------------------------------------------------
@@ -212,8 +219,18 @@ def verify_status_answer(token: str, body: dict, *, org_id: str, sub: str,
     return _verify_answer(token, "status", body, org_id=org_id, sub=sub, now=now)
 
 
-def _verify_answer(token, doc_type: str, body: dict, *, org_id: str, sub: str, now) -> dict:
-    claims = signed.verify(token, doc_type, {"org_id": org_id, "sub": sub}, now=now)
+def _verify_answer(token, doc_type: str, body: dict, *, org_id: str, sub: str, now,
+                   lapsed_ok: bool = False) -> dict:
+    expect = {"org_id": org_id, "sub": sub}
+    if lapsed_ok:
+        # Everything but the token's lifetime: signature, key, type, binding.
+        claims = signed.verify_signed(token, typ=signed.header_typ(doc_type), token_use=doc_type,
+                                      what=doc_type)
+        for name, value in expect.items():
+            if claims.get(name) != value:
+                raise signed.ClaimMismatch(f"{doc_type} claim {name!r} does not match")
+    else:
+        claims = signed.verify(token, doc_type, expect, now=now)
     if claims.get("doc_type") != doc_type:
         raise signed.ClaimMismatch(f"{doc_type} document does not say it covers a {doc_type}")
     covered = (document_sha256(claims["document"]) if "document" in claims
@@ -310,42 +327,87 @@ def _newest_version(a: str | None, b: str | None) -> str | None:
     return _both(a, b, lambda x, y: x if (version_tuple(x) or ()) >= (version_tuple(y) or ()) else y)
 
 
+# A side without a ``permission_grants`` block grants nothing and denies nothing.
+_NO_GRANTS = GrantPolicy(allow=False, kinds=(), overridable=(), max_minutes=0, max_uses=0,
+                         lifetimes=(), scopes=())
+
+
 def _stricter_grants(a: GrantPolicy | None, b: GrantPolicy | None) -> GrantPolicy | None:
-    """None (no grants at all) is the strictest; else each rule's stricter side."""
-    if a is None or b is None:
+    """Each rule's stricter side: what both allow, and every deny and control
+    of either. A side with no block grants nothing, so nothing is allowed,
+    but the other side's denies and controls still stand; None only when
+    nothing remains to restrict."""
+    if a is None and b is None:
         return None
-    return GrantPolicy(allow=a.allow and b.allow, kinds=_intersect(a.kinds, b.kinds),
-                       overridable=_intersect(a.overridable, b.overridable),
-                       max_minutes=min(a.max_minutes, b.max_minutes), max_uses=min(a.max_uses, b.max_uses),
-                       deny=_union(a.deny, b.deny), allow_persistent=a.allow_persistent and b.allow_persistent,
-                       lifetimes=_intersect(a.lifetimes, b.lifetimes), scopes=_intersect(a.scopes, b.scopes),
-                       controls=_union(a.controls, b.controls), org_name=a.org_name or b.org_name)
+    one_sided = a is None or b is None
+    a, b = a or _NO_GRANTS, b or _NO_GRANTS
+    merged = GrantPolicy(allow=a.allow and b.allow, kinds=_intersect(a.kinds, b.kinds),
+                         overridable=_intersect(a.overridable, b.overridable),
+                         max_minutes=min(a.max_minutes, b.max_minutes), max_uses=min(a.max_uses, b.max_uses),
+                         deny=_union(a.deny, b.deny), allow_persistent=a.allow_persistent and b.allow_persistent,
+                         lifetimes=_intersect(a.lifetimes, b.lifetimes), scopes=_intersect(a.scopes, b.scopes),
+                         controls=_union(a.controls, b.controls), org_name=a.org_name or b.org_name)
+    if one_sided and not merged.deny and not merged.controls:
+        return None
+    return merged
 
 
-def _stricter_setup(a: AgentSetup | None, b: AgentSetup | None) -> AgentSetup | None:
+def _denies_personal_keys(p: OrgPolicy) -> bool:
+    """``p``'s effective personal-key rule, by managed_models' precedence:
+    ``agent_setup`` when it sets one, else the policy's top-level field."""
+    s = p.agent_setup
+    return p.deny_personal_keys if s is None or s.deny_personal_keys is None else s.deny_personal_keys
+
+
+def _stricter_setup(a: AgentSetup | None, b: AgentSetup | None, deny_personal_keys: bool) -> AgentSetup | None:
     """Two routings can't be combined: ``a``'s routes stand, with the
-    stricter flags of both."""
+    stricter flags of both and the merged personal-key rule, which is read
+    from here first."""
+    if a is None and b is None:
+        return None
     if a is None or b is None:
-        return a or b
-    return replace(a, enforce=a.enforce or b.enforce,
-                   deny_personal_keys=_both(a.deny_personal_keys, b.deny_personal_keys, lambda x, y: x or y),
+        return replace(a or b, deny_personal_keys=deny_personal_keys)
+    return replace(a, enforce=a.enforce or b.enforce, deny_personal_keys=deny_personal_keys,
                    exclusive=_both(a.exclusive, b.exclusive, lambda x, y: x or y))
+
+
+def _larger_spend(x: OrgPolicy, y: OrgPolicy) -> dict:
+    """The seat spend to carry: the larger of the two sides' monthly spends,
+    so a budget guard counts at least what either side has seen."""
+    sides = [p for p in (x, y) if p.spend_seat_usd is not None]
+    if not sides:
+        return {"spend_seat_usd": None, "spend_month": None}
+    top = max(sides, key=lambda p: p.spend_seat_usd)
+    return {"spend_seat_usd": top.spend_seat_usd, "spend_month": top.spend_month}
+
+
+_PLAN_ORDER = {"never": 0, "auto": 1, "always": 2}
+
+
+def _stricter_plan(a: str, b: str) -> str:
+    return max(a, b, key=lambda m: _PLAN_ORDER.get(m, 0))
 
 
 def stricter(a: OrgPolicy, b: OrgPolicy) -> OrgPolicy:
     """One policy from two (each one's effective policy, overrides applied)
     where every rule takes the stricter side: allowed lists intersect (a
     missing list allows everything, so the other side's rules), budgets and
-    the worker limit take the lower value, protected paths, required items
-    and permission denies accumulate, flags (human review, paused, kill
-    switch, no personal keys) are on if either side has them, the version
-    floor is the higher one, permission grants shrink to what both allow
-    (none when either side grants none), and visibility is what both show.
-    A managed provider or agent routing can't be combined, so ``a``'s stands
-    (the device's, when ``a`` is the device policy). The result is its own
-    effective policy and carries ``a``'s identity, spend and sources."""
+    the worker limit take the lower value, protected paths, plan paths, plan
+    approvers, required items and permission denies and controls accumulate,
+    flags (human review, paused, kill switch, two-person plans, no personal
+    keys by either side's effective rule) are on if either side has them,
+    a reviewer may approve a low-risk plan only when both sides let them,
+    planning is "always" over "auto" over "never", the version floor is the
+    higher one, permission grants shrink to what both allow (a side with no
+    grants block allows none, and the other side's denies still stand), and
+    visibility is what both show. A managed provider or agent routing can't
+    be combined, so ``a``'s stands (the device's, when ``a`` is the device
+    policy). The seat spend carried is the larger of the two, so a budget
+    guard never counts less than either side has seen. The result is its
+    own effective policy and carries ``a``'s identity and sources."""
     x, y = a.enforced, b.enforced
     paused = x.paused or y.paused
+    deny_keys = _denies_personal_keys(x) or _denies_personal_keys(y)
     merged = OrgPolicy(
         org_id=a.org_id, version=max(a.version, b.version), fetched_at=min(a.fetched_at, b.fetched_at),
         allowed_providers=_intersect(x.allowed_providers, y.allowed_providers),
@@ -360,7 +422,7 @@ def stricter(a: OrgPolicy, b: OrgPolicy) -> OrgPolicy:
         paused=paused,
         paused_reason=(x.paused_reason if x.paused else y.paused_reason) if paused else None,
         budget_sources=dict(x.budget_sources), member_overrides=dict(x.member_overrides),
-        spend_seat_usd=x.spend_seat_usd, spend_month=x.spend_month,
+        **_larger_spend(x, y),
         visibility={k: bool(x.visibility.get(k, True)) and bool(y.visibility.get(k, True))
                     for k in {*x.visibility, *y.visibility}},
         min_version=_newest_version(x.min_version, y.min_version),
@@ -368,9 +430,14 @@ def stricter(a: OrgPolicy, b: OrgPolicy) -> OrgPolicy:
         required_rule_packs=_union(x.required_rule_packs, y.required_rule_packs),
         kill_switch=x.kill_switch or y.kill_switch,
         provider_config=x.provider_config or y.provider_config,
-        deny_personal_keys=x.deny_personal_keys or y.deny_personal_keys,
-        agent_setup=_stricter_setup(x.agent_setup, y.agent_setup),
+        deny_personal_keys=deny_keys,
+        agent_setup=_stricter_setup(x.agent_setup, y.agent_setup, deny_keys),
         permission_grants=_stricter_grants(x.permission_grants, y.permission_grants),
+        plan=_stricter_plan(x.plan, y.plan), plan_paths=_union(x.plan_paths, y.plan_paths),
+        plan_approvers=_union(x.plan_approvers, y.plan_approvers),
+        plan_two_person=x.plan_two_person or y.plan_two_person,
+        plan_reviewer_may_approve_low_risk=(x.plan_reviewer_may_approve_low_risk
+                                            and y.plan_reviewer_may_approve_low_risk),
         role=a.role, policy_role=a.policy_role)
     return merged
 
