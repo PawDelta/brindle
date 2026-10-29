@@ -11,6 +11,7 @@ PLAN_PATHS = (
     "deploy/**", "**/deploy/**", "Dockerfile", "**/Dockerfile", "**/*.tf",
 )
 PLAN_WEIGHTS = ("heavy", "advanced")
+LOW_RISK_WEIGHTS = ("light", "medium")
 
 
 @dataclass
@@ -37,16 +38,77 @@ def _matches(path: str, pattern: str) -> bool:
                or fnmatch(f"{base}/x" if base else "x", p) for p in forms)
 
 
-def needs_plan(task: PlanTask, *, config, org_rules: dict | None = None) -> bool:
+@dataclass(frozen=True)
+class OrgPlanRules:
+    """The org's plan rules, from its policy (``plan``, ``plan_paths``,
+    ``plan_approvers``, ``plan_two_person``, ``plan_reviewer_may_approve_low_risk``)."""
+    plan: str = "auto"                  # auto | always | never
+    paths: tuple[str, ...] = ()
+    approvers: tuple[str, ...] = ()     # member ids; empty: any member may approve
+    two_person: bool = False
+    reviewer_low_risk: bool = False
+
+    @classmethod
+    def from_policy(cls, policy: dict | None) -> "OrgPlanRules":
+        p = policy if isinstance(policy, dict) else {}
+        plan = p.get("plan")
+        return cls(
+            plan=plan if plan in ("auto", "always", "never") else "auto",
+            paths=tuple(s for s in p.get("plan_paths") or () if isinstance(s, str)),
+            approvers=tuple(s for s in p.get("plan_approvers") or () if isinstance(s, str)),
+            two_person=p.get("plan_two_person") is True,
+            reviewer_low_risk=p.get("plan_reviewer_may_approve_low_risk") is True,
+        )
+
+
+def load_org_rules(repo_root: str | None) -> OrgPlanRules | None:
+    """The org's plan rules for ``repo_root``, or None without a team org or a
+    readable cached policy."""
+    try:
+        from brindle.pro import team_policy as tp
+
+        pp = tp.ProPolicy(repo_root or "")
+        ent = pp._team_entitlement()
+        if ent is None:
+            return None
+        body = tp.current_policy(ent, pp._client, pp._store, repo_root).raw_body or {}
+        policy = body.get("policy") if isinstance(body.get("policy"), dict) else body
+        return OrgPlanRules.from_policy(policy)
+    except Exception:  # noqa: BLE001 - no readable org policy: no org rules
+        return None
+
+
+def current_member(repo_root: str | None) -> str | None:
+    """This person's member id in the team org, or None."""
+    try:
+        from brindle.pro import team_policy as tp
+
+        pp = tp.ProPolicy(repo_root or "")
+        ent = pp._team_entitlement()
+        return ent.sub if ent else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def touches_plan_paths(task: PlanTask, paths) -> bool:
+    return any(_matches(f, p) for f in task.files or () for p in paths)
+
+
+def needs_plan(task: PlanTask, *, config, org_rules: OrgPlanRules | None = None) -> bool:
     """True when ``task`` must submit a plan first. ``config.plan`` "always" /
     "never" decide alone; "auto" plans for heavy work, cross-repo work and
-    ``PLAN_PATHS``. ``org_rules`` (``{"paths": [...]}``) adds paths that always
-    need a plan; None adds nothing."""
+    ``PLAN_PATHS``. ``org_rules`` layers the org's on top: its ``plan`` "always"
+    or "never" replaces the local auto heuristics, its ``plan_paths`` always
+    need a plan, and a local "always" still holds (the stricter answer wins)."""
+    if org_rules is not None:
+        if org_rules.plan == "always" or touches_plan_paths(task, org_rules.paths):
+            return True
+        if org_rules.plan == "never":
+            return config.plan == "always"
     if config.plan == "always":
         return True
     if config.plan == "never":
         return False
     if (task.weight or "").lower() in PLAN_WEIGHTS or task.cross_repo:
         return True
-    paths = (*PLAN_PATHS, *((org_rules or {}).get("paths") or ()))
-    return any(_matches(f, p) for f in task.files or () for p in paths)
+    return touches_plan_paths(task, PLAN_PATHS)

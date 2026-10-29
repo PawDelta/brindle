@@ -2678,6 +2678,7 @@ def delegate(
         raise AgentError(str(e)) from e
     if plan_first is None:
         from brindle import tasks as task_mod
+        from brindle import plan_policy
         from brindle.plan_policy import PlanTask, needs_plan
 
         own = repos.own_root(db, pilot.root_of(db, caller.id)) if caller else None
@@ -2686,7 +2687,8 @@ def delegate(
             PlanTask(weight=weight, files=files,
                      cross_repo=(bool(own) and own != caller_ws.repo_root)
                      or any(r != caller_ws.repo_root for r in dep_repos)),
-            config=load_repo_config(caller_ws.repo_root))
+            config=load_repo_config(caller_ws.repo_root),
+            org_rules=plan_policy.load_org_rules(caller_ws.repo_root))
     from brindle import identity_lock
 
     identity_lock.ensure_workspace(db, caller_ws)
@@ -3363,11 +3365,45 @@ def submit_plan(db: DB, agent_id: str, plan: str) -> str:
         return "Give the plan."
     if not agent.parent_id:
         raise AgentError("no supervisor to send the plan to")
-    db.update_agent(agent.id, plan_state="proposed", plan_text=plan.strip())
+    db.update_agent(agent.id, plan_state="proposed", plan_text=plan.strip(), plan_approvals=None)
+    _emit_plan(db, "plan.submitted", agent, agent)
     send_message(db, agent.parent_id,
                  f"Worker {agent.id} proposes this plan and is waiting for your decision "
                  f"(approve_plan agent_id={agent.id}):\n\n{plan.strip()}", sender_id=agent.id)
     return "Plan sent. Stop now and wait for your supervisor's decision; don't edit files until it's approved."
+
+
+def _emit_plan(db: DB, kind: str, agent: Agent, actor: Agent | str | None) -> None:
+    """Record a plan event in the audit log (through the events plugins)."""
+    from brindle import events
+    from brindle.config import load_repo_config
+
+    ws = db.get_workspace(agent.workspace_id)
+    if ws is not None:
+        events.emit(load_repo_config(ws.repo_root), kind, ws, agent, actor=actor)
+
+
+def _org_plan_refusal(db: DB, caller_id: str, agent: Agent, so_far: list[str]) -> str | None:
+    """Why the org's plan rules refuse this approval, or None. An approval a
+    two-person rule is still waiting on is recorded and refused."""
+    from brindle import plan_approvals, plan_policy
+
+    ws = db.get_workspace(agent.workspace_id)
+    rules = plan_policy.load_org_rules(ws.repo_root) if ws else None
+    if rules is None:
+        return None
+    caller = db.get_agent(caller_id)
+    reviewer = bool(caller) and is_review_profile(caller.profile, ws.repo_root)
+    who = caller_id if reviewer else (plan_policy.current_member(ws.repo_root) or caller_id)
+    task = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == agent.id), None)
+    plan = plan_policy.PlanTask(weight=agent.weight, files=json.loads(task.files) if task and task.files else None)
+    d = plan_approvals.may_approve(rules, plan_approvals.Approver(who, reviewer), plan, so_far)
+    if d.allowed:
+        return None
+    if rules.two_person and who not in so_far and (not rules.approvers or who in rules.approvers or reviewer):
+        db.update_agent(agent.id, plan_approvals=json.dumps([*so_far, who]))
+        _emit_plan(db, "plan.approved", agent, caller_id)
+    return d.reason
 
 
 def approve_plan(db: DB, caller_id: str | None, agent_id: str, feedback: str = "",
@@ -3382,7 +3418,12 @@ def approve_plan(db: DB, caller_id: str | None, agent_id: str, feedback: str = "
         raise AgentError(f"{agent.id} has no plan awaiting a decision")
     feedback = feedback.strip()
     if approved:
-        db.update_agent(agent.id, plan_state="approved", plan_text=None)
+        so_far = json.loads(agent.plan_approvals or "[]")
+        denied = _org_plan_refusal(db, caller_id, agent, so_far)
+        if denied:
+            raise AgentError(denied)
+        db.update_agent(agent.id, plan_state="approved", plan_text=None, plan_approvals=None)
+        _emit_plan(db, "plan.approved", agent, caller_id)
         text = "Your plan is approved: go ahead and implement it."
     else:
         db.update_agent(agent.id, plan_state="revise")
