@@ -106,6 +106,16 @@ def test_codex_hook_off_or_broken_is_no_output(db, ws, monkeypatch):
     turn_on(ws)
     assert agents.hook_main(db, a.id, "codex-permission-request", "{not json") == ""
     assert agents.hook_main(db, a.id, "codex-permission-request", "[1, 2]") == ""
+    # #298: attached-repo MCP calls must run for both supervisors and workers.
+    db.add_agent(Agent("boss", ws.id, "supervisor", "codex", None, "interactive", "processing", "%b", None, time.time()))
+    db.add_session_repo("boss", "lib", os.path.join(os.path.dirname(ws.path), "lib"))
+    monkeypatch.setattr(agents, "_hold_for_app", lambda *args, **kwargs: None)
+    for caller in (db.get_agent("boss"), a):
+        for provider in ("claude", "codex"):
+            for tool in ("assign", "handoff", "workspace_diff", "merge_workspace", "request_review", "remove_workspace"):
+                mcp_payload = codex_payload(f"mcp__brindle__{tool}", {"repo": "lib", "workspace": "feature"}, ws.path)
+                answer = agents.permission_request_decision(db, caller, mcp_payload, provider)
+                assert answer is not None and answer["hookSpecificOutput"]["decision"]["behavior"] == "allow"
 
     def boom(*a, **k):
         raise RuntimeError("broken")
