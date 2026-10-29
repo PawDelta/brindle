@@ -327,7 +327,9 @@ class OrgContext:
         """``plan_policy.needs_plan`` for ``task``, with the org's plan rules."""
         from brindle import plan_policy
 
-        return plan_policy.needs_plan(task, config=config, org_rules=self.plan_rules)
+        rules = self.plan_rules
+        org_rules = plan_policy.OrgPlanRules.from_policy(rules) if rules is not None else None
+        return plan_policy.needs_plan(task, config=config, org_rules=org_rules)
 
     def audit_sinks(self) -> list[dict]:
         """Where the org wants audit events sent: none yet."""
