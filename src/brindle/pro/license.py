@@ -11,7 +11,13 @@ header names a ``kid``, which must be one of the keys pinned in
     iss, aud="brindle-pro", sub, org_id, plan, status, features[], seats,
     iat, exp, kid, jti, token_use="entitlement"
 
-``iss`` must equal the base URL the entitlement was fetched from.
+``iss`` must equal the base URL the entitlement was fetched from. The
+signature, header, ``kid`` and revocation checks are
+:func:`brindle.pro.signed.verify_signed`'s; every entitlement fetched from the
+backend is preceded by a refresh of the revocation list
+(:func:`brindle.pro.signed.refresh_revocations`, in ``auth``), and a failure
+there never stops the fetch. A cached entitlement is checked against the
+stored revocations (whichever process stored them) before it is returned.
 
 Everything fails closed: any problem -- a malformed token, an unknown key, a
 bad signature, the wrong ``alg``/``typ``/``aud``/``iss``/``token_use``, an
@@ -42,13 +48,10 @@ Tokens are never logged or put in exception messages.
 from __future__ import annotations
 
 import base64
-import binascii
 import hashlib
 import json
 import logging
 import os
-import sys
-import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -56,24 +59,25 @@ from dataclasses import dataclass
 from functools import wraps
 from inspect import signature
 
-from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from brindle.pro.keys import PINNED_KEYS
+from brindle.pro import signed
+from brindle.pro.keys import PINNED_KEYS  # noqa: F401 - re-exported
+from brindle.pro.signed import (  # noqa: F401 - re-exported
+    ALG, AUDIENCE, MAX_TOKEN_BYTES, _b64decode, _is_int, _json_object, _test_keys,
+    verify_signed,
+)
 
 log = logging.getLogger(__name__)
 
-AUDIENCE = "brindle-pro"
-ALG = "EdDSA"
-TYP = "brindle-entitlement+jwt"
+TYP = signed.header_typ("entitlement")
 TOKEN_USE = "entitlement"
 DEFAULT_GRACE = 3600
 MAX_GRACE = 14 * 86400        # hard cap on grace past the signed exp
 LOGIN_AGAIN = "log in to brindle Pro again: run `brindle account login`"
 NO_SUBSCRIPTION = "no active brindle Pro subscription"
 PAID_STATUSES = frozenset({"active", "trialing", "past_due"})
-LEEWAY = 60                   # clock skew tolerated on exp / iat
-MAX_TOKEN_BYTES = 8192
+LEEWAY = signed.LEEWAY        # clock skew tolerated on exp / iat
 REFRESH_WHEN_LEFT = 0.25      # refresh once less than this share of lifetime remains
 MAX_AGE = 600                 # seconds: the sweep refetches an older entitlement (plan and policy changes)
 _REQUIRED = ("iss", "aud", "sub", "org_id", "plan", "status", "features", "seats", "iat", "exp",
@@ -81,12 +85,8 @@ _REQUIRED = ("iss", "aud", "sub", "org_id", "plan", "status", "features", "seats
 LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
-class LicenseError(Exception):
-    """No valid entitlement. The message never contains a token."""
-
-
-class Expired(LicenseError):
-    """An entitlement past its expiry and its offline grace."""
+LicenseError = signed.SignedError    # no valid entitlement; the message never contains a token
+Expired = signed.Expired             # an entitlement past its expiry and its offline grace
 
 
 class NotEntitled(LicenseError):
@@ -109,12 +109,10 @@ class Entitlement:
     role: str | None = None          # the caller's role in org_id (owner|admin|member)
     policy_version: int = 0          # the org policy version current when issued
     policy_role: str | None = None   # the caller's policy role in org_id, when one is set
+    policy_signed: bool = False      # org policy and status must be signed (policy_cache.enforced)
 
 
-# -- keys ----------------------------------------------------------------------------
-
-_test_keys: dict[str, Ed25519PublicKey] = {}
-_keys_lock = threading.Lock()
+# -- keys (see brindle.pro.signed) ------------------------------------------------------------
 
 
 def jwk_thumbprint(x: str) -> str:
@@ -125,107 +123,21 @@ def jwk_thumbprint(x: str) -> str:
 
 
 def _trusted_key(kid: str) -> Ed25519PublicKey:
-    raw = PINNED_KEYS.get(kid)
-    if raw is not None:
-        try:
-            return Ed25519PublicKey.from_public_bytes(bytes.fromhex(raw))
-        except ValueError as e:
-            raise LicenseError("pinned key is malformed") from e
-    if kid in _test_keys:
-        return _test_keys[kid]
-    raise LicenseError("entitlement signed by an unknown key")
+    return signed._trusted_key(kid)
 
 
 @contextmanager
 def _test_signing_key(kid: str, public_key: Ed25519PublicKey):
-    """Test-only: trust ``public_key`` as ``kid`` for the duration. Refuses to
-    run outside pytest and refuses to shadow a pinned kid. Not configurable
-    from the environment, files or the network."""
-    if "pytest" not in sys.modules:
-        raise RuntimeError("test signing keys are only available under pytest")
-    if kid in PINNED_KEYS:
-        raise RuntimeError("a test key may not shadow a pinned kid")
-    with _keys_lock:
-        _test_keys[kid] = public_key
+    """Test-only: :func:`brindle.pro.signed._test_signing_key`, forgetting
+    the cached entitlement afterwards."""
     try:
-        yield
+        with signed._test_signing_key(kid, public_key):
+            yield
     finally:
-        with _keys_lock:
-            _test_keys.pop(kid, None)
         clear_cache()
 
 
 # -- verification ----------------------------------------------------------------------
-
-
-def _b64decode(part: str, what: str = "entitlement") -> bytes:
-    if not part or any(c not in _B64URL for c in part) or len(part) % 4 == 1:
-        raise LicenseError(f"malformed {what}")
-    try:
-        return base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))
-    except (binascii.Error, ValueError) as e:
-        raise LicenseError(f"malformed {what}") from e
-
-
-_B64URL = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
-
-
-def _json_object(raw: bytes, what: str = "entitlement") -> dict:
-    try:
-        obj = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as e:
-        raise LicenseError(f"malformed {what}") from e
-    if not isinstance(obj, dict):
-        raise LicenseError(f"malformed {what}")
-    return obj
-
-
-def _is_int(v) -> bool:
-    return isinstance(v, int) and not isinstance(v, bool)
-
-
-def verify_signed(token: str, *, typ: str, token_use: str, what: str = "entitlement",
-                  max_bytes: int = MAX_TOKEN_BYTES) -> dict:
-    """The claims of ``token`` once its signature checks out against a pinned
-    key and its header says ``typ``, its ``token_use`` claim says
-    ``token_use``, its ``kid`` claim matches the header and its audience is
-    brindle Pro. Nothing else is checked (no ``exp``, ``iat`` or issuer):
-    callers do that for their own token kind. ``what`` names the token kind
-    in errors. Raises :class:`LicenseError`."""
-    if not isinstance(token, str) or len(token) > max_bytes:
-        raise LicenseError(f"malformed {what}")
-    parts = token.split(".")
-    if len(parts) != 3:
-        raise LicenseError(f"malformed {what}")
-    header = _json_object(_b64decode(parts[0], what), what)
-    if header.get("alg") != ALG:
-        raise LicenseError(f"{what} uses an unsupported algorithm")
-    if header.get("typ") != typ:
-        raise LicenseError(f"token is not an {what}" if what[0] in "aeiou" else f"token is not a {what}")
-    if "crit" in header:
-        raise LicenseError(f"{what} has unsupported critical headers")
-    kid = header.get("kid")
-    if not isinstance(kid, str) or not kid:
-        raise LicenseError(f"{what} names no key")
-    key = _trusted_key(kid)
-    sig = _b64decode(parts[2], what)
-    try:
-        key.verify(sig, f"{parts[0]}.{parts[1]}".encode("ascii"))
-    except InvalidSignature as e:
-        raise LicenseError(f"{what} signature is invalid") from e
-    # Only now is the payload trusted enough to parse.
-    claims = _json_object(_b64decode(parts[1], what), what)
-    missing = [c for c in ("aud", "kid", "token_use") if c not in claims]
-    if missing:
-        raise LicenseError(f"{what} is missing claims: {', '.join(missing)}")
-    if claims["kid"] != kid:
-        raise LicenseError(f"{what} kid mismatch")
-    if claims["token_use"] != token_use:
-        raise LicenseError(f"token is not an {what}" if what[0] in "aeiou" else f"token is not a {what}")
-    aud = claims.get("aud")
-    if not (aud == AUDIENCE or (isinstance(aud, list) and AUDIENCE in aud)):
-        raise LicenseError(f"{what} is for a different audience")
-    return claims
 
 
 def verify(token: str, *, issuer: str | None, now: float | None = None,
@@ -268,7 +180,7 @@ def verify(token: str, *, issuer: str | None, now: float | None = None,
         sub=claims["sub"], org_id=claims["org_id"], plan=claims["plan"], status=claims["status"],
         features=frozenset(feats), seats=claims["seats"], iat=iat, exp=exp, kid=kid,
         in_grace=in_grace, grace_until=grace_until, role=role, policy_version=policy_version,
-        policy_role=policy_role)
+        policy_role=policy_role, policy_signed=claims.get("policy_signed") is True)
 
 
 def paid(token: str | None) -> bool:
@@ -487,6 +399,15 @@ def reading():
         _request_reads.reset(token)
 
 
+def _unrevoked(ent: Entitlement) -> Entitlement:
+    """``ent``, from a cache, unless another process (or this one) has since
+    revoked its key: then every cache is cleared and it is refused."""
+    if ent.kid in signed.revoked_kids():
+        clear_cache()
+        raise signed.Revoked("entitlement is signed by a revoked key")
+    return ent
+
+
 def request_cached(fn):
     sig = signature(fn)
 
@@ -506,7 +427,7 @@ def request_cached(fn):
         result = memo[key]
         if isinstance(result, LicenseError):
             raise result
-        return result
+        return _unrevoked(result) if isinstance(result, Entitlement) else result
 
     return wrapped
 
@@ -549,7 +470,7 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
     now = time.time() if now is None else now
     default = store is None and client is None
     if default and _cache and _cache[0] > now and (max_age is None or now - _cache[1].iat <= max_age):
-        return _cache[1]
+        return _unrevoked(_cache[1])
     from brindle import airgap
     from brindle.pro import auth, credentials
 
@@ -610,6 +531,7 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
             if e.revoked:
                 raise LicenseError(_lapsed(creds)) from e
             log.info("entitlement refresh failed (%s); using the stored entitlement", e.code)
+            ent = None    # checked again below, against revocations the attempt may have fetched
     if ent is None:
         try:
             ent = verify(creds.get("entitlement") or "", issuer=issuer, now=now)

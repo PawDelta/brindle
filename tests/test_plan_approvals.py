@@ -30,6 +30,10 @@ LIGHT = PlanTask(weight="light", files=["src/app/util.py"])
     # a broad glob declaration overlaps a sensitive path
     ({}, PlanTask(files=[".github/**"]), True),
     ({}, PlanTask(files=["src/pro/*.py"]), True),
+    ({}, PlanTask(files=[".github/**/*.yml"]), True),
+    ({}, PlanTask(files=["src/**/session.py"]), True),
+    ({}, PlanTask(files=["infra/*.t[f]"]), True),
+    pytest.param({}, PlanTask(files=["infra/*.[t]f"]), True, marks=pytest.mark.variant("character-class bypass")),
     # plan_first and plan resolve together, local > shared > user
     ({"shared": {"plan_first": True}, "user": {"plan": "never"}}, LIGHT, True),
     ({"local": {"plan_first": False}, "shared": {"plan": "always"}}, PlanTask(weight="heavy"), False),
@@ -79,8 +83,8 @@ def test_plan_approvals_may_approve(rules, approver, plan, so_far, allowed):
         assert "alice" in d.reason
 
 
-@pytest.mark.parametrize("queued", [False, True])
-def test_plan_approvals_dependency_in_another_repo_plans_first(db, tmp_path, monkeypatch, queued):
+@pytest.mark.parametrize("how", ["immediate", "queued", "queued_same_branch"])
+def test_plan_approvals_dependency_in_another_repo_plans_first(db, tmp_path, monkeypatch, how):
     """A light task depending on a task in an attached repo gets a plan, via real dispatch."""
     def workspace(name):
         root = str(tmp_path / name)
@@ -110,9 +114,11 @@ def test_plan_approvals_dependency_in_another_repo_plans_first(db, tmp_path, mon
     monkeypatch.setattr("brindle.identity_lock.ensure_workspace", lambda *a: None)
     monkeypatch.setattr("brindle.events.emit", lambda *a, **kw: None)
 
-    if queued:
-        t = tasks.enqueue(db, boss, app, "developer", "light job", "assign", isolate=False, branch=None,
-                          done_when=None, files=["src/app/util.py"], depends_on=[upstream.id], weight="light")
+    if how != "immediate":   # the same-branch task must not shadow its own upstream
+        t = tasks.enqueue(db, boss, app, "developer", "light job", "assign", isolate=False,
+                          branch="dep" if how == "queued_same_branch" else None, done_when=None,
+                          files=["src/app/util.py"], weight="light",
+                          depends_on=["dep" if how == "queued_same_branch" else upstream.id])
         tasks.start_queued(db, t)
     else:
         agents.delegate(db, boss, app, "developer", "light job", "assign", isolate=False,

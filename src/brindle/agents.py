@@ -2659,6 +2659,7 @@ def delegate(
     files: list[str] | None = None,
     weight: str | None = None,
     depends_on: list[str] | None = None,
+    dependent_task_id: str | None = None,
 ) -> tuple[Agent, Workspace]:
     """Start a worker. ``weight`` is the weight its task was routed as;
     ``depends_on`` only feeds the plan policy (a dependency in another repo).
@@ -2689,7 +2690,8 @@ def delegate(
     except plan_policy.OrgRulesUnavailable as e:
         raise AgentError(str(e)) from e
     own = repos.own_root(db, pilot.root_of(db, caller.id)) if caller else None
-    dep_repos = task_mod.dependency_repos(db, caller_ws, depends_on, caller.id if caller else None)
+    dep_repos = task_mod.dependency_repos(db, caller_ws, depends_on, caller.id if caller else None,
+                                          dependent_task_id=dependent_task_id)
     plan_task = PlanTask(weight=weight, files=files,
                          cross_repo=(bool(own) and own != caller_ws.repo_root)
                          or any(r != caller_ws.repo_root for r in dep_repos))
