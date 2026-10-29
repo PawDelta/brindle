@@ -12,12 +12,14 @@ import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
 import { releaseNotesUrl, type AppUpdateStatus, type AppUpdates } from "../../api/tauri";
 import { watchAppUpdates } from "../../store/appUpdates";
+import { Permissions } from "../Settings/Permissions";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
 import { watchInbox } from "./notify";
 
 afterEach(cleanup);
 
 const notice: InboxItemDTO = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };
+const prReady: InboxItemDTO = { kind: "pr_ready", reason: "PR ready for your approval", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "Ship ls --json" };
 const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship ls --json" };
 
 function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client(), props: Partial<InboxScreenProps> = {}) {
@@ -61,11 +63,15 @@ describe("inbox", () => {
       repos: [{ repo_root: REPO, name: "proj" }],
       sessions: [session],
       workspaces: [root, worker],
-      inbox: [question, waiting, notice],
+      inbox: [question, waiting, notice, prReady],
     });
     const { sync, onOpen } = mount(daemon);
     const group = await screen.findByRole("region", { name: "Ship ls --json" });
-    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(2);
+    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(3);
+    // The PR brindle prepared (its checks passed, nothing pushed): Review & open PR opens the session's sheet.
+    expect(card("pr_ready").textContent).toContain("PR ready for your approval");
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Review & open PR" }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "review" });
     expect(group.textContent).toContain("sup1 · proj");
     fireEvent.click(within(group).getByRole("button", { name: "Open the session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO);
@@ -219,6 +225,21 @@ describe("inbox", () => {
     sync.stop();
   });
 
+  it.each([
+    ["the groups entry's reason", null, "the shell/unchecked baseline is ask"],
+    ["the engine's d-shell-syntax rule", "d-shell-syntax", "shell syntax cannot be checked safely"],
+  ])("unchecked commands opt-in: the ask (%s) offers only Deny and Allow once, and a link to the Settings row", async (_, rule, reason) => {
+    const unchecked: AskGroupDTO = { ...pushes, key: "k-unchecked", title: "Allow this unchecked command?", modes: ["once", "deny"], rule, items: pushes.items.map((a) => ({ ...a, rule, reason })) };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [unchecked] });
+    const { sync, onOpenRule } = mount(daemon);
+    const held = await screen.findByRole("article", { name: "Allow this unchecked command?" });
+    expect(within(held).getAllByRole("button").filter((b) => ["Deny", "Allow once", "Allow"].includes(b.textContent ?? "")).map((b) => b.textContent)).toEqual(["Deny", "Allow once"]);
+    fireEvent.click(within(held).getByRole("button", { name: "Stop asking for these…" }));
+    expect(within(held).queryByRole("button", { name: /rule/ })).toBeNull();
+    expect(onOpenRule).toHaveBeenCalledWith("unchecked-commands");
+    sync.stop();
+  });
+
   it("a hold with no group: the request is in the headline, Allow never saves a grant by itself, and a refusal shows on the card", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, permissionInTerminal] });
     const { sync } = mount(daemon);
@@ -280,6 +301,38 @@ describe("inbox", () => {
     expect(daemon.data.policy.saved).toEqual([]);
     expect(daemon.data.policy.groups?.shell.subcategories).toEqual({ install: "allow" });
     sync.stop();
+  });
+
+  it("org policy shown to member: an org Ask is labelled with the org and its reason, saves only what the org allows; a Block is one calm notice; Settings shows locked rows", async () => {
+    const org = { name: "Acme", what: "local git changes", decision: "ask", reason: "commits are audited" };
+    const commits: AskGroupDTO = {
+      key: `${REPO}|bash|family: git/local`, repo: REPO, kind: "bash", title: "Allow local git changes?", general: scopesFor("bash", "git add -A")[0],
+      scopes: scopesFor("bash", "git add -A"), blocked: false, rule: "org-git-local", limits: { life: "time", minutes: 15 }, modes: ["once", "deny", "always-deny", "timed"], org,
+      items: [{ ...ask("w1", "req-1", "bash", "git add -A", 60, "org-git-local"), limits: { life: "time", minutes: 15 } }],
+    };
+    const blocked: InboxItemDTO = { kind: "org_blocked", reason: "Blocked by Acme policy: installs go through platform review", detail: "3 requests stopped today. Agents were told to work around it." };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, blocked], asks: [commits] });
+    daemon.data.policy.org_controls = [org, { name: "Acme", what: "package installs", decision: "deny", reason: "installs go through platform review" }];
+    const { sync } = mount(daemon);
+    const item = await screen.findByRole("article", { name: "Allow local git changes?" });
+    const why = within(item).getByTestId("org-why");
+    expect([why.dataset.org, why.dataset.reason, why.dataset.setting]).toEqual(["Acme", "commits are audited", "ask"]);
+    // Offered: what the org allows (no lasting save), and no way into the member's own rules.
+    expect(within(item).queryByRole("button", { name: /rule/ })).toBeNull();
+    fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
+    expect(within(item).getAllByRole("menuitem")).toHaveLength(1);   // a timed approval, its only save
+    expect(within(item).getByRole("button", { name: "Allow once" })).toBeTruthy();
+    // A Block: one quiet notice in the org's group, however many requests it stopped.
+    expect(document.querySelectorAll('[data-kind="org_blocked"]')).toHaveLength(1);
+    expect(screen.getByRole("region", { name: "Your org" }).contains(card("org_blocked"))).toBe(true);
+    sync.stop();
+    cleanup();
+
+    render(<Permissions client={daemon.client()} />);
+    const rows = [...(await screen.findByTestId("org-controls")).querySelectorAll<HTMLElement>("[data-locked]")];
+    expect(rows.map((r) => [r.dataset.org, r.dataset.what, r.dataset.setting, r.dataset.reason])).toEqual([
+      ["Acme", "local git changes", "ask", "commits are audited"], ["Acme", "package installs", "deny", "installs go through platform review"]]);
+    expect(rows.flatMap((r) => [...r.querySelectorAll("button, input, select")])).toEqual([]);   // locked: nothing to change
   });
 
   it("groups a closed worker's running child under its session, as the sidebar does", async () => {

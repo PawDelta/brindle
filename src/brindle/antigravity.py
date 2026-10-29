@@ -413,7 +413,7 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
     cfg = load_repo_config(ws.repo_root)
     if cfg.permission_policy != "on" and not strict:
         return output(None)
-    req = permissions.from_agy(payload, worktree=ws.path, repo_root=ws.repo_root)
+    req = permissions.from_agy(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
     rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
     escalate = False
     if strict:

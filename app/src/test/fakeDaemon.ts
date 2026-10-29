@@ -19,6 +19,7 @@ import type {
   AskGroupDTO,
   AskResultDTO,
   DecisionDTO,
+  OrgControlViewDTO,
   PermissionPolicyDTO,
   PermissionRuleDTO,
   SavedActionDTO,
@@ -34,10 +35,11 @@ import type {
   RoutingTierDTO,
   SessionDTO,
   WorkspaceDTO,
+  CloudOptionsDTO,
 } from "../api/schema";
 import { LOGIN_PROVIDERS } from "../api/client";
 import { hunksOf, parseDiff } from "../screens/Branch/parseDiff";
-import type { AccountInfo, Cost, DebugEntry, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
+import type { AccountInfo, ConnectionReady, Cost, DebugEntry, ProviderConnection, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
 
 export const BASE_URL = "http://127.0.0.1:47321";
 export const TOKEN = "test-token";
@@ -96,6 +98,12 @@ export interface DaemonData {
      DELETE /providers/{p} turns a row off (state "off": still found,
      unused); POST /providers/{p}/use-mine or an install turns it back on. */
   providers: ProviderInstalled[];
+  /* GET / PUT /providers/{p}/connection (brindle.connections): how each
+     provider connects. A provider with none listed connects "auto" (its own
+     sign-in). `clouds` per provider follows connections.ROUTES. */
+  connections: Record<string, Partial<Omit<ProviderConnection, "provider">>>;
+  /* GET /cloud/options: what this machine's cloud CLIs are set up with. */
+  cloudOptions: CloudOptionsDTO;
   /* Every profile as GET /routing describes it (`excluded` is worked out
      from the excluded providers). */
   routingProfiles: RoutingProfile[];
@@ -152,8 +160,8 @@ export interface DaemonData {
      brindle judges it ready for a PR and why not, its branch and base, and
      its diff against the base as a unified patch (GET /sessions/{root}/diff
      splits it into files and hunks as the engine does; 409 not_ready until
-     ready). `pr`: the PR brindle opened itself (the engine's auto-PR,
-     branch desktop/auto-pr; stubbed here). A session with no entry reads
+     ready). `pr`: the PR the person opened, with how many session commits
+     aren't pushed to it yet (POST .../pr/push pushes them). A session with no entry reads
      as not ready. readyForPr() flips one and puts session.pr_ready on the bus. */
   sessionReview: Record<string, SessionReviewData>;
   /* Root agent id → path → the file as the session's checkout has it (GET,
@@ -168,7 +176,7 @@ export interface DaemonData {
   /* The person's permission store (permissions.Store, GET /permissions):
      the preset, the unmatched setting, every rule and saved action, and
      per-rule prompt counts over the last day. */
-  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }> };
+  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }>; org_controls?: OrgControlViewDTO[] };
   /* GET /permissions/asks: the requests hooks hold, grouped
      (permission_grants.groups). A decision takes its requests out of these
      and out of `inbox` (the hold's answer). */
@@ -239,7 +247,7 @@ export interface SessionReviewData {
   branch: string;
   base: string;
   diff: string;
-  pr?: { url: string } | null;
+  pr?: { url: string; unpushed: number } | null;
 }
 
 /* Permission rules as POST /permissions keeps them (permissions.Rule.to_dict). */
@@ -268,8 +276,6 @@ const REPO_CONFIG_TYPES: Record<string, "string" | "number" | "boolean" | "list"
   overlap: "any", coordinator: "boolean", protected_paths: "list", pool_size: "any", add_dirs: "list",
   worker_extra_read_dirs: "list", services: "list", local_models: "boolean", delete_merged_branches: "boolean",
   pr_footer: "boolean", sidebar: "string", rules: "list", learning: "string", learning_candidates: "list",
-  // Engine branch desktop/auto-pr (stubbed until it merges): brindle opens a ready session's PR itself.
-  auto_pr: "boolean",
 };
 
 /* config.load_repo_config: the command lists come from the repo's files only
@@ -406,6 +412,25 @@ function actionCommand(kind: string, name: string): string[] {
 /* keystore.check_name: a key agents may be given; brindle's own token never. */
 const KEY_NAME = /^[A-Z][A-Z0-9_]{2,}$/;
 const RESERVED_KEYS = new Set(["BRINDLE_TOKEN"]);
+/* key_check: the keys checked with their provider when stored, and where to get each. */
+const KEY_CHECKED = new Set(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"]);
+const KEY_PAGES: Record<string, string> = {
+  ANTHROPIC_API_KEY: "https://console.anthropic.com/settings/keys",
+  OPENAI_API_KEY: "https://platform.openai.com/api-keys",
+  OPENROUTER_API_KEY: "https://openrouter.ai/keys",
+  GEMINI_API_KEY: "https://aistudio.google.com/apikey",
+};
+/* keystore.provider_of. */
+const KEY_PROVIDER: Record<string, string> = { ANTHROPIC_API_KEY: "claude", OPENAI_API_KEY: "codex", CODEX_API_KEY: "codex", GEMINI_API_KEY: "antigravity" };
+/* The keys each provider reads (pane_auth.API_KEYS; OpenCode its model providers'). */
+const FAKE_PROVIDER_KEYS: Record<string, string[]> = {
+  claude: ["ANTHROPIC_API_KEY"],
+  codex: ["OPENAI_API_KEY", "CODEX_API_KEY"],
+  antigravity: ["GEMINI_API_KEY"],
+  opencode: ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+};
+/* connections.ROUTES: the clouds each provider can go through. */
+const CLOUD_ROUTES: Record<string, string[]> = { claude: ["bedrock", "vertex", "foundry"], opencode: ["vertex", "azure"] };
 
 /* picker.LOGIN_METHODS: the ways a CLI's sign-in can be asked for, by flag. */
 const LOGIN_METHODS: Record<string, string[]> = { claude: ["claudeai", "console", "sso"], codex: ["device"] };
@@ -655,6 +680,25 @@ export class FakeDaemon {
   shellPanes: PtyViewTarget[] = [];
   /* The keys PUT /keys/{name} stored, in order (never their values). */
   readonly keysStored: string[] = [];
+  /* Keys their provider refuses (key_check.evaluate REJECTED): a save is
+     refused 422, a test reads rejected. */
+  readonly rejectedKeys = new Set<string>();
+  /* Keys set in the daemon's environment, for POST /keys/{name}/import (GET /config's `importable`). */
+  readonly shellKeys = new Set<string>();
+  /* The cloud sign-ins POST /providers/{p}/cloud-sign-in started, by provider; held until completeCloudSignIn(). */
+  readonly cloudSignIns: string[] = [];
+  private pendingCloudSignIns: Array<(result: string) => void> = [];
+  /* Hold each PUT /keys/{name} (the provider's check of the key), and with holdConnections each
+     PUT /providers/{p}/connection, until releaseKeys(): applied and answered then, in order. */
+  holdKeys = false;
+  holdConnections = false;
+  private pendingKeys: Array<() => void> = [];
+  releaseKeys(): void {
+    for (const answer of this.pendingKeys.splice(0)) answer();
+  }
+  /* Codex is signed in to ChatGPT, which wins over its API key (blocked_by "codex_login") until POST /providers/codex/sign-out. */
+  codexChatGPT = false;
+  codexSignOuts = 0;
   /* The knowledge sources synced and removed, in order, and how many documents an index finds in a folder. */
   readonly kbSyncs: string[] = [];
   readonly kbRemovals: string[] = [];
@@ -667,6 +711,8 @@ export class FakeDaemon {
   readonly sessionEdits: { root: string; path: string; content: string | null }[] = [];
   /* The PRs POST /sessions/{root}/pr opened, in order, with their URLs. */
   readonly prs: { root: string; title?: string; body?: string; draft?: boolean; url: string }[] = [];
+  /* The sessions POST /sessions/{root}/pr/push pushed to their PR, in order. */
+  readonly prPushes: string[] = [];
   events: BusEvent[] = [];
   readonly requests: Request[] = [];
   readonly sockets: FakeSocket[] = [];
@@ -701,6 +747,16 @@ export class FakeDaemon {
       files: {},
       preflight: {},
       providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" } }),
+      connections: {},
+      cloudOptions: {
+        aws_profiles: [
+          { name: "default", sso: false, region: "us-west-2" },
+          { name: "work-sso", sso: true, region: "us-east-1" },
+        ],
+        gcloud: { adc: true, project: "my-project", region: "us-central1" },
+        azure: null,
+        regions: { bedrock: ["us-east-1", "us-west-2", "eu-central-1"], vertex: ["global", "us-central1", "europe-west1"] },
+      },
       routingProfiles: [],
       routingConfig: { user: {}, repo: {}, local: {} },
       routingByRepo: {},
@@ -766,12 +822,13 @@ export class FakeDaemon {
     this.publish("autopilot.done", { root_id: root, agent_id: root, payload: {} });
   }
 
-  /* GET /sessions/{root}/pr/readiness, /diff, /pr/draft, /file (routes_read). */
+  /* GET /sessions/{root}/pr/readiness, /diff, /tree, /pr/draft, /file (routes_read). */
   private sessionReviewRead(root: string, what: string, query: Record<string, string>): Response {
     const d = this.data;
     const session = d.sessions.find((s) => s.id === root);
     if (!session) return error("not_found", `no session ${root}`, 404);
-    const review = d.sessionReview[root] ?? { ready: false, reasons: ["autopilot isn't on for this session, so there is no goal to judge it by"], branch: "", base: "", diff: "" };
+    const workspace = d.workspaces.find((ws) => ws.id === session.workspace_id);
+    const review = d.sessionReview[root] ?? { ready: false, reasons: ["autopilot isn't on for this session, so there is no goal to judge it by"], branch: workspace?.branch ?? "", base: workspace?.base_branch ?? "main", diff: "" };
     if (what === "pr/readiness") return json({ root_id: root, ready: review.ready, reasons: review.reasons, pr: review.pr ?? null });
     if (what === "file") {
       const content = d.sessionFiles[root]?.[query.path ?? ""];
@@ -779,7 +836,8 @@ export class FakeDaemon {
       if (content === undefined) return error("not_found", `no file ${query.path} in the session's checkout`, 404);
       return json({ path: query.path, content, base: fakeBlob(content) });
     }
-    if (!review.ready) return json({ error: { code: "not_ready", message: `the session isn't ready for a PR: ${review.reasons.join("; ")}` }, reasons: review.reasons }, 409);
+    // The checkout's files as `git ls-files` lists them: sessionFiles' paths, sorted.
+    if (what === "tree") return json({ root_id: root, branch: review.branch, files: Object.keys(d.sessionFiles[root] ?? {}).sort() });
     if (what === "diff") {
       // From the base and the checkout as they stand, when the base is known: the diff follows every edit.
       const base = d.sessionBase[root];
@@ -795,6 +853,7 @@ export class FakeDaemon {
       }));
       return json({ root_id: root, branch: review.branch, base: review.base, base_sha: "b".repeat(40), head: `h${this.nextId}`.padEnd(40, "0"), files, workers: [] });
     }
+    if (!review.ready) return json({ error: { code: "not_ready", message: `the session isn't ready for a PR: ${review.reasons.join("; ")}` }, reasons: review.reasons }, 409);
     if (what === "pr/draft") {
       const goal = d.goal?.root_id === root ? d.goal : null;
       const titles = goal?.milestones?.map((m) => `- ${m.title}`) ?? [];
@@ -919,13 +978,136 @@ export class FakeDaemon {
     if (typeof value !== "string" || !value.trim()) return error("invalid", "value must be a non-empty string", 400);
     if (!KEY_NAME.test(name) || RESERVED_KEYS.has(name)) return error("invalid", `${name} isn't a key agents can be given`, 400);
     if (this.data.routingPolicy?.deny_personal_keys) return error("forbidden", `org ${this.data.routingPolicy.org_id} doesn't allow personal API keys`, 403);
+    // keys_cmds.store: checked with its provider first; a key it refuses isn't stored.
+    if (this.rejectedKeys.has(name)) return error("not_stored", `${name} not stored: the provider rejected this key (401 unauthorized); check that you copied all of it`, 422);
     const last4 = value.trim().slice(-4);
     const keys = this.data.config.keys;
     const at = keys.findIndex((k) => k.name === name);
-    if (at >= 0) keys[at] = { name, set: true, last4 };
-    else keys.push({ name, set: true, last4 });
+    const stored: KeyInfo = { ...keys[at], name, set: true, last4, status: KEY_CHECKED.has(name) ? "verified" : "unchecked", checked_at: Date.now() / 1000 };
+    if (at >= 0) keys[at] = stored;
+    else keys.push(stored);
     this.keysStored.push(name);
     return json({ name, last4, set: true });
+  }
+
+  /* routes_read.get_config's keys: each with its provider, check and key page, importable while only the shell has it. */
+  private keyInfos(): KeyInfo[] {
+    const keys = [...this.data.config.keys];
+    for (const name of this.shellKeys) if (!keys.some((k) => k.name === name)) keys.push({ name, set: false, last4: "" });
+    return keys.map((k) => ({ provider: KEY_PROVIDER[k.name] ?? null, key_page: KEY_PAGES[k.name] ?? null, status: k.set ? (k.status ?? "unchecked") : null, ...k, importable: !k.set && this.shellKeys.has(k.name) }));
+  }
+
+  /* routes_actions.delete_key: `brindle keys unset NAME`. */
+  private deleteKey(name: string): Response {
+    const keys = this.data.config.keys;
+    const at = keys.findIndex((k) => k.name === name);
+    if (at >= 0) keys[at] = { name, set: false, last4: "" };
+    return json({ name, set: false });
+  }
+
+  /* routes_actions.retest_key: the stored key checked with its provider again. */
+  private testKey(name: string): Response {
+    const k = this.data.config.keys.find((x) => x.name === name && x.set);
+    if (!k) return error("not_found", `no ${name} is stored`, 404);
+    k.status = this.rejectedKeys.has(name) ? "rejected" : "verified";
+    k.checked_at = Date.now() / 1000;
+    return json({ name, status: k.status, checked_at: k.checked_at });
+  }
+
+  /* routes_actions.import_key: the daemon's environment value, stored as a save would. */
+  private importKey(name: string, body: Record<string, unknown>): Response {
+    if (!this.shellKeys.has(name)) return error("invalid", `${name} isn't set in the daemon's environment`, 400);
+    const stored = this.putKey(name, { ...body, value: `sk-from-shell-${name.slice(0, 4)}` });
+    if (stored.ok) this.shellKeys.delete(name);
+    return stored;
+  }
+
+  /* routes_read.provider_connection (connections.view, with feat/connection-readiness's
+     ready, blocked_by and stopped_agents). Readiness follows the row, the keys and the
+     login unless a test sets `ready` itself. */
+  private connectionDto(provider: string): ProviderConnection {
+    const c = this.data.connections[provider] ?? {};
+    const method = c.method ?? "auto";
+    const row = this.data.providers.find((r) => r.provider === provider);
+    const stored = (FAKE_PROVIDER_KEYS[provider] ?? []).some((n) => this.data.config.keys.some((k) => k.name === n && k.set));
+    const blocked = provider === "codex" && method === "api_key" && this.codexChatGPT;
+    const not = (reason: string, action: ConnectionReady["action"]): ConnectionReady => ({ ok: false, reason, action });
+    const ready: ConnectionReady =
+      c.ready ??
+      (!row || row.state !== "installed" || !row.path
+        ? not(`${CLI_NAMES[provider] ?? provider} isn't installed`, "install")
+        : method === "api_key"
+          ? !stored
+            ? not("no API key is stored", "set_key")
+            : blocked
+              ? not("Codex's ChatGPT login is used instead of the API key", "sign_out")
+              : { ok: true, reason: null, action: null }
+          : method === "cloud"
+            ? c.login?.valid
+              ? { ok: true, reason: null, action: null }
+              : not("the cloud login has expired", "renew")
+            : row.signed_in === true || (method === "auto" && stored)
+              ? { ok: true, reason: null, action: null }
+              : not("not signed in", "sign_in"));
+    return { provider, method: "auto", choice: null, cloud: null, settings: {}, login: null, managed: null, stopped_agents: [], ...c, clouds: CLOUD_ROUTES[provider] ?? [], ready, blocked_by: blocked ? "codex_login" : null };
+  }
+
+  private connectionOf(provider: string): Response {
+    if (!(INSTALLABLE as readonly string[]).includes(provider)) return error("invalid", `provider must be one of ${INSTALLABLE.join(", ")}`, 400);
+    return json(this.connectionDto(provider));
+  }
+
+  /* POST /providers/codex/sign-out (feat/connection-readiness): Codex's ChatGPT login signed out, a job; job.done's result is the connection after. */
+  private codexSignOut(): Response {
+    const job = `job${this.nextJob++}`;
+    this.codexSignOuts++;
+    setTimeout(() => {
+      this.codexChatGPT = false;
+      this.publish("job.done", { payload: { job, job_kind: "provider.sign_out", provider: "codex", result: this.connectionDto("codex") } });
+    }, 0);
+    return json({ job, kind: "provider.sign_out" }, 202);
+  }
+
+  /* routes_actions.put_provider_connection (connections.choose): the method, and for cloud a route the provider has and its settings. */
+  private putConnection(provider: string, body: Record<string, unknown>): Response {
+    if (!(INSTALLABLE as readonly string[]).includes(provider)) return error("invalid", `provider must be one of ${INSTALLABLE.join(", ")}`, 400);
+    const method = String(body.method ?? "");
+    if (!["auto", "sign_in", "api_key", "cloud"].includes(method)) return error("invalid", "method must be one of auto, sign_in, api_key, cloud", 400);
+    const managed = this.data.connections[provider]?.managed;
+    if (managed) return error("forbidden", managed, 403);
+    if (method === "cloud") {
+      const routes = CLOUD_ROUTES[provider] ?? [];
+      if (!routes.includes(String(body.cloud))) return error("invalid", routes.length ? `${provider} clouds: ${routes.join(", ")}` : `${provider} can't connect through a cloud in brindle yet`, 400);
+      const settings = (body.settings ?? {}) as Record<string, string>;
+      const choice = { method, cloud: String(body.cloud), settings };
+      this.data.connections[provider] = { ...this.data.connections[provider], method, choice, cloud: choice.cloud, settings, login: { valid: false, expired: false } };
+    } else {
+      if (body.cloud != null || body.settings != null) return error("invalid", "cloud and settings go with method cloud", 400);
+      const kept = { stopped_agents: this.data.connections[provider]?.stopped_agents ?? [] };
+      this.data.connections[provider] = method === "auto" ? kept : { ...kept, method, choice: { method, settings: {} }, cloud: null, settings: {}, login: null };
+    }
+    return this.connectionOf(provider);
+  }
+
+  /* routes_actions.provider_cloud_sign_in: the saved route's cloud login, a job; held until completeCloudSignIn(). */
+  private cloudSignIn(provider: string): Response {
+    const c = this.data.connections[provider];
+    if (c?.method !== "cloud" || !c.cloud) return error("invalid", `${provider} doesn't connect through a cloud: choose one first`, 400);
+    const job = `job${this.nextJob++}`;
+    this.cloudSignIns.push(provider);
+    setTimeout(() => {
+      this.publish("job.progress", { payload: { job, text: "https://device.sso.us-east-1.amazonaws.com/?user_code=ABCD-EFGH" } });
+      this.pendingCloudSignIns.push((result) => {
+        if (result === "signed in") this.data.connections[provider] = { ...c, login: { valid: true, expired: false, expires_at: Date.now() / 1000 + 8 * 3600 } };
+        this.publish("job.done", { payload: { job, job_kind: "provider.cloud_sign_in", provider, result: { provider, cloud: c.cloud, result, exit_code: result === "signed in" ? 0 : 1 } } });
+      });
+    }, 0);
+    return json({ job, kind: "provider.cloud_sign_in" }, 202);
+  }
+
+  /* The browser comes back from the cloud sign-ins started so far: how each went. */
+  completeCloudSignIn(result = "signed in"): void {
+    for (const finish of this.pendingCloudSignIns.splice(0)) finish(result);
   }
 
   /* Finish the upgrades held by deferUpgrade: the command prints its last lines and exits. */
@@ -1226,6 +1408,10 @@ export class FakeDaemon {
     if ((m = path.match(/^\/providers\/([^/]+)\/install$/))) return this.installProvider(m[1]);
     if ((m = path.match(/^\/providers\/([^/]+)\/use-mine$/))) return this.pickProviderInstall(m[1], body);
     if ((m = path.match(/^\/providers\/([^/]+)\/logout$/))) return this.signOutProvider(m[1]);
+    if ((m = path.match(/^\/providers\/([^/]+)\/cloud-sign-in$/))) return this.cloudSignIn(m[1]);
+    if (path === "/providers/codex/sign-out") return this.codexSignOut();
+    if ((m = path.match(/^\/keys\/([^/]+)\/test$/))) return this.testKey(m[1]);
+    if ((m = path.match(/^\/keys\/([^/]+)\/import$/))) return this.importKey(m[1], body);
     if (path === "/repos/clone") return this.cloneRepo(body);
     if (path === "/repos/open") return this.openRepo(body);
     if (path === "/terminals/shell") return this.openShell(body);
@@ -1466,6 +1652,7 @@ export class FakeDaemon {
       saved: p.saved.map((s) => ({ ...s, expired: s.expires != null && s.expires <= now })),
       prompt_counts: { ...p.prompts },
       groups: Object.entries(p.groups ?? {}).map(([name, g]) => ({ name, ...g })),
+      org_controls: p.org_controls ?? [],
     };
   }
 
@@ -2137,10 +2324,15 @@ export class FakeDaemon {
       if (method === "DELETE" && provider) return this.removeProvider(provider[1]);
       const terminal = path.match(/^\/terminals\/([^/]+)$/);
       if (method === "DELETE" && terminal) return this.closeTerminal(terminal[1]);
+      const key = path.match(/^\/keys\/([^/]+)$/);
+      if (method === "DELETE" && key) return this.deleteKey(key[1]);
       if (method === "DELETE") return error("not_found", `no route DELETE ${path}`, 404);
+      const connection = path.match(/^\/providers\/([^/]+)\/connection$/);
+      if (connection && this.holdConnections) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>))));
+      if (connection) return this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>);
       if (path === "/routing") return this.putRouting((body ?? {}) as Record<string, unknown>);
       if (path === "/debug") return this.putDebug((body ?? {}) as Record<string, unknown>);
-      const key = path.match(/^\/keys\/([^/]+)$/);
+      if (key && this.holdKeys) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putKey(key[1], (body ?? {}) as Record<string, unknown>))));
       if (key) return this.putKey(key[1], (body ?? {}) as Record<string, unknown>);
       const file = path.match(/^\/workspaces\/(.+)\/file$/);
       if (file) return this.editFile(file[1], (body ?? {}) as Record<string, unknown>);
@@ -2266,7 +2458,9 @@ export class FakeDaemon {
         return needRepo() ?? json(d.rulePacks);
       case "/config":
         // The repo's config comes only when a repo is asked for (routes_read.get_config).
-        return json(repo ? { user: d.config.user, repo: effectiveConfig(d.config), overrides: configOverrides(d.config), keys: d.config.keys } : { user: d.config.user, keys: d.config.keys });
+        return json(repo ? { user: d.config.user, repo: effectiveConfig(d.config), overrides: configOverrides(d.config), keys: this.keyInfos() } : { user: d.config.user, keys: this.keyInfos() });
+      case "/cloud/options":
+        return json(d.cloudOptions);
       case "/user-settings":
         return json(d.userSettings);
       case "/debug":
@@ -2315,7 +2509,8 @@ export class FakeDaemon {
       return json(d.providers);
     }
     if ((m = path.match(/^\/providers\/([^/]+)\/preflight$/))) return json(this.preflightOf(m[1]));
-    if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
+    if ((m = path.match(/^\/providers\/([^/]+)\/connection$/))) return this.connectionOf(m[1]);
+    if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|tree|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
     return error("not_found", `no route ${path}`, 404);
   };
 
@@ -2523,6 +2718,21 @@ export class FakeDaemon {
         this.pendingLaunch = () => resolve(launched());
       });
     }
+    const prPush = path.match(/^\/sessions\/([^/]+)\/pr\/push$/);
+    if (prPush) {
+      // routes_actions.push_session_pr: only to the PR the person opened; its commits pushed, session.pr_pushed.
+      const root = prPush[1];
+      const review = d.sessionReview[root];
+      if (!review?.pr) return error("conflict", "the session has no PR to push to; open it first", 409);
+      const job = `job${this.nextJob++}`;
+      review.pr = { ...review.pr, unpushed: 0 };
+      this.prPushes.push(root);
+      setTimeout(() => {
+        this.publish("session.pr_pushed", { root_id: root, agent_id: root, payload: { url: review.pr?.url } });
+        this.publish("job.done", { root_id: root, agent_id: root, payload: { job, job_kind: "session.push", result: { url: review.pr?.url } } });
+      }, 0);
+      return json({ job, kind: "session.push" }, 202);
+    }
     const pr = path.match(/^\/sessions\/([^/]+)\/pr$/);
     if (pr) {
       // routes_actions.open_session_pr: refused with the reasons unless ready; a job whose result carries the URL.
@@ -2533,6 +2743,7 @@ export class FakeDaemon {
       const job = `job${this.nextJob++}`;
       const url = `https://github.com/example/proj/pull/${this.prs.length + 1}`;
       this.prs.push({ root, title: body.title as string | undefined, body: body.body as string | undefined, draft: body.draft as boolean | undefined, url });
+      review.pr = { url, unpushed: 0 };
       this.setGoalPhase(root, "pr_open", url);
       setTimeout(() => this.publish("job.done", { root_id: root, agent_id: root, payload: { job, job_kind: "session.pr", result: { url, keeps_merged_branches: true } } }), 0);
       return json({ job, kind: "session.pr" }, 202);

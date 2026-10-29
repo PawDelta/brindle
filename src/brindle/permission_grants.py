@@ -3,7 +3,10 @@
 An **ask** is a request the policy left to a person. Each one carries its
 exact form and a ladder of scopes a decision may cover (``generalize``): a
 push's destination ("into main from any branch"), a file's top directory, a
-command's family (its first two words), an MCP tool (or its whole server).
+command's families (read-only git, read-only shell, test runs, tool queries,
+local git changes, installs, file changes in a checkout: "Command families"
+below) or else its first two words, an MCP tool (or its
+whole server).
 The second rung, the general form, is what brindle proposes as the default
 grant; pending asks of the same kind and general form make one Inbox item
 (``groups``), one decision resolves the item, and the person may narrow to
@@ -24,11 +27,13 @@ so a broad grant never resolves a request its policy forbids."""
 from __future__ import annotations
 
 import fnmatch
+import glob
 import hashlib
 import os
+import re
 import subprocess
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlsplit
 
 from brindle import permissions
@@ -124,9 +129,430 @@ def push_scopes(keys: list[str]) -> list[dict]:
             _scope("all", f"*{PUSH_ARROW}*{PUSH_AT}*", "All pushes in every repository", "all")]
 
 
-def scopes_for(kind: str, key: str, name: str = "") -> list[dict]:
+# -- command families ----------------------------------------------------------------------------
+#
+# A shell command's families are what its simple commands are, as
+# permission_groups classifies them: a read-only git command or a read-only
+# shell command (grep, ls, cat, cd ...), or, of a dev tool's commands, only
+# a test run or a query whose operation brindle knows (DEV_OPERATIONS; "uv
+# run" alone may run anything). Three more change files, each only in a
+# checkout (_checkouts: a repo of the asking agent's session, attached or its
+# own, and the session's worktrees): a local git command (GIT_LOCAL: never a push), a package
+# install into the project (INSTALLS), and a file change (a write, edit,
+# move, copy or delete, a redirection) whose every path is in one. An
+# approval at the general scope covers any command whose every part falls in
+# the families it was granted for, however they are piped or chained. A part
+# of any other class (a push, a reset or clean, a delete of a checkout or of
+# anything outside one, a write outside, a word only the run knows, a cd
+# brindle can't follow before it) puts the command in no family: only its
+# own grant covers it.
+
+FAMILY = "family: "
+READ_FILTER = "shell/readonly"
+TESTS = "dev/tests"
+QUERIES = "dev/queries"
+LOCAL_GIT = "git/local"
+INSTALL = "dev/install"
+WRITES = "files/write-worktree"
+FAMILY_LABELS = {"git/readonly": "read-only git commands", READ_FILTER: "read-only shell commands",
+                 TESTS: "test runs", QUERIES: "package and GitHub queries", LOCAL_GIT: "local git changes",
+                 INSTALL: "package installs into the project", WRITES: "file changes in the checkout"}
+# What an org may Block or Ask for as a whole (team_policy.OrgControl.group,
+# org_decision): each family, commands brindle can't check, and three
+# groupings that cut across them.
+UNCHECKED = "shell/unchecked"
+NETWORK = "network/fetch"
+DEPLOY = "deploy/trigger"
+PACKAGES = "packages/install"
+ORG_GROUPINGS = {**FAMILY_LABELS, UNCHECKED: "unchecked commands", NETWORK: "network fetches",
+                 DEPLOY: "deploys, releases and workflow runs", PACKAGES: "package installs"}
+# program -> the words that make one of its commands a deploy or a workflow
+# trigger, wherever they come in it (aws cloudformation deploy, gcloud run
+# deploy); gh's by its first two words (DEPLOY_GH).
+DEPLOY_VERBS = {
+    "aws": {"deploy", "create-deployment", "create-stack", "update-stack", "update-service",
+            "update-function-code", "publish-version", "start-pipeline-execution"},
+    "gcloud": {"deploy"}, "az": {"deploy", "deployment"}, "terraform": {"apply", "destroy"},
+    "tofu": {"apply", "destroy"}, "pulumi": {"up", "destroy"}, "kubectl": {"apply", "rollout", "replace"},
+    "helm": {"install", "upgrade", "rollback"}, "fly": {"deploy"}, "flyctl": {"deploy"},
+    "vercel": {"deploy", "--prod"}, "netlify": {"deploy"}, "firebase": {"deploy"}, "cdk": {"deploy", "destroy"},
+    "sam": {"deploy"}, "serverless": {"deploy"}, "sls": {"deploy"}, "wrangler": {"deploy", "publish"},
+    "heroku": {"releases:rollback"}, "eb": {"deploy"},
+}
+DEPLOY_GH = (("workflow", "run"), ("run", "rerun"), ("release", "create"), ("release", "upload"),
+             ("release", "edit"), ("release", "delete"))
+# git subcommands that change only the local repository -> (long options never in the family,
+# short ones, the short options that take a value). A long option counts however git lets it be
+# abbreviated (--exe), a short one anywhere in a cluster before a value (-x"cmd", -tf). What
+# runs a command (rebase --exec, a merge strategy that isn't git's own) or discards the
+# checkout's changes (checkout/switch --force, a restore or checkout of a whole checkout, as
+# reset --hard would) is never in it.
+GIT_LOCAL = {"add": ((), "", ""), "commit": ((), "", "mFcCt"), "stash": ((), "", "m"), "tag": ((), "", "mFu"),
+             "branch": ((), "", ""), "merge": ((), "", "mFsX"), "rebase": (("--exec",), "x", "sXC"),
+             "restore": ((), "", "s"), "switch": (("--force", "--discard-changes"), "f", "cC"),
+             "checkout": (("--force",), "f", "bB")}
+STRATEGIES = frozenset({"ort", "recursive", "resolve", "octopus", "ours", "subtree"})
+# Short options whose value is optional and only ever attached (-S, -Skey): never the next word.
+GIT_ATTACHED_VALUES = "S"
+# A package manager's install or add, into the project where it runs (and pip, from the project's
+# own environment: .venv/bin/pip, .venv/bin/python -m pip).
+INSTALLS = (("npm", "install"), ("npm", "i"), ("npm", "add"), ("pnpm", "install"), ("pnpm", "i"), ("pnpm", "add"),
+            ("yarn", "install"), ("yarn", "add"), ("uv", "add"), ("uv", "sync"), ("uv", "pip", "install"))
+# The only install options in the family: none that puts packages, a cache or a log elsewhere or
+# fetches from elsewhere. Those that take a value take a name or a path in the project.
+INSTALL_FLAGS = frozenset({"-D", "--save-dev", "-E", "--save-exact", "-O", "--save-optional", "-P", "--save-prod",
+                           "--save-peer", "-S", "--save", "--no-save", "--dev", "--exact", "--optional", "--peer",
+                           "--frozen-lockfile", "--immutable", "--prefer-offline", "--offline", "--no-audit",
+                           "--no-fund", "--legacy-peer-deps", "--ignore-scripts", "--silent", "--frozen", "--locked",
+                           "--no-dev", "--all-extras", "--all-groups", "--upgrade", "-U", "--no-deps", "--pre",
+                           "--no-install-project", "-q", "--quiet", "-v", "--verbose"})
+INSTALL_VALUES = frozenset({"--group", "--extra", "--package", "--upgrade-package", "-r", "--requirement", "-c",
+                            "--constraint", "-e", "--editable"})
+# What makes files whose links brindle doesn't follow before they exist (_part_families).
+COPIERS = frozenset({"cp", "mv", "ln", "rsync", "tar", "unzip"})
+# The files rm and rmdir delete, by the options brindle reads for each.
+REMOVE_FLAGS = {"rm": re.compile(r"-[rRfidvI]+|--(recursive|force|dir|verbose)"),
+                "rmdir": re.compile(r"-v|--verbose")}
+# pytest however it is started, with only these options: none that loads code or a config from
+# elsewhere (-p, -c, --rootdir ...) or deletes a directory (--basetemp).
+PYTEST = (("pytest",), ("python", "-m", "pytest"), ("python3", "-m", "pytest"), ("uv", "run", "pytest"),
+          ("uv", "run", "python", "-m", "pytest"))
+PYTEST_FLAGS = re.compile(r"-[qvxsl]+|-r[a-zA-Z]+|-n(\d+|auto)|--(tb|maxfail|durations|color)=[a-z0-9]+"
+                          r"|--(lf|ff|last-failed|failed-first|nf|new-first|sw|stepwise|co|collect-only|no-header"
+                          r"|strict-markers|disable-warnings|quiet|verbose|exitfirst|showlocals)")
+PYTEST_VALUES = ("-k", "-m", "-n")
+# A package manager's test script, with nothing after it but test names or paths after "--".
+SCRIPT_TESTS = tuple((tool, *verb) for tool in ("npm", "pnpm", "yarn") for verb in (("test",), ("run", "test")))
+# What only reads: a package manager's listing or lookup, GitHub's view of a pull request or run.
+DEV_QUERIES = (("npm", "ls"), ("npm", "list"), ("npm", "view"), ("npm", "info"), ("npm", "outdated"),
+               ("npm", "explain"), ("npm", "config", "get"), ("npm", "config", "list"), ("pnpm", "ls"),
+               ("pnpm", "list"), ("pnpm", "why"), ("pnpm", "outdated"), ("yarn", "list"), ("yarn", "info"),
+               ("yarn", "why"), ("uv", "pip", "list"), ("uv", "pip", "show"), ("uv", "pip", "freeze"),
+               ("gh", "pr", "view"), ("gh", "pr", "list"), ("gh", "pr", "diff"), ("gh", "pr", "checks"),
+               ("gh", "pr", "status"), ("gh", "run", "list"), ("gh", "run", "view"), ("gh", "issue", "view"),
+               ("gh", "issue", "list"), ("gh", "repo", "view"))
+
+
+def _local(word: str) -> bool:
+    """A test path or name inside the checkout: nothing absolute, from home, or up a level."""
+    return not word.startswith(("/", "~", "-", "@")) and ".." not in word.split("/")
+
+
+def _pytest_args(args: list[str]) -> bool:
+    if any(a.startswith("@") for a in args):    # an argument file: options brindle doesn't see, wherever it is
+        return False
+    i = 0
+    while i < len(args):
+        if args[i] in PYTEST_VALUES and i + 1 < len(args):
+            i += 2
+        elif PYTEST_FLAGS.fullmatch(args[i]) or _local(args[i]):
+            i += 1
+        else:
+            return False
+    return True
+
+
+def _dev_operation(words: list[str]) -> str | None:
+    """A dev tool command's family: a test run or a query (DEV_QUERIES), else None."""
+    def started(prefixes):
+        return next((len(p) for p in prefixes if tuple(words[:len(p)]) == p), None)
+
+    if (n := started(PYTEST)) is not None:
+        return TESTS if _pytest_args(words[n:]) else None
+    if (n := started(SCRIPT_TESTS)) is not None:
+        rest = words[n:]
+        return TESTS if not rest or rest[0] == "--" and all(_local(w) for w in rest[1:]) else None
+    return QUERIES if started(DEV_QUERIES) is not None else None
+
+
+def _checkouts(req: Request) -> list[str]:
+    """Where a family's change may land: every checkout of ``req``'s session
+    (permissions.session_roots: its worktree and repo, each repo attached to
+    the session and the session's worktrees in them), never another session's."""
+    return permissions.session_roots(req)
+
+
+def scratchpads(req: Request) -> list[str]:
+    """The Claude Code scratchpads of ``req``'s sessions: folders of the
+    agent's own, where its file changes are as a checkout's, under ``<tmp>/claude-<uid>/<the folder
+    the session started in, every other character a dash>/<session>/``."""
+    if not hasattr(os, "getuid"):
+        return []
+    base = os.path.join(os.environ.get("CLAUDE_CODE_TMPDIR") or "/tmp", f"claude-{os.getuid()}")
+    try:
+        if os.stat(base).st_uid != os.getuid():
+            return []    # someone else's folder, made to look like this person's
+    except OSError:
+        return []
+    found = []
+    for start in dict.fromkeys(r for r in (req.worktree, req.cwd) if r):
+        project = os.path.join(base, re.sub(r"[^A-Za-z0-9]", "-", start))
+        found += sorted(glob.glob(os.path.join(glob.escape(project), "*", "scratchpad")))
+    return [p for p in found if os.path.isdir(p) and not os.path.islink(p)]
+
+
+def _runs_in(cwd: str, roots: list[str]) -> bool:
+    real = os.path.realpath(cwd)
+    return any(real == os.path.realpath(r) or permissions._inside(real, r) for r in roots)
+
+
+def _holds_root(path: str, roots: list[str]) -> bool:
+    """``path`` is one of ``roots`` or a folder holding one, as written or resolved."""
+    return any(f(r) == f(path) or f(r).startswith(f(path).rstrip(os.sep) + os.sep)
+               for f in (os.path.normpath, os.path.realpath) for r in roots)
+
+
+def _changeable(path: str, roots: list[str]) -> bool:
+    """Whether a change to ``path`` stays in a checkout, as written and as
+    resolved: inside one of ``roots``, never a root itself or a folder
+    holding one, nor in the .git/.brindle/.agents of the root it is in."""
+    if _holds_root(path, roots):
+        return False
+    protected = {d.casefold() for d in permissions.AGY_PROTECTED_DIRS}
+    for f in (os.path.normpath, os.path.realpath):
+        p, rs = f(path), [f(r) for r in roots]
+        inside = [r for r in rs if p.startswith(r + os.sep)]
+        if not inside:
+            return False
+        if protected & {part.casefold() for part in os.path.relpath(p, max(inside, key=len)).split(os.sep)}:
+            return False
+    return True
+
+
+def _git_local(words: list[str], cwd: str, roots: list[str]) -> bool:
+    """A git command in GIT_LOCAL with none of its banned options (GIT_LOCAL),
+    no merge strategy but git's own, no global option (-C, -c), and no restore
+    or checkout of a whole checkout."""
+    if len(words) < 2 or os.path.basename(words[0]) != "git" or words[1] not in GIT_LOCAL:
+        return False
+    sub, args = words[1], words[2:]
+    longs, shorts, values = GIT_LOCAL[sub]
+    strategies = sub in ("merge", "rebase")
+    i = 0
+    while i < len(args):
+        arg, i = args[i], i + 1
+        if arg == "--":
+            break
+        if arg.startswith("--"):
+            name, eq, value = arg.partition("=")
+            if any(b.startswith(name) for b in longs):
+                return False
+            if strategies and "--strategy".startswith(name):
+                if not eq:
+                    value, i = (args[i] if i < len(args) else ""), i + 1
+                if value not in STRATEGIES:
+                    return False
+        elif arg.startswith("-"):
+            for j, c in enumerate(arg[1:], 2):    # j: where c's value starts
+                if c in shorts:
+                    return False
+                if c in GIT_ATTACHED_VALUES:
+                    break
+                if c in values:
+                    value = arg[j:] or (args[i] if i < len(args) else "")
+                    if strategies and c == "s" and value not in STRATEGIES:
+                        return False
+                    i += j == len(arg)    # its value is the next word
+                    break
+    if sub in ("restore", "checkout"):
+        names = [a for a in args if not a.startswith("-")]
+        if any(n.startswith(":") or any(c in n for c in "*?[") for n in names):
+            return False    # pathspec magic (:/ is the whole checkout), a pattern
+        if any(_holds_root(os.path.join(cwd, n), roots) for n in names):
+            return False    # a checkout's root, or a folder holding one
+    return True
+
+
+def _installs(words: list[str], cwd: str, roots: list[str]) -> bool:
+    """A package install into the project (INSTALLS, or the project's own
+    pip) with only the options in INSTALL_FLAGS and INSTALL_VALUES, and
+    every package, name or file it is given one in the project."""
+    n = next((len(p) for p in INSTALLS if tuple(words[:len(p)]) == p), None)
+    # A venv's python links to the system's: where it is written is what says whose environment it is.
+    program = os.path.normpath(os.path.join(cwd, words[0]))
+    if n is None and "/" in words[0] and any(program.startswith(os.path.normpath(r) + os.sep) for r in roots):
+        name = os.path.basename(program)
+        if name in ("pip", "pip3") and words[1:2] == ["install"]:
+            n = 2
+        elif name in ("python", "python3") and words[1:4] == ["-m", "pip", "install"]:
+            n = 4
+    if n is None:
+        return False
+
+    def in_project(word: str) -> bool:    # a registry package, or a path in the project (no URL, file: or git+)
+        return bool(word) and not word.startswith(("/", "~", "-")) and ".." not in word.split("/") and ":" not in word
+
+    args, i = words[n:], 0
+    while i < len(args):
+        arg, i = args[i], i + 1
+        name, eq, value = arg.partition("=") if arg.startswith("--") else (arg, "", "")
+        if name in INSTALL_VALUES:
+            if not eq:
+                value, i = (args[i] if i < len(args) else ""), i + 1
+            if not in_project(value):
+                return False
+        elif arg.startswith("-") and arg not in INSTALL_FLAGS or not arg.startswith("-") and not in_project(arg):
+            return False
+    return True
+
+
+def _removes(words: list[str], cwd: str, roots: list[str]) -> bool:
+    """An rm or rmdir, with only the options brindle reads, of files in a checkout."""
+    flags = REMOVE_FLAGS.get(os.path.basename(words[0]))
+    if flags is None:
+        return False
+    names, options = [], True
+    for arg in words[1:]:
+        if options and arg == "--":
+            options = False
+        elif options and arg.startswith("-"):
+            if not flags.fullmatch(arg):
+                return False
+        else:
+            names.append(arg)
+    return bool(names) and all(_changeable(os.path.join(cwd, n), roots) for n in names)
+
+
+def _file_writes(program: str, args: list[str], cwd: str, roots: list[str]) -> bool:
+    """Whether every file a FILE_WRITERS program (not ln) or ``sed -i``
+    changes stays in a checkout: each name it is given, what cp or mv makes
+    in a destination folder (a recursive copy only into a new one; no option
+    that names the destination), and no sed backup put in another folder."""
+    from brindle import permission_groups
+
+    targets = permission_groups._write_targets(program, args)
+    if not targets or program == "ln":
+        return False
+    if program == "sed" and any(re.fullmatch(r"-[nErsuz]*i.*/.*|--in-place=.*/.*", a, re.S) for a in args):
+        return False
+    paths = [os.path.join(cwd, t) for t in targets]
+    if program in ("cp", "mv"):
+        # Only the last name is the destination: no long option (--target-directory=) and no -T.
+        if any(a.startswith("--") and a != "--" or re.fullmatch(r"-[A-Za-z]*T[A-Za-z]*", a) for a in args):
+            return False
+        if len(paths) < 2:
+            return False
+        dest, sources = paths[-1], targets[:-1]
+        into = len(paths) > 2 or os.path.isdir(dest) or targets[-1].endswith("/")
+        recursive = program == "cp" and any(re.fullmatch(r"-[A-Za-z]*[rRa][A-Za-z]*", a) for a in args)
+        made = [os.path.join(dest, os.path.basename(os.path.normpath(p))) for p in paths[:-1]] if into else []
+        # A recursive copy only makes a new folder: into one that's there (or src/'s contents into dest,
+        # as BSD cp copies them) it writes below names that may lead anywhere.
+        if recursive and (any(os.path.lexists(m) for m in made) or os.path.lexists(dest) and (
+                not into or any(s.endswith(("/", "/.")) for s in sources))):
+            return False
+        paths += made
+    return all(_changeable(p, roots) for p in paths)
+
+
+def _part_family(req: Request, part: permissions.ShellPart, rules: list[Rule],
+                 roots: list[str], places: list[str]) -> list[str | None]:
+    """A part's family, then one for the files its redirections write (WRITES when
+    every one is in a checkout). ``places``: where a file change is as one in a
+    checkout (``roots`` and the agent's scratchpads)."""
+    from brindle import permission_groups
+
+    # Where it runs unknown (after a cd that may not have happened), the files it reads are too.
+    if part.cwd is None or part.expanded or part.assigned or part.reads or part.redirect_glob:
+        return [None]
+    writes = [WRITES if all(os.path.isabs(p) and _changeable(p, places) for p in part.writes) else None
+              ] if part.writes else []
+    program = os.path.basename(part.words[0])
+    if part.unknown:
+        # A word only the run knows is text to what only prints or compares, and a
+        # query's argument (gh run view "$id"): anything else may take it as a file.
+        if part.words[0] in permissions.TEXT_ONLY:    # the bare name: ./echo may be any program
+            return [READ_FILTER, *writes]
+        quoted = all(not permissions._unread(w) or re.fullmatch(r'"\$\{?\w+\}?"', w) for w in part.words)
+        query = _dev_operation(part.words) == QUERIES and _runs_in(part.cwd, roots)
+        return [QUERIES if quoted and query else None, *writes]
+    (group, sub), *_ = permission_groups.part_classes(req, part, rules, [])
+    if f"{group}/{sub}" in ("git/readonly", READ_FILTER):
+        return [f"{group}/{sub}", *writes]
+    # What changes or runs the project does so where it runs: in a checkout, never elsewhere
+    # (a file change, in a scratchpad too).
+    checkout = _runs_in(part.cwd, roots)
+    if not checkout and not _runs_in(part.cwd, places):
+        return [None]
+    words = part.words
+    if checkout and _git_local(words, part.cwd, roots):
+        found = LOCAL_GIT
+    elif checkout and _installs(words, part.cwd, roots):
+        found = INSTALL
+    elif _removes(words, part.cwd, places):
+        found = WRITES
+    elif group == "files":
+        found = WRITES if _file_writes(program, words[1:], part.cwd, places) else None
+    elif checkout and f"{group}/{sub}" == "shell/dev-tools":
+        found = _dev_operation(words)
+    else:
+        found = None
+    return [found, *writes]
+
+
+def _part_families(req: Request, rules: list[Rule] | None = None) -> list[str | None] | None:
+    """Each part of ``req``'s shell command's family, and its redirections'
+    (None: in none), or None when brindle can't read what it runs. What a
+    part is doesn't depend on the ask rules that make it ask, only on the
+    denies (a read of a denied file is no read-only command). A file change
+    after a copy, move, link or extraction is in none too: what that made
+    (a symlink it copied) may lead anywhere."""
+    parts = permissions.shell_parts(req) if req.kind == "bash" else None
+    if not parts:
+        return None
+    rules = permissions.all_rules(req.repo_root or None) if rules is None else rules
+    denies = [r for r in rules if r.decision == "deny"]
+    roots = _checkouts(req)
+    places = [*roots, *scratchpads(req)]
+    found, copied = [], False
+    for part in parts:
+        each = _part_family(req, part, denies, roots, places)
+        found += [*each, None] if copied and WRITES in each else each
+        copied |= os.path.basename(part.words[0]) in COPIERS
+    return found
+
+
+def families(req: Request, rules: list[Rule] | None = None) -> list[str] | None:
+    """The families ``req``'s shell command falls in, or None unless every
+    part falls in one. A read-only shell part beside another family's (the
+    ``| tail -5`` after a test run) only reads what that one prints: the
+    command is of the other family alone."""
+    found = _part_families(req, rules)
+    if found is None or None in found:
+        return None
+    return sorted(set(found) - {READ_FILTER}) or [READ_FILTER]
+
+
+def family_pattern(found: list[str]) -> str:
+    return FAMILY + PUSH_LIST.join(found)
+
+
+def pattern_families(pattern: str) -> set[str] | None:
+    return set(pattern.removeprefix(FAMILY).split(PUSH_LIST)) if pattern.startswith(FAMILY) else None
+
+
+def family_label(found: list[str]) -> str:
+    names = [FAMILY_LABELS.get(f, f) for f in found]
+    text = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+    return text[0].upper() + text[1:]
+
+
+def _family_matches(pattern: str, req: Request | None, rules: list[Rule] | None, loose: bool) -> bool:
+    """Whether family pattern ``pattern`` covers ``req``: a part in one of its
+    families and every other part in one too or read-only (families), or for
+    a deny (``loose``) any part in one."""
+    wanted = pattern_families(pattern) or set()
+    found = _part_families(req, rules) if req is not None else None
+    if not found:
+        return False
+    hit = any(f in wanted for f in found)
+    return hit if loose else hit and all(f in wanted or f == READ_FILTER for f in found)
+
+
+def scopes_for(kind: str, key: str, name: str = "", families: list[str] | None = None) -> list[dict]:
     """The scope ladder for a request of ``kind`` with ask key ``key``,
-    narrowest first; the general form is the one valued GENERAL."""
+    narrowest first; the general form is the one valued GENERAL: for a shell
+    command whose every part falls in a family (``families``), those families."""
     if kind == "push":
         return push_scopes(key.split(PUSH_LIST))
     if kind in permissions.PATH_KINDS:
@@ -141,9 +567,13 @@ def scopes_for(kind: str, key: str, name: str = "") -> list[dict]:
         return out
     if kind == "bash":
         out = [_scope(EXACT, key, f"This command only · {key}")]
-        if simple_argv(key) is not None:
-            family = " ".join(key.split()[:2])
-            out.append(_scope(GENERAL, f"{family} *", f"Commands starting with {family}"))
+        prefix = " ".join(key.split()[:2]) if simple_argv(key) is not None else None
+        if families:
+            if prefix:
+                out.append(_scope("command", f"{prefix} *", f"Commands starting with {prefix}"))
+            out.append(_scope(GENERAL, family_pattern(families), family_label(families)))
+        elif prefix:
+            out.append(_scope(GENERAL, f"{prefix} *", f"Commands starting with {prefix}"))
         else:
             out.append(_scope(GENERAL, key, f"This command only · {key}"))
         out.append(_scope("repository", "*", "Any command in the repository"))
@@ -191,7 +621,7 @@ def generalize(req: Request) -> Ask:
     if kind == "push":
         keys = list(dict.fromkeys(ask_keys(req)))
         return Ask(kind, _join(keys), push_scopes(keys))
-    return Ask(kind, ask_key(req), scopes_for(kind, ask_key(req), req.tool))
+    return Ask(kind, ask_key(req), scopes_for(kind, ask_key(req), req.tool, families(req) if kind == "bash" else None))
 
 
 # -- matching saved actions ----------------------------------------------------------------------
@@ -213,15 +643,20 @@ def _push_fits(pattern: str, key: str, loose: bool) -> bool:
     return True
 
 
-def scope_matches(kind: str, pattern: str, key: str, loose: bool = False) -> bool:
+def scope_matches(kind: str, pattern: str, key: str, loose: bool = False, req: Request | None = None,
+                  rules: list[Rule] | None = None) -> bool:
     """Whether a saved action's ``pattern`` covers ask key ``key``. A push
     pattern may list several pushes (push_scopes): the key fits any one.
     ``loose``: for a deny, a push whose branch only git knows counts as
-    covered whenever it may be the one the pattern names."""
+    covered whenever it may be the one the pattern names, and a family
+    pattern any command with a part in one of its families. A family pattern
+    reads the command itself: ``req``, the request ``key`` is of (none: no match)."""
     if pattern in ("*", "**"):
         return True
     if kind == "push":
         return any(_push_fits(p, key, loose) for p in pattern.split(PUSH_LIST))
+    if kind == "bash" and pattern.startswith(FAMILY):
+        return _family_matches(pattern, req, rules, loose)
     if kind == "bash":
         if simple_argv(key) is None:
             return pattern == key   # a compound or quoted command: only the exact grant
@@ -265,7 +700,7 @@ def covers(action: SavedAction, req: Request, rules: list[Rule] | None = None) -
     if action.repo is not None and req.repo_root and action.repo != req.repo_root:
         return False
     deny = action.decision == "deny"
-    hits = [scope_matches(action.kind, action.pattern, key, loose=deny) for key in ask_keys(req)]
+    hits = [scope_matches(action.kind, action.pattern, key, deny, req, rules) for key in ask_keys(req)]
     if deny:
         return any(hits)
     if not all(hits) or action.binding and not _binding_holds(action.binding, req):
@@ -356,7 +791,7 @@ def limits_allow(action_level: str | None, action_pattern: str, action_life: str
 # nothing here limits the person's own.
 
 # A saved action's level or scope value -> the org scope it needs.
-ORG_SCOPES = {"branch": "branch", "destination": "branch", "exact": "branch", "general": "branch",
+ORG_SCOPES = {"branch": "branch", "destination": "branch", "exact": "branch", "general": "branch", "command": "branch",
               "remote": "remote", "repository": "repo", "server": "repo", "all": "all"}
 
 
@@ -371,6 +806,12 @@ class OrgLimits:
     deny: tuple[Rule, ...] = ()
     why: str = ""                 # why no saved allow applies
     owner: str = "local"          # "org:<id>": whose approvals these are (_owner_now)
+    controls: tuple = ()          # team_policy.OrgControl: Block or Ask over groupings and patterns
+    org_name: str = ""
+
+    @property
+    def name(self) -> str:
+        return self.org_name or "your organization"
 
 
 def org_rule(spec: str) -> Rule:
@@ -401,13 +842,16 @@ def org_limits(repo_root: str | None) -> OrgLimits | None:
     g = p.permission_grants
     deny = tuple(org_rule(s) for s in g.deny) if g else ()
     owner = f"org:{p.org_id}"
+    controls, org_name = (tuple(g.controls), g.org_name) if g else ((), "")
     blocked = status.block_reason(p)
     if blocked:
-        return OrgLimits(False, deny=deny, why=f"org {p.org_id}: {blocked}", owner=owner)
+        return OrgLimits(False, deny=deny, why=f"org {p.org_id}: {blocked}", owner=owner, controls=controls,
+                         org_name=org_name)
     if g is None:
         return OrgLimits(False, why=f"org {p.org_id}'s policy sets no permission_grants", owner=owner)
     return OrgLimits(g.allow, tuple(g.kinds), g.max_minutes, tuple(g.lifetimes), tuple(g.scopes),
-                     g.allow_persistent, deny, "" if g.allow else f"org {p.org_id} allows no saved approvals", owner)
+                     g.allow_persistent, deny, "" if g.allow else f"org {p.org_id} allows no saved approvals", owner,
+                     controls, org_name)
 
 
 def org_denies(repo_root: str | None) -> list[Rule]:
@@ -432,6 +876,277 @@ def org_refuses(lim: OrgLimits | None, kind: str, life: str, minutes: float | No
     if ORG_SCOPES.get(level or scope, "all") not in lim.scopes:
         return "wider than the org allows"
     return None
+
+
+# -- the org's controls --------------------------------------------------------------------------
+#
+# A Team org's ``permission_grants.controls`` Block (deny) or Ask over a
+# whole grouping (ORG_GROUPINGS) or one pattern, ahead of everything a member
+# has: their preset, rules, capability groups and saved approvals
+# (permissions.decide checks org_decision first). A Block is final; an Ask
+# may be settled only by a saved approval the org's limits allow.
+
+ORG_GROUP = "org-group"          # an org grouping's rule's match_type (its match: the ORG_GROUPINGS id)
+ORG_BLOCKED = "Blocked by "      # how an org Block's reason begins (the Inbox groups them by its first line)
+
+
+# What only starts another program (env FOO=1 npm ..., sudo --user root npm ...): an org control looks past it.
+WRAPPERS = frozenset({"env", "sudo", "doas", "command", "nohup", "time", "nice", "exec", "ionice", "stdbuf"})
+
+
+def _plain(word: str) -> str:
+    """A program's plain name: .venv/bin/pip3.12 is pip, python3 is python."""
+    name = os.path.basename(word)
+    return re.sub(r"\d+(\.\d+)*$", "", name) or name
+
+
+def _after_options(words: list[str], i: int) -> list[int]:
+    """Where what follows the options from ``words[i]`` may begin: the first
+    word that isn't one, and, while the option before it may take that word
+    as its value (it has no =value), each such reading further on. Which of
+    a tool's options take a value is the tool's to say; every reading is kept."""
+    out = []
+    while True:
+        start = i
+        while i < len(words) and words[i].startswith("-") and words[i] not in ("-", "--"):
+            i += 1
+        if i < len(words) and words[i] == "--":
+            return [*out, i + 1] if i + 1 < len(words) else out
+        if i >= len(words):
+            return out
+        out.append(i)
+        before = words[i - 1] if i > start else ""
+        if not (before.startswith("-") and "=" not in before):
+            return out
+        i += 1
+
+
+def _python_module(words: list[str]) -> int | None:
+    """Where ``python [options] -m <module>`` names its module: the index of the -m, or None."""
+    for j, word in enumerate(words[1:], 1):
+        if word == "-c" or not word.startswith("-") and not words[j - 1].startswith("-"):
+            return None    # code, or a script: whatever follows is its own
+        if word.startswith("-m"):
+            return j
+    return None
+
+
+def _operations(words: list[str]) -> list[list[str]]:
+    """What a simple command may do, for an org control's sake, as every
+    reading of it: [program, *what follows], past assignments and wrappers
+    (env, sudo --user root ...), ``python [options] -m <module>`` as the
+    module, a versioned or pathed program by its plain name (_plain); first
+    with its options as written (vercel --prod), then with each way its
+    options before the subcommand may end (npm --location global install:
+    npm install). A superset of what the families read: a Block must see
+    what an allow would not, so no reading is ever dropped: each command
+    a wrapper may start is read once, however many wrappers or options
+    lead to it."""
+    out: dict[tuple, None] = {}
+    todo, seen = [tuple(words)], set()
+    while todo:
+        words = todo.pop()
+        while words and permissions._ASSIGNMENT.match(words[0]):
+            words = words[1:]
+        if not words or words in seen:
+            continue
+        seen.add(words)
+        program = _plain(words[0])
+        if program in WRAPPERS:
+            todo += [words[j:] for j in _after_options(list(words), 1)]
+        elif program == "python" and (k := _python_module(list(words))) is not None:
+            module = words[k][2:] or (words[k + 1] if k + 1 < len(words) else "")
+            if module:
+                todo.append((module, *(words[k + 1:] if words[k][2:] else words[k + 2:])))
+        else:
+            out[(program, *words[1:])] = None
+            out.update(((program, *words[j:]), None) for j in _after_options(list(words), 1))
+    return [list(r) for r in out]
+
+
+def _starts(op: list[str], prefix: tuple) -> bool:
+    return tuple(op[:len(prefix)]) == tuple(prefix)
+
+
+def _loose_families(op: list[str]) -> set[str]:
+    """The families a reading of a command (_operations) may be of, by its program and
+    subcommand alone: whatever its options or where it runs."""
+    if not op:
+        return set()
+    found = set()
+    if any(_starts(op, p) for p in INSTALLS) or _starts(op, ("pip", "install")):
+        found.add(INSTALL)
+    if op[0] == "git" and len(op) > 1:
+        found |= {LOCAL_GIT} if op[1] in GIT_LOCAL else set()
+        found |= {"git/readonly"} if op[1] in permissions.READONLY_GIT else set()
+    if any(_starts(op, p) for p in (*PYTEST, *SCRIPT_TESTS, ("pytest",))):
+        found.add(TESTS)
+    if any(_starts(op, p) for p in DEV_QUERIES):
+        found.add(QUERIES)
+    if op[0] in permissions.READONLY_PROGRAMS:
+        found.add(READ_FILTER)
+    if op[0] in {*COPIERS, *REMOVE_FLAGS, "mkdir", "touch", "tee", "truncate"} or op[0] == "sed" and any(
+            w.startswith(("-i", "--in-place")) for w in op[1:]):
+        found.add(WRITES)
+    return found
+
+
+def _installer(op: list[str]) -> bool:
+    """Any package manager's install or add (permission_groups.INSTALLERS), anywhere."""
+    from brindle import permission_groups
+
+    return bool(op) and any(op[1:1 + len(sub.split())] == sub.split()
+                            for sub in permission_groups.INSTALLERS.get(op[0], ()))
+
+
+def _deploys(op: list[str]) -> bool:
+    program = op[0] if op else ""
+    if program == "gh":
+        return tuple(op[1:3]) in DEPLOY_GH
+    return bool(DEPLOY_VERBS.get(program, set()) & set(op[1:]))
+
+
+def _command_words(req: Request) -> list[list[str]]:
+    """Each simple command ``req``'s shell command may run, read as
+    permission_groups.classify does: best effort where it can't be read, so
+    no part hides from a Block."""
+    command = (req.command or "").strip()
+    if req.kind != "bash" or not command:
+        return []
+    read = permissions.shell_parts(req)
+    if read is not None:
+        return [p.words for p in read]
+    return (permissions.compound_parts(command) or permissions._restriction_parts(command)
+            or permissions._restriction_parts(command, word_pattern=permissions.RESTRICTION_WORD)
+            or permissions._segments(command))
+
+
+def _readings(req: Request) -> list[list[str]]:
+    """Every reading (_operations) of every simple command ``req`` may run."""
+    return [op for words in _command_words(req) for op in _operations(words)]
+
+
+def _in_grouping(group: str, req: Request, rules: list[Rule], checks: list[str] | None) -> bool:
+    """Whether ``req`` is in an org grouping: as the families read it, or by
+    any reading of its commands (_operations), so an assignment, a wrapper or
+    a tool's options never take it out."""
+    from brindle import permission_groups
+
+    if group in FAMILY_LABELS:
+        if req.kind in ("write", "edit"):
+            return group == WRITES and permissions._in_worktree(req)
+        return req.kind == "bash" and (group in (_part_families(req, rules) or [])
+                                       or any(group in _loose_families(op) for op in _readings(req)))
+    if group == UNCHECKED:
+        return (req.kind == "bash" and bool(req.command) and simple_argv(req.command) is None
+                and permissions.shell_parts(req) is None)
+    if group == NETWORK:
+        return (("network", "fetch") in permission_groups.classify(req, rules, checks)
+                or any(op[0] in permission_groups.FETCHERS for op in _readings(req)))
+    if group == PACKAGES:
+        return (("shell", "install") in permission_groups.classify(req, rules, checks)
+                or any(_installer(op) for op in _readings(req)))
+    if group == DEPLOY:
+        return any(_deploys(op) for op in _readings(req))
+    return False
+
+
+def control_rule(c, kind: str) -> Rule:
+    """An org control as the rule a Decision names: its pattern's, or for a grouping one of ORG_GROUP."""
+    if c.rule is not None:
+        rkind, match_type, match = c.rule.split(None, 2)
+        return Rule(rkind, match, match_type, c.decision, "org", label=c.reason)
+    return Rule(kind, c.group, ORG_GROUP, c.decision, "org", label=c.reason)
+
+
+def control_label(c) -> str:
+    """What an org control covers, in plain words."""
+    if c.group is not None:
+        return ORG_GROUPINGS[c.group]
+    kind, match_type, match = c.rule.split(None, 2)
+    if match_type in permissions.BUILTIN_MATCHERS:
+        return match
+    how = {"exact": "that are exactly", "prefix": "starting with", "glob": "matching"}[match_type]
+    return f"{KIND_WORDS[kind]} {how} {match.strip()}"
+
+
+KIND_WORDS = {"bash": "commands", "read": "file reads", "write": "file writes", "edit": "file edits",
+              "fetch": "URL fetches", "mcp": "MCP tools", "other": "tools"}
+
+
+def _control_matches(c, req: Request, rules: list[Rule], checks: list[str] | None) -> Decision | None:
+    """The control's Decision when it covers ``req``: its own decision, or for
+    a pattern a part of a command brindle can't read may hide, an ask."""
+    if c.group is not None:
+        return Decision(c.decision, "", control_rule(c, req.kind)) if _in_grouping(c.group, req, rules, checks) else None
+    rule = control_rule(c, req.kind)
+    # Each part as written and as the operation it is (FOO=1 npm --prefix web install x: npm install x).
+    spelled = [" ".join(w) for words in _command_words(req) for w in (words, *_operations(words)) if w]
+    if permissions.rule_matches(rule, req, checks) or any(
+            permissions.rule_matches(rule, replace(req, command=command), checks) for command in spelled):
+        return Decision(c.decision, "", rule)
+    found = permissions._restriction_in_parts(req, checks=checks, rules=[rule])
+    if found is not None and found.rule == rule:
+        return Decision(c.decision, "", rule)
+    if found is not None:    # it may be in there, where brindle can't read: never let it run unasked
+        return Decision("ask", "", replace(rule, decision="ask", id=""))
+    return None
+
+
+def org_reason(lim: OrgLimits, c, decision: str) -> str:
+    what = control_label(c)
+    if decision == "deny":
+        why = c.reason or f"the organization blocks {what}"
+        return (f"{ORG_BLOCKED}{lim.name} policy: {why}\n"
+                f"Your organization's rule for {what} blocks this, and no approval lifts it. "
+                "Running it again gets the same answer: do the task another way, or tell the person an "
+                "organization admin has to change that rule.")
+    why = c.reason or f"the organization asks for approval of {what}"
+    return f"Your organization asks for approval ({lim.name} policy, {what}): {why}"
+
+
+def org_decision(req: Request, rules: list[Rule], checks: list[str] | None = None) -> Decision | None:
+    """What the org's controls say about ``req``: the first Block that covers
+    it, else the first Ask, as a Decision whose rule is the org's (source
+    "org"), or None (no Team org, no controls, or none covers it)."""
+    lim = org_limits(req.repo_root or None)
+    if lim is None or not lim.controls:
+        return None
+    asked = None
+    for c in lim.controls:
+        found = _control_matches(c, req, rules, checks)
+        if found is None:
+            continue
+        rule = found.rule
+        if found.decision == "deny":
+            return Decision("deny", org_reason(lim, c, "deny"), rule)
+        if asked is None:
+            asked = Decision("ask", org_reason(lim, c, "ask"),
+                             replace(rule, decision="ask", id="", limits=org_ask_limits(lim), person_only=True))
+    return asked
+
+
+def org_ask_limits(lim: OrgLimits) -> dict:
+    """How far a saved approval of an org Ask may reach: never until revoked
+    (a member's lasting grant never answers it), for the org's longest timed
+    approval, else the session, else once at a time (org_refuses checks the rest)."""
+    if lim.allow and "time" in lim.lifetimes:
+        return {"life": "time", "minutes": lim.max_minutes}
+    if lim.allow and "session" in lim.lifetimes:
+        return {"life": "session"}
+    return {"life": "once"}
+
+
+def org_control_view(lim: OrgLimits | None, rule: Rule | None) -> dict | None:
+    """``{"name", "reason", "what"}`` for a Decision's org rule (the Inbox's
+    label), or None when it isn't one of the org's controls."""
+    if lim is None or rule is None or rule.source != "org":
+        return None
+    for c in lim.controls:
+        if (c.group is not None and rule.match_type == ORG_GROUP and c.group == rule.match
+                or c.rule is not None and c.rule.split(None, 2) == [rule.kind, rule.match_type, rule.match]):
+            return {"name": lim.name, "reason": c.reason, "what": control_label(c)}
+    return {"name": lim.name, "reason": "", "what": rule.describe()}
 
 
 def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session: str | None = None,
@@ -575,7 +1290,7 @@ def eligible(ask: PendingAsk, scope: dict, mode: str, minutes: float | None) -> 
         return "blocked by a deny rule"
     if mode in ("deny", "always-deny"):
         return None
-    if not all(scope_matches(ask.ask.kind, scope["pattern"], key) for key in ask_keys(ask.request)):
+    if not all(scope_matches(ask.ask.kind, scope["pattern"], key, req=ask.request) for key in ask_keys(ask.request)):
         if not _is_exact(ask, scope):
             return "pushes outside this scope"     # a command pushing to more than the scope covers
         if mode != "once":
@@ -604,7 +1319,7 @@ def candidates(asks: list[PendingAsk], g: Group, scope: dict, loose: bool = Fals
     scope is). ``loose``: for a deny, as scope_matches reads it."""
     return [a for a in asks if a.repo_root == g.repo_root and a.ask.kind == g.kind
             and (_is_exact(a, scope)
-                 or all(scope_matches(g.kind, scope["pattern"], key, loose) for key in ask_keys(a.request)))]
+                 or all(scope_matches(g.kind, scope["pattern"], key, loose, a.request) for key in ask_keys(a.request)))]
 
 
 def _result(a: PendingAsk, why: str | None = None) -> dict:
@@ -783,6 +1498,9 @@ def unblock_denied(db, repo_root: str | None = None, forever: bool = False) -> d
         req = a.request
         key = ask_key(req) if req.kind != "bash" else " ".join((req.command or "").split())
         kind = req.kind
+        if a.rule is not None and a.rule.source == "org":
+            locked.append(a)         # the org's Block: nothing a member does lifts it
+            continue
         for r in deny_rules_for(a, permissions.all_rules(a.repo_root)):
             if r.id not in store_ids:
                 locked.append(a)     # the repo's own deny, or a profile's: not the person's to narrow
@@ -794,6 +1512,8 @@ def unblock_denied(db, repo_root: str | None = None, forever: bool = False) -> d
         a.policy = _policy(req, a.repo_root)
         if a.blocked:    # unmatched actions are denied: a rule for its general form, that asks
             general = a.ask.general
+            if general["pattern"].startswith(FAMILY):    # no rule matches a family: its command's own prefix
+                general = a.ask.scope("command") or a.ask.scopes[0]
             match_type = "push" if a.ask.kind == "push" else ("exact" if general["pattern"] == key else "glob")
             permissions.add_rule(kind, general["pattern"], "ask", match_type)
             added += 1

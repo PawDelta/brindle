@@ -51,9 +51,10 @@ import {
   type RuleShape,
   type Unit,
 } from "../../api/permissions";
-import type { AskScopeDTO, PermissionPolicyDTO, PermissionRuleDTO, SavedActionDTO } from "../../api/schema";
+import type { AskScopeDTO, OrgControlViewDTO, PermissionPolicyDTO, PermissionRuleDTO, SavedActionDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
 import { Sheet } from "../../components/Sheet";
+import { RuleTarget, type Target } from "./RuleTarget";
 import { alert, button, card, field, h2, mono, pill, quiet } from "../../components/ui";
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -69,7 +70,9 @@ const GROUP_LIST: { id: string; name: string; subs: [string, string, string][] }
   { id: "network", name: "Network", subs: [["fetch", "Fetch URLs", "Web pages and APIs"], ["search", "Web search", "Search the web"]] },
   { id: "mcp", name: "MCP", subs: [["tool", "MCP tool calls", "Tools from connected MCP servers"], ["other", "Other MCP requests", "Resources and prompts"]] },
 ];
-const BASELINE_LEVELS = ["allow", "ask", "deny"] as const;
+/* The `rule` the Inbox passes to open the Dangerous row instead of a rule's editor. */
+export const UNCHECKED_ROW = "unchecked-commands";
+const BASELINE_LEVELS =["allow", "ask", "deny"] as const;
 const LEVEL_NAME: Record<string, string> = { allow: "Allow", ask: "Ask", deny: "Deny", inherit: "Inherit" };
 const BY_DEFAULT: Record<string, string> = { allow: "Allowed by default", ask: "Asks by default", deny: "Denied by default" };
 /* Which group a rule belongs to, from its kind (a push is a bash rule with the push matcher). */
@@ -87,9 +90,6 @@ interface Activity {
   at: number;
 }
 
-/* The rule editor's actions: a request kind, or a git push (a bash rule with the push matcher). */
-const ACTIONS = ["read", "write", "edit", "bash", "push", "fetch", "mcp", "other"];
-const MATCH_LABEL: Record<string, string> = { exact: "Is exactly", prefix: "Starts with", glob: "Matches pattern" };
 const TONE: Record<string, string> = { deny: "bg-sap-soft text-sap", ask: "bg-branch-soft text-branch", allow: "bg-pass-soft text-pass" };
 /* The same tones on a rule's pill: in the text only (pills are hairlines, never a fill). */
 const INK: Record<string, string> = { deny: "text-sap", ask: "text-branch", allow: "text-pass" };
@@ -162,6 +162,12 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
   useEffect(() => {
     const want = openId ? `${openId}:${ask ?? 0}` : null;
     if (!want || !policy || opened.current === want) return;
+    if (openId === UNCHECKED_ROW) {
+      opened.current = want;
+      setView("groups");
+      setReveal(true);
+      return;
+    }
     const found = policy.rules.find((r) => r.id === openId);
     if (!found) return;
     opened.current = want;
@@ -169,6 +175,14 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
     setEditing(found);
     document.getElementById("permissions")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   }, [openId, ask, policy]);
+
+  // The Inbox's "Stop asking for these…": the Dangerous row, once the groups view holding it is shown.
+  const [reveal, setReveal] = useState(false);
+  useEffect(() => {
+    if (!reveal || !policy || view !== "groups") return;
+    document.getElementById(UNCHECKED_ROW)?.scrollIntoView?.({ behavior: "smooth", block: "center" });
+    setReveal(false);
+  }, [reveal, policy, view]);
 
   const record = (kind: string, what: string, detail: string) => setLog((l) => [{ kind, what, detail, at: Date.now() / 1000 }, ...l]);
 
@@ -319,6 +333,43 @@ function Segmented({ label, value, levels, disabled, onPick }: { label: string; 
 
 /* The default view (design/permissions-settings.html): the preset, how often agents are asked, and one row per
    capability group with its baseline, expanding to the subcategories that may override it. */
+const Lock = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden>
+    <rect x="5" y="11" width="14" height="10" rx="2" />
+    <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+  </svg>
+);
+const ORG_SETTING: Record<string, string> = { deny: "Block", ask: "Ask" };
+
+/* What the person's organization sets above their own policy: locked rows (permission_grants.org_decision). */
+function OrgControls({ controls }: { controls: OrgControlViewDTO[] }) {
+  return (
+    <div className="flex flex-col gap-1">
+      <div>
+        <h3 className="text-sm font-semibold">Set by your organization</h3>
+        <p className="text-xs text-ink-3">These come before your preset, rules and saved approvals. Only an organization admin can change them.</p>
+      </div>
+      <ul className={`${card} divide-y divide-line`} data-testid="org-controls">
+        {controls.map((c, i) => (
+          <li key={i} className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5 px-s2 py-s1" data-locked data-org={c.name} data-what={c.what} data-setting={c.decision} data-reason={c.reason}>
+            <span className="self-center text-ink-3">
+              <Lock />
+            </span>
+            <span className="min-w-0 flex-1 text-sm">
+              <span className="font-medium first-letter:uppercase">{c.what}</span>
+              <span className="block text-xs text-ink-3">
+                Set by {c.name}
+                {c.reason ? ` · ${c.reason}` : ""}
+              </span>
+            </span>
+            <span className={`${pill} ${INK[c.decision ?? "ask"]}`}>{ORG_SETTING[c.decision ?? "ask"]}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
   client: DaemonClient;
   policy: PermissionPolicyDTO;
@@ -366,7 +417,7 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
         </div>
         <div className="grid gap-s2 sm:grid-cols-2 xl:grid-cols-4" data-testid="presets">
           {policy.presets.map((p) => (
-            <div key={p.name} className={`flex flex-col gap-1 rounded-md border p-s2 ${p.current ? "border-branch bg-branch-soft" : "border-line bg-canvas-2"}`} data-preset={p.name}>
+            <div key={p.name} className={`${card} flex flex-col gap-1 p-s2 ${p.current ? "border-branch bg-branch-soft" : ""}`} data-preset={p.name}>
               <h4 className="flex items-center gap-1 text-sm font-medium">
                 {presetLabel(p.name)}
                 {p.name === "autonomous" && <span className="rounded-sm bg-branch-soft px-1 text-[10px] text-branch">RECOMMENDED</span>}
@@ -388,6 +439,8 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
                 : `${report.asks} ask${report.asks === 1 ? "" : "s"} in the last ${report.days} days (${Math.round(report.ask_rate * 100)}% of ${report.decisions} requests)${report.causes[0] ? `; most from ${report.causes[0].reason}` : ""}.`}
         </p>
       </div>
+
+      {(policy.org_controls ?? []).length > 0 && <OrgControls controls={policy.org_controls ?? []} />}
 
       <div>
         <h3 className="text-sm font-semibold">Capabilities</h3>
@@ -468,6 +521,68 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
             Open advanced view
           </button>
         </span>
+      </div>
+      <Dangerous client={client} policy={policy} busy={busy} run={run} record={record} />
+    </div>
+  );
+}
+
+/* Dangerous: the one switch that lets commands brindle can't read run without asking. Off by default; turning
+   it on is confirmed in the page; an org that forces it off locks it. */
+function Dangerous({ client, policy, busy, run, record }: {
+  client: DaemonClient;
+  policy: PermissionPolicyDTO;
+  busy: boolean;
+  run(change: () => Promise<unknown>, done: Feedback): Promise<void>;
+  record(kind: string, what: string, detail: string): void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  // The shell/unchecked entry of the groups table: "ask" (default), "allow", or "deny" (org policy's to set).
+  const level = policy.groups?.find((g) => g.name === "shell")?.subcategories?.unchecked ?? "ask";
+  const on = level === "allow";
+  const lockedBy = level === "deny" ? "your organization" : null;
+  const set = (value: "ask" | "allow") => {
+    setConfirming(false);
+    void run(async () => {
+      await client.setPermissionGroups({ shell: { subcategories: { unchecked: value } } });
+      record("Policy", "Unchecked commands changed", value === "allow" ? "Run without asking" : "Ask every time");
+    }, { text: value === "allow" ? "Unchecked commands now run without asking." : "Unchecked commands ask every time." });
+  };
+  return (
+    <div className="flex flex-col gap-s1 border-t border-line pt-s2" data-testid="dangerous">
+      <h3 className="text-sm font-semibold text-sap">Dangerous</h3>
+      <div id={UNCHECKED_ROW} className={`${card} flex flex-col gap-s1 p-s2`}>
+        <div className="flex flex-wrap items-center gap-s2">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm font-medium">Run unchecked commands without asking</div>
+            <p className="text-xs text-ink-3">Commands brindle can't read before they run, such as ones built from downloaded text or variables set elsewhere. brindle still stops force pushes, protected-branch pushes, sudo and deletes outside your repos.</p>
+            {lockedBy && <p className="text-xs text-ink-3">Set by {lockedBy}</p>}
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={on}
+            aria-label="Run unchecked commands without asking"
+            disabled={busy || !!lockedBy}
+            className={`${button} ${on ? "text-sap" : ""}`}
+            onClick={() => (on ? set("ask") : setConfirming(true))}
+          >
+            {on ? "On" : "Off"}
+          </button>
+        </div>
+        {confirming && !on && (
+          <div role="alertdialog" aria-label="Confirm unchecked commands" className="flex flex-col gap-s1 rounded-md border border-sap p-s2 text-sm">
+            <p>Agents will run commands brindle can't read without asking you first. Turn this on only if you accept that.</p>
+            <div className="flex gap-s1">
+              <button type="button" className={button} disabled={busy} onClick={() => set("allow")}>
+                Run unchecked commands
+              </button>
+              <button type="button" className={quiet} onClick={() => setConfirming(false)}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -675,22 +790,19 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const named = !PLAIN_MATCHES.includes(matchType) && matchType !== "push";
   const draft: RuleShape & { label: string } = { id: rule?.id, kind: action === "push" ? "bash" : action, match: match.trim(), match_type: matchType, decision, label: name.trim() };
   const minutes = toMinutes(Number(amount), unit);
   const ruleMinutes = toMinutes(Number(ruleAmount), ruleUnit);
   const askLimits = { life, ...(life === "time" ? { minutes } : {}), ...(maxScope.trim() ? { max_scope: maxScope.trim() } : {}) };
 
-  const pickAction = (a: string) => {
-    setAction(a);
-    if (a === "push") {
-      setMatchType("push");
-      if (!maxScope) setMaxScope("destination");
-    } else if (matchType === "push" || named) {
-      setMatchType("exact");
-      setMatch("");
+  const pickTarget = (next: Target) => {
+    if (next.action !== action) {
+      if (next.action === "push" && !maxScope) setMaxScope("destination");
+      if (next.action !== "push" && LEVELS.includes(maxScope as never)) setMaxScope("");
     }
-    if (a !== "push" && LEVELS.includes(maxScope as never)) setMaxScope("");
+    setAction(next.action);
+    setMatchType(next.matchType);
+    setMatch(next.match);
   };
 
   const invalid = (): string | null => {
@@ -756,7 +868,6 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
 
   const strongest = [draft, ...(conflicts ?? []).map((c) => c.rule)].sort((a, b) => strength(b.decision) - strength(a.decision))[0];
   const summary = `${ruleAction(draft)} · ${draft.label || draft.match || "no target yet"} · ${decisionLabel(decision)}${decision === "ask" ? ` · ${limitsText(askLimits)}` : decision === "allow" && timed ? ` · for ${ruleAmount} ${ruleUnit}` : ""}`;
-  const placeholder = action === "push" ? "* → @default" : action === "bash" ? "npm test" : action === "fetch" ? "https://docs.example.com/*" : action === "mcp" ? "mcp__github__create_issue" : "docs/**";
 
   return (
     <Sheet
@@ -819,42 +930,7 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
       ) : (
         <>
           <Step title="1. Action" blurb="The kind of request this rule covers, and which ones.">
-            <label className={fieldLabel}>
-              Action
-              <select className={field} aria-label="Action" value={action} onChange={(e) => pickAction(e.target.value)}>
-                {ACTIONS.map((a) => (
-                  <option key={a} value={a}>
-                    {kindLabel(a)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {action !== "push" && (
-              <label className={fieldLabel}>
-                Match
-                <select className={field} aria-label="Match" value={matchType} onChange={(e) => setMatchType(e.target.value)}>
-                  {named && <option value={matchType}>Built-in: {matchType}</option>}
-                  {PLAIN_MATCHES.map((m) => (
-                    <option key={m} value={m}>
-                      {MATCH_LABEL[m]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-            <label className={`${fieldLabel} sm:col-span-2`}>
-              Target
-              <input className={`${field} font-mono`} aria-label="Target" value={match} readOnly={named} placeholder={placeholder} onChange={(e) => setMatch(e.target.value)} />
-              <span className="font-normal">
-                {named
-                  ? "A built-in matcher: brindle decides what it covers. Pick another match to write your own target."
-                  : action === "push"
-                    ? "source → destination; * for any branch, @default for the repo's default branch."
-                    : matchType === "glob"
-                      ? "* matches anything; docs/** matches files in docs and its folders."
-                      : ""}
-              </span>
-            </label>
+            <RuleTarget value={{ action, matchType, match }} onChange={pickTarget} labelClass={fieldLabel} />
             <label className={`${fieldLabel} sm:col-span-2`}>
               Name (optional)
               <input className={field} aria-label="Rule name" value={name} placeholder="Shown in the rules list" onChange={(e) => setName(e.target.value)} />

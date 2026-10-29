@@ -10,6 +10,7 @@ import type {
   AllowAllPlanDTO,
   AskDecisionDTO,
   AskGroupDTO,
+  CloudOptionsDTO,
   DecisionDTO,
   GoalDTO,
   InboxItemDTO,
@@ -23,6 +24,7 @@ import type {
   PermissionRuleDTO,
   PreflightItemDTO,
   ProfileDTO,
+  ProviderConnectionDTO,
   RoutingDTO,
   SavedActionDTO,
   SessionDTO,
@@ -201,20 +203,20 @@ export interface FileEdited {
    no worker running or task queued, nothing waiting on the person, the
    branch committed and ahead of its base), and `reasons`, what is missing
    in plain words (none when ready). `session.pr_ready` arrives on the bus
-   when it flips. `pr`: once brindle has opened the PR itself (the engine's
-   auto-PR setting, branch desktop/auto-pr; stubbed in the fake daemon until
-   it merges), where it is. */
+   when it flips. `pr`: once the person has opened the PR, where it is and
+   `unpushed`, how many session commits aren't on it yet (brindle never
+   pushes them itself: pushSessionPr does). */
 export interface SessionReadiness {
   root_id: string;
   ready: boolean;
   reasons: string[];
-  pr?: { url: string } | null;
+  pr?: { url: string; unpushed: number } | null;
 }
 
 /* GET /sessions/{root}/diff (session_review.diff): the session branch
    against its PR base, each file with its hunks. The engine attributes each
    file and hunk to whoever wrote it (`authors`, `workers`); the app never
-   shows that. 409 "not_ready" (with `reasons`) unless the session is ready. */
+   shows that. Available independently of PR readiness. */
 export interface SessionHunk {
   header: string;
   old_start: number;
@@ -244,6 +246,14 @@ export interface SessionDiff {
   head: string;
   files: SessionFileDiff[];
   workers?: unknown[];
+}
+
+/* GET /sessions/{root}/tree (routes_read.session_tree): the session
+   checkout's tracked files, paths only, and its branch. */
+export interface SessionTree {
+  root_id: string;
+  branch: string;
+  files: string[];
 }
 
 /* GET /sessions/{root}/pr/draft (session_review.draft): the PR's title and
@@ -421,6 +431,40 @@ export interface KeyInfo {
   name: string;
   set: boolean;
   last4: string;
+  provider?: string | null;
+  /* How the last check came out; null while no key is stored. */
+  status?: "verified" | "rejected" | "unchecked" | null;
+  checked_at?: number | null;
+  /* Where to get a key. */
+  key_page?: string | null;
+  /* Storing it makes a signed-in subscription's agents bill the key instead. */
+  bills?: boolean;
+  personal_keys_denied?: boolean;
+  /* Set in the daemon's environment but not stored (POST /keys/{name}/import). */
+  importable?: boolean;
+}
+
+/* Whether the provider can launch the way it connects (engine branch
+   feat/connection-readiness): when not, why, and the one action that fixes it. */
+export interface ConnectionReady {
+  ok: boolean;
+  reason: string | null;
+  action: "install" | "sign_in" | "sign_out" | "renew" | "set_key" | null;
+}
+
+/* GET /providers/{p}/connection with its readiness: `blocked_by` "codex_login"
+   when Codex's ChatGPT login wins over its API key, and the agents that
+   stopped on this provider's credentials. */
+export type ProviderConnection = ProviderConnectionDTO & {
+  ready?: ConnectionReady | null;
+  blocked_by?: "codex_login" | null;
+  stopped_agents?: { id: string; name: string; profile: string }[];
+};
+
+export interface KeyTested {
+  name: string;
+  status: "verified" | "rejected" | "unchecked";
+  checked_at: number | null;
 }
 
 export interface Config {
@@ -892,7 +936,7 @@ export class DaemonClient {
     return this.get<SessionReadiness>(`${this.sessionPath(root)}/pr/readiness`);
   }
 
-  /* The session branch against its PR base (throws DaemonError "not_ready" with `reasons` until it is). */
+  /* The session branch against its PR base, including work still in progress. */
   sessionDiff(root: string) {
     return this.get<SessionDiff>(`${this.sessionPath(root)}/diff`);
   }
@@ -900,6 +944,11 @@ export class DaemonClient {
   /* The PR's title and body as brindle drafts them. */
   prDraft(root: string) {
     return this.get<PrDraft>(`${this.sessionPath(root)}/pr/draft`);
+  }
+
+  /* Every tracked file of the session's checkout. */
+  sessionTree(root: string) {
+    return this.get<SessionTree>(`${this.sessionPath(root)}/tree`);
   }
 
   /* Any file of the session's checkout, with the blob the edit below takes. */
@@ -919,6 +968,11 @@ export class DaemonClient {
   /* Pushes the session branch and opens its PR: a job whose result carries the URL. */
   openSessionPr(root: string, body: OpenSessionPr = {}) {
     return this.post<Job>(`${this.sessionPath(root)}/pr`, body);
+  }
+
+  /* Pushes the session's commits not on its open PR yet, through the same checks: a job. */
+  pushSessionPr(root: string) {
+    return this.post<Job>(`${this.sessionPath(root)}/pr/push`, {});
   }
 
   snapshot(repo?: string) {
@@ -1286,6 +1340,37 @@ export class DaemonClient {
     return this.post<ProviderInstalled>(`/providers/${encodeURIComponent(provider)}/logout`, {});
   }
 
+  /* How the provider connects (brindle.connections): its own sign-in, an API
+     key or the person's cloud, and for a cloud its settings and login. */
+  providerConnection(provider: string, repo?: string) {
+    return this.get<ProviderConnection>(`/providers/${encodeURIComponent(provider)}/connection`, { repo });
+  }
+
+  /* Saves how the provider connects: `method` auto | sign_in | api_key | cloud,
+     and for cloud the route (`cloud`) and its non-secret `settings`. 403 when
+     the org decides instead, with why. */
+  setProviderConnection(provider: string, choice: { method: string; cloud?: string; settings?: Record<string, string>; repo?: string }) {
+    return this.put<ProviderConnection>(`/providers/${encodeURIComponent(provider)}/connection`, choice);
+  }
+
+  /* Signs Codex's ChatGPT login out so its API key is used (ready.action
+     "sign_out"), a job like cloudSignIn: job.done's result is the connection after. */
+  codexSignOut() {
+    return this.post<Job>("/providers/codex/sign-out", {});
+  }
+
+  /* What this machine's cloud CLIs are set up with: AWS profiles, gcloud, the Azure tenant, usual regions. */
+  cloudOptions() {
+    return this.get<CloudOptionsDTO>("/cloud/options");
+  }
+
+  /* The cloud sign-in (or its renewal) for the provider's saved route, a job
+     (provider.cloud_sign_in): the CLI's lines as job.progress, job.done's
+     result {result: "signed in" | "failed" | "waiting" | "manual"}. */
+  cloudSignIn(provider: string) {
+    return this.post<Job>(`/providers/${encodeURIComponent(provider)}/cloud-sign-in`, {});
+  }
+
   /* Runs `path`, one of the copies found, and turns the provider back on
      (an off one comes back without running any installer); answers the provider. */
   pickProviderInstall(provider: string, path: string) {
@@ -1314,6 +1399,21 @@ export class DaemonClient {
      the answer carries the last four characters and never the value. */
   putKey(name: string, value: string, repo?: string) {
     return this.put<KeyStored>(`/keys/${encodeURIComponent(name)}`, repo ? { value, repo } : { value });
+  }
+
+  /* `brindle keys unset NAME` (DELETE /keys/{name}). */
+  deleteKey(name: string) {
+    return this.delete<{ name: string; set: false }>(`/keys/${encodeURIComponent(name)}`, {});
+  }
+
+  /* Re-checks the stored key with its provider (POST /keys/{name}/test). */
+  testKey(name: string) {
+    return this.post<KeyTested>(`/keys/${encodeURIComponent(name)}/test`);
+  }
+
+  /* Stores the daemon's own environment value of `name` (POST /keys/{name}/import). */
+  importKey(name: string, repo?: string) {
+    return this.post<KeyStored>(`/keys/${encodeURIComponent(name)}/import`, repo ? { repo } : {});
   }
 
   /* `brindle keys set NAME` in a terminal of the daemon's: the value is typed

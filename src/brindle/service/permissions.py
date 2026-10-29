@@ -3,6 +3,7 @@ actions, prompt counts) and the pending asks, grouped, as DTOs."""
 
 from __future__ import annotations
 
+import os
 import time
 
 from brindle import permission_grants as grants
@@ -16,6 +17,7 @@ from brindle.service.dto import (
     AskGroupDTO,
     AskResultDTO,
     AskScopeDTO,
+    OrgControlViewDTO,
     PermissionExceptionDTO,
     PermissionGroupDTO,
     PermissionLimitsDTO,
@@ -44,10 +46,19 @@ def saved_dto(action: permissions.SavedAction) -> SavedActionDTO:
     return SavedActionDTO(**{**action.to_dict(), "request": action.request, "expired": action.expired()})
 
 
-def policy_dto(store: permissions.Store | None = None) -> PermissionPolicyDTO:
+def org_controls(repo_root: str | None = None) -> list[OrgControlViewDTO]:
+    """The org's controls as its members see them (Settings' locked rows). The
+    policy is the account's; a repo only adds its offline policy files."""
+    lim = grants.org_limits(repo_root or os.path.expanduser("~"))
+    return [OrgControlViewDTO(name=lim.name, what=grants.control_label(c), decision=c.decision, reason=c.reason)
+            for c in (lim.controls if lim else ())]
+
+
+def policy_dto(store: permissions.Store | None = None, repo_root: str | None = None) -> PermissionPolicyDTO:
     store = store or permissions.load_store()
     counts = permissions.prompt_counts(store)
     return PermissionPolicyDTO(
+        org_controls=org_controls(repo_root),
         preset=store.preset, unmatched=store.unmatched,
         presets=[PermissionPresetDTO(name=name, description=desc, unmatched=unmatched, current=name == store.preset)
                  for name, (_, unmatched, desc) in permissions.PRESETS.items()],
@@ -77,9 +88,14 @@ def _title(g: grants.Group) -> str:
     if g.kind in permissions.PATH_KINDS:
         verb = {"read": "reads", "write": "writes", "edit": "edits"}[g.kind]
         return f"Allow {verb} under {general['pattern']}?"
+    if g.kind == "bash" and general["pattern"].startswith(grants.FAMILY):
+        return f"Allow {general['label'][0].lower()}{general['label'][1:]}?"
     if g.kind == "bash":
         return f"Allow commands starting with {general['pattern'].removesuffix(' *')}?"
     return f"Allow {g.rep.request.tool}?"
+
+
+SAVED_LIFE = {"session": "session", "timed": "time", "forever": "forever"}
 
 
 def _modes(g: grants.Group) -> list[str]:
@@ -99,12 +115,39 @@ def _modes(g: grants.Group) -> list[str]:
     return out
 
 
+def _org_offer(g: grants.Group) -> tuple[list[dict], list[str], dict | None]:
+    """What an org Ask's item offers: the scopes, modes and limits a saved
+    approval may take, held to the same check a decision is
+    (grants.eligible): every ask rule that applies and the org's limits.
+    Allow once always; with nothing savable, the request's own form for it."""
+    rep = g.rep
+    rules = [r for r in (*rep.policy.asks, rep.rule) if r is not None]
+    caps = [r.limits["minutes"] for r in rules if (r.limits or {}).get("life") == "time" and r.limits.get("minutes")]
+    cap = min(caps) if caps else None
+    modes = _modes(g)
+    reach = {m: [s for s in rep.ask.scopes if grants.eligible(rep, s, m, cap if m == "timed" else None) is None]
+             for m in modes if m in SAVED_LIFE}
+    modes = [m for m in modes if m not in SAVED_LIFE or reach[m]]
+    scopes = ([s for s in rep.ask.scopes if any(s in found for found in reach.values())]
+              or [rep.ask.scope(grants.EXACT) or rep.ask.scopes[0]])
+    limits = {"life": "time", "minutes": cap} if "timed" in modes else (rep.rule.limits if rep.rule else None)
+    return scopes, modes, limits
+
+
 def group_dto(g: grants.Group) -> AskGroupDTO:
     rule = g.policy.rule
-    return AskGroupDTO(key=g.key, repo=g.repo_root, kind=g.kind, title=_title(g), general=scope_dto(g.rep.ask.general),
-                       scopes=[scope_dto(s) for s in g.rep.ask.scopes], items=[ask_dto(a) for a in g.items],
+    lim = grants.org_limits(g.repo_root) if rule is not None and rule.source == "org" else None
+    org = grants.org_control_view(lim, rule)
+    scopes, general, modes = g.rep.ask.scopes, g.rep.ask.general, None
+    limits = rule.limits if rule else None
+    if org:
+        scopes, modes, limits = _org_offer(g)
+        general = general if general in scopes else scopes[0]
+    return AskGroupDTO(key=g.key, repo=g.repo_root, kind=g.kind, title=_title(g), general=scope_dto(general),
+                       scopes=[scope_dto(s) for s in scopes], items=[ask_dto(a) for a in g.items],
                        blocked=g.policy.decision == "deny", rule=rule.id if rule else None,
-                       limits=limits_dto(rule.limits if rule else None), modes=_modes(g))
+                       limits=limits_dto(limits), modes=modes if modes is not None else _modes(g),
+                       org=OrgControlViewDTO(**org, decision=g.policy.decision) if org else None)
 
 
 def asks(db: DB, repo_root: str | None) -> list[AskGroupDTO]:

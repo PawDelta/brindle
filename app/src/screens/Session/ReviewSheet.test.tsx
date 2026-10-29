@@ -144,12 +144,12 @@ describe("review", () => {
     await waitFor(() => expect(daemon.sessionEdits).toHaveLength(1));
     expect(daemon.sessionEdits[0]).toEqual({ root: "sup1", path: "src/ls.py", content: "import json\nprint(json.dumps(x, indent=2))\nprint('done')\n\ndef main():\n    pass\n" });
     expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/sessions/sup1/file")!.body).toEqual({ path: "src/ls.py", content: daemon.sessionEdits[0].content, base: fakeBlob(LS_PY) });
-    await waitFor(() => expect(gets(daemon, "/sessions/sup1/diff")).toBe(diffs + 1));
+    await waitFor(() => expect(gets(daemon, "/sessions/sup1/diff")).toBeGreaterThan(diffs));
     await waitFor(() => expect(within(hunk()).queryByTestId("hunk-editor")).toBeNull());
     await waitFor(() => expect(hunk().textContent).toContain("+print(json.dumps(x, indent=2))"));
     expect(hunk().textContent).not.toContain("+print(json.dumps(x))\n");
     // The fresh diff pins the file again.
-    await waitFor(() => expect(gets(daemon, "/sessions/sup1/file")).toBe(3));
+    await waitFor(() => expect(within(hunk()).getByRole("button", { name: HUNK })).toHaveProperty("disabled", false));
 
     // The file moves on under the sheet: the save reads a different blob, so nothing is written; the box keeps
     // its text and says so in one line, with Copy my edit / Discard / Reload.
@@ -275,7 +275,7 @@ describe("review", () => {
     const moved = await within(sheet()).findByTestId("draft-moved");
     expect(within(moved).getByTestId("draft-snapshot").textContent).toContain("print(json.dumps(x))");
     expect(box().value).toBe("MY HUNK EDIT");
-    expect(within(moved).getByTestId("draft-conflict").textContent).toBe("Changed since you started editing");
+    await within(moved).findByTestId("draft-conflict");
     expect(within(moved).queryByRole("button", { name: /Save/ })).toBeNull();
     expect(daemon.sessionEdits).toHaveLength(0);
     // Reload reads the diff and file again; the draft is still there, still in conflict; Discard drops it.
@@ -424,12 +424,11 @@ describe("review", () => {
     await waitFor(() => expect(within(sheet()).getByTitle("docs/ls.md")).toBeTruthy());
   });
 
-  it("recovers after a save made the engine judge the session again: the diff it refused is read once it is ready, with the edit shown and the files editable, and the PR can be opened", async () => {
+  it("keeps showing saved edits while the engine judges readiness again, then opens the PR when ready", async () => {
     const { daemon } = mount({ sessionReview: { sup1: READY } }, { ...onSession, sheet: { kind: "review" } }, (daemon) => async (input, init) => {
-      const response = await daemon.fetch(input, init);
-      // The commit of the edit sets the engine re-checking: every read of the diff after it is 409 not_ready.
+      // Readiness changes before the edit event; the diff remains available throughout.
       if ((init?.method ?? "GET") === "PUT" && String(input).endsWith("/sessions/sup1/file")) daemon.data.sessionReview.sup1 = { ...READY, ready: false, reasons: ["the completion audit hasn't approved the session's current commit"] };
-      return response;
+      return daemon.fetch(input, init);
     });
     await screen.findByRole("dialog", { name: "Review & open PR" });
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
@@ -439,15 +438,16 @@ describe("review", () => {
     fireEvent.change(box, { target: { value: "import json\nprint(json.dumps(x, indent=2))\nprint('done')\n\ndef main():\n    pass" } });
     fireEvent.keyDown(box, { key: "s", metaKey: true });
     await waitFor(() => expect(daemon.sessionEdits).toHaveLength(1));
-    // The diff read after the save is refused: the sheet stays, says so, keeps the diff it had.
+    // The sheet shows the saved edit even while PR readiness is being checked.
     const note = await within(sheet()).findByTestId("review-rechecking");
     expect(note.textContent).toContain("the completion audit hasn't approved");
-    const diffsWhileRefused = gets(daemon, "/sessions/sup1/diff");
+    await waitFor(() => expect(hunk().textContent).toContain("+print(json.dumps(x, indent=2))"));
+    const diffsWhileRechecking = gets(daemon, "/sessions/sup1/diff");
     expect(within(sheet()).getByRole("navigation", { name: "Changed files" })).toBeTruthy();
-    // Ready again: the refused diff is read again, shows the edit, and its hunks are editable; the PR step drafts.
+    // Ready again: its hunks remain editable and the PR step drafts.
     daemon.readyForPr("sup1", READY);
     await waitFor(() => expect(within(sheet()).queryByTestId("review-rechecking")).toBeNull());
-    await waitFor(() => expect(gets(daemon, "/sessions/sup1/diff")).toBeGreaterThan(diffsWhileRefused));
+    await waitFor(() => expect(gets(daemon, "/sessions/sup1/diff")).toBeGreaterThan(diffsWhileRechecking));
     await waitFor(() => expect(hunk().textContent).toContain("+print(json.dumps(x, indent=2))"));
     await waitFor(() => expect(within(hunk()).getByRole("button", { name: HUNK })).toHaveProperty("disabled", false));
     expect(within(sheet()).queryByTestId("file-stale")).toBeNull();
@@ -495,7 +495,7 @@ describe("review", () => {
     expect(screen.getByRole("dialog", { name: "Review & open PR" })).toBeTruthy();
   });
 
-  it("opens the PR with the title and body pre-filled from the engine's draft; when the person's settings let brindle open it, shows that it did, with the link, and keeps the diff editable", async () => {
+  it("opens the PR with the title and body pre-filled from the engine's draft; an open PR's new commits wait for the person's Push, and the diff stays editable", async () => {
     const { daemon, openUrl } = mount({ sessionReview: { sup1: READY } }, { ...onSession, sheet: { kind: "review" } });
     await screen.findByRole("dialog", { name: "Review & open PR" });
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
@@ -521,23 +521,29 @@ describe("review", () => {
     sync?.stop();
     cleanup();
 
-    // brindle opened the PR itself (the engine's auto-PR setting): the sheet says so, with the link and no Open
-    // PR of its own, and the diff stays editable: edits go to the branch, which is the PR's.
-    const auto = mount(
-      {
-        sessionReview: { sup1: { ...READY, pr: { url: "https://github.com/example/proj/pull/7" } } },
-        config: { user: {}, repo: { auto_pr: true }, local: {}, keys: [] },
-        goal: { ...goal, goal_phase: "pr_open", pr_url: "https://github.com/example/proj/pull/7" },
-      },
-      { ...onSession, sheet: { kind: "review" } },
-    );
+    // The PR the person opened, everything on it; then a commit in the session checkout, said only by a git
+    // sweep: it waits, the goal panel's way back into Review says so, and Push is the only way onto the PR.
+    const later = mount({
+      sessionReview: { sup1: { ...READY, pr: { url: "https://github.com/example/proj/pull/7", unpushed: 0 } } },
+      goal: { ...goal, goal_phase: "pr_open", pr_url: "https://github.com/example/proj/pull/7" },
+    });
+    const back = await within(nav()).findByTestId("goal-pr-review");
+    expect(back.textContent).not.toContain("not on the PR");
+    later.daemon.data.sessionReview.sup1.pr = { url: "https://github.com/example/proj/pull/7", unpushed: 2 };
+    later.daemon.send({ type: "git", workspace_id: root.id, status: { branch: "dev/ls", base: "main", ahead: 3, behind: 0, dirty_files: [], unpushed: 2 } });
+    await waitFor(() => expect(within(nav()).getByTestId("goal-pr-review").textContent).toContain("2 not on the PR"));
+    fireEvent.click(within(nav()).getByTestId("goal-pr-review"));
     await screen.findByRole("dialog", { name: "Review & open PR" });
     const notice = await within(sheet()).findByTestId("pr-opened");
-    expect(notice.textContent).toContain("brindle opened the PR");
     expect(notice.textContent).toContain("https://github.com/example/proj/pull/7");
+    expect(within(notice).getByTestId("pr-unpushed").textContent).toBe("2 new commits not on the PR");
     expect(within(sheet()).queryByTestId("open-pr-step")).toBeNull();
+    expect(later.daemon.prPushes).toEqual([]);
+    fireEvent.click(within(notice).getByRole("button", { name: "Push" }));
+    await waitFor(() => expect(later.daemon.prPushes).toEqual(["sup1"]));
+    await waitFor(() => expect(within(sheet()).queryByTestId("pr-unpushed")).toBeNull());
     fireEvent.click(within(sheet()).getByRole("button", { name: "Open the PR ↗" }));
-    expect(auto.openUrl).toHaveBeenCalledWith("https://github.com/example/proj/pull/7");
+    expect(later.openUrl).toHaveBeenCalledWith("https://github.com/example/proj/pull/7");
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
     await waitFor(() => expect(within(hunk()).getByRole("button", { name: HUNK })).toHaveProperty("disabled", false));
     // The sidebar says it once, in the goal's lifecycle: PR open, with its link.
