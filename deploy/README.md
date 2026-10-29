@@ -6,6 +6,10 @@ cloud with no stored secret. Each one trusts only GitHub's OIDC token
 environment `brindle-ci` of one repository, i.e. the subject
 `repo:OWNER/REPO:environment:brindle-ci`.
 
+To enroll machines with brindle Enterprise through your MDM (managed device
+files, device tokens and offline policy exports), see
+[`managed-devices.md`](managed-devices.md).
+
 ## Tightening trust
 
 The run job in the `brindle-ci` environment can mint cloud credentials for

@@ -7,7 +7,9 @@ the environment. Every path that would leave the machine asks here first:
 * ``brindle.pro`` refuses every backend request (login, refresh, entitlement,
   JWKS, learning, team policy, audit events); see :func:`guard`. Learning
   makes no suggestions, the team policy comes from an offline
-  file (``.brindle/policy.json``, same schema as the org policy), events are
+  file (``.brindle/policy.json``: the signed offline policy export that
+  ``brindle account org policy --export`` writes, verified before use, or
+  an unsigned policy in the org policy's schema, with a warning), events are
   not recorded, and the entitlement is the offline license installed with
   ``brindle account license install`` (never refreshed).
 * Delegation only reaches profiles whose model is on this machine or the
