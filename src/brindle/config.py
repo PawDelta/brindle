@@ -108,6 +108,7 @@ class RepoConfig:
     autopilot: bool = True             # deprecated; the goal driver is always on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
     scoped_checks: str | None = None   # "off" or "infer"; None: not chosen (acts as "infer", see brindle.check_scope.inferred)
+    scoped_checks_max_files: int = 40  # a worker branch whose scoped tests exceed this runs only its own and namesake tests (0: no cap)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
@@ -387,7 +388,8 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
-                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks", "scoped_checks"):
+                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks", "scoped_checks",
+                "scoped_checks_max_files"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])
