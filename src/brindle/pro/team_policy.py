@@ -1092,11 +1092,12 @@ def load_offline(repo_root: str | None, org_id: str) -> OrgPolicy:
     return parse_policy(org_id, body, time.time())
 
 
-def current_policy(ent, client=None, store=None, repo_root: str | None = None) -> OrgPolicy:
+def current_policy(ent, client=None, store=None, repo_root: str | None = None, cached=None) -> OrgPolicy:
     """The policy for ``ent``'s org at (at least) ``ent.policy_version`` and
     for ``ent``'s role and policy role (changing those bumps no version, and
     the member's effective policy depends on them), else the last good copy;
-    raises :class:`PolicyUnavailable` if there is none.
+    raises :class:`PolicyUnavailable` if there is none. ``cached`` reads the
+    cached copy (default :func:`load_cached`).
     In air-gap mode, the offline policy file (:func:`load_offline`) and
     nothing else: nothing is fetched and the cache is not consulted."""
     from brindle import airgap
@@ -1104,7 +1105,7 @@ def current_policy(ent, client=None, store=None, repo_root: str | None = None) -
     if airgap.enabled():
         return with_role_overrides(load_offline(repo_root, ent.org_id), ent.role,
                                    getattr(ent, "policy_role", None))
-    cached = load_cached(ent.org_id)
+    cached = (cached or load_cached)(ent.org_id)
     want = (ent.role, ent.policy_role)
     if (cached is not None and cached.version >= ent.policy_version
             and cached.cached_for == want):
@@ -1128,38 +1129,17 @@ class ProPolicy(PolicyPlugin):
         self._store, self._client = store, client
         self._entitlement = entitlement
 
-    def _team_entitlement(self):
-        from brindle.pro import license
-
-        try:
-            ent = self._entitlement() if self._entitlement else license.current(store=self._store,
-                                                                                client=self._client)
-        except license.LicenseError:
-            return None
-        except Exception:  # noqa: BLE001 - no verified entitlement: nothing to enforce
-            log.warning("brindle Pro: couldn't check the entitlement; no team policy applies",
-                        exc_info=True)
-            return None
-        return ent if FEATURE in ent.features else None
-
     def policy(self) -> OrgPolicy | Decision:
         """The policy to enforce (this member's effective one when the backend
         gives it, else the org's base policy), ``allow()`` with no team
         entitlement, or a denial when a policy is required but has never
-        been fetched."""
-        ent = self._team_entitlement()
-        if ent is None:
-            return allow()
-        try:
-            from brindle.pro import status
+        been fetched (brindle.pro.org_context.OrgContext.read_policy, with
+        the org context being resolved, if any)."""
+        from brindle.pro import org_context
 
-            # A throttle from the org's remote control narrows the member's own policy.
-            return status.narrow(current_policy(ent, self._client, self._store,
-                                                self.repo_root).enforced)
-        except PolicyUnavailable as e:
-            from brindle.pro import org_context
-
-            return org_context.unavailable(ent.org_id, e)
+        ctx = org_context.active() or org_context.OrgContext.resolve(repo_root=self.repo_root)
+        return ctx.read_policy(self.repo_root, store=self._store, client=self._client,
+                               entitlement=self._entitlement)
 
     def org_budgets(self) -> OrgPolicy | Decision | None:
         """The org policy whose budgets and protected paths apply here: None
@@ -1199,17 +1179,19 @@ class ProPolicy(PolicyPlugin):
         return p
 
     def check_assign(self, info: AssignInfo) -> Decision:
-        p = self.policy()
+        from brindle.pro.org_context import OrgContext
+
+        ctx = OrgContext.resolve(repo_root=self.repo_root)
+        with ctx.activated():
+            p = self.policy()
         if isinstance(p, Decision):
             return p
         from brindle.pro import rollout
-        from brindle.pro.org_context import OrgContext, Providers
 
-        why = rollout.refusal(p) if rollout.entitled() else None
+        why = rollout.refusal(p) if ctx.entitled(rollout.FEATURE) else None
         if why:
             return deny(why)
-        ctx = OrgContext.resolve(repo_root=self.repo_root, providers=Providers(policy=lambda: p))
-        why = ctx.blocked_reason()       # paused, or shut down remotely
+        why = ctx.blocked_reason(p)       # paused, or shut down remotely
         if why:
             return deny(f"org {p.org_id}: {why}")
         who = f"profile {info.profile!r}" if info.profile else "this delegation"

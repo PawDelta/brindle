@@ -445,10 +445,10 @@ def _disk_cache_write(now: float, gen: int | None, *, token: str | None = None,
     switch meanwhile must not be undone by old credentials."""
     import tempfile
 
-    from brindle.config import brindle_home
+    from brindle.pro._files import pro_home
 
     try:
-        if not brindle_home().is_dir():
+        if not pro_home().is_dir():
             return   # no home yet: a lookup that caches a result mustn't create it
         with _disk_cache_lock() as d:
             if gen is None or _disk_cache_generation(d) != gen:
@@ -474,13 +474,14 @@ _request_reads: ContextVar[dict | None] = ContextVar("license_request_reads", de
 
 
 @contextmanager
-def reading():
-    """Reuse completed licensing evaluations for one routing request.
+def reading(memo: dict | None = None):
+    """Reuse completed licensing evaluations for one routing request (or,
+    with ``memo``, for every read that passes the same dict: one org check).
 
     Credential reads inside an evaluation remain fresh, especially under
     the refresh lock. The next request starts with an empty view.
     """
-    token = _request_reads.set({})
+    token = _request_reads.set({} if memo is None else memo)
     try:
         yield
     finally:
@@ -495,9 +496,11 @@ def request_cached(fn):
         memo = _request_reads.get()
         if memo is None:
             return fn(*args, **kwargs)
+        from brindle.pro._files import pro_home
+
         bound = sig.bind(*args, **kwargs)
         bound.apply_defaults()
-        key = (fn, tuple(bound.arguments.items()))
+        key = (fn, pro_home(), tuple(bound.arguments.items()))
         if key not in memo:
             try:
                 memo[key] = fn(*args, **kwargs)
@@ -516,11 +519,10 @@ def clear_cache() -> None:
     generation so a read already in flight can't store what it saw."""
     global _cache
     _cache = None
-    from brindle.config import brindle_home
-    from brindle.pro._files import write_private
+    from brindle.pro._files import pro_home, write_private
 
     try:
-        if brindle_home().is_dir():   # no home, so nothing on disk to invalidate
+        if pro_home().is_dir():   # no home, so nothing on disk to invalidate
             with _disk_cache_lock() as d:
                 write_private(d / DISK_CACHE_GEN, str((_disk_cache_generation(d) or 0) + 1).encode())
                 (d / DISK_CACHE_FILE).unlink(missing_ok=True)
@@ -546,8 +548,10 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
     switch meanwhile) is never cached or returned: the credentials are read
     once more, and a second such change fails closed."""
     global _cache
+    from brindle.pro._files import home_set
+
     now = time.time() if now is None else now
-    default = store is None and client is None
+    default = store is None and client is None and not home_set()   # the in-process cache is the default home's
     if default and _cache and _cache[0] > now and (max_age is None or now - _cache[1].iat <= max_age):
         return _cache[1]
     from brindle import airgap

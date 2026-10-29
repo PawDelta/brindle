@@ -5,17 +5,46 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 from brindle.pro.credentials import CredentialError, FileStore
+
+_home: ContextVar[Path | None] = ContextVar("brindle_pro_home", default=None)
+
+
+def pro_home() -> Path:
+    """brindle's home for the Pro files: the one :func:`at_home` set for this
+    thread or task, else ``brindle_home()``."""
+    from brindle.config import brindle_home
+
+    return _home.get() or brindle_home()
+
+
+def home_set() -> bool:
+    """Whether :func:`at_home` chose the home (so process-wide caches of the
+    default home don't apply)."""
+    return _home.get() is not None
+
+
+@contextmanager
+def at_home(home: Path) -> Iterator[None]:
+    """Read and write the Pro files under ``home`` in this thread or task
+    (brindle.pro.org_context resolves a context for another home); the
+    environment is left alone."""
+    token = _home.set(Path(home))
+    try:
+        yield
+    finally:
+        _home.reset(token)
 
 
 def private_dir(create: bool = True) -> Path | None:
     """The private directory, made if missing. A read passes ``create=False``
     and gets None instead, so a lookup never creates brindle's home."""
-    from brindle.config import brindle_home
-
-    d = brindle_home() / "pro"
+    d = pro_home() / "pro"
     if not create and not os.path.lexists(d):
         return None
     if create:

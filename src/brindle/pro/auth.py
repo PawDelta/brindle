@@ -483,9 +483,9 @@ def login(client: Client, store, *, show: Callable[[str], None] = print,
 
 
 def lock_path() -> Path:
-    from brindle.config import brindle_home
+    from brindle.pro._files import pro_home
 
-    return brindle_home() / "pro" / "refresh.lock"
+    return pro_home() / "pro" / "refresh.lock"
 
 
 @contextmanager
