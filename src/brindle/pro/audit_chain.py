@@ -559,12 +559,18 @@ def export(repo_root: str | None = None, *, since: datetime | None = None, fmt: 
 
 
 class AuditChain(EventsPlugin):
-    """Append every event to the repo's chain, when entitled."""
+    """Append every event to the repo's chain, when entitled.
 
-    def __init__(self, repo_root: str, *, home: Path | None = None, entitled=None) -> None:
+    ``stream_targets`` is this repo's target list or cache-only provider;
+    an unconfigured chain never inherits another repo's streaming targets.
+    """
+
+    def __init__(self, repo_root: str, *, home: Path | None = None, entitled=None,
+                 stream_targets=()) -> None:
         self.repo_root = repo_root
         self.home = home
         self._entitled = entitled
+        self._stream_targets = stream_targets if stream_targets is not None else ()
         self.dropped = 0
 
     def entitled(self) -> bool:
@@ -592,18 +598,18 @@ class AuditChain(EventsPlugin):
 
             # audit streaming: queue under the chain lock (same order as the chain), send in the background
             append(event.repo_root or self.repo_root, event_record(event), home=self.home,
-                   after=lambda rec: audit_stream.enqueue(rec, self.home))
-            audit_stream.kick(self.home)
+                   after=lambda rec: audit_stream.enqueue(rec, self.home, targets=self._stream_targets))
+            audit_stream.kick(self.home, targets=self._stream_targets)
         except Exception:  # noqa: BLE001 - never fail the operation being reported
             self.dropped += 1
             log.warning("brindle: couldn't append to the audit chain", exc_info=True)
 
 
 def make(repo_root: str) -> AuditChain:
-    from brindle.pro import audit_stream, org_context
+    from brindle.pro import org_context
 
-    audit_stream.configure(lambda: org_context.OrgContext.resolve(repo_root=repo_root, cached_only=True).audit_sinks())
-    return AuditChain(repo_root)
+    return AuditChain(repo_root, stream_targets=lambda: org_context.OrgContext.resolve(
+        repo_root=repo_root, cached_only=True).audit_sinks())
 
 
 __all__ = ["CHECKPOINT_KIND", "CSV_COLUMNS", "EVENT_KEYS", "FEATURE", "RECORD_KEYS", "ZERO_HASH",
