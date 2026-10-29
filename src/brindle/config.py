@@ -384,7 +384,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",
                 "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
-                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "plan", "learning",
+                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
@@ -393,13 +393,13 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             if key in source:
                 setattr(cfg, key, source[key])
                 break
-    if cfg.plan not in ("auto", "always", "never"):
-        cfg.plan = "auto"
-    if not any("plan" in source for source in (local, shared, user)):   # an old config's plan_first
-        for source in (local, shared, user):
-            if "plan_first" in source:
-                cfg.plan = "always" if source["plan_first"] else "never"
-                break
+    for source in (local, shared, user):   # `plan`, or an old config's plan_first, from the first layer with either
+        if source.get("plan") in ("auto", "always", "never"):
+            cfg.plan = source["plan"]
+            break
+        if "plan_first" in source:
+            cfg.plan = "always" if source["plan_first"] else "never"
+            break
     rules: list[str] = []
     for source in (user, shared, local):
         found = source.get("rules")

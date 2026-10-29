@@ -2654,8 +2654,10 @@ def delegate(
     start: str | None = None,
     files: list[str] | None = None,
     weight: str | None = None,
+    depends_on: list[str] | None = None,
 ) -> tuple[Agent, Workspace]:
-    """Start a worker. ``weight`` is the weight its task was routed as.
+    """Start a worker. ``weight`` is the weight its task was routed as;
+    ``depends_on`` only feeds the plan policy (a dependency in another repo).
     ``plan_first`` (None: the repo's ``plan_first`` config)
     makes it get a plan approved before it may edit; ``files`` picks the
     decisions its brief carries. With ``isolate``, the worker gets a new worktree whose
@@ -2675,11 +2677,15 @@ def delegate(
     except pilot.AutopilotError as e:
         raise AgentError(str(e)) from e
     if plan_first is None:
+        from brindle import tasks as task_mod
         from brindle.plan_policy import PlanTask, needs_plan
 
         own = repos.own_root(db, pilot.root_of(db, caller.id)) if caller else None
+        dep_repos = task_mod.dependency_repos(db, caller_ws, depends_on, caller.id if caller else None)
         plan_first = needs_plan(
-            PlanTask(weight=weight, files=files, cross_repo=bool(own) and own != caller_ws.repo_root),
+            PlanTask(weight=weight, files=files,
+                     cross_repo=(bool(own) and own != caller_ws.repo_root)
+                     or any(r != caller_ws.repo_root for r in dep_repos)),
             config=load_repo_config(caller_ws.repo_root))
     from brindle import identity_lock
 

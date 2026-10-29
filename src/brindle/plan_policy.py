@@ -21,11 +21,20 @@ class PlanTask:
 
 
 def _matches(path: str, pattern: str) -> bool:
+    """Whether the declared ``path`` (a file or a glob) can name a file ``pattern`` covers."""
     path = path.removeprefix("./")
-    if fnmatch(path, pattern):
-        return True
     # fnmatch's "*" crosses "/", so "x/**" also covers "x/a/b"; a leading "**/" may match nothing.
-    return pattern.startswith("**/") and fnmatch(path, pattern[3:])
+    forms = (pattern, pattern.removeprefix("**/"))
+    if any(fnmatch(path, p) for p in forms):
+        return True
+    if not any(c in path for c in "*?["):
+        return False
+    # A glob declaration: does it overlap the pattern? Compare the pattern against the
+    # glob itself, and against the glob's literal directory with the pattern placed under it.
+    parts = path.split("/")
+    base = "/".join(parts[:next((i for i, s in enumerate(parts) if any(c in s for c in "*?[")), len(parts))])
+    return any(fnmatch(p, path) or fnmatch(f"{base}/{p}" if base else p, path)
+               or fnmatch(f"{base}/x" if base else "x", p) for p in forms)
 
 
 def needs_plan(task: PlanTask, *, config, org_rules: dict | None = None) -> bool:
