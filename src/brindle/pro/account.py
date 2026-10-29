@@ -404,10 +404,20 @@ class _OrgCommands:
             from brindle.pro import managed
 
             device = managed.load()
-            p = device.snapshot if isinstance(device, managed.Managed) else None
+            member = None
+            client = self._client(base)
+            try:      # a second org this person is signed in to: the stricter rule wins
+                other = license.current(store=self.store, client=client)
+                if "team" in other.features and other.org_id != getattr(device, "org_id", None):
+                    member = team_policy.fetch_policy(other.org_id, client, self.store,
+                                                      cached_for=(other.role, other.policy_role))
+            except Exception:   # noqa: BLE001 - signed out or offline: the device policy alone
+                member = None
+            p = (org_cli.device_policy(device, client, member)
+                 if isinstance(device, managed.Managed) else None)
             if p is None:
-                self._say("brindle account: this managed device has no usable signed policy snapshot; "
-                          "it fetches a fresh one with its device token.")
+                self._say("brindle account: this managed device has no valid signed policy yet; "
+                          "it fetches one with its device token.")
                 return 1
             note = " (managed device, signed policy)"
         else:

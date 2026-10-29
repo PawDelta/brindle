@@ -1,13 +1,14 @@
 """brindle org device-file and the offline policy export (brindle.pro.org_cli)."""
 import io
 import json
+import time
 
 import pytest
 
 from brindle.pro import managed, org_cli
 from brindle.pro.account import ProAccount
-from pro_fixtures import signing_key  # noqa: F401 - fixture
-from test_managed_device import NOW, ORG, answer, managed_file
+from pro_fixtures import FakeTransport, pro_env, signing_key  # noqa: F401 - fixtures
+from test_managed_device import NOW, ORG, answer, managed_file, signed_answer
 
 
 def test_device_file_verifies_and_binds_org(signing_key, tmp_path):
@@ -28,15 +29,22 @@ def test_device_file_verifies_and_binds_org(signing_key, tmp_path):
     assert not (tmp_path / "x").exists()
 
 
-def test_policy_on_managed_device_ignores_account(signing_key, monkeypatch):
-    """A device-sourced policy is the device's signed policy, even signed out."""
-    device = managed.verify_file(managed_file(signing_key, answer(version=7)), now=NOW)
+def test_policy_on_managed_device_uses_newest_signed_copy(signing_key, monkeypatch):
+    """Signed out, with a lapsed file snapshot, the device's freshly fetched policy is the one in force."""
+    device = managed.verify_file(managed_file(signing_key, answer(version=7), policy_exp=NOW - 1), now=NOW)
+    assert device.snapshot is None and device.snapshot_expired
+    fetched = signed_answer(signing_key, answer(version=9))
+    transport = FakeTransport({f"GET /managed/{ORG}/policy": [(200, fetched)]})
+    chosen = []
+    real = org_cli.device_policy
+    monkeypatch.setattr(time, "time", lambda: NOW)
     monkeypatch.setattr(org_cli, "policy_source", lambda: "device")
     monkeypatch.setattr(managed, "load", lambda *a, **k: device)
-    out = io.StringIO()
-    acct = ProAccount(None, out=out)    # no credentials: the account is never consulted
-    assert acct.cmd_org_policy(None) == 0
-    assert f"Policy for org {ORG}, version 7" in out.getvalue()
+    monkeypatch.setattr(org_cli, "device_policy", lambda *a, **k: chosen.append(real(*a, **k)) or chosen[-1])
+    err = io.StringIO()
+    acct = ProAccount(None, transport=transport, out=io.StringIO(), err=err)
+    assert acct.run(["org", "policy"]) == 0, err.getvalue()
+    assert (chosen[0].org_id, chosen[0].version) == (ORG, 9)
 
 
 @pytest.mark.parametrize("days, ok", [(0, False), (91, False), (7, True)])

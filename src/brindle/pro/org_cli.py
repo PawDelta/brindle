@@ -186,6 +186,31 @@ def run_export(repo_root: str | None, *, org: str | None, days: int | None, base
     return 0
 
 
+def device_policy(device: managed.Managed, client=None, member=None, now: float | None = None):
+    """The policy in force on a managed device: the newest valid copy among a
+    fresh fetch with the device token (when ``client`` is given), the cached
+    copy and the file's snapshot (:func:`managed.device_policy`), merged with
+    ``member``, a signed-in member's policy for another org, where the
+    stricter rule wins. None when no copy is valid."""
+    def fetch(m: managed.Managed):
+        if client is None:
+            return None
+        path, headers = managed.device_request(m)
+        status, body = client.call("GET", path, None, headers=headers)
+        if status in (401, 403):
+            raise managed.DeviceTokenRefused(f"http {status}")
+        if status != 200:
+            raise OrgCliError(f"http {status}")
+        return body
+
+    from brindle.pro import team_policy
+
+    policy = managed.device_policy(device, fetch=fetch, cached=team_policy.load_cached(device.org_id), now=now)
+    if policy is not None and member is not None and member.org_id != device.org_id:
+        policy = managed.stricter(policy, member, now=now)
+    return policy
+
+
 def policy_source() -> str | None:
     """Where the verified policy came from (device, account, snapshot or
     offline), or None when this build can't say."""
