@@ -100,7 +100,7 @@ The app reads the running daemon's command line with `ps`:
 | The running daemon | What the app does |
 |---|---|
 | this engine's (the engine's `python/bin/python3`) with this build's `-X brindle-build=` | uses it |
-| this engine's path with another build's id, or none (from before an update, however the update put the new files in place) | stops it with SIGTERM, waits up to 15 s for it to exit (it removes its files), starts the engine's own |
+| this engine's path with another build's id, or none (from before an update, however the update put the new files in place) | stops it with SIGTERM, waits up to 2 s for it to exit (it removes its files; a daemon gives requests still running 1 s), kills it if it hasn't (the next daemon takes over its files), starts the engine's own. Meanwhile "Starting brindle…" says it's stopping the engine that ran before |
 | another install's, started by an app (`--idle-exit`: an older app's uv brindle, or a copy run from a staging place) | the same: stops it, then starts its own |
 | another install's, started by a person (`brindle daemon` in a terminal), or one whose command line `ps` can't give | leaves it running, and fails with `engine conflict: …`, naming it and how to stop it (`brindle daemon stop`) |
 
