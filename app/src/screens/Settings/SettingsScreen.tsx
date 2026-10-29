@@ -1322,8 +1322,8 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
           <OrgApprovals client={client} />
         </Row>
-        <Row label="Offline policy export" help="The signed policy for a device that can't reach your organization, saved to ~/.brindle/policy.json." wide>
-          <PolicyExport client={client} />
+        <Row label="Offline policy export" help="The signed policy for a device that can't reach your organization, saved to the project's .brindle/policy.json." wide>
+          <PolicyExport client={client} repo={repo} />
         </Row>
         {governance.status?.enterprise_admin && (
           <Row label="Managed device" help="A device file that puts one device under your organization's signed policy, with its own device token." wide>

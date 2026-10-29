@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from brindle import config
-from brindle.pro import auth
+from brindle import airgap, config
+from brindle.pro import auth, managed
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401
 from test_daemon_actions import _send
 from test_pro_team import ORG, login, team, team_claims  # noqa: F401
@@ -63,21 +63,22 @@ def admin(team, pro_env, monkeypatch):
 
 
 @pytest.mark.parametrize("bad_signature", [False, True])
-def test_offline_export_and_device_file(admin, monkeypatch, signing_key, bad_signature):
+def test_offline_export_and_device_file(admin, monkeypatch, signing_key, bad_signature, tmp_path):
     from test_managed_device import NOW, ORG as DEVICE_ORG, answer, managed_file
 
     sent = []
+    repo = str(tmp_path)
     # A signed policy naming another org is refused, and nothing is written.
     admin.routes[f"POST /orgs/{ORG}/policy/offline"] = lambda f, h: (200, {"token": "t", "body": {"org_id": "org_other"}})
-    assert _send("POST", PREFIX + "/offline-policy", {"days": 30})[0] == 502
-    assert not (config.brindle_home() / "policy.json").exists()
+    assert _send("POST", PREFIX + "/offline-policy", {"days": 30, "repo": repo})[0] == 502
+    assert not airgap.policy_path(repo).exists()
     admin.routes[f"POST /orgs/{ORG}/policy/offline"] = lambda f, h: (
         sent.append(dict(f)) or (200, {"token": "signed.token", "body": {"org_id": ORG, "exp": 99}}))
     assert _send("POST", PREFIX + "/offline-policy", {"days": 91})[0] == 400
-    code, got = _send("POST", PREFIX + "/offline-policy", {"days": 30})
+    code, got = _send("POST", PREFIX + "/offline-policy", {"days": 30, "repo": repo})
     assert code == 200 and sent == [{"days": 30}]
-    written = json.loads((config.brindle_home() / "policy.json").read_text())
-    assert got["path"] == str(config.brindle_home() / "policy.json")
+    written = json.loads(airgap.policy_path(repo).read_text())
+    assert got["path"] == str(airgap.policy_path(repo))
     assert written == {"token": "signed.token", "body": {"org_id": ORG, "exp": 99}}
 
     monkeypatch.setattr("time.time", lambda: NOW)
@@ -94,7 +95,8 @@ def test_offline_export_and_device_file(admin, monkeypatch, signing_key, bad_sig
     assert code == (502 if bad_signature else 200)
     if bad_signature:
         return
-    assert got == {"filename": "managed.json", "device_id": doc["device_id"], "managed": doc}
+    assert got == {"filename": "managed.json", "device_id": doc["device_id"], "managed": doc,
+                   "system_dir": str(managed.system_dir())}
     # The signed-in Enterprise admin may hand out device files.
     fake_org(monkeypatch, source="account")
     assert _send("GET", PREFIX)[1]["enterprise_admin"] is True

@@ -1257,13 +1257,13 @@ export class DaemonClient {
 
   /* Organization governance (routes_governance): who manages this device and
      whether its signed policy verifies; an offline policy export (written to
-     ~/.brindle/policy.json); a managed device file to save; plan approvals. */
+     the repo's .brindle/policy.json); a managed device file to save; plan approvals. */
   governance() {
     return this.get<GovernanceStatusDTO>("/governance");
   }
 
-  exportOfflinePolicy(days: number) {
-    return this.post<OfflinePolicyExportDTO>("/governance/offline-policy", { days });
+  exportOfflinePolicy(days: number, repo?: string) {
+    return this.post<OfflinePolicyExportDTO>("/governance/offline-policy", { days, ...(repo ? { repo } : {}) });
   }
 
   deviceFile(body: { name: string; allow_airgap: boolean; audit_sink?: string }) {

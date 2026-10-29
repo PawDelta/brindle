@@ -68,7 +68,7 @@ export function OrgStatus({ status, error }: { status: GovernanceStatusDTO | nul
 }
 
 /* An offline policy export: the signed policy for a device with no connection, good for 1 to 90 days. */
-export function PolicyExport({ client }: { client: DaemonClient }) {
+export function PolicyExport({ client, repo }: { client: DaemonClient; repo?: string | null }) {
   const [days, setDays] = useState(30);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<string | null>(null);
@@ -79,7 +79,7 @@ export function PolicyExport({ client }: { client: DaemonClient }) {
     setDone(null);
     setError(null);
     try {
-      const got = await client.exportOfflinePolicy(days);
+      const got = await client.exportOfflinePolicy(days, repo ?? undefined);
       setDone(`Saved a ${got.days}-day offline policy export to ${got.path}`);
     } catch (e) {
       setError(failure(e));
@@ -143,8 +143,20 @@ export function DeviceFile({ client }: { client: DaemonClient }) {
           <a className={`${quiet} underline`} href={`data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(file.managed, null, 2))}`} download={file.filename} data-testid="device-file">
             Save {file.filename}
           </a>{" "}
-          for device {file.device_id}: put it in ~/.brindle on that device.
+          for device {file.device_id}.
         </p>
+      )}
+      {file && (
+        <div className={notice} data-testid="install-location" data-path={file.system_dir}>
+          <p>
+            Have your MDM install it as <code>{file.system_dir}/{file.filename}</code> on that device:
+          </p>
+          <ol className="list-decimal pl-5">
+            <li>Upload the file to your MDM as a managed file.</li>
+            <li>Target it at the device's system folder above.</li>
+            <li>Push it to the device; brindle does not install it itself.</li>
+          </ol>
+        </div>
       )}
       {error && <p role="alert" className={alert}>Could not make the device file: {error}</p>}
     </div>

@@ -149,13 +149,14 @@ describe("settings screen", () => {
     fireEvent.change(days, { target: { value: "14" } });
     fireEvent.click(screen.getByRole("button", { name: "Offline policy export" }));
     expect((await within(screen.getByTestId("org-approvals")).findByRole("status")).textContent).toContain("/home/u/.brindle/policy.json");
-    expect(posts(daemon).find((r) => r.path === "/governance/offline-policy")?.body).toEqual({ days: 14 });
+    expect(posts(daemon).find((r) => r.path === "/governance/offline-policy")?.body).toEqual({ days: 14, repo: "/home/u/proj" });
     // The device file comes back to save as managed.json.
     fireEvent.change(screen.getByRole("textbox", { name: "Device name" }), { target: { value: "build-01" } });
     fireEvent.click(screen.getByRole("checkbox", { name: "Allow air-gapped use" }));
     fireEvent.click(screen.getByRole("button", { name: "Download device file" }));
     const file = await screen.findByTestId("device-file");
     expect(file.getAttribute("download")).toBe("managed.json");
+    expect(screen.getByTestId("install-location").getAttribute("data-path")).toBe("/Library/Application Support/brindle");
     expect(JSON.parse(decodeURIComponent(file.getAttribute("href")!.split(",")[1]))).toEqual({ org_id: "org_1", name: "build-01", allow_airgap: true });
     // Plan approvals: the default for every project, saved when picked.
     const plan = await screen.findByRole("combobox", { name: "Plan approvals" });
