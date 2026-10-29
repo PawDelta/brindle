@@ -132,7 +132,7 @@ function Seg<T extends string>({ name, options, value, onPick, disabled, labelOf
 /* The link every "isn't connected" carries: Settings › Providers. */
 function ConnectLink({ provider, onNavigate, children }: { provider: string; onNavigate?: AgentsScreenProps["onNavigate"]; children?: ReactNode }) {
   return (
-    <button type="button" className="text-sm text-branch underline" data-connect={provider} onClick={() => onNavigate?.("providers")}>
+    <button type="button" className="text-sm text-pass underline" data-connect={provider} onClick={() => onNavigate?.("providers")}>
       {children ?? `Connect ${productName(provider)}`}
     </button>
   );
@@ -174,7 +174,7 @@ function Choices({ name, choices, current, skip = [], fresh, onPick, onMake, mis
       ) : (
       <button
         type="button"
-        className={`grid w-full grid-cols-[minmax(0,14rem)_5rem_minmax(0,1fr)] items-baseline gap-x-s2 rounded-md px-s1 py-0.5 text-left text-sm hover:bg-surface-2 ${c.id === current ? "bg-branch-soft" : ""}`}
+        className={`grid w-full grid-cols-[minmax(0,14rem)_5rem_minmax(0,1fr)] items-baseline gap-x-s2 rounded-md px-s1 py-0.5 text-left text-sm hover:bg-surface-2 ${c.id === current ? "bg-pass-soft" : ""}`}
         aria-current={c.id === current ? "true" : undefined}
         data-choice={c.id}
         onClick={() => onPick(c.id)}
@@ -205,7 +205,7 @@ function Choices({ name, choices, current, skip = [], fresh, onPick, onMake, mis
       {byProvider.map((p) => group(<><Mark provider={p} />{productName(p)}</>, shown.filter((c) => !c.custom && c.provider === p), p))}
       {onMake && (
         <button type="button" className="flex items-baseline gap-s2 rounded-md px-s1 py-0.5 text-left text-sm hover:bg-surface-2" onClick={onMake}>
-          <span className="font-medium text-branch">+ Make a custom agent…</span>
+          <span className="font-medium text-pass">+ Make a custom agent…</span>
           <span className="text-xs text-ink-3">A model plus your effort, instructions and rules</span>
         </button>
       )}
@@ -287,10 +287,10 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
   let note: ReactNode = null;
   if (learned) {
     note = (
-      <div className="flex flex-col gap-0.5 rounded-md bg-branch-soft px-s1 py-0.5 text-sm" data-testid="learned">
+      <div className="flex flex-col gap-0.5 rounded-md bg-pass-soft px-s1 py-0.5 text-sm" data-testid="learned">
         <span>
           brindle learned <b>{learned.label}</b> does better here ·{" "}
-          <button type="button" className="text-branch underline" disabled={busy} onClick={() => put({ locked: true })}>
+          <button type="button" className="text-pass underline" disabled={busy} onClick={() => put({ locked: true })}>
             use mine instead
           </button>
         </span>
@@ -424,7 +424,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
             <ChoiceName c={first} />
             <CostTag cost={first.cost} />
             {first.speed && <span className="text-ink-3">{first.speed}</span>}
-            {learned && <span className={`${pill} text-branch`}>learned</span>}
+            {learned && <span className={`${pill} text-pass`}>learned</span>}
             <span className="text-ink-3" aria-hidden>
               ▾
             </span>
@@ -450,7 +450,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
                     </span>
                   ))}
             </span>{" "}
-            <span className="text-branch">
+            <span className="text-pass">
               fallbacks ({rest.length}) {panel === "fb" ? "▴" : "▾"}
             </span>
         </button>
@@ -458,7 +458,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
       <div className="flex items-start gap-s1">
         <button
           type="button"
-          className={`${chip} border ${state.locked ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2"}`}
+          className={`${chip} border ${state.locked ? "border-pass/55 bg-pass-soft text-pass" : "border-line text-ink-2"}`}
           aria-pressed={state.locked}
           data-testid="lock"
           title={state.locked ? "Locked: learning won't change this row. Click to let it." : "Learning may run a better model here. Click to lock your choice."}
@@ -512,14 +512,14 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
   const step = (i: number, body: ReactNode) => (
     <div key={STEPS[i][0]} className={`grid gap-x-s3 gap-y-1 border-t border-line py-s1 md:grid-cols-[11rem_minmax(0,1fr)] ${i > reach ? "opacity-60" : ""}`} data-step={STEPS[i][0]}>
       <span className="flex items-baseline gap-1 text-sm font-semibold">
-        <span className="inline-flex size-4 items-center justify-center rounded-full bg-branch-soft text-[10px] text-branch">{i + 1}</span>
+        <span className="inline-flex size-4 items-center justify-center rounded-full bg-pass-soft text-[10px] text-pass">{i + 1}</span>
         {STEPS[i][1]}
       </span>
       <div className="flex min-w-0 flex-col gap-s1">{body}</div>
     </div>
   );
   return (
-    <section className={`${card} flex flex-col gap-s1 border-branch px-s2 py-s2`} aria-label="New custom agent" data-testid="builder">
+    <section className={`${card} flex flex-col gap-s1 border-pass/55 px-s2 py-s2`} aria-label="New custom agent" data-testid="builder">
       <header className="flex flex-col">
         <h3 className="text-sm font-semibold">New custom agent</h3>
         <p className="text-xs text-ink-2">A model plus how it should work. When it's made, it's in every model list, and {KIND_INFO[kind].name} can use it.</p>
@@ -543,7 +543,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
           <div className="flex flex-wrap gap-1" role="group" aria-label="Provider">
             {providers.map((p) =>
               connected.has(p) ? (
-                <button key={p} type="button" aria-pressed={draft.provider === p} className={`${chip} gap-1 border py-0.5 ${draft.provider === p ? "border-branch bg-branch-soft text-branch" : "border-line text-ink"}`} onClick={() => set({ provider: p, model: null })}>
+                <button key={p} type="button" aria-pressed={draft.provider === p} className={`${chip} gap-1 border py-0.5 ${draft.provider === p ? "border-pass/55 bg-pass-soft text-pass" : "border-line text-ink"}`} onClick={() => set({ provider: p, model: null })}>
                   <Mark provider={p} />
                   {productName(p)}
                   <span className="text-ink-3">{modelsOf(p, profiles).length} models</span>
@@ -564,7 +564,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
           {draft.provider ? (
             <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3" role="group" aria-label="Model">
               {models.map((m) => (
-                <button key={m.name} type="button" aria-pressed={draft.model === m.model} className={`flex flex-col items-start rounded-md border px-s1 py-0.5 text-left ${draft.model === m.model ? "border-branch bg-branch-soft" : "border-line hover:bg-surface-2"}`} onClick={() => set({ model: m.model ?? null })}>
+                <button key={m.name} type="button" aria-pressed={draft.model === m.model} className={`flex flex-col items-start rounded-md border px-s1 py-0.5 text-left ${draft.model === m.model ? "border-pass/55 bg-pass-soft" : "border-line hover:bg-surface-2"}`} onClick={() => set({ model: m.model ?? null })}>
                   <span className="text-sm font-semibold">{prettyModel(m.model)}</span>
                   <span className="text-xs text-ink-3">
                     {COST_MARK[m.cost_tier]} {COST_WORDS[m.cost_tier]} · {speedOf(m)}
@@ -593,7 +593,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
           <div className="flex flex-col gap-0.5 text-sm" role="group" aria-label="Rules">
             <p className="text-xs text-ink-3">
               Rules are short instructions brindle adds to this agent's brief.{" "}
-              <button type="button" className="text-branch underline" onClick={() => onNavigate?.("knowledge")}>
+              <button type="button" className="text-pass underline" onClick={() => onNavigate?.("knowledge")}>
                 See all rules
               </button>
             </p>
@@ -867,7 +867,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
         <ol className="grid gap-s1 md:grid-cols-2 xl:grid-cols-4" aria-label="How a task is run">
           {FLOW.map(([t, b], i) => (
             <li key={t} className="flex gap-s1 rounded-md bg-canvas-2 px-s1 py-s1">
-              <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-branch-soft text-xs text-branch">{i + 1}</span>
+              <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-pass-soft text-xs text-pass">{i + 1}</span>
               <span className="flex flex-col">
                 <b className="text-sm">{t}</b>
                 <span className="text-xs text-ink-2">{b}</span>

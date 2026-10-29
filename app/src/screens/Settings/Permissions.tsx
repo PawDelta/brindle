@@ -363,15 +363,15 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
             {customized && <span className="text-ink-3"> · customized</span>}
           </span>
         </div>
-        <div className="flex flex-col divide-y divide-line border-y border-line" data-testid="presets">
+        <div className="grid gap-s2 sm:grid-cols-2 xl:grid-cols-4" data-testid="presets">
           {policy.presets.map((p) => (
-            <div key={p.name} className={`flex flex-wrap items-center gap-x-s2 gap-y-1 px-s1 py-s1 ${p.current ? "bg-pass-soft" : ""}`} data-preset={p.name}>
-              <h4 className="flex w-40 shrink-0 items-center gap-1.5 text-sm font-medium">
+            <div key={p.name} className={`flex flex-col gap-1 rounded-md border p-s2 ${p.current ? "border-pass/55 bg-pass-soft" : "border-line bg-canvas-2"}`} data-preset={p.name}>
+              <h4 className="flex items-center gap-1 text-sm font-medium">
                 {presetLabel(p.name)}
-                {p.name === "autonomous" && <span className="font-mono text-[10px] tracking-wider text-ink-3">RECOMMENDED</span>}
+                {p.name === "autonomous" && <span className="rounded-sm bg-pass-soft px-1 text-[10px] text-pass">RECOMMENDED</span>}
               </h4>
-              <p className="min-w-0 flex-1 text-xs text-ink-2">{p.description}</p>
-              <button type="button" className={`${button} shrink-0`} disabled={busy || p.current} onClick={() => usePreset(p.name)}>
+              <p className="flex-1 text-xs text-ink-2">{p.description}</p>
+              <button type="button" className={`${button} mt-1 self-start`} disabled={busy || p.current} onClick={() => usePreset(p.name)}>
                 {p.current ? "Current" : `Use ${presetLabel(p.name)}`}
               </button>
             </div>
