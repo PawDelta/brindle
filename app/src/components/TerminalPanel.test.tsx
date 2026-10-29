@@ -150,6 +150,10 @@ describe("TerminalPanel", () => {
     expect(here).toEqual({ repo: REPO, name: "pawdelta", cwd: WORKTREE, why: "started in a7aaa807's worktree" });
     expect(shellPlace({ screen: "session", root: "sup-42", repo: REPO }, repos, workspaces)).toMatchObject({ cwd: REPO, why: "started at the repo root" });
     expect(shellPlace({ screen: "settings" }, repos, workspaces)).toMatchObject({ cwd: REPO, why: "started at the repo root" });
+    // Project settings of the second repo: its shell starts there, not in the last-visited or first repo.
+    const OTHER = "/home/sam/Projects/other";
+    const two = [...repos, { repo_root: OTHER, name: "other" }];
+    expect(shellPlace({ screen: "project-settings", repo: OTHER }, two, workspaces)).toEqual({ repo: OTHER, name: "other", cwd: OTHER, why: "started at the repo root" });
   });
 
   it("opens a shell from the status line's toggle, another on +, and closes the shown one on ×, saying when either fails", async () => {

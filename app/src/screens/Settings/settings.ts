@@ -98,6 +98,10 @@ export function overrideText(s: Setting, value: unknown): string {
   return value === undefined || value === null ? "Default" : `${String(value)}${s.unit ? ` ${s.unit}` : ""}`;
 }
 
+/* What a project's override says next to what it overrides: "Off here · yours: On" (yours falls back to the engine's default). */
+export const overrideLabel = (s: Setting, projectValue: unknown, yourValue: unknown): string =>
+  `${overrideText(s, projectValue)} here · yours: ${overrideText(s, yourValue ?? s.fallback)}`;
+
 /* PATCH /config's `values`: only what changed, as the engine takes it (a
    list setting's lines, a number, a bool, a choice; null only where the
    engine's own choice is null). */
