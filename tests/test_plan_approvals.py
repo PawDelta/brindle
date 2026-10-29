@@ -143,22 +143,35 @@ def _org_setup(db, tmp_path, monkeypatch, rules):
     return ws, boss, worker, make, state
 
 
+def agents_approve_as_parent(db, caller, worker):
+    try:
+        return agents.approve_plan(db, caller.id, worker.id)
+    except agents.AgentError as e:
+        return str(e)
+
+
 def test_plan_approvals_org_rules_gate_approve_plan(db, tmp_path, monkeypatch):
     """Through the real approve_plan: named approvers, a two-person quorum, a reviewer, an unreadable policy."""
     ws, boss, worker, make, state = _org_setup(
         db, tmp_path, monkeypatch, _rules(approvers=["alice", "bob"], two_person=True))
+    state["member"] = None          # no process-wide identity: each caller's own member counts
     reviewer = make("reviewer")
+    callers = {"alice": boss, "bob": make("supervisor"), "carol": make("supervisor"), "rev": reviewer}
+    for name, a in (("alice", boss), ("bob", callers["bob"]), ("carol", callers["carol"]), ("alice", reviewer)):
+        db.update_agent(a.id, member=name)
 
-    def attempt(who, caller=boss):
-        state["member"] = who
+    def attempt(who):
         try:
-            agents.approve_plan(db, caller.id, worker.id)
+            agents.approve_plan(db, callers[who].id, worker.id)
             return "approved"
         except agents.AgentError as e:
             return str(e)
 
     assert "carol may not approve" in attempt("carol")
-    assert "two different people" in attempt("alice", reviewer)   # a reviewer isn't one of them
+    assert "two different people" in attempt("rev")               # a reviewer isn't one of them
+    db.update_agent(worker.id, parent_id=reviewer.id)             # ... not even as the worker's parent
+    assert "two different people" in agents_approve_as_parent(db, reviewer, worker)
+    db.update_agent(worker.id, parent_id=boss.id)
     assert db.get_agent(worker.id).plan_approvals is None and state["audit"] == []
     assert "second person" in attempt("alice")
     assert "second person" in attempt("alice")                    # the same person twice

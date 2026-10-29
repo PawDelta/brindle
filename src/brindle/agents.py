@@ -461,6 +461,10 @@ def spawn(
     if why:
         raise AgentError(why)
     db.add_agent(agent)
+    # The verified team member this session ran for, so a plan approval is bound to it.
+    from brindle import plan_policy
+
+    db.update_agent(agent_id, member=plan_policy.current_member(ws.repo_root))
     if agent.weight:
         db.update_agent(agent_id, weight=agent.weight)
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):
@@ -3407,8 +3411,8 @@ def _org_plan_refusal(db: DB, caller_id: str, agent: Agent, rules, so_far: list[
 
     ws = db.get_workspace(agent.workspace_id)
     caller = db.get_agent(caller_id)
-    reviewer = caller_id != agent.parent_id and bool(caller) and is_review_profile(caller.profile, ws.repo_root)
-    member = plan_policy.current_member(ws.repo_root)
+    reviewer = bool(caller) and is_review_profile(caller.profile, ws.repo_root)   # whoever the caller is
+    member = (caller.member if caller else None) or plan_policy.current_member(ws.repo_root)
     if member is None:
         return "your org's plan rules need a signed-in team member to approve plans"
     task = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == agent.id), None)
@@ -3435,12 +3439,10 @@ def approve_plan(db: DB, caller_id: str | None, agent_id: str, feedback: str = "
     if caller_id is None:
         raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
     rules = _org_rules_for(db, agent)
-    if agent.parent_id != caller_id:
-        caller = db.get_agent(caller_id)
-        ws = db.get_workspace(agent.workspace_id)
-        if not (rules and caller and ws and caller.workspace_id == agent.workspace_id
-                and is_review_profile(caller.profile, ws.repo_root)):
-            raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
+    if agent.parent_id != caller_id and not (rules and caller_id != agent.id and db.get_agent(caller_id)):
+        # Org rules open approval to any other agent (another member's supervisor, a
+        # reviewer); the member behind it is verified and judged by the rules.
+        raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
     if agent.plan_state != "proposed":
         raise AgentError(f"{agent.id} has no plan awaiting a decision")
     feedback = feedback.strip()
