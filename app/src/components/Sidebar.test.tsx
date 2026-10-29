@@ -222,7 +222,7 @@ describe("Sidebar", () => {
     );
     const context = () => screen.getByTestId("session-context");
     // Completion stays visible alongside the phase; the milestone list carries the detail.
-    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete · In progress"));
+    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete"));
     expect(context().textContent).toContain("Ship ls --json");
     expect(context().textContent).toContain("sup1 · proj · interactive · autopilot");
     const milestones = within(context()).getByRole("list", { name: "Milestones" });
@@ -267,7 +267,7 @@ describe("Sidebar", () => {
   it("offers no autopilot for a paused session's context, and says nothing about a PR", async () => {
     const { sync } = mount({ workspaces: [root, worker], goal: { ...structuredClone(goal), root_id: "sup0", state: "paused", enabled: false } }, { screen: "session", root: "sup0", repo: REPO, agent: "sup0" });
     const context = () => screen.getByTestId("session-context");
-    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete · In progress"));
+    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete"));
     expect(context().textContent).toContain("Refactor the cache");
     expect(within(context()).queryByRole("switch")).toBeNull();
     expect(context().textContent).not.toMatch(/PR/);

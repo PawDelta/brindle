@@ -581,10 +581,11 @@ describe("closing a session", () => {
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
     const context = within(nav()).getByTestId("session-context");
-    // Beside the Done status: a primary Close session.
+    // Finished: the count line is green, with no phase label; Close session sits under the milestone list.
     const close = await within(context).findByRole("button", { name: "Close session" });
-    expect(within(context).getByTestId("goal-phase").textContent).toBe("Done");
-    expect(close.parentElement).toBe(within(context).getByTestId("goal-line").parentElement);
+    expect(within(context).getByTestId("goal-line").className).toContain("text-pass");
+    expect(within(context).queryByTestId("goal-phase")).toBeNull();
+    expect(within(context).getByRole("list", { name: "Milestones" }).compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(sessionRow("sup1")).toBeTruthy();
 
     fireEvent.click(close);
