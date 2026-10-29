@@ -67,18 +67,31 @@ class OrgPlanRules:
     ``plan_approvers``, ``plan_two_person``, ``plan_reviewer_may_approve_low_risk``)."""
     plan: str = "auto"                  # auto | always | never
     paths: tuple[str, ...] = ()
-    approvers: tuple[str, ...] = ()     # member ids; empty: any member may approve
+    approvers: tuple[str, ...] = ()     # member ids for display
     two_person: bool = False
     reviewer_low_risk: bool = False
+    approver_groups: tuple[tuple[str, ...], ...] = ()
+
+    @property
+    def requires_member(self) -> bool:
+        """Whether human approvals need a verified identity to satisfy these rules."""
+        return bool(self.approver_groups or self.two_person)
 
     @classmethod
     def from_policy(cls, policy: dict | None) -> "OrgPlanRules":
+        groups = getattr(policy, "plan_approver_groups", None)
+        if callable(getattr(policy, "plan_rules", None)):
+            policy = policy.plan_rules()
         p = policy if isinstance(policy, dict) else {}
+        approvers = tuple(s for s in p.get("plan_approvers") or () if isinstance(s, str))
+        if groups is None:
+            groups = p.get("plan_approver_groups", (approvers,) if approvers else ())
         plan = p.get("plan")
         return cls(
             plan=plan if plan in ("auto", "always", "never") else "auto",
             paths=tuple(s for s in p.get("plan_paths") or () if isinstance(s, str)),
-            approvers=tuple(s for s in p.get("plan_approvers") or () if isinstance(s, str)),
+            approvers=approvers,
+            approver_groups=tuple(tuple(g) for g in groups if g),
             two_person=p.get("plan_two_person") is True,
             reviewer_low_risk=p.get("plan_reviewer_may_approve_low_risk") is True,
         )
@@ -91,22 +104,10 @@ class OrgRulesUnavailable(Exception):
 def load_org_rules(repo_root: str | None) -> OrgPlanRules | None:
     """The org's plan rules for ``repo_root``; None without a team org.
     Raises :class:`OrgRulesUnavailable` when there is a team org whose policy can't be read."""
-    from brindle.pro import team_policy as tp
-
     from brindle.pro import org_context
 
-    pp = tp.ProPolicy(repo_root or "")
     ctx = org_context.active() or org_context.OrgContext.resolve(repo_root=repo_root)
-    ent = ctx._team_entitlement()
-    if ent is None:
-        return None
-    try:
-        body = tp.current_policy(ent, pp._client, pp._store, repo_root).raw_body or {}
-    except tp.PolicyUnavailable as e:
-        raise OrgRulesUnavailable(f"org {ent.org_id}'s policy can't be read ({e}); "
-                                  "plans can't be checked against its rules until it can") from e
-    policy = body.get("policy") if isinstance(body.get("policy"), dict) else body
-    return OrgPlanRules.from_policy(policy)
+    return ctx.plan_rules
 
 
 def org_requires_plan(task: "PlanTask", rules: OrgPlanRules | None) -> bool:

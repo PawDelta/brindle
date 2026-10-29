@@ -573,10 +573,10 @@ class AuditChain(EventsPlugin):
         event never waits on the network. Fails closed."""
         if self._entitled is not None:
             return bool(self._entitled())
-        from brindle.pro import license
+        from brindle.pro import license, managed
 
         try:
-            return FEATURE in license.current(refresh=False).features
+            return isinstance(managed.load(), managed.Managed) or FEATURE in license.current(refresh=False).features
         except Exception:  # noqa: BLE001 - not logged in, expired, unreadable: no audit
             return False
 
@@ -600,6 +600,9 @@ class AuditChain(EventsPlugin):
 
 
 def make(repo_root: str) -> AuditChain:
+    from brindle.pro import audit_stream, org_context
+
+    audit_stream.configure(lambda: org_context.OrgContext.resolve(repo_root=repo_root, cached_only=True).audit_sinks())
     return AuditChain(repo_root)
 
 

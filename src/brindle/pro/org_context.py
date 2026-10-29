@@ -19,8 +19,8 @@ policy that is required but can't be read (:func:`unavailable`), a policy
 that can't be read at all (no saved approval applies), a member the org
 paused or shut down (:meth:`OrgContext.blocked_reason`).
 
-The reads go through :class:`Providers`, so later sources (a signed policy
-cache, managed devices, org plan rules) plug in without touching callers.
+The reads go through :class:`Providers`: signed account policies, managed
+device policies and org plan rules share the same context.
 While a context reads its policy it is :func:`active`, so
 ``ProPolicy.policy`` (the default policy read) reuses its entitlement,
 status and cached policy instead of reading them again.
@@ -57,16 +57,17 @@ class Providers:
       raise: the context then fails closed. Default:
       ``team_policy.ProPolicy(repo_root).policy()``, which reads through this
       context.
-    * ``status()``: the org status as ``brindle.pro.status.load()`` returns it.
+    * ``status()``: the verified signed status for enforced accounts, otherwise
+      the legacy saved status, as ``brindle.pro.status.Saved``.
     * ``managed()``: the managed-device binding (brindle.pro.managed), None
-      when the device isn't managed. Default: None.
+      when the device isn't managed. Default: ``managed.load()``.
     * ``plan_rules()``: the org's plan rules for ``plan_policy.needs_plan``
-      (``{"paths": [...]}``), None for none. Default: None.
+      (``OrgPlanRules`` or a policy dict), None for none. Default: the policy's rules.
     """
     policy: Callable[[], object] | None = None
     status: Callable[[], object] | None = None
-    managed: Callable[[], dict | None] | None = None
-    plan_rules: Callable[[], dict | None] | None = None
+    managed: Callable[[], object] | None = None
+    plan_rules: Callable[[], object] | None = None
 
 
 def _once(read: Callable[[], object]) -> tuple[object, Exception | None]:
@@ -80,33 +81,40 @@ class OrgContext:
     """The org's state for one check. Build it with :meth:`resolve`."""
 
     def __init__(self, *, repo_root: str | None, home: Path, home_given: bool, now: float,
-                 providers: Providers) -> None:
+                 providers: Providers, cached_only: bool = False) -> None:
         self.repo_root = repo_root
         self.home = home
         self.now = now
         self.providers = providers
+        self.cached_only = cached_only
         self._home_given = home_given
         self._offline = False
         self._cached: dict[str, object] = {}
         self._license_reads: dict = {}
+        self._verified: dict = {}
+        self._policy_sources: list = []
+        self._source: str | None = None
+        self._unavailable: str | None = None
+        self._client = self._store = None
 
     @classmethod
     def resolve(cls, *, home=None, now: float | None = None, providers: Providers | None = None,
-                repo_root: str | None = None) -> OrgContext:
+                repo_root: str | None = None, cached_only: bool = False) -> OrgContext:
         """The org context for ``repo_root`` (the checkout whose policy
         applies; None: the first request :meth:`org_decision` is asked
         about). ``home`` is brindle's home the default reads use (the
         entitlement, the status, the cached policy; ``brindle_home()`` when
         None). ``now`` is the time the check is made at (the current time
         when None). Each provider is called the first time an answer needs
-        it, and never again for this context."""
+        it, and never again for this context. ``cached_only`` reads verified
+        local state without network requests, for audit recording."""
         import time
 
         from brindle.pro._files import pro_home
 
         return cls(repo_root=repo_root, home=Path(home) if home is not None else pro_home(),
                    home_given=home is not None, now=time.time() if now is None else now,
-                   providers=providers or Providers())
+                   providers=providers or Providers(), cached_only=cached_only)
 
     @contextmanager
     def _reads(self) -> Iterator[None]:
@@ -137,7 +145,7 @@ class OrgContext:
         from brindle.pro import license
 
         with self._reads():
-            return _once(license.current)
+            return _once((lambda: license.current(refresh=False)) if self.cached_only else license.current)
 
     @property
     def entitlement(self):
@@ -145,9 +153,14 @@ class OrgContext:
         return self._entitlement[0]
 
     def entitled(self, feature: str) -> bool:
-        """Whether the entitlement includes ``feature`` (``license.has``: fails closed)."""
-        from brindle.pro import license
+        """Whether account or device governance includes ``feature``."""
+        from brindle.pro import license, managed
 
+        if feature in ("team", "org_budgets", "managed_models", "managed_rollout", "audit") \
+                and isinstance(self.managed, managed.Managed):
+            return True
+        if self.cached_only:
+            return self.entitlement is not None and feature in self.entitlement.features
         with self._reads():
             return license.has(feature)
 
@@ -183,10 +196,59 @@ class OrgContext:
 
     @cached_property
     def _status(self):
-        from brindle.pro import status
-
         with self._reads():
-            return _once(self.providers.status or status.load)
+            return _once(self.providers.status or self._default_status)
+
+    def _default_status(self):
+        from brindle import airgap
+        from brindle.pro import managed, policy_cache, status
+
+        ent = self.__dict__.get("_policy_entitlement", self.entitlement)
+        if airgap.enabled() and managed.airgap_allowed(self.managed):
+            return status.Saved()
+        if ent is not None and (policy_cache.enforced(ent) or isinstance(self.managed, managed.Managed)):
+            copy = self._signed("status", ent)
+            if isinstance(copy, policy_cache.Unavailable):
+                self._unavailable = copy.reason
+                return status.Saved(org_id=ent.org_id)
+            return status.Saved(org_id=ent.org_id, status=status.parse(copy.body, self.now))
+        if self.managed is not None:
+            return status.Saved()
+        return status._load_saved() if self.cached_only else status.load()
+
+    def _signed(self, kind, ent):
+        from brindle.pro import policy_cache, signed
+
+        binding = policy_cache.Binding(ent.sub, ent.org_id, ent.role, ent.policy_role)
+        key = (kind, binding)
+        if key not in self._verified:
+            try:
+                self._verified[key] = policy_cache.get_verified(
+                    kind, binding=binding, fetch=lambda k: self._fetch(k, ent.org_id),
+                    home=self.home, now=self.now)
+            except (OSError, signed.SignedError) as e:
+                self._verified[key] = policy_cache.Unavailable(f"The signed {kind} cache can't be used: {e}")
+        return self._verified[key]
+
+    def _fetch(self, kind, org_id, device=None):
+        from brindle import airgap
+        from brindle.pro import auth, credentials, managed, team_policy
+
+        if self.cached_only:
+            raise team_policy.PolicyUnavailable("This context reads only locally stored governance documents")
+        store = self._store or credentials.default_store()
+        client = self._client or auth.Client((store.load() or {}).get("base_url"))
+        airgap.guard(client.base, "org governance request")
+        if device is not None:
+            path, headers = managed.device_request(device, kind)
+            code, body = client.call("GET", path, None, headers=headers)
+            if code in (401, 403):
+                raise managed.DeviceTokenRefused(f"HTTP {code}")
+        else:
+            code, body = auth.authed(client, store, "GET", f"/orgs/{org_id}/{kind}")
+        if code != 200:
+            raise team_policy.PolicyUnavailable(f"HTTP {code}")
+        return body
 
     @property
     def status(self):
@@ -197,12 +259,22 @@ class OrgContext:
         return saved
 
     @cached_property
-    def managed(self) -> dict | None:
-        return self.providers.managed() if self.providers.managed else None
+    def managed(self):
+        from brindle.pro import managed
+
+        return self.providers.managed() if self.providers.managed else managed.load(now=self.now)
 
     @cached_property
-    def plan_rules(self) -> dict | None:
-        return self.providers.plan_rules() if self.providers.plan_rules else None
+    def plan_rules(self):
+        from brindle.plan_policy import OrgPlanRules, OrgRulesUnavailable
+
+        if self.providers.plan_rules:
+            rules = self.providers.plan_rules()
+            return rules if isinstance(rules, OrgPlanRules) or rules is None else OrgPlanRules.from_policy(rules)
+        if why := self.blocked_reason():
+            raise OrgRulesUnavailable(why)
+        p = self._enforced()
+        return OrgPlanRules.from_policy(p) if p is not None else None
 
     def _enforced(self):
         """The ``OrgPolicy`` in force, or None (no team org, a denial, unreadable)."""
@@ -214,7 +286,7 @@ class OrgContext:
     # -- the default policy read ---------------------------------------------------------------------
 
     def _team_entitlement(self, store=None, client=None, entitlement=None):
-        from brindle.pro import license, team_policy
+        from brindle.pro import license, policy_cache, team_policy
 
         if entitlement or store or client:
             with self._reads():
@@ -227,7 +299,7 @@ class OrgContext:
             log.warning("brindle Pro: couldn't check the entitlement; no team policy applies",
                         exc_info=error)
             return None
-        return ent if team_policy.FEATURE in ent.features else None
+        return ent if ent is not None and (team_policy.FEATURE in ent.features or policy_cache.enforced(ent)) else None
 
     def read_policy(self, repo_root: str | None, *, store=None, client=None, entitlement=None):
         """``ProPolicy.policy``: the member's effective policy narrowed by a
@@ -235,23 +307,88 @@ class OrgContext:
         when a policy is required but none can be had (:func:`unavailable`).
         ``store``, ``client`` and ``entitlement`` are the plugin's own, if it
         was given any; otherwise this context's entitlement is used."""
-        from brindle.policy import allow
-        from brindle.pro import team_policy
+        from brindle import airgap
+        from brindle.policy import Decision, allow, deny
+        from brindle.pro import managed, policy_cache, team_policy
+
+        self._client, self._store = client, store
+        if isinstance(self.managed, managed.Invalid):
+            self._unavailable = self.managed.reason
+            return deny(self._unavailable)
 
         ent = self._team_entitlement(store, client, entitlement)
+        self._policy_entitlement = ent
+        device = self._device_policy
+        if isinstance(device, Decision):
+            return device
+        if device is not None and (ent is None or ent.org_id == device.org_id):
+            return self.narrow(device.enforced)
         if ent is None:
             return allow()
         try:
             with self._reads():
-                p = team_policy.current_policy(ent, client, store, repo_root, cached=self.cached_policy)
+                if airgap.enabled() and (device is None or managed.airgap_allowed(self.managed)):
+                    p = team_policy.with_role_overrides(team_policy.load_offline(repo_root, ent.org_id),
+                                                        ent.role, ent.policy_role)
+                elif policy_cache.enforced(ent) or device is not None:
+                    copy = self._signed("policy", ent)
+                    if isinstance(copy, policy_cache.Unavailable):
+                        self._unavailable = copy.reason
+                        return deny(copy.reason)
+                    p = team_policy.with_role_overrides(
+                        team_policy.parse_policy(ent.org_id, copy.body, self.now), ent.role, ent.policy_role)
+                elif self.cached_only:
+                    p = self.cached_policy(ent.org_id)
+                    if p is None or p.cached_for != (ent.role, ent.policy_role):
+                        raise team_policy.PolicyUnavailable("No policy is saved for this member's role")
+                else:
+                    p = team_policy.current_policy(ent, client, store, repo_root, cached=self.cached_policy)
         except team_policy.PolicyUnavailable as e:
             return unavailable(ent.org_id, e)
-        from brindle import airgap
-
         if not airgap.enabled():
             self._cached[ent.org_id] = p      # what the cache now holds
+        self._policy_sources.append(p)
+        if device is not None:
+            p = managed.stricter(device, p, now=self.now)
         # A throttle from the org's remote control narrows the member's own policy.
         return self.narrow(p.enforced)
+
+    @cached_property
+    def _device_policy(self):
+        import json
+
+        from brindle import airgap
+        from brindle.policy import deny
+        from brindle.pro import managed, team_policy
+        from brindle.pro._files import private_dir, read_private, write_private
+
+        device = self.managed
+        if not isinstance(device, managed.Managed):
+            return None
+        if airgap.enabled() and managed.airgap_allowed(device):
+            try:
+                p = team_policy.load_offline(self.repo_root, device.org_id)
+            except team_policy.PolicyUnavailable as e:
+                self._unavailable = str(e)
+                return deny(str(e))
+            self._source = "offline"
+        else:
+            path = private_dir(home=self.home) / "device-policy.json"
+            try:
+                raw = read_private(path, team_policy.MAX_CACHE)
+                cached = json.loads(raw) if raw else None
+            except (OSError, ValueError):
+                cached = None
+            p = managed.device_policy(device, fetch=lambda d: self._fetch("policy", d.org_id, d),
+                                      cached=cached, now=self.now)
+            if p is None:
+                self._unavailable = ("This managed device has no valid signed policy. Connect to the network "
+                                     "to fetch one with its device token, or ask your admin for a new device file.")
+                return deny(self._unavailable)
+            self._source = "snapshot" if device.snapshot and p.raw_body == device.snapshot.raw_body else "device"
+            write_private(path, json.dumps(p.raw_body).encode())
+        self._policy_sources.append(p)
+        return p
 
     # -- the questions -------------------------------------------------------------------------------
 
@@ -296,6 +433,8 @@ class OrgContext:
         if self.repo_root is None and "_policy" not in self.__dict__:
             self.repo_root = request.repo_root or None
         lim = self.limits()
+        if self._unavailable:
+            return Decision("deny", self._unavailable)
         if lim is None or not lim.controls:
             return None
         if rules is None:
@@ -327,13 +466,25 @@ class OrgContext:
         """``plan_policy.needs_plan`` for ``task``, with the org's plan rules."""
         from brindle import plan_policy
 
-        rules = self.plan_rules
-        org_rules = plan_policy.OrgPlanRules.from_policy(rules) if rules is not None else None
-        return plan_policy.needs_plan(task, config=config, org_rules=org_rules)
+        return plan_policy.needs_plan(task, config=config, org_rules=self.plan_rules)
 
     def audit_sinks(self) -> list[dict]:
-        """Where the org wants audit events sent: none yet."""
-        return []
+        """The signed policies' sinks and the managed file's sink, once each."""
+        from brindle.pro import managed
+
+        p = self.policy
+        sinks = []
+        sources = self._policy_sources or ([p] if self._enforced() is not None else [])
+        for p in sources:
+            body = p.raw_body or {}
+            body = body.get("body", body)
+            policy = body.get("policy", body)
+            sink = policy.get("audit_sink")
+            if isinstance(sink, dict) and sink not in sinks:
+                sinks.append(sink)
+        if isinstance(self.managed, managed.Managed) and self.managed.audit_sink not in (None, *sinks):
+            sinks.append(self.managed.audit_sink)
+        return sinks
 
     def shutdown_control(self) -> dict | None:
         """A remote shutdown in force, for an org with ``managed_rollout``."""
@@ -349,6 +500,8 @@ class OrgContext:
         saved = self.status
         why = saved.status.paused_reason
         if not saved.status.paused:
+            if self._verified or self.managed is not None:
+                return None
             try:
                 cached = self.cached_policy(saved.org_id) if saved.org_id else None
             except Exception:  # noqa: BLE001
@@ -363,9 +516,18 @@ class OrgContext:
         ``policy``, default the policy in force here, or by the org status)
         or their org shut brindle down remotely. None when nothing blocks,
         and when the status file can't be read at all."""
+        from brindle.policy import Decision
         from brindle.pro import status
 
         p = self._enforced() if policy is _RESOLVED else policy
+        if self._unavailable:
+            return self._unavailable
+        if policy is _RESOLVED:
+            raw, error = self._policy
+            if error is not None:
+                return str(error)
+            if isinstance(raw, Decision) and not raw.allowed:
+                return raw.reason
         try:
             if self._status[1] is not None:
                 raise self._status[1]
@@ -374,7 +536,8 @@ class OrgContext:
             c = self.shutdown_control()
             if c:
                 return status.shutdown_reason(c)
-            return self.pause_reason()
+            why = self.pause_reason()
+            return self._unavailable or why
         except Exception:  # noqa: BLE001 - a broken status file must not stop all work
             log.warning("brindle: couldn't read the org status", exc_info=True)
             return None
@@ -406,14 +569,41 @@ class OrgContext:
         """Where the org policy in force came from: the managed binding's
         ``source`` on a managed device ("device" for a copy got with the
         device token, "snapshot" for the managed file's own), else "account";
-        None when none is in force (no team org, a denial) or it is air-gap
-        mode's offline policy file."""
+        "offline" for air-gap mode's local policy. None without an org policy."""
         p = self._enforced()
         if p is None:
-            return None
-        if self.managed and self.managed.get("source"):
+            from brindle.pro import managed, policy_cache
+
+            if isinstance(self.managed, (managed.Managed, managed.Invalid)):
+                return self._source or "device"
+            return "account" if policy_cache.enforced(self.entitlement) else None
+        if self._source:
+            return self._source
+        if isinstance(self.managed, dict) and self.managed.get("source"):
             return self.managed["source"]
-        return None if self._offline else "account"
+        return "offline" if self._offline else "account"
+
+    @property
+    def org_id(self) -> str | None:
+        return getattr(self.managed, "org_id", None) or getattr(self.entitlement, "org_id", None)
+
+    @property
+    def org_name(self) -> str | None:
+        p = self._enforced()
+        grants = p.permission_grants if p is not None else None
+        return (grants.org_name if grants else None) or self.org_id
+
+    @property
+    def verified(self) -> bool:
+        """Whether the policy in force came from a verified signed document."""
+        from brindle.pro import policy_cache
+
+        if self._enforced() is None:
+            return False
+        return (self._source in ("device", "snapshot") or any(
+            isinstance(copy, policy_cache.VerifiedCopy) and copy.kind == "policy"
+            for copy in self._verified.values()) or any(
+            "token" in (p.raw_body or {}) for p in self._policy_sources))
 
 
 def _tighter(a, b):

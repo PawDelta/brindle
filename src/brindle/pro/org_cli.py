@@ -186,74 +186,12 @@ def run_export(repo_root: str | None, *, org: str | None, days: int | None, base
     return 0
 
 
-def _device_fetch(client):
-    """``fetch`` for :func:`managed.device_policy`: the device's policy, asked
-    for with its device token (nothing without a ``client``)."""
-    def fetch(m: managed.Managed):
-        if client is None:
-            return None
-        path, headers = managed.device_request(m)
-        status, body = client.call("GET", path, None, headers=headers)
-        if status in (401, 403):
-            raise managed.DeviceTokenRefused(f"http {status}")
-        if status != 200:
-            raise OrgCliError(f"http {status}")
-        return body
-
-    return fetch
-
-
 def context(repo_root: str | None, *, store=None, client=None, now: float | None = None):
-    """The org context ``brindle account org policy`` shows
-    (:class:`brindle.pro.org_context.OrgContext`). Its policy is the
-    member's, read by the usual resolver (``ProPolicy``: fetched, cached, or
-    air-gap mode's offline file), except on a managed device: there it is the
-    device's newest valid signed policy (a copy fetched or cached with the
-    device token, or the managed file's snapshot), and a second org the
-    person is signed in to adds its rules, the stricter one winning (while
-    that org's policy is unavailable, its denial stands). The
-    managed binding's ``source`` says which copy the device's was."""
-    from brindle.policy import deny
-    from brindle.pro import license, org_context, team_policy
+    """The shared governance context, using the CLI's account transport."""
+    from brindle.pro import org_context, team_policy
 
-    def member(entitlement=None):
-        return team_policy.ProPolicy(repo_root or "", store=store, client=client,
-                                     entitlement=entitlement).policy()
-
-    device = managed.load(now=now)
-    if device is None:
-        return org_context.OrgContext.resolve(repo_root=repo_root, now=now,
-                                              providers=org_context.Providers(policy=member))
-    binding: dict = {}
-
-    def device_policy():
-        if isinstance(device, managed.Invalid):
-            return deny(f"this device's managed device file can't be used: {device.reason}")
-        binding.update(org_id=device.org_id, device_id=device.device_id)
-        p = managed.device_policy(device, fetch=_device_fetch(client),
-                                  cached=team_policy.load_cached(device.org_id), now=now)
-        if p is None:
-            return deny(f"managed device {device.device_id} has no valid signed policy yet; "
-                        "it fetches one with its device token")
-        snapshot = device.snapshot is not None and p.raw_body == device.snapshot.raw_body
-        binding["source"] = "snapshot" if snapshot else "device"
-        # The signed-in account's verified entitlement, read once: a member of the device's own
-        # org is covered by the device policy, whether or not their own copy can be had.
-        ent, error = org_context._once(lambda: license.current(store=store, client=client))
-        if ent is not None and ent.org_id == device.org_id:
-            return p.enforced
-
-        def entitlement():
-            if error is not None:
-                raise error
-            return ent
-
-        other = member(entitlement)
-        if isinstance(other, team_policy.OrgPolicy):
-            return managed.stricter(p, other, now=now)
-        if not other.allowed:    # the second org's policy is unavailable: agents wait, with its reason
-            return other
-        return p.enforced        # no team org: the device's policy alone
+    def member():
+        return team_policy.ProPolicy(repo_root or "", store=store, client=client).policy()
 
     return org_context.OrgContext.resolve(repo_root=repo_root, now=now, providers=org_context.Providers(
-        policy=device_policy, managed=lambda: binding))
+        policy=member))

@@ -23,7 +23,7 @@ def eligible(rules: OrgPlanRules | None, approver: Approver, plan: PlanTask) -> 
     ``approver.id`` is the verified member id, also when a reviewer agent acts for them."""
     if rules is None:
         return allow()
-    if rules.approvers and approver.id not in rules.approvers:
+    if rules.approver_groups and not any(approver.id in g for g in rules.approver_groups):
         return deny(f"{approver.id} may not approve plans; " + _who(rules))
     if approver.reviewer:
         if rules.two_person:
@@ -45,7 +45,12 @@ def may_approve(rules: OrgPlanRules | None, approver: Approver, plan: PlanTask,
     if not d.allowed or rules is None:
         return d
     # an earlier vote counts only while its member may still approve under the current rules
-    still_allowed = {m for m in approvals_so_far if not rules.approvers or m in rules.approvers}
+    still_allowed = {m for m in approvals_so_far
+                     if not rules.approver_groups or any(m in g for g in rules.approver_groups)}
+    votes = {*still_allowed, approver.id}
+    if any(not votes.intersection(g) for g in rules.approver_groups):
+        return deny("this approval is recorded; an approver from every organization's group must approve. "
+                    + _who(rules))
     if rules.two_person and len({*still_allowed, approver.id}) < 2:
         return deny("your org requires two different people to approve a plan; "
                     "this approval is recorded, a second person must approve too. " + _who(rules))
@@ -53,4 +58,5 @@ def may_approve(rules: OrgPlanRules | None, approver: Approver, plan: PlanTask,
 
 
 def _who(rules: OrgPlanRules) -> str:
-    return ("only " + ", ".join(rules.approvers) + " can approve") if rules.approvers else "any member can approve"
+    return ("approver groups: " + "; ".join(", ".join(g) for g in rules.approver_groups)
+            if rules.approver_groups else "any member can approve")

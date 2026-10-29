@@ -50,9 +50,8 @@ def managed_file(key, body, *, allow_airgap=False, install=None, policy_sub=SUB,
     return json.dumps(doc).encode()
 
 
-# The budget guard only counts spend dated the current UTC month, at the real clock.
-THIS_MONTH = time.strftime("%Y-%m", time.gmtime())
-LAST_MONTH = time.strftime("%Y-%m", time.gmtime(time.mktime(time.strptime(THIS_MONTH + "-01", "%Y-%m-%d")) - 86400))
+THIS_MONTH = "2027-01"
+LAST_MONTH = "2026-12"
 
 
 def member_policy(spend=None, month=THIS_MONTH, **rules):
@@ -61,11 +60,11 @@ def member_policy(spend=None, month=THIS_MONTH, **rules):
             "role": "member", "policy_role": None}
     if spend is not None:
         body["spend"] = {"month": month, "seat_usd": spend}
-    return parse_policy("org_other", body)
+    return parse_policy("org_other", body, NOW)
 
 
 def both_orders(a, b):
-    return [(managed.stricter(a, b), a) for a, b in ((a, b), (b, a))]
+    return [(managed.stricter(a, b, now=NOW), a) for a, b in ((a, b), (b, a))]
 
 
 GRANTS = {"allow": True, "kinds": ["bash"], "overridable": [], "max_minutes": 60, "max_uses": 5,
@@ -213,6 +212,8 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
             monkeypatch.setattr(team_policy, "managed_models", lambda root, s=s: s)
             assert managed_models.current("repo").deny_personal_keys
     elif case == "exhausted_member_budget":
+        gmtime = time.gmtime
+        monkeypatch.setattr(time, "gmtime", lambda now=NOW: gmtime(now))
         # The lower cap with the larger spend: the guard can't count less than either side.
         device = managed.device_policy(m, fetch=refused, cached=signed_answer(
             signing_key, {**answer(version=4), "spend": {"month": THIS_MONTH, "seat_usd": 5.0}}), now=NOW)

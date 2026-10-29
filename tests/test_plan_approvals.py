@@ -78,12 +78,15 @@ def _rules(**kw):
     # alice's vote was cast under the old allowlist; once she's off it, carol must approve
     (_rules(two_person=True, approvers=["bob", "carol"]), Approver("bob"), LIGHT, ["alice"], False),
     (None, Approver("anyone"), PlanTask(weight="heavy"), [], True),
+    pytest.param(_rules(approver_groups=[["alice"]]), Approver("alice"), LIGHT, [], True,
+                 marks=pytest.mark.variant("a group-only policy carries no display approvers")),
+    (_rules(approver_groups=[["alice"], ["bob"]]), Approver("alice"), LIGHT, [], False),
+    (_rules(approvers=["alice"], approver_groups=[["alice"], ["bob"]]),
+     Approver("bob"), LIGHT, ["alice"], True),
 ])
 def test_plan_approvals_may_approve(rules, approver, plan, so_far, allowed):
     d = may_approve(rules, approver, plan, so_far)
     assert d.allowed is allowed
-    if not allowed and rules.approvers:
-        assert all(m in d.reason for m in rules.approvers)
 
 
 @pytest.mark.parametrize("how", ["immediate", "queued", "queued_same_branch"])
@@ -206,6 +209,18 @@ def test_plan_approvals_org_rules_gate_approve_plan(db, tmp_path, monkeypatch):
     assert json.loads(db.get_agent(worker.id).plan_approvals) == ["alice"]
     assert attempt("bob") == "approved" and db.get_agent(worker.id).plan_state == "approved"
     assert state["audit"] == ["plan.approved", "plan.approved"]
+
+    from brindle.pro import managed, team_policy
+
+    state["rules"] = OrgPlanRules.from_policy(managed.stricter(
+        team_policy.parse_policy("device", {"version": 1, "policy": {"plan_approvers": ["alice"]}}),
+        team_policy.parse_policy("account", {"version": 1, "policy": {"plan_approvers": ["bob"]}})))
+    db.update_agent(worker.id, plan_state="proposed")
+    with pytest.raises(agents.AgentError):
+        agents.approve_plan(db, boss.id, worker.id)
+    assert json.loads(db.get_agent(worker.id).plan_approvals) == ["alice"]
+    agents.approve_plan(db, callers["bob"].id, worker.id)
+    assert db.get_agent(worker.id).plan_state == "approved"
 
     def unreadable(root):
         raise PlanUnavailable("down")

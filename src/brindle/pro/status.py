@@ -11,8 +11,9 @@
   activity (or a worker is running), every 5 minutes after 15 minutes without
   any, never in air-gap mode and never again after a 404 (an old server). When
   ``policy_version`` moves past the cached policy's, the policy is refetched.
-* The last answer is kept in ``$BRINDLE_HOME/pro/status.json`` (0600) so other
-  processes (the MCP server's spawn gate, the cull pass) see it. A failed poll
+* Enforced accounts keep verified answers in ``pro/signed/status.json``;
+  ``pro/status.json`` holds delivery and ack bookkeeping, and legacy accounts'
+  status. Signed reads always verify the cache for the current member. A failed poll
   changes nothing: notices fail open (none arrive), a pause keeps its last
   known value (fails closed).
 * ``block_reason`` is the spawn gate for a pause or a remote shutdown,
@@ -84,6 +85,7 @@ class Saved:
     delivered: list = field(default_factory=list)      # notice ids already put into a chat
     acked: list = field(default_factory=list)          # control ids already acknowledged
     pending: dict = field(default_factory=dict)        # control id -> workers stopped, not yet acked
+    read: list = field(default_factory=list)           # notice ids marked read at the account
 
 
 def _num(v) -> float | None:
@@ -174,6 +176,21 @@ def _org_id() -> str | None:
 
 
 def load(org_id: str | None = None) -> Saved:
+    """Verified status for enforced accounts; local delivery and ack bookkeeping."""
+    from brindle.pro import managed, policy_cache
+
+    saved = _load_saved(org_id)
+    ctx = _context()
+    ent = ctx.entitlement
+    if ent is not None and (policy_cache.enforced(ent) or isinstance(ctx.managed, managed.Managed)):
+        if saved.org_id != ent.org_id:
+            return Saved(org_id=saved.org_id)
+        saved.status = ctx.status.status
+        saved.status.notices = [n for n in saved.status.notices if n["id"] not in saved.read]
+    return saved
+
+
+def _load_saved(org_id: str | None = None) -> Saved:
     """The saved status for ``org_id`` (default: the signed-in org), else an
     empty one: nothing is paused or sent."""
     org_id = org_id or _org_id()
@@ -188,6 +205,7 @@ def load(org_id: str | None = None) -> Saved:
     return Saved(org_id=org_id, status=st,
                  delivered=[x for x in d.get("delivered") or [] if isinstance(x, str)][-KEEP_IDS:],
                  acked=[x for x in d.get("acked") or [] if isinstance(x, str)][-KEEP_IDS:],
+                 read=[x for x in d.get("read") or [] if isinstance(x, str)][-KEEP_IDS:],
                  pending={k: v for k, v in (d.get("pending") or {}).items()
                           if isinstance(k, str) and isinstance(v, int)})
 
@@ -195,7 +213,7 @@ def load(org_id: str | None = None) -> Saved:
 def save(s: Saved) -> None:
     write_private(_path(), json.dumps({
         "org_id": s.org_id, "status": s.status.to_json(), "delivered": s.delivered[-KEEP_IDS:],
-        "acked": s.acked[-KEEP_IDS:], "pending": s.pending}).encode())
+        "acked": s.acked[-KEEP_IDS:], "pending": s.pending, "read": s.read[-KEEP_IDS:]}).encode())
 
 
 # -- what is in force ---------------------------------------------------------------------------
@@ -214,7 +232,7 @@ def _context(now: float | None = None, saved: Saved | None = None):
     """An org context at ``now`` whose status is ``saved`` (default: :func:`load`)."""
     from brindle.pro.org_context import OrgContext, Providers
 
-    return OrgContext.resolve(now=now, providers=Providers(status=(lambda: saved) if saved else load))
+    return OrgContext.resolve(now=now, providers=Providers(status=(lambda: saved) if saved else None))
 
 
 def shutdown_control(now: float | None = None, saved: Saved | None = None) -> dict | None:
@@ -237,7 +255,8 @@ def block_reason(p=None, now: float | None = None) -> str | None:
     org shut brindle down remotely. ``p`` is the policy being enforced (its
     ``paused`` counts too). None when nothing blocks
     (brindle.pro.org_context.OrgContext.blocked_reason)."""
-    return _context(now).blocked_reason(p)
+    ctx = _context(now)
+    return ctx.blocked_reason(p) if p is not None else ctx.blocked_reason()
 
 
 def narrow(p, now: float | None = None):
@@ -352,21 +371,28 @@ class Poller:
         return client, store
 
     def _refetch_policy(self, ent) -> None:
-        from brindle.pro import team_policy
+        from brindle.pro import managed, org_context, policy_cache, team_policy
 
         client, store = self._make_client()
+        ctx = org_context.OrgContext.resolve(now=self._clock())
+        if policy_cache.enforced(ent) or isinstance(ctx.managed, managed.Managed):
+            ctx._client, ctx._store = client, store
+            policy_cache.get_verified("policy", binding=policy_cache.Binding(
+                ent.sub, ent.org_id, ent.role, ent.policy_role),
+                fetch=lambda kind: ctx._fetch(kind, ent.org_id), now=ctx.now, home=ctx.home, refresh=True)
+            return
         team_policy.fetch_policy(ent.org_id, client, store,
                                  cached_for=(ent.role, getattr(ent, "policy_role", None)))
 
     def poll_once(self) -> Status | None:
         """One poll. None when there is nothing to do or it failed (nothing is changed then)."""
-        from brindle.pro import auth, team_policy
+        from brindle.pro import auth, managed, policy_cache, team_policy
 
         if self.disabled or airgap.enabled():
             return None
         try:
             ent = self._ent()
-            if team_policy.FEATURE not in ent.features:
+            if team_policy.FEATURE not in ent.features and not policy_cache.enforced(ent):
                 return None
             client, store = self._make_client()
             code, body = auth.authed(client, store, "GET", f"/orgs/{ent.org_id}/status")
@@ -376,11 +402,21 @@ class Poller:
         if code == 404:
             self.disabled = True
             return None
-        st = parse(body, self._clock()) if code == 200 else None
+        now = self._clock()
+        signed_required = policy_cache.enforced(ent) or isinstance(managed.load(now=now), managed.Managed)
+        if code == 200 and signed_required:
+            binding = policy_cache.Binding(ent.sub, ent.org_id, ent.role, ent.policy_role)
+            copy = policy_cache.get_verified("status", binding=binding,
+                                             fetch=lambda kind: body, now=now, refresh=True)
+            if isinstance(copy, policy_cache.Unavailable):
+                return None
+            body = copy.body
+        st = parse(body, now) if code == 200 else None
         if st is None:
             return None
         with _lock:
-            saved = load(ent.org_id)
+            saved = _load_saved(ent.org_id)
+            st.notices = [n for n in st.notices if n["id"] not in saved.read]
             saved.org_id, saved.status = ent.org_id, st
             try:
                 save(saved)
@@ -388,8 +424,13 @@ class Poller:
                 log.warning("brindle: couldn't save the org status", exc_info=True)
         self.saved = saved
         try:
-            cached = team_policy.load_cached(ent.org_id)
-            if st.policy_version is not None and (cached is None or st.policy_version > cached.version):
+            if signed_required:
+                cached = policy_cache.get_verified("policy", binding=binding, fetch=lambda kind: None, now=now)
+                version = cached.claims["policy_version"] if isinstance(cached, policy_cache.VerifiedCopy) else None
+            else:
+                cached = team_policy.load_cached(ent.org_id)
+                version = cached.version if cached else None
+            if st.policy_version is not None and (version is None or st.policy_version > version):
                 self._refetch(ent)
         except Exception:  # noqa: BLE001 - the old policy stays; the next poll tries again
             log.debug("brindle: policy refetch failed", exc_info=True)
@@ -507,6 +548,7 @@ def mark_read(ids: list[str], client=None, store=None) -> list[str]:
     if done:
         with _lock:
             saved = load(saved.org_id)
+            saved.read = list(dict.fromkeys([*saved.read, *done]))[-KEEP_IDS:]
             saved.status.notices = [n for n in saved.status.notices if n["id"] not in done]
             save(saved)
     return done

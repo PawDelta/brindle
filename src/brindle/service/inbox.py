@@ -22,7 +22,7 @@ from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent
 from brindle.providers import get_provider
-from brindle.service.dto import InboxActionDTO, InboxItemDTO, PermissionChoiceDTO, PermissionDTO
+from brindle.service.dto import InboxActionDTO, InboxItemDTO, PermissionChoiceDTO, PermissionDTO, PlanApprovalDTO
 from brindle.service.errors import ServiceError
 
 WORKERS = ("assign", "handoff")
@@ -175,6 +175,28 @@ def _pr_items(db: DB, root_id: str, branch: str, link: dict) -> list[InboxItemDT
             for r in rows]
 
 
+def _plan_approval(db: DB, row: Agent) -> PlanApprovalDTO:
+    """The people this plan waits on and whether the viewer may contribute a vote."""
+    from brindle import plan_approvals, plan_policy
+
+    ws = db.get_workspace(row.workspace_id)
+    if ws is None:
+        return PlanApprovalDTO(you=False)
+    repo_root = ws.repo_root
+    votes = json.loads(row.plan_approvals or "[]")
+    try:
+        rules = plan_policy.load_org_rules(repo_root)
+    except plan_policy.OrgRulesUnavailable:
+        return PlanApprovalDTO(you=False)
+    member = plan_policy.current_member(repo_root)
+    who = plan_approvals.Approver(member) if member else None
+    allowed = rules is None or not rules.requires_member or bool(who and plan_approvals.eligible(
+        rules, who, plan_policy.PlanTask(weight=row.weight)).allowed and member not in votes)
+    return PlanApprovalDTO(approvers=list(dict.fromkeys(m for g in rules.approver_groups for m in g)) if rules else [],
+                           second_person=bool(rules and rules.two_person),
+                           requested_by=votes[0] if votes else None, you=allowed)
+
+
 def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -> list[InboxItemDTO]:
     """Everything waiting on a person in ``repo_root``'s sessions (every
     session when None), then the org's unread notices. Each agent's item
@@ -204,7 +226,7 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                                         action=_sign_in(row.provider) if kind == "credentials" else None))
             if row.plan_state == "proposed":
                 out.append(InboxItemDTO(kind="plan", reason="plan awaiting approval", **link,
-                                        detail=row.plan_text))
+                                        detail=row.plan_text, approval=_plan_approval(db, row)))
             if row.parent_id is not None:
                 continue
             ap = db.get_autopilot(row.id)

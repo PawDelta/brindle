@@ -2690,10 +2690,13 @@ def delegate(
         raise AgentError(str(e)) from e
     from brindle import plan_policy
     from brindle import tasks as task_mod
-    from brindle.plan_policy import PlanTask, needs_plan
+    from brindle.plan_policy import PlanTask
+    from brindle.pro.org_context import OrgContext, Providers
 
+    ctx = OrgContext.resolve(repo_root=caller_ws.repo_root, providers=Providers(
+        plan_rules=lambda: plan_policy.load_org_rules(caller_ws.repo_root)))
     try:
-        org_rules = plan_policy.load_org_rules(caller_ws.repo_root)
+        org_rules = ctx.plan_rules
     except plan_policy.OrgRulesUnavailable as e:
         raise AgentError(str(e)) from e
     own = repos.own_root(db, pilot.root_of(db, caller.id)) if caller else None
@@ -2703,7 +2706,7 @@ def delegate(
                          cross_repo=(bool(own) and own != caller_ws.repo_root)
                          or any(r != caller_ws.repo_root for r in dep_repos))
     if plan_first is None:
-        plan_first = needs_plan(plan_task, config=load_repo_config(caller_ws.repo_root), org_rules=org_rules)
+        plan_first = ctx.needs_plan(plan_task, config=load_repo_config(caller_ws.repo_root))
     elif not plan_first:
         plan_first = plan_policy.org_requires_plan(plan_task, org_rules)  # an explicit False can't waive the org's
     from brindle import identity_lock
@@ -3412,14 +3415,13 @@ def _org_rules_for(db: DB, agent: Agent):
         raise AgentError(str(e)) from e
 
 
-def _org_eligibility(db: DB, caller_id: str, agent: Agent, rules):
-    """(approver, plan, refusal) for the caller under the org's plan rules. The
-    member is only the one bound to the caller at spawn (agent.member), never
-    the process-wide signed-in one; refusal is None when the caller may approve."""
+def _org_eligibility(db: DB, caller_id: str | None, agent: Agent, rules, human_member: str | None = None):
+    """Judge the verified Inbox member or the member bound to an agent at spawn.
+    Return (approver, plan, refusal); refusal is None when the caller may approve."""
     from brindle import plan_approvals, plan_policy
 
     ws = db.get_workspace(agent.workspace_id)
-    caller = db.get_agent(caller_id)
+    caller = db.get_agent(caller_id) if caller_id is not None else None
     # the caller's profile is judged in the caller's own repo: a custom profile may exist only there
     caller_ws = db.get_workspace(caller.workspace_id) if caller else None
     if caller and caller_ws is None:
@@ -3428,24 +3430,25 @@ def _org_eligibility(db: DB, caller_id: str, agent: Agent, rules):
         reviewer = bool(caller) and review_role(caller.profile, caller_ws.repo_root)
     except Exception:  # noqa: BLE001 - an unresolvable profile can't be shown to be a builder
         return None, None, "can't verify the caller's profile is not a reviewer agent; refusing"
-    member = caller.member if caller else None
+    member = human_member if human_member is not None else caller.member if caller else None
     task = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == agent.id), None)
     plan = plan_policy.PlanTask(weight=agent.weight, files=json.loads(task.files) if task and task.files else None)
     if member is None:
         return None, plan, ("your org's plan rules need an approver started while signed in to the org "
                             "(this agent has no team member bound)")
     who = plan_approvals.Approver(member, reviewer)
-    return who, plan, (None if plan_approvals.eligible(rules, who, plan).allowed
-                       else plan_approvals.eligible(rules, who, plan).reason)
+    decision = plan_approvals.eligible(rules, who, plan)
+    return who, plan, None if decision.allowed else decision.reason
 
 
-def _org_plan_refusal(db: DB, caller_id: str, agent: Agent, rules, so_far: list[str]) -> str | None:
+def _org_plan_refusal(db: DB, caller_id: str | None, agent: Agent, rules, so_far: list[str],
+                      human_member: str | None = None) -> str | None:
     """Why the org's plan rules refuse this approval, or None. An eligible
     first approval a two-person rule still waits on is recorded and refused;
     an ineligible one changes nothing."""
     from brindle import plan_approvals
 
-    who, plan, denied = _org_eligibility(db, caller_id, agent, rules)
+    who, plan, denied = _org_eligibility(db, caller_id, agent, rules, human_member)
     if denied:
         return denied
     member = who.id
@@ -3454,39 +3457,47 @@ def _org_plan_refusal(db: DB, caller_id: str, agent: Agent, rules, so_far: list[
         return None
     if member not in so_far:
         db.update_agent(agent.id, plan_approvals=json.dumps([*so_far, member]))
-        _emit_plan(db, "plan.approved", agent, caller_id)
+        _emit_plan(db, "plan.approved", agent, human_member or caller_id)
     return d.reason
 
 
 def approve_plan(db: DB, caller_id: str | None, agent_id: str, feedback: str = "",
-                 approved: bool = True) -> str:
+                 approved: bool = True, *, human: bool = False, human_member: str | None = None) -> str:
     """The worker's parent decides on its proposed plan; the worker is told.
-    Under the org's plan rules a reviewer in the worker's workspace may too."""
+    The Inbox supplies human decisions, with a verified member for identity-based org rules."""
     agent = get(db, agent_id)
     if not agent.plan_first:
         raise AgentError(f"{agent.id} isn't a plan-first worker")
-    if caller_id is None:
+    if caller_id is None and not human:
         raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
     rules = _org_rules_for(db, agent)
-    if agent.parent_id != caller_id and not (rules and caller_id != agent.id and db.get_agent(caller_id)):
+    if human:
+        if rules and rules.requires_member:
+            if not human_member:
+                raise AgentError("Sign in to approve or revise a plan under your org's approval rules")
+        else:
+            # A local human decision needs no member vote when the policy has no identity requirement.
+            rules = None
+    if not human and agent.parent_id != caller_id and not (
+            rules and caller_id != agent.id and db.get_agent(caller_id)):
         # Org rules open approval to any other agent (another member's supervisor, a
         # reviewer); the member behind it is verified and judged by the rules.
         raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
     if agent.plan_state != "proposed":
         raise AgentError(f"{agent.id} has no plan awaiting a decision")
-    if not approved and rules and agent.parent_id != caller_id:
+    if not approved and rules and (human or agent.parent_id != caller_id):
         # A revision is a decision too: a non-parent needs an eligible bound member.
-        denied = _org_eligibility(db, caller_id, agent, rules)[2]
+        denied = _org_eligibility(db, caller_id, agent, rules, human_member)[2]
         if denied:
             raise AgentError(denied)
     feedback = feedback.strip()
     if approved:
         so_far = json.loads(agent.plan_approvals or "[]")
-        denied = _org_plan_refusal(db, caller_id, agent, rules, so_far) if rules else None
+        denied = _org_plan_refusal(db, caller_id, agent, rules, so_far, human_member) if rules else None
         if denied:
             raise AgentError(denied)
         db.update_agent(agent.id, plan_state="approved", plan_text=None, plan_approvals=None)
-        _emit_plan(db, "plan.approved", agent, caller_id)
+        _emit_plan(db, "plan.approved", agent, human_member or caller_id)
         text = "Your plan is approved: go ahead and implement it."
     else:
         db.update_agent(agent.id, plan_state="revise")
