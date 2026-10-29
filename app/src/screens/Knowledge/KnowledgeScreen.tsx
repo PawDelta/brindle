@@ -147,7 +147,7 @@ function RecordForm({ client, repo, onRecorded, onCancel }: { client: DaemonClie
 
   const row = "grid gap-x-s2 gap-y-0.5 md:grid-cols-[9rem_minmax(0,1fr)] md:items-start";
   return (
-    <form aria-label="Record a decision" onSubmit={submit} className={`${card} flex flex-col gap-s1 border-branch px-s2 py-s2`} data-testid="record-form">
+    <form aria-label="Record a decision" onSubmit={submit} className={`${card} flex flex-col gap-s1 border-pass/55 px-s2 py-s2`} data-testid="record-form">
       <div className="flex items-baseline gap-s1">
         <span className="font-semibold">Record a decision</span>
         <span className="text-xs text-ink-3">A rule for every agent in this repo, from now on. Every session is told; new tasks on these paths carry it in their brief.</span>
@@ -228,7 +228,7 @@ function AddFolderForm({ pickFolder, busy, onAdd, onCancel }: { pickFolder?: Pic
   return (
     <form
       aria-label="Add a folder"
-      className={`${card} flex flex-col gap-s1 border-branch px-s2 py-s2`}
+      className={`${card} flex flex-col gap-s1 border-pass/55 px-s2 py-s2`}
       onSubmit={(e) => {
         e.preventDefault();
         if (path.trim()) onAdd(path.trim(), isPrivate);
@@ -341,19 +341,19 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
       </div>
       <ol className="flex flex-col gap-s1 text-sm">
         <li className="flex gap-s2">
-          <span className="w-5 shrink-0 font-semibold text-branch">1</span>
+          <span className="w-5 shrink-0 font-semibold text-pass">1</span>
           <span>
             <span className="font-medium">You record a decision.</span> A rule every agent follows from now on, with why. Workers get the ones that cover their files in their brief.
           </span>
         </li>
         <li className="flex gap-s2">
-          <span className="w-5 shrink-0 font-semibold text-branch">2</span>
+          <span className="w-5 shrink-0 font-semibold text-pass">2</span>
           <span>
             <span className="font-medium">A session records one.</span> A supervisor that settles something durable keeps it here for every later session.
           </span>
         </li>
         <li className="flex gap-s2">
-          <span className="w-5 shrink-0 font-semibold text-branch">3</span>
+          <span className="w-5 shrink-0 font-semibold text-pass">3</span>
           <span>
             <span className="font-medium">You add a folder of documents.</span> Markdown or text (design notes, runbooks) that agents can look up and get the relevant parts of.
           </span>
@@ -616,7 +616,7 @@ export function KnowledgeScreen({ client, pickFolder }: KnowledgeScreenProps) {
           {adding && <AddFolderForm pickFolder={pickFolder} busy={busy} onAdd={(path, isPrivate) => void addFolder(path, isPrivate)} onCancel={() => setAdding(false)} />}
           {pending.map((p) => (
             <p key={p.job} role="status" className={`${notice} flex items-center gap-s1`} data-testid="source-pending">
-              <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />
+              <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-pass/55 border-t-transparent" aria-hidden />
               {p.label}…
             </p>
           ))}

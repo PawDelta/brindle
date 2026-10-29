@@ -48,7 +48,7 @@ function SearchPicker({ label, choices, selected, onSelect, children }: {
       <div className={`${panel} absolute left-0 top-full z-50 mt-1 w-full min-w-56 p-s1 shadow-lg`}>
         <input ref={search} type="search" className={`${field} w-full`} aria-label={`Search ${label.toLowerCase()}`} value={query} onChange={(event) => setQuery(event.target.value)} />
         <div className="mt-s1 max-h-56 overflow-auto" role="group" aria-label={`Available ${label.toLowerCase()}`}>
-          {visible.map((item) => <button key={item.id} type="button" aria-pressed={selected.includes(item.id)} className={`${quiet} flex w-full flex-col items-start text-left aria-pressed:bg-branch-soft aria-pressed:text-branch`} onClick={() => {
+          {visible.map((item) => <button key={item.id} type="button" aria-pressed={selected.includes(item.id)} className={`${quiet} flex w-full flex-col items-start text-left aria-pressed:bg-pass-soft aria-pressed:text-pass`} onClick={() => {
             onSelect(item.id);
             if (host.current) { host.current.open = false; host.current.querySelector("summary")?.focus(); }
           }}><span>{item.label}</span>{item.detail && <> <small className="break-all text-xs text-ink-3">{item.detail}</small></>}</button>)}

@@ -181,7 +181,7 @@ function Section({ id, title, blurb, actions, children, testId, staff = false }:
         <span className="flex-1" />
         {actions}
       </header>
-      <div className={`${card} ${staff ? "border-sap bg-sap-soft" : ""} flex flex-col divide-y divide-line`}>{children}</div>
+      <div className={`${card} flex flex-col divide-y divide-line`}>{children}</div>
     </section>
   );
 }
@@ -214,7 +214,7 @@ function Row({ label: text, help, htmlFor, badges, wide = false, children, testI
   );
 }
 
-const Edited = () => <span className={`${pill} text-branch`}>edited</span>;
+const Edited = () => <span className={`${pill} text-ink-2`}>edited</span>;
 
 /* On or off, as a switch. */
 function Toggle({ id, label: name, checked, disabled, onChange }: { id: string; label: string; checked: boolean; disabled: boolean; onChange(on: boolean): void }) {
@@ -226,10 +226,10 @@ function Toggle({ id, label: name, checked, disabled, onChange }: { id: string; 
       aria-checked={checked}
       aria-label={name}
       disabled={disabled}
-      className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${checked ? "border-branch bg-branch" : "border-line-strong bg-surface-2"}`}
+      className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${checked ? "border-pass bg-pass" : "border-line-strong bg-surface-2"}`}
       onClick={() => onChange(!checked)}
     >
-      <span aria-hidden className={`absolute top-0.5 size-3.5 rounded-full transition-[left] ${checked ? "left-[18px] bg-on-branch" : "left-0.5 bg-ink-3"}`} />
+      <span aria-hidden className={`absolute top-0.5 size-3.5 rounded-full transition-[left] ${checked ? "left-[18px] bg-canvas" : "left-0.5 bg-ink-3"}`} />
     </button>
   );
 }
@@ -315,7 +315,7 @@ function SettingRow({ s, value, dirty, disabled, onChange, override }: { s: Sett
       wide={s.kind === "list"}
       badges={
         <>
-          {s.pro && <span className={`${pill} text-branch`}>Pro</span>}
+          {s.pro && <span className={`${pill} text-ink-2`}>Pro</span>}
           {dirty && <Edited />}
         </>
       }
@@ -396,7 +396,7 @@ function PermissionMode({ client }: { client: DaemonClient }) {
       data={{ mode: current }}
     >
       {!unavailable && (
-        <div role="radiogroup" aria-label="Claude permission mode" className="inline-flex rounded-md border border-line-strong bg-surface p-0.5">
+        <div role="radiogroup" aria-label="Claude permission mode" className="inline-flex rounded-md border border-line p-0.5">
           {MODES.map((m) => (
             <button
               key={m.value}
@@ -405,7 +405,7 @@ function PermissionMode({ client }: { client: DaemonClient }) {
               aria-checked={current === m.value}
               disabled={saving || !settings}
               title={m.blurb}
-              className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${current === m.value ? "bg-branch text-on-branch" : "text-ink-2 hover:bg-surface-2"}`}
+              className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${current === m.value ? "bg-pass-soft font-medium text-pass" : "text-ink-2 hover:bg-surface-2"}`}
               onClick={() => void pick(m.value)}
             >
               {m.label}
@@ -1188,7 +1188,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
     if (!source) return undefined;
     return (
       <span className="mt-0.5 flex flex-wrap items-center gap-x-s1" data-testid={`override-${s.key}`} data-source={source}>
-        <span className={`${pill} text-branch`}>
+        <span className={`${pill} text-ink-2`}>
           {overrideText(s, config?.repo?.[s.key])} in this project
         </span>
         <button type="button" className={`${quiet} text-xs`} disabled={saving} onClick={() => void clearOverride(s.key, source)}>
@@ -1633,7 +1633,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         </p>
       )}
       {repo && dirty.length > 0 && (
-        <div className={`${panel} sticky bottom-0 flex flex-col gap-s1 border-branch px-s2 py-s2 shadow-lg`} data-testid="settings-save">
+        <div className={`${panel} sticky bottom-0 flex flex-col gap-s1 border-pass/55 px-s2 py-s2 shadow-lg`} data-testid="settings-save">
           <div className="flex flex-wrap items-center gap-s2">
             <span className="text-sm font-medium">{dirty.length === 1 ? "1 change" : `${dirty.length} changes`}</span>
             <span className="flex-1" />

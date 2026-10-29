@@ -156,7 +156,7 @@ function PlanCard({ account, client, openUrl, onChanged }: { account: AccountInf
     <section className={`${card} flex flex-col gap-s1 px-s2 py-s2`} aria-label="Plan" data-testid="plan">
       <header className="flex flex-wrap items-center gap-s1">
         <h2 className={h2}>{account.name ?? "Signed in"}</h2>
-        <span className={`${pill} ${plan === "free" ? "text-ink-2" : "text-branch"}`} data-testid="plan-pill">
+        <span className={`${pill} text-ink-2`} data-testid="plan-pill">
           brindle {PLAN_LABEL[plan]}
         </span>
         <span className="flex-1" />
@@ -263,7 +263,7 @@ function PlanLine({ f, features, dim = false, onUse }: { f: TierFeature; feature
       </span>
       <span>
         {use ? (
-          <button type="button" className="text-left underline decoration-line-strong underline-offset-2 hover:text-branch" onClick={() => onUse(use)} data-use={"screen" in use ? use.screen : "site"}>
+          <button type="button" className="text-left underline decoration-line-strong underline-offset-2 hover:text-ink" onClick={() => onUse(use)} data-use={"screen" in use ? use.screen : "site"}>
             {f.what}
             {"url" in use && <span className="text-ink-3"> ↗</span>}
           </button>
@@ -292,14 +292,14 @@ function PaidPlan({ plan, features, openUrl, onUse }: { plan: Plan; features: st
     <section className={`${card} flex flex-col gap-s1 px-s2 py-s2`} aria-label="Your plan" data-testid="features">
       <header className="flex flex-wrap items-baseline gap-s1">
         <h2 className={h2}>{tier.name}</h2>
-        <span className={`${pill} text-branch`}>{tier.label}</span>
+        <span className={`${pill} text-ink-2`}>{tier.label}</span>
         <span className="flex-1" />
         <button type="button" className={`${quiet} text-xs`} onClick={() => open(PLAN_GUIDE_URL[plan])} data-testid="plan-guide">
           Get the most from {PLAN_LABEL[plan]} ↗
         </button>
         {/* A paying customer may still move up a tier, quietly: a text link, no comparison, no banner. */}
         {next && (
-          <button type="button" className={`${quiet} text-xs text-branch`} onClick={() => open(UPGRADE_URL[next])} data-testid="upgrade-next">
+          <button type="button" className={`${quiet} text-xs`} onClick={() => open(UPGRADE_URL[next])} data-testid="upgrade-next">
             Upgrade to {PLAN_LABEL[next]} ↗
           </button>
         )}
@@ -369,7 +369,7 @@ function Plans({ openUrl, signedIn }: { openUrl: OpenUrl; signedIn: boolean }) {
           <tr>
             <th className="py-1 text-left font-normal text-ink-3" />
             {TIERS.map((t) => (
-              <th key={t.plan} className={`w-24 py-1 text-center ${t.plan === "free" ? "rounded-t-md bg-branch-soft text-branch" : "font-medium text-ink-2"}`} data-plan={t.plan} data-current={t.plan === "free" || undefined}>
+              <th key={t.plan} className={`w-24 py-1 text-center ${t.plan === "free" ? "rounded-t-md bg-pass-soft text-pass" : "font-medium text-ink-2"}`} data-plan={t.plan} data-current={t.plan === "free" || undefined}>
                 {t.label}
                 <span className="block text-xs font-normal text-ink-3">{t.price}</span>
                 {t.plan === "free" && <span className="block text-xs font-normal">yours</span>}
@@ -388,7 +388,7 @@ function Plans({ openUrl, signedIn }: { openUrl: OpenUrl; signedIn: boolean }) {
               <tr key={f.what} className="border-t border-line">
                 <td className="py-1 pr-s2 text-ink-2">{f.what}</td>
                 {TIERS.map((t) => (
-                  <td key={t.plan} className={`py-1 text-center ${t.plan === "free" ? "bg-branch-soft" : ""}`} aria-label={planHas(t.plan, tier) ? `${t.label}: included` : `${t.label}: not included`}>
+                  <td key={t.plan} className={`py-1 text-center ${t.plan === "free" ? "bg-pass-soft" : ""}`} aria-label={planHas(t.plan, tier) ? `${t.label}: included` : `${t.label}: not included`}>
                     <span className={planHas(t.plan, tier) ? "text-pass" : "text-ink-3"}>{planHas(t.plan, tier) ? "✓" : "–"}</span>
                   </td>
                 ))}
@@ -465,7 +465,7 @@ function Spend({ client, openUrl, signedIn, paying, revision }: { client: Daemon
         <>
           <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Days">
             {DAYS.map((d) => (
-              <button key={d} type="button" className={`${chip} border ${days === d ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2 hover:bg-surface-2"}`} aria-pressed={days === d} onClick={() => setDays(d)}>
+              <button key={d} type="button" className={`${chip} border ${days === d ? "border-pass/55 bg-pass-soft text-pass" : "border-line text-ink-2 hover:bg-surface-2"}`} aria-pressed={days === d} onClick={() => setDays(d)}>
                 {d} days
               </button>
             ))}

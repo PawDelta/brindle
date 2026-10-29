@@ -90,7 +90,6 @@ interface Activity {
   at: number;
 }
 
-const TONE: Record<string, string> = { deny: "bg-sap-soft text-sap", ask: "bg-branch-soft text-branch", allow: "bg-pass-soft text-pass" };
 /* The same tones on a rule's pill: in the text only (pills are hairlines, never a fill). */
 const INK: Record<string, string> = { deny: "text-sap", ask: "text-branch", allow: "text-pass" };
 const fieldLabel = "flex min-w-0 flex-col gap-1 text-xs font-medium text-ink-3";
@@ -245,7 +244,7 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
       </header>
       {view !== "groups" && (
         <div className="flex items-center gap-s2">
-          <button type="button" className={`${quiet} -ml-2 text-branch`} onClick={() => setView("groups")}>
+          <button type="button" className={`${quiet} -ml-2`} onClick={() => setView("groups")}>
             ← Back to permissions
           </button>
           <span className="text-sm font-medium">{VIEW_TITLE[view]}</span>
@@ -263,7 +262,7 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
         <p role={feedback.failed ? "alert" : "status"} className={`text-sm ${feedback.failed ? "text-sap" : "text-ink-2"}`} data-testid="permissions-feedback">
           {feedback.text}{" "}
           {feedback.undo && (
-            <button type="button" className={`${quiet} text-branch`} disabled={busy} onClick={feedback.undo}>
+            <button type="button" className={`${quiet}`} disabled={busy} onClick={feedback.undo}>
               Undo
             </button>
           )}
@@ -314,14 +313,14 @@ export function Permissions({ client, rule: openId, ask }: PermissionsProps) {
 /* A segmented Allow / Ask / Deny (and Inherit) control: the pressed one is the current answer. */
 function Segmented({ label, value, levels, disabled, onPick }: { label: string; value: string; levels: readonly string[]; disabled: boolean; onPick(level: string): void }) {
   return (
-    <div role="group" aria-label={label} className="inline-flex overflow-hidden rounded-md border border-line bg-canvas-2">
+    <div role="group" aria-label={label} className="inline-flex overflow-hidden rounded-md border border-line">
       {levels.map((l) => (
         <button
           key={l}
           type="button"
           aria-pressed={value === l}
           disabled={disabled}
-          className={`border-l border-line px-s2 py-0.5 text-sm first:border-l-0 ${value === l ? (l === "inherit" ? "bg-surface-2 text-ink" : TONE[l]) : "text-ink-2 hover:bg-surface-2"}`}
+          className={`border-l border-line px-s2 py-0.5 text-sm first:border-l-0 ${value === l ? `bg-surface-2 font-medium ${l === "inherit" ? "text-ink" : INK[l]}` : "text-ink-2 hover:bg-surface-2"}`}
           onClick={() => onPick(l)}
         >
           {LEVEL_NAME[l]}
@@ -417,10 +416,10 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
         </div>
         <div className="grid gap-s2 sm:grid-cols-2 xl:grid-cols-4" data-testid="presets">
           {policy.presets.map((p) => (
-            <div key={p.name} className={`${card} flex flex-col gap-1 p-s2 ${p.current ? "border-branch bg-branch-soft" : ""}`} data-preset={p.name}>
+            <div key={p.name} className={`flex flex-col gap-1 rounded-md border p-s2 ${p.current ? "border-pass/55 bg-pass-soft" : "border-line bg-canvas-2"}`} data-preset={p.name}>
               <h4 className="flex items-center gap-1 text-sm font-medium">
                 {presetLabel(p.name)}
-                {p.name === "autonomous" && <span className="rounded-sm bg-branch-soft px-1 text-[10px] text-branch">RECOMMENDED</span>}
+                {p.name === "autonomous" && <span className="rounded-sm bg-pass-soft px-1 text-[10px] text-pass">RECOMMENDED</span>}
               </h4>
               <p className="flex-1 text-xs text-ink-2">{p.description}</p>
               <button type="button" className={`${button} mt-1 self-start`} disabled={busy || p.current} onClick={() => usePreset(p.name)}>
@@ -472,14 +471,14 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
                   {g.subs.map(([sub, name, hint]) => {
                     const o = overrideOf(g.id, sub);
                     return (
-                      <div key={sub} data-sub={sub} className={`flex flex-wrap items-center gap-s2 border-b border-line border-l-2 py-s1 pl-s1 text-sm last:border-b-0 ${o === "inherit" ? "border-l-transparent" : "border-l-branch bg-branch-soft"}`}>
+                      <div key={sub} data-sub={sub} className={`flex flex-wrap items-center gap-s2 border-b border-line border-l-2 py-s1 pl-s1 text-sm last:border-b-0 ${o === "inherit" ? "border-l-transparent" : "border-l-pass bg-pass-soft"}`}>
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-1">
                             {name}
                             {o === "inherit" ? (
                               <span className="text-[11px] text-ink-3">Inherits {LEVEL_NAME[base]}</span>
                             ) : (
-                              <span className="rounded-sm border border-branch bg-surface px-1 text-[11px] text-branch" data-testid="override-marker">
+                              <span className="text-[11px] text-pass" data-testid="override-marker">
                                 {o === base ? `Pinned to ${LEVEL_NAME[o]} (same as group)` : `Overrides ${g.name}: ${LEVEL_NAME[base]} → ${LEVEL_NAME[o]}`}
                               </span>
                             )}
@@ -504,7 +503,7 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
           </strong>
           <p className="text-xs text-ink-3">Allows and denials you saved from the Inbox.</p>
         </div>
-        <button type="button" className={`${quiet} text-branch`} onClick={() => onOpen("saved")}>
+        <button type="button" className={`${quiet}`} onClick={() => onOpen("saved")}>
           Manage saved actions
         </button>
       </div>
@@ -514,7 +513,7 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
           <p className="text-xs text-ink-3">{policy.rules.length} rules in total. Search, filter and inspect every rule.</p>
         </div>
         <span className="flex gap-s1">
-          <button type="button" className={`${quiet} text-branch`} onClick={() => onOpen("activity")}>
+          <button type="button" className={`${quiet}`} onClick={() => onOpen("activity")}>
             Activity
           </button>
           <button type="button" className={button} onClick={() => onOpen("advanced")}>
@@ -655,7 +654,7 @@ function AdvancedView({ client, policy, busy, run, record, onEdit, onRemove }: {
             <option value="user">You</option>
             <option value="learned">Learned</option>
           </select>
-          <button type="button" className={`${quiet} text-branch`} disabled={!filtered} onClick={() => { setQuery(""); setCapability(""); setDecision(""); setSource(""); }}>
+          <button type="button" className={`${quiet}`} disabled={!filtered} onClick={() => { setQuery(""); setCapability(""); setDecision(""); setSource(""); }}>
             Clear
           </button>
         </div>
@@ -894,7 +893,7 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
     >
       {conflicts ? (
         <div className="flex flex-col gap-s2" data-testid="conflict-review">
-          <div className="rounded-md border border-sap p-s2 text-sm">
+          <div className="border-l-2 border-sap px-s2 py-s1 text-sm">
             <span className="text-[11px] font-medium uppercase tracking-wider text-ink-3">
               {conflicts.length} {conflicts.every((c) => c.certain) ? `conflict${conflicts.length === 1 ? "" : "s"}` : "possible overlap"} found
             </span>
@@ -923,7 +922,7 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
             </button>
           </div>
           <p className="text-xs text-ink-3">Keep existing discards your changes. Use my new rule removes the conflicting rules. Auto-resolve keeps the stricter decision on the shared requests by adding an exception to the other rule.</p>
-          <button type="button" className={`${quiet} self-start text-branch`} onClick={() => setConflicts(null)}>
+          <button type="button" className={`${quiet} self-start`} onClick={() => setConflicts(null)}>
             Back to editing
           </button>
         </div>
@@ -1046,7 +1045,7 @@ function SavedTab({ saved, busy, onEdit, onDelete }: { saved: SavedActionDTO[]; 
                 </small>
               </td>
               <td className="border-b border-line py-s1 pr-s1">
-                <span className={`${pill} ${s.decision === "deny" ? TONE.deny : TONE.allow}`}>{s.decision === "deny" ? "Denied" : "Allowed"}</span>
+                <span className={`${pill} ${s.decision === "deny" ? INK.deny : INK.allow}`}>{s.decision === "deny" ? "Denied" : "Allowed"}</span>
               </td>
               <td className="border-b border-line py-s1 pr-s1 text-xs">{savedLasts(s)}</td>
               <td className="whitespace-nowrap border-b border-line py-s1 text-right">
@@ -1190,7 +1189,7 @@ function SavedEditor({ client, saved: s, onClose, onDelete, onSaved }: { client:
           {life === "session" ? "Ends when the session it was saved in closes." : life === "forever" ? "Stays until you delete it here." : "Expires after this time, counted from when you save."}
         </p>
       </Step>
-      <p className="rounded-md bg-branch-soft px-s2 py-s1 text-xs text-ink-2" aria-live="polite" data-testid="saved-summary">
+      <p className={`border-l-2 px-s1 py-1 text-xs text-ink-2 ${decision === "deny" ? "border-sap" : "border-pass"}`} aria-live="polite" data-testid="saved-summary">
         {decision === "deny" ? "Deny" : "Allow"} without asking · {kindLabel(s.kind)} · {covers} · {life === "session" ? "this session" : life === "forever" ? "until deleted" : `${amount} ${unit}`}
       </p>
       {error && (

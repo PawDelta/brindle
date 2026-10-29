@@ -31,7 +31,7 @@ import { alert, button, field, mono, quiet } from "./ui";
 export type Method = "sign_in" | "api_key" | "cloud";
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
-const link = "text-branch underline-offset-2 hover:underline";
+const link = "text-pass underline-offset-2 hover:underline";
 const fine = "text-xs text-ink-3";
 
 /* ---- The three choices. ---- */
@@ -80,7 +80,7 @@ export function MethodChoice({ provider, name, value, cloud, disabled = false, o
           aria-labelledby={`${provider}-${method}-title`}
           aria-describedby={`${provider}-${method}-blurb`}
           disabled={disabled}
-          className="flex flex-col items-start gap-1 border-t-2 border-line px-s1 pb-s1 pt-s2 text-left hover:bg-surface-2 disabled:opacity-50 aria-checked:border-branch aria-checked:bg-surface-2"
+          className="flex flex-col items-start gap-1 border-t-2 border-line px-s1 pb-s1 pt-s2 text-left hover:bg-surface-2 disabled:opacity-50 aria-checked:border-pass/55 aria-checked:bg-surface-2"
           onClick={() => onChange(method)}
         >
           <span id={`${provider}-${method}-title`} className="text-sm font-semibold">
@@ -491,7 +491,7 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, locked = f
       <div className="flex flex-wrap items-center gap-s2">
         {busy ? (
           <span className="inline-flex items-center gap-s1 text-sm" role="status">
-            <span className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />
+            <span className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-pass/55 border-t-transparent" aria-hidden />
             Waiting for the browser…
           </span>
         ) : result === "signed in" ? (
