@@ -13,7 +13,7 @@ import type { Detection, Setup } from "../../api/setup";
 import { plain } from "../../api/wording";
 import { ProgressCard } from "../../components/ProgressCard";
 import { plainText } from "../../components/ProviderSignIn";
-import { alert, primary, quiet } from "../../components/ui";
+import { alert, mainTone, quiet } from "../../components/ui";
 import { Frame, Spinner } from "../Onboarding/Frame";
 
 export interface FirstRunProps {
@@ -32,7 +32,7 @@ type Phase =
   | { kind: "start-failed"; message: string };
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
-const big = `${primary} px-s2 py-s1 text-[15px]`;
+const big = `inline-flex items-center gap-1 rounded-md border px-s2 py-s1 ${mainTone}`;
 
 /* What the install will add, from what the shell found. */
 export function installSteps(d: Detection | null): string {

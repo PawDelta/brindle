@@ -34,7 +34,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { DaemonClient } from "../../api/client";
 import { openExternal, type OpenUrl } from "../../api/open";
 import { Sheet } from "../../components/Sheet";
-import { button, field, label, mono, primary, quiet } from "../../components/ui";
+import { button, field, label, main, mono, quiet } from "../../components/ui";
 import { useAppState } from "../../store/useStore";
 import { BUSY } from "../Branch/DiffView";
 import { useJob } from "../Branch/useJob";
@@ -170,11 +170,11 @@ function DiffFooter({ opened, canOpen, onOpen, openUrl }: { opened: { url: strin
   return (
     <>
       {opened ? (
-        <button type="button" className={primary} onClick={() => void openUrl(opened.url)}>
+        <button type="button" className={main} onClick={() => void openUrl(opened.url)}>
           Open the PR ↗
         </button>
       ) : (
-        <button type="button" className={primary} disabled={!canOpen} onClick={onOpen} data-testid="open-pr-step">
+        <button type="button" className={main} disabled={!canOpen} onClick={onOpen} data-testid="open-pr-step">
           Open PR…
         </button>
       )}
@@ -259,7 +259,7 @@ function PrStep({ client, root, diff, ready, openUrl, onBack, onClose }: { clien
       <div className="mt-auto flex flex-wrap items-center gap-s1 border-t border-line pt-s2">
         {url ? (
           <>
-            <button type="button" className={primary} onClick={() => void openUrl(url)}>
+            <button type="button" className={main} onClick={() => void openUrl(url)}>
               Open it ↗
             </button>
             <button type="button" className={button} onClick={onClose}>
@@ -268,7 +268,7 @@ function PrStep({ client, root, diff, ready, openUrl, onBack, onClose }: { clien
           </>
         ) : (
           <>
-            <button type="button" className={primary} disabled={!loaded || job.busy || !title.trim()} onClick={open} data-testid="open-pr">
+            <button type="button" className={main} disabled={!loaded || job.busy || !title.trim()} onClick={open} data-testid="open-pr">
               {job.busy ? "Opening…" : "Open PR"} <kbd className="ml-1 font-mono text-[10px] opacity-80">⌘↵</kbd>
             </button>
             <button type="button" className={quiet} disabled={job.busy} onClick={onBack}>

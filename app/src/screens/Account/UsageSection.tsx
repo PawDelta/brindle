@@ -46,7 +46,7 @@ function ProviderCard({ q, now }: { q: ProviderUsage; now: number }) {
   const note = q.known && !q.limited ? hint(q) : null;
   return (
     <article
-      className={`relative flex min-h-24 flex-col gap-s1 rounded-md border border-line bg-surface py-2.5 pr-3 pl-[15px] before:absolute before:top-2.5 before:bottom-2.5 before:-left-px before:w-[3px] before:rounded-[2px] before:content-[''] ${EDGE[state]}`}
+      className={`relative flex min-h-24 flex-col gap-s1 border-t border-line py-2.5 pr-3 pl-[15px] before:absolute before:top-2.5 before:bottom-2.5 before:left-0 before:w-[2px] before:rounded-[2px] before:content-[''] ${EDGE[state]}`}
       aria-label={providerName(q.provider)}
       data-provider={q.provider}
       data-state={state}

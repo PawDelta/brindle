@@ -13,7 +13,7 @@ import { useDaemon } from "../api/context";
 import type { PreflightDTO, PreflightItem } from "../api/client";
 import { providerName } from "../store/overview";
 import { ProviderSignIn } from "./ProviderSignIn";
-import { alert, button, card, field, primary } from "./ui";
+import { alert, button, card, field, main } from "./ui";
 
 export interface PreflightProps {
   preflight: PreflightDTO;
@@ -53,7 +53,7 @@ function KeyField({ item, provider, onDone }: { item: PreflightItem; provider: s
     <form className="flex flex-col gap-1" aria-label={`Value for ${name}`} onSubmit={submit}>
       <div className="flex gap-s1">
         <input type="password" className={`${field} w-full font-mono`} aria-label={`${name} value`} placeholder={`${name} for ${providerName(provider)}`} value={value} autoComplete="off" onChange={(e) => setValue(e.target.value)} />
-        <button type="submit" className={primary} disabled={busy || !value.trim()}>
+        <button type="submit" className={button} disabled={busy || !value.trim()}>
           Save
         </button>
       </div>
@@ -145,7 +145,7 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
         ))}
       </ul>
       <div className="flex items-center gap-s1">
-        <button type="button" className={primary} disabled={open.length > 0} onClick={onLaunch}>
+        <button type="button" className={main} disabled={open.length > 0} onClick={onLaunch}>
           {launchLabel}
         </button>
         {open.length > 0 && <span className="text-xs text-ink-3">{repo ? `in ${repo}` : ""}</span>}

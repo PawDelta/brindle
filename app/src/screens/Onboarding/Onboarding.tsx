@@ -29,7 +29,7 @@ import { ProgressCard } from "../../components/ProgressCard";
 import { ProjectPicker } from "../../components/ProjectPicker";
 import { ApiKeyPaste, CLOUD_NAME, CloudSetup, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, ReadyNote, type Lock, type Method } from "../../components/ProviderConnect";
 import { useProviderSignIn } from "../../components/ProviderSignIn";
-import { alert, button, card, field, mono, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, mainTone, mono, quiet } from "../../components/ui";
 import type { Route } from "../../routes";
 import { useSessions } from "../../store/sessions";
 import { useJob } from "../Branch/useJob";
@@ -52,7 +52,7 @@ export interface OnboardingProps {
 
 type Step = "loading" | "signin" | "connect" | "install" | "provider-signin" | "ready" | "permissions" | "project";
 
-const big = `${primary} px-s2 py-s1 text-[15px]`;
+const big = `inline-flex items-center gap-1 rounded-md border px-s2 py-s1 ${mainTone}`;
 const link = "text-branch underline-offset-2 hover:underline";
 const fine = "text-xs text-ink-3";
 
@@ -411,7 +411,7 @@ function ProviderSignInStep({ row, index, of, rest, already, check, openUrl, onL
             }}
           >
             <input className={`${field} w-full font-mono`} aria-label="Code from the browser" placeholder={phase.prompt} value={code} autoFocus onChange={(e) => setCode(e.target.value)} />
-            <button type="submit" className={primary} disabled={!code.trim()}>
+            <button type="submit" className={button} disabled={!code.trim()}>
               Continue
             </button>
           </form>
@@ -689,7 +689,7 @@ function Permissions({ client, onNext }: { client: DaemonClient; onNext(): void 
           />
         ))}
       </div>
-      <p className="flex items-start gap-s1 rounded-md border border-line bg-canvas-2 px-s2 py-s1 text-[13px] text-ink-2" data-testid="onb-preset-note">
+      <p className="flex items-start gap-s1 rounded-md bg-canvas-2 px-s2 py-s1 text-[13px] text-ink-2" data-testid="onb-preset-note">
         <span aria-hidden className="text-branch">◇</span>
         {copy.note}
       </p>

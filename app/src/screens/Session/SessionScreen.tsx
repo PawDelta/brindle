@@ -17,7 +17,7 @@
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { DaemonClient } from "../../api/client";
 import type { OpenUrl } from "../../api/open";
-import { button, mono, primary } from "../../components/ui";
+import { button, main, mono } from "../../components/ui";
 import type { SheetRef } from "../../routes";
 import { CLI_INK, agentName, cliStatus, isPaused, liveWorkers, needsYou, providerName } from "../../store/overview";
 import { SessionsContext } from "../../store/sessions";
@@ -317,7 +317,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
       </div>
       <span className="flex-1" />
       {paused ? (
-        <button type="button" className={primary} disabled={recovery.busy} onClick={() => void recovery.resume()}>
+        <button type="button" className={main} disabled={recovery.busy} onClick={() => void recovery.resume()}>
           Continue
         </button>
       ) : (

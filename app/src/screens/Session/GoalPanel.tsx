@@ -14,7 +14,7 @@
    the one way to the review sheet), PR open (a link to it), Done. Done keeps
    the goal and every milestone, all checked, as the engine serves them
    (it keeps a reached goal until a new one replaces it), and beside it a
-   primary Close session (POST /sessions/{root}/close, one click, nothing
+   button Close session (POST /sessions/{root}/close, one click, nothing
    asked: the session goes, its branches stay). An older engine sends no
    goal_phase: the PR readiness (review.ts) and the milestones stand in for
    it. Nothing here ever says "failed".
@@ -27,7 +27,7 @@ import type { BusEvent } from "../../api/events";
 import type { DaemonClient } from "../../api/client";
 import { openExternal, type OpenUrl } from "../../api/open";
 import type { GoalDTO, MilestoneDTO } from "../../api/schema";
-import { alert, button, card, mono, pill, primary, quiet } from "../../components/ui";
+import { alert, button, card, mainTone, mono, pill, quiet } from "../../components/ui";
 import type { AppStore } from "../../store/store";
 import { usePrReadiness, type Readiness } from "./review";
 
@@ -353,7 +353,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
     phase === "ready_for_pr" && onReview ? (
       <button
         type="button"
-        className={`flex items-center gap-s1 rounded-md bg-pass-soft px-s1 py-1 text-left text-xs font-semibold text-pass hover:opacity-90 ${compact ? "mx-0.5" : ""}`}
+        className={`flex items-center gap-s1 rounded-md border px-s1 py-1 text-left ${mainTone} ${compact ? "mx-0.5" : ""}`}
         data-testid="goal-review"
         title="brindle judges the session ready: review its changes and open the PR"
         onClick={onReview}
@@ -393,7 +393,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
     finished && onCloseSession ? (
       <button
         type="button"
-        className={`${primary} shrink-0 whitespace-nowrap px-s1 py-0.5 text-xs`}
+        className={`inline-flex shrink-0 items-center whitespace-nowrap rounded-md border px-s1 py-0.5 ${mainTone}`}
         data-testid="goal-close"
         title="Stop and hide the whole session; its branches stay"
         onClick={onCloseSession}
@@ -489,7 +489,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
             type="button"
             role="switch"
             aria-checked={goal.enabled}
-            className={`${goal.enabled ? primary : button} whitespace-nowrap px-s1 py-0.5 text-xs`}
+            className={`${button} whitespace-nowrap px-s1 py-0.5 text-xs`}
             disabled={enabling}
             onClick={toggleAutopilot}
           >

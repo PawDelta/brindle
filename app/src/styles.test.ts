@@ -1,11 +1,12 @@
 // @vitest-environment node
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { chip, pill, primary } from "./components/ui";
+import { button, card, chip, main, panel, pill } from "./components/ui";
 
 /* The app wears the site's Crisp tokens (web/public/assets/site.css): the
-   values, the radii, the braid's own threads in the logo, the green
-   primary and the hairline pills. */
+   values, the radii and the braid's own threads in the logo, worn quiet:
+   one plane for ground and surface, neutral hairlines, green only for the
+   one main action, sections as dividers and pills as a dot and text. */
 const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 const block = (selector: string) => {
   const at = css.indexOf(`${selector} {`);
@@ -17,12 +18,14 @@ describe("the Crisp palette", () => {
   it("has the site's dark tokens", () => {
     const dark = block(":root");
     expect(token(dark, "canvas")).toBe("#080d0b");
-    expect(token(dark, "surface")).toBe("#111a16");
+    expect(token(dark, "surface")).toBe("#080d0b");
+    expect(token(dark, "surface")).toBe(token(dark, "canvas"));
     expect(token(dark, "ink")).toBe("#e8f0eb");
     expect(token(dark, "fawn")).toBe("#34d399");
     expect(token(dark, "on-fawn")).toBe("#03160e");
     expect(token(dark, "shell-bg")).toBe("#070b09");
     expect(token(dark, "shell-acc")).toBe("#34d399");
+    expect(token(dark, "shell-cursor")).toBe("#a4aba7");
     expect(token(dark, "r-sm")).toBe("2px");
     expect(token(dark, "r")).toBe("4px");
     expect(token(dark, "r-lg")).toBe("4px");
@@ -30,7 +33,8 @@ describe("the Crisp palette", () => {
 
   it("has the site's cool light tokens, the same under the media query and data-theme", () => {
     const light = block(':root[data-theme="light"]');
-    expect(token(light, "canvas")).toBe("#f1f5f5");
+    expect(token(light, "canvas")).toBe("#f4f6f6");
+    expect(token(light, "surface")).toBe(token(light, "canvas"));
     expect(token(light, "ink")).toBe("#0e1716");
     expect(token(light, "fawn")).toBe("#046e50");
     expect(token(light, "on-fawn")).toBe("#ffffff");
@@ -66,11 +70,22 @@ describe("the Crisp palette", () => {
     expect(css).not.toMatch(/\.lm-\w+ \{ stroke: var\(--fawn\)/);
   });
 
-  it("makes the primary button the green accent and pills hairlines", () => {
-    expect(primary).toContain("bg-fawn");
-    expect(primary).toContain("text-on-fawn");
-    expect(pill).toContain("inset-ring-line-strong");
-    expect(pill).toContain("rounded-sm");
+  it("gives the main action the chip voice and keeps every other button neutral", () => {
+    for (const c of ["font-mono", "text-[13px]", "text-pass", "border-pass/55", "bg-pass/4", "hover:bg-pass-soft"]) expect(main).toContain(c);
+    expect(button).not.toMatch(/fawn|pass/);
+    expect(button).toContain("bg-transparent");
+  });
+
+  it("draws sections as a divider, not a box, and pills as a dot and text", () => {
+    expect(card).toBe("border-t border-line");
+    expect(card).not.toMatch(/rounded|bg-/);
+    expect(panel).toContain("border-line-strong");
+    expect(pill).not.toMatch(/inset-ring|border|rounded/);
+    expect(css).toContain(".pill:not(:has(.rounded-full)):not(.font-mono)::before");
     expect(chip).not.toContain("inset-ring");
+  });
+
+  it("keeps green for the action: the focus ring is branch, as the fields' focus and the selection", () => {
+    expect(block("  :focus-visible")).toContain("outline: 2px solid var(--branch);");
   });
 });

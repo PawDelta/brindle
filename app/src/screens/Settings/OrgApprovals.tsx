@@ -10,7 +10,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { DaemonError, type DaemonClient } from "../../api/client";
 import type { OrgGrantPolicyDTO, OrgPermissionsDTO } from "../../api/schema";
-import { alert, button, card, field, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, panel, quiet } from "../../components/ui";
 import { RuleTarget, parseRule, ruleText } from "./RuleTarget";
 
 type Choice = { id: string; label: string; detail?: string };
@@ -45,7 +45,7 @@ function SearchPicker({ label, choices, selected, onSelect, children }: {
       }
     }}>
       <summary aria-labelledby={id} className={`${field} cursor-pointer`}>{selected.map((value) => choices.find((item) => item.id === value)?.label ?? value).join(", ") || `Choose ${label.toLowerCase()}`}</summary>
-      <div className={`${card} absolute left-0 top-full z-50 mt-1 w-full min-w-56 p-s1 shadow-lg`}>
+      <div className={`${panel} absolute left-0 top-full z-50 mt-1 w-full min-w-56 p-s1 shadow-lg`}>
         <input ref={search} type="search" className={`${field} w-full`} aria-label={`Search ${label.toLowerCase()}`} value={query} onChange={(event) => setQuery(event.target.value)} />
         <div className="mt-s1 max-h-56 overflow-auto" role="group" aria-label={`Available ${label.toLowerCase()}`}>
           {visible.map((item) => <button key={item.id} type="button" aria-pressed={selected.includes(item.id)} className={`${quiet} flex w-full flex-col items-start text-left aria-pressed:bg-branch-soft aria-pressed:text-branch`} onClick={() => {
@@ -107,7 +107,7 @@ function OrgRules({ controls, onChange }: { controls: Control[]; onChange(contro
   return <fieldset className="space-y-s2">
     <legend className="text-sm font-semibold">Organization rules</legend>
     <p className="text-xs text-ink-3">Block or Ask over a whole kind of action, or one pattern. These win over every member’s preset, rules and saved approvals; members see the reason.</p>
-    <ul className="divide-y divide-line rounded-md border border-line" aria-label="Groupings">
+    <ul className={`${card} divide-y divide-line`} aria-label="Groupings">
       {GROUPINGS.map(([id, label, hint]) => {
         const c = grouped.get(id);
         return <li key={id} className="grid gap-s1 px-s2 py-s1 sm:grid-cols-[minmax(0,1fr)_auto]">
@@ -121,7 +121,7 @@ function OrgRules({ controls, onChange }: { controls: Control[]; onChange(contro
     </ul>
     <div className="space-y-s1" aria-label="Patterns">
       {patterns.map((c, i) => (
-        <div key={i} className="grid gap-s1 rounded-md border border-line p-s1 sm:grid-cols-2" data-testid="org-pattern">
+        <div key={i} className={`${card} grid gap-s1 p-s1 sm:grid-cols-2`} data-testid="org-pattern">
           <RuleTarget value={parseRule(c.rule!)} offerNamed labelClass="flex min-w-0 flex-col gap-1 text-xs font-medium text-ink-3" onChange={(target) => setPattern(i, { ...c, rule: ruleText(target) })} />
           <label className="flex flex-col gap-1 text-xs font-medium text-ink-3">Setting
             <select className={field} aria-label="Pattern setting" value={c.decision} onChange={(event) => setPattern(i, { ...c, decision: event.target.value as Control["decision"] })}><option value="ask">Ask</option><option value="deny">Block</option></select>
@@ -217,7 +217,7 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
         }} />
         <SearchPicker label="Assignment roles" choices={roleChoices} selected={assignment ? [assignment] : []} onSelect={setAssignment} />
       </fieldset>
-      <button type="button" className={primary} disabled={busy || !person || !assignment || assignment === currentRole} onClick={() => void run(async () => {
+      <button type="button" className={button} disabled={busy || !person || !assignment || assignment === currentRole} onClick={() => void run(async () => {
         await client.assignOrgRole({ org_id: state.identity.org_id, actor_sub: state.identity.sub, sub: member, role: assignment });
         const loaded = await client.orgPermissions();
         // Assigning the signed-in person may change their authority. Keep any
@@ -258,7 +258,7 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
         <OrgRules controls={draft.controls} onChange={(controls) => update("controls", controls)} />
       </fieldset>
       <div className="flex flex-wrap gap-s1">
-        <button type="submit" className={primary} disabled={locked}>Save approval limits</button>
+        <button type="submit" className={button} disabled={locked}>Save approval limits</button>
         {role && <button type="button" className={button} disabled={locked} onClick={() => void save(true)}>Use inherited limits</button>}
         <button type="button" className={button} disabled={busy} onClick={() => void reload()}>Reload policy and keep drafts</button>
       </div>

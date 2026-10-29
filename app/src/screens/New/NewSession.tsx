@@ -20,7 +20,7 @@ import Logo from "../../components/Logo";
 import { Preflight } from "../../components/Preflight";
 import { ProjectCombobox } from "../../components/ProjectCombobox";
 import { ProjectPicker } from "../../components/ProjectPicker";
-import { alert, button, card, field, mono, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, main, mono, quiet } from "../../components/ui";
 import { isPaused } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
 
@@ -230,7 +230,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
         </button>
         <span className="flex-1" />
         <span className="text-xs text-ink-3">⌘↵</span>
-        <button type="submit" disabled={busy || !repo} className={primary}>
+        <button type="submit" disabled={busy || !repo} className={main}>
           Start
         </button>
       </div>
