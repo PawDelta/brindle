@@ -652,5 +652,16 @@ def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     # One read per key, and none at all when the page asks without the keys (the project page).
     assert sorted(reads) == ["OPENAI_API_KEY", "UNSET_KEY"]
     reads.clear()
+    # A saved model choice is judged while the config loads: that must run no sign-in CLI
+    # and read no key (a `security` call on macOS), or the quick read waits on them.
+    from brindle import config, doctor, providers, worker_models
+
+    config.set_user("routing_heavy", "or-glm-4.6")      # a hosted pick: its key is in the keychain
+    probed: list = []
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(doctor, "signin_providers", lambda: list(doctor.CLI_INSTALL))
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: probed.append(argv[0]))
+    monkeypatch.setattr(keystore, "get_key", lambda name: probed.append(name))
+    monkeypatch.setattr(worker_models, "_signed_in", None)
     _, bare = _get("/v1/config", AUTH, f"repo={seeded['repo']}&keys=0")
-    assert bare["keys"] == [] and "repo" in bare and reads == []
+    assert bare["keys"] == [] and "repo" in bare and reads == [] and probed == []
