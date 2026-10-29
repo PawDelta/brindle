@@ -18,8 +18,10 @@ left its base decide what runs:
   affected by them), and if none is left the check is skipped; the command
   runs on the test files the branch touched plus the
   tests ``graphify affected`` reaches from each changed symbol. A changed file
-  the graph can't map is resolved through test imports of its module path;
-  an unresolved module or import runs the full suite instead.
+  the graph can't map is resolved through imports of its module path,
+  followed through the modules, test helpers and ``conftest.py`` files that
+  import it to the tests at the end; an unresolved module or test import
+  runs the full suite instead.
 
 Every check on a worker's branch also gets ``BRINDLE_CHANGED_FILES`` (see
 ``changed_files``), so a script can narrow itself.
@@ -32,6 +34,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -286,53 +289,102 @@ def _module_path(root: Path, path: str) -> str | None:
 
 
 def _importing_tests(root: Path, path: str) -> set[str] | None:
-    """Find static test imports by full module path; uncertain imports require full checks."""
+    """The tests that import ``path``'s module, directly or through other
+    modules (a source module, a package's ``__init__``, a test helper), and
+    every test under a ``conftest.py`` that does; None when an import is uncertain."""
     module = _module_path(root, path)
     if module is None:
         return None
-    tests: set[str] = set()
+    importers: dict[str, set[str]] = {}   # a module and each of its parents -> the files importing it
+    anything: dict[str, str] = {}         # file -> prefix of the modules a dynamic import may load
+    files: list[str] = []
     try:
         paths = git.paths(["ls-files", "--cached", "--others", "--exclude-standard", "*.py"], str(root))
-        for test in paths:
-            if not is_test_file(test) or not (root / test).is_file():
+        for f in paths:
+            if not (root / f).is_file():
                 continue
-            tree = ast.parse((root / test).read_text(encoding="utf-8"))
-            dynamic = {"__import__"}
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module == "importlib":
-                    dynamic.update(n.asname or n.name for n in node.names if n.name == "import_module")
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Call) and (
-                    isinstance(node.func, ast.Name) and node.func.id in dynamic
-                    or isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"
-                ):
-                    # fromlist, level and package arguments can change the imported module.
-                    # Only a lone absolute name is resolved here.
-                    if len(node.args) > 1 or any(kw.arg != "name" for kw in node.keywords):
-                        return None
-                    name = node.args[0] if node.args else next(
-                        (kw.value for kw in node.keywords if kw.arg == "name"), None)
-                    if not isinstance(name, ast.Constant) or not isinstance(name.value, str) or name.value.startswith("."):
-                        return None
-                    imports = [name.value]
-                elif isinstance(node, ast.Import):
-                    imports = [n.name for n in node.names]
-                elif isinstance(node, ast.ImportFrom):
-                    prefix = node.module or ""
-                    if node.level:
-                        owner = _module_path(root, test)
-                        if owner is None or node.level >= len(owner.split(".")):
-                            return None
-                        package = owner.split(".")[:-node.level]
-                        prefix = ".".join([*package, prefix]).rstrip(".")
-                    imports = [prefix, *(f"{prefix}.{n.name}" for n in node.names)]
-                else:
-                    continue
-                if any(name == module or name.startswith(module + ".") for name in imports):
-                    tests.add(test)
+            files.append(f)
+            imports = _imports(root, f)
+            if imports is None:
+                return None
+            names, prefix = imports
+            if prefix is not None:
+                anything[f] = prefix
+            for name in names:
+                parts = name.split(".")
+                for i in range(1, len(parts) + 1):
+                    importers.setdefault(".".join(parts[:i]), set()).add(f)
     except (OSError, SyntaxError, ValueError, git.GitError):
         return None
+    tests: set[str] = set()
+    seen, queue, reached = {module}, [module], {path}
+    while queue:
+        m = queue.pop()
+        found = set(importers.get(m, ()))
+        found |= {f for f, p in anything.items() if (m + ".").startswith(p) or p.startswith(m + ".")}
+        for f in found - reached:
+            reached.add(f)
+            if is_test_file(f):
+                tests.add(f)
+            if PurePosixPath(f).name == "conftest.py":
+                under = PurePosixPath(f).parent.parts
+                tests |= {t for t in files if is_test_file(t) and PurePosixPath(t).parts[:len(under)] == under}
+            # A file outside a package is imported by its name from its own directory (pytest's rootdir insertion).
+            owner = _module_path(root, f) or PurePosixPath(f).stem
+            if owner not in seen:
+                seen.add(owner)
+                queue.append(owner)
     return tests
+
+
+def _imports(root: Path, path: str) -> tuple[list[str], str | None] | None:
+    """The modules ``path`` imports, and the prefix of those a dynamic import
+    there may load (None: none). An import a test makes that can't be resolved
+    is None (the full checks run); a source module's loads every module under its prefix."""
+    test = is_test_file(path)
+    tree = ast.parse((root / path).read_text(encoding="utf-8"))
+    dynamic = {"__import__"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "importlib":
+            dynamic.update(n.asname or n.name for n in node.names if n.name == "import_module")
+    imports: list[str] = []
+    loads: str | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and (
+            isinstance(node.func, ast.Name) and node.func.id in dynamic
+            or isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"
+        ):
+            # fromlist, level and package arguments can change the imported module.
+            # Only a lone absolute name is resolved here.
+            name = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg == "name"), None)
+            if (len(node.args) <= 1 and all(kw.arg == "name" for kw in node.keywords)
+                    and isinstance(name, ast.Constant) and isinstance(name.value, str)
+                    and not name.value.startswith(".")):
+                imports.append(name.value)
+                continue
+            if test:
+                return None
+            lead = name.values[0] if isinstance(name, ast.JoinedStr) and name.values else None
+            prefix = lead.value if isinstance(lead, ast.Constant) and isinstance(lead.value, str) else ""
+            loads = prefix if loads is None else os.path.commonprefix([loads, prefix])
+        elif isinstance(node, ast.Import):
+            imports += [n.name for n in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            prefix = node.module or ""
+            if node.level:
+                owner = _module_path(root, path)
+                # A package's __init__ is its package: `from . import x` there is the package's own x.
+                depth = len(owner.split(".")) + (PurePosixPath(path).stem == "__init__") if owner else 0
+                if node.level >= depth:
+                    if test:
+                        return None
+                    loads = ""
+                    continue
+                package = owner.split(".")[:depth - node.level]
+                prefix = ".".join([*package, prefix]).rstrip(".")
+            imports += [prefix, *(f"{prefix}.{n.name}" for n in node.names)]
+    return [i for i in imports if i], loads
 
 
 def _nodes_by_file(graph: Path) -> dict[str, list[dict]]:

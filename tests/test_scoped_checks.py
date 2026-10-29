@@ -52,7 +52,8 @@ DYNAMIC_IMPORTS = {
      [PYTEST]),   # an unmapped module with an unresolved dynamic test import
     ("infer", PYTEST, {"src/pkg/pro/status.py": "X = 1\n",
                        "tests/test_other.py": "import pkg.pro.status\ndef test_new(): pass\n"},
-     [f"{PYTEST} tests/test_direct.py tests/test_from.py tests/test_member.py tests/test_other.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/sub/test_sub.py tests/test_api.py tests/test_direct.py tests/test_from.py tests/test_member.py "
+      "tests/test_other.py || [ $? -eq 5 ]"]),   # test_api and tests/sub reach it only through pkg.api
     ("fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST]),
     pytest.param("dynamic-fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST],
                  marks=pytest.mark.variant("review requested a nonliteral fromlist bypass")),
@@ -104,6 +105,8 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
                  "tests/test_from.py": "from pkg.pro import status\n",
                  "tests/test_member.py": "from pkg.pro.status import X\n",
                  "tests/test_unrelated.py": "from pkg.other import status\n",
+                 "src/pkg/api.py": "from .pro import status\n", "tests/test_api.py": "import pkg.api\n",
+                 "tests/sub/conftest.py": "from pkg import api\n", "tests/sub/test_sub.py": "def test_s(): pass\n",
                  "tests/test_f.py": TEST_F, "tests/test_g.py": "from test_f import helper\n"})
     if where in DYNAMIC_IMPORTS:
         write(repo, {"tests/test_dynamic.py": DYNAMIC_IMPORTS[where]})
