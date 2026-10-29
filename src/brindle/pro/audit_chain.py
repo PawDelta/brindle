@@ -602,7 +602,7 @@ class AuditChain(EventsPlugin):
 def make(repo_root: str) -> AuditChain:
     from brindle.pro import audit_stream, org_context
 
-    audit_stream.configure(lambda: org_context.OrgContext.resolve(repo_root=repo_root).audit_sinks())
+    audit_stream.configure(lambda: org_context.OrgContext.resolve(repo_root=repo_root, cached_only=True).audit_sinks())
     return AuditChain(repo_root)
 
 

@@ -81,11 +81,12 @@ class OrgContext:
     """The org's state for one check. Build it with :meth:`resolve`."""
 
     def __init__(self, *, repo_root: str | None, home: Path, home_given: bool, now: float,
-                 providers: Providers) -> None:
+                 providers: Providers, cached_only: bool = False) -> None:
         self.repo_root = repo_root
         self.home = home
         self.now = now
         self.providers = providers
+        self.cached_only = cached_only
         self._home_given = home_given
         self._offline = False
         self._cached: dict[str, object] = {}
@@ -98,21 +99,22 @@ class OrgContext:
 
     @classmethod
     def resolve(cls, *, home=None, now: float | None = None, providers: Providers | None = None,
-                repo_root: str | None = None) -> OrgContext:
+                repo_root: str | None = None, cached_only: bool = False) -> OrgContext:
         """The org context for ``repo_root`` (the checkout whose policy
         applies; None: the first request :meth:`org_decision` is asked
         about). ``home`` is brindle's home the default reads use (the
         entitlement, the status, the cached policy; ``brindle_home()`` when
         None). ``now`` is the time the check is made at (the current time
         when None). Each provider is called the first time an answer needs
-        it, and never again for this context."""
+        it, and never again for this context. ``cached_only`` reads verified
+        local state without network requests, for audit recording."""
         import time
 
         from brindle.pro._files import pro_home
 
         return cls(repo_root=repo_root, home=Path(home) if home is not None else pro_home(),
                    home_given=home is not None, now=time.time() if now is None else now,
-                   providers=providers or Providers())
+                   providers=providers or Providers(), cached_only=cached_only)
 
     @contextmanager
     def _reads(self) -> Iterator[None]:
@@ -143,7 +145,7 @@ class OrgContext:
         from brindle.pro import license
 
         with self._reads():
-            return _once(license.current)
+            return _once((lambda: license.current(refresh=False)) if self.cached_only else license.current)
 
     @property
     def entitlement(self):
@@ -157,6 +159,8 @@ class OrgContext:
         if feature in ("team", "org_budgets", "managed_models", "managed_rollout", "audit") \
                 and isinstance(self.managed, managed.Managed):
             return True
+        if self.cached_only:
+            return self.entitlement is not None and feature in self.entitlement.features
         with self._reads():
             return license.has(feature)
 
@@ -208,7 +212,9 @@ class OrgContext:
                 self._unavailable = copy.reason
                 return status.Saved(org_id=ent.org_id)
             return status.Saved(org_id=ent.org_id, status=status.parse(copy.body, self.now))
-        return status.Saved() if self.managed is not None else status.load()
+        if self.managed is not None:
+            return status.Saved()
+        return status._load_saved() if self.cached_only else status.load()
 
     def _signed(self, kind, ent):
         from brindle.pro import policy_cache, signed
@@ -228,6 +234,8 @@ class OrgContext:
         from brindle import airgap
         from brindle.pro import auth, credentials, managed, team_policy
 
+        if self.cached_only:
+            raise team_policy.PolicyUnavailable("This context reads only locally stored governance documents")
         store = self._store or credentials.default_store()
         client = self._client or auth.Client((store.load() or {}).get("base_url"))
         airgap.guard(client.base, "org governance request")
@@ -314,7 +322,7 @@ class OrgContext:
         if isinstance(device, Decision):
             return device
         if device is not None and (ent is None or ent.org_id == device.org_id):
-            return device.enforced
+            return self.narrow(device.enforced)
         if ent is None:
             return allow()
         try:
@@ -329,6 +337,10 @@ class OrgContext:
                         return deny(copy.reason)
                     p = team_policy.with_role_overrides(
                         team_policy.parse_policy(ent.org_id, copy.body, self.now), ent.role, ent.policy_role)
+                elif self.cached_only:
+                    p = self.cached_policy(ent.org_id)
+                    if p is None or p.cached_for != (ent.role, ent.policy_role):
+                        raise team_policy.PolicyUnavailable("No policy is saved for this member's role")
                 else:
                     p = team_policy.current_policy(ent, client, store, repo_root, cached=self.cached_policy)
         except team_policy.PolicyUnavailable as e:

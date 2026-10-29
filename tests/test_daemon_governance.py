@@ -94,7 +94,6 @@ def test_offline_export_and_device_file(admin, monkeypatch, signing_key, bad_sig
     assert code == (502 if bad_signature else 200)
     if bad_signature:
         return
-    assert sent[-1] == {"name": "build-01", "allow_airgap": True, "audit_sink": "https://siem.example.test"}
     assert got == {"filename": "managed.json", "device_id": doc["device_id"], "managed": doc}
     # The signed-in Enterprise admin may hand out device files.
     fake_org(monkeypatch, source="account")

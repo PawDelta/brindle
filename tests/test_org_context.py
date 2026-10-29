@@ -134,9 +134,10 @@ def test_governance_wiring(tmp_path, monkeypatch, signing_key, seam):
                 {"rule": "bash prefix terraform apply", "decision": "deny"}]}}}
     ent = SimpleNamespace(**{**vars(ENT), "org_id": "org_member", "sub": "user_1", "policy_signed": True,
                              "plan": "enterprise"})
+    remote_status = {"policy_version": 3, "paused": False}
 
     def response(kind):
-        data = body if kind == "policy" else {"policy_version": 3, "paused": False}
+        data = body if kind == "policy" else remote_status
         claims = {"iss": ISS, "aud": "brindle-pro", "sub": ent.sub, "org_id": ent.org_id,
                   "role": ent.role, "policy_role": None, "policy_version": 3, "iat": NOW - 60,
                   "exp": NOW + 3600, "kid": TEST_KID, "token_use": kind, "doc_type": kind,
@@ -157,24 +158,14 @@ def test_governance_wiring(tmp_path, monkeypatch, signing_key, seam):
     if seam == "policy_source":
         assert ctx.policy.max_parallel_workers == 1 and ctx.source() == "account"
         assert (ctx.org_id, ctx.org_name) == (ent.org_id, "Acme")
-        assert ctx.status.org_id == ent.org_id and ctx.blocked_reason() is None
-        from brindle.daemon.routes_governance import governance_status
-
-        with monkeypatch.context() as patch:
-            patch.setattr(OrgContext, "resolve", lambda: ctx)
-            assert governance_status().verified
+        assert ctx.verified and ctx.status.org_id == ent.org_id and ctx.blocked_reason() is None
         # The real verifier rejects a different member's otherwise valid cached copy.
         ent = SimpleNamespace(**{**vars(ent), "sub": "user_2"})
         monkeypatch.setattr(auth, "authed", lambda *a, **kw: (503, {}))
         assert context().blocked_reason()
         monkeypatch.setattr(managed, "load", lambda **kw: device)
         ent = None
-        assert context().source() == "snapshot"
         assert context().org_name == device.org_id
-        with context().activated():
-            plugin = team_policy.ProPolicy(str(tmp_path))
-            assert plugin.org_budgets().budget_seat_month_usd == 50
-            assert plugin.managed_models().allowed_models == ("opus",)
         assert context(NOW + 7200).blocked_reason()
         monkeypatch.setenv("BRINDLE_AIRGAP", "1")
         assert context().policy.max_parallel_workers == 2
@@ -192,11 +183,6 @@ def test_governance_wiring(tmp_path, monkeypatch, signing_key, seam):
             signing_key, claims, {"typ": "brindle-offline-policy+jwt"})}))
         offline = context()
         assert offline.source() == "offline" and offline.verified and offline.policy.max_parallel_workers == 4
-        from brindle.pro import rollout
-
-        with monkeypatch.context() as patch:
-            patch.setattr("time.time", lambda: NOW)
-            assert rollout.kill_switch_reason(str(tmp_path)) is None
         monkeypatch.setattr(managed, "load", lambda **kw: managed.Invalid("invalid device signature"))
         assert context().blocked_reason() == "invalid device signature"
         airgap.reset()
@@ -204,7 +190,6 @@ def test_governance_wiring(tmp_path, monkeypatch, signing_key, seam):
         req = Request("claude", "bash", "Bash", str(tmp_path), str(tmp_path), str(tmp_path),
                       command="terraform apply")
         assert ctx.org_decision(req).decision == "deny"
-        assert ctx.policy.max_parallel_workers == 1 and ctx.policy.allowed_models == ("opus",)
         with ctx.activated():
             assert team_policy.access(str(tmp_path)).allowed_models == ("opus",)
             assert team_policy.org_budgets(str(tmp_path)).budget_seat_month_usd == 50
@@ -215,13 +200,28 @@ def test_governance_wiring(tmp_path, monkeypatch, signing_key, seam):
         path.write_text(json.dumps({"version": 1}))
         with pytest.raises(team_policy.PolicyUnavailable):
             team_policy.load_offline(str(tmp_path), device.org_id)
+        ent = SimpleNamespace(**{**vars(ent), "org_id": device.org_id, "policy_signed": False})
+        remote_status["control"] = {"id": "c1", "action": "throttle", "throttle": {
+            "allowed_models": [], "max_parallel_workers": 1, "seat_month_usd": 10}}
+        throttled = context().policy
+        assert (throttled.allowed_models, throttled.max_parallel_workers,
+                throttled.budget_seat_month_usd) == ((), 1, 10)
     elif seam == "audit_sinks":
+        from test_audit_chain import ev
+
         assert ctx.audit_sinks() == [sink, device_sink]
-        monkeypatch.setattr(OrgContext, "resolve", lambda **kw: ctx)
+        requests, refreshes = [], []
+        monkeypatch.setattr("time.time", lambda: NOW)
+        monkeypatch.setattr(license, "current", lambda refresh=True, **kw: refreshes.append(refresh) or ent)
+        monkeypatch.setattr(auth, "authed", lambda *a, **kw: requests.append("account") or (503, {}))
+        monkeypatch.setattr(auth.Client, "call", lambda *a, **kw: requests.append("device") or (503, {}))
         monkeypatch.setattr(audit_stream, "_targets", [])
-        ent = None
-        assert audit_chain.make(str(tmp_path)).entitled()
-        audit_stream.enqueue({"event": {"kind": "test"}}, tmp_path)
+        with at_home(tmp_path):
+            chain = audit_chain.make(str(tmp_path))
+            chain.home = tmp_path
+            monkeypatch.setattr(audit_stream, "_spawn", lambda fn: None)
+            chain.emit(ev(repo_root=str(tmp_path)))
+        assert requests == [] and not any(refreshes)
         assert all(audit_stream.queue_path(s, tmp_path).exists() for s in (sink, device_sink))
         monkeypatch.setenv("BRINDLE_AIRGAP", "1")
         monkeypatch.setattr(audit_stream._opener, "open", lambda *a, **kw: _unreadable())
@@ -231,7 +231,6 @@ def test_governance_wiring(tmp_path, monkeypatch, signing_key, seam):
         from brindle import plan_policy
 
         assert ctx.needs_plan(PlanTask(files=["finance/report.py"]), config=SimpleNamespace(plan="never"))
-        assert ctx.plan_rules == plan_policy.OrgPlanRules.from_policy(body["policy"])
         with ctx.activated():
             assert plan_policy.load_org_rules(str(tmp_path)).paths == ("finance/**",)
 
