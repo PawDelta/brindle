@@ -72,6 +72,11 @@ class OrgPlanRules:
     reviewer_low_risk: bool = False
     approver_groups: tuple[tuple[str, ...], ...] = ()
 
+    @property
+    def requires_member(self) -> bool:
+        """Whether human approvals need a verified identity to satisfy these rules."""
+        return bool(self.approver_groups or self.two_person)
+
     @classmethod
     def from_policy(cls, policy: dict | None) -> "OrgPlanRules":
         groups = getattr(policy, "plan_approver_groups", None)

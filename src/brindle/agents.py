@@ -3462,23 +3462,30 @@ def _org_plan_refusal(db: DB, caller_id: str | None, agent: Agent, rules, so_far
 
 
 def approve_plan(db: DB, caller_id: str | None, agent_id: str, feedback: str = "",
-                 approved: bool = True, *, human_member: str | None = None) -> str:
+                 approved: bool = True, *, human: bool = False, human_member: str | None = None) -> str:
     """The worker's parent decides on its proposed plan; the worker is told.
-    Org rules also judge other agents and the verified member supplied by the Inbox."""
+    The Inbox supplies human decisions, with a verified member for identity-based org rules."""
     agent = get(db, agent_id)
     if not agent.plan_first:
         raise AgentError(f"{agent.id} isn't a plan-first worker")
-    if caller_id is None and human_member is None:
+    if caller_id is None and not human:
         raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
     rules = _org_rules_for(db, agent)
-    if human_member is None and agent.parent_id != caller_id and not (
+    if human:
+        if rules and rules.requires_member:
+            if not human_member:
+                raise AgentError("Sign in to approve or revise a plan under your org's approval rules")
+        else:
+            # A local human decision needs no member vote when the policy has no identity requirement.
+            rules = None
+    if not human and agent.parent_id != caller_id and not (
             rules and caller_id != agent.id and db.get_agent(caller_id)):
         # Org rules open approval to any other agent (another member's supervisor, a
         # reviewer); the member behind it is verified and judged by the rules.
         raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
     if agent.plan_state != "proposed":
         raise AgentError(f"{agent.id} has no plan awaiting a decision")
-    if not approved and rules and (human_member is not None or agent.parent_id != caller_id):
+    if not approved and rules and (human or agent.parent_id != caller_id):
         # A revision is a decision too: a non-parent needs an eligible bound member.
         denied = _org_eligibility(db, caller_id, agent, rules, human_member)[2]
         if denied:

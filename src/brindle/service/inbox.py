@@ -190,7 +190,7 @@ def _plan_approval(db: DB, row: Agent) -> PlanApprovalDTO:
         return PlanApprovalDTO(you=False)
     member = plan_policy.current_member(repo_root)
     who = plan_approvals.Approver(member) if member else None
-    allowed = rules is None or bool(who and plan_approvals.eligible(
+    allowed = rules is None or not rules.requires_member or bool(who and plan_approvals.eligible(
         rules, who, plan_policy.PlanTask(weight=row.weight)).allowed and member not in votes)
     return PlanApprovalDTO(approvers=list(dict.fromkeys(m for g in rules.approver_groups for m in g)) if rules else [],
                            second_person=bool(rules and rules.two_person),
