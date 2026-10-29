@@ -1155,7 +1155,7 @@ def load_offline(repo_root: str | None, org_id: str) -> OrgPolicy:
         body = json.loads(raw)
     except ValueError as e:
         raise PolicyUnavailable(f"{path} is not valid JSON") from e
-    airgap.check_local_policy(signed=isinstance(body, dict) and "token" in body)
+    airgap.check_local_policy(signed=isinstance(body, dict) and "token" in body, org_id=org_id)
     export = body if isinstance(body, dict) and "token" in body else None
     if export is not None:
         token, body = body.get("token"), body.get("body")

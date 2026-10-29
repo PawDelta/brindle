@@ -233,8 +233,12 @@ def policy_path(repo_root: str | None):
     return Path(root) / CONFIG_DIR / POLICY_FILE
 
 
-def check_local_policy(*, signed: bool) -> None:
-    """Require a signed offline export on a managed device."""
+def check_local_policy(*, signed: bool, org_id: str) -> None:
+    """Require a signed offline export belonging to the managed device's org.
+
+    The caller's account cannot change which organization governs the device.
+    Validate that binding before the export is interpreted as policy.
+    """
     from brindle.pro import managed, org_context, team_policy
 
     ctx = org_context.active()
@@ -243,6 +247,9 @@ def check_local_policy(*, signed: bool) -> None:
         raise team_policy.PolicyUnavailable(device.reason)
     if not managed.local_policy_allowed(device, signed):
         raise team_policy.PolicyUnavailable("This managed device requires a signed offline policy export.")
+    if isinstance(device, managed.Managed) and org_id != device.org_id:
+        raise team_policy.PolicyUnavailable(
+            f"This managed device requires an offline policy export for org {device.org_id}.")
 
 
 __all__ = ["ENV", "FEATURE", "POLICY_FILE", "AirGapError", "arm", "check_profile", "enabled",

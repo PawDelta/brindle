@@ -95,8 +95,14 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, se
            if i.kind == kind]
     assert sorted((i.agent_id, i.detail) for i in got) == expected
     if setup is _plan_approval:
-        assert got[0].approval.to_json() == {"approvers": ["alice", "bob"], "second_person": True,
-                                            "requested_by": "alice", "you": True}
+        from brindle.tmux import PaneSnapshot
+        from test_daemon_actions import _send
+
+        monkeypatch.setattr("brindle.tmux.list_panes", PaneSnapshot)
+        code, rows = _send("GET", f"/v1/inbox?repo={repo}")
+        assert code == 200
+        assert next(i["approval"] for i in rows if i["kind"] == "plan") == {
+            "approvers": ["alice", "bob"], "second_person": True, "requested_by": "alice", "you": True}
     # Each agent's item links into its session; a sign-in carries the login the app can start.
     assert all(i.root_id == {"r2": "r2"}.get(i.agent_id, "r1") for i in got if i.agent_id)
     assert all(i.action.path == "/v1/providers/claude/login" for i in got if kind == "credentials")

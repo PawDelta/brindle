@@ -68,32 +68,33 @@ def test_policy_on_managed_device_is_the_org_contexts(signing_key, token, monkey
         "device", ORG, 12, workers)
 
 
-@pytest.mark.parametrize("days, tampered, ok", [(0, False, False), (91, False, False), (7, False, True),
-                                                (7, True, False)])
-def test_export_round_trip(signing_key, tmp_path, monkeypatch, days, tampered, ok):
+@pytest.mark.parametrize("days, tampered, device, ok", [(0, False, False, False), (91, False, False, False),
+    (7, False, False, True), (7, True, False, False), (7, False, True, False)])
+def test_export_round_trip(signing_key, tmp_path, monkeypatch, days, tampered, device, ok):
     """The signed offline policy export is written as the server sent it and loads back once
     verified; a body the token doesn't cover is refused."""
-    body = answer(version=4)
-    claims = {"iss": ISS, "aud": "brindle-pro", "org_id": ORG, "doc_type": "offline-policy",
+    org_id = "org_other" if device else ORG
+    body = {**answer(version=4), "org_id": org_id}
+    claims = {"iss": ISS, "aud": "brindle-pro", "org_id": org_id, "doc_type": "offline-policy",
               "policy_version": 4, "document_sha256": managed.document_sha256(body),
               "iat": NOW - 60, "exp": NOW + days * 86400, "jti": "o1", "kid": TEST_KID,
               "token_use": "offline-policy"}
     export = {"token": sign(signing_key, claims, {"typ": "brindle-offline-policy+jwt"}),
               "body": answer(version=4, max_parallel_workers=9) if tampered else body}
 
-    def call(method, path, req):
-        assert (path, req) == (f"/orgs/{ORG}/policy/offline", {"days": days})
-        return 200, export
-
+    call = lambda method, path, req: (200, export)
     monkeypatch.setattr(time, "time", lambda: NOW)
+    if device:
+        binding = managed.verify_file(managed_file(signing_key, answer()), now=NOW)
+        monkeypatch.setattr(managed, "load", lambda **kw: binding)
     if not 1 <= days <= 90:
         with pytest.raises(org_cli.OrgCliError):
             org_cli.export_policy(call, ORG, str(tmp_path), days)
         return
-    org_cli.export_policy(call, ORG, str(tmp_path), days)
+    org_cli.export_policy(call, org_id, str(tmp_path), days)
     if not ok:
         with pytest.raises(team_policy.PolicyUnavailable):
-            team_policy.load_offline(str(tmp_path), ORG)
+            team_policy.load_offline(str(tmp_path), org_id)
         return
     p = team_policy.load_offline(str(tmp_path), ORG)
     assert (p.org_id, p.version, p.max_parallel_workers, p.allowed_models) == (ORG, 4, 2, ("opus",))
