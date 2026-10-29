@@ -401,11 +401,17 @@ class OrgContext:
             return p
 
     def source(self) -> str | None:
-        """"account" when an org policy is in force and came from the
-        account, else None (no team org, a denial, or air-gap mode's offline
-        policy file)."""
+        """Where the org policy in force came from: the managed binding's
+        ``source`` on a managed device ("device" for a copy got with the
+        device token, "snapshot" for the managed file's own), else "account";
+        None when none is in force (no team org, a denial) or it is air-gap
+        mode's offline policy file."""
         p = self._enforced()
-        return "account" if p is not None and not self._offline else None
+        if p is None:
+            return None
+        if self.managed and self.managed.get("source"):
+            return self.managed["source"]
+        return None if self._offline else "account"
 
 
 def _tighter(a, b):

@@ -388,66 +388,30 @@ class _OrgCommands:
 
     def cmd_org_policy(self, base: str | None, org: str | None = None, export: bool = False,
                        days: int | None = None) -> int:
-        from brindle.pro import org_cli, team_policy
+        from brindle import airgap
+        from brindle.policy import Decision
+        from brindle.pro import org_cli
 
         if export:
             return org_cli.run_export(self.repo_root, org=org, days=days, base=base,
                                       transport=self.transport, echo=self._say)
-        source = org_cli.policy_source()
-        if source:
-            self._say(f"Verified policy source: {source}")
-
-        from brindle import airgap
-
-        ent = None
-        if source == "device":      # the device's signed policy applies, whatever the account is
-            from brindle.pro import managed
-
-            device = managed.load()
-            member = None
-            client = self._client(base)
-            try:      # a second org this person is signed in to: the stricter rule wins
-                other = license.current(store=self.store, client=client)
-                if "team" in other.features and other.org_id != getattr(device, "org_id", None):
-                    member = team_policy.fetch_policy(other.org_id, client, self.store,
-                                                      cached_for=(other.role, other.policy_role))
-            except Exception:   # noqa: BLE001 - signed out or offline: the device policy alone
-                member = None
-            p = (org_cli.device_policy(device, client, member)
-                 if isinstance(device, managed.Managed) else None)
-            if p is None:
-                self._say("brindle account: this managed device has no valid signed policy yet; "
-                          "it fetches one with its device token.")
+        ctx = org_cli.context(self.repo_root, store=self.store, client=self._client(base))
+        p = ctx.policy
+        if p is None:
+            self._say("brindle account: the org policy can't be read; delegations and merges are refused "
+                      "until it can.")
+            return 1
+        if isinstance(p, Decision):
+            if not p.allowed:
+                self._say(f"brindle account: {p.reason}")
                 return 1
-            note = " (managed device, signed policy)"
-        else:
-            client = self._client(base)
-            ent = license.current(store=self.store, client=client)
-            if "team" not in ent.features:
-                self._say(f"Org {ent.org_id} has no team policy (plan {ent.plan}); nothing is enforced.")
-                return 0
-        try:
-            if ent is None:
-                pass
-            elif airgap.enabled():     # nothing is fetched: the policy is the offline file's
-                p = team_policy.with_role_overrides(
-                    team_policy.load_offline(self.repo_root, ent.org_id), ent.role, ent.policy_role)
-                note = f" (offline: {airgap.policy_path(self.repo_root)})"
-            else:
-                p = team_policy.fetch_policy(ent.org_id, client, self.store,
-                                             cached_for=(ent.role, ent.policy_role))
-                note = ""
-        except team_policy.PolicyUnavailable as e:
-            if airgap.enabled():
-                self._say(f"brindle account: no usable offline policy for {ent.org_id} ({e}); "
-                          f"delegations and merges are refused until it is at .brindle/{airgap.POLICY_FILE}.")
-                return 1
-            p = team_policy.load_cached(ent.org_id)
-            if p is None:
-                self._say(f"brindle account: couldn't fetch the policy for {ent.org_id} ({e}), "
-                          "and none is cached; delegations and merges are refused until it is.")
-                return 1
-            note = f" (cached; couldn't refresh: {e})"
+            ent = ctx.entitlement
+            self._say(f"Org {ent.org_id} has no team policy (plan {ent.plan}); nothing is enforced." if ent
+                      else "No team policy applies; nothing is enforced.")
+            return 0
+        source = ctx.source() or ("offline" if airgap.enabled() else "account")
+        self._say(f"Verified policy source: {source}")
+        full = ctx.cached_policy(p.org_id) if source == "account" else None   # its role overrides
         fmt = lambda v: "any" if v is None else (", ".join(v) or "none")  # noqa: E731
         show = {"allowed_providers": ("providers", fmt), "allowed_models": ("models", fmt),
                 "allowed_profiles": ("profiles", fmt),
@@ -458,29 +422,32 @@ class _OrgCommands:
             for key, (label, f) in show.items():
                 self._say(f"  {label:<22} {f(getattr(q, key))}")
 
-        self._say(f"Policy for org {p.org_id}, version {p.version}{note}")
-        rules(p)
-        c = p.agent_setup.claude if p.agent_setup else None
+        org_p = full or p
+        self._say(f"Policy for org {org_p.org_id}, version {org_p.version}")
+        rules(org_p)
+        c = org_p.agent_setup.claude if org_p.agent_setup else None
         if c is not None:
             from brindle.pro import managed_models
 
             route = managed_models._describe_claude(c) if c.route in managed_models.CLAUDE_ROUTE_NAMES else c.route
             self._say(f"  {'agent setup':<22} Claude: {route}")
-        if p.roles:
+        if org_p.roles:
             self._say("Role overrides (what a role's members get instead):")
-            for role, over in sorted(p.roles.items()):
-                self._say(f"  {role}")
+            for name, over in sorted(org_p.roles.items()):
+                self._say(f"  {name}")
                 for key, v in over.items():
                     self._say(f"    {show[key][0]:<22} {show[key][1](v)}")
         else:
             self._say("Role overrides: none")
-        role, policy_role = p.role or (ent and ent.role), p.policy_role or (ent and ent.policy_role)
+        ent = ctx.entitlement
+        role = org_p.role or (ent and ent.role)
+        policy_role = org_p.policy_role or (ent and ent.policy_role)
         who = f"role {role or 'member'}" + (f", policy role {policy_role}" if policy_role else "")
-        if p.effective is None:
+        if p is org_p:
             self._say(f"Your policy ({who}): the org policy above.")
         else:
             self._say(f"Your effective policy ({who}):")
-            rules(p.effective)
+            rules(p)
         return 0
 
 

@@ -2,13 +2,14 @@
 import io
 import json
 import time
+from dataclasses import replace
 
 import pytest
 
-from brindle.pro import managed, org_cli
+from brindle.pro import credentials, managed, org_cli, team_policy
 from brindle.pro.account import ProAccount
-from pro_fixtures import FakeTransport, pro_env, signing_key  # noqa: F401 - fixtures
-from test_managed_device import NOW, ORG, answer, managed_file, signed_answer
+from pro_fixtures import BASE, FakeTransport, pro_env, signing_key, token  # noqa: F401 - fixtures
+from test_managed_device import NOW, ORG, answer, managed_file, member_policy, signed_answer
 
 
 def test_device_file_verifies_and_binds_org(signing_key, tmp_path):
@@ -29,22 +30,28 @@ def test_device_file_verifies_and_binds_org(signing_key, tmp_path):
     assert not (tmp_path / "x").exists()
 
 
-def test_policy_on_managed_device_uses_newest_signed_copy(signing_key, monkeypatch):
-    """Signed out, with a lapsed file snapshot, the device's freshly fetched policy is the one in force."""
+def test_policy_on_managed_device_is_the_org_contexts(signing_key, token, monkeypatch):
+    """With a lapsed file snapshot, the device's freshly fetched policy is in force, and a second
+    org's cached worker limit stays in force while its fetch fails."""
     device = managed.verify_file(managed_file(signing_key, answer(version=7), policy_exp=NOW - 1), now=NOW)
     assert device.snapshot is None and device.snapshot_expired
-    fetched = signed_answer(signing_key, answer(version=9))
-    transport = FakeTransport({f"GET /managed/{ORG}/policy": [(200, fetched)]})
-    chosen = []
-    real = org_cli.device_policy
+    team_policy.save_cached(replace(member_policy(max_parallel_workers=1), cached_for=("member", None)))
+    credentials.default_store().save({"base_url": BASE, "entitlement": token(
+        org_id="org_other", features=[team_policy.FEATURE], role="member", policy_version=10,
+        iat=NOW - 60, exp=NOW + 3600)})
+    transport = FakeTransport({f"GET /managed/{ORG}/policy": [(200, signed_answer(signing_key, answer(version=12)))],
+                               "GET /orgs/org_other/policy": [(500, {})]})
+    contexts = []
+    real = org_cli.context
     monkeypatch.setattr(time, "time", lambda: NOW)
-    monkeypatch.setattr(org_cli, "policy_source", lambda: "device")
     monkeypatch.setattr(managed, "load", lambda *a, **k: device)
-    monkeypatch.setattr(org_cli, "device_policy", lambda *a, **k: chosen.append(real(*a, **k)) or chosen[-1])
+    monkeypatch.setattr(org_cli, "context", lambda *a, **k: contexts.append(real(*a, **k)) or contexts[-1])
     err = io.StringIO()
     acct = ProAccount(None, transport=transport, out=io.StringIO(), err=err)
     assert acct.run(["org", "policy"]) == 0, err.getvalue()
-    assert (chosen[0].org_id, chosen[0].version) == (ORG, 9)
+    ctx, = contexts
+    assert (ctx.source(), ctx.policy.org_id, ctx.policy.version, ctx.policy.max_parallel_workers) == (
+        "device", ORG, 12, 1)
 
 
 @pytest.mark.parametrize("days, ok", [(0, False), (91, False), (7, True)])
