@@ -4,7 +4,8 @@
    and the settings it overrides of the person's own, each saying what it
    sets and what it overrides, with Clear for the override (the same PATCH
    with `unset`; the committed file's own override has its own explicit
-   clear). The page asks GET /v1/config without the stored keys (keys=0):
+   clear). Plan approvals has its own override here (Governance.tsx, PUT
+   /v1/governance/plan). The page asks GET /v1/config without the stored keys (keys=0):
    they are the slow part of that route and nothing here shows them. The
    header and every section render at once; each fills in when the config
    arrives, so the page never waits on it. */
@@ -15,7 +16,8 @@ import { PageHeader } from "../../components/PageHeader";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
 import { alert, button, notice, panel, quiet } from "../../components/ui";
 import { useSessions } from "../../store/sessions";
-import { More, message, RestOfConfig, Section, SettingRow } from "./SettingsScreen";
+import { PLAN_HELP, PlanChoice } from "./Governance";
+import { More, message, RestOfConfig, Row, Section, SettingRow } from "./SettingsScreen";
 import { PROJECT_RULES, SETTINGS, YOURS, carryEdits, changed, draftOf, invalid, overrideLabel, values } from "./settings";
 
 const CHECKS = PROJECT_RULES.filter((s) => s.key === "checks");
@@ -133,6 +135,12 @@ function Project({ client, repo }: { client: DaemonClient; repo: string }) {
         ) : (
           loading("rules-loading", "rules")
         )}
+      </Section>
+
+      <Section id="project-plans" title="Plan approvals" blurb="This project's own choice, saved to .brindle/config.local.json; Yours uses your default." testId="project-plan-approvals">
+        <Row label="Plan approvals" help={PLAN_HELP} htmlFor="plan-project">
+          <PlanChoice client={client} repo={repo} id="plan-project" />
+        </Row>
       </Section>
 
       <Section id="overrides" title="Overrides of your settings" blurb="Settings this project sets instead of yours." testId="project-overrides">

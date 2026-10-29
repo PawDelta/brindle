@@ -47,7 +47,11 @@
    its update line feeds the engine row (its sign-in lines stay out of the
    health list: the provider rows say that).
    Organization (OrgApprovals.tsx, read only when opened): the organization's
-   members, roles and approval limits (/v1/org-permissions). The command-line
+   members, roles and approval limits (/v1/org-permissions); above it who
+   manages this device, the offline policy export and, for an Enterprise
+   admin, the managed device file (Governance.tsx). Plan approvals: the
+   person's default (Governance.tsx; a project's override is on Project
+   settings). The command-line
    tool's install is the shell's (install_cli, api/tauri.ts): App passes it
    in the app, where the row then says where the link went; in a browser
    tab there is none and the button stays disabled. Staff alone (GET
@@ -76,6 +80,7 @@ import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PRO
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import { About } from "./About";
+import { DeviceFile, OrgStatus, PLAN_HELP, PlanChoice, PolicyExport, useGovernance } from "./Governance";
 import { OrgApprovals } from "./OrgApprovals";
 import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
@@ -186,7 +191,7 @@ export function Section({ id, title, blurb, actions, children, testId, staff = f
 /* One row of a section: a label with its one-line help on the left, the
    control (or the state and one button) on the right; `wide` puts the
    control under the label, for a list. */
-function Row({ label: text, help, htmlFor, badges, wide = false, children, testId, data }: { label: ReactNode; help?: ReactNode; htmlFor?: string; badges?: ReactNode; wide?: boolean; children?: ReactNode; testId?: string; data?: Record<string, string | undefined> }) {
+export function Row({ label: text, help, htmlFor, badges, wide = false, children, testId, data }: { label: ReactNode; help?: ReactNode; htmlFor?: string; badges?: ReactNode; wide?: boolean; children?: ReactNode; testId?: string; data?: Record<string, string | undefined> }) {
   const heading = (
     <>
       {text}
@@ -1014,6 +1019,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const pick = useRepo();
   const { repo, repos } = pick;
   const [config, setConfig] = useState<Config | null>(null);
+  const governance = useGovernance(client);
   const [checks, setChecks] = useState<DoctorCheck[] | null>(null);
   const [doctorError, setDoctorError] = useState<string | null>(null);
   const [meta, setMeta] = useState<Meta | null>(null);
@@ -1303,10 +1309,27 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
 
       <Permissions client={client} rule={rule} ask={ask} />
 
-      <Section id="organization" title="Organization" blurb="Your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
+      <Section id="plans" title="Plan approvals" blurb="Whether workers propose a plan and wait for approval before they edit. A project can set its own." testId="plan-approvals">
+        <Row label="Plan approvals" help={PLAN_HELP} htmlFor="plan-user">
+          <PlanChoice client={client} id="plan-user" />
+        </Row>
+      </Section>
+
+      <Section id="organization" title="Organization" blurb="Who manages this device, your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
+        <Row label="Organization">
+          <OrgStatus status={governance.status} error={governance.error} />
+        </Row>
         <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
           <OrgApprovals client={client} />
         </Row>
+        <Row label="Offline policy export" help="The signed policy for a device that can't reach your organization, saved to ~/.brindle/policy.json." wide>
+          <PolicyExport client={client} />
+        </Row>
+        {governance.status?.enterprise_admin && (
+          <Row label="Managed device" help="A device file that puts one device under your organization's signed policy, with its own device token." wide>
+            <DeviceFile client={client} />
+          </Row>
+        )}
       </Section>
 
       <Section

@@ -106,18 +106,17 @@ describe("settings screen", () => {
     expect(within(mine).queryByRole("textbox", { name: "Checks" })).toBeNull();
     expect(within(mine).queryByRole("combobox", { name: "Overlapping tasks" })).toBeNull();
     expect(screen.queryByTestId("user-save")).toBeNull();
-    fireEvent.click(within(mine).getByRole("switch", { name: "Plan first" }));
     // A number can't be left empty: the engine would store the null and choke on it later.
     const workers = within(mine).getByRole("spinbutton", { name: "Workers at once" });
     fireEvent.change(workers, { target: { value: "" } });
     expect(screen.getByTestId("settings-invalid").textContent).toContain("Workers at once needs a number");
     expect(screen.getByRole("button", { name: "Save your settings" })).toHaveProperty("disabled", true);
     fireEvent.change(workers, { target: { value: "2" } });
-    expect(mine.querySelector('[data-setting="plan_first"]')!.textContent).toContain("edited");
+    expect(mine.querySelector('[data-setting="max_agents"]')!.textContent).toContain("edited");
     fireEvent.click(screen.getByRole("button", { name: "Save your settings" }));
-    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Saved max_agents, plan_first for every project to /home/u/.brindle/config.json"));
-    expect(patches(daemon)[0].body).toEqual({ scope: "user", values: { max_agents: 2, plan_first: true } });
-    expect(daemon.data.config.user).toMatchObject({ max_agents: 2, plan_first: true });
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Saved max_agents for every project to /home/u/.brindle/config.json"));
+    expect(patches(daemon)[0].body).toEqual({ scope: "user", values: { max_agents: 2 } });
+    expect(daemon.data.config.user).toMatchObject({ max_agents: 2 });
     expect(daemon.data.config.local).toEqual({});
     // More: the other settings; what the person has set beyond the rows is listed to read.
     fireEvent.click(within(mine).getByRole("button", { name: /^More/ }));
@@ -125,6 +124,39 @@ describe("settings screen", () => {
     expect(screen.getByRole("switch", { name: "Coordinator" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Other settings you have/ }));
     expect(screen.getByTestId("user-rest").textContent).toContain("supervisor");
+    stop();
+  });
+
+  it("organization: the policy's exact problem and what to do, an offline policy export of at most 90 days, a device file for an Enterprise admin, and the plan approvals default", async () => {
+    const { daemon, stop } = setup({
+      governance: { status: "problem", org_id: "org_1", org_name: "Acme", source: "snapshot", verified: false, enterprise_admin: true,
+        problem: "The saved policy expired 3 days ago.", action: "Connect to the internet so brindle can fetch a fresh signed policy." },
+      plan: { user: "auto", projects: {} },
+    });
+    const status = await screen.findByTestId("org-status");
+    expect(status.textContent).toContain("Managed by Acme · policy not verified · from the last saved copy");
+    expect(within(status).getByRole("alert").textContent).toBe("The saved policy expired 3 days ago.Connect to the internet so brindle can fetch a fresh signed policy.");
+    // The export lasts 1 to 90 days.
+    const days = screen.getByRole("spinbutton", { name: "Days the export lasts" });
+    fireEvent.change(days, { target: { value: "91" } });
+    expect(screen.getByRole("button", { name: "Offline policy export" })).toHaveProperty("disabled", true);
+    fireEvent.change(days, { target: { value: "14" } });
+    fireEvent.click(screen.getByRole("button", { name: "Offline policy export" }));
+    expect((await screen.findByText(/offline policy export to/)).textContent).toBe("Saved a 14-day offline policy export to /home/u/.brindle/policy.json");
+    expect(posts(daemon).find((r) => r.path === "/governance/offline-policy")?.body).toEqual({ days: 14 });
+    // The device file comes back to save as managed.json.
+    fireEvent.change(screen.getByRole("textbox", { name: "Device name" }), { target: { value: "build-01" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Allow air-gapped use" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download device file" }));
+    const file = await screen.findByTestId("device-file");
+    expect(file.getAttribute("download")).toBe("managed.json");
+    expect(JSON.parse(decodeURIComponent(file.getAttribute("href")!.split(",")[1]))).toEqual({ org_id: "org_1", name: "build-01", allow_airgap: true });
+    // Plan approvals: the default for every project, saved when picked.
+    const plan = await screen.findByRole("combobox", { name: "Plan approvals" });
+    expect(plan).toHaveProperty("value", "auto");
+    fireEvent.change(plan, { target: { value: "always" } });
+    await waitFor(() => expect(daemon.data.plan.user).toBe("always"));
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/governance/plan")?.body).toEqual({ scope: "user", plan: "always" });
     stop();
   });
 

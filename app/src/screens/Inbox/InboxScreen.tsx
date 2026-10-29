@@ -13,7 +13,9 @@
    request brindle's hook holds, a note and a way to the agent's window for
    a prompt only that window can take. Acted on here too: a lapsed sign-in (Sign in: the provider CLI's own login on the engine, or
    brindle's cloud sign-in for a "login" item), a plan (Approve; changes
-   are asked for in its session), proposed checks (Accept / Decline), an
+   are asked for in its session; under plan approvals, a line saying it
+   waits on you as a named approver or the second person, or on someone
+   else, with no Approve then), proposed checks (Accept / Decline), an
    org notice (Mark read) and a setup problem the engine can repair itself
    (Fix: a job on the engine, POST /v1/setup/codex-hook for a Codex that no
    longer trusts brindle's permission hook; the card goes when the job is
@@ -48,7 +50,7 @@ import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
 import { ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
-import { FIXES, KIND_SHORT, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
+import { FIXES, KIND_SHORT, approverPrompt, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
 import { useInboxActions } from "./useInboxActions";
 
 export interface InboxScreenProps {
@@ -289,8 +291,14 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
 
   let body: ReactNode = null;
   if (item.kind === "proposed_checks" || item.kind === "plan") {
-    // Approved or accepted from this card: shown whole, never cut short.
-    body = <pre className="whitespace-pre-wrap font-mono text-xs" data-testid="card-detail">{item.detail}</pre>;
+    // Approved or accepted from this card: shown whole, never cut short. A plan says whose approval it waits on.
+    const prompt = approverPrompt(item);
+    body = (
+      <>
+        {prompt && <p className="mb-1 font-medium text-branch" data-testid="approver-prompt">{prompt}</p>}
+        <pre className="whitespace-pre-wrap font-mono text-xs" data-testid="card-detail">{item.detail}</pre>
+      </>
+    );
   } else if (item.kind === "org_notice") {
     body = item.detail ? <span>from your org's {item.detail}</span> : null;
   } else if (item.kind === "setup") {
@@ -310,7 +318,9 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     </button>
   );
   let acts: ReactNode;
-  if (item.kind === "plan") {
+  if (item.kind === "plan" && item.approval && !item.approval.you) {
+    acts = <span className="text-[11px] text-ink-3">not yours to approve</span>;
+  } else if (item.kind === "plan") {
     acts = (
       <>
         {act("Approve", "approve", { feedback: "" })}

@@ -1926,6 +1926,30 @@
       "title": "DecisionDTO",
       "type": "object"
     },
+    "DeviceFileDTO": {
+      "properties": {
+        "device_id": {
+          "title": "Device Id",
+          "type": "string"
+        },
+        "filename": {
+          "title": "Filename",
+          "type": "string"
+        },
+        "managed": {
+          "additionalProperties": true,
+          "title": "Managed",
+          "type": "object"
+        }
+      },
+      "required": [
+        "filename",
+        "device_id",
+        "managed"
+      ],
+      "title": "DeviceFileDTO",
+      "type": "object"
+    },
     "GcloudOptionsDTO": {
       "properties": {
         "adc": {
@@ -2207,6 +2231,102 @@
       "title": "GoalDTO",
       "type": "object"
     },
+    "GovernanceStatusDTO": {
+      "description": "Who manages this device and whether its signed policy verifies (daemon/routes_governance).",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Action"
+        },
+        "enterprise_admin": {
+          "default": false,
+          "title": "Enterprise Admin",
+          "type": "boolean"
+        },
+        "org_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Org Id"
+        },
+        "org_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Org Name"
+        },
+        "problem": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Problem"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "enum": [
+                "device",
+                "account",
+                "snapshot",
+                "offline"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source"
+        },
+        "status": {
+          "enum": [
+            "managed",
+            "unmanaged",
+            "problem",
+            "unavailable"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "verified": {
+          "default": false,
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "status"
+      ],
+      "title": "GovernanceStatusDTO",
+      "type": "object"
+    },
     "InboxActionDTO": {
       "description": "A route the app can call to act on the item itself.",
       "properties": {
@@ -2418,6 +2538,43 @@
           ],
           "title": "PermissionDTO",
           "type": "object"
+        },
+        "PlanApprovalDTO": {
+          "description": "Who may approve a plan: named approvers, or a second person (anyone but who asked).",
+          "properties": {
+            "approvers": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Approvers",
+              "type": "array"
+            },
+            "requested_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Requested By"
+            },
+            "second_person": {
+              "default": false,
+              "title": "Second Person",
+              "type": "boolean"
+            },
+            "you": {
+              "default": false,
+              "title": "You",
+              "type": "boolean"
+            }
+          },
+          "title": "PlanApprovalDTO",
+          "type": "object"
         }
       },
       "properties": {
@@ -2443,6 +2600,17 @@
           ],
           "default": null,
           "title": "Agent Id"
+        },
+        "approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanApprovalDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "detail": {
           "anyOf": [
@@ -2705,6 +2873,24 @@
         "started_at"
       ],
       "title": "NativeSubagentDTO",
+      "type": "object"
+    },
+    "OfflinePolicyExportDTO": {
+      "properties": {
+        "days": {
+          "title": "Days",
+          "type": "integer"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "days"
+      ],
+      "title": "OfflinePolicyExportDTO",
       "type": "object"
     },
     "OrgApprovalPolicyDTO": {
@@ -4926,6 +5112,96 @@
       "title": "PermissionRuleDTO",
       "type": "object"
     },
+    "PlanApprovalDTO": {
+      "description": "Who may approve a plan: named approvers, or a second person (anyone but who asked).",
+      "properties": {
+        "approvers": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Approvers",
+          "type": "array"
+        },
+        "requested_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requested By"
+        },
+        "second_person": {
+          "default": false,
+          "title": "Second Person",
+          "type": "boolean"
+        },
+        "you": {
+          "default": false,
+          "title": "You",
+          "type": "boolean"
+        }
+      },
+      "title": "PlanApprovalDTO",
+      "type": "object"
+    },
+    "PlanSettingDTO": {
+      "description": "Plan approvals: Auto / Always / Never, the person's default and a project's override.",
+      "properties": {
+        "effective": {
+          "anyOf": [
+            {
+              "enum": [
+                "auto",
+                "always",
+                "never"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Effective"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "enum": [
+                "auto",
+                "always",
+                "never"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project"
+        },
+        "user": {
+          "enum": [
+            "auto",
+            "always",
+            "never"
+          ],
+          "title": "User",
+          "type": "string"
+        }
+      },
+      "required": [
+        "user"
+      ],
+      "title": "PlanSettingDTO",
+      "type": "object"
+    },
     "PreflightActionDTO": {
       "properties": {
         "body": {
@@ -7049,6 +7325,26 @@
     {
       "method": "POST",
       "path": "/v1/goal/enabled"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/governance"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/governance/device-file"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/governance/offline-policy"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/governance/plan"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/governance/plan"
     },
     {
       "method": "POST",

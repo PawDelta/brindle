@@ -19,6 +19,7 @@ import type {
   AskGroupDTO,
   AskResultDTO,
   DecisionDTO,
+  GovernanceStatusDTO,
   OrgControlViewDTO,
   PermissionPolicyDTO,
   PermissionRuleDTO,
@@ -39,7 +40,7 @@ import type {
 } from "../api/schema";
 import { LOGIN_PROVIDERS } from "../api/client";
 import { hunksOf, parseDiff } from "../screens/Branch/parseDiff";
-import type { AccountInfo, ConnectionReady, Cost, DebugEntry, ProviderConnection, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
+import type { AccountInfo, ConnectionReady, Cost, DebugEntry, ProviderConnection, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, Plan, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
 
 export const BASE_URL = "http://127.0.0.1:47321";
 export const TOKEN = "test-token";
@@ -139,6 +140,10 @@ export interface DaemonData {
      person's own settings that are not a repo's. A PATCH with a value the
      engine doesn't know is refused (400). */
   userSettings: UserSettings;
+  /* GET /governance (routes_governance): who manages this device. */
+  governance: GovernanceStatusDTO;
+  /* GET and PUT /governance/plan: the person's plan approvals default and each project's override. */
+  plan: { user: Plan; projects: Record<string, Plan> };
   /* GET and PUT /debug (staff-only debug logging): whether the account is
      staff and whether logging is on. A PUT from someone not staff is
      refused (403). POST /debug/log's entries land in `debugLog`. */
@@ -770,6 +775,8 @@ export class FakeDaemon {
       orgs: {},
       config: { user: {}, repo: {}, local: {}, keys: [] },
       userSettings: { claude_permission_mode: "default" },
+      governance: { status: "unmanaged" },
+      plan: { user: "auto", projects: {} },
       debug: { staff: false, enabled: false },
       debugLog: [],
       doctor: [],
@@ -1734,6 +1741,34 @@ export class FakeDaemon {
     return { grants, dto };
   }
 
+  /* Organization governance's routes (routes_governance), or null for any other path. */
+  private governanceRoute(method: string, path: string, body: Record<string, unknown>, query: Record<string, string>): Response | null {
+    if (!path.startsWith("/governance")) return null;
+    const plan = this.data.plan;
+    const planDTO = (repo?: string) => (repo ? { user: plan.user, project: plan.projects[repo] ?? null, effective: plan.projects[repo] ?? plan.user } : { user: plan.user });
+    if (path === "/governance" && method === "GET") return json(this.data.governance);
+    if (path === "/governance/offline-policy" && method === "POST") {
+      const days = body.days;
+      if (typeof days !== "number" || days < 1 || days > 90) return error("invalid", "days must be 1 to 90", 400);
+      return json({ path: "/home/u/.brindle/policy.json", days });
+    }
+    if (path === "/governance/device-file" && method === "POST") {
+      if (typeof body.name !== "string" || !body.name) return error("invalid", "name is required", 400);
+      return json({ filename: "managed.json", device_id: "dev_1", managed: { org_id: this.data.governance.org_id, name: body.name, allow_airgap: body.allow_airgap } });
+    }
+    if (path === "/governance/plan" && method === "GET") return json(planDTO(query.repo));
+    if (path === "/governance/plan" && method === "PUT") {
+      const value = body.plan as Plan | null;
+      if (body.scope === "user") plan.user = value ?? plan.user;
+      else if (typeof body.repo === "string") {
+        if (value === null) delete plan.projects[body.repo];
+        else plan.projects[body.repo] = value;
+      }
+      return json(planDTO(typeof body.repo === "string" ? body.repo : undefined));
+    }
+    return error("not_found", `no route ${method} ${path}`, 404);
+  }
+
   /* The permission policy's routes (routes_read get_permissions,
      get_permission_asks, get_permission_plan; routes_actions' preset,
      unmatched, rules, exceptions, saved actions and asks), or null for any
@@ -2305,6 +2340,8 @@ export class FakeDaemon {
     if (auth !== `Bearer ${this.token}`) {
       return error("unauthorized", "missing or wrong token (see ~/.brindle/daemon.json)", 401);
     }
+    const governance = this.governanceRoute(method, path, (body ?? {}) as Record<string, unknown>, query);
+    if (governance) return governance;
     const policy = this.permissionRoute(method, path, (body ?? {}) as Record<string, unknown>, query);
     if (policy) {
       if (method === "PUT" && path === "/permissions/preset" && this.holdPreset) {

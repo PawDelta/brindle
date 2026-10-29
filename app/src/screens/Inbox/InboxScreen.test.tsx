@@ -196,6 +196,24 @@ describe("inbox", () => {
     sync.stop();
   });
 
+  it("plan approvals: a plan waiting on the viewer as the second person says so and can be approved; one waiting on named approvers can't", async () => {
+    const plan: InboxItemDTO = { kind: "plan", reason: "plan awaiting approval", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", detail: "1. Migrate." };
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker],
+      inbox: [{ ...plan, approval: { second_person: true, requested_by: "ana@example.test", you: true } }],
+    });
+    const { sync } = mount(daemon);
+    const prompt = await screen.findByTestId("approver-prompt");
+    expect(prompt.textContent).toBe("Needs a second person: ana@example.test asked for it, so it waits on your approval.");
+    expect(within(card("plan")).getByRole("button", { name: "Approve" })).toBeTruthy();
+    daemon.data.inbox = [{ ...plan, approval: { approvers: ["lee@example.test", "kim@example.test"], you: false } }];
+    daemon.publish("message.queued", { agent_id: "w1" });
+    await waitFor(() => expect(screen.getByTestId("approver-prompt").textContent).toBe("Waiting on lee@example.test, kim@example.test to approve."));
+    expect(card("plan").textContent).toContain("Plan waiting on another approver");
+    expect(within(card("plan")).queryByRole("button", { name: "Approve" })).toBeNull();
+    sync.stop();
+  });
+
   it("self-repair: a setup problem the engine can fix is a card with one Fix, a job on the engine; the card clears when it is done, or shows the job's error", async () => {
     // As the engine's M10 inbox lists it (service/inbox._setup_items): no agent, a fix the app has a button for.
     const setupItem: InboxItemDTO = { kind: "setup", fix: "codex_hook_trust", reason: "Codex's trust of brindle's permission hook was removed from Codex's config", action: { method: "POST", path: "/v1/setup/codex-hook" } };

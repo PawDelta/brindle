@@ -71,14 +71,14 @@ describe("project settings screen", () => {
   it("lists what the project overrides with what it overrides, and clears an override in the local file but not the committed one", async () => {
     const { daemon, stop } = setup({
       config: {
-        user: { plan_first: false },
+        user: { coordinator: false },
         repo: { max_agents: 2 },
-        local: { plan_first: true },
+        local: { coordinator: true },
         keys: [],
       },
     }, REPO);
     const list = await screen.findByTestId("project-overrides");
-    const marker = await within(list).findByTestId("override-plan_first");
+    const marker = await within(list).findByTestId("override-coordinator");
     expect(marker.textContent).toContain("On here · yours: Off");
     expect(within(list).getByTestId("override-max_agents").textContent).toContain("2 here · yours: 5");
     expect(within(list).queryByTestId("override-autopilot")).toBeNull();
@@ -86,10 +86,10 @@ describe("project settings screen", () => {
     const checks = screen.getByRole("textbox", { name: "Checks" });
     fireEvent.change(checks, { target: { value: "npm test\nnpm run lint" } });
     fireEvent.click(within(marker).getByRole("button", { name: "Clear override" }));
-    await waitFor(() => expect(within(list).queryByTestId("override-plan_first")).toBeNull());
-    expect(patches(daemon)[0].body).toEqual({ scope: "repo", repo: REPO, unset: ["plan_first"] });
+    await waitFor(() => expect(within(list).queryByTestId("override-coordinator")).toBeNull());
+    expect(patches(daemon)[0].body).toEqual({ scope: "repo", repo: REPO, unset: ["coordinator"] });
     expect(daemon.data.config.local).toEqual({});
-    expect(daemon.data.config.user).toEqual({ plan_first: false });
+    expect(daemon.data.config.user).toEqual({ coordinator: false });
     expect(checks).toHaveProperty("value", "npm test\nnpm run lint");
     // The committed file's override has its own explicit clear, scoped to that file.
     fireEvent.click(within(within(list).getByTestId("override-max_agents")).getByRole("button", { name: "Clear in .brindle/config.json" }));
@@ -98,6 +98,21 @@ describe("project settings screen", () => {
     expect(daemon.data.config.repo).toEqual({});
     expect(list.textContent).toContain("overrides none of your settings");
     expect(screen.getByTestId("settings-save")).toBeTruthy();
+    stop();
+  });
+
+  it("plan approvals: the project overrides your default, and Yours clears the override", async () => {
+    const { daemon, stop } = setup({ plan: { user: "never", projects: {} } }, REPO);
+    const plan = await within(screen.getByTestId("project-plan-approvals")).findByRole("combobox", { name: "Plan approvals" });
+    expect(plan).toHaveProperty("value", "");
+    expect(within(plan).getByRole("option", { name: "Yours: Never" })).toBeTruthy();
+    fireEvent.change(plan, { target: { value: "always" } });
+    await waitFor(() => expect(daemon.data.plan.projects).toEqual({ [REPO]: "always" }));
+    await waitFor(() => expect(plan).toHaveProperty("value", "always"));
+    fireEvent.change(plan, { target: { value: "" } });
+    await waitFor(() => expect(daemon.data.plan.projects).toEqual({}));
+    const puts = daemon.requests.filter((r) => r.method === "PUT" && r.path === "/governance/plan").map((r) => r.body);
+    expect(puts).toEqual([{ scope: "repo", repo: REPO, plan: "always" }, { scope: "repo", repo: REPO, plan: null }]);
     stop();
   });
 
@@ -126,8 +141,8 @@ describe("project settings screen", () => {
 describe("overrideLabel", () => {
   const setting = (key: string) => SETTINGS.find((s) => s.key === key)!;
   it.each([
-    ["plan_first", true, false, "On here · yours: Off"],
-    ["plan_first", false, undefined, "Off here · yours: Off"],
+    ["coordinator", true, false, "On here · yours: Off"],
+    ["coordinator", false, undefined, "Off here · yours: Off"],
     ["max_agents", 2, undefined, "2 here · yours: 5"],
     ["stale_after", 0, 45, "0 minutes here · yours: 45 minutes"],
     ["sidebar", "bottom", "left", "Below the chat here · yours: Left of the chat"],
