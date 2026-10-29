@@ -206,13 +206,18 @@ describe("App", () => {
     // The second repo's heading: its Project settings, and a shell from the status line starts at that repo.
     await screen.findByRole("complementary", { name: "Sidebar" });
     fireEvent.click(await within(nav()).findByRole("button", { name: "Project settings for other" }));
-    expect((await screen.findByRole("region", { name: "Project settings" })).textContent).toContain("Project settings: other");
+    await screen.findByRole("region", { name: "Project settings" });
+    expect(screen.getByRole("radio", { name: /^other/ }).getAttribute("aria-checked")).toBe("true");
     fireEvent.click(screen.getByTestId("terminal-toggle"));
     await waitFor(() => expect(daemon.shells.map((s) => s.cwd)).toEqual([OTHER]));
-    // Settings' link opens the page of the repo Settings is showing.
+    // Settings opens on You; the switch's repo side is the current session's repo (here the second), with a menu for the others.
+    localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ root: "sup2", repo: OTHER }));
     fireEvent.click(link("Settings"));
-    fireEvent.click(await screen.findByTestId("project-settings-link"));
-    expect((await screen.findByRole("region", { name: "Project settings" })).textContent).toContain("Project settings: proj");
+    fireEvent.click(await screen.findByRole("radio", { name: /^other/ }));
+    await screen.findByRole("region", { name: "Project settings" });
+    fireEvent.click(screen.getByRole("radio", { name: /^other/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "proj" }));
+    expect((await screen.findByRole("radio", { name: /^proj/ })).getAttribute("aria-checked")).toBe("true");
     sync.stop();
   });
 

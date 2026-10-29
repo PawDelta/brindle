@@ -319,6 +319,8 @@ def get_config(db: DB, request: Request) -> Any:
             settings["repo"] = dataclasses.asdict(config.load_repo_config(repo))
         # Settings this project's own files set (over the person's): key -> "local" or "repo".
         settings["overrides"] = {k: s for k in settings["repo"] if (s := config.setting_source(repo, k)) in ("local", "repo")}
+        # The local file's own rules: the effective list unions every scope's, so the app edits this one.
+        settings["local"] = config.local_values(repo, ("rules",))
     # `keys=0`: the page doesn't show the stored keys, and reading them is the slow part
     # (one keychain read per name), so it skips them.
     if request.query_params.get("keys") in ("0", "false"):

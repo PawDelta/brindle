@@ -2361,6 +2361,11 @@ def test_config_reports_a_projects_overrides_and_unset_clears_a_local_one(db, re
     assert code == 200 and reply["path"].endswith("config.json")
     _, cfg = _send("GET", f"/v1/config?repo={repo}")
     assert cfg["overrides"] == {}
+    # Rules union across scopes; the local file's own list comes separately, so the app can edit it.
+    config.set_repo(repo, "rules", ["Require review"])
+    config.set_local(repo, "rules", ["Use tests"])
+    _, cfg = _send("GET", f"/v1/config?repo={repo}")
+    assert (cfg["repo"]["rules"], cfg["local"]) == (["Require review", "Use tests"], {"rules": ["Use tests"]})
 
 
 @pytest.mark.variant("a race: a second settings write lands between the first's read and its write")
