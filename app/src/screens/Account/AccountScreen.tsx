@@ -21,7 +21,7 @@ import type { OpenUrl } from "../../api/open";
 import { plain } from "../../api/wording";
 import { PageHeader } from "../../components/PageHeader";
 import { RepoSelect, useRepo } from "../../components/RepoSelect";
-import { alert, button, card, chip, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
+import { alert, button, card, chip, field, h2, label, main, mono, notice, pill, quiet } from "../../components/ui";
 import { useSessions } from "../../store/sessions";
 import { useUsage } from "../../store/usage";
 import { useAppState, useStore } from "../../store/useStore";
@@ -78,7 +78,7 @@ function SignIn({ client, openUrl, onDone }: { client: DaemonClient; openUrl: Op
       <p className="text-sm text-ink-2">brindle is complete without an account. A brindle Pro plan adds hosted learning, cost reports, Docker services per worktree and more, listed below.</p>
       {!busy && (
         <div className="flex flex-wrap items-center gap-s1">
-          <button type="button" className={primary} onClick={() => begin(false)}>
+          <button type="button" className={main} onClick={() => begin(false)}>
             Sign in with your browser
           </button>
           <button type="button" className={quiet} onClick={() => begin(true)}>
@@ -344,7 +344,7 @@ function PaidPlan({ plan, features, openUrl, onUse }: { plan: Plan; features: st
 /* The plans for someone on the free one (signed in or not): the free plan
    in a sentence, the pricing page's four cards as columns over its lists
    (theirs highlighted), and the site's own way to upgrade. */
-function Plans({ openUrl }: { openUrl: OpenUrl }) {
+function Plans({ openUrl, signedIn }: { openUrl: OpenUrl; signedIn: boolean }) {
   const [openError, setOpenError] = useState<string | null>(null);
   const open = (url: string) => void openUrl(url).catch((e: unknown) => setOpenError(message(e)));
   const free = tierOf("free");
@@ -356,7 +356,7 @@ function Plans({ openUrl }: { openUrl: OpenUrl }) {
         <button type="button" className={button} onClick={() => open(PRICING_URL)} data-testid="pricing">
           Pricing ↗
         </button>
-        <button type="button" className={primary} onClick={() => open(ACCOUNT_URL)} data-testid="upgrade">
+        <button type="button" className={signedIn ? main : button} onClick={() => open(ACCOUNT_URL)} data-testid="upgrade">
           Upgrade to Pro ↗
         </button>
       </header>
@@ -597,7 +597,7 @@ export function AccountScreen({ client, openUrl, onNavigate, section, ask }: Acc
       )}
       {/* Usage is the providers' own allowance, signed in or not. */}
       <UsageSection ref={usageRef} />
-      {account && (paying ? <PaidPlan plan={plan} features={account.features} openUrl={openUrl} onUse={use} /> : <Plans openUrl={openUrl} />)}
+      {account && (paying ? <PaidPlan plan={plan} features={account.features} openUrl={openUrl} onUse={use} /> : <Plans openUrl={openUrl} signedIn={account.signed_in} />)}
     </section>
   );
 }

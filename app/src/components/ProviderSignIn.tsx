@@ -28,7 +28,7 @@ import { keptLink, PANE_DEAD, readPane, READ_SIZE, type PaneReading } from "../a
 import { usePtyViews, type PtyViews, type PtyViewTarget } from "../api/ptyView";
 import { providerLabel } from "../api/providers";
 import { PtyTerminal } from "./PtyTerminal";
-import { alert, button, field, primary, quiet } from "./ui";
+import { alert, button, field, quiet } from "./ui";
 
 export interface ProviderSignInProps {
   provider: string;
@@ -338,7 +338,7 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
 
   if (phase.kind === "idle") {
     return (
-      <button type="button" className={small ? `${primary} px-s1 py-0.5 text-xs` : primary} onClick={() => void begin()}>
+      <button type="button" className={small ? `${button} px-s1 py-0.5 text-xs` : button} onClick={() => void begin()}>
         Sign in to {name}
       </button>
     );
@@ -346,7 +346,7 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
   const terminal = "terminal" in phase ? phase.terminal : null;
   const busy = phase.kind === "starting" || phase.kind === "waiting" || phase.kind === "checking";
   return (
-    <div className="flex w-full flex-col gap-s1 rounded-md border border-line bg-canvas-2 px-s2 py-s1 text-sm" role="status" aria-label={`Sign in to ${name}`} data-testid="sign-in-flow" data-phase={phase.kind}>
+    <div className="flex w-full flex-col gap-s1 rounded-md bg-canvas-2 px-s2 py-s1 text-sm" role="status" aria-label={`Sign in to ${name}`} data-testid="sign-in-flow" data-phase={phase.kind}>
       <div className="flex flex-wrap items-center gap-s1">
         {busy && <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />}
         {phase.kind === "starting" && <span>Starting {name}'s sign-in…</span>}
@@ -409,7 +409,7 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
           }}
         >
           <input className={`${field} w-full font-mono`} aria-label="Code from the browser" placeholder="Paste the code from the browser" value={code} autoFocus onChange={(e) => setCode(e.target.value)} />
-          <button type="submit" className={primary} disabled={!code.trim()}>
+          <button type="submit" className={button} disabled={!code.trim()}>
             Continue
           </button>
         </form>
@@ -417,7 +417,7 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
       {phase.kind === "failed" && (
         <p className={alert} role="alert">
           {phase.message}{" "}
-          <button type="button" className={primary} onClick={() => void begin(true)}>
+          <button type="button" className={button} onClick={() => void begin(true)}>
             Try again
           </button>
         </p>

@@ -16,7 +16,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { DaemonError, type Diff } from "../../api/client";
 import { useDaemon } from "../../api/context";
-import { button, card, label, mono, primary, quiet } from "../../components/ui";
+import { button, card, label, mono, quiet } from "../../components/ui";
 import { hunksOf, newSide, parseDiff, splice, type FileDiff, type Hunk, type Untracked } from "./parseDiff";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -173,7 +173,7 @@ function HunkEditor({ file, hunk, access, onSaved, onDone }: { file: FileDiff; h
           </span>
         )}
         <span className="flex-1" />
-        <button type="button" className={`${primary} px-s1 py-0.5 text-xs`} disabled={busy} onClick={() => void save()}>
+        <button type="button" className={`${button} px-s1 py-0.5 text-xs`} disabled={busy} onClick={() => void save()}>
           Save <kbd className="ml-1 font-mono text-[10px] opacity-80">⌘S</kbd>
         </button>
         <button type="button" className={`${quiet} text-xs`} disabled={busy} onClick={onDone}>

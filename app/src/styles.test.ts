@@ -1,11 +1,11 @@
 // @vitest-environment node
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { chip, pill, primary } from "./components/ui";
 
 /* The app wears the site's Crisp tokens (web/public/assets/site.css): the
-   values, the radii, the braid's own threads in the logo, the green
-   primary and the hairline pills. */
+   values, the radii and the braid's own threads in the logo, worn quiet:
+   one plane for ground and surface, neutral hairlines, green only for the
+   one main action, sections as dividers and pills as a dot and text. */
 const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
 const block = (selector: string) => {
   const at = css.indexOf(`${selector} {`);
@@ -17,7 +17,7 @@ describe("the Crisp palette", () => {
   it("has the site's dark tokens", () => {
     const dark = block(":root");
     expect(token(dark, "canvas")).toBe("#080d0b");
-    expect(token(dark, "surface")).toBe("#111a16");
+    expect(token(dark, "surface")).toBe("#080d0b");
     expect(token(dark, "ink")).toBe("#e8f0eb");
     expect(token(dark, "fawn")).toBe("#34d399");
     expect(token(dark, "on-fawn")).toBe("#03160e");
@@ -30,7 +30,7 @@ describe("the Crisp palette", () => {
 
   it("has the site's cool light tokens, the same under the media query and data-theme", () => {
     const light = block(':root[data-theme="light"]');
-    expect(token(light, "canvas")).toBe("#f1f5f5");
+    expect(token(light, "canvas")).toBe("#f4f6f6");
     expect(token(light, "ink")).toBe("#0e1716");
     expect(token(light, "fawn")).toBe("#046e50");
     expect(token(light, "on-fawn")).toBe("#ffffff");
@@ -66,11 +66,4 @@ describe("the Crisp palette", () => {
     expect(css).not.toMatch(/\.lm-\w+ \{ stroke: var\(--fawn\)/);
   });
 
-  it("makes the primary button the green accent and pills hairlines", () => {
-    expect(primary).toContain("bg-fawn");
-    expect(primary).toContain("text-on-fawn");
-    expect(pill).toContain("inset-ring-line-strong");
-    expect(pill).toContain("rounded-sm");
-    expect(chip).not.toContain("inset-ring");
-  });
 });

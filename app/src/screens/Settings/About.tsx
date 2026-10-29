@@ -12,7 +12,7 @@
 import { useEffect, useState } from "react";
 import type { About as AboutInfo, AppUpdateStatus, AppUpdates } from "../../api/tauri";
 import { plain } from "../../api/wording";
-import { alert, button, card, h2, primary } from "../../components/ui";
+import { alert, button, card, h2 } from "../../components/ui";
 import { formatAge } from "../../store/overview";
 
 const TITLES: Record<string, string> = {
@@ -90,7 +90,7 @@ export function About({ read, updates, status = null }: { read?: () => Promise<A
               </span>
               <span className="flex-1" />
               {status.pending ? (
-                <button type="button" className={primary} disabled={updating !== null} onClick={() => void run("restarting", updates.restart)}>
+                <button type="button" className={button} disabled={updating !== null} onClick={() => void run("restarting", updates.restart)}>
                   Restart to update
                 </button>
               ) : (

@@ -25,7 +25,7 @@ import type { DecisionDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
 import { PageHeader } from "../../components/PageHeader";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
-import { alert, button, card, field, h2, mono, notice, pill, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, h2, main, mono, notice, pill, quiet } from "../../components/ui";
 import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
 
@@ -73,7 +73,7 @@ function DecisionCard({ d }: { d: DecisionDTO }) {
     <li className={`${card} flex flex-col gap-s1 px-s2 py-s2`} data-decision={d.id} data-topic={d.topic}>
       <div className="flex flex-wrap items-baseline gap-x-s1 gap-y-0.5">
         <span className="font-semibold">{d.topic}</span>
-        <span className={`${pill} ${d.status === "accepted" ? "text-pass" : "text-ink-3"}`}>{d.status === "accepted" ? "In force" : d.status}</span>
+        <span className={`${pill} ${d.status === "accepted" ? "text-ink-2" : "text-ink-3"}`}>{d.status === "accepted" ? "In force" : d.status}</span>
         <span className="flex-1" />
         <span className="text-xs text-ink-3" title={d.id}>
           {ago(d.created_at)}
@@ -201,7 +201,7 @@ function RecordForm({ client, repo, onRecorded, onCancel }: { client: DaemonClie
         <button type="button" className={quiet} disabled={busy} onClick={onCancel}>
           Cancel
         </button>
-        <button type="submit" className={primary} disabled={busy || !topic.trim() || !decision.trim()}>
+        <button type="submit" className={main} disabled={busy || !topic.trim() || !decision.trim()}>
           {busy ? "Recording…" : "Record"}
         </button>
       </div>
@@ -252,7 +252,7 @@ function AddFolderForm({ pickFolder, busy, onAdd, onCancel }: { pickFolder?: Pic
         <button type="button" className={quiet} disabled={busy} onClick={onCancel}>
           Cancel
         </button>
-        <button type="submit" className={primary} disabled={busy || !path.trim()}>
+        <button type="submit" className={button} disabled={busy || !path.trim()}>
           Add
         </button>
       </div>
@@ -360,7 +360,7 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
         </li>
       </ol>
       <div className="flex flex-wrap gap-s1">
-        <button type="button" className={primary} onClick={onRecord}>
+        <button type="button" className={main} onClick={onRecord}>
           Record a decision
         </button>
         <button type="button" className={button} onClick={onAddFolder}>
@@ -566,7 +566,7 @@ export function KnowledgeScreen({ client, pickFolder }: KnowledgeScreenProps) {
             </span>
             <span className="flex-1" />
             {!recording && (
-              <button type="button" className={primary} onClick={startRecording}>
+              <button type="button" className={main} onClick={startRecording}>
                 Record a decision
               </button>
             )}

@@ -291,7 +291,7 @@ describe("GoalPanel", () => {
       // Done's step sits on the Done status's line, a primary button, and closes in one click.
       const close = sidebar.getByRole("button", { name: "Close session" });
       expect(close.parentElement).toBe(sidebar.getByTestId("goal-line").parentElement);
-      expect(close.className).toContain("bg-fawn");
+      expect(close.className).toContain("text-pass");
       fireEvent.click(close);
       expect(onCloseSession).toHaveBeenCalledTimes(1);
       expect(sidebar.queryByRole("dialog")).toBeNull();
