@@ -15,7 +15,7 @@ import typer
 
 from brindle import agents, git, identity_lock, tmux, workspaces
 from brindle import history as history_mod
-from brindle import keys_cmds, repo_cmds
+from brindle import config_cmds, keys_cmds, repo_cmds
 from brindle.usage import format_tokens
 from brindle.config import write_template
 from brindle.db import DB, Workspace
@@ -79,6 +79,7 @@ agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
 app.add_typer(agent_app, name="agent")
 app.add_typer(repo_cmds.app, name="repo")
 app.add_typer(keys_cmds.app, name="keys")
+app.add_typer(config_cmds.app, name="config")
 
 
 def _fail(msg: str) -> None:
