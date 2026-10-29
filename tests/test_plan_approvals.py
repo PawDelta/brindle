@@ -233,12 +233,13 @@ def test_plan_approvals_org_rules_gate_approve_plan(db, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("weight,cross_repo", [
     ("heavy", None), ("light", "target"), ("light", "dependency"),
+    ("light", "dependency_same_branch"),
 ])
 def test_plan_approvals_reviewer_judged_in_callers_repo(db, tmp_path, monkeypatch, weight, cross_repo):
     """A custom reviewer profile that exists only in the caller's repo still counts as a reviewer."""
     ws, boss, worker, _make, _state = _org_setup(
         db, tmp_path, monkeypatch, _rules(reviewer_may_approve_low_risk=True))
-    other = Workspace("other", str(tmp_path / "other"), "other", "main", "main", "main",
+    other = Workspace("other", str(tmp_path / "other"), "other", "main", "brindle/shared", "main",
                       str(tmp_path / "other"), None, "", 1)
     db.add_workspace(other)
     qa = Agent(agents.new_id(), other.id, "qa", "claude", boss.id, "assign", "processing", "", None, time.time())
@@ -249,9 +250,17 @@ def test_plan_approvals_reviewer_judged_in_callers_repo(db, tmp_path, monkeypatc
     db.add_session_repo(boss.id, "other", other.repo_root)
     target = other if cross_repo == "target" else ws
     db.update_agent(worker.id, workspace_id=target.id)
+    depends_on = [qa.id] if cross_repo == "dependency" else None
+    if cross_repo == "dependency_same_branch":
+        depends_on = ["brindle/shared"]
+        assert tasks.dependency_repos(db, ws, depends_on, qa.id) == {other.repo_root}
+        isolated = Workspace("worker", ws.repo_root, "worker", "worktree", "brindle/shared",
+                             "main", str(tmp_path / "worker"), None, "", 1)
+        db.add_workspace(isolated)
+        db.update_agent(worker.id, workspace_id=isolated.id)
     tasks.record_started(db, target, db.get_agent(worker.id), "developer", "job", "assign",
-                         isolate=False, branch=None, done_when=None, files=["src/app/util.py"],
-                         depends_on=[qa.id] if cross_repo == "dependency" else None, weight=weight)
+                         isolate=cross_repo == "dependency_same_branch", branch="brindle/shared",
+                         done_when=None, files=["src/app/util.py"], depends_on=depends_on, weight=weight)
     real_load = agents.load_profile
 
     def load(name, repo_root):
