@@ -20,7 +20,7 @@ import type { AskDecisionDTO, AskGroupDTO, AskResultDTO, InboxItemDTO, OrgContro
 import { plain } from "../../api/wording";
 import { card, field, mainTone } from "../../components/ui";
 import { formatAge } from "../../store/overview";
-import { describeItem, itemKey, permissionAnswer, permissionLine, seenAt } from "./items";
+import { askKey, describeItem, itemKey, permissionAnswer, permissionLine, seenAt } from "./items";
 import type { useInboxActions } from "./useInboxActions";
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -71,7 +71,15 @@ export function groupItem(reason: string | undefined): { group: string; sub: str
 /* The held requests, grouped, read again whenever the inbox changes. */
 export function usePermissionAsks(client: DaemonClient, inbox: InboxItemDTO[]) {
   const [groups, setGroups] = useState<AskGroupDTO[]>([]);
-  const reload = useCallback(() => client.permissionAsks().then(setGroups, () => undefined), [client]);
+  const [loaded, setLoaded] = useState(false);
+  const reload = useCallback(
+    () =>
+      client.permissionAsks().then((g) => {
+        setGroups(g);
+        setLoaded(true);
+      }, () => undefined),
+    [client],
+  );
   useEffect(() => {
     void reload();
   }, [reload, inbox]);
@@ -80,12 +88,14 @@ export function usePermissionAsks(client: DaemonClient, inbox: InboxItemDTO[]) {
     (item: InboxItemDTO) => item.kind === "permission" && item.permission?.via === "hook" && groups.some((g) => g.items.some((a) => a.agent_id === item.agent_id && a.request_id === item.permission?.request_id)),
     [groups],
   );
-  return { groups, reload, held };
+  return { groups, loaded, reload, held };
 }
 
 export interface PermissionAsksProps {
   client: DaemonClient;
   groups: AskGroupDTO[];
+  /* askKeys of the requests not shown on this page before: their card is marked new. */
+  fresh?: Set<string>;
   /* After a decision: the asks and the inbox read again. */
   onDone(): void;
   /* Settings › Permissions, with that rule's editor open (none: the unmatched setting). */
@@ -94,7 +104,7 @@ export interface PermissionAsksProps {
 
 type Run = (work: () => Promise<string>) => Promise<void>;
 
-export function PermissionAsks({ client, groups, onDone, onOpenRule }: PermissionAsksProps) {
+export function PermissionAsks({ client, groups, fresh, onDone, onOpenRule }: PermissionAsksProps) {
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<{ text: string; failed?: boolean } | null>(null);
   const inflight = useRef(false);
@@ -123,7 +133,7 @@ export function PermissionAsks({ client, groups, onDone, onOpenRule }: Permissio
         </p>
       )}
       {groups.map((g) => (
-        <AskCard key={g.key} client={client} g={g} groups={groups} busy={busy} run={run} onOpenRule={onOpenRule} />
+        <AskCard key={g.key} client={client} g={g} groups={groups} isNew={!!fresh && g.items.some((a) => fresh.has(askKey(a)))} busy={busy} run={run} onOpenRule={onOpenRule} />
       ))}
     </section>
   );
@@ -152,9 +162,11 @@ function decided(g: AskGroupDTO, got: AskDecisionDTO, duration: string): string 
 
 /* The one permission card: who asks for what, its chip, why it reached the person, the actions it is
    given, and the details collapsed. `window` (an agent's own prompt) is branch-coloured, a held request sap. */
-export function PermissionCard({ label, source, id, dataKey, who, what, chip, age, why, note, details, children }: {
+export function PermissionCard({ label, source, isNew, id, dataKey, who, what, chip, age, why, note, details, children }: {
   label: string;
   source: "hook" | "window";
+  /* Not shown on this page before: marked "new" and briefly highlighted. */
+  isNew?: boolean;
   id?: string;
   dataKey?: string;
   who: string;
@@ -168,10 +180,11 @@ export function PermissionCard({ label, source, id, dataKey, who, what, chip, ag
 }) {
   const window = source === "window";
   return (
-    <article id={id} tabIndex={-1} aria-label={label} data-testid="permission-card" data-source={source} data-key={dataKey} className={`${card} relative flex max-w-[960px] scroll-mt-s3 flex-col gap-s1 py-s2 pl-5 pr-4 outline-none before:absolute before:bottom-3 before:left-0 before:top-3 before:w-[2px] before:rounded-sm before:opacity-80 focus:ring-2 focus:ring-branch ${window ? "before:bg-branch" : "before:bg-sap"}`}>
+    <article id={id} tabIndex={-1} aria-label={label} data-testid="permission-card" data-source={source} data-key={dataKey} data-new={isNew || undefined} className={`${isNew ? "inbox-new " : ""}${card} relative flex max-w-[960px] scroll-mt-s3 flex-col gap-s1 py-s2 pl-5 pr-4 outline-none before:absolute before:bottom-3 before:left-0 before:top-3 before:w-[2px] before:rounded-sm before:opacity-80 focus:ring-2 focus:ring-branch ${window ? "before:bg-branch" : "before:bg-sap"}`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-[15px] font-semibold leading-[1.4]">
+            {isNew && <span className="mr-2 rounded-full bg-sap px-1.5 align-middle text-[10px] font-semibold leading-4 text-on-sap" data-testid="new-mark">new</span>}
             {who} <span className="font-normal text-ink-2">{what}</span>
           </h3>
           {chip && (
@@ -239,7 +252,7 @@ function OrgWhy({ org, blocked }: { org: OrgControlViewDTO; blocked?: boolean })
 }
 
 /* A request brindle's hook holds, with the others like it. */
-function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonClient; g: AskGroupDTO; groups: AskGroupDTO[]; busy: boolean; run: Run; onOpenRule?(rule?: string): void }) {
+function AskCard({ client, g, groups, isNew, busy, run, onOpenRule }: { client: DaemonClient; g: AskGroupDTO; groups: AskGroupDTO[]; isNew: boolean; busy: boolean; run: Run; onOpenRule?(rule?: string): void }) {
   const fits = (value: string) => scopeWithin(g.scopes.find((s) => s.value === value)!, g.limits);
   const [scope, setScope] = useState(fits(g.general.value) ? g.general.value : (g.scopes.find((s) => scopeWithin(s, g.limits))?.value ?? g.general.value));
   const cap = g.limits?.life === "time" ? (g.limits.minutes ?? null) : null;
@@ -290,6 +303,7 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
     <PermissionCard
       label={g.title}
       source="hook"
+      isNew={isNew}
       id={`ask-${g.key}`}
       dataKey={g.key}
       who={names.join(", ")}
@@ -409,7 +423,7 @@ function AskCard({ client, g, groups, busy, run, onOpenRule }: { client: DaemonC
 
 /* A permission /inbox lists as an item of its own: a prompt only the agent's window can take (a note, and the
    way to that window), or a hold brindle's hook has no group for (the provider's own choices). */
-export function PermissionItemCard({ item, actions, who, onGo }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; who: string; onGo?(): void }) {
+export function PermissionItemCard({ item, isNew, actions, who, onGo }: { item: InboxItemDTO; isNew?: boolean; actions: ReturnType<typeof useInboxActions>; who: string; onGo?(): void }) {
   const p = item.permission;
   const line = permissionLine(item);
   const choices = p?.terminal ? [] : (p?.choices ?? []);
@@ -428,6 +442,7 @@ export function PermissionItemCard({ item, actions, who, onGo }: { item: InboxIt
     <PermissionCard
       label={`${who} permission`}
       source={window ? "window" : "hook"}
+      isNew={isNew}
       who={who}
       what={window ? <>asks: {first}{line.code && <> <code className="font-mono text-[13px]">{line.code}</code></>}</> : <>wants to run <code className="font-mono text-[13px]">{line.code ?? line.whole}</code></>}
       chip={window ? "Agent prompt" : null}

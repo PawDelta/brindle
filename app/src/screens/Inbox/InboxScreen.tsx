@@ -48,7 +48,7 @@ import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
 import { ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
-import { FIXES, KIND_SHORT, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, seenAt, shownKeys, unseenKeys } from "./items";
+import { FIXES, KIND_SHORT, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, pruneShown, seenAt, shownKeys, unseenKeys } from "./items";
 import { useInboxActions } from "./useInboxActions";
 
 export interface InboxScreenProps {
@@ -114,13 +114,6 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
 
   useEffect(() => forgetGone(inbox), [inbox]);
 
-  // What this page showed before it opened: an item not among them is marked "new" until the person leaves.
-  const before = useRef(shownKeys());
-  const latest = useRef(inbox);
-  latest.current = inbox;
-  useEffect(() => () => markShown(latest.current), []);
-  const fresh = useMemo(() => unseenKeys(inbox, before.current), [inbox]);
-
   const agents = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []), [workspaces]);
 
   // On one session: the items of any of its agents (the whole tree), none from elsewhere.
@@ -129,6 +122,25 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
   const here = useMemo(() => (session === null ? inbox : inbox.filter(inSession)).filter((i) => !actions.hidden.has(itemKey(i)) && !asks.held(i)), [inbox, session, agents, hidden, actions.hidden, asks.held]); // eslint-disable-line react-hooks/exhaustive-deps
   const askGroups = useMemo(() => (session === null ? asks.groups : asks.groups.map((g) => ({ ...g, items: g.items.filter((a) => a.root_id === session) })).filter((g) => g.items.length > 0)), [asks.groups, session]);
   const waiting = here.length + askGroups.length + (update ? 1 : 0);
+
+  /* What this page showed before it opened is not new; the rest is marked "new" until the person leaves,
+     and what leaves the inbox meanwhile is forgotten, so it is new again if it returns. Only what this
+     view drew is marked shown on leaving (not other sessions' items a filter hid). */
+  const before = useRef(shownKeys());
+  const drawn = useRef<string[]>([]);
+  drawn.current = [...here.map(itemKey), ...askGroups.flatMap((g) => g.items.map(askKey))];
+  useEffect(() => () => markShown(drawn.current), []);
+  const fresh = useMemo(() => {
+    // Before the first snapshot nothing is known to be gone.
+    const inboxKeys = synced ? inbox.map(itemKey) : [...before.current].filter((k) => !k.startsWith("ask:"));
+    // Held requests not read yet are not "gone".
+    const askKeys = asks.loaded ? asks.groups.flatMap((g) => g.items.map(askKey)) : [...before.current].filter((k) => k.startsWith("ask:"));
+    return unseenKeys([...inboxKeys, ...askKeys], before.current);
+  }, [inbox, synced, asks.groups, asks.loaded]);
+  useEffect(() => {
+    if (synced) pruneShown(inbox.map(itemKey));
+    if (asks.loaded) pruneShown(asks.groups.flatMap((g) => g.items.map(askKey)), true);
+  }, [inbox, asks.groups, asks.loaded]);
   const sessionTitle = session === null ? null : (find(session)?.name || (find(session)?.goal ?? session));
 
   /* By session: the root each item's agent hangs under, with the session's
@@ -220,6 +232,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
         <PermissionAsks
           client={client}
           groups={askGroups}
+          fresh={fresh}
           onOpenRule={onOpenRule}
           onDone={() => {
             void asks.reload();
@@ -240,7 +253,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
             </header>
             {group.items.map((item) =>
               item.kind === "permission" ? (
-                <PermissionItemCard key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
+                <PermissionItemCard key={itemKey(item)} item={item} isNew={fresh.has(itemKey(item))} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
               ) : (
               <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(itemKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} />
               ),

@@ -102,15 +102,27 @@ describe("inbox", () => {
   });
 
   it("marks an item new until the page has been left; one shown before is not marked again", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [notice] });
-    const first = mount(daemon);
-    await waitFor(() => expect(card("org_notice")).toBeTruthy());
-    expect(card("org_notice").getAttribute("data-new")).toBe("true");
+    const mine = { ...prReady, workspace_id: "proj-new" };
+    const elsewhere = { ...notice, notice_id: "n-new" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [mine, elsewhere] });
+    // A visit filtered to one session shows (and marks) only that session's item.
+    const first = mount(daemon, daemon.client(), { session: "sup1" });
+    await waitFor(() => expect(card("pr_ready")).toBeTruthy());
+    expect(card("pr_ready").getAttribute("data-new")).toBe("true");
     cleanup();
     first.sync.stop();
+    // The full Inbox: the item already shown is not new, the one the filter hid is.
     const second = mount(daemon);
     await waitFor(() => expect(card("org_notice")).toBeTruthy());
-    expect(card("org_notice").getAttribute("data-new")).toBeNull();
+    expect(card("org_notice").getAttribute("data-new")).toBe("true");
+    expect(card("pr_ready").getAttribute("data-new")).toBeNull();
+    // It leaves and comes back: new again.
+    daemon.data.inbox = [elsewhere];
+    daemon.publish("message.queued", { agent_id: "sup1" });
+    await waitFor(() => expect(card("pr_ready")).toBeFalsy());
+    daemon.data.inbox = [mine, elsewhere];
+    daemon.publish("message.queued", { agent_id: "sup1" });
+    await waitFor(() => expect(card("pr_ready")?.getAttribute("data-new")).toBe("true"));
     second.sync.stop();
   });
 

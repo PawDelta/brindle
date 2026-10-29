@@ -209,22 +209,35 @@ export function seenAt(item: InboxItemDTO, now = Date.now()): number {
   return now;
 }
 
-/* The items the Inbox page has already shown this person, by key: what is
+/* The keys (itemKey, askKey) the Inbox page has already shown this person: what is
    not in it is new to them, and marked on the page until they leave it. */
 const shown = new Set<string>();
 
 export const shownKeys = (): Set<string> => new Set(shown);
 
-export function markShown(inbox: InboxItemDTO[]): void {
-  for (const item of inbox) shown.add(itemKey(item));
+export const markShown = (keys: Iterable<string>): void => {
+  for (const key of keys) shown.add(key);
+};
+
+/* A held permission request, told apart within its group. */
+export const askKey = (a: { agent_id: string; request_id: string }) => `ask:${a.agent_id}:${a.request_id}`;
+
+/* Forget shown keys no longer live, so a returning one counts as new. `asks`
+   picks which kind: askKey's, or the inbox items'. */
+export function pruneShown(live: Iterable<string>, asks = false): void {
+  const keep = new Set(live);
+  for (const key of shown) if (key.startsWith("ask:") === asks && !keep.has(key)) shown.delete(key);
 }
 
-/* The keys of the items not in `before` (a shownKeys() taken when the page opened). */
-export const unseenKeys = (inbox: InboxItemDTO[], before: Set<string>): Set<string> => new Set(inbox.map(itemKey).filter((k) => !before.has(k)));
+/* The live keys not in `before` (a shownKeys() taken when the page opened, kept to what is still live). */
+export function unseenKeys(live: Iterable<string>, before: Set<string>): Set<string> {
+  const keys = new Set(live);
+  for (const key of before) if (!keys.has(key)) before.delete(key);
+  return new Set([...keys].filter((k) => !before.has(k)));
+}
 
 /* Forget items no longer in the inbox, so a returning one counts as new. */
 export function forgetGone(inbox: InboxItemDTO[]): void {
   const keys = new Set(inbox.map(itemKey));
   for (const key of firstSeen.keys()) if (!keys.has(key)) firstSeen.delete(key);
-  for (const key of shown) if (!keys.has(key)) shown.delete(key);
 }

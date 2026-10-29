@@ -37,6 +37,7 @@ import { DaemonContext } from "../api/context";
 import type { OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
 import { readLastSession, routeSession, sameRoute, type Route, type SessionRef } from "../routes";
+import { itemKey, pruneShown } from "../screens/Inbox/items";
 import { goalPhase, useGoal } from "../screens/Session/GoalPanel";
 import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
@@ -495,6 +496,12 @@ function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate"
   const total = useAppState(waitingCount);
   const on = route.screen === "inbox";
   // A count that rose since last drawn: the pill glows once (a new key restarts the animation).
+  // The sidebar is always there: an item that leaves the inbox while the page is closed is new when it returns.
+  const inbox = useAppState((s) => s.inbox);
+  const synced = useAppState((s) => s.synced);
+  useEffect(() => {
+    if (synced) pruneShown(inbox.map(itemKey));
+  }, [inbox, synced]);
   const last = useRef(total);
   const [pulse, setPulse] = useState(0);
   useEffect(() => {
