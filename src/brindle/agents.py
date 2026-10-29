@@ -2676,19 +2676,23 @@ def delegate(
         pilot.check_capacity(db, caller.id if caller else None, load_repo_config(cap_root))
     except pilot.AutopilotError as e:
         raise AgentError(str(e)) from e
-    if plan_first is None:
-        from brindle import tasks as task_mod
-        from brindle import plan_policy
-        from brindle.plan_policy import PlanTask, needs_plan
+    from brindle import plan_policy
+    from brindle import tasks as task_mod
+    from brindle.plan_policy import PlanTask, needs_plan
 
-        own = repos.own_root(db, pilot.root_of(db, caller.id)) if caller else None
-        dep_repos = task_mod.dependency_repos(db, caller_ws, depends_on, caller.id if caller else None)
-        plan_first = needs_plan(
-            PlanTask(weight=weight, files=files,
-                     cross_repo=(bool(own) and own != caller_ws.repo_root)
-                     or any(r != caller_ws.repo_root for r in dep_repos)),
-            config=load_repo_config(caller_ws.repo_root),
-            org_rules=plan_policy.load_org_rules(caller_ws.repo_root))
+    try:
+        org_rules = plan_policy.load_org_rules(caller_ws.repo_root)
+    except plan_policy.OrgRulesUnavailable as e:
+        raise AgentError(str(e)) from e
+    own = repos.own_root(db, pilot.root_of(db, caller.id)) if caller else None
+    dep_repos = task_mod.dependency_repos(db, caller_ws, depends_on, caller.id if caller else None)
+    plan_task = PlanTask(weight=weight, files=files,
+                         cross_repo=(bool(own) and own != caller_ws.repo_root)
+                         or any(r != caller_ws.repo_root for r in dep_repos))
+    if plan_first is None:
+        plan_first = needs_plan(plan_task, config=load_repo_config(caller_ws.repo_root), org_rules=org_rules)
+    elif not plan_first:
+        plan_first = plan_policy.org_requires_plan(plan_task, org_rules)  # an explicit False can't waive the org's
     from brindle import identity_lock
 
     identity_lock.ensure_workspace(db, caller_ws)
@@ -3383,43 +3387,66 @@ def _emit_plan(db: DB, kind: str, agent: Agent, actor: Agent | str | None) -> No
         events.emit(load_repo_config(ws.repo_root), kind, ws, agent, actor=actor)
 
 
-def _org_plan_refusal(db: DB, caller_id: str, agent: Agent, so_far: list[str]) -> str | None:
-    """Why the org's plan rules refuse this approval, or None. An approval a
-    two-person rule is still waiting on is recorded and refused."""
+def _org_rules_for(db: DB, agent: Agent):
+    """The org's plan rules for ``agent``'s repo (None: no team org); a team
+    org whose policy can't be read refuses."""
+    from brindle import plan_policy
+
+    ws = db.get_workspace(agent.workspace_id)
+    try:
+        return plan_policy.load_org_rules(ws.repo_root) if ws else None
+    except plan_policy.OrgRulesUnavailable as e:
+        raise AgentError(str(e)) from e
+
+
+def _org_plan_refusal(db: DB, caller_id: str, agent: Agent, rules, so_far: list[str]) -> str | None:
+    """Why the org's plan rules refuse this approval, or None. An eligible
+    first approval a two-person rule still waits on is recorded and refused;
+    an ineligible one changes nothing."""
     from brindle import plan_approvals, plan_policy
 
     ws = db.get_workspace(agent.workspace_id)
-    rules = plan_policy.load_org_rules(ws.repo_root) if ws else None
-    if rules is None:
-        return None
     caller = db.get_agent(caller_id)
-    reviewer = bool(caller) and is_review_profile(caller.profile, ws.repo_root)
-    who = caller_id if reviewer else (plan_policy.current_member(ws.repo_root) or caller_id)
+    reviewer = caller_id != agent.parent_id and bool(caller) and is_review_profile(caller.profile, ws.repo_root)
+    member = plan_policy.current_member(ws.repo_root)
+    if member is None:
+        return "your org's plan rules need a signed-in team member to approve plans"
     task = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == agent.id), None)
     plan = plan_policy.PlanTask(weight=agent.weight, files=json.loads(task.files) if task and task.files else None)
-    d = plan_approvals.may_approve(rules, plan_approvals.Approver(who, reviewer), plan, so_far)
+    who = plan_approvals.Approver(member, reviewer)
+    if not plan_approvals.eligible(rules, who, plan).allowed:
+        return plan_approvals.eligible(rules, who, plan).reason
+    d = plan_approvals.may_approve(rules, who, plan, so_far)
     if d.allowed:
         return None
-    if rules.two_person and who not in so_far and (not rules.approvers or who in rules.approvers or reviewer):
-        db.update_agent(agent.id, plan_approvals=json.dumps([*so_far, who]))
+    if member not in so_far:
+        db.update_agent(agent.id, plan_approvals=json.dumps([*so_far, member]))
         _emit_plan(db, "plan.approved", agent, caller_id)
     return d.reason
 
 
 def approve_plan(db: DB, caller_id: str | None, agent_id: str, feedback: str = "",
                  approved: bool = True) -> str:
-    """The worker's parent decides on its proposed plan; the worker is told."""
+    """The worker's parent decides on its proposed plan; the worker is told.
+    Under the org's plan rules a reviewer in the worker's workspace may too."""
     agent = get(db, agent_id)
     if not agent.plan_first:
         raise AgentError(f"{agent.id} isn't a plan-first worker")
-    if caller_id is None or agent.parent_id != caller_id:
+    if caller_id is None:
         raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
+    rules = _org_rules_for(db, agent)
+    if agent.parent_id != caller_id:
+        caller = db.get_agent(caller_id)
+        ws = db.get_workspace(agent.workspace_id)
+        if not (rules and caller and ws and caller.workspace_id == agent.workspace_id
+                and is_review_profile(caller.profile, ws.repo_root)):
+            raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
     if agent.plan_state != "proposed":
         raise AgentError(f"{agent.id} has no plan awaiting a decision")
     feedback = feedback.strip()
     if approved:
         so_far = json.loads(agent.plan_approvals or "[]")
-        denied = _org_plan_refusal(db, caller_id, agent, so_far)
+        denied = _org_plan_refusal(db, caller_id, agent, rules, so_far) if rules else None
         if denied:
             raise AgentError(denied)
         db.update_agent(agent.id, plan_state="approved", plan_text=None, plan_approvals=None)

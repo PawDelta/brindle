@@ -10,6 +10,7 @@ from brindle.config import load_repo_config
 from brindle.db import Agent, Workspace
 from brindle.plan_approvals import Approver, may_approve
 from brindle.plan_policy import OrgPlanRules, PlanTask, needs_plan
+from brindle.plan_policy import OrgRulesUnavailable as PlanUnavailable
 
 LIGHT = PlanTask(weight="light", files=["src/app/util.py"])
 
@@ -63,6 +64,12 @@ def _rules(**kw):
     (_rules(reviewer_may_approve_low_risk=True), Approver("r1", reviewer=True),
      PlanTask(weight="light", files=["deploy/x.yaml"]), [], False),
     (_rules(reviewer_may_approve_low_risk=True), Approver("r1", reviewer=True), PlanTask(weight="heavy"), [], False),
+    # the named approvers bind a reviewer's member too; two reviewers are not two people
+    (_rules(approvers=["alice"], reviewer_may_approve_low_risk=True), Approver("bob", reviewer=True), LIGHT, [], False),
+    (_rules(approvers=["alice"], reviewer_may_approve_low_risk=True), Approver("alice", reviewer=True), LIGHT, [],
+     True),
+    (_rules(two_person=True, reviewer_may_approve_low_risk=True), Approver("bob", reviewer=True), LIGHT, ["r1"],
+     False),
     (None, Approver("anyone"), PlanTask(weight="heavy"), [], True),
 ])
 def test_plan_approvals_may_approve(rules, approver, plan, so_far, allowed):
@@ -111,3 +118,73 @@ def test_plan_approvals_dependency_in_another_repo_plans_first(db, tmp_path, mon
         agents.delegate(db, boss, app, "developer", "light job", "assign", isolate=False,
                         files=["src/app/util.py"], weight="light", depends_on=[upstream.id])
     assert planned == [True]
+
+
+def _org_setup(db, tmp_path, monkeypatch, rules):
+    root = str(tmp_path / "app")
+    ws = Workspace("app", root, "app", "main", "main", "main", root, None, "", 1)
+    db.add_workspace(ws)
+
+    def make(profile, parent=None):
+        a = Agent(agents.new_id(), ws.id, profile, "claude", parent, "assign", "processing", "", None, time.time())
+        db.add_agent(a)
+        return a
+
+    boss = make("supervisor")
+    worker = make("developer", boss.id)
+    db.update_agent(worker.id, plan_first=1, plan_state="proposed", weight="heavy")
+    state = {"member": "alice", "rules": rules, "audit": []}
+    monkeypatch.setattr("brindle.plan_policy.load_org_rules", lambda root: state["rules"])
+    monkeypatch.setattr("brindle.plan_policy.current_member", lambda root: state["member"])
+    monkeypatch.setattr(agents, "_emit_plan", lambda db, kind, agent, actor: state["audit"].append(kind))
+    monkeypatch.setattr(agents, "send_message", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *a: None)
+    monkeypatch.setattr("brindle.identity_lock.ensure_workspace", lambda *a: None)
+    return ws, boss, worker, make, state
+
+
+def test_plan_approvals_org_rules_gate_approve_plan(db, tmp_path, monkeypatch):
+    """Through the real approve_plan: named approvers, a two-person quorum, a reviewer, an unreadable policy."""
+    ws, boss, worker, make, state = _org_setup(
+        db, tmp_path, monkeypatch, _rules(approvers=["alice", "bob"], two_person=True))
+    reviewer = make("reviewer")
+
+    def attempt(who, caller=boss):
+        state["member"] = who
+        try:
+            agents.approve_plan(db, caller.id, worker.id)
+            return "approved"
+        except agents.AgentError as e:
+            return str(e)
+
+    assert "carol may not approve" in attempt("carol")
+    assert "two different people" in attempt("alice", reviewer)   # a reviewer isn't one of them
+    assert db.get_agent(worker.id).plan_approvals is None and state["audit"] == []
+    assert "second person" in attempt("alice")
+    assert "second person" in attempt("alice")                    # the same person twice
+    assert json.loads(db.get_agent(worker.id).plan_approvals) == ["alice"]
+    assert attempt("bob") == "approved" and db.get_agent(worker.id).plan_state == "approved"
+    assert state["audit"] == ["plan.approved", "plan.approved"]
+
+    def unreadable(root):
+        raise PlanUnavailable("down")
+
+    db.update_agent(worker.id, plan_state="proposed")
+    monkeypatch.setattr("brindle.plan_policy.load_org_rules", unreadable)
+    assert "down" in attempt("alice")
+    assert db.get_agent(worker.id).plan_state == "proposed"
+
+
+def test_plan_approvals_explicit_no_plan_cannot_waive_the_org(db, tmp_path, monkeypatch):
+    """delegate(plan_first=False) still plans when the org requires it."""
+    ws, boss, _worker, make, state = _org_setup(db, tmp_path, monkeypatch, OrgPlanRules.from_policy({"plan": "always"}))
+    planned = []
+
+    def fake_spawn(db, ws, profile, *, plan_first=False, **kw):
+        planned.append(plan_first)
+        return make(profile)
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    for flag in (False, None):
+        agents.delegate(db, boss, ws, "developer", "job", "assign", isolate=False, plan_first=flag, weight="light")
+    assert planned == [True, True]
