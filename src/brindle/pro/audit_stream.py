@@ -22,12 +22,17 @@ a target that is down loses nothing: the queue is drained, in order, on the next
 write or on :func:`flush`. A failed send stops the drain and leaves the rest
 queued. After a failure the target is left alone for ``COOLDOWN_SECONDS``
 (``flush`` ignores that), and every send is bounded by ``SEND_SECONDS``, so
-the agent never waits on a dead SIEM. Delivery is at least once. Nothing here
-raises into brindle.
+the agent never waits on a dead SIEM. Only one process drains a target's queue
+at a time (a non-blocking lock); a process that finds it taken just queues its
+record and returns. The queue holds ``MAX_QUEUE`` records: a full queue keeps the
+oldest and counts what it turned away, and the next complete drain sends one
+``audit_stream.dropped`` record with that count, so the SIEM sees the gap.
+Nothing here raises into brindle.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
@@ -35,14 +40,17 @@ import socket
 import time
 import urllib.parse
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
-from brindle.pro.audit_chain import _locked, _open_private, _write_atomic, audit_dir, canonical, sha256
+from brindle.pro.audit_chain import _iso, _locked, _open_private, _write_atomic, audit_dir, canonical, sha256
 
 log = logging.getLogger(__name__)
 
 SEND_SECONDS = 3
 COOLDOWN_SECONDS = 30
+MAX_QUEUE = 50_000               # queued records per target; a full queue turns new ones away
+DROPPED_KIND = "audit_stream.dropped"
 SYSLOG_PRI = 13 * 8 + 6          # facility "log audit", severity informational
 KINDS = ("syslog", "https")
 
@@ -90,17 +98,65 @@ def _read_queue(path: Path) -> list[bytes]:
         return [ln for ln in fh.read().split(b"\n") if ln.strip()]
 
 
+def _read_dropped(path: Path) -> int:
+    try:
+        fd = _open_private(path.with_suffix(".dropped"), os.O_RDONLY)
+    except FileNotFoundError:
+        return 0
+    with os.fdopen(fd, "rb") as fh:
+        raw = fh.read(32).strip()
+    return int(raw) if raw.isdigit() else 0
+
+
+def _add_dropped(path: Path, delta: int) -> None:
+    """Change the count of records the full queue turned away (under the queue lock)."""
+    total = max(0, _read_dropped(path) + delta)
+    dropped = path.with_suffix(".dropped")
+    if total:
+        _write_atomic(dropped, str(total).encode("ascii"))
+    else:
+        try:
+            os.unlink(dropped)
+        except FileNotFoundError:
+            pass
+
+
 def _enqueue(path: Path, record: dict | None) -> list[bytes]:
-    """Add ``record`` (if any) at the end of the queue; returns the queue."""
+    """Add ``record`` (if any) at the end of the queue; returns the queue. A
+    full queue keeps what it has and only counts the record as dropped."""
     with _locked(path):
-        if record is not None:
+        queued = _read_queue(path)
+        if record is not None and len(queued) >= MAX_QUEUE:
+            _add_dropped(path, 1)
+        elif record is not None:
+            line = canonical(record).encode("utf-8")
             fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT)
             try:
-                os.write(fd, (canonical(record) + "\n").encode("utf-8"))
+                os.write(fd, line + b"\n")
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        return _read_queue(path)
+            queued.append(line)
+        return queued
+
+
+@contextmanager
+def _try_drain_lock(path: Path):
+    """Yields True when this process may drain the queue (only one at a time);
+    False at once, without waiting, when another process is draining it."""
+    fd = _open_private(path.with_suffix(".drain"), os.O_RDWR | os.O_CREAT)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def _drop_sent(path: Path, count: int) -> None:
@@ -165,22 +221,32 @@ def _drain(target: dict, record: dict | None, home: Path | None, force: bool) ->
     path = queue_path(target, home)
     queued = _enqueue(path, record)
     tid = _target_id(target)
-    if not queued or (not force and _clock() < _down_until.get(tid, 0.0)):
+    if not (queued or _read_dropped(path)) or (not force and _clock() < _down_until.get(tid, 0.0)):
         return
-    send = _transport or deliver
-    sent = 0
-    try:
-        for line in queued:
-            send(target, json.loads(line))
-            sent += 1
-        _down_until.pop(tid, None)
-    except Exception:  # noqa: BLE001 - an unreachable target leaves the rest queued
-        _down_until[tid] = _clock() + COOLDOWN_SECONDS
-        log.warning("brindle: audit streaming target %s is unreachable; %d record(s) queued",
-                    target["url"], len(queued) - sent)
-    finally:
-        if sent:
-            _drop_sent(path, sent)
+    with _try_drain_lock(path) as mine:
+        if not mine:
+            return                      # another process is draining; the record is queued
+        queued = _read_queue(path)
+        send = _transport or deliver
+        sent = 0
+        try:
+            for line in queued:
+                send(target, json.loads(line))
+                sent += 1
+            with _locked(path):
+                gap = _read_dropped(path)
+            if gap:
+                send(target, {"ts": _iso(), "event": {"kind": DROPPED_KIND, "dropped": gap}})
+                with _locked(path):
+                    _add_dropped(path, -gap)
+            _down_until.pop(tid, None)
+        except Exception:  # noqa: BLE001 - an unreachable target leaves the rest queued
+            _down_until[tid] = _clock() + COOLDOWN_SECONDS
+            log.warning("brindle: audit streaming target %s is unreachable; %d record(s) queued",
+                        target["url"], len(queued) - sent)
+        finally:
+            if sent:
+                _drop_sent(path, sent)
 
 
 def send(record: dict, home: Path | None = None) -> None:
