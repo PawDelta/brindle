@@ -83,34 +83,53 @@ def test_one_permission_decision_reads_one_policy(tmp_path, monkeypatch, decide)
     assert next(reads) is by_deny                       # the decision read the policy once
 
 
-@pytest.mark.parametrize("provider", ["claude", "codex", "opencode", "antigravity", "native"])
-def test_org_controls_bind_every_hook_with_the_personal_policy_off(db, repo, monkeypatch, provider):
+@pytest.mark.parametrize("provider, mode", [
+    ("claude", "assign"), ("codex", "assign"), ("codex", "review"), ("opencode", "assign"),
+    ("antigravity", "assign"), ("native", "assign")])
+def test_org_controls_bind_every_hook_with_the_personal_policy_off(db, repo, monkeypatch, provider, mode):
+    """The launch installs the hook on the tools the org's controls may cover,
+    and the hook's dispatch denies what a control blocks."""
     import json
     import time
 
-    from brindle import agents, antigravity, opencode, workspaces
+    from brindle import agents, antigravity, codex_hook, opencode, workspaces
+    from brindle.config import set_local
     from brindle.db import Agent
     from brindle.native import runner
+    from brindle.profiles import load_profile
+    from brindle.providers import Antigravity, LaunchContext, OpenCode, _pre_tool_matcher
 
     monkeypatch.setattr(permission_grants, "_plugin", lambda repo: SimpleNamespace(policy=lambda: POLICY))
     ws = workspaces.create(db, str(repo), "feature").workspace
-    # A Codex agent gets brindle's hook with the policy off only as a reviewer.
-    a = Agent("a1", ws.id, "developer", provider, "boss", "review" if provider == "codex" else "assign",
-              "processing", "%a1", None, time.time())
+    a = Agent("a1", ws.id, "developer", provider, "boss", mode, "processing", "%a1", None, time.time())
     db.add_agent(a)
+    ctx = LaunchContext("a1", load_profile("developer"), None, cwd=ws.path, mode=mode)
     command = "terraform apply"
     if provider == "claude":
+        assert permissions.MCP_TOOL_PATTERN in _pre_tool_matcher(ctx).split("|")
         out = agents.handle_hook(db, a.id, "pre-tool", {"tool_name": "Bash", "tool_input": {"command": command}})
         decision = out["hookSpecificOutput"]["permissionDecision"]
     elif provider == "codex":
+        # A hook the person trusted already, in Codex's own config.
+        monkeypatch.setattr(codex_hook, "status", lambda command=None: codex_hook.TRUSTED)
+        monkeypatch.setattr(codex_hook, "ensure", lambda binary=None, command=None: codex_hook.TRUSTED)
+        assert codex_hook.launch_flags(ws.path, review=mode == "review")
         out = agents.hook_main(db, a.id, "codex-permission-request", json.dumps(
             {"session_id": "s", "cwd": ws.path, "tool_name": "Bash", "tool_input": {"command": command}}))
         decision = json.loads(out)["hookSpecificOutput"]["decision"]["behavior"]
     elif provider == "opencode":
+        monkeypatch.setenv("BRINDLE_OPENCODE_BIN", "/bin/opencode")
+        assert "BRINDLE_OPENCODE_POLICY=1" in OpenCode().command(ctx)   # the plugin asks about every tool
         out = opencode.hook_main(db, a.id, "opencode-pre-tool", json.dumps(
             {"session_id": "s", "tool": "bash", "args": {"command": command}}))
         decision = json.loads(out)["decision"]
     elif provider == "antigravity":
+        monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
+        set_local(ws.repo_root, "agy_approvals", "prompt")
+        Antigravity().command(ctx)
+        with open(f"{ws.path}/.agents/hooks.json") as f:
+            hooks = json.load(f)["brindle"]
+        assert "PreToolUse" in hooks
         decision = antigravity.pre_tool_decision(db, a.id, {
             "toolCall": {"name": "run_command", "args": {"CommandLine": command}},
             "workspacePaths": [ws.path]})["decision"]

@@ -856,6 +856,17 @@ def org_limits(repo_root: str | None) -> OrgLimits | None:
     return _context(repo_root).limits()
 
 
+def org_governs(repo_root: str | None) -> bool:
+    """Whether a Team org or a managed device governs ``repo_root``: an agent
+    brindle starts there gets its permission hook on every tool the org's
+    controls may cover, whatever the person's own permission_policy says
+    (permissions.org_only). When that can't be told: yes."""
+    try:
+        return org_limits(repo_root) is not None
+    except Exception:  # noqa: BLE001
+        return True
+
+
 def org_denies(repo_root: str | None) -> list[Rule]:
     lim = org_limits(repo_root)
     return list(lim.deny) if lim else []

@@ -3681,11 +3681,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         # Policy off: of the other CLIs only a Codex reviewer has the hook
         # (codex_hook.launch_flags). Nobody watches it, so it gets what its
         # allowed_tools cover and nothing else of brindle's: every other
-        # answer is Codex's own.
-        # OpenCode's plugin asks about Bash with the policy off too: only the
-        # org's and the managed device's word applies then (org_only).
+        # answer is Codex's own. With the policy off, any Codex or OpenCode
+        # agent that has the hook still gets the org's and the managed
+        # device's word (org_only).
         review_only = not policy and provider == "codex"
-        if not policy and provider not in ("claude", "opencode") and not (review_only and agent.mode == "review"):
+        if not policy and provider not in ("claude", "codex", "opencode"):
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         session = _session_of(db, agent)   # for saved actions that last this session
@@ -3709,8 +3709,10 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
                 if profile is not None:
                     rules += permissions.profile_bash_allows(profile)
-                # The org's and the managed device's word still binds a reviewer.
+                # The org's and the managed device's word still binds every agent.
                 bound = permissions.org_only(reqs, checks=cfg.checks) if review_only else None
+                if review_only and agent.mode != "review" and (bound is None or bound.decision != "deny"):
+                    return None    # only a reviewer gets its allowed_tools; the rest is Codex's own
                 if review_only:
                     decision = bound or permissions.Decision("ask", "not in the profile's allowed_tools")
                 else:
