@@ -27,7 +27,10 @@ def _has_glob(s: str) -> bool:
 def _segments_meet(x: str, y: str) -> bool:
     """Whether path segments ``x`` and ``y`` (either may be a glob) can name the same
     thing. Two globs are compared by their literal prefixes and suffixes, so it can
-    only err towards "yes"."""
+    only err towards "yes"; a segment with a character class, ``?`` or braces is not
+    analysed and meets anything."""
+    if any(c in s for s in (x, y) for c in "[]?{}"):
+        return True
     if not _has_glob(x):
         return fnmatch(x, y)
     if not _has_glob(y):

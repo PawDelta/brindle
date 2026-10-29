@@ -30,6 +30,8 @@ LIGHT = PlanTask(weight="light", files=["src/app/util.py"])
     ({}, PlanTask(files=["src/pro/*.py"]), True),
     ({}, PlanTask(files=[".github/**/*.yml"]), True),
     ({}, PlanTask(files=["src/**/session.py"]), True),
+    ({}, PlanTask(files=["infra/*.t[f]"]), True),
+    pytest.param({}, PlanTask(files=["infra/*.[t]f"]), True, marks=pytest.mark.variant("character-class bypass")),
     # plan_first and plan resolve together, local > shared > user
     ({"shared": {"plan_first": True}, "user": {"plan": "never"}}, LIGHT, True),
     ({"local": {"plan_first": False}, "shared": {"plan": "always"}}, PlanTask(weight="heavy"), False),
