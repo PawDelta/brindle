@@ -2675,7 +2675,12 @@ def delegate(
     except pilot.AutopilotError as e:
         raise AgentError(str(e)) from e
     if plan_first is None:
-        plan_first = load_repo_config(caller_ws.repo_root).plan_first
+        from brindle.plan_policy import PlanTask, needs_plan
+
+        own = repos.own_root(db, pilot.root_of(db, caller.id)) if caller else None
+        plan_first = needs_plan(
+            PlanTask(weight=weight, files=files, cross_repo=bool(own) and own != caller_ws.repo_root),
+            config=load_repo_config(caller_ws.repo_root))
     from brindle import identity_lock
 
     identity_lock.ensure_workspace(db, caller_ws)
