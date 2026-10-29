@@ -375,7 +375,8 @@ def _resolve_dependency(
     Internal ``task:<id>`` and ``workspace:<id>`` references preserve a requeued
     task's upstream even before it has a worker. Exclude the depending task itself:
     enqueueing a task with the same branch name as its upstream must not
-    create a new local dependency target."""
+    create a new local dependency target. Once started, its isolated worker's
+    workspace must not become a dependency target either."""
     if dep.startswith("workspace:"):
         ws = db.get_workspace(dep.removeprefix("workspace:"))
         if ws is None:
@@ -398,10 +399,18 @@ def _resolve_dependency(
         return target_repo, task, ws
 
     branch = dep
+    dependent = db.get_task(dependent_task_id) if dependent_task_id else None
+    worker = db.get_agent(dependent.agent_id) if dependent and dependent.isolate and dependent.agent_id else None
+    excluded_ws_id = worker.workspace_id if worker else None
+
+    def branch_workspaces(repo_root: str) -> list[Workspace]:
+        return [w for w in db.find_workspaces(repo_root)
+                if w.branch == branch and w.id != excluded_ws_id]
+
     # Check local repo first for either task or workspace (local-name precedence)
     local_tasks = [t for t in db.list_tasks(caller_ws.repo_root)
                    if t.branch == branch and t.id != dependent_task_id]
-    local_workspaces = [w for w in db.find_workspaces(caller_ws.repo_root) if w.branch == branch]
+    local_workspaces = branch_workspaces(caller_ws.repo_root)
     if local_tasks or local_workspaces:
         task = max(local_tasks, key=lambda t: t.created_at) if local_tasks else None
         ws = local_workspaces[-1] if local_workspaces else None
@@ -410,7 +419,7 @@ def _resolve_dependency(
     # Check other attached repos of the caller session
     other_repos = [r for r in session_roots if r != caller_ws.repo_root]
     repo_tasks = {r: [t for t in db.list_tasks(r) if t.branch == branch] for r in other_repos}
-    repo_workspaces = {r: [w for w in db.find_workspaces(r) if w.branch == branch] for r in other_repos}
+    repo_workspaces = {r: branch_workspaces(r) for r in other_repos}
     matching_repos = [r for r in other_repos if repo_tasks[r] or repo_workspaces[r]]
     if len(matching_repos) > 1:
         raise agents.AgentError(f"dependency {dep!r} is ambiguous: found in multiple attached repos")

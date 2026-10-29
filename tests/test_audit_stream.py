@@ -9,6 +9,7 @@ import os
 import threading
 import urllib.request
 import urllib.response
+from types import SimpleNamespace
 
 import pytest
 
@@ -47,7 +48,7 @@ def test_records_written_while_the_target_is_down_arrive_in_order_once_it_is_up(
     monkeypatch.setattr(audit_stream, "MAX_QUEUE", cap)
     siem, now = Siem(), [0.0]
     audit_stream.configure([TARGET], home=brindle_home, transport=siem, clock=lambda: now[0], spawn=lambda fn: fn())
-    chain = AuditChain(REPO, home=brindle_home, entitled=lambda: True)
+    chain = AuditChain(REPO, home=brindle_home, entitled=lambda: True, stream_targets=[TARGET])
     for i in range(3):
         chain.emit(ev(at=1_800_000_000 + i))
     assert siem.got == []
@@ -59,11 +60,30 @@ def test_records_written_while_the_target_is_down_arrive_in_order_once_it_is_up(
     assert siem.got == delivered
     assert not audit_stream.queue_path(TARGET, brindle_home).exists()
 
+    # Both plugins stay live after the second repo is configured.
+    from brindle.pro import org_context
+
+    other_repo = "/work/other-app"
+    other_target = {"kind": "https", "url": "https://other.example.com/ingest"}
+    monkeypatch.setattr(org_context.OrgContext, "resolve", lambda *, repo_root, cached_only:
+                        SimpleNamespace(audit_sinks=lambda: [TARGET] if repo_root == REPO else [other_target]))
+    monkeypatch.setattr(AuditChain, "entitled", lambda self: True)
+    chains = [audit_chain.make(REPO), audit_chain.make(other_repo)]
+    received, pending = [], []
+    monkeypatch.setattr(audit_stream, "_transport", lambda target, record: received.append((target, record)))
+    monkeypatch.setattr(audit_stream, "_spawn", pending.append)
+    for repo, plugin in zip((REPO, other_repo), chains):
+        plugin.emit(ev(repo_root=repo))
+    for drain in pending:
+        drain()
+    assert [(target, record["event"]["repo_root"]) for target, record in received] == [(TARGET, REPO),
+                                                                                  (other_target, other_repo)]
+
 
 def test_flush_delivers_during_the_cooldown_after_a_failed_send(brindle_home):
     siem = Siem()
     audit_stream.configure([TARGET], home=brindle_home, transport=siem, clock=lambda: 0.0, spawn=lambda fn: fn())
-    chain = AuditChain(REPO, home=brindle_home, entitled=lambda: True)
+    chain = AuditChain(REPO, home=brindle_home, entitled=lambda: True, stream_targets=[TARGET])
     chain.emit(ev())
     chain.emit(ev())
     siem.up = True
@@ -96,7 +116,7 @@ def lock_is_held(lock_file):
 def test_emit_returns_before_delivery_and_one_drainer_sends_everything(brindle_home, monkeypatch):
     pending, siem = [], Siem()
     siem.up = True
-    chain = AuditChain(REPO, home=brindle_home, entitled=lambda: True)
+    chain = AuditChain(REPO, home=brindle_home, entitled=lambda: True, stream_targets=[TARGET])
     inner, release_under_queue_lock = [], []
     release = audit_stream._release_drain
 
@@ -159,12 +179,12 @@ def test_emit_returns_before_delivery_and_one_drainer_sends_everything(brindle_h
 def test_a_record_is_queued_under_the_chain_lock(brindle_home, monkeypatch):
     held = []
 
-    def probe(rec, home=None):
+    def probe(rec, home=None, *, targets=None):
         held.append(lock_is_held(audit_chain._lock_path(audit_chain.log_path(REPO, brindle_home))))
 
     monkeypatch.setattr(audit_stream, "enqueue", probe)
     audit_stream.configure([TARGET], home=brindle_home, spawn=lambda fn: None)
-    AuditChain(REPO, home=brindle_home, entitled=lambda: True).emit(ev())
+    AuditChain(REPO, home=brindle_home, entitled=lambda: True, stream_targets=[TARGET]).emit(ev())
     assert held == [True]
 
 
@@ -192,6 +212,6 @@ def test_a_redirecting_siem_keeps_the_record_queued_and_gets_no_second_request(b
     monkeypatch.setattr(audit_stream, "_opener", audit_stream._build_opener(web))
     target = {"kind": "https", "url": "https://siem.example.com/ingest", "headers": {"Authorization": "x"}}
     audit_stream.configure([target], home=brindle_home, spawn=lambda fn: fn())
-    AuditChain(REPO, home=brindle_home, entitled=lambda: True).emit(ev())
+    AuditChain(REPO, home=brindle_home, entitled=lambda: True, stream_targets=[target]).emit(ev())
     assert web.asked == [("POST", "https://siem.example.com/ingest")]
     assert len(audit_stream._read_queue(audit_stream.queue_path(target, brindle_home))) == 1
