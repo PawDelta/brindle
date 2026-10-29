@@ -6,6 +6,7 @@ import email.message
 import fcntl
 import io
 import os
+import threading
 import urllib.request
 import urllib.response
 
@@ -120,6 +121,35 @@ def test_emit_returns_before_delivery_and_one_drainer_sends_everything(brindle_h
     pending[0]()
     assert siem.got == [1, 2]                        # the running drain also took the later record
     assert release_under_queue_lock == [True]
+
+    # A write that lands while the drainer is about to look at the (by then empty) queue:
+    # its own drain finds the lock taken, so the running drainer must pick the record up.
+    siem, pending = Siem(), []
+    siem.up = True
+    audit_stream.configure([TARGET], home=brindle_home, transport=siem, spawn=pending.append)
+    chain.emit(ev())
+    looking, go, checks = threading.Event(), threading.Event(), []
+
+    def at_empty_check():
+        checks.append(True)
+        if len(checks) == 2:                         # the pass after record 1 went out
+            looking.set()
+            go.wait()
+
+    monkeypatch.setattr(audit_stream, "_at_empty_check", at_empty_check)
+    drainer = threading.Thread(target=pending[0])
+    drainer.start()
+    looking.wait()
+    chain.emit(ev())                                 # queued while the drainer is held at its check
+    late = threading.Thread(target=pending[1])
+    late.start()
+    late.join()                                      # its drain finds the lock taken and leaves
+    go.set()
+    drainer.join()
+    assert siem.got == [3, 4]
+    audit_stream.flush()
+    assert siem.got == [3, 4]
+    assert not audit_stream.queue_path(TARGET, brindle_home).exists()
 
 
 def test_a_record_is_queued_under_the_chain_lock(brindle_home, monkeypatch):

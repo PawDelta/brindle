@@ -61,7 +61,8 @@ _home: Path | None = None
 _transport = None                # (target, record) -> None, raising when it can't deliver
 _clock = time.monotonic
 _down_until: dict[str, float] = {}
-_spawn = None                    # starts a background drain; set by configure (default: a daemon thread)
+_at_empty_check = lambda: None   # noqa: E731 - test seam: runs just before a drainer looks at the queue
+_spawn = None                   # starts a background drain; set by configure (default: a daemon thread)
 
 
 def configure(targets=None, *, home: Path | None = None, transport=None, clock=None,
@@ -247,6 +248,7 @@ def _drain(target: dict, home: Path | None, force: bool) -> None:
         return
     try:
         while True:
+            _at_empty_check()
             with _locked(path):
                 queued = _read_queue(path)
                 gap = _read_dropped(path)
