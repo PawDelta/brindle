@@ -83,6 +83,42 @@ def test_one_permission_decision_reads_one_policy(tmp_path, monkeypatch, decide)
     assert next(reads) is by_deny                       # the decision read the policy once
 
 
+@pytest.mark.parametrize("provider", ["claude", "codex", "opencode", "antigravity", "native"])
+def test_org_controls_bind_every_hook_with_the_personal_policy_off(db, repo, monkeypatch, provider):
+    import json
+    import time
+
+    from brindle import agents, antigravity, opencode, workspaces
+    from brindle.db import Agent
+    from brindle.native import runner
+
+    monkeypatch.setattr(permission_grants, "_plugin", lambda repo: SimpleNamespace(policy=lambda: POLICY))
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    # A Codex agent gets brindle's hook with the policy off only as a reviewer.
+    a = Agent("a1", ws.id, "developer", provider, "boss", "review" if provider == "codex" else "assign",
+              "processing", "%a1", None, time.time())
+    db.add_agent(a)
+    command = "terraform apply"
+    if provider == "claude":
+        out = agents.handle_hook(db, a.id, "pre-tool", {"tool_name": "Bash", "tool_input": {"command": command}})
+        decision = out["hookSpecificOutput"]["permissionDecision"]
+    elif provider == "codex":
+        out = agents.hook_main(db, a.id, "codex-permission-request", json.dumps(
+            {"session_id": "s", "cwd": ws.path, "tool_name": "Bash", "tool_input": {"command": command}}))
+        decision = json.loads(out)["hookSpecificOutput"]["decision"]["behavior"]
+    elif provider == "opencode":
+        out = opencode.hook_main(db, a.id, "opencode-pre-tool", json.dumps(
+            {"session_id": "s", "tool": "bash", "args": {"command": command}}))
+        decision = json.loads(out)["decision"]
+    elif provider == "antigravity":
+        decision = antigravity.pre_tool_decision(db, a.id, {
+            "toolCall": {"name": "run_command", "args": {"CommandLine": command}},
+            "workspacePaths": [ws.path]})["decision"]
+    else:
+        decision = runner.permission_decision(db, a.id, ws, "Bash", {"command": command})
+    assert decision == "deny"
+
+
 def test_the_entitlement_is_checked_at_the_contexts_time(token):
     credentials.default_store().save({"entitlement": token(iat=1000, exp=3000, features=["managed_rollout"]),
                                       "base_url": BASE})

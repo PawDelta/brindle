@@ -3581,8 +3581,9 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
 
 
 def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, load) -> dict | None:
-    """With ``permission_policy`` on, the policy's word on a PreToolUse call
-    before any approval of brindle's own: a deny denies it, and an ask a rule
+    """The policy's word on a PreToolUse call (with ``permission_policy`` off,
+    only the org's and the managed device's: permissions.org_only) before
+    any approval of brindle's own: a deny denies it, and an ask a rule
     makes explicitly forces Claude Code's prompt (``permissionDecision``
     "ask"), so the PermissionRequest hook then holds it for the person,
     whatever the profile's allowed_tools or Claude Code's own mode would have
@@ -3596,20 +3597,24 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, 
         from brindle.config import load_repo_config
 
         cfg = load_repo_config(ws.repo_root)
-        if cfg.permission_policy != "on":
-            return None
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
         if req is None:
             return None
-        try:
-            profile_rules = permissions.profile_rules(load())
-        except KeyError:  # a deleted profile: no override (profiles.profile_rules_for)
-            profile_rules = []
-        from brindle.permission_grants import org_check
+        if cfg.permission_policy != "on":
+            # Off drops the person's own rules, never the org's or the managed device's.
+            decision = permissions.org_only([req], checks=cfg.checks)
+            if decision is None:
+                return None
+        else:
+            try:
+                profile_rules = permissions.profile_rules(load())
+            except KeyError:  # a deleted profile: no override (profiles.profile_rules_for)
+                profile_rules = []
+            from brindle.permission_grants import org_check
 
-        with org_check(ws.repo_root):        # the rules' org denies and decide's controls: one policy
-            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
+            with org_check(ws.repo_root):        # the rules' org denies and decide's controls: one policy
+                rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+                decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
         if decision.decision == "deny" or (decision.decision == "ask" and decision.rule is not None):
             if decision.decision == "deny":   # an ask is counted when the PermissionRequest hook holds it
                 _note_decision(db, agent, ws, req.kind, req.summary(), decision)
@@ -3677,8 +3682,10 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         # (codex_hook.launch_flags). Nobody watches it, so it gets what its
         # allowed_tools cover and nothing else of brindle's: every other
         # answer is Codex's own.
+        # OpenCode's plugin asks about Bash with the policy off too: only the
+        # org's and the managed device's word applies then (org_only).
         review_only = not policy and provider == "codex"
-        if not policy and provider != "claude" and not (review_only and agent.mode == "review"):
+        if not policy and provider not in ("claude", "opencode") and not (review_only and agent.mode == "review"):
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         session = _session_of(db, agent)   # for saved actions that last this session
@@ -3702,8 +3709,13 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
                 if profile is not None:
                     rules += permissions.profile_bash_allows(profile)
-                decision = permissions.Decision("ask", "not in the profile's allowed_tools") if review_only \
-                    else permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session, spend=True)
+                # The org's and the managed device's word still binds a reviewer.
+                bound = permissions.org_only(reqs, checks=cfg.checks) if review_only else None
+                if review_only:
+                    decision = bound or permissions.Decision("ask", "not in the profile's allowed_tools")
+                else:
+                    decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session,
+                                                      spend=True)
                 if decision.decision == "ask" and len(reqs) == 1:
                     # A deny on one part of a compound command (cd x && <denied>)
                     # wins before any part-by-part allow below.
@@ -3739,7 +3751,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                             "deny", f"{decision.reason.removesuffix('; asking the user')}, and this profile "
                             "never asks (permission_mode dontAsk). Don't attempt it again: do without it, or ask "
                             "your supervisor with the send_message tool (brindle MCP server)")
-            if review_only and decision.decision != "allow":
+            if review_only and decision.decision != "allow" and (decision is not bound or bound.decision != "deny"):
                 return None  # as Codex would without brindle: its own prompt or refusal
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
@@ -3776,10 +3788,13 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 return None
             from brindle.permission_grants import org_check
 
-            with org_check(ws.repo_root):    # the rules' org denies and decide's controls: one policy
-                rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-                decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
-            if decision.decision == "ask" and len(reqs) == 1:
+            if not policy:
+                decision = permissions.org_only(reqs, checks=cfg.checks) or permissions.Decision("ask", "")
+            else:
+                with org_check(ws.repo_root):    # the rules' org denies and decide's controls: one policy
+                    rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+                    decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
+            if policy and decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
             if decision.decision == "ask" and decision.rule is not None:
