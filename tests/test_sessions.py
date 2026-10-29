@@ -106,6 +106,8 @@ def test_a_resumed_chat_is_shown_with_its_conversation_and_sidebar(db, root, mon
     tmux._tmux("wait-for", "stub-drew")
 
     # The person's terminal, 120x40, attached by `brindle continue`'s own _attach.
+    # CI runners set no TERM, and a tmux client without one exits at once.
+    monkeypatch.setenv("TERM", "xterm-256color")
     terminal, tty = pty.openpty()
     fcntl.ioctl(tty, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
     clients, run = [], subprocess.run
