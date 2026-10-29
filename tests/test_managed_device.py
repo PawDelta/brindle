@@ -2,13 +2,15 @@
 signed in, with the server's managed signing vectors verified the same way."""
 import base64
 import json
+import time
 from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from brindle.pro import managed, signed
+from brindle import budget
+from brindle.pro import license, managed, managed_models, signed, team_policy
 from brindle.pro.team_policy import parse_policy
 from pro_fixtures import ISS, TEST_KID, pro_env, sign, signing_key  # noqa: F401 - fixtures
 
@@ -38,22 +40,27 @@ def signed_answer(key, body, *, sub=SUB, exp=NOW + 3600, iat=NOW - 60):
 
 
 def managed_file(key, body, *, allow_airgap=False, install=None, policy_sub=SUB, policy_exp=NOW + 3600,
-                 exp=NOW + 86400) -> bytes:
+                 policy_iat=NOW - 60, exp=NOW + 86400) -> bytes:
     claims = {"iss": ISS, "aud": "brindle-pro", "sub": SUB, "org_id": ORG, "device_id": DEVICE,
               "device_token": DEVICE_TOKEN, "allow_airgap": allow_airgap,
-              "policy_token": signed_answer(key, body, sub=policy_sub, exp=policy_exp)["token"],
+              "policy_token": signed_answer(key, body, sub=policy_sub, exp=policy_exp, iat=policy_iat)["token"],
               "iat": NOW - 60, "exp": exp, "jti": "m1", "kid": TEST_KID, "token_use": "managed"}
     doc = {"managed": sign(key, claims, {"typ": "brindle-managed+jwt"}),
            "policy_body": install if install is not None else body, "device_id": DEVICE}
     return json.dumps(doc).encode()
 
 
-def member_policy(spend=None, **rules):
+# The budget guard only counts spend dated the current UTC month, at the real clock.
+THIS_MONTH = time.strftime("%Y-%m", time.gmtime())
+LAST_MONTH = time.strftime("%Y-%m", time.gmtime(time.mktime(time.strptime(THIS_MONTH + "-01", "%Y-%m-%d")) - 86400))
+
+
+def member_policy(spend=None, month=THIS_MONTH, **rules):
     """A signed-in member's policy for another org, as the client parsed it."""
     body = {"version": 9, "policy": {"allowed_models": ["opus", "sonnet"], **rules},
             "role": "member", "policy_role": None}
     if spend is not None:
-        body["spend"] = {"month": "2026-10", "seat_usd": spend}
+        body["spend"] = {"month": month, "seat_usd": spend}
     return parse_policy("org_other", body)
 
 
@@ -114,8 +121,11 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
         # A snapshot that is sound but lapsed leaves the file valid without a
         # usable snapshot; one bound to another device is the file's fault.
         other = "device:md_" + "2" * 32
-        (tmp_path / managed.FILE).write_bytes(managed_file(signing_key, body, policy_sub=other, policy_exp=NOW - 1))
-        assert isinstance(managed.load(tmp_path, now=NOW), managed.Invalid)
+        for faulty in (managed_file(signing_key, body, policy_sub=other, policy_exp=NOW - 1),
+                       managed_file(signing_key, body, policy_iat=NOW + 3600, policy_exp=NOW + 7200),
+                       managed_file(signing_key, answer(plan="bogus"), policy_exp=NOW - 1)):
+            (tmp_path / managed.FILE).write_bytes(faulty)
+            assert isinstance(managed.load(tmp_path, now=NOW), managed.Invalid)
         (tmp_path / managed.FILE).write_bytes(managed_file(signing_key, body, policy_exp=NOW - 1))
         m = managed.load(tmp_path, now=NOW)
         assert isinstance(m, managed.Managed) and m.snapshot is None and m.snapshot_expired
@@ -191,14 +201,33 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
         strict = member_policy(agent_setup={"deny_personal_keys": True})
         for s, _ in both_orders(device, strict):
             assert s.deny_personal_keys and s.agent_setup.deny_personal_keys is True
+        # A device that denies personal keys at the top level (no agent_setup) against a member
+        # whose agent_setup allows them: the denial survives, where managed_models reads it.
+        denying = managed.device_policy(m, fetch=refused, cached=signed_answer(
+            signing_key, answer(version=4, deny_personal_keys=True)), now=NOW)
+        assert denying.deny_personal_keys and denying.agent_setup is None
+        monkeypatch.setattr(license, "has", lambda feature: feature == "managed_models")
+        for s, _ in both_orders(denying, lenient):
+            assert s.deny_personal_keys and s.agent_setup.deny_personal_keys is True
+            monkeypatch.setattr(team_policy, "managed_models", lambda root, s=s: s)
+            assert managed_models.current("repo").deny_personal_keys
     elif case == "exhausted_member_budget":
         # The lower cap with the larger spend: the guard can't count less than either side.
         device = managed.device_policy(m, fetch=refused, cached=signed_answer(
-            signing_key, {**answer(version=4), "spend": {"month": "2026-10", "seat_usd": 5.0}}), now=NOW)
+            signing_key, {**answer(version=4), "spend": {"month": THIS_MONTH, "seat_usd": 5.0}}), now=NOW)
         assert (device.budget_seat_month_usd, device.spend_seat_usd) == (50.0, 5.0)
         exhausted = member_policy(spend=20.0, budget={"seat_month_usd": 20.0})
         for s, _ in both_orders(device, exhausted):
-            assert (s.budget_seat_month_usd, s.spend_seat_usd, s.spend_month) == (20.0, 20.0, "2026-10")
+            assert (s.budget_seat_month_usd, s.spend_seat_usd, s.spend_month) == (20.0, 20.0, THIS_MONTH)
+        # Month rollover: a larger amount from last month never displaces this month's usage,
+        # as the budget guard sees it.
+        stale = managed.device_policy(m, fetch=refused, cached=signed_answer(
+            signing_key, {**answer(version=4), "spend": {"month": LAST_MONTH, "seat_usd": 100.0}}), now=NOW)
+        for s, _ in both_orders(stale, exhausted):
+            assert (s.spend_seat_usd, s.spend_month) == (20.0, THIS_MONTH)
+            monkeypatch.setattr(team_policy, "org_budgets", lambda root, s=s: s)
+            lim = budget.org_limits("repo")
+            assert (lim.month_usd, lim.seat_spent_usd) == (20.0, 20.0)
     elif case == "plan_rules":
         device = managed.device_policy(m, fetch=refused, cached=signed_answer(signing_key, answer(
             version=4, plan="auto", plan_paths=["infra/**"], plan_approvers=["u_dev"],

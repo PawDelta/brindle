@@ -181,9 +181,11 @@ def verify_file(data: bytes, *, now: float | None = None) -> Managed:
     try:
         verify_policy_answer(token, body, org_id=org_id, sub=sub, now=now)
     except signed.Expired:
-        # Lapsed, but sound in every other respect (checked without its
-        # expiry): the file stays valid without a usable snapshot.
-        _verify_answer(token, "policy", body, org_id=org_id, sub=sub, now=None, lapsed_ok=True)
+        # Sound in every other respect (signature, timing but for the elapsed
+        # exp, binding, digest, and a body that parses as a policy): the file
+        # stays valid without a usable snapshot. Any other fault is the file's.
+        _verify_answer(token, "policy", body, org_id=org_id, sub=sub, now=now, lapsed_ok=True)
+        parse_policy(org_id, {**body, "token": token}, now)
         snapshot, expired = None, True
     else:
         snapshot = parse_policy(org_id, {**body, "token": token}, float(claims["iat"]))
@@ -223,9 +225,15 @@ def _verify_answer(token, doc_type: str, body: dict, *, org_id: str, sub: str, n
                    lapsed_ok: bool = False) -> dict:
     expect = {"org_id": org_id, "sub": sub}
     if lapsed_ok:
-        # Everything but the token's lifetime: signature, key, type, binding.
+        # Everything :func:`signed.verify` checks except that ``exp`` has
+        # elapsed at ``now``: a token not yet valid is still refused.
         claims = signed.verify_signed(token, typ=signed.header_typ(doc_type), token_use=doc_type,
                                       what=doc_type)
+        iat, exp = claims.get("iat"), claims.get("exp")
+        if not (signed._is_int(iat) and signed._is_int(exp)):
+            raise signed.ClaimMismatch(f"{doc_type} has no valid iat or exp")
+        if iat > now + signed.LEEWAY:
+            raise signed.Expired(f"{doc_type} is not valid yet")
         for name, value in expect.items():
             if claims.get(name) != value:
                 raise signed.ClaimMismatch(f"{doc_type} claim {name!r} does not match")
@@ -371,10 +379,16 @@ def _stricter_setup(a: AgentSetup | None, b: AgentSetup | None, deny_personal_ke
                    exclusive=_both(a.exclusive, b.exclusive, lambda x, y: x or y))
 
 
-def _larger_spend(x: OrgPolicy, y: OrgPolicy) -> dict:
-    """The seat spend to carry: the larger of the two sides' monthly spends,
-    so a budget guard counts at least what either side has seen."""
+def _larger_spend(x: OrgPolicy, y: OrgPolicy, now: float) -> dict:
+    """The seat spend to carry: the larger of the two sides' spends for the
+    current UTC month, so a budget guard counts at least what either side
+    has seen this month. A stale or undated amount never displaces a
+    current one; only when neither side has a current one is the larger of
+    them carried (the guard discards it as last month's)."""
+    month = time.strftime("%Y-%m", time.gmtime(now))
     sides = [p for p in (x, y) if p.spend_seat_usd is not None]
+    current = [p for p in sides if p.spend_month == month]
+    sides = current or sides
     if not sides:
         return {"spend_seat_usd": None, "spend_month": None}
     top = max(sides, key=lambda p: p.spend_seat_usd)
@@ -388,7 +402,7 @@ def _stricter_plan(a: str, b: str) -> str:
     return max(a, b, key=lambda m: _PLAN_ORDER.get(m, 0))
 
 
-def stricter(a: OrgPolicy, b: OrgPolicy) -> OrgPolicy:
+def stricter(a: OrgPolicy, b: OrgPolicy, *, now: float | None = None) -> OrgPolicy:
     """One policy from two (each one's effective policy, overrides applied)
     where every rule takes the stricter side: allowed lists intersect (a
     missing list allows everything, so the other side's rules), budgets and
@@ -403,9 +417,11 @@ def stricter(a: OrgPolicy, b: OrgPolicy) -> OrgPolicy:
     grants block allows none, and the other side's denies still stand), and
     visibility is what both show. A managed provider or agent routing can't
     be combined, so ``a``'s stands (the device's, when ``a`` is the device
-    policy). The seat spend carried is the larger of the two, so a budget
-    guard never counts less than either side has seen. The result is its
-    own effective policy and carries ``a``'s identity and sources."""
+    policy). The seat spend carried is the larger of the two for the
+    current month (at ``now``), so a budget guard never counts less than
+    either side has seen. The result is its own effective policy and
+    carries ``a``'s identity and sources."""
+    now = time.time() if now is None else now
     x, y = a.enforced, b.enforced
     paused = x.paused or y.paused
     deny_keys = _denies_personal_keys(x) or _denies_personal_keys(y)
@@ -423,7 +439,7 @@ def stricter(a: OrgPolicy, b: OrgPolicy) -> OrgPolicy:
         paused=paused,
         paused_reason=(x.paused_reason if x.paused else y.paused_reason) if paused else None,
         budget_sources=dict(x.budget_sources), member_overrides=dict(x.member_overrides),
-        **_larger_spend(x, y),
+        **_larger_spend(x, y, now),
         visibility={k: bool(x.visibility.get(k, True)) and bool(y.visibility.get(k, True))
                     for k in {*x.visibility, *y.visibility}},
         min_version=_newest_version(x.min_version, y.min_version),
