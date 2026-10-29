@@ -11,7 +11,8 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from brindle import airgap, budget
-from brindle.pro import auth, license, managed, managed_models, signed, team_policy
+from brindle.pro import _files, auth, license, managed, managed_models, signed, team_policy
+from brindle.pro._files import private_dir
 from brindle.pro.org_context import OrgContext, Providers
 from brindle.pro.team_policy import parse_policy
 from pro_fixtures import ISS, TEST_KID, pro_env, sign, signing_key  # noqa: F401 - fixtures
@@ -85,7 +86,10 @@ def refused(m):
     "expired_snapshot", "bad_outer_token",
     "vector:managed_with_policy_ok", "vector:managed_with_policy_tampered_body",
     "status:device_paused_signed_out", "status:other_org_signed_in",
+    "status:unsafe_cache", "status:unwritable_cache",
     "airgap:cached", "airgap:snapshot", "airgap:export", "airgap:none",
+    pytest.param("airgap:cached_older", marks=pytest.mark.variant(
+        "the cached copy comes first even when the snapshot is newer")),
 ])
 def test_managed_device(signing_key, tmp_path, monkeypatch, case):
     if case.startswith("vector:"):
@@ -114,7 +118,8 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
         lapsed = case in ("airgap:export", "airgap:none")
         m = managed.verify_file(managed_file(signing_key, body, allow_airgap=True,
                                              policy_exp=NOW - 1 if lapsed else NOW + 3600), now=NOW)
-        device_status = {"org_id": ORG, "policy_version": 4, "paused": case == "status:device_paused_signed_out",
+        device_status = {"org_id": ORG, "policy_version": 4,
+                         "paused": case.startswith("status:") and case != "status:other_org_signed_in",
                          "paused_reason": "lost laptop", "control": {
                              "id": "c_dev", "action": "throttle", "throttle": {"seat_month_usd": 10}}}
         served = {"policy": signed_answer(signing_key, answer(version=4, max_parallel_workers=3)),
@@ -139,6 +144,21 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
                 assert "lost laptop" in (ctx.blocked_reason() or "") and ctx.shutdown_control() is None
                 served.clear()
             return
+        cache = private_dir(home=tmp_path) / "device-status.json"
+        if case in ("status:unsafe_cache", "status:unwritable_cache"):
+            # A cache brindle refuses to read, or can't write, never erases a verified pause.
+            if case == "status:unsafe_cache":
+                context().blocked_reason()
+                cache.chmod(0o644)
+            else:
+                def write(path, data, real=_files.write_private):
+                    if path == cache:
+                        raise OSError("read-only home")
+                    real(path, data)
+
+                monkeypatch.setattr(_files, "write_private", write)
+            assert "lost laptop" in (context().blocked_reason() or "")
+            return
         if case == "status:other_org_signed_in":
             # Each org's throttle narrows the other's: the member's workers, the device's budget.
             ent = SimpleNamespace(sub="user_1", org_id="org_other", role="member", policy_role=None,
@@ -159,6 +179,9 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
         # snapshot, else a signed offline export for the device's org; none of them fails closed.
         if case == "airgap:cached":
             assert context().policy.version == 4        # online: fetched with the device token and cached
+        if case == "airgap:cached_older":
+            _files.write_private(private_dir(home=tmp_path) / "device-policy.json", json.dumps(
+                signed_answer(signing_key, answer(version=2, max_parallel_workers=4))).encode())
         if case == "airgap:export":
             exported = answer(max_parallel_workers=4)
             claims = {"iss": ISS, "aud": "brindle-pro", "org_id": ORG, "doc_type": "offline-policy",
@@ -173,7 +196,8 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
         if case == "airgap:none":
             assert ctx.blocked_reason() and not ctx.policy.allowed
             return
-        expect = {"airgap:cached": ("device", 3), "airgap:snapshot": ("snapshot", 2), "airgap:export": ("offline", 4)}
+        expect = {"airgap:cached": ("device", 3), "airgap:cached_older": ("device", 4),
+                  "airgap:snapshot": ("snapshot", 2), "airgap:export": ("offline", 4)}
         assert (ctx.source(), ctx.policy.max_parallel_workers) == expect[case] and ctx.blocked_reason() is None
         return
     if case == "bad_outer_token":

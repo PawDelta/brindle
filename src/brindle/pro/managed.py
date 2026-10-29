@@ -309,6 +309,19 @@ def device_policy(managed: Managed, *, fetch, cached=None, now: float | None = N
     return max(copies, key=lambda c: c[0])[1]
 
 
+def airgap_policy(managed: Managed, *, cached=None, now: float | None = None) -> OrgPolicy | None:
+    """The device's policy in air-gap mode it allows, from local copies only and
+    in this order: ``cached`` (the last answer kept), then the file's snapshot.
+    Nothing is fetched. None when neither verifies now: the caller tries a
+    signed offline export next."""
+    now = time.time() if now is None else now
+    for what, copy in (("cached", cached), ("snapshot", managed.snapshot)):
+        found = _valid_copy(managed, copy, now, what)
+        if found:
+            return found[1]
+    return None
+
+
 def device_status(managed: Managed, *, fetch, cached=None, now: float | None = None) -> dict | None:
     """The device's org status (pause and controls): the most recently signed
     valid answer between what ``fetch(managed)`` answers and ``cached`` (the

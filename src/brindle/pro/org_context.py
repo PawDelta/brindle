@@ -228,14 +228,18 @@ class OrgContext:
         try:
             raw = read_private(path, status.MAX_FILE)
             cached = json.loads(raw) if raw else None
-        except (OSError, ValueError):
+        except Exception:  # noqa: BLE001 - a cache that can't be used (unsafe, unreadable) is no cache
+            log.warning("brindle: ignoring the cached device status", exc_info=True)
             cached = None
         answer = managed.device_status(device, fetch=lambda d: self._fetch("status", d.org_id, d),
                                        cached=cached, now=self.now)
         if answer is None:
             return None
         if answer is not cached:
-            write_private(path, json.dumps(answer).encode())
+            try:
+                write_private(path, json.dumps(answer).encode())
+            except Exception:  # noqa: BLE001 - the verified status applies even if it can't be kept
+                log.warning("brindle: couldn't keep the device status", exc_info=True)
         return status.parse({k: v for k, v in answer.items() if k != "token"}, self.now)
 
     def _member_status(self):
@@ -410,14 +414,19 @@ class OrgContext:
             cached = json.loads(raw) if raw else None
         except (OSError, ValueError):
             cached = None
-        # A fresh copy got with the device token (air-gap mode refuses the request), else the
-        # verified cached copy, else the managed file's snapshot.
-        p = managed.device_policy(device, fetch=lambda d: self._fetch("policy", d.org_id, d),
-                                  cached=cached, now=self.now)
+        airgapped = airgap.enabled() and managed.airgap_allowed(device)
+        if airgapped:
+            # Local copies only, in order: the verified cached copy, then the file's snapshot.
+            p = managed.airgap_policy(device, cached=cached, now=self.now)
+        else:
+            # The newest of a fresh copy got with the device token, the cached copy and the snapshot.
+            p = managed.device_policy(device, fetch=lambda d: self._fetch("policy", d.org_id, d),
+                                      cached=cached, now=self.now)
         if p is not None:
             self._source = "snapshot" if device.snapshot and p.raw_body == device.snapshot.raw_body else "device"
-            write_private(path, json.dumps(p.raw_body).encode())
-        elif airgap.enabled() and managed.airgap_allowed(device):
+            if not airgapped:
+                write_private(path, json.dumps(p.raw_body).encode())
+        elif airgapped:
             # Air-gap mode the device allows: last, a signed offline export for the device's org.
             try:
                 p = team_policy.load_offline(self.repo_root, device.org_id)
