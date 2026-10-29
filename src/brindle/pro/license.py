@@ -13,9 +13,10 @@ header names a ``kid``, which must be one of the keys pinned in
 
 ``iss`` must equal the base URL the entitlement was fetched from. The
 signature, header, ``kid`` and revocation checks are
-:func:`brindle.pro.signed.verify_signed`'s; every refresh also refreshes the
-revocation list (:func:`brindle.pro.signed.refresh_revocations`), and a
-failure there never stops the refresh.
+:func:`brindle.pro.signed.verify_signed`'s; every entitlement fetched from the
+backend is preceded by a refresh of the revocation list
+(:func:`brindle.pro.signed.refresh_revocations`, in ``auth``), and a failure
+there never stops the fetch.
 
 Everything fails closed: any problem -- a malformed token, an unknown key, a
 bad signature, the wrong ``alg``/``typ``/``aud``/``iss``/``token_use``, an
@@ -513,15 +514,13 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
     if default and ent is not None and not offline and not needs_refresh(ent, now, max_age):
         _disk_cache_write(now, gen, token=creds["entitlement"], issuer=issuer)
     if refresh and (ent is None or needs_refresh(ent, now, max_age)) and creds.get("refresh_token"):
-        client = client or auth.Client(issuer)
-        if signed.refresh_revocations(client):
-            ent = None    # verified before a key it may use was revoked: checked again below
         try:
-            ent = auth.refresh(client, store, creds, now=now)
+            ent = auth.refresh(client or auth.Client(issuer), store, creds, now=now)
         except auth.AuthError as e:
             if e.revoked:
                 raise LicenseError(_lapsed(creds)) from e
             log.info("entitlement refresh failed (%s); using the stored entitlement", e.code)
+            ent = None    # checked again below, against revocations the attempt may have fetched
     if ent is None:
         try:
             ent = verify(creds.get("entitlement") or "", issuer=issuer, now=now)

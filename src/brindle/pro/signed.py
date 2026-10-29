@@ -11,8 +11,9 @@ revocations, no expiry) that other token kinds build on.
 Revocations: a ``brindle-revocation+jwt`` document with the claim
 ``revoked_kid`` withdraws trust in that key. It counts only when a different
 pinned key signed it; one signed by the key it names is ignored. Accepted
-revocations are kept in ``$BRINDLE_HOME/pro/revocations.json`` (0600) and
-only ever added to; every load re-verifies them, so nothing written to that
+revocations are kept in ``$BRINDLE_HOME/pro/revocations.json`` (0600): one
+per revoked kid, at most MAX_REVOCATIONS kids, revocations of trusted keys
+kept first. Every load re-verifies them, so nothing written to that
 file counts unless a pinned key signed it. :func:`refresh_revocations`
 merges the backend's public list (``GET /keys/revocations``) in; it never raises,
 so a failed fetch leaves verification as it was.
@@ -47,7 +48,7 @@ LEEWAY = 60                   # clock skew tolerated on iat (and, by license, on
 MAX_TOKEN_BYTES = 8192
 REVOCATIONS_PATH = "/keys/revocations"
 REVOCATIONS_FILE = "revocations.json"
-MAX_REVOCATIONS = 64          # kept locally; a revocation is one key, and keys are few
+MAX_REVOCATIONS = 64          # revoked kids kept locally, trusted keys' first; keys are few
 
 
 class SignedError(Exception):
@@ -159,9 +160,11 @@ def verify_signed(token: str, *, typ: str, token_use: str, what: str = "entitlem
     callers do that for their own token kind. ``what`` names the token kind
     in errors. Raises :class:`SignedError`.
 
-    The checks run in the backend verifier's order, so both report the same
-    verdict: a malformed token or algorithm, ``typ``, the key, the signature,
-    ``token_use``, then ``aud`` and the claimed ``kid``, then revocation."""
+    The checks run in this order, the one the shared signing vectors are
+    judged by: a malformed token or algorithm, ``typ``, the key, the
+    signature, revocation, ``token_use``, then ``aud`` and the claimed
+    ``kid``. A signature from a revoked key is refused as revoked whatever
+    else is wrong with the token."""
     if not isinstance(token, str) or len(token) > max_bytes:
         raise BadSignature(f"malformed {what}")
     parts = token.split(".")
@@ -183,6 +186,8 @@ def verify_signed(token: str, *, typ: str, token_use: str, what: str = "entitlem
         key.verify(sig, f"{parts[0]}.{parts[1]}".encode("ascii"))
     except InvalidSignature as e:
         raise BadSignature(f"{what} signature is invalid") from e
+    if _check_revoked and kid in revoked_kids():
+        raise Revoked(f"{what} is signed by a revoked key")
     # Only now is the payload trusted enough to parse.
     claims = _json_object(_b64decode(parts[1], what, ClaimMismatch), what, ClaimMismatch)
     missing = [c for c in ("aud", "kid", "token_use") if c not in claims]
@@ -196,8 +201,6 @@ def verify_signed(token: str, *, typ: str, token_use: str, what: str = "entitlem
     aud = claims.get("aud")
     if not (aud == AUDIENCE or (isinstance(aud, list) and AUDIENCE in aud)):
         raise ClaimMismatch(f"{what} is for a different audience")
-    if _check_revoked and kid in revoked_kids():
-        raise Revoked(f"{what} is signed by a revoked key")
     return claims
 
 
@@ -261,10 +264,21 @@ def _stored_revocations() -> list[str]:
         return []
 
 
+def _by_kid(tokens: list) -> dict[str, str]:
+    """One accepted revocation per revoked kid among ``tokens``: revocations of
+    trusted keys first, then the rest in order, at most MAX_REVOCATIONS kids."""
+    found: dict[str, str] = {}
+    for t in tokens:
+        kid = _accepted_revocation(t) if isinstance(t, str) else None
+        if kid is not None:
+            found.setdefault(kid, t)
+    order = sorted(found, key=lambda k: k not in PINNED_KEYS and k not in _test_keys)
+    return {k: found[k] for k in order[:MAX_REVOCATIONS]}
+
+
 def revoked_kids() -> frozenset[str]:
     """The kids revoked by the stored revocations (each re-verified)."""
-    kids = (_accepted_revocation(t) for t in _stored_revocations())
-    return frozenset(k for k in kids if k is not None)
+    return frozenset(_by_kid(_stored_revocations()))
 
 
 def save_revocations(tokens: list) -> frozenset[str]:
@@ -275,24 +289,21 @@ def save_revocations(tokens: list) -> frozenset[str]:
 
     from brindle.pro._files import private_dir
 
-    fresh = [t for t in tokens if isinstance(t, str) and _accepted_revocation(t) is not None]
-    if not fresh:
+    if not _by_kid(tokens):
         return frozenset()
     d = private_dir()
     fd = os.open(d / f"{REVOCATIONS_FILE}.lock",
                  os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        stored = [t for t in _stored_revocations() if _accepted_revocation(t) is not None]
-        before = {_accepted_revocation(t) for t in stored}
-        merged = stored + [t for t in dict.fromkeys(fresh) if t not in stored]
-        merged = merged[:MAX_REVOCATIONS]
+        stored = _by_kid(_stored_revocations())
+        merged = _by_kid(list(stored.values()) + list(tokens))
         if merged == stored:
             return frozenset()
         tmp_fd, tmp = tempfile.mkstemp(dir=d, prefix=f".{REVOCATIONS_FILE}.", suffix=".tmp")
         try:
             with os.fdopen(tmp_fd, "w") as fh:
-                json.dump({"revocations": merged}, fh)
+                json.dump({"revocations": list(merged.values())}, fh)
             os.replace(tmp, d / REVOCATIONS_FILE)
         except BaseException:
             try:
@@ -302,19 +313,20 @@ def save_revocations(tokens: list) -> frozenset[str]:
             raise
     finally:
         os.close(fd)   # releases the lock
-    return frozenset({_accepted_revocation(t) for t in merged} - before)
+    return frozenset(merged.keys() - stored.keys())
 
 
 def refresh_revocations(client) -> frozenset[str]:
     """Fetch the backend's public revocation list with ``client`` (an
     :class:`brindle.pro.auth.Client`) and keep the accepted ones. Returns the
-    newly revoked kids; any failure is logged and returns none."""
+    newly revoked kids; any failure is logged and returns none. The response
+    is bounded by the client's transport; the cache, by MAX_REVOCATIONS kids."""
     try:
         status, body = client.get(REVOCATIONS_PATH)
         toks = body.get("revocations") if status == 200 and isinstance(body, dict) else None
         if not isinstance(toks, list):
             return frozenset()
-        return save_revocations(toks[:MAX_REVOCATIONS])
+        return save_revocations(toks)
     except Exception:  # noqa: BLE001 - revocations are never worth failing a refresh over
         log.info("couldn't refresh the revocation list", exc_info=True)
         return frozenset()
