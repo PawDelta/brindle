@@ -43,7 +43,6 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from contextlib import contextmanager
 from pathlib import Path
 
 from brindle.pro.audit_chain import _iso, _locked, _open_private, _write_atomic, audit_dir, canonical, sha256
@@ -142,23 +141,23 @@ def _enqueue(path: Path, record: dict) -> None:
             os.close(fd)
 
 
-@contextmanager
-def _try_drain_lock(path: Path):
-    """Yields True when this process may drain the queue (only one at a time);
-    False at once, without waiting, when another process is draining it."""
+def _take_drain(path: Path) -> int | None:
+    """The drain lock's descriptor when this process may drain the queue (only
+    one at a time); None at once, without waiting, when another is draining."""
     fd = _open_private(path.with_suffix(".drain"), os.O_RDWR | os.O_CREAT)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
-        try:
-            yield True
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-    finally:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
         os.close(fd)
+        return None
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _release_drain(fd: int) -> None:
+    os.close(fd)                       # closing the descriptor drops the flock
 
 
 def _drop_sent(path: Path, count: int) -> None:
@@ -224,7 +223,11 @@ class _NoRedirects(urllib.request.HTTPRedirectHandler):
         return None
 
 
-_opener = urllib.request.build_opener(_NoRedirects)
+def _build_opener(*handlers):
+    return urllib.request.build_opener(_NoRedirects, *handlers)
+
+
+_opener = _build_opener()
 
 
 # -- sending --------------------------------------------------------------------------------------
@@ -239,13 +242,20 @@ def _drain(target: dict, home: Path | None, force: bool) -> None:
     if not force and _clock() < _down_until.get(tid, 0.0):
         return
     send = _transport or deliver
-    with _try_drain_lock(path) as mine:
-        while mine:
-            queued = _read_queue(path)
+    fd = _take_drain(path)
+    if fd is None:
+        return
+    try:
+        while True:
             with _locked(path):
+                queued = _read_queue(path)
                 gap = _read_dropped(path)
-            if not queued and not gap:
-                return
+                if not queued and not gap:
+                    # Giving up the drain lock under the queue lock: a writer's record
+                    # is either seen here, or queued after this and drained by its own kick.
+                    _release_drain(fd)
+                    fd = None
+                    return
             sent = 0
             try:
                 for line in queued:
@@ -264,6 +274,9 @@ def _drain(target: dict, home: Path | None, force: bool) -> None:
             finally:
                 if sent:
                     _drop_sent(path, sent)
+    finally:
+        if fd is not None:
+            _release_drain(fd)
 
 
 def _start(fn) -> None:

@@ -2,9 +2,12 @@
 durably and delivered in order once it is back. A fake transport stands in
 for the network."""
 
+import email.message
 import fcntl
+import io
 import os
 import urllib.request
+import urllib.response
 
 import pytest
 
@@ -69,18 +72,39 @@ def test_flush_delivers_during_the_cooldown_after_a_failed_send(brindle_home):
     assert siem.got == [1, 2, 3]
 
     path = audit_stream.queue_path(TARGET, brindle_home)
-    with audit_stream._try_drain_lock(path) as mine:  # another process is draining
-        assert mine
-        chain.emit(ev())
+    other = audit_stream._take_drain(path)           # another process is draining
+    assert other is not None
+    chain.emit(ev())
+    audit_stream._release_drain(other)
     assert siem.got == [1, 2, 3]                     # queued, not sent, and not waited for
     assert len(audit_stream._read_queue(path)) == 1
 
 
-def test_emit_returns_before_delivery_and_one_drainer_sends_everything(brindle_home):
+def lock_is_held(lock_file):
+    """Whether someone holds the flock on ``lock_file`` (probed without waiting)."""
+    fd = os.open(lock_file, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return False
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+
+
+def test_emit_returns_before_delivery_and_one_drainer_sends_everything(brindle_home, monkeypatch):
     pending, siem = [], Siem()
     siem.up = True
     chain = AuditChain(REPO, home=brindle_home, entitled=lambda: True)
-    inner = []
+    inner, release_under_queue_lock = [], []
+    release = audit_stream._release_drain
+
+    def probe_release(fd):                           # a writer arriving after the empty check must
+        release_under_queue_lock.append(              # find the drain lock free, so this happens
+            lock_is_held(audit_chain._lock_path(audit_stream.queue_path(TARGET, brindle_home))))
+        release(fd)                                  # while the queue lock is still held
+
+    monkeypatch.setattr(audit_stream, "_release_drain", probe_release)
 
     def gated(target, record):                       # the drain is mid-send when more writes arrive
         if not inner:
@@ -95,20 +119,14 @@ def test_emit_returns_before_delivery_and_one_drainer_sends_everything(brindle_h
     assert siem.got == [] and len(pending) == 1      # queued; delivery has not started
     pending[0]()
     assert siem.got == [1, 2]                        # the running drain also took the later record
+    assert release_under_queue_lock == [True]
 
 
 def test_a_record_is_queued_under_the_chain_lock(brindle_home, monkeypatch):
     held = []
 
     def probe(rec, home=None):
-        fd = os.open(audit_chain._lock_path(audit_chain.log_path(REPO, brindle_home)), os.O_RDWR)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            held.append(False)
-        except BlockingIOError:
-            held.append(True)
-        finally:
-            os.close(fd)
+        held.append(lock_is_held(audit_chain._lock_path(audit_chain.log_path(REPO, brindle_home))))
 
     monkeypatch.setattr(audit_stream, "enqueue", probe)
     audit_stream.configure([TARGET], home=brindle_home, spawn=lambda fn: None)
@@ -116,7 +134,30 @@ def test_a_record_is_queued_under_the_chain_lock(brindle_home, monkeypatch):
     assert held == [True]
 
 
-def test_a_redirect_is_not_followed():
-    handler = audit_stream._NoRedirects()
-    req = urllib.request.Request("https://siem.example.com/ingest", data=b"{}", method="POST")
-    assert handler.redirect_request(req, None, 302, "Found", {}, "http://elsewhere.example/") is None
+class FakeWeb(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
+    """Answers every request with a redirect and remembers what was asked."""
+
+    def __init__(self):
+        urllib.request.HTTPHandler.__init__(self)
+        urllib.request.HTTPSHandler.__init__(self)
+        self.asked = []
+
+    def https_open(self, req):
+        self.asked.append((req.get_method(), req.full_url))
+        headers = email.message.Message()
+        headers["Location"] = "http://elsewhere.example/collect"
+        resp = urllib.response.addinfourl(io.BytesIO(b""), headers, req.full_url, 302)
+        resp.msg = "Found"
+        return resp
+
+    http_open = https_open
+
+
+def test_a_redirecting_siem_keeps_the_record_queued_and_gets_no_second_request(brindle_home, monkeypatch):
+    web = FakeWeb()
+    monkeypatch.setattr(audit_stream, "_opener", audit_stream._build_opener(web))
+    target = {"kind": "https", "url": "https://siem.example.com/ingest", "headers": {"Authorization": "x"}}
+    audit_stream.configure([target], home=brindle_home, spawn=lambda fn: fn())
+    AuditChain(REPO, home=brindle_home, entitled=lambda: True).emit(ev())
+    assert web.asked == [("POST", "https://siem.example.com/ingest")]
+    assert len(audit_stream._read_queue(audit_stream.queue_path(target, brindle_home))) == 1
