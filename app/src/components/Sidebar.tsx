@@ -122,18 +122,26 @@ function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "naviga
     }
     return () => { current = false; };
   }, [client, connection, store]);
-  const name = account?.signed_in ? account.name || "Signed in" : "Guest";
-  const initials = account?.signed_in && account.name ? account.name.split("@")[0].split(/[\s._-]+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() : "?";
+  const name = account?.signed_in ? account.name?.trim() : "";
+  const email = account?.signed_in ? account.email?.trim() : "";
+  const initials = name
+    ? name.split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0]).join("").toUpperCase()
+    : email?.split("@")[0]?.slice(0, 1).toUpperCase();
   return (
     <button
       type="button"
       aria-label="Open Account"
       aria-current={route.screen === "account" ? "page" : undefined}
-      title={name}
-      className="flex size-7 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] text-ink-2 hover:bg-surface-2"
+      title={account?.signed_in ? name || email || "Signed in" : "Sign in"}
+      className={`flex size-7 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] ${account?.signed_in ? "text-ink-2" : "text-ink-3"} hover:bg-surface-2`}
       onClick={() => navigate({ screen: "account" })}
     >
-      {initials}
+      {initials || (
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="8" r="3.5" />
+          <path d="M5 21v-2a7 7 0 0 1 14 0v2" />
+        </svg>
+      )}
     </button>
   );
 }

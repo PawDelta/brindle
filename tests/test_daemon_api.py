@@ -243,7 +243,7 @@ def seeded(db, repo, monkeypatch):
     ("/v1/profiles", lambda b, s: "developer" in [p["name"] for p in b] and "env" not in b[0]),
     ("/v1/config", lambda b, s: "repo" in b and b["repo"]["default_agent"] == "developer"),
     ("/v1/doctor", lambda b, s: b == [{"level": "ok", "name": "python", "detail": "3.12"}]),
-    ("/v1/account", lambda b, s: b == {"signed_in": False, "name": None, "plan": None, "orgs": []}),
+    ("/v1/account", lambda b, s: b == {"signed_in": False, "name": None, "email": None, "plan": None, "orgs": []}),
     ("/v1/cost", lambda b, s: b["days"] == 30 and b["total"]["dollars"] == 0),
 ], ids=["repos", "sessions", "snapshot", "inbox", "goal", "agent", "agent-locked", "agent-missing", "diff",
         "knowledge-decisions", "knowledge-sources", "profiles", "config", "doctor", "account", "cost"])
@@ -251,6 +251,37 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     code, body = _get(path.format(ws=seeded["ws"]), AUTH, f"repo={seeded['repo']}")
     assert code in (200, 404)
     assert check(body, seeded)
+
+
+def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_home, monkeypatch):
+    from brindle.pro import auth
+    from brindle.pro.account import ProAccount
+
+    ent = license.Entitlement("user", "org", "pro", "active", frozenset(), 1, 0, 9999999999, "key")
+    monkeypatch.setattr(license, "current", lambda **kw: ent)
+    reads = []
+
+    def me(*args):
+        reads.append("me")
+        if len(reads) > 1:
+            raise auth.AuthError("offline", code="transport")
+        return {"name": "Sam Rivera", "email": "sam@example.com"}
+
+    def orgs(*args):
+        reads.append("orgs")
+        raise auth.AuthError("offline", code="transport")
+
+    monkeypatch.setattr(auth, "me", me)
+    monkeypatch.setattr(ProAccount, "orgs", orgs)
+    for _ in range(2):
+        code, body = _get("/v1/account", AUTH)
+        assert code == 200 and (body["name"], body["email"]) == ("Sam Rivera", "sam@example.com")
+    assert reads == ["me", "orgs"]
+    license.clear_cache()
+    for _ in range(2):
+        code, body = _get("/v1/account", AUTH)
+        assert code == 200 and body["signed_in"] and body["name"] is None and body["email"] is None
+    assert reads == ["me", "orgs", "me", "orgs"]
 
 
 def test_usage_lists_every_provider_and_flags_the_near_ones_worst_first(brindle_home, monkeypatch):

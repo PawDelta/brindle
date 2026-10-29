@@ -474,14 +474,14 @@ describe("review", () => {
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
     // Nothing is spliced from hunks that don't describe the file: the diff is read again (once), and the fresh
     // one, made from the file as it now is, shows the line that slipped in and can be edited again.
-    // Three diff reads in all: the sidebar's Changes row reads it once on its own, the sheet twice.
-    await waitFor(() => expect(gets(daemon, "/sessions/sup1/diff")).toBe(3));
+    // Two diff reads, both the sheet's: its first and the one re-read.
+    await waitFor(() => expect(gets(daemon, "/sessions/sup1/diff")).toBe(2));
     await waitFor(() => expect(gets(daemon, "/sessions/sup1/file")).toBe(2));
     await waitFor(() => expect(hunk().textContent).toContain("+# a line slipped in above"));
     expect(within(sheet()).queryByTestId("file-stale")).toBeNull();
     expect(within(hunk()).getByRole("button", { name: /@@/ })).toHaveProperty("disabled", false);
     await new Promise((r) => setTimeout(r, 150));
-    expect(gets(daemon, "/sessions/sup1/diff")).toBe(3);
+    expect(gets(daemon, "/sessions/sup1/diff")).toBe(2);
     expect(daemon.sessionEdits).toHaveLength(0);
     expect(daemon.requests.filter((r) => r.method === "PUT")).toHaveLength(0);
 

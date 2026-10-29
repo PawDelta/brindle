@@ -1,4 +1,11 @@
+import fcntl
 import os
+import pty
+import shlex
+import shutil
+import struct
+import subprocess
+import termios
 import time
 
 import pytest
@@ -60,6 +67,81 @@ def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, 
     assert [a for a, _ in launched] == ["boss", "w1"]  # finished workers stay done
     assert launched[0][1]["resume"] == "sess-boss" and launched[0][1]["prompt"] is None
     assert launched[0][1]["watch_pane"] and not launched[1][1]["watch_pane"]
+
+
+@pytest.mark.parametrize("status, chat_rows", [("on", 39), ("off", 40)])   # the person's tmux config
+def test_a_resumed_chat_is_shown_with_its_conversation_and_sidebar(db, root, monkeypatch, tmp_path,
+                                                                    status, chat_rows):
+    # #264: the resumed conversation was drawn in a detached 80x24 window, then
+    # resized by the sidebar's split and again by the terminal attaching, and
+    # Claude Code, which wipes what it drew when resized, showed a black screen.
+    # The stub draws a conversation, wipes it on a resize as Claude Code does,
+    # and records the size it drew at.
+    from brindle import cli
+
+    saved = tmp_path / "claude-config" / "projects" / "p"
+    saved.mkdir(parents=True)
+    (saved / "sess-boss.jsonl").write_text("{}")
+    drew, tmux_cmd = tmp_path / "drew", [shutil.which(tmux._bin()), *tmux._base()[1:]]
+    stub = tmp_path / "claude-stub"
+    stub.write_text("#!/bin/sh\n"
+                    "trap 'printf \"\\033[2J\\033[H> \"' WINCH\n"
+                    f'echo "$(stty size) $*" > {drew}\n'
+                    "printf 'you: where were we\\nclaude: the earlier conversation\\n> '\n"
+                    f'{shlex.join([*tmux_cmd, "wait-for", "-S", "stub-drew"])}\n'
+                    # A line typed in is answered once the pane's size (tmux sends a
+                    # resize a moment later) has reached the stub, and so its wipe.
+                    "while :; do read -r line\n"
+                    f'  until [ "$(stty size)" = "$({shlex.join([*tmux_cmd, "display-message", "-p", "-t"])}'
+                    ' "$TMUX_PANE" "#{pane_height} #{pane_width}")" ]; do :; done\n'
+                    f'  {shlex.join([*tmux_cmd, "wait-for", "-S", "stub-read"])}\ndone\n')
+    stub.chmod(0o755)
+    monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(stub))
+    for var in ("TMUX", "TMUX_PANE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(os, "get_terminal_size", lambda fd=1: os.terminal_size((120, 40)))
+    tmux._tmux("set-option", "-g", "status", status)
+    add(db, root, "boss")
+    agents.resume(db, "boss")
+    tmux._tmux("wait-for", "stub-drew")
+
+    # The person's terminal, 120x40, attached by `brindle continue`'s own _attach.
+    terminal, tty = pty.openpty()
+    fcntl.ioctl(tty, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+    clients, run = [], subprocess.run
+
+    def attach(argv, *a, **kw):
+        if "attach-session" not in argv:
+            return run(argv, *a, **kw)
+        clients.append(subprocess.Popen(argv, stdin=tty, stdout=tty, stderr=tty, start_new_session=True))
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", attach)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli, "_after_detach", lambda ws: None)
+    tmux._tmux("set-hook", "-t", root.tmux_session, "client-attached", "wait-for -S attached")
+    cli._attach(root, db.get_agent("boss").tmux_window)
+    try:
+        tmux._tmux("wait-for", "attached")
+        chat, sidebar = db.get_agent("boss").tmux_window, db.get_sidebar_pane("boss")
+        tmux.send_keys(chat, "Enter")
+        tmux._tmux("wait-for", "stub-read")
+        client = tmux._tmux("list-clients", "-t", f"={root.tmux_session}", "-F", "#{client_name}").stdout.split()[0]
+        showing = tmux._tmux("display-message", "-p", "-c", client, "#{window_id}").stdout.strip()
+        assert tmux.pane_window(chat) == showing == tmux.pane_window(sidebar)
+        assert tmux.window_alive(sidebar)
+        on_screen = tmux._tmux("capture-pane", "-p", "-t", chat).stdout   # not the scrollback
+        assert "claude: the earlier conversation" in on_screen
+        rows, cols, *argv = drew.read_text().split()
+        assert "--resume sess-boss" in " ".join(argv)
+        shown = tmux._tmux("display-message", "-p", "-t", chat, "#{pane_height} #{pane_width}").stdout.split()
+        assert [rows, cols] == shown == [str(chat_rows), str(120 - 30 - 1)]  # never resized once drawn
+    finally:
+        for c in clients:
+            c.kill()
+            c.wait()
+        os.close(tty)
+        os.close(terminal)
 
 
 def test_hook_records_the_cli_session_id(db, root):
