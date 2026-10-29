@@ -423,7 +423,8 @@ class _OrgCommands:
                 self._say(f"  {label:<22} {f(getattr(q, key))}")
 
         org_p = full or p
-        self._say(f"Policy for org {org_p.org_id}, version {org_p.version}")
+        note = f" (offline: {airgap.policy_path(self.repo_root)})" if source == "offline" else ""
+        self._say(f"Policy for org {org_p.org_id}, version {org_p.version}{note}")
         rules(org_p)
         c = org_p.agent_setup.claude if org_p.agent_setup else None
         if c is not None:

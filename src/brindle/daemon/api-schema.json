@@ -2540,7 +2540,7 @@
           "type": "object"
         },
         "PlanApprovalDTO": {
-          "description": "Who may approve a plan: named approvers, or a second person (anyone but who asked).\nIts producer (InboxItemDTO.approval from the plan-approvals backend) is wired in integration.",
+          "description": "Who may approve a plan, from the org rules and votes already recorded.",
           "properties": {
             "approvers": {
               "default": [],
@@ -5113,7 +5113,7 @@
       "type": "object"
     },
     "PlanApprovalDTO": {
-      "description": "Who may approve a plan: named approvers, or a second person (anyone but who asked).\nIts producer (InboxItemDTO.approval from the plan-approvals backend) is wired in integration.",
+      "description": "Who may approve a plan, from the org rules and votes already recorded.",
       "properties": {
         "approvers": {
           "default": [],

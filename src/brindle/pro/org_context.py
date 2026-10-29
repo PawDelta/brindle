@@ -620,7 +620,7 @@ def unavailable(org_id: str, error) -> object:
     from brindle.policy import deny
 
     if airgap.enabled():
-        return deny(f"air-gap mode: no usable offline team policy for org {org_id} "
+        return deny(f"air-gap mode: no usable offline policy for org {org_id} "
                     f"({error}); put the org's policy (the schema `brindle account org policy` "
                     f"shows, as JSON) at .brindle/{airgap.POLICY_FILE}")
     return deny(f"brindle Pro team policy for org {org_id} has never been fetched "

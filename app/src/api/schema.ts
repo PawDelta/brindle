@@ -496,8 +496,7 @@ export interface InboxItemDTO {
   workspace_id?: string | null;
 }
 /**
- * Who may approve a plan: named approvers, or a second person (anyone but who asked).
- * Its producer (InboxItemDTO.approval from the plan-approvals backend) is wired in integration.
+ * Who may approve a plan, from the org rules and votes already recorded.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanApprovalDTO".
