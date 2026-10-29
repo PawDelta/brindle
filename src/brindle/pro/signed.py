@@ -115,11 +115,13 @@ def _test_signing_key(kid: str, public_key: Ed25519PublicKey):
         raise RuntimeError("a test key may not shadow a pinned kid")
     with _keys_lock:
         _test_keys[kid] = public_key
+    _forget_revoked()      # which revocations verify depends on the trusted keys
     try:
         yield
     finally:
         with _keys_lock:
             _test_keys.pop(kid, None)
+        _forget_revoked()
 
 
 # -- verification ----------------------------------------------------------------------------
@@ -311,9 +313,40 @@ def _by_kid(tokens: list) -> dict[str, str]:
     return {k: found[k] for k in order[:MAX_REVOCATIONS]}
 
 
+_revoked_memo: tuple[tuple, frozenset[str]] | None = None   # (file stamp, kids)
+
+
+def _revocations_stamp() -> tuple:
+    """What identifies the revocation file's current contents: its path and,
+    when it exists, its mtime, size and inode."""
+    try:
+        path = _revocations_path()
+    except Exception:  # noqa: BLE001 - an unusable directory holds no revocations
+        return (None,)
+    try:
+        st = os.stat(path) if path is not None else None
+    except OSError:
+        st = None
+    return (str(path),) if st is None else (str(path), st.st_mtime_ns, st.st_size, st.st_ino)
+
+
 def revoked_kids() -> frozenset[str]:
-    """The kids revoked by the stored revocations (each re-verified)."""
-    return frozenset(_by_kid(_stored_revocations()))
+    """The kids revoked by the stored revocations (each re-verified). The file
+    is read again only when its stamp changes, so this is cheap enough to ask
+    on every cache hit; another process's additions show up at once."""
+    global _revoked_memo
+    stamp, memo = _revocations_stamp(), _revoked_memo
+    if memo is not None and memo[0] == stamp:
+        return memo[1]
+    kids = frozenset(_by_kid(_stored_revocations())) if len(stamp) > 1 else frozenset()
+    _revoked_memo = (stamp, kids)
+    return kids
+
+
+def _forget_revoked() -> None:
+    """Drop the memo: which revocations count has changed in this process."""
+    global _revoked_memo
+    _revoked_memo = None
 
 
 def save_revocations(tokens: list) -> frozenset[str]:
@@ -340,6 +373,7 @@ def save_revocations(tokens: list) -> frozenset[str]:
             with os.fdopen(tmp_fd, "w") as fh:
                 json.dump({"revocations": list(merged.values())}, fh)
             os.replace(tmp, d / REVOCATIONS_FILE)
+            _forget_revoked()
         except BaseException:
             try:
                 os.unlink(tmp)

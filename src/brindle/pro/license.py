@@ -16,7 +16,8 @@ signature, header, ``kid`` and revocation checks are
 :func:`brindle.pro.signed.verify_signed`'s; every entitlement fetched from the
 backend is preceded by a refresh of the revocation list
 (:func:`brindle.pro.signed.refresh_revocations`, in ``auth``), and a failure
-there never stops the fetch.
+there never stops the fetch. A cached entitlement is checked against the
+stored revocations (whichever process stored them) before it is returned.
 
 Everything fails closed: any problem -- a malformed token, an unknown key, a
 bad signature, the wrong ``alg``/``typ``/``aud``/``iss``/``token_use``, an
@@ -398,6 +399,15 @@ def reading():
         _request_reads.reset(token)
 
 
+def _unrevoked(ent: Entitlement) -> Entitlement:
+    """``ent``, from a cache, unless another process (or this one) has since
+    revoked its key: then every cache is cleared and it is refused."""
+    if ent.kid in signed.revoked_kids():
+        clear_cache()
+        raise signed.Revoked("entitlement is signed by a revoked key")
+    return ent
+
+
 def request_cached(fn):
     sig = signature(fn)
 
@@ -417,7 +427,7 @@ def request_cached(fn):
         result = memo[key]
         if isinstance(result, LicenseError):
             raise result
-        return result
+        return _unrevoked(result) if isinstance(result, Entitlement) else result
 
     return wrapped
 
@@ -460,7 +470,7 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
     now = time.time() if now is None else now
     default = store is None and client is None
     if default and _cache and _cache[0] > now and (max_age is None or now - _cache[1].iat <= max_age):
-        return _cache[1]
+        return _unrevoked(_cache[1])
     from brindle import airgap
     from brindle.pro import auth, credentials
 
