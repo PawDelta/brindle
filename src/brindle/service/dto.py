@@ -405,6 +405,7 @@ class AccountOrgDTO(_DTO):
 class AccountDTO(_DTO):
     signed_in: bool
     name: str | None = None
+    email: str | None = None
     plan: str | None = None
     orgs: list[AccountOrgDTO] = []
 
