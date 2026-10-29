@@ -93,8 +93,11 @@ def load_org_rules(repo_root: str | None) -> OrgPlanRules | None:
     Raises :class:`OrgRulesUnavailable` when there is a team org whose policy can't be read."""
     from brindle.pro import team_policy as tp
 
+    from brindle.pro import org_context
+
     pp = tp.ProPolicy(repo_root or "")
-    ent = pp._team_entitlement()
+    ctx = org_context.active() or org_context.OrgContext.resolve(repo_root=repo_root)
+    ent = ctx._team_entitlement()
     if ent is None:
         return None
     try:
@@ -114,10 +117,10 @@ def org_requires_plan(task: "PlanTask", rules: OrgPlanRules | None) -> bool:
 def current_member(repo_root: str | None) -> str | None:
     """This person's member id in the team org, or None."""
     try:
-        from brindle.pro import team_policy as tp
+        from brindle.pro import org_context
 
-        pp = tp.ProPolicy(repo_root or "")
-        ent = pp._team_entitlement()
+        ctx = org_context.active() or org_context.OrgContext.resolve(repo_root=repo_root)
+        ent = ctx._team_entitlement()
         return ent.sub if ent else None
     except Exception:  # noqa: BLE001
         return None

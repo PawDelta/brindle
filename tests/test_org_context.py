@@ -38,7 +38,7 @@ def test_each_provider_is_read_once_per_check(tmp_path):
     ctx = OrgContext.resolve(home=tmp_path, now=0.0, providers=Providers(
         policy=counted(calls, "policy", POLICY), status=counted(calls, "status", status.Saved(org_id="org_acme")),
         managed=counted(calls, "managed", {"device": "d1"}),
-        plan_rules=counted(calls, "plan_rules", {"paths": ["infra/**"]})))
+        plan_rules=counted(calls, "plan_rules", {"plan_paths": ["infra/**"]})))
     req = Request("claude", "bash", "Bash", root, root, root, command="terraform apply")
     for _ in range(2):
         assert ctx.org_decision(req).decision == "deny"
