@@ -638,8 +638,19 @@ def test_profiles_detail_lints_a_broken_profile(seeded):
 @pytest.mark.variant("a secret is shown only as its name and last four characters, never whole")
 def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     monkeypatch.setattr(keystore, "known_names", lambda repo=None: ["OPENAI_API_KEY", "UNSET_KEY"])
-    monkeypatch.setattr(keystore, "get_key", lambda n: "sk-live-1234567890WXYZ" if n == "OPENAI_API_KEY" else None)
+    reads: list[str] = []
+
+    def record(name):
+        reads.append(name)
+        return {"value": "sk-live-1234567890WXYZ"} if name == "OPENAI_API_KEY" else {}
+
+    monkeypatch.setattr(keystore, "get_record", record)
     _, body = _get("/v1/config", AUTH, f"repo={seeded['repo']}")
     assert [(k["name"], k["set"], k["last4"]) for k in body["keys"]] == [("OPENAI_API_KEY", True, "WXYZ"),
                                                                          ("UNSET_KEY", False, "")]
     assert "1234567890" not in json.dumps(body)
+    # One read per key, and none at all when the page asks without the keys (the project page).
+    assert sorted(reads) == ["OPENAI_API_KEY", "UNSET_KEY"]
+    reads.clear()
+    _, bare = _get("/v1/config", AUTH, f"repo={seeded['repo']}&keys=0")
+    assert bare["keys"] == [] and "repo" in bare and reads == []
