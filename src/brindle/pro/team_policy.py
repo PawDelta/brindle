@@ -344,6 +344,22 @@ class OrgPolicy:
     agent_setup: AgentSetup | None = None
     # The org's ``permission_grants`` block (None: absent, so no grants at all).
     permission_grants: GrantPolicy | None = None
+    # Plan rules (the server's PLAN_RULE_FIELDS, org-wide): whether workers
+    # plan before editing ("auto" | "always" | "never"), globs whose changes
+    # always need a plan, the members (by sub) who may approve one, and the
+    # two approval switches. A policy stored before them is served at these
+    # defaults, so they are optional here too.
+    plan: str = "auto"
+    plan_paths: tuple[str, ...] = ()
+    plan_approvers: tuple[str, ...] = ()
+    plan_two_person: bool = False
+    plan_reviewer_may_approve_low_risk: bool = False
+    # Who may approve a plan, for enforcement: one group per org whose policy
+    # applies, each that org's approver list, and an approval needs an eligible
+    # person from EVERY group. One org's policy is one group (none when its
+    # list is empty); merging two policies keeps both groups, so neither org's
+    # approvers are widened by the other's (see brindle.pro.managed.stricter).
+    plan_approver_groups: tuple[tuple[str, ...], ...] = ()
     # Keep the server answer separate from the interpreted policy: newer
     # servers may send fields this client cannot model yet. Do not serialize
     # the interpreted policy back over those fields when caching it.
@@ -381,10 +397,15 @@ class OrgPolicy:
         return {"permission_grants": None if g is None else {
             k: list(v) if isinstance(v, tuple) else v for k, v in asdict(g).items()}}
 
+    def plan_rules(self) -> dict:
+        return {"plan": self.plan, "plan_paths": list(self.plan_paths),
+                "plan_approvers": list(self.plan_approvers), "plan_two_person": self.plan_two_person,
+                "plan_reviewer_may_approve_low_risk": self.plan_reviewer_may_approve_low_risk}
+
     def to_json(self) -> dict:
         out = {"org_id": self.org_id, "version": self.version, "fetched_at": self.fetched_at,
                "policy": {**self.rules(), **self.budgets(), **self.rollout(), **self.managed(),
-                          **self.grants(),
+                          **self.grants(), **self.plan_rules(),
                           "agent_setup": asdict(self.agent_setup) if self.agent_setup else None,
                           "roles": {r: {k: _list(v) if k in LISTS else v
                                         for k, v in o.items()}
@@ -472,6 +493,43 @@ def _budgets(p: dict) -> dict:
                                if isinstance(k, str) and isinstance(v, str)},
             "member_overrides": {k: v for k, v in list((overrides or {}).items())[:4096]
                                  if isinstance(k, str) and isinstance(v, dict)}}
+
+
+PLAN_MODES = ("auto", "always", "never")
+MAX_PLAN_APPROVERS = 64
+
+
+def _plan_rules(p: dict) -> dict:
+    """The plan-rule fields of a policy dict, as ``OrgPolicy`` keyword
+    arguments: each at its default when absent (a policy stored before them).
+    Malformed ones make the policy unusable."""
+    mode = p.get("plan", "auto")
+    if mode is None:
+        mode = "auto"
+    if mode not in PLAN_MODES:
+        raise PolicyUnavailable("malformed plan")
+    paths = p.get("plan_paths")
+    if paths is None:
+        paths = []
+    if (not isinstance(paths, list) or len(paths) > MAX_PROTECTED_PATHS
+            or not all(isinstance(g, str) and g.strip() for g in paths)):
+        raise PolicyUnavailable("malformed plan_paths")
+    approvers = p.get("plan_approvers")
+    if approvers is None:
+        approvers = []
+    if (not isinstance(approvers, list) or len(approvers) > MAX_PLAN_APPROVERS
+            or not all(isinstance(a, str) and a.strip() for a in approvers)):
+        raise PolicyUnavailable("malformed plan_approvers")
+    flags = {}
+    for name in ("plan_two_person", "plan_reviewer_may_approve_low_risk"):
+        v = p.get(name, False)
+        if v is None:
+            v = False
+        if not isinstance(v, bool):
+            raise PolicyUnavailable(f"malformed {name}")
+        flags[name] = v
+    return {"plan": mode, "plan_paths": tuple(paths), "plan_approvers": tuple(approvers),
+            "plan_approver_groups": (tuple(approvers),) if approvers else (), **flags}
 
 
 def _rollout(p: dict) -> dict:
@@ -972,14 +1030,15 @@ def parse_policy(org_id: str, body: dict, fetched_at: float | None = None) -> Or
     spend = {**_spend(body.get("spend")),
              "visibility": _visibility(body.get("visibility", p.get("visibility")))}
     roll = _rollout(p)
+    plan = _plan_rules(p)         # org-wide too
     managed = _managed(p)
     setup = _agent_setup(p)       # org-wide, like the rollout: the effective policy carries it too
     grants = _grants(p)
     return OrgPolicy(org_id=org_id, version=version, fetched_at=at, **_rules(p), **_budgets(p),
-                     **roll, **managed, **grants, roles=_roles(p.get("roles")),
+                     **roll, **plan, **managed, **grants, roles=_roles(p.get("roles")),
                      effective=None if eff is None else OrgPolicy(
                          org_id=org_id, version=version, fetched_at=at, **_rules(eff),
-                         **_budgets(eff), **roll, **(_managed(eff) if (
+                         **_budgets(eff), **roll, **plan, **(_managed(eff) if (
                              "provider_config" in eff or "deny_personal_keys" in eff) else managed),
                          agent_setup=setup,
                          **(_grants(eff) if "permission_grants" in eff else grants), **spend),
@@ -1061,6 +1120,7 @@ def with_role_overrides(p: OrgPolicy, role: str | None, policy_role: str | None)
     return replace(p, effective=OrgPolicy(org_id=p.org_id, version=p.version,
                                           fetched_at=p.fetched_at, **_rules(merged),
                                           **_budgets(p.budgets()), **_rollout(p.rollout()),
+                                          **_plan_rules(p.plan_rules()),
                                           provider_config=p.provider_config,
                                           deny_personal_keys=p.deny_personal_keys,
                                           agent_setup=p.agent_setup,

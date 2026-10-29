@@ -41,10 +41,11 @@ def at_home(home: Path) -> Iterator[None]:
         _home.reset(token)
 
 
-def private_dir(create: bool = True) -> Path | None:
-    """The private directory, made if missing. A read passes ``create=False``
-    and gets None instead, so a lookup never creates brindle's home."""
-    d = pro_home() / "pro"
+def private_dir(create: bool = True, home: Path | None = None) -> Path | None:
+    """The private directory under ``home`` (default: :func:`pro_home`, brindle's
+    home unless :func:`at_home` set another), made if missing. A read passes
+    ``create=False`` and gets None instead, so a lookup never creates brindle's home."""
+    d = Path(home or pro_home()) / "pro"
     if not create and not os.path.lexists(d):
         return None
     if create:

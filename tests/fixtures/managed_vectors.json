@@ -1,0 +1,69 @@
+{
+  "source": "pawdelta-web f6be6837 tests/fixtures/signing_vectors.json: the managed_with_policy_* rows and the keys, copied unchanged",
+  "now": 1800000000,
+  "aud": "brindle-pro",
+  "keys": {
+    "R5vFGz1Ef-yvE2WnXhvfigWgReI-3f0kk4KJNm_h4xA": "-LsUAD_rMBPQO7kDeYA_DFiOD-95g-eSLqV5p5x6IgA",
+    "Hxq9Hnk4XsDkWCCaJET5TMb3oieb4MODLOUCDFFimhM": "1GYK_RUSMyLFlTQLrH_l3WUwXrX0ENA2o4d7cg_zM3Q",
+    "knCky93RH6GSj3AC5x4c6JED8ZxZsetmMfkVcGc_lXc": "jsMbKbSJYUljOWGrSEv1BG_JgpZyGa0Jx_eAVRRLyXM",
+    "uEpK59_nkRGZB4VwCM9nL1wIWsa1BNEBYji0SV1H3o4": "0Ut57V-MwidhaqFz1ZgzdWuqgHkSCoQEZyTD_pbASYM"
+  },
+  "vectors": [
+    {
+      "name": "managed_with_policy_ok",
+      "typ": "brindle-managed+jwt",
+      "token_use": "managed",
+      "expect": {
+        "org_id": "org_vectors",
+        "device_id": "md_00000000000000000000000000000000"
+      },
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImJyaW5kbGUtbWFuYWdlZCtqd3QiLCJraWQiOiJSNXZGR3oxRWYteXZFMlduWGh2ZmlnV2dSZUktM2Ywa2s0S0pObV9oNHhBIn0.eyJpc3MiOiJodHRwczovL2JyaW5kbGUudGVzdC9hcGkvYnJpbmRsZS92MSIsInN1YiI6ImRldmljZTptZF8wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsIm9yZ19pZCI6Im9yZ192ZWN0b3JzIiwiaWF0IjoxNzk5OTk5OTQwLCJleHAiOjE4MDAwMDM2MDAsImp0aSI6InZlY3Rvci1tYW5hZ2VkX3dpdGhfcG9saWN5IiwibWFuYWdlZF92ZXJzaW9uIjoxLCJkZXZpY2VfaWQiOiJtZF8wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImRldmljZV90b2tlbiI6Im1kdF9BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBIiwiYWxsb3dfYWlyZ2FwIjpmYWxzZSwicG9saWN5X3Rva2VuIjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltSnlhVzVrYkdVdGNHOXNhV041SzJwM2RDSXNJbXRwWkNJNklsSTFka1pIZWpGRlppMTVka1V5VjI1WWFIWm1hV2RYWjFKbFNTMHpaakJyYXpSTFNrNXRYMmcwZUVFaWZRLmV5SnBjM01pT2lKb2RIUndjem92TDJKeWFXNWtiR1V1ZEdWemRDOWhjR2t2WW5KcGJtUnNaUzkyTVNJc0luTjFZaUk2SW1SbGRtbGpaVHB0WkY4d01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNQ0lzSW05eVoxOXBaQ0k2SW05eVoxOTJaV04wYjNKeklpd2lhV0YwSWpveE56azVPVGs1T1RRd0xDSmxlSEFpT2pFNE1EQXdNRE0yTURBc0ltcDBhU0k2SW5abFkzUnZjaTF0WVc1aFoyVmtYM2RwZEdoZmNHOXNhV041TFhCdmJHbGplU0lzSW5CdmJHbGplVjkyWlhKemFXOXVJam96TENKa2IyTmZkSGx3WlNJNkluQnZiR2xqZVNJc0luSnZiR1VpT2lKa1pYWnBZMlVpTENKd2IyeHBZM2xmY205c1pTSTZiblZzYkN3aVpHOWpkVzFsYm5SZmMyaGhNalUySWpvaVpqZGlOelEzWVRZd01EVmlPR001WlRJellURmhPV1V6T0RnMU5UUTNaRGt3T1dZeU1qUTROemN3TUdJNVlUVTNaalExTm1Vd01UTmpNbVpqTlRBell5SXNJbUYxWkNJNkltSnlhVzVrYkdVdGNISnZJaXdpYTJsa0lqb2lValYyUmtkNk1VVm1MWGwyUlRKWGJsaG9kbVpwWjFkblVtVkpMVE5tTUd0ck5FdEtUbTFmYURSNFFTSXNJblJ2YTJWdVgzVnpaU0k2SW5CdmJHbGplU0o5LkhyVXFOUF9jT1lhclJQNUV4WDhwYmpZbFl1UTFNeS1SYWpBN2RJbGF2RG1CRWtETHI3OHBiblNSM0JNQmJlaFVBTGV3WEk2aXpCQ2x0SzZiNk42VkNRIiwiYXVkIjoiYnJpbmRsZS1wcm8iLCJraWQiOiJSNXZGR3oxRWYteXZFMlduWGh2ZmlnV2dSZUktM2Ywa2s0S0pObV9oNHhBIiwidG9rZW5fdXNlIjoibWFuYWdlZCJ9.ianeB60J9l7wmoeYupn0zLvk0W_8_aGtFD3iof_u2rJtjTbMdqknRELfzMGT682UdiFR16q7w66axBMdOPNgDg",
+      "verdict": "ok",
+      "body": {
+        "org_id": "org_vectors",
+        "version": 3,
+        "role": "device",
+        "policy_role": null,
+        "policy": {
+          "plan": "auto",
+          "member_overrides": {},
+          "protected_paths": []
+        },
+        "effective": {
+          "plan": "auto",
+          "protected_paths": []
+        },
+        "updated_at": 1799999400,
+        "updated_by": "owner"
+      }
+    },
+    {
+      "name": "managed_with_policy_tampered_body",
+      "typ": "brindle-managed+jwt",
+      "token_use": "managed",
+      "expect": {
+        "org_id": "org_vectors",
+        "device_id": "md_00000000000000000000000000000000"
+      },
+      "token": "eyJhbGciOiJFZERTQSIsInR5cCI6ImJyaW5kbGUtbWFuYWdlZCtqd3QiLCJraWQiOiJSNXZGR3oxRWYteXZFMlduWGh2ZmlnV2dSZUktM2Ywa2s0S0pObV9oNHhBIn0.eyJpc3MiOiJodHRwczovL2JyaW5kbGUudGVzdC9hcGkvYnJpbmRsZS92MSIsInN1YiI6ImRldmljZTptZF8wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsIm9yZ19pZCI6Im9yZ192ZWN0b3JzIiwiaWF0IjoxNzk5OTk5OTQwLCJleHAiOjE4MDAwMDM2MDAsImp0aSI6InZlY3Rvci1tYW5hZ2VkX3dpdGhfcG9saWN5IiwibWFuYWdlZF92ZXJzaW9uIjoxLCJkZXZpY2VfaWQiOiJtZF8wMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMCIsImRldmljZV90b2tlbiI6Im1kdF9BQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBIiwiYWxsb3dfYWlyZ2FwIjpmYWxzZSwicG9saWN5X3Rva2VuIjoiZXlKaGJHY2lPaUpGWkVSVFFTSXNJblI1Y0NJNkltSnlhVzVrYkdVdGNHOXNhV041SzJwM2RDSXNJbXRwWkNJNklsSTFka1pIZWpGRlppMTVka1V5VjI1WWFIWm1hV2RYWjFKbFNTMHpaakJyYXpSTFNrNXRYMmcwZUVFaWZRLmV5SnBjM01pT2lKb2RIUndjem92TDJKeWFXNWtiR1V1ZEdWemRDOWhjR2t2WW5KcGJtUnNaUzkyTVNJc0luTjFZaUk2SW1SbGRtbGpaVHB0WkY4d01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNREF3TURBd01EQXdNQ0lzSW05eVoxOXBaQ0k2SW05eVoxOTJaV04wYjNKeklpd2lhV0YwSWpveE56azVPVGs1T1RRd0xDSmxlSEFpT2pFNE1EQXdNRE0yTURBc0ltcDBhU0k2SW5abFkzUnZjaTF0WVc1aFoyVmtYM2RwZEdoZmNHOXNhV041TFhCdmJHbGplU0lzSW5CdmJHbGplVjkyWlhKemFXOXVJam96TENKa2IyTmZkSGx3WlNJNkluQnZiR2xqZVNJc0luSnZiR1VpT2lKa1pYWnBZMlVpTENKd2IyeHBZM2xmY205c1pTSTZiblZzYkN3aVpHOWpkVzFsYm5SZmMyaGhNalUySWpvaVpqZGlOelEzWVRZd01EVmlPR001WlRJellURmhPV1V6T0RnMU5UUTNaRGt3T1dZeU1qUTROemN3TUdJNVlUVTNaalExTm1Vd01UTmpNbVpqTlRBell5SXNJbUYxWkNJNkltSnlhVzVrYkdVdGNISnZJaXdpYTJsa0lqb2lValYyUmtkNk1VVm1MWGwyUlRKWGJsaG9kbVpwWjFkblVtVkpMVE5tTUd0ck5FdEtUbTFmYURSNFFTSXNJblJ2YTJWdVgzVnpaU0k2SW5CdmJHbGplU0o5LkhyVXFOUF9jT1lhclJQNUV4WDhwYmpZbFl1UTFNeS1SYWpBN2RJbGF2RG1CRWtETHI3OHBiblNSM0JNQmJlaFVBTGV3WEk2aXpCQ2x0SzZiNk42VkNRIiwiYXVkIjoiYnJpbmRsZS1wcm8iLCJraWQiOiJSNXZGR3oxRWYteXZFMlduWGh2ZmlnV2dSZUktM2Ywa2s0S0pObV9oNHhBIiwidG9rZW5fdXNlIjoibWFuYWdlZCJ9.ianeB60J9l7wmoeYupn0zLvk0W_8_aGtFD3iof_u2rJtjTbMdqknRELfzMGT682UdiFR16q7w66axBMdOPNgDg",
+      "verdict": "claim_mismatch",
+      "body": {
+        "org_id": "org_vectors",
+        "version": 4,
+        "role": "device",
+        "policy_role": null,
+        "policy": {
+          "plan": "auto",
+          "member_overrides": {},
+          "protected_paths": []
+        },
+        "effective": {
+          "plan": "auto",
+          "protected_paths": []
+        },
+        "updated_at": 1799999400,
+        "updated_by": "owner"
+      }
+    }
+  ]
+}

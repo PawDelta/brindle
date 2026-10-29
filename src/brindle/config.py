@@ -365,6 +365,23 @@ def kind_overrides(found: object) -> dict[str, dict[str, str]]:
     return out
 
 
+def _layer_plan(layer: dict) -> str | None:
+    """One config file's ``plan``, or an old file's plan_first ("always" / "never"), or None."""
+    if layer.get("plan") in ("auto", "always", "never"):
+        return layer["plan"]
+    if "plan_first" in layer:
+        return "always" if layer["plan_first"] else "never"
+    return None
+
+
+def plan_layers(repo_root: str | Path) -> dict[str, str | None]:
+    """The plan each of ``repo_root``'s files sets, as load_repo_config reads
+    it ("local" over "repo", the shared file), plan_first included."""
+    base = config_root(repo_root) / CONFIG_DIR
+    return {"local": _layer_plan(_read_json(base / LOCAL_CONFIG_FILE)),
+            "repo": _layer_plan(_read_shared(base.parent, None))}
+
+
 def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: str | None = None) -> RepoConfig:
     """The settings for ``repo_root``: its local file over its shared one over
     the person's ~/.brindle/config.json. ``user_only``: the person's file
@@ -393,13 +410,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             if key in source:
                 setattr(cfg, key, source[key])
                 break
-    for source in (local, shared, user):   # `plan`, or an old config's plan_first, from the first layer with either
-        if source.get("plan") in ("auto", "always", "never"):
-            cfg.plan = source["plan"]
-            break
-        if "plan_first" in source:
-            cfg.plan = "always" if source["plan_first"] else "never"
-            break
+    cfg.plan = next((p for p in map(_layer_plan, (local, shared, user)) if p), cfg.plan)
     rules: list[str] = []
     for source in (user, shared, local):
         found = source.get("rules")

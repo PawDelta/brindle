@@ -67,7 +67,8 @@ def pro_env(monkeypatch, brindle_home):
 
 class FakeTransport:
     """Routes "METHOD /path" to a queue of (status, body) responses (the last
-    one repeats), an exception to raise, or a callable(form, headers)."""
+    one repeats), an exception to raise, or a callable(form, headers). The
+    public revocation list is empty and unrecorded unless a test routes it."""
 
     def __init__(self, routes=None, base=BASE):
         self.base = base
@@ -78,6 +79,8 @@ class FakeTransport:
     def request(self, method, url, form, headers):
         assert url.startswith(self.base), url
         key = f"{method} {url[len(self.base):]}"
+        if key == "GET /keys/revocations" and key not in self.routes:
+            return 200, {"revocations": []}   # the public list each entitlement fetch refreshes
         with self.lock:
             self.calls.append((key, dict(form or {}), dict(headers)))
         r = self.routes[key]

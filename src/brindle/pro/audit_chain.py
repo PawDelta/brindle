@@ -345,8 +345,10 @@ def _read_head(path: Path) -> dict | None:
 
 
 def append(repo_root: str, event: dict, *, home: Path | None = None,
-           key: Ed25519PrivateKey | None = None, ts: str | None = None) -> dict:
-    """Append ``event`` to the repo's chain and return the record written."""
+           key: Ed25519PrivateKey | None = None, ts: str | None = None, after=None) -> dict:
+    """Append ``event`` to the repo's chain and return the record written.
+    ``after(record)``, if given, runs once the record is on disk and while the
+    chain lock is still held (local file work only; it must not raise)."""
     path = log_path(repo_root, home)
     key = key or signing_key(home)
     with _locked(path):
@@ -365,6 +367,8 @@ def append(repo_root: str, event: dict, *, home: Path | None = None,
         finally:
             os.close(fd)
         _write_atomic(_head_path(path), (canonical({"seq": seq, "hash": record_hash(rec)}) + "\n").encode())
+        if after is not None:
+            after(rec)
     return rec
 
 
@@ -584,7 +588,12 @@ class AuditChain(EventsPlugin):
         try:
             if not self.entitled():
                 return
-            append(event.repo_root or self.repo_root, event_record(event), home=self.home)
+            from brindle.pro import audit_stream
+
+            # audit streaming: queue under the chain lock (same order as the chain), send in the background
+            append(event.repo_root or self.repo_root, event_record(event), home=self.home,
+                   after=lambda rec: audit_stream.enqueue(rec, self.home))
+            audit_stream.kick(self.home)
         except Exception:  # noqa: BLE001 - never fail the operation being reported
             self.dropped += 1
             log.warning("brindle: couldn't append to the audit chain", exc_info=True)
