@@ -106,3 +106,21 @@ brindle ci init --from-deployment main -g RG
 | `clientId` | the Azure client id |
 | `tenantId` | the Azure tenant id |
 | `subscriptionId` | not used |
+
+## Standby signing key
+
+brindle signs its entitlement, policy and revocation documents with the active
+Ed25519 key. A second, standby key is pinned ahead of need, so that a
+compromised active key can be revoked. The pinning procedure is described in
+the docstring of [`src/brindle/pro/keys.py`](../src/brindle/pro/keys.py).
+In short, an operator:
+
+1. creates a second Ed25519 key in KMS;
+2. sets `BRINDLE_KMS_STANDBY_KEY_ID` on the server;
+3. takes the key's public key (raw 32 bytes) and its RFC 7638 thumbprint, which
+   is the `kid`, and puts them in `STANDBY_KID` and `STANDBY_KEY`;
+4. ships that in a release before the key is ever needed.
+
+A revocation is issued by the standby key: a `brindle-revocation+jwt` token
+signed by it, naming the active `kid` in `revoked_kid`. Clients read revocations
+from `GET /keys/revocations` on their next refresh.
