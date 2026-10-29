@@ -5,12 +5,15 @@ import json
 import time
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from brindle import budget
-from brindle.pro import license, managed, managed_models, signed, team_policy
+from brindle import airgap, budget
+from brindle.pro import _files, auth, license, managed, managed_models, signed, team_policy
+from brindle.pro._files import private_dir
+from brindle.pro.org_context import OrgContext, Providers
 from brindle.pro.team_policy import parse_policy
 from pro_fixtures import ISS, TEST_KID, pro_env, sign, signing_key  # noqa: F401 - fixtures
 
@@ -31,12 +34,12 @@ def answer(version=3, **rules):
             "policy": policy, "updated_at": NOW - 600, "updated_by": "owner"}
 
 
-def signed_answer(key, body, *, sub=SUB, exp=NOW + 3600, iat=NOW - 60):
-    claims = {"iss": ISS, "aud": "brindle-pro", "sub": sub, "org_id": body["org_id"], "doc_type": "policy",
-              "role": "device", "policy_role": None, "policy_version": body["version"],
+def signed_answer(key, body, *, sub=SUB, exp=NOW + 3600, iat=NOW - 60, kind="policy", role="device"):
+    claims = {"iss": ISS, "aud": "brindle-pro", "sub": sub, "org_id": body["org_id"], "doc_type": kind,
+              "role": role, "policy_role": None, "policy_version": body.get("version", body.get("policy_version")),
               "document_sha256": managed.document_sha256(body), "iat": iat, "exp": exp, "jti": "p1",
-              "kid": TEST_KID, "token_use": "policy"}
-    return {**body, "token": sign(key, claims, {"typ": "brindle-policy+jwt"})}
+              "kid": TEST_KID, "token_use": kind}
+    return {**body, "token": sign(key, claims, {"typ": f"brindle-{kind}+jwt"})}
 
 
 def managed_file(key, body, *, allow_airgap=False, install=None, policy_sub=SUB, policy_exp=NOW + 3600,
@@ -82,6 +85,11 @@ def refused(m):
     "one_sided_grants", "deny_personal_keys", "exhausted_member_budget", "plan_rules",
     "expired_snapshot", "bad_outer_token",
     "vector:managed_with_policy_ok", "vector:managed_with_policy_tampered_body",
+    "status:device_paused_signed_out", "status:other_org_signed_in",
+    "status:unsafe_cache", "status:unwritable_cache",
+    "airgap:cached", "airgap:snapshot", "airgap:export", "airgap:none", "airgap:unsafe_cache",
+    pytest.param("airgap:cached_older", marks=pytest.mark.variant(
+        "the cached copy comes first even when the snapshot is newer")),
 ])
 def test_managed_device(signing_key, tmp_path, monkeypatch, case):
     if case.startswith("vector:"):
@@ -105,6 +113,97 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
         assert managed.airgap_allowed(None) and managed.local_policy_allowed(None, signed=False)
         return
     body = answer()
+    if case.startswith(("status:", "airgap:")):
+        # The real org context, with the device's routes answered by a fake server.
+        lapsed = case in ("airgap:export", "airgap:none")
+        m = managed.verify_file(managed_file(signing_key, body, allow_airgap=True,
+                                             policy_exp=NOW - 1 if lapsed else NOW + 3600), now=NOW)
+        device_status = {"org_id": ORG, "policy_version": 4,
+                         "paused": case.startswith("status:") and case != "status:other_org_signed_in",
+                         "paused_reason": "lost laptop", "control": {
+                             "id": "c_dev", "action": "throttle", "throttle": {"seat_month_usd": 10}}}
+        served = {"policy": signed_answer(signing_key, answer(version=4, max_parallel_workers=3)),
+                  "status": signed_answer(signing_key, device_status, kind="status")}
+
+        def server(self, method, url, form, headers):
+            assert headers["Authorization"] == f"Bearer {DEVICE_TOKEN}"
+            kind = url.rsplit("/", 1)[1]
+            return (200, served[kind]) if kind in served else (503, {})
+
+        monkeypatch.setattr(auth.UrllibTransport, "request", server)
+
+        def context():
+            return OrgContext.resolve(home=tmp_path, repo_root=str(tmp_path), now=NOW,
+                                      providers=Providers(managed=lambda: m))
+
+        if case == "status:device_paused_signed_out":
+            # Nobody is signed in: the device's own status still pauses new work, and from
+            # its verified cached copy once the server is out of reach. A pause stops nothing.
+            for _ in range(2):
+                ctx = context()
+                assert "lost laptop" in (ctx.blocked_reason() or "") and ctx.shutdown_control() is None
+                served.clear()
+            return
+        cache = private_dir(home=tmp_path) / "device-status.json"
+        if case in ("status:unsafe_cache", "status:unwritable_cache"):
+            # A cache brindle refuses to read, or can't write, never erases a verified pause.
+            if case == "status:unsafe_cache":
+                context().blocked_reason()
+                cache.chmod(0o644)
+            else:
+                def write(path, data, real=_files.write_private):
+                    if path == cache:
+                        raise OSError("read-only home")
+                    real(path, data)
+
+                monkeypatch.setattr(_files, "write_private", write)
+            assert "lost laptop" in (context().blocked_reason() or "")
+            return
+        if case == "status:other_org_signed_in":
+            # Each org's throttle narrows the other's: the member's workers, the device's budget.
+            ent = SimpleNamespace(sub="user_1", org_id="org_other", role="member", policy_role=None,
+                                  features=frozenset({"team"}), policy_signed=True)
+            docs = {"policy": signed_answer(signing_key, {
+                        "org_id": ent.org_id, "version": 9, "role": "member", "policy_role": None,
+                        "policy": {"allowed_models": ["opus", "sonnet"]}}, sub=ent.sub, role="member"),
+                    "status": signed_answer(signing_key, {
+                        "org_id": ent.org_id, "policy_version": 9, "paused": False, "control": {
+                            "id": "c_member", "action": "throttle", "throttle": {"max_parallel_workers": 1}}},
+                        sub=ent.sub, kind="status", role="member")}
+            monkeypatch.setattr(license, "current", lambda **kw: ent)
+            monkeypatch.setattr(auth, "authed", lambda client, store, method, path: (200, docs[path.rsplit("/", 1)[1]]))
+            p = context().policy
+            assert (p.max_parallel_workers, p.budget_seat_month_usd) == (1, 10.0)
+            return
+        # Air-gap mode on a device that allows it: the verified cached copy, else the file's
+        # snapshot, else a signed offline export for the device's org; none of them fails closed.
+        if case in ("airgap:cached", "airgap:unsafe_cache"):
+            assert context().policy.version == 4        # online: fetched with the device token and cached
+        if case == "airgap:unsafe_cache":
+            # A cache brindle refuses to read is no cache: the snapshot is next.
+            (private_dir(home=tmp_path) / "device-policy.json").chmod(0o644)
+        if case == "airgap:cached_older":
+            _files.write_private(private_dir(home=tmp_path) / "device-policy.json", json.dumps(
+                signed_answer(signing_key, answer(version=2, max_parallel_workers=4))).encode())
+        if case == "airgap:export":
+            exported = answer(max_parallel_workers=4)
+            claims = {"iss": ISS, "aud": "brindle-pro", "org_id": ORG, "doc_type": "offline-policy",
+                      "policy_version": 3, "document_sha256": managed.document_sha256(exported),
+                      "iat": NOW - 60, "exp": NOW + 3600, "kid": TEST_KID, "token_use": "offline-policy"}
+            path = airgap.policy_path(str(tmp_path))
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps({"body": exported, "token": sign(
+                signing_key, claims, {"typ": "brindle-offline-policy+jwt"})}))
+        monkeypatch.setenv("BRINDLE_AIRGAP", "1")
+        ctx = context()
+        if case == "airgap:none":
+            assert ctx.blocked_reason() and not ctx.policy.allowed
+            return
+        expect = {"airgap:cached": ("device", 3), "airgap:cached_older": ("device", 4),
+                  "airgap:snapshot": ("snapshot", 2), "airgap:export": ("offline", 4),
+                  "airgap:unsafe_cache": ("snapshot", 2)}
+        assert (ctx.source(), ctx.policy.max_parallel_workers) == expect[case] and ctx.blocked_reason() is None
+        return
     if case == "bad_outer_token":
         # The managed document itself is judged at the current clock.
         (tmp_path / managed.FILE).write_bytes(managed_file(signing_key, body, exp=NOW - 1))

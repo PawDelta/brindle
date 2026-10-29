@@ -58,7 +58,8 @@ class Providers:
       ``team_policy.ProPolicy(repo_root).policy()``, which reads through this
       context.
     * ``status()``: the verified signed status for enforced accounts, otherwise
-      the legacy saved status, as ``brindle.pro.status.Saved``.
+      the legacy saved status, as ``brindle.pro.status.Saved``; on a managed
+      device, combined with the device's own verified status (the stricter side).
     * ``managed()``: the managed-device binding (brindle.pro.managed), None
       when the device isn't managed. Default: ``managed.load()``.
     * ``plan_rules()``: the org's plan rules for ``plan_policy.needs_plan``
@@ -200,6 +201,48 @@ class OrgContext:
             return _once(self.providers.status or self._default_status)
 
     def _default_status(self):
+        """The member's status combined with the managed device's own, so a
+        pause or control from either org applies, signed in or not."""
+        from brindle.pro import status
+
+        saved = self._member_status()
+        device = self._device_status
+        if device is None:
+            return saved
+        return replace(saved, status=status.stricter(saved.status, device, self.now))
+
+    @cached_property
+    def _device_status(self):
+        """The managed device's verified org status, got with its device token
+        (``GET /managed/{org_id}/status``) or else its last verified copy, which
+        is kept; None off a managed device or when neither can be had."""
+        import json
+
+        from brindle.pro import managed, status
+        from brindle.pro._files import private_dir, read_private, write_private
+
+        device = self.managed
+        if not isinstance(device, managed.Managed):
+            return None
+        path = cached = None
+        try:
+            path = private_dir(home=self.home) / "device-status.json"
+            raw = read_private(path, status.MAX_FILE)
+            cached = json.loads(raw) if raw else None
+        except Exception:  # noqa: BLE001 - a cache that can't be used (unsafe, unreadable) is no cache
+            log.warning("brindle: ignoring the cached device status", exc_info=True)
+        answer = managed.device_status(device, fetch=lambda d: self._fetch("status", d.org_id, d),
+                                       cached=cached, now=self.now)
+        if answer is None:
+            return None
+        if answer is not cached and path is not None:
+            try:
+                write_private(path, json.dumps(answer).encode())
+            except Exception:  # noqa: BLE001 - the verified status applies even if it can't be kept
+                log.warning("brindle: couldn't keep the device status", exc_info=True)
+        return status.parse({k: v for k, v in answer.items() if k != "token"}, self.now)
+
+    def _member_status(self):
         from brindle import airgap
         from brindle.pro import managed, policy_cache, status
 
@@ -365,28 +408,45 @@ class OrgContext:
         device = self.managed
         if not isinstance(device, managed.Managed):
             return None
-        if airgap.enabled() and managed.airgap_allowed(device):
+        path = cached = None
+        try:
+            path = private_dir(home=self.home) / "device-policy.json"
+            raw = read_private(path, team_policy.MAX_CACHE)
+            cached = json.loads(raw) if raw else None
+        except Exception:  # noqa: BLE001 - a cache that can't be used (unsafe, unreadable) is no cache
+            log.warning("brindle: ignoring the cached device policy", exc_info=True)
+        airgapped = airgap.enabled() and managed.airgap_allowed(device)
+        if airgapped:
+            # Local copies only, in order: the verified cached copy, then the file's snapshot.
+            p = managed.airgap_policy(device, cached=cached, now=self.now)
+        else:
+            # The newest of a fresh copy got with the device token, the cached copy and the snapshot.
+            p = managed.device_policy(device, fetch=lambda d: self._fetch("policy", d.org_id, d),
+                                      cached=cached, now=self.now)
+        if p is not None:
+            self._source = "snapshot" if device.snapshot and p.raw_body == device.snapshot.raw_body else "device"
+            if not airgapped and path is not None:
+                try:
+                    write_private(path, json.dumps(p.raw_body).encode())
+                except Exception:  # noqa: BLE001 - the verified policy applies even if it can't be kept
+                    log.warning("brindle: couldn't keep the device policy", exc_info=True)
+        elif airgapped:
+            # Air-gap mode the device allows: last, a signed offline export for the device's org.
             try:
                 p = team_policy.load_offline(self.repo_root, device.org_id)
             except team_policy.PolicyUnavailable as e:
-                self._unavailable = str(e)
-                return deny(str(e))
+                snapshot = "has expired" if device.snapshot_expired else "doesn't verify"
+                self._unavailable = (
+                    f"air-gap mode: this managed device has no usable signed policy: no valid cached copy, "
+                    f"the managed file's snapshot {snapshot}, and no usable offline export ({e}). Connect "
+                    "to the network once to fetch one with the device token, or put the org's signed export "
+                    f"(`brindle account org policy --export`) at .brindle/{airgap.POLICY_FILE}")
+                return deny(self._unavailable)
             self._source = "offline"
         else:
-            path = private_dir(home=self.home) / "device-policy.json"
-            try:
-                raw = read_private(path, team_policy.MAX_CACHE)
-                cached = json.loads(raw) if raw else None
-            except (OSError, ValueError):
-                cached = None
-            p = managed.device_policy(device, fetch=lambda d: self._fetch("policy", d.org_id, d),
-                                      cached=cached, now=self.now)
-            if p is None:
-                self._unavailable = ("This managed device has no valid signed policy. Connect to the network "
-                                     "to fetch one with its device token, or ask your admin for a new device file.")
-                return deny(self._unavailable)
-            self._source = "snapshot" if device.snapshot and p.raw_body == device.snapshot.raw_body else "device"
-            write_private(path, json.dumps(p.raw_body).encode())
+            self._unavailable = ("This managed device has no valid signed policy. Connect to the network "
+                                 "to fetch one with its device token, or ask your admin for a new device file.")
+            return deny(self._unavailable)
         self._policy_sources.append(p)
         return p
 

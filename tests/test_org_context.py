@@ -181,8 +181,8 @@ def test_governance_wiring(tmp_path, monkeypatch, signing_key, seam):
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps({"body": exported, "token": sign(
             signing_key, claims, {"typ": "brindle-offline-policy+jwt"})}))
-        offline = context()
-        assert offline.source() == "offline" and offline.verified and offline.policy.max_parallel_workers == 4
+        offline = context()          # the device's own valid signed copy comes before the export
+        assert offline.source() == "snapshot" and offline.verified and offline.policy.max_parallel_workers == 2
         monkeypatch.setattr(managed, "load", lambda **kw: managed.Invalid("invalid device signature"))
         assert context().blocked_reason() == "invalid device signature"
         airgap.reset()
