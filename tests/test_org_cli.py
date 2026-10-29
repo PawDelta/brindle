@@ -30,20 +30,21 @@ def test_device_file_verifies_and_binds_org(signing_key, tmp_path):
     assert not (tmp_path / "x").exists()
 
 
-@pytest.mark.parametrize("second_org_cached", [True, False])
-def test_policy_on_managed_device_is_the_org_contexts(signing_key, token, monkeypatch, second_org_cached):
-    """With a lapsed file snapshot, the device's freshly fetched policy is in force, and a second
-    org's cached worker limit stays in force while its fetch fails; with no copy of the second
-    org's policy at all, its denial stands."""
+@pytest.mark.parametrize("member_org, cached, workers", [("org_other", True, 1), ("org_other", False, None),
+                                                         (ORG, False, 2)])
+def test_policy_on_managed_device_is_the_org_contexts(signing_key, token, monkeypatch, member_org, cached, workers):
+    """With a lapsed file snapshot, the device's freshly fetched policy is in force while the
+    member's own policy fetch fails: a second org's cached worker limit stays in force, with no
+    copy of it at all its denial stands, and a member of the device's org keeps the device policy."""
     device = managed.verify_file(managed_file(signing_key, answer(version=7), policy_exp=NOW - 1), now=NOW)
     assert device.snapshot is None and device.snapshot_expired
-    if second_org_cached:
+    if cached:
         team_policy.save_cached(replace(member_policy(max_parallel_workers=1), cached_for=("member", None)))
     credentials.default_store().save({"base_url": BASE, "entitlement": token(
-        org_id="org_other", features=[team_policy.FEATURE], role="member", policy_version=10,
+        org_id=member_org, features=[team_policy.FEATURE], role="member", policy_version=10,
         iat=NOW - 60, exp=NOW + 3600)})
     transport = FakeTransport({f"GET /managed/{ORG}/policy": [(200, signed_answer(signing_key, answer(version=12)))],
-                               "GET /orgs/org_other/policy": [(500, {})]})
+                               f"GET /orgs/{member_org}/policy": [(500, {})]})
     contexts = []
     real = org_cli.context
     monkeypatch.setattr(time, "time", lambda: NOW)
@@ -53,12 +54,12 @@ def test_policy_on_managed_device_is_the_org_contexts(signing_key, token, monkey
     acct = ProAccount(None, transport=transport, out=io.StringIO(), err=err)
     rc = acct.run(["org", "policy"])
     ctx, = contexts
-    if not second_org_cached:
+    if workers is None:
         assert (rc, ctx.policy.allowed) == (1, False) and "org_other" in ctx.policy.reason
         return
     assert rc == 0, err.getvalue()
     assert (ctx.source(), ctx.policy.org_id, ctx.policy.version, ctx.policy.max_parallel_workers) == (
-        "device", ORG, 12, 1)
+        "device", ORG, 12, workers)
 
 
 @pytest.mark.parametrize("days, tampered, ok", [(0, False, False), (91, False, False), (7, False, True),

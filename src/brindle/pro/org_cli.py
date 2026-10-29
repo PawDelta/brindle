@@ -214,10 +214,11 @@ def context(repo_root: str | None, *, store=None, client=None, now: float | None
     that org's policy is unavailable, its denial stands). The
     managed binding's ``source`` says which copy the device's was."""
     from brindle.policy import deny
-    from brindle.pro import org_context, team_policy
+    from brindle.pro import license, org_context, team_policy
 
-    def member():
-        return team_policy.ProPolicy(repo_root or "", store=store, client=client).policy()
+    def member(entitlement=None):
+        return team_policy.ProPolicy(repo_root or "", store=store, client=client,
+                                     entitlement=entitlement).policy()
 
     device = managed.load(now=now)
     if device is None:
@@ -236,9 +237,20 @@ def context(repo_root: str | None, *, store=None, client=None, now: float | None
                         "it fetches one with its device token")
         snapshot = device.snapshot is not None and p.raw_body == device.snapshot.raw_body
         binding["source"] = "snapshot" if snapshot else "device"
-        other = member()
+        # The signed-in account's verified entitlement, read once: a member of the device's own
+        # org is covered by the device policy, whether or not their own copy can be had.
+        ent, error = org_context._once(lambda: license.current(store=store, client=client))
+        if ent is not None and ent.org_id == device.org_id:
+            return p.enforced
+
+        def entitlement():
+            if error is not None:
+                raise error
+            return ent
+
+        other = member(entitlement)
         if isinstance(other, team_policy.OrgPolicy):
-            return p.enforced if other.org_id == device.org_id else managed.stricter(p, other, now=now)
+            return managed.stricter(p, other, now=now)
         if not other.allowed:    # the second org's policy is unavailable: agents wait, with its reason
             return other
         return p.enforced        # no team org: the device's policy alone
