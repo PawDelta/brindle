@@ -416,7 +416,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
             {showPhase && (
               <>
                 {total > 0 && " · "}
-                <span data-testid="goal-phase" className={phase === "ready_for_pr" ? "text-pass" : undefined}>
+                <span data-testid="goal-phase">
                   {phaseLabel}
                 </span>
               </>
