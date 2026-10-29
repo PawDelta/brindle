@@ -192,14 +192,13 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
         return cmd
     if not tests:
         return None
-    note = ""
     if max_files > 0 and len(tests) > max_files:
         tests = capped_targets(ws, changed)
-        if not tests:
-            return None
-        note = shlex.quote(CAP_NOTE.format(max=max_files, tests=" ".join(tests)))
-        note = f"printf '%s\\n' {note}; "
-    return f"{note}{cmd} {_quoted(tests)} || [ $? -eq 5 ]"   # 5: none of them selected
+        note = shlex.quote(CAP_NOTE.format(max=max_files, tests=" ".join(tests) or "none"))
+        echo = f"printf '%s\\n' {note}"
+        # Nothing own or namesake to run: only the note, never a bare pytest.
+        return f"{echo}; {cmd} {_quoted(tests)} || [ $? -eq 5 ]" if tests else echo
+    return f"{cmd} {_quoted(tests)} || [ $? -eq 5 ]"   # 5: none of them selected
 
 
 def capped_targets(ws: Workspace, changed: list[str]) -> list[str]:

@@ -26,7 +26,10 @@ def write(root: Path, files: dict[str, str]) -> None:
 
 
 OTHER = {"tests/test_other.py": "def test_o(): pass\n"}
-CAPPED_NOTE = check_scope.CAP_NOTE.format(max=1, tests="tests/test_other.py")
+CAPPED = ["tests/test_mod.py", "tests/test_mod_extra.py", "tests/test_other.py"]
+CAPPED_NOTE = check_scope.CAP_NOTE.format(max=1, tests=" ".join(CAPPED))
+EMPTY_NOTE = check_scope.CAP_NOTE.format(max=1, tests="none")
+BOTH = {"src/pkg/mod.py": MOD.replace("return 1", "return 3").replace("return 2", "return 4")}
 NARROWED =f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
 DYNAMIC_IMPORTS = {
     "fromlist": "__import__('pkg', fromlist=['new'])\n",
@@ -77,19 +80,23 @@ DYNAMIC_IMPORTS = {
     ("off", PYTEST, OTHER, [PYTEST]),
     ("supervisor", PYTEST, OTHER, [PYTEST]),
     ("cap", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER},
-     [f"printf '%s\\n' {shlex.quote(CAPPED_NOTE)}; {PYTEST} tests/test_other.py || [ $? -eq 5 ]"]),
+     [f"printf '%s\\n' {shlex.quote(CAPPED_NOTE)}; {PYTEST} {' '.join(CAPPED)} || [ $? -eq 5 ]"]),   # test_f dropped
     ("cap-none", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER},
      [f"{PYTEST} tests/test_f.py tests/test_other.py || [ $? -eq 5 ]"]),
+    ("cap-empty", PYTEST, BOTH, [f"printf '%s\\n' {shlex.quote(EMPTY_NOTE)}"]),   # no own or namesake test: note only
+    ("cap-pr", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER}, [PYTEST]),
 ], ids=["python-affected", "deleted-function", "test-helper", "lookup-failed", "fallback-unmapped", "unmapped-importers",
         "import-fromlist", "import-dynamic-fromlist", "import-relative-level", "import-dynamic-level", "unmapped-test-helper", "quoted-name",
         "fallback-conftest", "fallback-pyproject", "infer", "infer-options", "infer-selects", "other-command-changed_files_env", "empty-diff",
-        "non-python-only", "non-python-plus-python", "lockfile", "unset-mode", "off", "supervisor", "cap", "cap-none"])
+        "non-python-only", "non-python-plus-python", "lockfile", "unset-mode", "off", "supervisor", "cap", "cap-none", "cap-empty", "cap-pr"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran):
     config = {"checks": [cmd], "scoped_checks": "off" if where == "off" else "infer"}
     if where == "unset":
         del config["scoped_checks"]
-    if where in ("cap", "cap-none"):
-        config["scoped_checks_max_files"] = 1 if where == "cap" else 0
+    if where.startswith("cap"):
+        config["scoped_checks_max_files"] = 0 if where == "cap-none" else 1
+        if where != "cap-empty":   # the namesake tests of mod.py; one test per `_*` and plain name
+            write(repo, {"tests/test_mod.py": "def test_m(): pass\n", "tests/test_mod_extra.py": "def test_e(): pass\n"})
     write(repo, {".brindle/config.json": json.dumps(config), "src/pkg/mod.py": MOD, "docs/guide.md": "doc\n",
                  "src/pkg/__init__.py": "", "src/pkg/pro/__init__.py": "",
                  "app/src/view.ts": "export const v = 1\n", "tests/conftest.py": "X = 1\n",
@@ -125,6 +132,11 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
     sh("git add -A && git commit -qm work --allow-empty", Path(ws.path))
 
     cfg = load_repo_config(ws.repo_root)
-    assert all(gates.run_checked(db, ws, cmd, {}, 30)[0] for cmd in cfg.checks)
+    if where == "cap-pr":   # the pre-PR run on a worker's workspace never narrows
+        with gates.pr_checked(db, ws):
+            pass
+    else:
+        assert all(gates.run_checked(db, ws, cmd, {}, 30)[0] for cmd in cfg.checks)
     assert commands == ran
-    assert envs == [None if where == "supervisor" else "\n".join(sorted(changes))] * len(ran)   # the real gate dispatch sets it
+    full = where in ("supervisor", "cap-pr")
+    assert envs == [None if full else "\n".join(sorted(changes))] * len(ran)   # the real gate dispatch sets it
