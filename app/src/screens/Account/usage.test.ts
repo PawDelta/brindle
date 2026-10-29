@@ -20,7 +20,7 @@ describe("usage words", () => {
     expect(planWindows(claude).map(windowLabel)).toEqual(["5-hour window", "weekly window"]);
     expect(caps(claude).map(windowLabel)).toEqual(["Fable cap, this week"]);
     expect(fullest(claude)!.used).toBe(88);
-    expect(hint(claude)).toBe("Past 80%. brindle pauses new Claude work at 90% and pauses running Claude workers until the window resets.");
+    expect(hint(claude)).toBe("Past 80%. brindle pauses new Claude work by stopping new starts at 90% and pauses running Claude workers until the window resets.");
   });
 
   it("puts each provider in a state for its card", () => {

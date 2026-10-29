@@ -1,7 +1,7 @@
 /* The calm empty state, and the New session composer: where the app lands
    with no session to show, and where "New session" goes. One composer:
    what brindle should work on, in which repo, and Start (branch, CLI and
-   name behind Options). A start with sessions already running in the
+   session name behind Options). A start with sessions already running in the
    repo answers a conflict, and the person picks what to do (open one, a
    new worktree, or pause it and start fresh); a start the engine refuses
    with 409 {preflight} (the CLI needs a sign-in, a key, a trust or a

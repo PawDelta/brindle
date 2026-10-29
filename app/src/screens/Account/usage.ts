@@ -3,7 +3,7 @@
    a reset time as quota._when writes it ("5:10pm" today, "Thu 9:00am"
    later) or "in N min" under the hour, how old a reading is, and the two
    thresholds brindle acts on: 80% is `brindle watch`'s alert line, 90% is
-   RepoConfig.usage_limit, where brindle pauses new work. The
+   RepoConfig.usage_limit, where brindle pauses new work by stopping new starts. The
    sidebar's status-line reading (design/usage/A4) is `nearReading`. Every
    function takes `now` (epoch seconds) so the words can be checked. */
 
@@ -78,8 +78,8 @@ export function hint(q: ProviderUsage): string | null {
   if (!w) return null;
   const name = providerName(q.provider);
   const claude = q.provider === "claude";
-  if (w.used >= STOP) return `Past ${STOP}%: brindle has paused new ${name} work${claude ? " and paused the Claude workers that were running; they resume when the window resets" : ""}.`;
-  if (w.used >= WARN) return `Past ${WARN}%. brindle pauses new ${name} work at ${STOP}%${claude ? " and pauses running Claude workers until the window resets" : ""}.`;
+  if (w.used >= STOP) return `Past ${STOP}%: brindle has paused new ${name} work by stopping new starts${claude ? " and paused the Claude workers that were running; they resume when the window resets" : ""}.`;
+  if (w.used >= WARN) return `Past ${WARN}%. brindle pauses new ${name} work by stopping new starts at ${STOP}%${claude ? " and pauses running Claude workers until the window resets" : ""}.`;
   return null;
 }
 

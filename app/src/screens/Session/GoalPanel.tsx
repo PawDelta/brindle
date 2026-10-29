@@ -1,12 +1,11 @@
 /* The goal panel, above a session's agent tree: the session's goal and its
-   milestones with their check commands and last results, and autopilot
-   on / off (not offered for a paused session: nothing is driving it). The
+   milestones with their check commands and last results. The
    supervisor runs the checks; the panel only shows when they last ran.
 
    The goal is not part of the store's snapshot, so the panel fetches
    GET /v1/goal for its session (`root`) itself. It refetches after an action is
    acknowledged, when a goal check's job ends (job.done / job.failed), and when
-   the event stream reports autopilot activity or a resnapshot. Completion comes
+   the event stream reports goal activity or a resnapshot. Completion comes
    from the milestones' statuses: GoalDTO.progress is an activity counter.
 
    The panel shows the session's one lifecycle, the engine's goal_phase: In
@@ -30,9 +29,8 @@ import { openExternal, type OpenUrl } from "../../api/open";
 import type { GoalDTO, MilestoneDTO } from "../../api/schema";
 import { alert, button, card, mainTone, mono, pill, quiet } from "../../components/ui";
 import type { AppStore } from "../../store/store";
-import { usePrReadiness, type Readiness } from "./review";
+import { isGoalActivity, usePrReadiness, type Readiness } from "./review";
 
-const AUTOPILOT_EVENT = /^autopilot\./;
 const GOAL_JOBS = new Set(["goal.check", "session.pr"]);
 
 /* The last few lines of a check's output: enough to see why it stopped. */
@@ -61,12 +59,12 @@ function isGoalJobDone(e: BusEvent): boolean {
   return (e.kind === "job.done" || e.kind === "job.failed") && GOAL_JOBS.has(String(e.payload.job_kind));
 }
 
-/* A bus event that means the goal may have changed: autopilot activity for this
+/* A bus event that means the goal may have changed: goal activity for this
    session (or any session's, when the event names none), its PR's readiness or
    job, or a finished check. */
 function concernsGoal(e: BusEvent, root: string): boolean {
   if (e.root_id !== null && e.root_id !== root) return false;
-  return AUTOPILOT_EVENT.test(e.kind) || e.kind.startsWith("session.pr") || isGoalJobDone(e);
+  return isGoalActivity(e) || e.kind.startsWith("session.pr") || isGoalJobDone(e);
 }
 
 export type GoalPhase = "in_progress" | "in_review" | "ready_for_pr" | "pr_open" | "done";
@@ -211,7 +209,7 @@ export interface GoalPanelProps {
   repo: string;
   root: string;
   store: AppStore;
-  /* A paused session: its goal is shown, but autopilot isn't offered. */
+  /* A paused session still shows its goal. */
   paused?: boolean;
   /* In the sidebar's context pane: no card frame, tighter, and the
      milestones open from the start (the pane is theirs). */
@@ -224,14 +222,13 @@ export interface GoalPanelProps {
   onCloseSession?(): void;
 }
 
-export function GoalPanel({ client, repo, root, store, paused = false, compact = false, onReview, openUrl = openExternal, onCloseSession }: GoalPanelProps) {
+export function GoalPanel({ client, repo, root, store, compact = false, onReview, openUrl = openExternal, onCloseSession }: GoalPanelProps) {
   const [goal, setGoal] = useState<GoalDTO | null>(null);
   // An older engine's stand-in for goal_phase: its word on the session's PR.
   const readiness = usePrReadiness(client, root, store);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [enabling, setEnabling] = useState(false);
   // Beside a terminal the milestones fold away by default (it wants the room); in the sidebar they show.
   const [open, setOpen] = useState(compact);
   const frame = compact ? "flex flex-col gap-1.5 px-1.5 pb-1.5 pt-1" : `${card} flex flex-col gap-1 px-s2 py-s1`;
@@ -268,7 +265,6 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
     setLoaded(false);
     setLoadError(null);
     setActionError(null);
-    setEnabling(false);
     void refresh();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
@@ -287,22 +283,6 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
       unsubscribe();
     };
   }, [session, store, refresh, root]);
-
-  const toggleAutopilot = () => {
-    if (!goal) return;
-    setActionError(null);
-    setEnabling(true);
-    client
-      .setGoalEnabled(root, !goal.enabled)
-      // The switch stays disabled until the enabled state is reloaded.
-      .then(() => (activeSession.current === session ? refresh() : undefined))
-      .catch((e: unknown) => {
-        if (activeSession.current === session) setActionError(message(e));
-      })
-      .finally(() => {
-        if (activeSession.current === session) setEnabling(false);
-      });
-  };
 
   if (!loaded && loadError) {
     return (
@@ -400,7 +380,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
     ) : null;
   if (compact) {
     // The sidebar's goal: a ring and completed count, the milestones as a list (✓ done, every unfinished one lit),
-    // then when the supervisor last checked, with the autopilot switch beside it.
+    // then when the supervisor last checked.
     const lastCheck = Math.max(0, ...milestones.map((m) => m.checked_at ?? 0));
     const donePct = finished ? 100 : total === 0 ? 0 : (passed / total) * 100;
     const nowPct = finished ? 100 : total === 0 ? 0 : (Math.min(passed + 1, total) / total) * 100;
@@ -451,11 +431,6 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
         {step}
         <div className="flex items-center gap-1.5 whitespace-nowrap px-1.5 pt-0.5 text-[11px] text-ink-3" title={goal.detail ?? undefined}>
           <span className="min-w-0 truncate">Checked {lastCheck > 0 ? formatAgo(lastCheck) : "never"}</span>
-          {!paused && (
-            <button type="button" role="switch" aria-checked={goal.enabled} className="shrink-0 rounded-sm hover:text-ink disabled:opacity-50" disabled={enabling} title={goal.enabled ? "Autopilot is on: brindle drives the session. Click to turn it off." : "Autopilot is off. Click to let brindle drive the session."} onClick={toggleAutopilot}>
-              · autopilot {goal.enabled ? "on" : "off"}
-            </button>
-          )}
         </div>
         {shownError && <p className={`${alert} text-xs`}>{shownError}</p>}
         {goal.note && <p className="px-0.5 text-[11px] text-ink-3">{goal.note}</p>}
@@ -487,18 +462,6 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
         </p>
       )}
       <div className="flex flex-wrap items-center gap-1">
-        {!paused && (
-          <button
-            type="button"
-            role="switch"
-            aria-checked={goal.enabled}
-            className={`${button} whitespace-nowrap px-s1 py-0.5 text-xs`}
-            disabled={enabling}
-            onClick={toggleAutopilot}
-          >
-            Autopilot {goal.enabled ? "on" : "off"}
-          </button>
-        )}
         <span className="flex-1" />
         {/* A finished goal shows its milestones, unfolded: nothing to fold them for. */}
         {total > 0 && !finished && (

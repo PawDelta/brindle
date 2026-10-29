@@ -2,7 +2,7 @@
    (design/options-v2/M3b-multi .ctx, as design/options-v3/C2b-inbox-only
    keeps it): the goal's title with the session's id, repo and mode under
    it; the goal with its milestones, progress and checks (GoalPanel
-   compact: the check button, autopilot on / off, none of that for a paused
+   compact: the check button, none of that for a paused
    session), whose one lifecycle carries the PR step: at Ready for PR its
    Review & open PR opens the session's sheet, at PR open it links to the
    PR, and at Done its Close session closes the session and moves on. There
@@ -127,7 +127,7 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
           </p>
         )}
         <div className="truncate text-[11px] text-ink-3">
-          <span className="font-mono text-[11px]">{root}</span> · {repoName} · {row ? (paused ? sessionAge(row) : `${row.mode}${goal?.enabled ? " · autopilot" : ""} · ${liveWorkers(agents, alive)} working`) : "…"}
+          <span className="font-mono text-[11px]">{root}</span> · {repoName} · {row ? (paused ? sessionAge(row) : `${row.mode} · ${liveWorkers(agents, alive)} working`) : "…"}
         </div>
       </div>
       <GoalPanel

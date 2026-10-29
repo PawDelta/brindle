@@ -11,6 +11,28 @@ from brindle.db import Agent
 from conftest import sh
 
 
+@pytest.mark.parametrize("command", [[], ["start", "--no-attach"], ["supervisor", "--no-attach"]])
+@pytest.mark.parametrize("flag", ["--no-autopilot", pytest.param("--autopilot", marks=pytest.mark.variant("deprecated positive spelling"))])
+def test_deprecated_driver_flags_still_start_a_goal_session(db, repo, monkeypatch, command, flag):
+    from brindle import agents, cli, config
+
+    monkeypatch.chdir(repo)
+    config.set_local(str(repo), "autopilot", False)
+    monkeypatch.setattr(cli, "_resolve_supervisor", lambda *a, **k: "claude")
+    for name in ("_preflight", "_trust_codex_hook", "_pause_transferred", "_check_updates",
+                 "_cull_detached", "_local_models_detached", "_settings_sync_detached", "_attach"):
+        monkeypatch.setattr(cli, name, lambda *a, **k: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "_launch", lambda *a, **k: None)
+    result = CliRunner().invoke(app, [*command, flag, "--yes"])
+    assert result.exit_code == 0, result.output
+    roots = db.conn.execute("SELECT root_id FROM autopilot").fetchall()
+    assert len(roots) == 1
+    assert db.get_agent(roots[0][0]).profile == "supervisor"
+    assert db.get_autopilot(roots[0][0]).enabled
+    assert config.load_repo_config(str(repo)).autopilot
+
+
 @pytest.mark.variant("guards the suite against launching the real agent CLI")
 @pytest.mark.parametrize("argv, override", [
     (["claude", "--version"], None),

@@ -176,7 +176,7 @@ def test_history_cli_empty(db, repo, monkeypatch):
 
 def test_history_failure_does_not_block_merge_or_forward(db, repo, monkeypatch):
     (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text('{"pipeline": false}')  # the manual flow forwards
+    (repo / ".brindle" / "config.json").write_text('{"pipeline": false, "review": false}')  # the manual flow forwards
     from brindle import git
 
     def boom(*a, **k):
@@ -242,6 +242,7 @@ def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, mon
         with open(f"{w.path}/f{i}.py", "w") as f:
             f.write("x = 1\n")
         git.commit_all(w.path, "work")
+        db.add_review(w.id, git.out(["rev-parse", "HEAD"], w.path), None, True, "approved")
         with boss_t.open("a") as f:
             f.write(_usage_line(f"b{i + 2}", 10))
         assert asyncio.run(mcp_server.merge_workspace(w.id)).startswith("Merged")
