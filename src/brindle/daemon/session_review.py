@@ -83,7 +83,7 @@ def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
     ap = db.get_autopilot(root.id)
     ms = db.milestones(root.id)
     if ap is None:
-        out.append("autopilot isn't on for this session, so there is no goal to judge it by")
+        out.append("the session has no goal to judge it by")
     elif ms:
         out += [f"milestone {m.position} ({m.title}) hasn't passed its check"
                 for m in ms if m.status != "passed"]
@@ -133,7 +133,7 @@ def needs_you(db: DB, root: Agent, ap) -> list[str]:
     if ap is not None and ap.state == "blocked":
         out.append(f"the session is waiting on you: {ap.note or 'a question'}")
     if ap is not None and autopilot.proposing(ap):
-        out.append("checks autopilot proposed are waiting on your answer")
+        out.append("proposed checks are waiting on your answer")
     if (login := db.get_login_state(root.id)) and login.state == "auth_paused":
         out.append("the session's cloud login has expired")
     return out

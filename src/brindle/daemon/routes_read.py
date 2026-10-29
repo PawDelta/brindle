@@ -308,12 +308,19 @@ def get_profile(db: DB, request: Request) -> Any:
 
 @_json
 def get_config(db: DB, request: Request) -> Any:
+    from brindle import providers
+
     repo = _repo(request)
     settings = {"user": config.user_settings()}
     if repo:
-        settings["repo"] = dataclasses.asdict(config.load_repo_config(repo))
+        # Saved model choices are checked for readiness while the config loads (worker_models.apply):
+        # no sign-in probe or keychain read for that here, as for GET /routing?learned=0.
+        with providers.no_sign_in_probes():
+            settings["repo"] = dataclasses.asdict(config.load_repo_config(repo))
         # Settings this project's own files set (over the person's): key -> "local" or "repo".
         settings["overrides"] = {k: s for k in settings["repo"] if (s := config.setting_source(repo, k)) in ("local", "repo")}
+        # The local file's own rules: the effective list unions every scope's, so the app edits this one.
+        settings["local"] = config.local_values(repo, ("rules",))
     # `keys=0`: the page doesn't show the stored keys, and reading them is the slow part
     # (one keychain read per name), so it skips them.
     if request.query_params.get("keys") in ("0", "false"):

@@ -38,7 +38,7 @@ service ([details](#license)).
 - **Delegation built in.** Agents get a `brindle` MCP server: `assign` work to
   parallel workers with the files they'll touch and what they depend on, `handoff`
   and wait, `send_message`, then review and merge without spending the supervisor's turns.
-- **Walk away.** Autopilot keeps going until every milestone is verified, pauses
+- **Walk away.** brindle keeps going until every milestone is verified, pauses
   at your usage limit and resumes after the reset, and asks you only when it
   needs a decision. Quit and `brindle continue` later; workers resume too.
 - **Any model, including local ones.** Claude Code, Codex, Google Antigravity, or
@@ -126,8 +126,7 @@ switch windows or sessions; you can still move it manually or use `brindle attac
 to choose a brindle window.
 
 **Sidebar keys.** `?` shows them in the sidebar too. ◆ marks an agent that needs
-you: stuck on a prompt, a supervisor with a question, or (without autopilot) a
-worker whose branch is waiting for your review. Under autopilot, a reported worker shows
+you: stuck on a prompt or a supervisor with a question. A reported worker shows
 a dim ◇ instead, because the supervisor reviews it.
 
 **Copying chat text.** Drag with the mouse in the chat: the selection stays inside
@@ -231,7 +230,7 @@ things itself instead of starting workers.
 2. **Give it a goal with checks.** For anything bigger than one sitting, tell the
    supervisor what "done" means in commands (a test file, `npm test`, a build), or
    write `.brindle/goals.md` yourself. Milestones with real checks are what let
-   autopilot keep going without you and stop when the work is actually done.
+   brindle keep going without you and stop when the work is actually done.
 3. **Set `checks` in `.brindle/config.json`** (usually your full test suite) so no
    branch merges red, and a `setup` if new worktrees need `npm install` or similar.
 4. **Watch the sidebar, not every window.** It flags agents waiting on you (◆);
@@ -249,9 +248,9 @@ task to one area of the code with its own test command, and let the supervisor r
 to `max_agents` workers at once. Use a cheaper profile (see [Cheap workers](#cheap-workers))
 for mechanical edits and a Codex reviewer for a second model's opinion.
 
-## Autopilot
+## Driving toward a verified goal
 
-`brindle` starts the supervisor with autopilot on. Tell it what we're building,
+`brindle` drives the supervisor toward a verified goal. Tell it what we're building,
 or put the goal in `.brindle/goals.md`, and it works like a project manager:
 
 1. **Goal and milestones.** The goal is split into milestones, and each one has
@@ -277,7 +276,7 @@ or put the goal in `.brindle/goals.md`, and it works like a project manager:
    approves it, or (`approved=false`, with feedback) sends it back for a
    revision. For Claude workers brindle's PreToolUse hook refuses Edit, Write
    and NotebookEdit until the plan is approved; other CLIs are only told to
-   wait. Autopilot doesn't count a worker waiting on approval as stalled, and
+   wait. brindle doesn't count a worker waiting on approval as stalled, and
    reminds the supervisor about plans awaiting a decision.
 3. **Gated merges.** A branch merges only when everything is committed, a
    reviewer agent has approved that exact commit, your pre-commit hooks pass,
@@ -321,7 +320,7 @@ for byte as you wrote it. Since `goals.md` may be committed, it stays free of
 session data: no agent or session ids, check output, notes, usage or
 questions ever go in. A status line is information only: a new session
 starts every milestone as pending and re-runs the checks, never trusting it.
-A session stops writing when it's handed over, paused, or has autopilot off,
+A session stops writing when it's handed over or paused,
 or once its goal was replaced from the chat. From a linked worktree, it writes
 the `goals.md` it loaded (the main checkout's), never another session's. A
 write that fails never fails the check.
@@ -331,15 +330,14 @@ A new session takes a hand-written `goals.md` over by moving it to its own
 its deletion is left for you to commit or restore; brindle doesn't count it as
 an uncommitted change, so it never blocks a merge or a milestone's check.
 
-`brindle autopilot` shows progress, `brindle autopilot check` runs the checks
-now, and `brindle autopilot off` (or `on`) hands the wheel back (or takes it
-again). `brindle --no-autopilot`, or `"autopilot": false` in the repo config,
-starts without it.
+`brindle goal` shows progress and `brindle goal check` runs the checks now.
+Pause the session to stop it. The deprecated `--autopilot`/`--no-autopilot`
+flags and the `autopilot` config key are ignored: goal driving is always on.
 
-When your Claude usage reaches `usage_limit`, autopilot pauses for usage: its
+When your Claude usage reaches `usage_limit`, brindle pauses for usage: its
 running Claude workers stop (worktrees, branches, queued messages and sessions
 are kept) and the sidebar says "paused for usage until <time>". Once the usage
-window resets, brindle restarts those workers on its own, sets autopilot running
+window resets, brindle restarts those workers on its own, resumes goal driving
 again and tells the supervisor what it resumed. Speaking to the supervisor
 doesn't end the pause.
 
@@ -359,9 +357,9 @@ your own status line prints, so what you see doesn't change.
 | `brindle new BRANCH [-b BASE] [-p PROMPT] [--no-agent]` | worktree + branch + a supervisor in it |
 | `brindle continue [ID]` / `brindle -c` | resume a paused session (default: the most recent) |
 | `brindle sessions` / `brindle prune` | list paused sessions / apply retention rules, remove merged or missing worktrees, close stale stopped agents whose work is merged or gone, and remove leftover tmux sessions |
-| `brindle start [-p PROMPT] [--no-watch] [--no-autopilot] [-b BRANCH] [-w PATH]` | the same, with options; `-b`/`-w` run it in that branch's worktree (created if needed, or the one you already made), which gets the repo's `.brindle` config |
+| `brindle start [-p PROMPT] [--no-watch] [-b BRANCH] [-w PATH]` | the same, with options; `-b`/`-w` run it in that branch's worktree (created if needed, or the one you already made), which gets the repo's `.brindle` config |
 | `brindle handover --to BRANCH\|PATH [-n NOTE]` | hand the session to a new supervisor there: goal and milestones, workers, queued tasks and your note move across; the old one is paused |
-| `brindle autopilot [on\|off\|check]` | the goal's progress; turn autopilot on or off; run the checks now |
+| `brindle goal [check]` | the goal's progress; run the checks now |
 | `brindle audit-decision FINDING [-r RATIONALE]` | record acceptance of an audit finding with rationale so subsequent audits respect it |
 | `brindle delegation [conservative\|balanced\|fast]` | how readily the supervisor delegates: fewest tokens, the default, or quickest |
 | `brindle transfer [REPO] [--from SESSION] [-b BRANCH]` | move a scratch session's work into a real repo |
@@ -411,7 +409,7 @@ With no `WS` argument, commands act on the workspace you're in.
 `brindle web` serves the current session to your browser: workspaces, agents
 and their status, and the goal's milestones with each one's last check. Run
 it from a terminal in the session's tmux session to show that session's
-goal; elsewhere it shows the newest autopilot session
+goal; elsewhere it shows the newest session
 in the repo. The page refreshes itself every couple of seconds.
 
 It listens on `127.0.0.1` only, on a free port (or `--port N`), and prints a
@@ -443,7 +441,7 @@ knowing them helps when you tell the supervisor how to work.
 | `approve_plan` | supervisor | approve a worker's plan, or send it back with feedback (`approved=false`) |
 | `answer_permission` | supervisor | allow, deny or escalate (with a reason) a worker's permission ask before the person sees it |
 | `complete_subagent` | supervisor | record the result of a `subagent`-profile task |
-| `set_goal` / `get_progress` / `check_milestone` | supervisor | autopilot's goal, its progress, and running the checks |
+| `set_goal` / `get_progress` / `check_milestone` | supervisor | the session's goal, its progress, and running the checks |
 | `record_audit_decision` | supervisor | record acceptance of an audit finding with rationale so subsequent audits respect it |
 | `who_is_working` | supervisor | other sessions in this repo: their goals and running tasks, optionally only those matching `paths` or a `query` |
 | `record_decision` / `decisions` | supervisor (`decisions` also workers) | record a durable decision about the system / list the accepted ones that apply |
@@ -512,7 +510,7 @@ Set in `~/.brindle/config.json`, `.brindle/config.json` or `config.local.json`
 take the task, its goal or the month over a limit (a task's cost is estimated
 from this repo's finished tasks on that profile, else a typical token mix at
 list prices), brindle skips that candidate and uses the next cheaper one. If
-none fits it refuses the assign, says why and, in autopilot, asks you. A
+none fits it refuses the assign, says why and asks you. A
 profile you name yourself is never second-guessed. Running workers are
 reported to the supervisor at 80% of `task_usd` and again at 100%; set
 `"stop": true` to close a worker at 100% instead of only warning. Without the
@@ -601,7 +599,7 @@ brindle coordinator stop                 # close it and turn it off for this che
 brindle keeps one place (`~/.brindle/quota.json`) that knows how close each
 provider is to its subscription limit, and shows a note per provider that has
 data (e.g. `Codex at 82% of its weekly limit, resets Thu 9:00am`) in `assign`
-replies, `get_progress`, the sidebar's autopilot block and `brindle doctor`.
+replies, `get_progress`, the sidebar's goal block and `brindle doctor`.
 It only uses what the CLIs write locally, and never reads a CLI's login
 token or auth files or calls a provider's servers:
 
@@ -634,16 +632,16 @@ A linked git worktree you made yourself doesn't have the git-ignored parts of
 }
 ```
 
-Autopilot, merge gates and cleanup:
+Goal driving, merge gates and cleanup:
 
 | Key | Default | |
 |---|---|---|
-| `autopilot` | `true` | start the supervisor with autopilot on |
 | `claude_permission_mode` | `"default"` | the `--permission-mode` for Claude Code sessions whose profile sets no `permission_mode`; the default holds permission requests for the brindle app, set `"auto"` to opt into auto mode. Only read from `~/.brindle/config.json` |
 | `auto_update` | `false` | run `uv tool upgrade brindle` in the background at session start when PyPI has a newer version; restart to use it. Can also be set in `~/.brindle/config.json` for every repo |
 | `scoped_checks` | unset (acts as `"off"`) | `"infer"` narrows a bare pytest check (`pytest ...`, `python -m pytest ...`, `uv run pytest ...`, options only) on a worker's branch to the tests `graphify affected` reaches plus the touched test files, when the repo has a stored graph; it runs in full when the mapping fails or `conftest.py`, `pyproject.toml`, `setup.cfg`, `pytest.ini`, `tox.ini` or a lockfile changed. A pytest command that already names test paths (`pytest tests/`) and every other command always run in full. `"off"` narrows nothing. It becomes the default next release; until you set it, brindle tells you once |
+| `scoped_checks_max_files` | `40` | with `scoped_checks`, a worker's branch whose selected tests exceed this many files runs only its own changed test files and each changed module's namesake tests (`tests/test_<module>.py`, `tests/test_<module>_*.py`) instead, and the check output carries a one-line note saying so. The session branch and the full run before a PR (`gates.pr_checked`) always run everything. `0`: no cap |
 | `checks` | `[]` | commands (plain strings) that must pass in a worker's branch before it merges. On a worker's branch every check also gets `BRINDLE_CHANGED_FILES` (the files changed since the branch left its base, one repo-relative path per line) so a script can narrow itself; the supervisor's checkout always runs every check in full (see `scoped_checks` and `brindle/check_scope.py`) |
-| `review` | only under autopilot | require a reviewer's approval before merging |
+| `review` | required for sessions | require a reviewer's approval before merging |
 | `reviewer` | `"reviewer"` | the agent profile that reviews (a Codex profile gives a second model's view) |
 | `review_profile` | none | force `request_review`'s profile, skipping its automatic cross-model pick (see below) |
 | `pre_commit` | `true` | run [pre-commit](https://pre-commit.com) over the branch, if the repo uses it |
@@ -651,7 +649,7 @@ Autopilot, merge gates and cleanup:
 | `check_timeout` | `900` | seconds each check may take |
 | `check_concurrency` | half the logical cores, at least 2, at most 6 and 2 GB of RAM per run | check runs at once on this machine, across branches; the rest wait their turn (`0`: no cap). A run far past its last duration is reported to the supervisor |
 | `fable_escalation` | on, unless the worker runs on a cloud account (Bedrock, Vertex or Foundry) | retry a failed heavy task once on `developer-heavy` before handing it to you; `true` turns it on for a cloud account, `false` off |
-| `usage_limit` | `90` | autopilot stops pushing on at this % of your Claude usage limit |
+| `usage_limit` | `90` | brindle stops pushing on at this % of your Claude usage limit |
 | `limit_cooldown_minutes` | `300` for Antigravity | how long a provider that hit its limit counts as unavailable |
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
 | `graphify_auto_refresh` | `true` | automatically rebuild untracked code maps; `false` disables rebuilds while keeping queries available |
@@ -783,7 +781,7 @@ probe here; no Claude CLI or synthetic generation request is used for these chec
 The real first worker task is sent once. A detached helper inspects its current
 pane five seconds after delivery, so readiness delays do not use up that window.
 Fresh interactive Antigravity chats without a task still receive their profile,
-tool instructions and any autopilot context once after readiness; worker
+tool instructions and goal context once after readiness; worker
 instructions accompany the actual task in the same delivery.
 For argv tasks, the timer starts at prompt submission or observed CLI readiness,
 after trust/startup handling; readiness timeout does not establish delivery or
@@ -1499,7 +1497,7 @@ never handed to a worker: the supervisor gets them as "needs you".
 
 **The completion audit.** A milestone's check can pass without the milestone being
 done: the test asserts too little, or checks the wrong thing. So when every milestone
-passes, autopilot doesn't call the goal reached yet. A read-only reviewer audits everything since the goal was set
+passes, brindle doesn't call the goal reached yet. A read-only reviewer audits everything since the goal was set
 against the goal and each milestone, looking for what's missing, stubbed or weakly
 tested. Only its approval of that commit finishes the goal. If it finds gaps, the
 supervisor gets them as a message and keeps working until a fresh audit approves.
@@ -1550,7 +1548,7 @@ commands around the team's list. `~/.brindle/config.json` holds your own default
 for every repo (any key except the command lists, like `delegation` or
 `sidebar`); a repo's two files override it. With brindle Pro or higher, those
 preferences (`delegation`, `sidebar`, `message_delivery`, `pr_footer`,
-`delete_merged_branches`, `max_agents`, `autopilot`, `plan_first`, `stale_after`,
+`delete_merged_branches`, `max_agents`, `plan_first`, `stale_after`,
 `usage_limit`, `review_rounds`) sync across your machines (last change wins; nothing
 else in the file leaves the machine); `brindle account sync` syncs now.
 
@@ -1658,16 +1656,16 @@ Your org's `deny_personal_keys` (Enterprise) still applies on top of `auth`.
 
 #### Running unattended on API keys
 
-When running long, unattended autopilot sessions with API keys:
+When running long, unattended sessions with API keys:
 
 - **Quota, token and cost measurements per provider**:
-  - Autopilot's automatic usage pause (`usage_limit: 90`) relies on the percentage numbers emitted by Claude Code's status line under subscription plans. Under API-key billing (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), the CLIs report no subscription percentage, so subscription usage pause thresholds do not trigger; manage spend via provider account budget limits or brindle budget policies.
+  - brindle's automatic usage pause (`usage_limit: 90`) relies on the percentage numbers emitted by Claude Code's status line under subscription plans. Under API-key billing (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), the CLIs report no subscription percentage, so subscription usage pause thresholds do not trigger; manage spend via provider account budget limits or brindle budget policies.
   - Token and cost tracking: Token counts and cost estimates are captured from Claude and Codex transcripts. Antigravity (`agy`) currently has **no token/cost measurements**, so budget policies and cost tracking cannot monitor Antigravity spend; enforce usage caps directly in Google AI Studio or your Google Cloud project billing settings.
 - **Runtime auth failure handling and provider differences**:
-  - **Claude and Antigravity**: Runtime authentication failures (such as 401/403, revoked API keys, or credit/billing errors) are intercepted via StopFailure and exit hooks. Brindle marks the worker as failed, alerts the supervisor, invalidates cached sign-in checks, and pauses autopilot with a `Credentials need attention` notice rather than cycling idle nudges.
-  - **Codex (unsupported runtime auth detection)**: Codex CLI turn completion (`agent-turn-complete`) does not classify auth errors at runtime. If an OpenAI API key expires or is rejected, Codex workers will not automatically transition to `failed` or trigger an autopilot credential pause. When running Codex workers unattended, monitor their progress via `brindle watch` or check tmux panes; if an auth failure occurs, manually restart or rotate keys.
+  - **Claude and Antigravity**: Runtime authentication failures (such as 401/403, revoked API keys, or credit/billing errors) are intercepted via StopFailure and exit hooks. Brindle marks the worker as failed, alerts the supervisor, invalidates cached sign-in checks, and pauses goal driving with a `Credentials need attention` notice rather than cycling idle nudges.
+  - **Codex (unsupported runtime auth detection)**: Codex CLI turn completion (`agent-turn-complete`) does not classify auth errors at runtime. If an OpenAI API key expires or is rejected, Codex workers will not automatically transition to `failed` or trigger a credential pause. When running Codex workers unattended, monitor their progress via `brindle watch` or check tmux panes; if an auth failure occurs, manually restart or rotate keys.
 - **Supervisor credential refresh and key rotation**:
-  - **Recovering failed/blocked workers**: When an agent fails on an expired key or autopilot pauses with a credential error, export the fresh key (or update `brindle keys set`), then run `brindle continue`. This unpauses the session and relaunches paused/failed agents with the new credentials. The replacement credentials are automatically synced to the session credential store, dynamically refreshed by the supervisor's launcher on all subsequent worker delegations (`assign`/`handoff`).
+  - **Recovering failed/blocked workers**: When an agent fails on an expired key or brindle pauses with a credential error, export the fresh key (or update `brindle keys set`), then run `brindle continue`. This unpauses the session and relaunches paused/failed agents with the new credentials. The replacement credentials are automatically synced to the session credential store, dynamically refreshed by the supervisor's launcher on all subsequent worker delegations (`assign`/`handoff`).
   - **Proactive rotation in live sessions**: For Claude keys rotated outside brindle, set Claude Code's `apiKeyHelper` in `~/.claude/settings.json` or the project's `.claude/settings.json`. Claude Code re-runs the helper every 5 minutes (configurable with `CLAUDE_CODE_API_KEY_HELPER_TTL_MS`) and after a 401, so running workers pick up the new key. Don't also export `ANTHROPIC_API_KEY` or set a Claude key with `brindle keys set`, since an environment key takes precedence over the helper. Codex and Antigravity keys still need workers stopped, then `brindle keys set`, then `brindle continue`. Exporting a new key while an active session is healthy does not restart running workers or the supervisor (running `brindle continue` on an active healthy session simply reattaches to tmux without restarting workers). To proactively rotate credentials for the entire session and all running workers: run `brindle stop` -> update credentials in your environment or via `brindle keys set` -> run `brindle continue`.
   - **Precedence**: Newly stored keys (`brindle keys set`) or session credentials updated during recovery take effect dynamically for all new panes, overriding stale launcher environments. For profile-level overrides, an explicit profile key (`env.NAME`) takes precedence over default provider credentials.
 - **Antigravity permissions prerequisite**: Antigravity (`agy`) does not support approving shell commands solely via external hooks. brindle therefore runs agy workers with `--dangerously-skip-permissions` and its own hook as the gate, applying their profile's `allowed_tools` and denying the rest (see Permissions). Under an explicit `agy_approvals: "prompt"` they instead stall on approval prompts for anything `settings.json` doesn't allow, their profile's `allowed_tools` included.
@@ -2116,7 +2114,7 @@ To run workers on your own Bedrock, Vertex, Codex or Antigravity account, see
 Codex agents report status through Codex's `notify` hook (brindle passes
 `-c notify=[...]` at launch, leaving your own Codex config alone): a completed turn
 marks the agent idle and delivers any queued message. Codex has no Stop hook, so for
-an autopilot supervisor on Codex that turn end is also where brindle tells it to keep
+a supervisor on Codex that turn end is also where brindle tells it to keep
 going, with the same limit on reminders as Claude Code.
 
 ### Running workers on your own cloud
@@ -2335,7 +2333,7 @@ model's review) and the supervisor can hand it tasks.
 
 `agy` has no command-line options for hooks, MCP servers or instructions, so brindle
 adds three files to the checkout's `.agents/` folder: `mcp_config.json` (brindle's tools),
-`hooks.json` (status, messages, autopilot) and `rules/brindle.md`. They're listed in
+`hooks.json` (status, messages, goal driving) and `rules/brindle.md`. They're listed in
 `.git/info/exclude`, so they never show up in `git status`. brindle adds to these files if
 you already have them, and won't change one that's committed. Each agent's first
 message is a short warm-up with its instructions, because `agy` connects MCP servers
@@ -2378,7 +2376,7 @@ add rules to that file yourself, for example:
 - **Messages wake a supervisor through brindle's own hook.** Your interactive
   Claude Code chat runs a small background waiter (an `asyncRewake` hook started
   at `SessionStart` and at every `Stop`). When a worker reports, or brindle has a
-  "new messages" notice or an autopilot nudge, the waiter hands it over and Claude
+  "new messages" notice or a goal nudge, the waiter hands it over and Claude
   Code wakes the model with it: an idle chat starts a new turn, a busy one gets it
   between steps, and the chat shows one "Stop hook feedback" line. Each message
   is wrapped as `<brindle-msg nonce="..." from="developer agent w1">...</brindle-msg>`

@@ -395,8 +395,8 @@ def spawn(
     as, kept on the agent so the owner's per-kind effort and instructions apply
     from the first launch. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``; their brief carries the
-    accepted decisions covering ``files``. With ``autopilot``, the
-    agent is a session root that drives toward a goal (see brindle.autopilot);
+    accepted decisions covering ``files``. An interactive root always
+    drives toward a goal (see brindle.autopilot);
     with ``claim_goals`` it claims a hand-written ``.brindle/goals.md``."""
     from brindle import autopilot as pilot
     from brindle import identity_lock
@@ -477,7 +477,7 @@ def spawn(
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):
         db.update_agent(agent_id, plan_first=1)
         agent.plan_first = 1
-    if autopilot:
+    if parent_id is None and mode == "interactive":
         plan = pilot.enable(db, agent_id, ws, claim=claim_goals)
         if plan and not prompt:
             prompt = agent.task = pilot.kickoff(plan, agent_id)
@@ -1548,6 +1548,9 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     if any(a.id == root_id for a in candidates):
         from brindle import autopilot as pilot
 
+        root = db.get_agent(root_id)
+        if root and root.parent_id is None and root.mode == "interactive":
+            db.add_autopilot(root_id)
         pilot.reload_goals_file(db, root_id)   # edits the person made to this session's goal file
     resumed = []
     for a in candidates:

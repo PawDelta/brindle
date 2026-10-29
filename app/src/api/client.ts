@@ -479,6 +479,8 @@ export interface Config {
   repo?: Record<string, unknown>;
   /* Settings this project's own files set over the person's: key -> the file's scope. */
   overrides?: Record<string, "local" | "repo">;
+  /* What the repo's local file itself sets for the keys whose effective value unions every scope's (rules). */
+  local?: Record<string, unknown>;
   keys: KeyInfo[];
 }
 

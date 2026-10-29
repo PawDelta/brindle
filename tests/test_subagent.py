@@ -81,6 +81,7 @@ def test_subagent_is_working_until_completed_then_merges_and_removes(db, boss, r
     assert db.pending_count("boss") == 0  # nothing forwarded to the caller's own inbox
 
     assert "file.txt" in mcp_server.workspace_diff(ws.id)
+    db.add_review(ws.id, sh("git rev-parse HEAD", ws.path), None, True, "approved")
     merged = asyncio.run(mcp_server.merge_workspace(ws.id))
     assert merged.startswith("Merged feat/file into main"), merged
     assert (repo / "file.txt").read_text() == "new\n"

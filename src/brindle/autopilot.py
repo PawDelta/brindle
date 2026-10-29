@@ -1,6 +1,6 @@
 """Autopilot: the supervisor as a project manager that keeps going.
 
-A session with autopilot on has a goal broken into milestones. Each milestone
+A session has a goal broken into milestones. Each milestone
 has a check command that brindle runs itself (exit 0 means done), so progress
 is verified rather than claimed. The supervisor splits milestones into tasks,
 hands them to workers, gets their branches reviewed and merged (through the
@@ -130,8 +130,6 @@ to be asked each step.
   appears. If several are given, the first to finish ends the wait. An existing
   wait is kept if you call again. Keep working on independent steps meanwhile.
 - When a milestone passes, tell the user in one line.
-- If a message says autopilot is off, stop driving: wait for the user's
-  instructions.
 """
 
 DELEGATIONS = ("conservative", "balanced", "fast")
@@ -573,7 +571,7 @@ def sync_goals_file(db: DB, root_id: str) -> None:
     """Write each milestone's status back to the session's own goal file. What
     goes in it is only passed/failed/pending, a short sha and a date; loading
     it never trusts a status line. Does nothing for a session with no file,
-    with autopilot off (a handover switches the old session's off), paused,
+    paused,
     or whose milestones no longer match the file (the person edited it: the
     edit is taken up when the session resumes). Never raises: a file we
     can't write must not fail a check."""
@@ -581,7 +579,7 @@ def sync_goals_file(db: DB, root_id: str) -> None:
         _adopt_legacy(db, root_id)
         ap = db.get_autopilot(root_id)
         root = db.get_agent(root_id)
-        if not ap or not ap.enabled or not ap.goal or root is None \
+        if not ap or not ap.goal or root is None \
                 or root.status in ("paused", "done"):
             return
         path = session_goals_path(db, root_id)
@@ -622,7 +620,7 @@ def for_agent(db: DB, agent_id: str) -> Autopilot | None:
 
 
 def enable(db: DB, root_id: str, ws: Workspace, *, claim: bool = True) -> Plan | None:
-    """Turn autopilot on for a new session. With ``claim``, a hand-written
+    """Initialize a new session's goal driver. With ``claim``, a hand-written
     ``.brindle/goals.md`` becomes this session's goal (and file), and is returned."""
     db.add_autopilot(root_id)
     plan = _claim_seed(db, root_id, ws) if claim else None
@@ -632,12 +630,9 @@ def enable(db: DB, root_id: str, ws: Workspace, *, claim: bool = True) -> Plan |
 
 
 def set_enabled(db: DB, root_id: str, on: bool) -> None:
-    db.add_autopilot(root_id, enabled=on)
-    fields: dict[str, object] = {"enabled": int(on), "nudges": 0}
-    ap = db.get_autopilot(root_id)
-    if on and ap and ap.state in ("blocked", "stalled"):
-        fields.update(state="running", note=None, question=None)
-    db.update_autopilot(root_id, **fields)
+    """Deprecated compatibility entry point; pausing stops a session."""
+    db.add_autopilot(root_id)
+    db.update_autopilot(root_id, enabled=1)
 
 
 def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]:
@@ -1723,8 +1718,8 @@ def progress(db: DB, root_id: str, *, in_flight: bool = True) -> str:
     """
     ap = db.get_autopilot(root_id)
     if ap is None:
-        return "Autopilot is not set up for this session."
-    head = f"Autopilot {'on' if ap.enabled else 'off'}"
+        return "No goal is set up for this session."
+    head = "Goal progress"
     if not ap.goal:
         return (f"{head}. No goal yet: call set_goal with a goal and milestones derived from the "
                 "user's request (ask what we're building only if there is no request).")
@@ -1900,7 +1895,7 @@ def limit_reached(db: DB, agent: Agent) -> None:
     Claude limit, with a reset time known, stops that provider's workers and
     resumes on its own; any other provider's just blocks and names it."""
     ap = db.get_autopilot(root_of(db, agent.id))
-    if not ap or not ap.enabled:
+    if not ap:
         return
     u = usage() if agent.provider == "claude" else None
     if u and isinstance(u.get("resets_at"), (int, float)):
@@ -1987,7 +1982,7 @@ def usage_sweep(db: DB, now: float | None = None) -> list[str]:
         if root.mode != "interactive" or root.status in ("paused", "done"):
             continue
         ap = db.get_autopilot(root.id)
-        if ap is None or not ap.enabled:
+        if ap is None:
             continue
         if ap.state == "running" and ap.goal:
             ws = db.get_workspace(root.workspace_id)
@@ -2022,7 +2017,7 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     """The supervisor is about to stop. Returns a "block" decision telling it
     to keep going, or None to let it stop."""
     ap = db.get_autopilot(agent.id)
-    if ap is None or not ap.enabled or not ap.goal:
+    if ap is None or not ap.goal:
         return None
     from brindle import agents, login_pause
 
@@ -2276,7 +2271,7 @@ def goal_reminder(db: DB, caller_id: str) -> str | None:
     if root_of(db, caller_id) != caller_id:
         return None
     ap = db.get_autopilot(caller_id)
-    return GOAL_REMINDER if ap and ap.enabled and not ap.goal else None
+    return GOAL_REMINDER if ap and ap.state == "running" and not ap.goal else None
 
 
 def worker_goal(prompt: str, done_when: str, branch: str) -> str | None:

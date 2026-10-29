@@ -192,6 +192,35 @@ describe("App", () => {
     sync.stop();
   });
 
+  it("project settings: opens from a repo's sidebar heading and from Settings' link, and a shell opened there starts in that repo", async () => {
+    const OTHER = "/home/u/other";
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }],
+      sessions: [session, { ...session, id: "sup2", workspace_id: "other" }],
+      workspaces: [root],
+    });
+    const store = createAppStore();
+    const client = daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "new" }} />);
+    // The second repo's heading: its Project settings, and a shell from the status line starts at that repo.
+    await screen.findByRole("complementary", { name: "Sidebar" });
+    fireEvent.click(await within(nav()).findByRole("button", { name: "Project settings for other" }));
+    await screen.findByRole("region", { name: "Project settings" });
+    expect(screen.getByRole("radio", { name: /^other/ }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByTestId("terminal-toggle"));
+    await waitFor(() => expect(daemon.shells.map((s) => s.cwd)).toEqual([OTHER]));
+    // Settings opens on You; the switch's repo side is the current session's repo (here the second), with a menu for the others.
+    localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ root: "sup2", repo: OTHER }));
+    fireEvent.click(link("Settings"));
+    fireEvent.click(await screen.findByRole("radio", { name: /^other/ }));
+    await screen.findByRole("region", { name: "Project settings" });
+    fireEvent.click(screen.getByRole("radio", { name: /^other/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "proj" }));
+    expect((await screen.findByRole("radio", { name: /^proj/ })).getAttribute("aria-checked")).toBe("true");
+    sync.stop();
+  });
+
   it("inbox: a plan is approved and a notice marked read right on their cards, at once; Go to session opens the session with nothing over it", async () => {
     const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan.\n2. Ship it." };
     const notice = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };
@@ -581,10 +610,11 @@ describe("closing a session", () => {
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
     const context = within(nav()).getByTestId("session-context");
-    // Beside the Done status: a primary Close session.
+    // Finished: the count line is green, with no phase label; Close session sits under the milestone list.
     const close = await within(context).findByRole("button", { name: "Close session" });
-    expect(within(context).getByTestId("goal-phase").textContent).toBe("Done");
-    expect(close.parentElement).toBe(within(context).getByTestId("goal-line").parentElement);
+    expect(within(context).getByTestId("goal-line").className).toContain("text-pass");
+    expect(within(context).queryByTestId("goal-phase")).toBeNull();
+    expect(within(context).getByRole("list", { name: "Milestones" }).compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(sessionRow("sup1")).toBeTruthy();
 
     fireEvent.click(close);

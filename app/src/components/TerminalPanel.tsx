@@ -40,7 +40,7 @@ export interface ShellPlace {
    even when paused. Until that folder is known, don't substitute the repo root.
    Outside a session, use the repo on screen, last visited, or first listed. */
 export function shellPlace(route: Route, repos: { repo_root: string; name: string }[], workspaces: WorkspaceDTO[], session?: Pick<SessionDTO, "id" | "workspace_id"> | null): ShellPlace | null {
-  const repo = route.screen === "session" ? route.repo : (route.screen === "new" && route.repo) || readLastSession()?.repo || repos[0]?.repo_root;
+  const repo = route.screen === "session" ? route.repo : ((route.screen === "new" || route.screen === "project-settings") && route.repo) || readLastSession()?.repo || repos[0]?.repo_root;
   if (!repo) return null;
   const name = repos.find((r) => r.repo_root === repo)?.name ?? repo.split("/").filter(Boolean).pop() ?? repo;
   if (route.screen === "session") {

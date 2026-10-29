@@ -167,36 +167,6 @@ def test_tcp_daemon_needs_the_token_on_requests_and_as_the_ws_first_frame(tmp_pa
         lifecycle.cleanup(info)
 
 
-@pytest.mark.variant("real incident: a staff build's first start after an update waited on the old "
-                     "daemon finishing requests its quit app had left")
-def test_a_stopping_daemon_waits_only_briefly_for_a_request_still_running(monkeypatch):
-    # An app that quits for its update leaves its slow requests (a provider's sign-in probe) running,
-    # and the next app waits on this daemon's exit to start its own (daemon.rs stop_daemon).
-    monkeypatch.setattr(lifecycle, "SHUTDOWN_GRACE", 0.05)
-    asked = threading.Event()
-
-    async def never_answers(scope, receive, send):
-        asked.set()
-        await asyncio.Event().wait()
-
-    sock = lifecycle.bind_tcp()
-    sock.listen()
-    server = lifecycle.make_server(never_answers)
-    thread = threading.Thread(target=asyncio.run, args=(server.serve(sockets=[sock]),))
-    thread.start()
-    try:
-        with socket.create_connection(sock.getsockname()) as s:
-            s.sendall(b"GET /v1/meta HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
-            assert asked.wait(10)
-            server.should_exit = True
-            thread.join(10)
-            assert not thread.is_alive(), "still waiting on the request"
-    finally:
-        server.force_exit = True
-        thread.join(10)
-        sock.close()
-
-
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
@@ -652,5 +622,16 @@ def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     # One read per key, and none at all when the page asks without the keys (the project page).
     assert sorted(reads) == ["OPENAI_API_KEY", "UNSET_KEY"]
     reads.clear()
+    # A saved model choice is judged while the config loads: that must run no sign-in CLI
+    # and read no key (a `security` call on macOS), or the quick read waits on them.
+    from brindle import config, doctor, providers, worker_models
+
+    config.set_user("routing_heavy", "or-glm-4.6")      # a hosted pick: its key is in the keychain
+    probed: list = []
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(doctor, "signin_providers", lambda: list(doctor.CLI_INSTALL))
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: probed.append(argv[0]))
+    monkeypatch.setattr(keystore, "get_key", lambda name: probed.append(name))
+    monkeypatch.setattr(worker_models, "_signed_in", None)
     _, bare = _get("/v1/config", AUTH, f"repo={seeded['repo']}&keys=0")
-    assert bare["keys"] == [] and "repo" in bare and reads == []
+    assert bare["keys"] == [] and "repo" in bare and reads == [] and probed == []

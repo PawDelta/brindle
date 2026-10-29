@@ -221,8 +221,8 @@ def demo(
     """Watch brindle work on a tiny practice repo: two workers in parallel, reviews, gated merges, verified milestones.
 
     Creates a small Python repo under ~/.brindle/demo/ with two failing test
-    files and a two-milestone goal, then starts the supervisor there with
-    autopilot on. Takes a few minutes; nothing is created where you run it."""
+    files and a two-milestone goal, then starts the supervisor there to
+    verify the goal. Takes a few minutes; nothing is created where you run it."""
     from brindle import demo as demo_mod
 
     root = demo_mod.create(local=local)
@@ -290,17 +290,13 @@ def new(
             typer.secho(f"  setup   FAILED\n{created.setup.log}", fg="yellow")
             typer.echo(f"  (workspace kept; fix and re-run with `brindle setup {ws.name}`)")
 
-    from brindle.config import load_repo_config
-
     window = None
     if not no_agent:
-        autopilot = load_repo_config(ws.repo_root).autopilot
         a = _run(agents.spawn, db, ws, agents.SUPERVISOR, prompt=prompt, provider_name=provider,
-                 autopilot=autopilot)
+                 autopilot=True)
         window = a.tmux_window
         typer.echo(f"  agent   {a.id} ({a.profile}/{a.provider})")
-        if autopilot:
-            _say_autopilot(db, a.id)
+        _say_autopilot(db, a.id)
     typer.echo(f"\n  brindle attach {ws.name}")
     if attach:
         _attach(ws, window)
@@ -314,7 +310,7 @@ def start(
     ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
-    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .brindle/config.json)."),
+    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", hidden=True),
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't open the supervisor picker: use your last pick, else the default.")] = False,
@@ -331,6 +327,9 @@ def start(
     from brindle import picker
     from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS, get_provider
     from brindle.service import sessions as svc
+
+    if isinstance(autopilot, bool):
+        typer.echo("brindle's goal driver is always on; --autopilot/--no-autopilot is deprecated and ignored.")
 
     provider = provider or provider_alias or _group_supervisor
     if provider and provider != picker.PICK:
@@ -548,10 +547,9 @@ def _say_autopilot(db: DB, root_id: str) -> None:
     ap = db.get_autopilot(root_id)
     if ap and ap.goal:
         done, total = pilot.counts(db, root_id)
-        typer.echo(f"  autopilot: {ap.goal} ({done} of {total} milestones verified)")
+        typer.echo(f"  goal: {ap.goal} ({done} of {total} milestones verified)")
     else:
-        typer.echo("  autopilot: on. Tell the supervisor what we're building.")
-    typer.echo("  `brindle autopilot off` hands the wheel back to you.")
+        typer.echo("  Tell the supervisor what we're building; brindle drives toward a verified goal.")
 
 
 def _ask_about_running(live: list, wanted: Optional[str] = None, here: Optional[str] = None):
@@ -783,7 +781,7 @@ def handover(
 def default(
     ctx: typer.Context,
     cont: bool = typer.Option(False, "--continue", "-c", help="Pick up the most recent paused session instead of starting fresh."),
-    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="Start with autopilot on or off (default: on, or `autopilot` in .brindle/config.json)."),
+    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", hidden=True),
     provider: Optional[str] = typer.Option(
         None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
@@ -795,6 +793,8 @@ def default(
     provider = provider or provider_alias
     global _group_supervisor
     _group_supervisor = provider if ctx.invoked_subcommand else None   # `-s codex start`
+    if isinstance(autopilot, bool):
+        typer.echo("brindle's goal driver is always on; --autopilot/--no-autopilot is deprecated and ignored.")
     if show_version:
         from brindle import __version__
 
@@ -815,7 +815,7 @@ def default(
             continue_cmd(session_id=None, attach=True)
         else:
             start(prompt=None, provider=provider, attach=True, watch=True,
-                  autopilot=autopilot, branch=None, worktree=None, yes=yes)
+                  autopilot=None, branch=None, worktree=None, yes=yes)
 
 
 @app.command()
@@ -826,7 +826,7 @@ def supervisor(
     ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
-    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .brindle/config.json)."),
+    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", hidden=True),
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't open the supervisor picker: use your last pick, else the default.")] = False,
@@ -899,41 +899,28 @@ def _tell_supervisors_about_delegation(db: DB) -> None:
                 pass
 
 
-@app.command("autopilot")
+@app.command("goal")
+@app.command("autopilot", hidden=True)
 def autopilot_cmd(
-    action: Optional[str] = typer.Argument(None, help="on, off, or check (run the milestone checks now). Omit to show progress."),
+    action: Optional[str] = typer.Argument(None, help="check runs the milestone checks now. Omit to show progress."),
 ) -> None:
-    """Show the goal's progress, or turn autopilot on or off.
-
-    With autopilot on, the supervisor keeps working until every milestone's
-    check passes or it needs you."""
+    """Show the goal's progress or run its milestone checks."""
     from brindle import autopilot as pilot
 
     db = DB()
     root_id = _session_root(db)
     root = db.get_agent(root_id)
     if action in ("on", "off"):
-        on = action == "on"
-        pilot.set_enabled(db, root_id, on)
-        if root and agents.is_alive(root):
-            note = ("Autopilot is on again: keep driving toward the goal (get_progress shows where it stands)."
-                    if on else "Autopilot is now off: stop driving and wait for the user's instructions.")
-            try:
-                agents.send_message(db, root_id, f"[brindle autopilot] {note}")
-            except agents.AgentError:
-                pass
-        typer.echo(f"autopilot {action} for session {root_id}")
-        if on and not (root and agents.is_alive(root)):
-            typer.echo("It takes effect when the session runs: `brindle continue`.")
+        typer.echo("brindle's goal driver is always on; on/off is deprecated and ignored. Pause the session to stop it.")
         return
     if action == "check":
         ws = db.get_workspace(root.workspace_id) if root else None
         if ws is None or db.get_autopilot(root_id) is None:
-            _fail("autopilot isn't set up for this session")
+            _fail("no goal is set up for this session")
         typer.echo(_run(pilot.check_milestones, db, root_id, ws))
         return
     if action:
-        _fail(f"unknown action {action!r}: use on, off or check")
+        _fail(f"unknown action {action!r}: use check")
     typer.echo(pilot.progress(db, root_id))
     u = pilot.usage()
     if u:

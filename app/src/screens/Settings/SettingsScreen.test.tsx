@@ -79,7 +79,7 @@ function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps[
           <ProvidersProvider client={client}>
             {/* A sign-in's CLI read through the fake daemon's pty views, as the shell's show it. */}
             <PtyViewsProvider value={daemon.ptyViews()}>
-              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} readAbout={readAbout} rule={rule} onProjectSettings={() => {}} />
+              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} readAbout={readAbout} rule={rule} />
             </PtyViewsProvider>
           </ProvidersProvider>
         </SessionsProvider>
@@ -100,10 +100,12 @@ describe("settings screen", () => {
     expect(daemon.requests.find((r) => r.path === "/config")?.query).toEqual({ repo: REPO });
     // Your settings lead; the handful people change most show, the rest behind More. Checks is not among them.
     expect(screen.getAllByRole("region").map((s) => s.id).filter(Boolean).slice(0, 2)).toEqual(["your-settings", "you"]);
-    // The repo's own checks and rules are on its Project settings page, not here.
+    // The repo's own checks and rules are on the switch's repo side, not here; no Autopilot row anywhere.
     expect(screen.queryByTestId("repo-settings")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Checks" })).toBeNull();
-    expect(screen.getByTestId("project-settings-link").textContent).toBe("Project settings for proj ›");
+    expect(screen.getByRole("radio", { name: "You" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: "proj" })).toBeTruthy();
+    expect(screen.queryByRole("switch", { name: "Autopilot" })).toBeNull();
     expect(within(mine).queryByRole("textbox", { name: "Checks" })).toBeNull();
     expect(within(mine).queryByRole("combobox", { name: "Overlapping tasks" })).toBeNull();
     expect(screen.queryByTestId("user-save")).toBeNull();

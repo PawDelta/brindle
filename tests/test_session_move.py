@@ -91,7 +91,7 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     assert db.get_agent("w1").parent_id == "new"
     task = db.get_task("t1")
     assert task.caller_id == "new" and task.caller_ws_id == dest.id
-    assert not db.get_autopilot("old").enabled
+    assert autopilot.on_stop(db, db.get_agent("old"), {}) is None
     assert [(e["root_id"], e["payload"]) for e in bus.tail(db, kinds=("session.handover",))] == [
         ("new", {"from_root": "old"})]
     # The wait went with the session: once it ends, one notice, to the new supervisor.

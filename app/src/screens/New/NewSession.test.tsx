@@ -95,10 +95,9 @@ describe("NewSession", () => {
     const { daemon, onOpen, stop } = setup();
     const prompt = await screen.findByLabelText("What should brindle work on?");
     fireEvent.change(prompt, { target: { value: "Add a cache" } });
-    // Branch, CLI and autopilot wait behind Options.
-    expect(screen.queryByLabelText("Autopilot")).toBeNull();
+    // Branch, CLI and session name wait behind Options.
     fireEvent.click(screen.getByRole("button", { name: /Options/ }));
-    fireEvent.change(screen.getByLabelText("Autopilot"), { target: { value: "on" } });
+    expect(screen.queryByLabelText("Autopilot")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     // sup1 is running here: the engine asks what to do with it first.
     const ask = await screen.findByRole("group", { name: "Session already running" });
