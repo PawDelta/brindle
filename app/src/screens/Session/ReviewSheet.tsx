@@ -129,7 +129,7 @@ export function ReviewSheet({ client, root, readiness, state, onClose, openUrl =
       {opened && step === "diff" && (
         <p className="flex flex-wrap items-center gap-s1 rounded-md bg-pass-soft px-s2 py-s1 text-sm text-ink" data-testid="pr-opened">
           <span className="font-medium text-pass">✓ The PR is open.</span>
-          <a className="text-branch underline" href={opened.url} onClick={(e) => (e.preventDefault(), void openUrl(opened.url))}>
+          <a className="text-pass underline" href={opened.url} onClick={(e) => (e.preventDefault(), void openUrl(opened.url))}>
             {opened.url}
           </a>
           {opened.unpushed > 0 ? (
@@ -251,7 +251,7 @@ function PrStep({ client, root, diff, ready, openUrl, onBack, onClose }: { clien
       {url && (
         <p className="flex flex-wrap items-center gap-s1 rounded-md bg-pass-soft px-s2 py-s1 text-sm" data-testid="pr-opened">
           <span className="font-medium text-pass">✓ Opened.</span>
-          <a className="text-branch underline" href={url} onClick={(e) => (e.preventDefault(), void openUrl(url))}>
+          <a className="text-pass underline" href={url} onClick={(e) => (e.preventDefault(), void openUrl(url))}>
             {url}
           </a>
         </p>

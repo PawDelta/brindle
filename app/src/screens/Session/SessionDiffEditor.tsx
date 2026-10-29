@@ -179,7 +179,7 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
           <div className="flex flex-wrap items-center gap-s2">
             <span className={`${label} flex-1`} data-testid="changes-summary">
               {files.length} {files.length === 1 ? "file" : "files"} changed against {diff.base} ·{" "}
-              <span className={`${mono} text-ink-2`}>+{files.reduce((n, f) => n + f.added, 0)} −{files.reduce((n, f) => n + f.removed, 0)}</span>
+              <span className={mono}><span className="text-pass">+{files.reduce((n, f) => n + f.added, 0)}</span> <span className="text-sap">−{files.reduce((n, f) => n + f.removed, 0)}</span></span>
             </span>
             <div role="group" aria-label="Diff layout" className="flex gap-1">
               {[false, true].map((value) => <button key={String(value)} type="button" aria-pressed={split === value} className={`rounded-md px-s1 py-1 text-xs ${split === value ? "bg-surface-2 text-ink" : "text-ink-3 hover:bg-surface-2 hover:text-ink"}`} onClick={() => setSplit(value)}>{value ? "Split" : "Unified"}</button>)}
@@ -231,8 +231,8 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
                         <span className="shrink-0 font-sans text-xs text-ink-3">{GONE}</span>
                       ) : (
                         <>
-                          <span className="text-ink-3">+{f.added}</span>
-                          <span className="text-ink-3">-{f.removed}</span>
+                          <span className={f.added ? "text-pass" : "text-ink-3"}>+{f.added}</span>
+                          <span className={f.removed ? "text-sap" : "text-ink-3"}>−{f.removed}</span>
                         </>
                       )}
                     </button>
@@ -272,7 +272,9 @@ export function FileTree<F extends { path: string }>({ files, renderFile, prefix
     const key = directory || rest;
     groups.set(key, [...(groups.get(key) ?? []), file]);
   }
-  return [...groups].map(([name, children]) => !name.endsWith("/") ? renderFile(children[0]) : (
+  // As an editor lists them: folders first, then files, each by name.
+  const sorted = [...groups].sort(([a], [b]) => Number(!a.endsWith("/")) - Number(!b.endsWith("/")) || a.localeCompare(b));
+  return sorted.map(([name, children]) => !name.endsWith("/") ? renderFile(children[0]) : (
     <li key={name}>
       <button type="button" aria-expanded={!closed.has(name)} className={`${mono} flex w-full items-center gap-1 px-s1 py-1 text-left text-xs text-ink-3 hover:bg-surface-2`}
         onClick={() => setToggled((before) => {

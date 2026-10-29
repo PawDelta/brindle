@@ -66,7 +66,7 @@ const hunk = () => within(sheet()).getAllByTestId("hunk")[0];
 const gets = (daemon: FakeDaemon, path: string) => daemon.requests.filter((r) => r.method === "GET" && r.path === path).length;
 
 describe("review", () => {
-  it("shows nothing of the review before the engine says the session is ready; at that moment a notification and the goal panel's Ready for PR step, which opens the sheet", async () => {
+  it("shows nothing of the review before the engine says the session is ready; at that moment a notification and the goal panel's Ready for PR; the sheet opened then shows the session's diff", async () => {
     let readinessFails = true;
     let refused = 0;
     const { daemon, store } = mount({}, onSession, (daemon) => (input, init) => {
@@ -98,26 +98,30 @@ describe("review", () => {
     expect(screen.queryByRole("status")).toBeNull();
 
     // The engine judges it ready: session.pr_ready on the bus, the goal's phase ready_for_pr. A system
-    // notification and the goal panel's step; nothing pops up over the session and nothing opens by itself.
+    // notification and the goal panel's phase, said once; nothing pops up over the session and nothing opens by itself.
     daemon.readyForPr("sup1", READY);
     await waitFor(() => expect(notes).toEqual([READY_TITLE]));
     await waitFor(() => expect(within(context()).getByTestId("goal-phase").textContent).toBe("Ready for PR"));
-    expect(within(context()).getByTestId("goal-review").textContent).toContain("Review & open PR");
-    // The PR step lives in the goal panel alone: no separate Ready for PR banner beside it.
+    expect(within(context()).queryByTestId("goal-review")).toBeNull();
     expect(screen.queryByTestId("pr-ready")).toBeNull();
     expect(context().textContent!.match(/Ready for PR/g)).toHaveLength(1);
+    await new Promise((r) => setTimeout(r, 50));
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(screen.queryByRole("status")).toBeNull();
+    sync?.stop();
+    cleanup();
 
-    // The step opens the one sheet over the session: the session's diff, the files down the left, no worker named.
-    fireEvent.click(within(context()).getByTestId("goal-review"));
+    // The sheet, opened over the ready session: the session's diff, the files down the left, no worker named,
+    // and its own Open PR… step.
+    mount({ sessionReview: { sup1: READY } }, { ...onSession, sheet: { kind: "review" } });
     const dialog = await screen.findByRole("dialog", { name: "Review & open PR" });
     expect(dialog.textContent).toContain("dev/ls → main");
     const files = await within(dialog).findByRole("navigation", { name: "Changed files" });
-    expect(files.textContent).toContain("src/ls.py+2-1");
-    expect(files.textContent).toContain("tests/test_ls.py+1-0");
+    expect(files.textContent).toContain("src/ls.py+2−1");
+    expect(files.textContent).toContain("tests/test_ls.py+1−0");
     expect(dialog.textContent).not.toContain("supervisor wrote");
     expect(dialog.textContent).not.toContain("w1");
+    expect(within(dialog).getByTestId("open-pr-step").textContent).toContain("Open PR");
     expect(screen.getByTestId("terminal")).toBeTruthy(); // still there, under the sheet
     fireEvent.keyDown(dialog, { key: "Escape" });
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -189,7 +193,7 @@ describe("review", () => {
     expect(daemon.requests.filter((r) => r.method === "PUT").at(-1)!.body).toMatchObject({ base: fakeBlob(daemon.sessionEdits[0].content!) });
     await waitFor(() => expect(within(sheet()).queryByTestId("file-editor")).toBeNull());
     // The whole file is two lines now: the list says so.
-    await waitFor(() => expect(within(sheet()).getByTitle("src/ls.py").closest("button")!.textContent).toContain("+1-4"));
+    await waitFor(() => expect(within(sheet()).getByTitle("src/ls.py").closest("button")!.textContent).toContain("+1−4"));
 
     // A new file: its path and content, written with no base; it joins the list.
     fireEvent.click(within(sheet()).getByTestId("new-file"));
@@ -200,7 +204,7 @@ describe("review", () => {
     expect(daemon.sessionEdits[2]).toEqual({ root: "sup1", path: "docs/ls.md", content: "# ls --json\n" });
     expect(daemon.requests.filter((r) => r.method === "PUT").at(-1)!.body).toEqual({ path: "docs/ls.md", content: "# ls --json\n" });
     await waitFor(() => expect(within(sheet()).getByTitle("docs/ls.md")).toBeTruthy());
-    expect(within(sheet()).getByRole("navigation", { name: "Changed files" }).textContent).toContain("docs/ls.md+1-0");
+    expect(within(sheet()).getByRole("navigation", { name: "Changed files" }).textContent).toContain("docs/ls.md+1−0");
 
     // A file's ✕ deletes it from the branch, pinned to the blob it was read at; it leaves the list.
     await waitFor(() => expect(within(sheet()).getByRole("button", { name: "Delete tests/test_ls.py" })).toBeTruthy());
@@ -470,13 +474,14 @@ describe("review", () => {
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
     // Nothing is spliced from hunks that don't describe the file: the diff is read again (once), and the fresh
     // one, made from the file as it now is, shows the line that slipped in and can be edited again.
-    await waitFor(() => expect(gets(daemon, "/sessions/sup1/diff")).toBe(2));
+    // Three diff reads in all: the sidebar's Changes row reads it once on its own, the sheet twice.
+    await waitFor(() => expect(gets(daemon, "/sessions/sup1/diff")).toBe(3));
     await waitFor(() => expect(gets(daemon, "/sessions/sup1/file")).toBe(2));
     await waitFor(() => expect(hunk().textContent).toContain("+# a line slipped in above"));
     expect(within(sheet()).queryByTestId("file-stale")).toBeNull();
     expect(within(hunk()).getByRole("button", { name: /@@/ })).toHaveProperty("disabled", false);
     await new Promise((r) => setTimeout(r, 150));
-    expect(gets(daemon, "/sessions/sup1/diff")).toBe(2);
+    expect(gets(daemon, "/sessions/sup1/diff")).toBe(3);
     expect(daemon.sessionEdits).toHaveLength(0);
     expect(daemon.requests.filter((r) => r.method === "PUT")).toHaveLength(0);
 
