@@ -130,13 +130,6 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
           <span className="font-mono text-[11px]">{root}</span> · {repoName} · {row ? (paused ? sessionAge(row) : `${row.mode}${goal?.enabled ? " · autopilot" : ""} · ${liveWorkers(agents, alive)} working`) : "…"}
         </div>
       </div>
-      <ChangesRow
-        client={client}
-        root={root}
-        store={store}
-        open={here && route.screen === "session" && route.sheet?.kind === "changes"}
-        onOpen={(open) => navigate({ screen: "session", root, repo, agent: here && route.screen === "session" ? route.agent : undefined, sheet: open ? { kind: "changes" } : undefined })}
-      />
       <GoalPanel
         client={client}
         repo={repo}
@@ -148,9 +141,22 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
         openUrl={openUrl}
         onCloseSession={closeSession && (() => closeSession(root))}
       />
+      {sidebarChanges.shown && (
+        <ChangesRow
+          client={client}
+          root={root}
+          store={store}
+          open={here && route.screen === "session" && route.sheet?.kind === "changes"}
+          onOpen={(open) => navigate({ screen: "session", root, repo, agent: here && route.screen === "session" ? route.agent : undefined, sheet: open ? { kind: "changes" } : undefined })}
+        />
+      )}
     </section>
   );
 }
+
+/* Hidden for now: the row, its sheet and its tests stay, below the milestones;
+   set `shown` to bring it back. */
+export const sidebarChanges = { shown: false };
 
 /* The session's changes against its PR base, in one line: the files and lines,
    coloured. Clicking it puts the diff in the chat's place, and again (or ← Chat)
