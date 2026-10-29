@@ -23,12 +23,15 @@ export interface ApiSchema {
   CloudOptionsDTO: CloudOptionsDTO;
   ConnectionReadyDTO: ConnectionReadyDTO;
   DecisionDTO: DecisionDTO;
+  DeviceFileDTO: DeviceFileDTO;
   GcloudOptionsDTO: GcloudOptionsDTO;
   GoalDTO: GoalDTO;
+  GovernanceStatusDTO: GovernanceStatusDTO;
   InboxActionDTO: InboxActionDTO;
   InboxItemDTO: InboxItemDTO;
   MilestoneDTO: MilestoneDTO;
   NativeSubagentDTO: NativeSubagentDTO;
+  OfflinePolicyExportDTO: OfflinePolicyExportDTO;
   OrgApprovalPolicyDTO: OrgApprovalPolicyDTO;
   OrgAssignmentDTO: OrgAssignmentDTO;
   OrgAssignmentRequestDTO: OrgAssignmentRequestDTO;
@@ -48,6 +51,8 @@ export interface ApiSchema {
   PermissionPolicyDTO: PermissionPolicyDTO;
   PermissionPresetDTO: PermissionPresetDTO;
   PermissionRuleDTO: PermissionRuleDTO;
+  PlanApprovalDTO: PlanApprovalDTO;
+  PlanSettingDTO: PlanSettingDTO;
   PreflightActionDTO: PreflightActionDTO;
   PreflightItemDTO: PreflightItemDTO;
   ProfileDTO: ProfileDTO;
@@ -401,6 +406,17 @@ export interface DecisionDTO {
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "DeviceFileDTO".
+ */
+export interface DeviceFileDTO {
+  device_id: string;
+  filename: string;
+  managed: {
+    [k: string]: unknown;
+  };
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "GoalDTO".
  */
 export interface GoalDTO {
@@ -437,6 +453,22 @@ export interface MilestoneDTO {
   title: string;
 }
 /**
+ * Who manages this device and whether its signed policy verifies (daemon/routes_governance).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "GovernanceStatusDTO".
+ */
+export interface GovernanceStatusDTO {
+  action?: string | null;
+  enterprise_admin?: boolean;
+  org_id?: string | null;
+  org_name?: string | null;
+  problem?: string | null;
+  source?: ("device" | "account" | "snapshot" | "offline") | null;
+  status: "managed" | "unmanaged" | "problem" | "unavailable";
+  verified?: boolean;
+}
+/**
  * A route the app can call to act on the item itself.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -453,6 +485,7 @@ export interface InboxActionDTO {
 export interface InboxItemDTO {
   action?: InboxActionDTO | null;
   agent_id?: string | null;
+  approval?: PlanApprovalDTO | null;
   detail?: string | null;
   fix?: string | null;
   kind: string;
@@ -461,6 +494,19 @@ export interface InboxItemDTO {
   reason: string;
   root_id?: string | null;
   workspace_id?: string | null;
+}
+/**
+ * Who may approve a plan: named approvers, or a second person (anyone but who asked).
+ * Its producer (InboxItemDTO.approval from the plan-approvals backend) is wired in integration.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanApprovalDTO".
+ */
+export interface PlanApprovalDTO {
+  approvers?: string[];
+  requested_by?: string | null;
+  second_person?: boolean;
+  you?: boolean;
 }
 /**
  * A tool-permission request waiting on the person. ``via``: "hook"
@@ -497,6 +543,14 @@ export interface PermissionChoiceDTO {
   choice: string;
   label: string;
   rule?: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OfflinePolicyExportDTO".
+ */
+export interface OfflinePolicyExportDTO {
+  days: number;
+  path: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -699,6 +753,19 @@ export interface PermissionRuleDTO {
   prompts?: number;
   repo_root?: string | null;
   source: string;
+}
+/**
+ * Plan approvals: Auto / Always / Never, the person's default and a project's override.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanSettingDTO".
+ */
+export interface PlanSettingDTO {
+  effective?: ("auto" | "always" | "never") | null;
+  project?: ("auto" | "always" | "never") | null;
+  project_source?: ("local" | "shared") | null;
+  shared?: ("auto" | "always" | "never") | null;
+  user: "auto" | "always" | "never";
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
