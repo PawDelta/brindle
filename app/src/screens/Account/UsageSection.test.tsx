@@ -71,7 +71,7 @@ describe("Account › Usage", () => {
     stop();
   });
 
-  it("near a limit: the window turns warm or red, a limited provider says when it is back, and what autopilot does", async () => {
+  it("near a limit: the window turns warm or red, a limited provider says when it is back, and what brindle does", async () => {
     const { stop } = setup("reset");
     await waitFor(() => expect(card("Claude").getAttribute("data-state")).toBe("stop"));
     const claude = windows(card("Claude"));
