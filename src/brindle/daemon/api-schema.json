@@ -1940,12 +1940,17 @@
           "additionalProperties": true,
           "title": "Managed",
           "type": "object"
+        },
+        "system_dir": {
+          "title": "System Dir",
+          "type": "string"
         }
       },
       "required": [
         "filename",
         "device_id",
-        "managed"
+        "managed",
+        "system_dir"
       ],
       "title": "DeviceFileDTO",
       "type": "object"

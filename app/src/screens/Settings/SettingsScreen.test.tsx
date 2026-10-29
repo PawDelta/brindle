@@ -148,14 +148,15 @@ describe("settings screen", () => {
     expect(screen.getByRole("button", { name: "Offline policy export" })).toHaveProperty("disabled", true);
     fireEvent.change(days, { target: { value: "14" } });
     fireEvent.click(screen.getByRole("button", { name: "Offline policy export" }));
-    expect((await within(screen.getByTestId("org-approvals")).findByRole("status")).textContent).toContain("/home/u/.brindle/policy.json");
-    expect(posts(daemon).find((r) => r.path === "/governance/offline-policy")?.body).toEqual({ days: 14 });
+    expect((await within(screen.getByTestId("org-approvals")).findByRole("status")).textContent).toContain("/home/u/proj/.brindle/policy.json");
+    expect(posts(daemon).find((r) => r.path === "/governance/offline-policy")?.body).toEqual({ days: 14, repo: "/home/u/proj" });
     // The device file comes back to save as managed.json.
     fireEvent.change(screen.getByRole("textbox", { name: "Device name" }), { target: { value: "build-01" } });
     fireEvent.click(screen.getByRole("checkbox", { name: "Allow air-gapped use" }));
     fireEvent.click(screen.getByRole("button", { name: "Download device file" }));
     const file = await screen.findByTestId("device-file");
     expect(file.getAttribute("download")).toBe("managed.json");
+    expect(screen.getByTestId("install-location").getAttribute("data-path")).toBe("/Library/Application Support/brindle");
     expect(JSON.parse(decodeURIComponent(file.getAttribute("href")!.split(",")[1]))).toEqual({ org_id: "org_1", name: "build-01", allow_airgap: true });
     // Plan approvals: the default for every project, saved when picked.
     const plan = await screen.findByRole("combobox", { name: "Plan approvals" });
@@ -172,6 +173,14 @@ describe("settings screen", () => {
     // An unusable device file names no organization: the problem says it, and an admin can make a new one.
     ["an unusable device file", { status: "problem", problem: "This device's managed device file can't be used: bad signature", action: "Ask your admin.", enterprise_admin: true }, { alert: true, deviceFile: true }],
   ])("organization: %s shows that state and only the actions it allows", async (_, governance, want) => {
+    // With no project, the export stays off and sends nothing.
+    const none = setup({ governance, repos: [] });
+    const exportButton = await screen.findByRole("button", { name: "Offline policy export" });
+    expect(exportButton).toHaveProperty("disabled", true);
+    fireEvent.click(exportButton);
+    expect(posts(none.daemon).some((r) => r.path === "/governance/offline-policy")).toBe(false);
+    none.stop();
+    cleanup();
     const { stop } = setup({ governance });
     const status = await screen.findByTestId("org-status");
     expect(status.dataset.status).toBe(governance.status);

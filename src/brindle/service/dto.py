@@ -140,6 +140,7 @@ class DeviceFileDTO(_DTO):
     filename: str
     device_id: str
     managed: dict[str, Any]
+    system_dir: str                 # where an MDM installs managed.json on this OS
 
 
 class PlanApprovalDTO(_DTO):
