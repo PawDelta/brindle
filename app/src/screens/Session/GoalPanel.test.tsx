@@ -265,13 +265,14 @@ describe("GoalPanel", () => {
     expect(sidebar.getByTestId("goal-line").textContent).toContain("1 of 3 milestones complete");
   });
 
-  /* One row per goal phase: the panel's one status in both views, and the step that phase has (Ready for PR's
-     Review & open PR, PR open's link), nothing of either in any other phase. */
+  /* One row per goal phase: the panel's one status in both views, and the step that phase has (PR open's link,
+     Done's Close session), nothing of either in any other phase. Ready for PR is only its label: the session's
+     ready notice offers the PR. */
   const PR = "https://github.com/example/proj/pull/7";
-  it.each<[string, string, "review" | "pr" | "close" | null]>([
+  it.each<[string, string, "pr" | "close" | null]>([
     ["in_progress", "In progress", null],
     ["in_review", "In review", null],
-    ["ready_for_pr", "Ready for PR", "review"],
+    ["ready_for_pr", "Ready for PR", null],
     ["pr_open", "PR open", "pr"],
     ["done", "Done", "close"],
   ])("shows the goal phase %s as '%s', with its own step", async (phase, label, step) => {
@@ -284,7 +285,7 @@ describe("GoalPanel", () => {
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} compact onReview={onReview} openUrl={openUrl} onCloseSession={onCloseSession} />);
     await waitFor(() => expect(sidebar.getByTestId("goal-phase").textContent).toBe(label));
     expect(sidebar.getByRole("region", { name: "Goal" }).dataset.phase).toBe(phase);
-    expect(!!sidebar.queryByTestId("goal-review")).toBe(step === "review");
+    expect(sidebar.queryByTestId("goal-review")).toBeNull();
     expect(!!sidebar.queryByTestId("goal-pr")).toBe(step === "pr");
     expect(!!sidebar.queryByTestId("goal-close")).toBe(step === "close");
     if (step === "close") {
@@ -295,10 +296,6 @@ describe("GoalPanel", () => {
       fireEvent.click(close);
       expect(onCloseSession).toHaveBeenCalledTimes(1);
       expect(sidebar.queryByRole("dialog")).toBeNull();
-    }
-    if (step === "review") {
-      fireEvent.click(sidebar.getByTestId("goal-review"));
-      expect(onReview).toHaveBeenCalledTimes(1);
     }
     if (step === "pr") {
       fireEvent.click(sidebar.getByTestId("goal-pr"));
@@ -311,7 +308,7 @@ describe("GoalPanel", () => {
 
     const full = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} onReview={onReview} openUrl={openUrl} onCloseSession={onCloseSession} />);
     await waitFor(() => expect(full.getByTestId("goal-phase").textContent).toBe(label));
-    expect(!!full.queryByTestId("goal-review")).toBe(step === "review");
+    expect(full.queryByTestId("goal-review")).toBeNull();
     expect(!!full.queryByTestId("goal-pr")).toBe(step === "pr");
     expect(!!full.queryByTestId("goal-close")).toBe(step === "close");
     if (step === "close") {

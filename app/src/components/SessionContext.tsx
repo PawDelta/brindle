@@ -16,7 +16,9 @@ import type { DaemonClient } from "../api/client";
 import { DaemonContext } from "../api/context";
 import type { OpenUrl } from "../api/open";
 import type { Route, SessionRef } from "../routes";
+import type { AppStore } from "../store/store";
 import { useGoal } from "../screens/Session/GoalPanel";
+import { useSessionDiff } from "../screens/Session/review";
 import { GoalPanel } from "../screens/Session/GoalPanel";
 import { agentIds, sessionTree } from "../screens/Session/tree";
 import { isPaused, liveWorkers, sessionAge } from "../store/overview";
@@ -128,6 +130,13 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
           <span className="font-mono text-[11px]">{root}</span> · {repoName} · {row ? (paused ? sessionAge(row) : `${row.mode}${goal?.enabled ? " · autopilot" : ""} · ${liveWorkers(agents, alive)} working`) : "…"}
         </div>
       </div>
+      <ChangesRow
+        client={client}
+        root={root}
+        store={store}
+        open={here && route.screen === "session" && route.sheet?.kind === "changes"}
+        onOpen={(open) => navigate({ screen: "session", root, repo, agent: here && route.screen === "session" ? route.agent : undefined, sheet: open ? { kind: "changes" } : undefined })}
+      />
       <GoalPanel
         client={client}
         repo={repo}
@@ -140,5 +149,43 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
         onCloseSession={closeSession && (() => closeSession(root))}
       />
     </section>
+  );
+}
+
+/* The session's changes against its PR base, in one line: the files and lines,
+   coloured. Clicking it puts the diff in the chat's place, and again (or ← Chat)
+   takes it away. */
+function ChangesRow({ client, root, store, open, onOpen }: { client: DaemonClient; root: string; store: AppStore; open: boolean; onOpen(open: boolean): void }) {
+  const { diff, files } = useSessionDiff(client, root, store);
+  const added = files.reduce((n, f) => n + f.added, 0);
+  const removed = files.reduce((n, f) => n + f.removed, 0);
+  return (
+    <div className="mx-s1 flex items-center gap-1">
+      <button
+        type="button"
+        aria-pressed={open}
+        className="flex min-w-0 flex-1 items-baseline gap-s1 rounded-md px-s1 py-1 text-left text-[13px] hover:bg-surface-2 aria-pressed:bg-surface-2"
+        onClick={() => onOpen(!open)}
+        data-testid="changes-row"
+      >
+        <span className="font-medium text-ink">Changes</span>
+        {!diff ? (
+          <span className="text-xs text-ink-3">…</span>
+        ) : files.length === 0 ? (
+          <span className="text-xs text-ink-3">none yet</span>
+        ) : (
+          <span className="truncate font-mono text-xs" data-testid="changes-count">
+            <span className="text-ink-3">
+              {files.length} {files.length === 1 ? "file" : "files"}
+            </span>{" "}
+            <span className="text-pass">+{added}</span> <span className="text-sap">−{removed}</span>
+          </span>
+        )}
+        <span className="flex-1" />
+        <span className="text-ink-3" aria-hidden>
+          {open ? "‹" : "›"}
+        </span>
+      </button>
+    </div>
   );
 }

@@ -23,7 +23,9 @@ export interface SessionRef {
    the engine says the session is ready for one. Nothing else ever lies
    over a session: what waits on the person is acted on from the Inbox's
    cards or in the agent's own terminal. */
-export type SheetRef = { kind: "review" };
+/* What lies over a session's chat: the review sheet (an open PR's Review changes), or the session's
+   changes in the chat's place (the sidebar's Changes row). */
+export type SheetRef = { kind: "review" } | { kind: "changes" };
 
 export type Route =
   /* `repo`: the project to start in (one just picked, as the first launch ends). */

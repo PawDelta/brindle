@@ -1,10 +1,6 @@
-/* A session's main area has Chat, Changes and Repo tabs. Chat keeps
-   the selected agent's ProviderSurface; Changes shows the whole session
-   branch against its PR base, even before readiness; Repo, the session
-   checkout's files to open and edit (RepoView). Each
-   remains mounted after opening so switching tabs keeps the pane and unsaved drafts.
-   The session branch is named in the Repo tab, whichever agent is selected;
-   the change counts, in the Changes view's own header.
+/* A session's main area is the selected agent's chat (ProviderSurface), or
+   its changes in the chat's place when the sidebar's Changes row asks
+   (sheet "changes").
    Continue in the bar and on the state card share useContinue.
    The goal and PR lifecycle stay in the sidebar; Review & open PR opens
    its sheet from there and uses the same editor as Changes.
@@ -27,7 +23,6 @@ import { AgentMenu, SessionMenu, closeSessionLabel, type CloseSessionItem } from
 import { failure, type Notice } from "./notice";
 import { ProviderSurface } from "./ProviderSurface";
 import { usePrReadiness, useSessionDiff } from "./review";
-import { RepoView } from "./RepoView";
 import { ReviewSheet } from "./ReviewSheet";
 import { SessionDiffEditor } from "./SessionDiffEditor";
 import { agentIds, sessionTree, sessionWork, since, type AgentNode } from "./tree";
@@ -54,8 +49,6 @@ export interface SessionScreenProps {
   onCloseSession?(root: string): void;
 }
 
-const TABS = ["terminal", "changes", "repo"] as const;
-type Tab = (typeof TABS)[number];
 
 export function findNode(node: AgentNode | null, id: string): AgentNode | null {
   if (!node) return null;
@@ -125,6 +118,24 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   // The engine's word on a PR: the Review & open PR entry exists only once it says ready.
   const readiness = usePrReadiness(client, root, store);
   const changes = useSessionDiff(client, root, store);
+  // The session's changes in the chat's place, opened from the sidebar's Changes row; read afresh each time.
+  const showChanges = shownSheet?.kind === "changes";
+  const reloadChanges = changes.reload;
+  const [changesOpened, setChangesOpened] = useState<string | null>(null);
+  useEffect(() => {
+    if (!showChanges) return;
+    setChangesOpened(root);
+    reloadChanges();
+  }, [showChanges, reloadChanges, root]);
+  useEffect(() => {
+    if (!showChanges) return;
+    // Esc goes back to the chat, unless an edit box took it first.
+    const back = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !e.defaultPrevented) select(selected, null);
+    };
+    window.addEventListener("keydown", back);
+    return () => window.removeEventListener("keydown", back);
+  });
   // A new HEAD the diff's own refresh found: readiness (an open PR's unpushed count) is read again.
   const head = changes.diff?.head;
   const seenHead = useRef(head);
@@ -133,17 +144,11 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     if (seenHead.current && head && head !== seenHead.current) reloadReadiness();
     if (head) seenHead.current = head;
   }, [head, reloadReadiness]);
-  const [view, setView] = useState<{ root: string; tab: Tab }>({ root, tab: "terminal" });
-  const tab = view.root === root ? view.tab : "terminal";
-  const [visited, setVisited] = useState<string | null>(null);
-  const [repoVisited, setRepoVisited] = useState<string | null>(null);
-  const checkout = workspaces.find((ws) => ws.id === rootWorkspace);
-  const branch = changes.diff?.branch || checkout?.branch || "…";
 
   const host = useRef<HTMLElement>(null);
   useEffect(() => {
     const section = host.current;
-    if (!section || shownSheet || tab !== "terminal") return;
+    if (!section || shownSheet) return;
     // xterm loads asynchronously and adds its textarea after the pane mounts.
     // Focus once per navigation, never on later terminal output or store updates.
     const focus = () => {
@@ -158,7 +163,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     });
     observer.observe(section, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [root, repo, selected, shownSheet, tab]);
+  }, [root, repo, selected, shownSheet]);
 
   return (
     <section ref={host} className="relative flex min-h-0 flex-1 flex-col" aria-label="Session">
@@ -176,15 +181,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         onAgent={(id) => select(id, null)}
         onOpen={onOpen}
         closeSession={closeSession}
-        tab={tab}
-        onTab={(tab) => {
-          setView({ root, tab });
-          if (tab === "changes") {
-            setVisited(root);
-            changes.reload();
-          }
-          if (tab === "repo") setRepoVisited(root);
-        }}
+        onChat={showChanges ? closeSheet : undefined}
       />
       {pausedUnder && (
         <div role="status" className="flex items-center gap-s2 border-b border-line px-s2 py-1 text-sm text-ink-2">
@@ -202,7 +199,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
           </button>
         </div>
       )}
-      <div role="tabpanel" id="session-terminal" aria-labelledby="session-tab-terminal" hidden={tab !== "terminal"} className={tab === "terminal" ? "flex min-h-0 flex-1 p-s2" : "hidden"}>
+      <div className={showChanges ? "hidden" : "flex min-h-0 flex-1 p-s2"}>
         {!tree && !paused && !synced ? (
           <p className="flex-1 text-ink-3">Loading…</p>
         ) : !tree && !paused && !session ? (
@@ -222,21 +219,21 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
           </div>
         )}
       </div>
-      <div role="tabpanel" id="session-changes" aria-labelledby="session-tab-changes" hidden={tab !== "changes"} className={tab === "changes" ? "flex min-h-0 min-w-0 flex-1 flex-col p-s2" : "hidden"}>
-        {visited === root && <SessionDiffEditor key={root} client={client} root={root} state={changes} />}
-      </div>
-      <div role="tabpanel" id="session-repo" aria-labelledby="session-tab-repo" hidden={tab !== "repo"} className={tab === "repo" ? "flex min-h-0 min-w-0 flex-1 flex-col p-s2" : "hidden"}>
-        {repoVisited === root && <RepoView key={root} client={client} root={root} branch={branch} active={tab === "repo"} />}
-      </div>
-      {/* The one thing that ever lies over a session, opened on purpose from the goal panel's Ready for PR step.
+      {/* Kept once opened, so an unsaved edit outlives a look back at the chat. */}
+      {changesOpened === root && (
+        <div className={showChanges ? "flex min-h-0 min-w-0 flex-1 flex-col p-s2" : "hidden"} hidden={!showChanges} data-testid="session-changes">
+          <SessionDiffEditor key={root} client={client} root={root} state={changes} />
+        </div>
+      )}
+      {/* The one thing that ever lies over a session, opened on purpose: an open PR's Review changes.
           Open, it stays through readiness being read again (an edit here, a sweep): it says so quietly instead. */}
       {shownSheet?.kind === "review" && <ReviewSheet key={root} client={client} root={root} readiness={readiness} state={changes} onClose={closeSheet} openUrl={openUrl} />}
     </section>
   );
 }
 
-/* Tabs, and the selected agent's status and controls. */
-function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, reload, refresh, recovery, onAgent, onOpen, closeSession, tab, onTab }: {
+/* The selected agent's status and controls. */
+function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, reload, refresh, recovery, onAgent, onOpen, closeSession, onChat }: {
   client: DaemonClient;
   root: string;
   repo: string;
@@ -250,8 +247,8 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
   onAgent(id: string): void;
   onOpen?(root: string, repo: string): void;
   closeSession?: CloseSessionItem;
-  tab: Tab;
-  onTab(tab: Tab): void;
+  /* The changes are showing in the chat's place: the way back. */
+  onChat?(): void;
 }) {
   const workspaces = useAppState((s) => s.workspaces);
   const [busy, setBusy] = useState(false);
@@ -281,23 +278,6 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
   // The bar's own notice is the pause's; a continue's shows on the surface's card, where it was asked for.
   return (
     <header className="flex flex-wrap items-center gap-x-s2 gap-y-1 border-b border-line px-s2 py-1" data-testid="session-bar">
-      <div role="tablist" aria-label="Session views" data-testid="session-tabs" className="flex shrink-0 items-center self-stretch gap-s1 pr-s2">
-        {TABS.map((item, at) => (
-          <button key={item} id={`session-tab-${item}`} role="tab" type="button" aria-selected={tab === item} aria-controls={`session-${item}`} tabIndex={tab === item ? 0 : -1} data-testid={`${item}-tab`}
-            className={`rounded-md px-s2 py-s1 text-sm ${tab === item ? "bg-surface-2 text-ink" : "text-ink-3 hover:bg-surface-2 hover:text-ink"}`}
-            onClick={() => onTab(item)}
-            onKeyDown={(e) => {
-              if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(e.key)) return;
-              e.preventDefault();
-              const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
-              const next = e.key === "Home" ? TABS[0] : e.key === "End" ? TABS[TABS.length - 1] : TABS[(at + step + TABS.length) % TABS.length];
-              onTab(next);
-              document.getElementById(`session-tab-${next}`)?.focus();
-            }}>
-            {item === "terminal" ? "Chat" : item === "repo" ? "Repo" : "Changes"}
-          </button>
-        ))}
-      </div>
       <div className="flex min-w-0 items-center gap-s1">
         <span className="truncate text-sm font-semibold" data-testid="surface-title">
           {provider} · {who}
@@ -316,6 +296,11 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         </span>
       </div>
       <span className="flex-1" />
+      {onChat && (
+        <button type="button" className={button} onClick={onChat} data-testid="back-to-chat" title="Back to the chat (esc)">
+          ← Chat
+        </button>
+      )}
       {paused ? (
         <button type="button" className={main} disabled={recovery.busy} onClick={() => void recovery.resume()}>
           Continue

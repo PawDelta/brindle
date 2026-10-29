@@ -159,6 +159,34 @@ describe("Sidebar", () => {
     sync.stop();
   });
 
+  it("shows the session's changes in one coloured line that toggles them in the chat's place", async () => {
+    const onSession: Route = { screen: "session", root: "sup1", repo: REPO, agent: "w1" };
+    const changed = {
+      workspaces: [root, worker],
+      sessionReview: { sup1: { ready: false, reasons: ["work in progress"], branch: "dev/ls", base: "main", diff: "" } },
+      sessionBase: { sup1: { "src/a.ts": "old\ncontext\n" } },
+      sessionFiles: { sup1: { "src/a.ts": "new\ncontext\n", "docs/readme.md": "hello\nworld\n" } },
+    };
+    const first = mount(changed, onSession);
+    const row = () => within(screen.getByTestId("session-context")).getByTestId("changes-row");
+    await waitFor(() => expect(within(row()).getByTestId("changes-count").textContent).toBe("2 files +3 −1"));
+    expect(within(row()).getByText("+3").className).toContain("text-pass");
+    expect(within(row()).getByText("−1").className).toContain("text-sap");
+    expect(row().getAttribute("aria-pressed")).toBe("false");
+    // Clicking puts the changes in the chat's place, on the agent shown.
+    fireEvent.click(row());
+    expect(first.navigate).toHaveBeenLastCalledWith({ screen: "session", root: "sup1", repo: REPO, agent: "w1", sheet: { kind: "changes" } });
+    first.sync.stop();
+    cleanup();
+
+    // Shown: pressed, and clicking again takes them away.
+    const second = mount(changed, { ...onSession, sheet: { kind: "changes" } });
+    await waitFor(() => expect(row().getAttribute("aria-pressed")).toBe("true"));
+    fireEvent.click(row());
+    expect(second.navigate).toHaveBeenLastCalledWith({ screen: "session", root: "sup1", repo: REPO, agent: "w1", sheet: undefined });
+    second.sync.stop();
+  });
+
   it("shows the selected session's context above the tree: goal and milestones and the PR status, nothing of what waits; the split drags and is kept", async () => {
     const credentials: InboxItemDTO = { kind: "credentials", reason: "credentials need attention", agent_id: "c1", workspace_id: "proj/feat-ls", detail: "claude auth login" };
     const { sync } = mount(
