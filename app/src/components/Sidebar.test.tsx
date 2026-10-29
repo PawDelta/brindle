@@ -35,7 +35,7 @@ function mount(data: Partial<DaemonData>, route: Route = { screen: "new" }, fetc
       </StoreContext.Provider>
     </DaemonContext.Provider>,
   );
-  return { daemon, sync, navigate };
+  return { daemon, sync, navigate, store };
 }
 
 const agentRow = (id: string) => document.querySelector<HTMLButtonElement>(`button[data-tree-agent="${id}"]`);
@@ -43,6 +43,28 @@ const sessionRow = (id: string) => document.querySelector<HTMLButtonElement>(`bu
 const list = () => screen.getByRole("navigation", { name: "Sessions" });
 
 describe("Sidebar", () => {
+  it.each([
+    { account: { signed_in: true, name: "Sam Rivera", email: "other@example.com" }, initials: "SR" },
+    { account: { signed_in: true, name: "  ", email: "sam.rivera@example.com" }, initials: "S" },
+    { account: { signed_in: true }, initials: "" },
+    { account: { signed_in: false, name: "Sam Rivera", email: "sam@example.com" }, initials: "" },
+  ])("renders the account identity fallback for $account", async ({ account, initials }) => {
+    const { sync, navigate, store } = mount({ account });
+    const button = screen.getByRole("button", { name: "Open Account" });
+    try {
+      await waitFor(() => {
+        expect(store.getState().account).toEqual(account);
+        expect(button.textContent).toBe(initials);
+        expect(Boolean(button.querySelector("svg"))).toBe(!initials);
+        expect(button.className.includes("text-ink-3")).toBe(!account.signed_in);
+      });
+      fireEvent.click(button);
+      expect(navigate).toHaveBeenLastCalledWith({ screen: "account" });
+    } finally {
+      sync.stop();
+    }
+  });
+
   it("lists every open session by repo with its agents nested in the CLI's rows, recent ones folded, and opens them", async () => {
     const { sync, navigate } = mount({ workspaces: [root, { ...worker, agents: [...worker.agents!, child] }], inbox: [waiting] }, { screen: "session", root: "sup1", repo: REPO, agent: "w1" });
     expect(list().textContent).toContain("Loading");

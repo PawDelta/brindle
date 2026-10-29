@@ -72,6 +72,7 @@ export interface ApiSchema {
  * via the `definition` "AccountDTO".
  */
 export interface AccountDTO {
+  email?: string | null;
   name?: string | null;
   orgs?: AccountOrgDTO[];
   plan?: string | null;
