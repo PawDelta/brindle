@@ -530,15 +530,16 @@ def _pre_tool_matcher(ctx: "LaunchContext") -> str:
     """Which tools Claude Code's PreToolUse hook sees: Bash always, the edit
     tools for a plan_first worker, every tool the permission policy rules on
     (the file, fetch and MCP tools, by name pattern: agents._pre_tool_policy
-    denies or forces the prompt there) when the policy is on, and the file
-    tools a profile's write or read scope covers (brindle.guardrails;
+    denies or forces the prompt there) when the policy is on or an org or
+    managed device governs the checkout (its controls bind either way), and
+    the file tools a profile's write or read scope covers (brindle.guardrails;
     already cleared without the Pro feature, see agents._profile_for)."""
-    from brindle import guardrails, permissions
+    from brindle import guardrails, permission_grants, permissions
 
     tools = ["Bash"]
     if ctx.plan_first:
         tools += ["Edit", "Write", "NotebookEdit"]
-    if _policy_on(ctx.cwd):
+    if _policy_on(ctx.cwd) or bool(ctx.cwd) and permission_grants.org_governs(ctx.cwd):
         tools += [t for t in permissions.CLAUDE_KINDS if t not in tools]
         tools.append(permissions.MCP_TOOL_PATTERN)
     for t in guardrails.hook_matcher(ctx.profile).split("|"):
@@ -1795,7 +1796,11 @@ class Antigravity(Provider):
             # dontAsk (nobody watches, e.g. a reviewer) brindle's hook decides
             # every call, as under agy_approvals "brindle" (unset, for workers).
             strict = ctx.profile.permission_mode == "dontAsk" or antigravity.strict_on(ctx.cwd, ctx.mode)
-            antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict)
+            # An org's or managed device's controls bind with the policy off too (permissions.org_only).
+            from brindle.permission_grants import org_governs
+
+            antigravity.install(ctx.cwd, permission_policy=policy is not None or org_governs(ctx.cwd),
+                                strict=strict)
             antigravity.sync_for_launch(ctx.cwd, policy)
         argv = [antigravity.binary()]
         if strict:
@@ -1914,8 +1919,11 @@ class OpenCode(Provider):
         # merges them over the person's own config.
         argv = ["env", "OPENCODE_CONFIG_CONTENT=" + json.dumps(opencode.config(ctx))]
         from brindle.codex_hook import policy_on
+        from brindle.permission_grants import org_governs
 
-        if policy_on(ctx.cwd):   # the plugin asks brindle before each tool call
+        # The plugin asks brindle before each tool call; an org's or managed
+        # device's controls bind with the policy off too (permissions.org_only).
+        if policy_on(ctx.cwd) or bool(ctx.cwd) and org_governs(ctx.cwd):
             argv.append("BRINDLE_OPENCODE_POLICY=1")
         argv.append(opencode.binary())
         model = opencode.model_arg(ctx.profile.model)

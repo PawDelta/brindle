@@ -2011,6 +2011,30 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
                                  saved=saved, spend=spend, groups=groups)
 
 
+def org_only(reqs: list[Request], *, checks: list[str] | None = None) -> Decision | None:
+    """What binds ``reqs`` with the person's own policy off, which drops only
+    their own rules: the org's and the managed device's controls
+    (permission_grants.org_decision) and the org policy's denies. The first
+    deny, else the first ask (the CLI's own prompt answers it; no saved
+    approval of the person's settles it), else None."""
+    from brindle import permission_grants
+
+    asked = None
+    for req in reqs:
+        if req is None or req.kind not in KINDS or not req.repo_root:
+            continue
+        with permission_grants.org_check(req.repo_root):
+            denies = permission_grants.org_denies(req.repo_root)
+            found = _rule_decision(req, denies, checks) or _restriction_in_parts(req, checks=checks, rules=denies)
+            if found is None or found.decision != "deny":
+                org = permission_grants.org_decision(req, all_rules(req.repo_root), checks)
+                found = org if org is not None and org.decision == "deny" else found or org
+        if found is not None and found.decision == "deny":
+            return found
+        asked = asked or found
+    return asked
+
+
 def _decide_under_org(req: Request, *, checks: list[str] | None, rules: list[Rule] | None,
                       unmatched: str | None, session: str | None, saved: list[SavedAction] | None,
                       spend: bool, groups: dict[str, dict] | None) -> Decision:
