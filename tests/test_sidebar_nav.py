@@ -226,8 +226,6 @@ def test_snapshot_carries_the_sessions_autopilot_and_open_question(db, repo):
     db.add_agent(Agent("work01", w.id, "developer", "claude", "root01", "assign", "idle",
                        "%992", "done", now))
     entry = lambda: next(e for e in view.snapshot(db, str(repo)) if e["id"] == w.id)  # noqa: E731
-    assert (entry()["autopilot"], entry()["asking"]) == (False, None)
-    db.add_autopilot("root01")
     assert (entry()["autopilot"], entry()["asking"]) == (True, None)
     autopilot.need_user(db, "root01", "Which database?")
     assert (entry()["autopilot"], entry()["asking"]) == (True, "root01")

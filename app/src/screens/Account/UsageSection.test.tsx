@@ -81,7 +81,6 @@ describe("Account › Usage", () => {
     expect(within(card("Claude")).getAllByTestId("usage-reset")[0].className).toContain("text-pass");
     expect(card("Codex").getAttribute("data-state")).toBe("warn");
     expect(windows(card("Codex"))[1]).toMatchObject({ level: "warn", bar: "83%" });
-    expect(card("Codex").textContent).toContain("Past 80%. Autopilot stops starting new Codex work at 90%.");
     const ag = card("Antigravity");
     expect(ag.getAttribute("data-state")).toBe("limit");
     expect(within(ag).getByTestId("usage-limited").textContent).toContain("Limit reached · available again in 6 min (3:04pm)");

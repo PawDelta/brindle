@@ -26,6 +26,26 @@ def root(db, repo):
     return workspaces.adopt_root(db, str(repo))
 
 
+@pytest.mark.variant("live legacy --no-autopilot sessions have no driver row")
+def test_continue_backfills_a_live_legacy_root_without_enabling_workers(db, root, monkeypatch):
+    from brindle import autopilot
+    from brindle.service import sessions as service
+
+    boss = add(db, root, "boss", status="idle")
+    add(db, root, "w1", mode="assign", parent="boss", status="idle")
+    monkeypatch.setattr(agents, "find_running", lambda *a, **k: boss)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    assert db.conn.execute("SELECT root_id FROM autopilot").fetchall() == []
+
+    continued = service.continue_(db, root)
+
+    assert continued.root.id == boss.id
+    assert [r[0] for r in db.conn.execute("SELECT root_id FROM autopilot")] == [boss.id]
+    assert db.get_autopilot(boss.id).state == "running"
+    assert autopilot.goal_reminder(db, boss.id) is not None
+    assert db.get_autopilot("w1") is None
+
+
 @pytest.mark.parametrize("own_dirty", [False, True])
 def test_forget_removes_clean_worktrees_keeps_dirty_ones_and_all_branches_and_own_worktree(
     db, root, repo, own_dirty

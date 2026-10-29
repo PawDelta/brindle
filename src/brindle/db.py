@@ -1704,6 +1704,19 @@ class DB:
 
     def get_autopilot(self, root_id: str) -> Autopilot | None:
         row = self.conn.execute("SELECT * FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
+        if row is None:
+            # Live sessions created before goal driving became unconditional
+            # may have no row. Backfill at lookup so hooks and continuation agree.
+            root = self.get_agent(root_id)
+            if root and root.parent_id is None and root.mode == "interactive" \
+                    and root.status not in ("paused", "done"):
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO autopilot (root_id, enabled, created_at) "
+                    "SELECT id, 1, ? FROM agents WHERE id=? AND parent_id IS NULL "
+                    "AND mode='interactive' AND status NOT IN ('paused', 'done')",
+                    (time.time(), root_id),
+                )
+                row = self.conn.execute("SELECT * FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
         ap = _load(Autopilot, row) if row else None
         if ap:
             ap.enabled = 1  # Legacy off values no longer disable the goal driver.
