@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from brindle import agents, git, sessions, tmux, workspaces
+from brindle import agents, git, providers, sessions, tmux, workspaces
 from brindle.db import Agent
 
 
@@ -100,6 +100,8 @@ def test_a_resumed_chat_is_shown_with_its_conversation_and_sidebar(db, root, mon
     for var in ("TMUX", "TMUX_PANE"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(os, "get_terminal_size", lambda fd=1: os.terminal_size((120, 40)))
+    # The sidebar runs this checkout's `brindle watch`, not whichever one is installed.
+    monkeypatch.setattr(providers, "_in_worktree", lambda path: False)
     tmux._tmux("set-option", "-g", "status", status)
     add(db, root, "boss")
     agents.resume(db, "boss")
