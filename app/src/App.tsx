@@ -133,7 +133,7 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     case "settings":
-      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} section={route.section} ask={route.ask} rule={route.rule} />;
+      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} section={route.section} ask={route.ask} rule={route.rule} current={readLastSession()?.repo} />;
     case "project-settings":
       return <SettingsScreen key={`repo:${route.repo}`} client={client} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} repo={route.repo} />;
     case "account":

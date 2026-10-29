@@ -20,7 +20,7 @@ export interface Setting {
   blurb: string;
   /* A number needs a value; a boolean is on or off; a choice may be the
      engine's own null when it lists it; a list is one entry per line. */
-  kind: "number" | "boolean" | "choice" | "list";
+  kind: "number" | "boolean" | "choice" | "list" | "text";
   choices?: { value: string | null; label: string }[];
   /* The engine's default, for a field the config leaves unset. */
   fallback: unknown;
@@ -36,6 +36,9 @@ export interface Setting {
 
 export const SETTINGS: Setting[] = [
   { key: "checks", label: "Checks", kind: "list", fallback: [], repoOnly: true, common: true, blurb: "Commands a branch must pass before it merges, one per line, run from the repo root." },
+  { key: "setup", label: "Setup", kind: "list", fallback: [], repoOnly: true, blurb: "Commands run in a new worktree before a worker starts, one per line." },
+  { key: "base_branch", label: "PR branch", kind: "text", fallback: null, repoOnly: true, blurb: "The branch pull requests target. Empty: the repo's default branch." },
+  { key: "rules", label: "Project rules", kind: "list", fallback: [], repoOnly: true, blurb: "Rules every worker in this repo follows, one per line." },
   { key: "max_agents", label: "Workers at once", kind: "number", fallback: 5, common: true, blurb: "How many workers a session runs at the same time. 0 means no cap." },
   { key: "plan_first", label: "Plan first", kind: "boolean", fallback: false, common: true, blurb: "Workers propose a plan and wait for your approval before they edit anything." },
   {

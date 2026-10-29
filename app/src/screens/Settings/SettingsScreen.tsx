@@ -133,6 +133,8 @@ export interface SettingsScreenProps {
   rule?: string;
   /* The repo to open the switch on (the sidebar's repo header, the old project-settings route): its view, not You's. */
   repo?: string;
+  /* The current session's repo: the one the switch starts on when no route names one. */
+  current?: string;
 }
 
 export const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -281,6 +283,8 @@ function Field({ s, value, disabled, onChange }: { s: Setting; value: unknown; d
           {s.unit && <span className="text-xs text-ink-3">{s.unit}</span>}
         </>
       );
+    case "text":
+      return <input id={id} type="text" className={`${field} w-56`} aria-label={s.label} value={typeof value === "string" ? value : ""} disabled={disabled} onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)} />;
     case "boolean":
       return <Toggle id={id} label={s.label} checked={value === true} disabled={disabled} onChange={onChange} />;
     case "choice":
@@ -1012,8 +1016,10 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
 function ScopeSwitch({ view, onView, repo, repos, onRepo, disabled }: { view: "you" | "repo"; onView(v: "you" | "repo"): void; repo: string | null; repos: ReturnType<typeof useRepo>["repos"]; onRepo(repo: string): void; disabled: boolean }) {
   const name = repos?.find((r) => r.repo_root === repo)?.name ?? repo?.split("/").filter(Boolean).pop();
   const choices: { id: "you" | "repo"; label: string }[] = [{ id: "you", label: "You" }, ...(repo ? [{ id: "repo" as const, label: name ?? repo }] : [])];
+  const [open, setOpen] = useState(false);
+  const several = !!repos && repos.length > 1;
   return (
-    <div className="flex flex-wrap items-center gap-s1">
+    <div className="relative flex flex-wrap items-center gap-s1">
       <div role="radiogroup" aria-label="Settings for" className="inline-flex rounded-md border border-line p-0.5">
         {choices.map((c) => (
           <button
@@ -1021,28 +1027,41 @@ function ScopeSwitch({ view, onView, repo, repos, onRepo, disabled }: { view: "y
             type="button"
             role="radio"
             aria-checked={view === c.id}
+            aria-haspopup={c.id === "repo" && several ? "menu" : undefined}
+            aria-expanded={c.id === "repo" && several ? open : undefined}
             disabled={disabled}
             className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${view === c.id ? "bg-pass-soft font-medium text-pass" : "text-ink-2 hover:bg-surface-2"}`}
-            onClick={() => onView(c.id)}
+            // The repo segment, already chosen, opens the menu of repos.
+            onClick={() => (c.id === "repo" && several && view === "repo" ? setOpen((o) => !o) : (setOpen(false), onView(c.id)))}
           >
             {c.label}
+            {c.id === "repo" && several ? " ▾" : ""}
           </button>
         ))}
       </div>
-      {repos && repos.length > 1 && view === "repo" && (
-        <select className={field} aria-label="Repo" value={repo ?? ""} disabled={disabled} onChange={(e) => onRepo(e.target.value)}>
-          {repos.map((r) => (
-            <option key={r.repo_root} value={r.repo_root}>
+      {open && several && (
+        <div role="menu" aria-label="Repo" className={`${card} absolute left-0 top-full z-10 mt-1 flex min-w-40 flex-col p-0.5`}>
+          {repos!.map((r) => (
+            <button
+              key={r.repo_root}
+              type="button"
+              role="menuitem"
+              className={`rounded-sm px-s2 py-0.5 text-left text-sm hover:bg-surface-2 ${r.repo_root === repo ? "font-medium" : ""}`}
+              onClick={() => {
+                setOpen(false);
+                onRepo(r.repo_root);
+              }}
+            >
               {r.name}
-            </option>
+            </button>
           ))}
-        </select>
+        </div>
       )}
     </div>
   );
 }
 
-export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, section, ask, rule, repo: routed }: SettingsScreenProps) {
+export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, section, ask, rule, repo: routed, current }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const connection = useAppState((state) => state.connection);
@@ -1050,14 +1069,18 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const pick = useRepo();
   const { repos, setRepo } = pick;
   /* The repo a route names is the one on screen from the first paint, before the repos are known. */
-  const repo = pick.repo ?? routed ?? null;
+  const repo = pick.repo ?? routed ?? current ?? null;
   const [view, setView] = useState<"you" | "repo">(routed ? "repo" : "you");
+  /* Start on the repo the route names, else the current session's; only a route opens its view. */
   useEffect(() => {
-    if (routed) {
-      setRepo(routed);
-      setView("repo");
-    }
-  }, [routed, setRepo]);
+    const first = routed ?? current;
+    if (first) setRepo(first);
+    if (routed) setView("repo");
+  }, [routed, current, setRepo]);
+  /* A section asked for (the sidebar's problem line, the Inbox) lives on You's side. */
+  useEffect(() => {
+    if (section) setView("you");
+  }, [section, ask]);
   const [config, setConfig] = useState<Config | null>(null);
   const [checks, setChecks] = useState<DoctorCheck[] | null>(null);
   const [doctorError, setDoctorError] = useState<string | null>(null);
@@ -1239,7 +1262,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const placed = config !== null;
   useEffect(() => {
     if (section) document.getElementById(section)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
-  }, [section, ask, placed]);
+  }, [section, ask, placed, view]);
   const install = async () => {
     if (!installCli) return;
     setCliState("installing");

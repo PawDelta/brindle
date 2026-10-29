@@ -17,8 +17,10 @@ import { alert, button, notice, panel, quiet } from "../../components/ui";
 import { More, message, RestOfConfig, Section, SettingRow } from "./SettingsScreen";
 import { PROJECT_RULES, SETTINGS, YOURS, carryEdits, changed, draftOf, invalid, scopeOf, statusLine, values, type Setting } from "./settings";
 
-const CHECKS = PROJECT_RULES.filter((s) => s.key === "checks");
-const RULES = PROJECT_RULES.filter((s) => s.key !== "checks");
+const only = (...keys: string[]) => PROJECT_RULES.filter((s) => keys.includes(s.key));
+const CHECKS = only("checks");
+const SETUP = only("setup", "base_branch");
+const RULES = only("rules");
 
 const LOADING = "px-s2 py-s1 text-sm text-ink-3";
 
@@ -44,12 +46,15 @@ export function RepoSettings({ client, repo }: { client: DaemonClient; repo: str
   }, [load]);
 
   /* The repo's settings as a draft; an unsaved edit survives a reload after another change here. */
+  const cleared = useRef<string[]>([]);
   const loaded = useMemo(() => draftOf(config?.repo ?? {}), [config]);
   const [base, setBase] = useState(loaded);
   const [draft, setDraft] = useState(loaded);
   if (config && base !== loaded) {
     setBase(loaded);
-    setDraft(carryEdits(base, draft, loaded));
+    // A cleared row takes the value it now inherits, not its old draft; other rows keep their edits.
+    setDraft({ ...carryEdits(base, draft, loaded), ...Object.fromEntries(cleared.current.map((k) => [k, loaded[k]])) });
+    cleared.current = [];
   }
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
@@ -91,7 +96,11 @@ export function RepoSettings({ client, repo }: { client: DaemonClient; repo: str
     });
   };
   const justForMe = (key: string) => run(async () => void (await client.patchConfig({ scope: "repo", repo, values: { [key]: draft[key] } })));
-  const clearLocal = (key: string) => run(async () => void (await client.patchConfig({ scope: "repo", repo, unset: [key] })));
+  const clearLocal = (key: string) =>
+    run(async () => {
+      await client.patchConfig({ scope: "repo", repo, unset: [key] });
+      cleared.current = [key];
+    });
 
   const shown = SETTINGS.map((s) => s.key);
   const restLines: [string, string][] = Object.entries(config?.repo ?? {})
@@ -137,6 +146,10 @@ export function RepoSettings({ client, repo }: { client: DaemonClient; repo: str
 
       <Section id="checks" title="Checks" blurb="Run before a branch merges." testId="project-checks">
         {config ? CHECKS.map(checkRow) : loading("checks-loading", "checks")}
+      </Section>
+
+      <Section id="setup" title="Setup and PR branch" blurb="How a new worktree starts, and where pull requests go." testId="project-setup">
+        {config ? SETUP.map(checkRow) : loading("setup-loading", "setup")}
       </Section>
 
       <Section id="this-repo" title="Project rules" blurb="Only a repo's own files carry these, so they save to this repo." testId="repo-settings">

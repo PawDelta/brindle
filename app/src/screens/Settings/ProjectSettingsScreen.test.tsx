@@ -34,27 +34,29 @@ function setup(data: Partial<DaemonData> = {}) {
     [...failing].some((p) => String(input).includes(p)) ? Promise.reject(new Error("socket hung up")) : daemon.fetch(input, init);
   const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch });
   const sync = startSync({ client, store, connect: daemon.connect });
-  render(
+  const views = daemon.ptyViews();
+  const ui = (props: { section?: "providers"; ask?: number } = {}) => (
     <DaemonContext.Provider value={client}>
       <StoreContext.Provider value={store}>
         <SessionsProvider client={client}>
           <ProvidersProvider client={client}>
-            <PtyViewsProvider value={daemon.ptyViews()}>
-              <SettingsScreen client={client} repo={REPO} />
+            <PtyViewsProvider value={views}>
+              <SettingsScreen client={client} repo={REPO} {...props} />
             </PtyViewsProvider>
           </ProvidersProvider>
         </SessionsProvider>
       </StoreContext.Provider>
-    </DaemonContext.Provider>,
+    </DaemonContext.Provider>
   );
-  return { daemon, failing, stop: () => sync.stop() };
+  const { rerender } = render(ui());
+  return { daemon, failing, stop: () => sync.stop(), goto: (props: { section?: "providers"; ask?: number }) => rerender(ui(props)) };
 }
 
 const patches = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "PATCH" && r.path === "/config");
 
 describe("settings repo view", () => {
   it("opens on the repo side of the switch, draws at once, then fills in the checks (asked for without the stored keys) and saves them to the repo", async () => {
-    const { daemon, stop } = setup();
+    const { daemon, stop, goto } = setup();
     // Before the config has answered: the repo view and its sections are there, each saying it is loading.
     expect(screen.getByTestId("project-settings")).toBeTruthy();
     expect(screen.getByTestId("checks-loading")).toBeTruthy();
@@ -67,16 +69,28 @@ describe("settings repo view", () => {
     expect(checks).toHaveProperty("value", "npm test \nnpm run build");
     const bar = screen.getByTestId("settings-save");
     expect(bar.textContent).toContain("1 change");
-    fireEvent.click(within(bar).getByRole("button", { name: "Save" }));
+    // Setup, the PR branch and the project rules are repo-only rows too, saved with it.
+    fireEvent.change(screen.getByRole("textbox", { name: "Setup" }), { target: { value: "npm ci" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "PR branch" }), { target: { value: "develop" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Project rules" }), { target: { value: "Keep PRs small" } });
+    fireEvent.click(within(screen.getByTestId("settings-save")).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(patches(daemon)).toHaveLength(1));
-    expect(patches(daemon)[0].body).toEqual({ scope: "repo", repo: REPO, values: { checks: ["npm test", "npm run build"] } });
-    expect(daemon.data.config.local).toEqual({ checks: ["npm test", "npm run build"] });
+    expect(patches(daemon)[0].body).toEqual({
+      scope: "repo",
+      repo: REPO,
+      values: { checks: ["npm test", "npm run build"], setup: ["npm ci"], base_branch: "develop", rules: ["Keep PRs small"] },
+    });
+    expect(daemon.data.config.local).toMatchObject({ checks: ["npm test", "npm run build"], setup: ["npm ci"], base_branch: "develop", rules: ["Keep PRs small"] });
     await waitFor(() => expect(screen.queryByTestId("settings-save")).toBeNull());
     fireEvent.click(within(screen.getByTestId("repo-settings")).getByRole("button", { name: /Everything else/ }));
     expect(screen.getByTestId("config-rest").textContent).toContain("default_agent");
     // The Autopilot row is gone, and so is the old overrides list.
     expect(screen.queryByRole("switch", { name: "Autopilot" })).toBeNull();
     expect(screen.queryByTestId("project-overrides")).toBeNull();
+    // A section asked for (the sidebar's provider problem line) brings You's side back.
+    goto({ section: "providers", ask: 1 });
+    expect((await screen.findByRole("radio", { name: "You" })).getAttribute("aria-checked")).toBe("true");
+    expect(await screen.findByTestId("providers")).toBeTruthy();
     stop();
   });
 
@@ -90,8 +104,16 @@ describe("settings repo view", () => {
     expect(daemon.data.config.local).toEqual({ max_agents: 2 });
     // The committed file is untouched.
     expect(daemon.data.config.repo).toEqual({ max_agents: 2 });
+    // An unsaved edit to the cleared row is dropped (it would otherwise be saved into the team's file); another row's edit stays.
+    fireEvent.change(screen.getByRole("spinbutton", { name: "Workers at once" }), { target: { value: "4" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Checks" }), { target: { value: "make" } });
     fireEvent.click(within(screen.getByTestId("status-max_agents")).getByRole("button", { name: "Clear" }));
     await waitFor(() => expect(daemon.data.config.local).toEqual({}));
+    await waitFor(() => expect(screen.getByRole("spinbutton", { name: "Workers at once" })).toHaveProperty("value", "2"));
+    expect(screen.getByTestId("settings-save").textContent).toContain("1 change");
+    fireEvent.click(within(screen.getByTestId("settings-save")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(daemon.data.config.local).toEqual({ checks: ["make"] }));
+    expect(daemon.data.config.repo).toEqual({ max_agents: 2 });
     stop();
   });
 
@@ -103,7 +125,8 @@ describe("settings repo view", () => {
     expect(screen.getByTestId("settings-save")).toBeTruthy();
     // The other repo's config fails to load: no checks to edit and no save bar to write this repo's edit into it.
     failing.add("/config");
-    fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: OTHER } });
+    fireEvent.click(screen.getByRole("radio", { name: /^proj/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "other" }));
     await screen.findByText(/Could not load project settings/);
     expect(screen.queryByTestId("settings-save")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Checks" })).toBeNull();
