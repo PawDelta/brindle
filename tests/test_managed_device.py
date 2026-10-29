@@ -87,7 +87,7 @@ def refused(m):
     "vector:managed_with_policy_ok", "vector:managed_with_policy_tampered_body",
     "status:device_paused_signed_out", "status:other_org_signed_in",
     "status:unsafe_cache", "status:unwritable_cache",
-    "airgap:cached", "airgap:snapshot", "airgap:export", "airgap:none",
+    "airgap:cached", "airgap:snapshot", "airgap:export", "airgap:none", "airgap:unsafe_cache",
     pytest.param("airgap:cached_older", marks=pytest.mark.variant(
         "the cached copy comes first even when the snapshot is newer")),
 ])
@@ -177,8 +177,11 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
             return
         # Air-gap mode on a device that allows it: the verified cached copy, else the file's
         # snapshot, else a signed offline export for the device's org; none of them fails closed.
-        if case == "airgap:cached":
+        if case in ("airgap:cached", "airgap:unsafe_cache"):
             assert context().policy.version == 4        # online: fetched with the device token and cached
+        if case == "airgap:unsafe_cache":
+            # A cache brindle refuses to read is no cache: the snapshot is next.
+            (private_dir(home=tmp_path) / "device-policy.json").chmod(0o644)
         if case == "airgap:cached_older":
             _files.write_private(private_dir(home=tmp_path) / "device-policy.json", json.dumps(
                 signed_answer(signing_key, answer(version=2, max_parallel_workers=4))).encode())
@@ -197,7 +200,8 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
             assert ctx.blocked_reason() and not ctx.policy.allowed
             return
         expect = {"airgap:cached": ("device", 3), "airgap:cached_older": ("device", 4),
-                  "airgap:snapshot": ("snapshot", 2), "airgap:export": ("offline", 4)}
+                  "airgap:snapshot": ("snapshot", 2), "airgap:export": ("offline", 4),
+                  "airgap:unsafe_cache": ("snapshot", 2)}
         assert (ctx.source(), ctx.policy.max_parallel_workers) == expect[case] and ctx.blocked_reason() is None
         return
     if case == "bad_outer_token":
