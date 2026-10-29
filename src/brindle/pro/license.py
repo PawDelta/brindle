@@ -471,6 +471,18 @@ def _disk_cache_write(now: float, gen: int | None, *, token: str | None = None,
 
 
 _request_reads: ContextVar[dict | None] = ContextVar("license_request_reads", default=None)
+_clock: ContextVar[float | None] = ContextVar("license_clock", default=None)
+
+
+@contextmanager
+def at_time(now: float):
+    """Check the entitlement at ``now`` (one org check's time) wherever
+    :func:`current` isn't given a time, :func:`has` included."""
+    token = _clock.set(now)
+    try:
+        yield
+    finally:
+        _clock.reset(token)
 
 
 @contextmanager
@@ -550,6 +562,7 @@ def current(*, refresh: bool = True, now: float | None = None, store=None, clien
     global _cache
     from brindle.pro._files import home_set
 
+    now = _clock.get() if now is None else now
     now = time.time() if now is None else now
     default = store is None and client is None and not home_set()   # the in-process cache is the default home's
     if default and _cache and _cache[0] > now and (max_age is None or now - _cache[1].iat <= max_age):

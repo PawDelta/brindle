@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from urllib.parse import urlsplit
 
@@ -827,10 +828,24 @@ def _plugin(repo_root: str):
 
 
 def _context(repo_root: str | None):
-    """The org context for ``repo_root``, its policy read through :func:`_plugin`."""
-    from brindle.pro.org_context import OrgContext, Providers
+    """The org context for ``repo_root``: the one this check is under
+    (:func:`org_check`), else a new one whose policy is read through :func:`_plugin`."""
+    from brindle.pro import org_context
 
-    return OrgContext.resolve(repo_root=repo_root, providers=Providers(policy=lambda: _plugin(repo_root).policy()))
+    ctx = org_context.active()
+    if ctx is not None and ctx.repo_root == repo_root:
+        return ctx
+    return org_context.OrgContext.resolve(
+        repo_root=repo_root, providers=org_context.Providers(policy=lambda: _plugin(repo_root).policy()))
+
+
+@contextmanager
+def org_check(repo_root: str | None):
+    """One org context for everything inside (a whole permission decision:
+    the org's denies, its controls and the saved approvals it settles), so
+    each reads the same policy, status and entitlement."""
+    with _context(repo_root).activated():
+        yield
 
 
 def org_limits(repo_root: str | None) -> OrgLimits | None:

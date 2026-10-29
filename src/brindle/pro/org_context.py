@@ -110,12 +110,14 @@ class OrgContext:
 
     @contextmanager
     def _reads(self) -> Iterator[None]:
-        """Read at this context's home, every entitlement lookup answered from
-        one read (license.reading with this context's memo)."""
+        """Read at this context's home, every entitlement lookup checked at
+        this context's time and answered from one read (license.reading with
+        this context's memo)."""
         from brindle.pro import license
         from brindle.pro._files import at_home
 
-        with at_home(self.home) if self._home_given else nullcontext(), license.reading(self._license_reads):
+        with (at_home(self.home) if self._home_given else nullcontext(), license.reading(self._license_reads),
+              license.at_time(self.now)):
             yield
 
     @contextmanager
@@ -215,7 +217,8 @@ class OrgContext:
         from brindle.pro import license, team_policy
 
         if entitlement or store or client:
-            ent, error = _once(entitlement or (lambda: license.current(store=store, client=client)))
+            with self._reads():
+                ent, error = _once(entitlement or (lambda: license.current(store=store, client=client)))
         else:
             ent, error = self._entitlement
         if isinstance(error, license.LicenseError):

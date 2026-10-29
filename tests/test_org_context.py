@@ -10,10 +10,11 @@ import pytest
 from brindle.permissions import Request
 from brindle.plan_policy import PlanTask
 from brindle.policy import allow
-from brindle.pro import license, status, team_policy
+from brindle.pro import credentials, license, status, team_policy
 from brindle.pro._files import at_home
 from brindle.pro.org_context import OrgContext, Providers
 from brindle.pro.team_policy import GrantPolicy, OrgControl, OrgPolicy
+from pro_fixtures import BASE, pro_env, signing_key, token  # noqa: F401 - fixtures
 
 GRANTS = dict(allow=True, kinds=("bash",), overridable=(), max_minutes=60, max_uses=100, allow_persistent=True,
               lifetimes=("session", "time", "forever"), scopes=("branch",), org_name="Acme",
@@ -59,6 +60,32 @@ def test_the_default_reads_happen_once_and_an_injected_status_replaces_the_file(
     assert ctx.policy.max_parallel_workers == 1          # narrowed by the context's own status
     assert ctx.limits().allow and ctx.blocked_reason() is None and ctx.source() == "account"
     assert calls == Counter(entitlement=1, cache=1, **({} if injected else {"status": 1}))
+
+
+def test_one_permission_decision_reads_one_policy(tmp_path, monkeypatch):
+    """Two policies that each block ``terraform apply`` (a control, a deny):
+    a decision that read one for its denies and the other for its controls
+    would let it through."""
+    from brindle import permission_grants, permissions
+
+    by_control = POLICY
+    by_deny = replace(POLICY, permission_grants=replace(POLICY.permission_grants, controls=(),
+                                                        deny=("bash prefix terraform apply",)))
+    reads = iter([by_control, by_deny, by_control, by_deny])
+    monkeypatch.setattr(permission_grants, "_plugin", lambda repo: SimpleNamespace(policy=lambda: next(reads)))
+    root = str(tmp_path)
+    req = Request("claude", "bash", "Bash", root, root, root, command="terraform apply")
+    assert permissions.decide(req).decision == "deny"
+    assert next(reads) is by_deny                        # the decision read the policy once
+
+
+def test_the_entitlement_is_checked_at_the_contexts_time(token):
+    credentials.default_store().save({"entitlement": token(iat=1000, exp=3000, features=["managed_rollout"]),
+                                      "base_url": BASE})
+    shutdown = status.Saved(org_id="org_1", status=status.Status(control={
+        "id": "c1", "action": "shutdown", "reason": "incident", "until": None}))
+    ctx = OrgContext.resolve(now=2000.0, providers=Providers(policy=allow, status=lambda: shutdown))
+    assert ctx.entitlement.org_id == "org_1" and "incident" in ctx.blocked_reason()
 
 
 def test_a_context_reads_the_status_of_the_home_it_was_given(tmp_path, monkeypatch):
