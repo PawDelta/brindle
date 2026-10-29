@@ -95,10 +95,9 @@ describe("NewSession", () => {
     const { daemon, onOpen, stop } = setup();
     const prompt = await screen.findByLabelText("What should brindle work on?");
     fireEvent.change(prompt, { target: { value: "Add a cache" } });
-    // Branch, CLI and autopilot wait behind Options.
-    expect(screen.queryByLabelText("Autopilot")).toBeNull();
+    // Branch and CLI wait behind Options.
     fireEvent.click(screen.getByRole("button", { name: /Options/ }));
-    fireEvent.change(screen.getByLabelText("Autopilot"), { target: { value: "on" } });
+    expect(screen.queryByLabelText("Autopilot")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     // sup1 is running here: the engine asks what to do with it first.
     const ask = await screen.findByRole("group", { name: "Session already running" });
@@ -106,8 +105,8 @@ describe("NewSession", () => {
     fireEvent.click(within(ask).getByRole("button", { name: "Pause it and start fresh" }));
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
     expect(posts(daemon).map((r) => r.body)).toEqual([
-      { repo: REPO, autopilot: true, prompt: "Add a cache" },
-      { repo: REPO, autopilot: true, prompt: "Add a cache", choice: "p", session_id: "sup1" },
+      { repo: REPO, prompt: "Add a cache" },
+      { repo: REPO, prompt: "Add a cache", choice: "p", session_id: "sup1" },
     ]);
     stop();
   });

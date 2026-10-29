@@ -1,7 +1,7 @@
 /* The calm empty state, and the New session composer: where the app lands
    with no session to show, and where "New session" goes. One composer:
-   what brindle should work on, in which repo, and Start (branch, CLI and
-   autopilot behind Options). A start with sessions already running in the
+   what brindle should work on, in which repo, and Start (branch and
+   CLI behind Options). A start with sessions already running in the
    repo answers a conflict, and the person picks what to do (open one, a
    new worktree, or pause it and start fresh); a start the engine refuses
    with 409 {preflight} (the CLI needs a sign-in, a key, a trust or a
@@ -128,8 +128,6 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
   const [branch, setBranch] = useState("");
   const [sessionName, setSessionName] = useState("");
   const [provider, setProvider] = useState("");
-  // "" leaves it to the repo's `autopilot` config.
-  const [autopilot, setAutopilot] = useState<"" | "on" | "off">("");
   const [providers, setProviders] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -182,7 +180,6 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     const ok = await start({
-      autopilot: autopilot ? autopilot === "on" : undefined,
       prompt: prompt.trim() || undefined,
       branch: branch.trim() || undefined,
       provider: provider || undefined,
@@ -248,11 +245,6 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
               ))}
             </select>
           )}
-          <select className={field} aria-label="Autopilot" value={autopilot} onChange={(e) => setAutopilot(e.target.value as "" | "on" | "off")}>
-            <option value="">autopilot: repo default</option>
-            <option value="on">autopilot on</option>
-            <option value="off">autopilot off</option>
-          </select>
         </div>
       )}
       {pending && <ConflictChoice conflict={pending.conflict} onChoose={(key, session) => start(pending.fields, { key, session })} onCancel={() => setPending(null)} />}

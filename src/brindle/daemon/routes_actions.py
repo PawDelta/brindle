@@ -913,7 +913,7 @@ def _prepare_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str]) -> Job
 def _autopilot_root(db: DB, body: Body) -> tuple[Agent, Workspace]:
     root, ws = _root(db, _get(body, "root", required=True))
     if db.get_autopilot(root.id) is None:
-        raise ServiceError("conflict", "autopilot isn't set up for this session", 409)
+        raise ServiceError("conflict", "no goal is set up for this session", 409)
     return root, ws
 
 
@@ -938,16 +938,9 @@ def check_goal(db: DB, params: dict, body: Body) -> Any:
 
 def enable_goal(db: DB, params: dict, body: Body) -> Any:
     root, _ = _root(db, _get(body, "root", required=True))
-    on = _get(body, "enabled", bool, required=True)
-    autopilot.set_enabled(db, root.id, on)
-    if agents.is_alive(root):
-        note = ("Autopilot is on again: keep driving toward the goal (get_progress shows where it stands)."
-                if on else "Autopilot is now off: stop driving and wait for the user's instructions.")
-        try:
-            agents.send_message(db, root.id, f"[brindle autopilot] {note}")
-        except agents.AgentError:
-            pass
-    return {"enabled": on}
+    _get(body, "enabled", bool, required=True)
+    autopilot.set_enabled(db, root.id, True)
+    return {"enabled": True}
 
 
 # -- decisions, coordinator, config, permissions -----------------------------------
