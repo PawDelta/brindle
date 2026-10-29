@@ -217,9 +217,6 @@ def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | No
     for f in files:
         test = is_test_file(f)
         found = _changed_nodes(ws, base, f, nodes.get(f, []), skip_tests=test)
-        if test and not nodes.get(f):
-            tests.add(f)
-            continue
         if found is None or (not test and not found):
             imported = _importing_tests(Path(ws.path), f)
             if imported is None:
@@ -281,6 +278,10 @@ def _importing_tests(root: Path, path: str) -> set[str] | None:
                     isinstance(node.func, ast.Name) and node.func.id in dynamic
                     or isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"
                 ):
+                    # fromlist, level and package arguments can change the imported module.
+                    # Only a lone absolute name is resolved here.
+                    if len(node.args) > 1 or any(kw.arg != "name" for kw in node.keywords):
+                        return None
                     name = node.args[0] if node.args else next(
                         (kw.value for kw in node.keywords if kw.arg == "name"), None)
                     if not isinstance(name, ast.Constant) or not isinstance(name.value, str) or name.value.startswith("."):
