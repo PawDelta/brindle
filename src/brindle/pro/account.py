@@ -397,15 +397,29 @@ class _OrgCommands:
         if source:
             self._say(f"Verified policy source: {source}")
 
-        client = self._client(base)
-        ent = license.current(store=self.store, client=client)
-        if "team" not in ent.features:
-            self._say(f"Org {ent.org_id} has no team policy (plan {ent.plan}); nothing is enforced.")
-            return 0
         from brindle import airgap
 
+        ent = None
+        if source == "device":      # the device's signed policy applies, whatever the account is
+            from brindle.pro import managed
+
+            device = managed.load()
+            p = device.snapshot if isinstance(device, managed.Managed) else None
+            if p is None:
+                self._say("brindle account: this managed device has no usable signed policy snapshot; "
+                          "it fetches a fresh one with its device token.")
+                return 1
+            note = " (managed device, signed policy)"
+        else:
+            client = self._client(base)
+            ent = license.current(store=self.store, client=client)
+            if "team" not in ent.features:
+                self._say(f"Org {ent.org_id} has no team policy (plan {ent.plan}); nothing is enforced.")
+                return 0
         try:
-            if airgap.enabled():     # nothing is fetched: the policy is the offline file's
+            if ent is None:
+                pass
+            elif airgap.enabled():     # nothing is fetched: the policy is the offline file's
                 p = team_policy.with_role_overrides(
                     team_policy.load_offline(self.repo_root, ent.org_id), ent.role, ent.policy_role)
                 note = f" (offline: {airgap.policy_path(self.repo_root)})"
@@ -450,7 +464,7 @@ class _OrgCommands:
                     self._say(f"    {show[key][0]:<22} {show[key][1](v)}")
         else:
             self._say("Role overrides: none")
-        role, policy_role = p.role or ent.role, p.policy_role or ent.policy_role
+        role, policy_role = p.role or (ent and ent.role), p.policy_role or (ent and ent.policy_role)
         who = f"role {role or 'member'}" + (f", policy role {policy_role}" if policy_role else "")
         if p.effective is None:
             self._say(f"Your policy ({who}): the org policy above.")
