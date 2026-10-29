@@ -46,7 +46,7 @@ DYNAMIC_IMPORTS = {
                        "tests/test_other.py": "from importlib import import_module as load\nload(name)\n"},
      [PYTEST]),   # an unmapped module with an unresolved dynamic test import
     ("infer", PYTEST, {"src/pkg/pro/status.py": "X = 1\n",
-                       "tests/test_other.py": "def test_new():\n    import pkg.pro.status\n"},
+                       "tests/test_other.py": "import pkg.pro.status\ndef test_new(): pass\n"},
      [f"{PYTEST} tests/test_direct.py tests/test_from.py tests/test_member.py tests/test_other.py || [ $? -eq 5 ]"]),
     ("fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST]),
     pytest.param("dynamic-fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST],
@@ -55,7 +55,8 @@ DYNAMIC_IMPORTS = {
                  marks=pytest.mark.variant("review requested positional relative import arguments")),
     pytest.param("dynamic-level", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST],
                  marks=pytest.mark.variant("review requested a nonliteral relative import level")),
-    ("no-graph", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1", "return 2", 1)}, [PYTEST]),
+    ("no-graph", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1", "return 2", 1)},
+     [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),
     pytest.param("infer", PYTEST, {"src/café.py": "X = 1\n"}, [PYTEST],
                  marks=pytest.mark.variant("git C-quotes a non-ASCII name without -z; it was once skipped")),
     ("infer", PYTEST, {"tests/conftest.py": "X = 2\n"}, [PYTEST]),

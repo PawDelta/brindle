@@ -245,14 +245,15 @@ def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | No
 
 
 def _module_path(root: Path, path: str) -> str | None:
-    """Resolve a Python file through its package directories, independent of src layout."""
+    """Resolve packages, or a standalone pytest test module imported by its filename."""
     file = root / path
     parts = [] if file.stem == "__init__" else [file.stem]
     parent = file.parent
     while parent != root and (parent / "__init__.py").is_file():
         parts.insert(0, parent.name)
         parent = parent.parent
-    if parent == file.parent or not file.is_file() or not all(p.isidentifier() for p in parts):
+    if ((parent == file.parent and not is_test_file(path))
+            or not file.is_file() or not all(p.isidentifier() for p in parts)):
         return None
     return ".".join(parts)
 
