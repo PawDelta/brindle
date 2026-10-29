@@ -409,6 +409,7 @@ async def handoff(
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
                 done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
+                **({"depends_on": depends_on} if depends_on else {}),
             )
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
@@ -542,6 +543,7 @@ async def assign(
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
                 done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
+                **({"depends_on": depends_on} if depends_on else {}),
             )
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
