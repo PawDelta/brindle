@@ -58,7 +58,8 @@ class Providers:
       ``team_policy.ProPolicy(repo_root).policy()``, which reads through this
       context.
     * ``status()``: the verified signed status for enforced accounts, otherwise
-      the legacy saved status, as ``brindle.pro.status.Saved``.
+      the legacy saved status, as ``brindle.pro.status.Saved``; on a managed
+      device, combined with the device's own verified status (the stricter side).
     * ``managed()``: the managed-device binding (brindle.pro.managed), None
       when the device isn't managed. Default: ``managed.load()``.
     * ``plan_rules()``: the org's plan rules for ``plan_policy.needs_plan``
@@ -200,6 +201,44 @@ class OrgContext:
             return _once(self.providers.status or self._default_status)
 
     def _default_status(self):
+        """The member's status combined with the managed device's own, so a
+        pause or control from either org applies, signed in or not."""
+        from brindle.pro import status
+
+        saved = self._member_status()
+        device = self._device_status
+        if device is None:
+            return saved
+        return replace(saved, status=status.stricter(saved.status, device, self.now))
+
+    @cached_property
+    def _device_status(self):
+        """The managed device's verified org status, got with its device token
+        (``GET /managed/{org_id}/status``) or else its last verified copy, which
+        is kept; None off a managed device or when neither can be had."""
+        import json
+
+        from brindle.pro import managed, status
+        from brindle.pro._files import private_dir, read_private, write_private
+
+        device = self.managed
+        if not isinstance(device, managed.Managed):
+            return None
+        path = private_dir(home=self.home) / "device-status.json"
+        try:
+            raw = read_private(path, status.MAX_FILE)
+            cached = json.loads(raw) if raw else None
+        except (OSError, ValueError):
+            cached = None
+        answer = managed.device_status(device, fetch=lambda d: self._fetch("status", d.org_id, d),
+                                       cached=cached, now=self.now)
+        if answer is None:
+            return None
+        if answer is not cached:
+            write_private(path, json.dumps(answer).encode())
+        return status.parse({k: v for k, v in answer.items() if k != "token"}, self.now)
+
+    def _member_status(self):
         from brindle import airgap
         from brindle.pro import managed, policy_cache, status
 

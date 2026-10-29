@@ -309,6 +309,35 @@ def device_policy(managed: Managed, *, fetch, cached=None, now: float | None = N
     return max(copies, key=lambda c: c[0])[1]
 
 
+def device_status(managed: Managed, *, fetch, cached=None, now: float | None = None) -> dict | None:
+    """The device's org status (pause and controls): the most recently signed
+    valid answer between what ``fetch(managed)`` answers and ``cached`` (the
+    last answer kept). Each must be a ``brindle-status+jwt`` answer bound to
+    this device that verifies now; a fetch that raises leaves the cached
+    copy. None when neither is valid. The answer, with its token, is what to
+    cache."""
+    now = time.time() if now is None else now
+    try:
+        fetched = fetch(managed)
+    except Exception as e:  # noqa: BLE001 - any failed fetch leaves the stored copy
+        log.info("device status fetch failed (%s); using the stored status", e)
+        fetched = None
+    best = None
+    for what, copy in (("fetched", fetched), ("cached", cached)):
+        answer = _answer(copy)
+        if answer is None:
+            continue
+        body = {k: v for k, v in answer.items() if k != "token"}
+        try:
+            claims = verify_status_answer(answer["token"], body, org_id=managed.org_id, sub=managed.sub, now=now)
+        except signed.SignedError as e:
+            log.info("ignoring the %s device status (%s)", what, e)
+            continue
+        if best is None or claims["iat"] > best[0]:
+            best = (claims["iat"], answer)
+    return best[1] if best else None
+
+
 # -- merging with a member's policy -----------------------------------------------------------------
 
 

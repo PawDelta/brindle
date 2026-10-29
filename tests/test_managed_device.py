@@ -5,12 +5,14 @@ import json
 import time
 from contextlib import ExitStack
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from brindle import budget
-from brindle.pro import license, managed, managed_models, signed, team_policy
+from brindle.pro import auth, license, managed, managed_models, signed, team_policy
+from brindle.pro.org_context import OrgContext, Providers
 from brindle.pro.team_policy import parse_policy
 from pro_fixtures import ISS, TEST_KID, pro_env, sign, signing_key  # noqa: F401 - fixtures
 
@@ -31,12 +33,12 @@ def answer(version=3, **rules):
             "policy": policy, "updated_at": NOW - 600, "updated_by": "owner"}
 
 
-def signed_answer(key, body, *, sub=SUB, exp=NOW + 3600, iat=NOW - 60):
-    claims = {"iss": ISS, "aud": "brindle-pro", "sub": sub, "org_id": body["org_id"], "doc_type": "policy",
-              "role": "device", "policy_role": None, "policy_version": body["version"],
+def signed_answer(key, body, *, sub=SUB, exp=NOW + 3600, iat=NOW - 60, kind="policy", role="device"):
+    claims = {"iss": ISS, "aud": "brindle-pro", "sub": sub, "org_id": body["org_id"], "doc_type": kind,
+              "role": role, "policy_role": None, "policy_version": body.get("version", body.get("policy_version")),
               "document_sha256": managed.document_sha256(body), "iat": iat, "exp": exp, "jti": "p1",
-              "kid": TEST_KID, "token_use": "policy"}
-    return {**body, "token": sign(key, claims, {"typ": "brindle-policy+jwt"})}
+              "kid": TEST_KID, "token_use": kind}
+    return {**body, "token": sign(key, claims, {"typ": f"brindle-{kind}+jwt"})}
 
 
 def managed_file(key, body, *, allow_airgap=False, install=None, policy_sub=SUB, policy_exp=NOW + 3600,
@@ -82,6 +84,7 @@ def refused(m):
     "one_sided_grants", "deny_personal_keys", "exhausted_member_budget", "plan_rules",
     "expired_snapshot", "bad_outer_token",
     "vector:managed_with_policy_ok", "vector:managed_with_policy_tampered_body",
+    "status:device_paused_signed_out", "status:other_org_signed_in",
 ])
 def test_managed_device(signing_key, tmp_path, monkeypatch, case):
     if case.startswith("vector:"):
@@ -105,6 +108,49 @@ def test_managed_device(signing_key, tmp_path, monkeypatch, case):
         assert managed.airgap_allowed(None) and managed.local_policy_allowed(None, signed=False)
         return
     body = answer()
+    if case.startswith("status:"):
+        # The real org context, with the device's routes answered by a fake server.
+        m = managed.verify_file(managed_file(signing_key, body), now=NOW)
+        device_status = {"org_id": ORG, "policy_version": 4, "paused": case == "status:device_paused_signed_out",
+                         "paused_reason": "lost laptop", "control": {
+                             "id": "c_dev", "action": "throttle", "throttle": {"seat_month_usd": 10}}}
+        served = {"policy": signed_answer(signing_key, answer(version=4, max_parallel_workers=3)),
+                  "status": signed_answer(signing_key, device_status, kind="status")}
+
+        def server(self, method, url, form, headers):
+            assert headers["Authorization"] == f"Bearer {DEVICE_TOKEN}"
+            kind = url.rsplit("/", 1)[1]
+            return (200, served[kind]) if kind in served else (503, {})
+
+        monkeypatch.setattr(auth.UrllibTransport, "request", server)
+
+        def context():
+            return OrgContext.resolve(home=tmp_path, repo_root=str(tmp_path), now=NOW,
+                                      providers=Providers(managed=lambda: m))
+
+        if case == "status:device_paused_signed_out":
+            # Nobody is signed in: the device's own status still pauses new work, and from
+            # its verified cached copy once the server is out of reach. A pause stops nothing.
+            for _ in range(2):
+                ctx = context()
+                assert "lost laptop" in (ctx.blocked_reason() or "") and ctx.shutdown_control() is None
+                served.clear()
+            return
+        # Each org's throttle narrows the other's: the member's workers, the device's budget.
+        ent = SimpleNamespace(sub="user_1", org_id="org_other", role="member", policy_role=None,
+                              features=frozenset({"team"}), policy_signed=True)
+        docs = {"policy": signed_answer(signing_key, {
+                    "org_id": ent.org_id, "version": 9, "role": "member", "policy_role": None,
+                    "policy": {"allowed_models": ["opus", "sonnet"]}}, sub=ent.sub, role="member"),
+                "status": signed_answer(signing_key, {
+                    "org_id": ent.org_id, "policy_version": 9, "paused": False, "control": {
+                        "id": "c_member", "action": "throttle", "throttle": {"max_parallel_workers": 1}}},
+                    sub=ent.sub, kind="status", role="member")}
+        monkeypatch.setattr(license, "current", lambda **kw: ent)
+        monkeypatch.setattr(auth, "authed", lambda client, store, method, path: (200, docs[path.rsplit("/", 1)[1]]))
+        p = context().policy
+        assert (p.max_parallel_workers, p.budget_seat_month_usd) == (1, 10.0)
+        return
     if case == "bad_outer_token":
         # The managed document itself is judged at the current clock.
         (tmp_path / managed.FILE).write_bytes(managed_file(signing_key, body, exp=NOW - 1))
