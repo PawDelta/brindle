@@ -291,7 +291,8 @@ def _module_path(root: Path, path: str) -> str | None:
 def _importing_tests(root: Path, path: str) -> set[str] | None:
     """The tests that import ``path``'s module, directly or through other
     modules (a source module, a package's ``__init__``, a test helper), and
-    every test under a ``conftest.py`` that does; None when an import is uncertain."""
+    every test under a ``conftest.py`` that does; None when a test's import
+    is uncertain or a module on the way has no module path to follow."""
     module = _module_path(root, path)
     if module is None:
         return None
@@ -329,8 +330,11 @@ def _importing_tests(root: Path, path: str) -> set[str] | None:
             if PurePosixPath(f).name == "conftest.py":
                 under = PurePosixPath(f).parent.parts
                 tests |= {t for t in files if is_test_file(t) and PurePosixPath(t).parts[:len(under)] == under}
-            # A file outside a package is imported by its name from its own directory (pytest's rootdir insertion).
-            owner = _module_path(root, f) or PurePosixPath(f).stem
+            # A conftest is imported by its name from its own directory (pytest's rootdir insertion).
+            # Any other file whose module path is unknown (a namespace package, a script) can't be followed.
+            owner = _module_path(root, f) or ("conftest" if PurePosixPath(f).name == "conftest.py" else None)
+            if owner is None:
+                return None
             if owner not in seen:
                 seen.add(owner)
                 queue.append(owner)
@@ -365,8 +369,13 @@ def _imports(root: Path, path: str) -> tuple[list[str], str | None] | None:
                 continue
             if test:
                 return None
+            # A lone absolute f-string name loads only modules under its literal start; anything else
+            # (a relative name, a package, fromlist or level argument, a variable) may load any module.
             lead = name.values[0] if isinstance(name, ast.JoinedStr) and name.values else None
-            prefix = lead.value if isinstance(lead, ast.Constant) and isinstance(lead.value, str) else ""
+            prefix = lead.value if (isinstance(lead, ast.Constant) and isinstance(lead.value, str)
+                                    and len(node.args) <= 1 and all(kw.arg == "name" for kw in node.keywords)) else ""
+            if prefix.startswith("."):
+                prefix = ""
             loads = prefix if loads is None else os.path.commonprefix([loads, prefix])
         elif isinstance(node, ast.Import):
             imports += [n.name for n in node.names]
