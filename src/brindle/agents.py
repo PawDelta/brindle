@@ -3418,7 +3418,7 @@ def _org_rules_for(db: DB, agent: Agent):
 def _org_eligibility(db: DB, caller_id: str | None, agent: Agent, rules, human_member: str | None = None):
     """Judge the verified Inbox member or the member bound to an agent at spawn.
     Return (approver, plan, refusal); refusal is None when the caller may approve."""
-    from brindle import plan_approvals, plan_policy
+    from brindle import autopilot, plan_approvals, plan_policy, repos, tasks
 
     ws = db.get_workspace(agent.workspace_id)
     caller = db.get_agent(caller_id) if caller_id is not None else None
@@ -3432,7 +3432,23 @@ def _org_eligibility(db: DB, caller_id: str | None, agent: Agent, rules, human_m
         return None, None, "can't verify the caller's profile is not a reviewer agent; refusing"
     member = human_member if human_member is not None else caller.member if caller else None
     task = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == agent.id), None)
-    plan = plan_policy.PlanTask(weight=agent.weight, files=json.loads(task.files) if task and task.files else None)
+    # Rebuild delegation's risk in the delegating session, not the approver's.
+    # Use the original workspace for dependency resolution: the worker may have
+    # its own worktree, and a queued task must not shadow its own dependency.
+    delegator_id = task.caller_id if task else agent.parent_id
+    target_ws = db.get_workspace(task.caller_ws_id) if task else ws
+    own = repos.own_root(db, autopilot.root_of(db, delegator_id)) if delegator_id else None
+    dep_repos = tasks.dependency_repos(
+        db, target_ws or ws,
+        json.loads(task.depends_on) if task and task.depends_on else None,
+        delegator_id, dependent_task_id=task.id if task else None,
+    )
+    plan = plan_policy.PlanTask(
+        weight=agent.weight,
+        files=json.loads(task.files) if task and task.files else None,
+        cross_repo=(bool(own) and own != ws.repo_root)
+        or any(r != ws.repo_root for r in dep_repos),
+    )
     if member is None:
         return None, plan, ("your org's plan rules need an approver started while signed in to the org "
                             "(this agent has no team member bound)")

@@ -228,6 +228,32 @@ def control_in_force(st: Status, now: float | None = None) -> dict | None:
     return c
 
 
+def _tighter(a, b):
+    return b if a is None else a if b is None else min(a, b)
+
+
+def stricter(a: Status, b: Status, now: float | None = None) -> Status:
+    """One status from two orgs' (a signed-in member's ``a`` and the managed
+    device's ``b``) where each takes the stricter side: paused if either is,
+    a shutdown in force over a throttle, two throttles combined (the models
+    both allow, the lower worker limit and budget). ``a``'s policy version,
+    seat and bookkeeping stand; notices of both are shown."""
+    ca, cb = control_in_force(a, now), control_in_force(b, now)
+    control = next((c for c in (ca, cb) if c and c["action"] == "shutdown"), None) or ca or cb
+    if control is not None and control["action"] == "throttle" and ca and cb:
+        ta, tb = ca.get("throttle") or {}, cb.get("throttle") or {}
+        ma, mb = ta.get("allowed_models"), tb.get("allowed_models")
+        control = {**ca, "throttle": {
+            "allowed_models": mb if ma is None else ma if mb is None else [m for m in ma if m in mb],
+            "max_parallel_workers": _tighter(ta.get("max_parallel_workers"), tb.get("max_parallel_workers")),
+            "seat_month_usd": _tighter(ta.get("seat_month_usd"), tb.get("seat_month_usd"))}}
+    pauser = b if b.paused and not a.paused else a
+    seen = {n["id"] for n in a.notices}
+    return Status(policy_version=a.policy_version, paused=pauser.paused, paused_reason=pauser.paused_reason,
+                  seat=a.seat, notices=[*a.notices, *(n for n in b.notices if n["id"] not in seen)],
+                  org_alert=a.org_alert, control=control, at=a.at or b.at)
+
+
 def _context(now: float | None = None, saved: Saved | None = None):
     """An org context at ``now`` whose status is ``saved`` (default: :func:`load`)."""
     from brindle.pro.org_context import OrgContext, Providers

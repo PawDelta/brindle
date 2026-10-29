@@ -1757,11 +1757,12 @@ export class FakeDaemon {
     if (path === "/governance/offline-policy" && method === "POST") {
       const days = body.days;
       if (typeof days !== "number" || days < 1 || days > 90) return error("invalid", "days must be 1 to 90", 400);
-      return json({ path: "/home/u/.brindle/policy.json", days });
+      if (typeof body.repo !== "string" || !body.repo) return error("invalid", "repo is required", 400);
+      return json({ path: `${body.repo}/.brindle/policy.json`, days });
     }
     if (path === "/governance/device-file" && method === "POST") {
       if (typeof body.name !== "string" || !body.name) return error("invalid", "name is required", 400);
-      return json({ filename: "managed.json", device_id: "dev_1", managed: { org_id: this.data.governance.org_id, name: body.name, allow_airgap: body.allow_airgap } });
+      return json({ filename: "managed.json", device_id: "dev_1", managed: { org_id: this.data.governance.org_id, name: body.name, allow_airgap: body.allow_airgap }, system_dir: "/Library/Application Support/brindle" });
     }
     if (path === "/governance/plan" && method === "GET") return json(planDTO(query.repo));
     if (path === "/governance/plan" && method === "PUT") {

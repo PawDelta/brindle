@@ -2,8 +2,9 @@
 (``audit_chain.AuditChain.emit``, registered through ``brindle.events``) that
 sends each audit record, as it is written, to a company SIEM.
 
-Targets are plain values handed to :func:`configure` (a list, or a callable
-returning one); this module reads no policy::
+Targets are plain values owned by each AuditChain (a list, or a callable
+returning one); this module reads no policy. Standalone callers can set
+defaults with :func:`configure`::
 
     {"kind": "syslog", "url": "udp://siem.example.com:514"}     # or tcp://
     {"kind": "https", "url": "https://siem.example.com/ingest",
@@ -62,7 +63,7 @@ _transport = None                # (target, record) -> None, raising when it can
 _clock = time.monotonic
 _down_until: dict[str, float] = {}
 _after_empty_snapshot = lambda: None   # noqa: E731 - test seam: a drainer has just read an empty queue
-_spawn = None                   # starts a background drain; set by configure (default: a daemon thread)
+_spawn = None                   # optional background drain starter (default: a daemon thread)
 
 
 def configure(targets=None, *, home: Path | None = None, transport=None, clock=None,
@@ -79,8 +80,9 @@ def configure(targets=None, *, home: Path | None = None, transport=None, clock=N
     _down_until.clear()
 
 
-def _current() -> list[dict]:
-    raw = _targets() if callable(_targets) else _targets
+def _current(targets=None) -> list[dict]:
+    targets = _targets if targets is None else targets
+    raw = targets() if callable(targets) else targets
     return [t for t in (raw or []) if isinstance(t, dict) and t.get("kind") in KINDS and t.get("url")]
 
 
@@ -295,10 +297,10 @@ def _start(fn) -> None:
     threading.Thread(target=fn, daemon=True, name="audit-streaming").start()
 
 
-def _each_target(action) -> None:
+def _each_target(action, targets=None) -> None:
     """Run ``action(target)`` for every target; a failure never leaves this module."""
     try:
-        targets = _current()
+        targets = _current(targets)
     except Exception:  # noqa: BLE001 - a broken provider must not touch the agent
         log.warning("brindle: couldn't read the audit streaming targets", exc_info=True)
         return
@@ -309,16 +311,16 @@ def _each_target(action) -> None:
             log.warning("brindle: audit streaming failed", exc_info=True)
 
 
-def enqueue(record: dict, home: Path | None = None) -> None:
+def enqueue(record: dict, home: Path | None = None, *, targets=None) -> None:
     """Put ``record`` in every target's durable queue. Local file work only (no
     network), so the audit chain calls it while still holding its append lock,
     which keeps queue order the same as chain order."""
-    _each_target(lambda target: _enqueue(queue_path(target, home), record))
+    _each_target(lambda target: _enqueue(queue_path(target, home), record), targets)
 
 
-def kick(home: Path | None = None) -> None:
+def kick(home: Path | None = None, *, targets=None) -> None:
     """Start delivering the queues in the background; returns at once."""
-    _each_target(lambda target: _spawn(lambda: _drain_quietly(target, home, False)))
+    _each_target(lambda target: (_spawn or _start)(lambda: _drain_quietly(target, home, False)), targets)
 
 
 def flush() -> None:
