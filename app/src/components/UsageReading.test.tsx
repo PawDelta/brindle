@@ -64,7 +64,10 @@ describe("the sidebar's weekly usage reading", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
     fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
     await screen.findByTestId("sign-in");
-    await waitFor(() => expect(account.textContent).toBe("?"));
+    await waitFor(() => {
+      expect(account.textContent).toBe("");
+      expect(account.querySelector("svg")).not.toBeNull();
+    });
     fireEvent.click(within(screen.getByTestId("pages")).getByRole("button", { name: "Settings" }));
     const settings = await screen.findByRole("region", { name: "Settings" });
     const theme = within(settings).getByRole("group", { name: "Theme" });
@@ -83,7 +86,8 @@ describe("the sidebar's weekly usage reading", () => {
     expect(within(pages).getByRole("button", { name: "Agents" }).querySelector("[data-testid*='badge']")).toBeNull();
     fireEvent.click(account);
     await screen.findByTestId("sign-in");
-    expect(account.textContent).toBe("?");
+    expect(account.textContent).toBe("");
+    expect(account.querySelector("svg")).not.toBeNull();
     daemon.deferLogin = true;
     daemon.data.accountAfterLogin = { signed_in: true, name: "Sam Rivera", plan: "pro" };
     fireEvent.click(screen.getByRole("button", { name: "Use a device code instead" }));

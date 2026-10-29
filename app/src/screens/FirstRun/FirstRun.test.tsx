@@ -188,6 +188,17 @@ describe("Launch", () => {
     render(<Launch setup={crashed.setup}>{() => <p>the app</p>}</Launch>);
     expect((await screen.findByTestId("first-run-reason", {}, { timeout: 3000 })).textContent).toBe(CRASHED);
     expect(crashed.setup.connect).toHaveBeenCalledTimes(2);
+    cleanup();
+
+    // Meanwhile the screen says what the shell's start is doing: here, stopping the old build's daemon.
+    let connected = () => {};
+    const replacing = fakeSetup([detection([...REQUIRED])], [null]);
+    replacing.setup.connect = () => new Promise<void>((resolve) => (connected = resolve));
+    replacing.setup.startStep = vi.fn(async () => ({ step: "stopping" as const, pid: 4242, secs: 2 }));
+    render(<Launch setup={replacing.setup}>{() => <p>the app</p>}</Launch>);
+    expect((await screen.findByRole("status")).textContent).toContain("4242");
+    connected();
+    expect(await screen.findByText("the app")).toBeTruthy();
   });
 
   it("onboarding says an engine too old to start is out of date, without the command that would upgrade it", async () => {

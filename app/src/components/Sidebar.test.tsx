@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { DaemonClient } from "../api/client";
 import { DaemonContext } from "../api/context";
 import type { GoalDTO, InboxItemDTO, SessionDTO } from "../api/schema";
@@ -11,6 +11,7 @@ import { StoreContext } from "../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN, type DaemonData } from "../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../test/fixtures";
 import { PAUSED_KEY, SPLIT_KEY, Sidebar } from "./Sidebar";
+import { sidebarChanges } from "./SessionContext";
 
 beforeEach(() => localStorage.clear());
 afterEach(cleanup);
@@ -35,7 +36,7 @@ function mount(data: Partial<DaemonData>, route: Route = { screen: "new" }, fetc
       </StoreContext.Provider>
     </DaemonContext.Provider>,
   );
-  return { daemon, sync, navigate };
+  return { daemon, sync, navigate, store };
 }
 
 const agentRow = (id: string) => document.querySelector<HTMLButtonElement>(`button[data-tree-agent="${id}"]`);
@@ -43,6 +44,28 @@ const sessionRow = (id: string) => document.querySelector<HTMLButtonElement>(`bu
 const list = () => screen.getByRole("navigation", { name: "Sessions" });
 
 describe("Sidebar", () => {
+  it.each([
+    { account: { signed_in: true, name: "Sam Rivera", email: "other@example.com" }, initials: "SR" },
+    { account: { signed_in: true, name: "  ", email: "sam.rivera@example.com" }, initials: "S" },
+    { account: { signed_in: true }, initials: "" },
+    { account: { signed_in: false, name: "Sam Rivera", email: "sam@example.com" }, initials: "" },
+  ])("renders the account identity fallback for $account", async ({ account, initials }) => {
+    const { sync, navigate, store } = mount({ account });
+    const button = screen.getByRole("button", { name: "Open Account" });
+    try {
+      await waitFor(() => {
+        expect(store.getState().account).toEqual(account);
+        expect(button.textContent).toBe(initials);
+        expect(Boolean(button.querySelector("svg"))).toBe(!initials);
+        expect(button.className.includes("text-ink-3")).toBe(!account.signed_in);
+      });
+      fireEvent.click(button);
+      expect(navigate).toHaveBeenLastCalledWith({ screen: "account" });
+    } finally {
+      sync.stop();
+    }
+  });
+
   it("lists every open session by repo with its agents nested in the CLI's rows, recent ones folded, and opens them", async () => {
     const { sync, navigate } = mount({ workspaces: [root, { ...worker, agents: [...worker.agents!, child] }], inbox: [waiting] }, { screen: "session", root: "sup1", repo: REPO, agent: "w1" });
     expect(list().textContent).toContain("Loading");
@@ -151,15 +174,19 @@ describe("Sidebar", () => {
     expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("working");
     fireEvent.click(inbox);
     expect(navigate).toHaveBeenLastCalledWith({ screen: "inbox" });
-    // Nothing waiting: the entry says so, quietly.
+    // Nothing waiting: no pill at all.
     daemon.data.inbox = [];
     daemon.publish("message.queued", { agent_id: "sup1" });
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
-    expect(inbox.textContent).toBe("Inboxempty");
+    expect(inbox.textContent).toBe("Inbox");
     sync.stop();
   });
 
   it("shows the session's changes in one coloured line that toggles them in the chat's place", async () => {
+    sidebarChanges.shown = true;
+    onTestFinished(() => {
+      sidebarChanges.shown = false;
+    });
     const onSession: Route = { screen: "session", root: "sup1", repo: REPO, agent: "w1" };
     const changed = {
       workspaces: [root, worker],
@@ -195,7 +222,7 @@ describe("Sidebar", () => {
     );
     const context = () => screen.getByTestId("session-context");
     // Completion stays visible alongside the phase; the milestone list carries the detail.
-    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete · In progress"));
+    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete"));
     expect(context().textContent).toContain("Ship ls --json");
     expect(context().textContent).toContain("sup1 · proj · interactive · autopilot");
     const milestones = within(context()).getByRole("list", { name: "Milestones" });
@@ -240,7 +267,7 @@ describe("Sidebar", () => {
   it("offers no autopilot for a paused session's context, and says nothing about a PR", async () => {
     const { sync } = mount({ workspaces: [root, worker], goal: { ...structuredClone(goal), root_id: "sup0", state: "paused", enabled: false } }, { screen: "session", root: "sup0", repo: REPO, agent: "sup0" });
     const context = () => screen.getByTestId("session-context");
-    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete · In progress"));
+    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete"));
     expect(context().textContent).toContain("Refactor the cache");
     expect(within(context()).queryByRole("switch")).toBeNull();
     expect(context().textContent).not.toMatch(/PR/);
