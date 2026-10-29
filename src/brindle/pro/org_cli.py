@@ -210,7 +210,8 @@ def context(repo_root: str | None, *, store=None, client=None, now: float | None
     air-gap mode's offline file), except on a managed device: there it is the
     device's newest valid signed policy (a copy fetched or cached with the
     device token, or the managed file's snapshot), and a second org the
-    person is signed in to adds its rules, the stricter one winning. The
+    person is signed in to adds its rules, the stricter one winning (while
+    that org's policy is unavailable, its denial stands). The
     managed binding's ``source`` says which copy the device's was."""
     from brindle.policy import deny
     from brindle.pro import org_context, team_policy
@@ -235,10 +236,12 @@ def context(repo_root: str | None, *, store=None, client=None, now: float | None
                         "it fetches one with its device token")
         snapshot = device.snapshot is not None and p.raw_body == device.snapshot.raw_body
         binding["source"] = "snapshot" if snapshot else "device"
-        other = member()    # a denial or no team org: the device's policy alone
-        if isinstance(other, team_policy.OrgPolicy) and other.org_id != device.org_id:
-            return managed.stricter(p, other, now=now)
-        return p.enforced
+        other = member()
+        if isinstance(other, team_policy.OrgPolicy):
+            return p.enforced if other.org_id == device.org_id else managed.stricter(p, other, now=now)
+        if not other.allowed:    # the second org's policy is unavailable: agents wait, with its reason
+            return other
+        return p.enforced        # no team org: the device's policy alone
 
     return org_context.OrgContext.resolve(repo_root=repo_root, now=now, providers=org_context.Providers(
         policy=device_policy, managed=lambda: binding))

@@ -1131,10 +1131,16 @@ def with_role_overrides(p: OrgPolicy, role: str | None, policy_role: str | None)
 
 
 def load_offline(repo_root: str | None, org_id: str) -> OrgPolicy:
-    """The offline policy file (``.brindle/policy.json``, the org policy's
-    schema) for air-gap mode; raises :class:`PolicyUnavailable` when it is
-    missing, unreadable, malformed or for another org."""
+    """The offline policy file (``.brindle/policy.json``) for air-gap mode,
+    for ``org_id`` (the signed-in org, or the managed device's). A signed
+    offline policy export (``{"token", "body"}``) counts only once its token
+    verifies as an offline-policy document for ``org_id`` that is unexpired
+    and covers ``body``; a plain policy (the org policy's schema, unsigned)
+    still loads, with a warning. Raises :class:`PolicyUnavailable` when the
+    file is missing, unreadable, malformed, for another org, or an export
+    that doesn't verify."""
     from brindle import airgap
+    from brindle.pro import signed
 
     path = airgap.policy_path(repo_root)
     try:
@@ -1149,6 +1155,17 @@ def load_offline(repo_root: str | None, org_id: str) -> OrgPolicy:
         body = json.loads(raw)
     except ValueError as e:
         raise PolicyUnavailable(f"{path} is not valid JSON") from e
+    if isinstance(body, dict) and "token" in body:
+        token, body = body.get("token"), body.get("body")
+        if not isinstance(token, str) or not isinstance(body, dict):
+            raise PolicyUnavailable(f"{path} is a malformed offline policy export")
+        try:
+            signed.verify(token, "offline-policy", {"org_id": org_id}, body=body)
+        except signed.SignedError as e:
+            raise PolicyUnavailable(f"the offline policy export at {path} doesn't verify: {e}") from e
+    else:
+        log.warning("the offline policy at %s is unsigned; `brindle account org policy --export` "
+                    "writes a signed one", path)
     return parse_policy(org_id, body, time.time())
 
 
