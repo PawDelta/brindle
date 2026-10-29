@@ -95,7 +95,8 @@ describe("settings repo view", () => {
   });
 
   it("'Change just for me' writes a team-set value to the local file, and Clear takes it back out", async () => {
-    const { daemon, stop } = setup({ config: { user: { plan_first: false }, repo: { max_agents: 2 }, local: {}, keys: [] } });
+    const shared = { max_agents: 2, base_branch: "main", rules: ["Require review"] };
+    const { daemon, stop } = setup({ config: { user: { plan_first: false }, repo: shared, local: {}, keys: [] } });
     const status = await screen.findByTestId("status-max_agents");
     expect(status.textContent).toContain("Set by the team");
     fireEvent.click(within(status).getByRole("button", { name: "Change just for me" }));
@@ -103,7 +104,7 @@ describe("settings repo view", () => {
     expect(patches(daemon)[0].body).toEqual({ scope: "repo", repo: REPO, values: { max_agents: 2 } });
     expect(daemon.data.config.local).toEqual({ max_agents: 2 });
     // The committed file is untouched.
-    expect(daemon.data.config.repo).toEqual({ max_agents: 2 });
+    expect(daemon.data.config.repo).toEqual(shared);
     // An unsaved edit to the cleared row is dropped (it would otherwise be saved into the team's file); another row's edit stays.
     fireEvent.change(screen.getByRole("spinbutton", { name: "Workers at once" }), { target: { value: "4" } });
     fireEvent.change(screen.getByRole("textbox", { name: "Checks" }), { target: { value: "make" } });
@@ -113,7 +114,23 @@ describe("settings repo view", () => {
     expect(screen.getByTestId("settings-save").textContent).toContain("1 change");
     fireEvent.click(within(screen.getByTestId("settings-save")).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(daemon.data.config.local).toEqual({ checks: ["make"] }));
-    expect(daemon.data.config.repo).toEqual({ max_agents: 2 });
+    expect(daemon.data.config.repo).toEqual(shared);
+    // Rules union across scopes: the box is the local file's own list, the team's rule is shown apart and stays in force.
+    expect(screen.getByTestId("inherited-rules").textContent).toContain("Require review");
+    expect(screen.getByRole("textbox", { name: "Project rules" })).toHaveProperty("value", "");
+    fireEvent.change(screen.getByRole("textbox", { name: "Project rules" }), { target: { value: "Use tests" } });
+    // A team-set PR branch is edited in the committed file; Change just for me and Clear work on it like any row.
+    expect(screen.getByTestId("status-base_branch").textContent).toContain("Set by the team");
+    fireEvent.change(screen.getByRole("textbox", { name: "PR branch" }), { target: { value: "develop" } });
+    expect(screen.getByTestId("settings-save").textContent).toContain("base_branch would change .brindle/config.json");
+    fireEvent.click(within(screen.getByTestId("settings-save")).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(daemon.data.config.repo).toEqual({ ...shared, base_branch: "develop" }));
+    await waitFor(() => expect(daemon.data.config.local).toEqual({ checks: ["make"], rules: ["Use tests"] }));
+    expect(screen.getByTestId("inherited-rules").textContent).toContain("Require review");
+    fireEvent.click(within(screen.getByTestId("status-base_branch")).getByRole("button", { name: "Change just for me" }));
+    await waitFor(() => expect(daemon.data.config.local).toMatchObject({ base_branch: "develop" }));
+    fireEvent.click(await within(await screen.findByTestId("status-base_branch")).findByRole("button", { name: "Clear" }));
+    await waitFor(() => expect(daemon.data.config.local).not.toHaveProperty("base_branch"));
     stop();
   });
 

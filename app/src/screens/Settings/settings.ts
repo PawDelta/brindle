@@ -108,7 +108,7 @@ export const scopeOf = (overrides: Record<string, "local" | "repo"> | undefined,
 
 /* The one plain line under a repo-view row; yours falls back to the engine's default. */
 export const statusLine = (s: Setting, scope: Scope, yourValue: unknown): string =>
-  scope === "team" ? "Set by the team" : scope === "local" ? "Just for you" : `Same as yours (${overrideText(s, yourValue ?? s.fallback)})`;
+  scope === "team" ? "Set by the team" : scope === "local" ? "Just for you" : s.repoOnly ? "Not set" : `Same as yours (${overrideText(s, yourValue ?? s.fallback)})`;
 
 /* PATCH /config's `values`: only what changed, as the engine takes it (a
    list setting's lines, a number, a bool, a choice; null only where the

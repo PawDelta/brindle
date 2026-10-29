@@ -15,7 +15,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Config, DaemonClient } from "../../api/client";
 import { alert, button, notice, panel, quiet } from "../../components/ui";
 import { More, message, RestOfConfig, Section, SettingRow } from "./SettingsScreen";
-import { PROJECT_RULES, SETTINGS, YOURS, carryEdits, changed, draftOf, invalid, scopeOf, statusLine, values, type Setting } from "./settings";
+import { PROJECT_RULES, SETTINGS, YOURS, carryEdits, changed, draftOf, invalid, scopeOf, statusLine, values, type Draft, type Setting } from "./settings";
 
 const only = (...keys: string[]) => PROJECT_RULES.filter((s) => keys.includes(s.key));
 const CHECKS = only("checks");
@@ -47,7 +47,9 @@ export function RepoSettings({ client, repo }: { client: DaemonClient; repo: str
 
   /* The repo's settings as a draft; an unsaved edit survives a reload after another change here. */
   const cleared = useRef<string[]>([]);
-  const loaded = useMemo(() => draftOf(config?.repo ?? {}), [config]);
+  // Rules union across scopes (the effective list), so the box edits this file's own list; the rest is shown, not editable.
+  const loaded = useMemo((): Draft => ({ ...draftOf(config?.repo ?? {}), rules: config?.local?.rules ?? [] }), [config]);
+  const inherited = ((config?.repo?.rules as string[] | undefined) ?? []).filter((r) => !((config?.local?.rules as string[] | undefined) ?? []).includes(r));
   const [base, setBase] = useState(loaded);
   const [draft, setDraft] = useState(loaded);
   if (config && base !== loaded) {
@@ -68,7 +70,7 @@ export function RepoSettings({ client, repo }: { client: DaemonClient; repo: str
   };
   const sourceOf = (key: string) => scopeOf(config?.overrides, key);
   /* An edit to a row the team sets goes to the committed file; every other edit stays local. */
-  const toTeam = dirty.filter((k) => YOURS.some((s) => s.key === k) && sourceOf(k) === "team");
+  const toTeam = dirty.filter((k) => !["checks", "rules"].includes(k) && sourceOf(k) === "team");
 
   const run = async (what: () => Promise<void>) => {
     if (saving) return;
@@ -149,13 +151,23 @@ export function RepoSettings({ client, repo }: { client: DaemonClient; repo: str
       </Section>
 
       <Section id="setup" title="Setup and PR branch" blurb="How a new worktree starts, and where pull requests go." testId="project-setup">
-        {config ? SETUP.map(checkRow) : loading("setup-loading", "setup")}
+        {config ? SETUP.map(row) : loading("setup-loading", "setup")}
       </Section>
 
       <Section id="this-repo" title="Project rules" blurb="Only a repo's own files carry these, so they save to this repo." testId="repo-settings">
         {config ? (
           <>
-            {RULES.map(checkRow)}
+            {RULES.map((s) => (
+              <SettingRow
+                key={s.key}
+                s={s}
+                value={draft[s.key]}
+                dirty={dirty.includes(s.key)}
+                disabled={saving}
+                onChange={(v) => edit(s.key, v)}
+                override={inherited.length > 0 ? <span className="block" data-testid="inherited-rules">Also in force, from the team or you: {inherited.join("; ")}</span> : undefined}
+              />
+            ))}
             <div className="flex flex-col gap-1 px-s2 py-1">
               {restLines.length > 0 ? (
                 <>
