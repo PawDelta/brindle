@@ -168,6 +168,25 @@ def test_plan_approvals_org_rules_gate_approve_plan(db, tmp_path, monkeypatch):
             return str(e)
 
     assert "carol may not approve" in attempt("carol")
+    ghost = make("supervisor")                                    # spawned unbound (member NULL)
+    callers["ghost"] = ghost
+    state["member"] = "alice"                                     # a signed-in alice can't be borrowed
+    assert "signed in to the org" in attempt("ghost")
+    db.update_agent(worker.id, parent_id=ghost.id)                # ... nor as the worker's parent
+    assert "signed in to the org" in attempt("ghost")
+    db.update_agent(worker.id, parent_id=boss.id)
+    state["member"] = None
+
+    def revise(who):
+        try:
+            agents.approve_plan(db, callers[who].id, worker.id, "redo", approved=False)
+            return "revised"
+        except agents.AgentError as e:
+            return str(e)
+
+    assert "carol may not approve" in revise("carol") and "signed in to the org" in revise("ghost")
+    assert db.get_agent(worker.id).plan_state == "proposed" and db.get_agent(worker.id).plan_approvals is None
+    assert state["audit"] == []
     assert "two different people" in attempt("rev")               # a reviewer isn't one of them
     db.update_agent(worker.id, parent_id=reviewer.id)             # ... not even as the worker's parent
     assert "two different people" in agents_approve_as_parent(db, reviewer, worker)

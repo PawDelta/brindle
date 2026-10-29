@@ -3403,23 +3403,36 @@ def _org_rules_for(db: DB, agent: Agent):
         raise AgentError(str(e)) from e
 
 
-def _org_plan_refusal(db: DB, caller_id: str, agent: Agent, rules, so_far: list[str]) -> str | None:
-    """Why the org's plan rules refuse this approval, or None. An eligible
-    first approval a two-person rule still waits on is recorded and refused;
-    an ineligible one changes nothing."""
+def _org_eligibility(db: DB, caller_id: str, agent: Agent, rules):
+    """(approver, plan, refusal) for the caller under the org's plan rules. The
+    member is only the one bound to the caller at spawn (agent.member), never
+    the process-wide signed-in one; refusal is None when the caller may approve."""
     from brindle import plan_approvals, plan_policy
 
     ws = db.get_workspace(agent.workspace_id)
     caller = db.get_agent(caller_id)
     reviewer = bool(caller) and is_review_profile(caller.profile, ws.repo_root)   # whoever the caller is
-    member = (caller.member if caller else None) or plan_policy.current_member(ws.repo_root)
-    if member is None:
-        return "your org's plan rules need a signed-in team member to approve plans"
+    member = caller.member if caller else None
     task = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == agent.id), None)
     plan = plan_policy.PlanTask(weight=agent.weight, files=json.loads(task.files) if task and task.files else None)
+    if member is None:
+        return None, plan, ("your org's plan rules need an approver started while signed in to the org "
+                            "(this agent has no team member bound)")
     who = plan_approvals.Approver(member, reviewer)
-    if not plan_approvals.eligible(rules, who, plan).allowed:
-        return plan_approvals.eligible(rules, who, plan).reason
+    return who, plan, (None if plan_approvals.eligible(rules, who, plan).allowed
+                       else plan_approvals.eligible(rules, who, plan).reason)
+
+
+def _org_plan_refusal(db: DB, caller_id: str, agent: Agent, rules, so_far: list[str]) -> str | None:
+    """Why the org's plan rules refuse this approval, or None. An eligible
+    first approval a two-person rule still waits on is recorded and refused;
+    an ineligible one changes nothing."""
+    from brindle import plan_approvals
+
+    who, plan, denied = _org_eligibility(db, caller_id, agent, rules)
+    if denied:
+        return denied
+    member = who.id
     d = plan_approvals.may_approve(rules, who, plan, so_far)
     if d.allowed:
         return None
@@ -3445,6 +3458,11 @@ def approve_plan(db: DB, caller_id: str | None, agent_id: str, feedback: str = "
         raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
     if agent.plan_state != "proposed":
         raise AgentError(f"{agent.id} has no plan awaiting a decision")
+    if not approved and rules and agent.parent_id != caller_id:
+        # A revision is a decision too: a non-parent needs an eligible bound member.
+        denied = _org_eligibility(db, caller_id, agent, rules)[2]
+        if denied:
+            raise AgentError(denied)
     feedback = feedback.strip()
     if approved:
         so_far = json.loads(agent.plan_approvals or "[]")
