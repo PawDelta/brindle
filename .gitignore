@@ -17,3 +17,5 @@ docs/*
 commit_msg.txt
 model_routing_plan.*
 open_plan.py
+
+/node_modules/

@@ -487,6 +487,28 @@ export interface DocExport {
   content_b64?: string;
 }
 
+export type ExportDestination = "download" | "google_docs" | "sharepoint";
+
+/* GET /analysis-docs/policy (the rest of the org's policy passes through untouched). */
+export interface DocPolicy {
+  export_destinations?: ExportDestination[];
+}
+
+/* GET /analysis-docs/export-config */
+export interface DocExportConfig {
+  google_client_id: string | null;
+  microsoft_client_id: string | null;
+}
+
+export type TeamDestinationKind = "sharepoint" | "google_drive";
+
+/* GET /analysis-docs/destination */
+export interface TeamDestination {
+  kind: TeamDestinationKind | null;
+  target_name: string | null;
+  connected_at: number | string | null;
+}
+
 export interface DocsQuery {
   repo?: string;
   scope?: string;
@@ -1119,8 +1141,31 @@ export class DaemonClient {
   }
 
   /* With `dir` the daemon writes the file there; without, it comes back as base64. */
-  exportDoc(id: string, format: "md" | "docx" | "zip", dir?: string) {
-    return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, dir ? { format, dir } : { format });
+  exportDoc(id: string, format: "md" | "docx" | "zip", dir?: string, destination: ExportDestination = "download") {
+    return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, { format, destination, ...(dir ? { dir } : {}) });
+  }
+
+  /* The org's doc policy: which export destinations it allows. */
+  docPolicy(repo?: string) {
+    return this.get<DocPolicy>("/analysis-docs/policy", { repo });
+  }
+
+  /* The public client ids for the in-app Google / Microsoft sign-in; null hides that button. */
+  docExportConfig(repo?: string) {
+    return this.get<DocExportConfig>("/analysis-docs/export-config", { repo });
+  }
+
+  /* The team's export destination (kind null when none). Changing it is admin only. */
+  docDestination(repo?: string) {
+    return this.get<TeamDestination>("/analysis-docs/destination", { repo });
+  }
+
+  setDocDestination(body: { kind: TeamDestinationKind; target: { drive_id: string; folder_id?: string } | { site: string; folder?: string }; credential: string | { tenant_id: string; client_id: string; client_secret: string } }) {
+    return this.put<TeamDestination>("/analysis-docs/destination", body);
+  }
+
+  clearDocDestination() {
+    return this.delete<unknown>("/analysis-docs/destination", {});
   }
 
   profile(name: string, repo?: string) {

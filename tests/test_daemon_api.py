@@ -599,6 +599,47 @@ def test_docs_with_no_scope_lists_each_readable_scope_once_per_doc(brindle_home,
     assert topics["topics"] == [{"topic": "refunds", "count": 3}, {"topic": "checkout", "count": 2}]
 
 
+@pytest.mark.parametrize("role,allowed", [("owner", True), ("admin", True), ("member", False), (None, False)])
+def test_doc_destination_is_read_by_anyone_and_changed_only_by_admins(monkeypatch, role, allowed):
+    from brindle.daemon import routes_actions
+    from brindle.pro import analysis_docs
+    from brindle.service.errors import ServiceError
+
+    sent = []
+
+    def api(method, path, body=None, **kw):
+        sent.append((method, path, body))
+        return {"kind": "sharepoint", "target_name": "Docs", "connected_at": 1}
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement",
+                        lambda store=None: SimpleNamespace(sub="u1", org_id="o1", role=role))
+    monkeypatch.setattr(analysis_docs, "api", api)
+    code, body = _get("/v1/analysis-docs/destination", AUTH)
+    assert (code, body["target_name"], sent[-1][:2]) == (200, "Docs", ("GET", "/orgs/o1/analysis-docs/destination"))
+    put = {"kind": "sharepoint", "target": "site/folder", "credential": "tok"}
+    sent.clear()
+    if allowed:
+        routes_actions.put_doc_destination(None, {}, put)
+        routes_actions.delete_doc_destination(None, {}, {})
+        assert [(m, b) for m, _, b in sent] == [("PUT", put), ("DELETE", None)]
+    else:
+        for act, args in ((routes_actions.put_doc_destination, put), (routes_actions.delete_doc_destination, {})):
+            with pytest.raises(ServiceError) as e:
+                act(None, {}, args)
+            assert e.value.http_status == 403
+        assert sent == []
+
+
+def test_doc_policy_and_export_config_are_proxied(monkeypatch):
+    from brindle.pro import analysis_docs
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement",
+                        lambda store=None: SimpleNamespace(sub="u1", org_id="o1", role="member"))
+    monkeypatch.setattr(analysis_docs, "api", lambda method, path, body=None, **kw: {"path": path})
+    assert _get("/v1/analysis-docs/policy", AUTH)[1] == {"path": "/orgs/o1/analysis-docs/policy"}
+    assert _get("/v1/analysis-docs/export-config", AUTH)[1] == {"path": "/analysis-docs/export-config"}
+
+
 @pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])
 def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, enough):
     from brindle.db import Task
