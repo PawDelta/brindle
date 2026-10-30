@@ -44,6 +44,10 @@ export interface KnowledgeScreenProps {
   doc?: number | string;
   /* Docs only of this session (its root agent id). */
   session?: string;
+  /* Back to the session the person came from (Docs' Back to session). */
+  onBackToSession?(): void;
+  /* The repo the session belongs to: Docs opens on it (else the first repo). */
+  fromRepo?: string;
 }
 
 const TABS: [KnowledgeView, string][] = [
@@ -389,8 +393,8 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
   );
 }
 
-export function KnowledgeScreen({ client, pickFolder, view, doc, session }: KnowledgeScreenProps) {
-  const pick = useRepo();
+export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
+  const pick = useRepo(fromRepo);
   const { repo, repos } = pick;
   const [tab, setTab] = useState<KnowledgeView>(view ?? (typeof doc === "number" ? "imported" : "docs"));
   const [decisions, setDecisions] = useState<DecisionDTO[] | null>(null);
@@ -560,7 +564,7 @@ export function KnowledgeScreen({ client, pickFolder, view, doc, session }: Know
           <p className="text-sm text-ink-2">Docs, decisions and imported folders, laid out by topic and by the paths they cover, with what connects them. Until then, Docs, Imported and Decisions each list theirs.</p>
         </section>
       )}
-      {tab === "docs" && <DocsView client={client} repo={repo ?? undefined} session={session} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />}
+      {tab === "docs" && <DocsView client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />}
       {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {local && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>

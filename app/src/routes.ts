@@ -34,8 +34,9 @@ export type Route =
   /* `session`: only what waits in that session (its root), from its bar's count. */
   | { screen: "inbox"; session?: string }
   /* `doc`: a library doc's id (opened in the Docs reader) or an imported doc's number;
-     `session`: Docs only of that session (its root), from the session's goal panel. */
-  | { screen: "knowledge"; view?: KnowledgeView; doc?: number | string; section?: string; session?: string }
+     `session`: Docs only of that session (its root), from the session's goal panel;
+     `from`: the session the person came from, for Docs' Back to session. */
+  | { screen: "knowledge"; view?: KnowledgeView; doc?: number | string; section?: string; session?: string; from?: SessionRef }
   | { screen: "agents" }
   /* `section`: scrolled to on opening (the sidebar's usage reading opens Account › Usage,
      a provider's problem Settings › Providers); `ask` counts the requests, so asking
