@@ -282,6 +282,8 @@ def _module_path(root: Path, path: str) -> str | None:
     while parent != root and (parent / "__init__.py").is_file():
         parts.insert(0, parent.name)
         parent = parent.parent
+    if parent != file.parent and parent not in (root, root / "src"):
+        return None   # a namespace gap: only the repo root and src/ are known source roots
     if ((parent == file.parent and not is_test_file(path))
             or not file.is_file() or not all(p.isidentifier() for p in parts)):
         return None
