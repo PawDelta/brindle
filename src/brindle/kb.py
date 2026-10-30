@@ -399,9 +399,9 @@ def sources(db: DB, repo_key: str) -> list[dict]:
         "SELECT s.*, (SELECT count(*) FROM kb_docs d WHERE d.source_id = s.id AND NOT d.tombstoned) AS docs,"
         " (SELECT count(*) FROM kb_chunks c JOIN kb_docs d ON d.id = c.doc_id WHERE d.source_id = s.id"
         " AND NOT d.tombstoned AND c.quarantined IS NOT NULL) AS quarantined,"
-        " EXISTS (SELECT 1 FROM kb_import_library l WHERE l.source_id = s.id AND NOT l.removing) AS in_library,"
+        " EXISTS (SELECT 1 FROM kb_import_library l WHERE l.source_id = s.id AND l.state = 'in_library') AS in_library,"
         " COALESCE((SELECT l.pending FROM kb_import_library l WHERE l.source_id = s.id), 0) AS library_pending,"
-        " COALESCE((SELECT CASE WHEN l.removing THEN (SELECT count(*) FROM kb_import_deletions x"
+        " COALESCE((SELECT CASE WHEN l.state = 'removing' THEN (SELECT count(*) FROM kb_import_deletions x"
         " WHERE x.source_id = s.id) ELSE 0 END FROM kb_import_library l WHERE l.source_id = s.id), 0)"
         " AS library_removing"
         " FROM kb_sources s WHERE s.repo_key = ? ORDER BY s.added_at", (repo_key,))]

@@ -116,7 +116,18 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 2}
     shown = kb.sources(db, "github.com/acme/app")[0]
     assert (shown["in_library"], shown["library_removing"]) == (0, 2) and remote.deleted == []
-    remote.fail_delete = False
+    remote.fail_delete, remote.switches = False, {"import_upload": "off"}
+    kb.sync(db, source, None, "/repo")                  # switch off: not even the queued deletes go
+    assert remote.deleted == [] and kb.sources(db, "github.com/acme/app")[0]["library_removing"] == 2
+    remote.switches = {"import_upload": "on"}
     kb.sync(db, source, None, "/repo")                  # the next index finishes the removal
     assert sorted(remote.deleted) == ["d1", "d2"] and not imports.in_library(db, source)
     assert kb.sources(db, "github.com/acme/app")[0]["library_removing"] == 0
+    # A removal landing between the sync's membership check and its upload, via the real sync.
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
+    (docs / "notes.md").write_text("# Notes\nchanged once more")
+    remote.deleted.clear()
+    remote.during = lambda: imports.remove_from_library(db, source, **{k: deps[k] for k in ("client", "store")})
+    kb.sync(db, source, None, "/repo")
+    assert sorted(remote.deleted) == ["d3", "d4"] and imports.state(db, source) is None
+    assert db.conn.execute("SELECT count(*) FROM kb_import_uploads").fetchone()[0] == 0
