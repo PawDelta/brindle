@@ -16,7 +16,7 @@
    through the engine's own search (GET /v1/kb/search, the same ranking
    agents get). A repo with nothing yet gets an empty state that says how
    knowledge gets here. Nothing here sends anyone to a terminal.
-   Four tabs: Map (still to come), Docs (the analysis-doc library, DocsView),
+   Four tabs: Map, Docs (the analysis-doc library, DocsView),
    Imported (the folders above) and Decisions; the search box and the empty
    state serve the last two. */
 
@@ -33,6 +33,7 @@ import type { KnowledgeView } from "../../routes";
 import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
 import { DocsView } from "./DocsView";
+import { MapView } from "./MapView";
 
 export interface KnowledgeScreenProps {
   client: DaemonClient;
@@ -86,7 +87,7 @@ const ago = (ts: number) => {
   return age === "just now" ? age : `${age} ago`;
 };
 
-function DecisionCard({ d }: { d: DecisionDTO }) {
+export function DecisionCard({ d }: { d: DecisionDTO }) {
   return (
     <li className={`${card} flex flex-col gap-s1 px-s2 py-s2`} data-decision={d.id} data-topic={d.topic}>
       <div className="flex flex-wrap items-baseline gap-x-s1 gap-y-0.5">
@@ -554,12 +555,7 @@ export function KnowledgeScreen({ client, pickFolder, view, doc, session }: Know
           </button>
         ))}
       </div>
-      {tab === "map" && (
-        <section className={`${card} flex flex-col gap-1 px-s3 py-s3`} aria-label="Map" data-testid="map">
-          <h2 className={h2}>The map is on its way</h2>
-          <p className="text-sm text-ink-2">Docs, decisions and imported folders, laid out by topic and by the paths they cover, with what connects them. Until then, Docs, Imported and Decisions each list theirs.</p>
-        </section>
-      )}
+      {tab === "map" && <MapView key={repo} client={client} repo={repo ?? undefined} decisions={decisions ?? []} sources={sources ?? []} />}
       {tab === "docs" && <DocsView client={client} repo={repo ?? undefined} session={session} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />}
       {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {local && loadError && (
