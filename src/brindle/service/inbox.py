@@ -162,7 +162,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 kind = _kind(a, ws, reason)
                 out.append(InboxItemDTO(kind=kind, reason=reason, **link,
                                         action=_sign_in(row.provider) if kind == "credentials" else None))
-            if row.plan_state == "proposed":
+            # Only a plan agents.approve_plan would take: a plan-first worker with a supervisor.
+            if row.plan_state == "proposed" and row.plan_first and row.parent_id is not None:
                 out.append(InboxItemDTO(kind="plan", reason="plan awaiting approval", **link,
                                         detail=row.plan_text))
             if row.parent_id is not None:
