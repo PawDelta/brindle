@@ -123,8 +123,8 @@ describe("account screen", () => {
     expect(onNavigate).toHaveBeenLastCalledWith("agents");
     fireEvent.click(within(card).getByRole("button", { name: "Settings sync" }));
     expect(onNavigate).toHaveBeenLastCalledWith("settings");
-    fireEvent.click(within(card).getByRole("button", { name: /brindle CI on 1 repo/ }));
-    expect(openUrl).toHaveBeenLastCalledWith(`${DOCS_URL}commands/#ci`);
+    fireEvent.click(within(card).getByRole("button", { name: /Federated cloud credentials/ }));
+    expect(openUrl).toHaveBeenLastCalledWith(`${DOCS_URL}commands/#paid-commands`);
     fireEvent.click(screen.getByRole("button", { name: /See everything your plan includes/ }));
     await waitFor(() => expect(screen.getByTestId("spend-total").textContent).toContain("$12.50"));
     expect(screen.getByTestId("spend").querySelector('tr[data-model="sonnet"]')!.textContent).toContain("1.0M");
@@ -163,8 +163,8 @@ describe("account screen", () => {
     // Its entitlement has "team" only: the plan's other lines read unavailable, quietly, and so do Pro's below.
     const lines = screen.getByTestId("plan-features");
     expect(lines.querySelector('li[data-feature="team"]')!.getAttribute("data-available")).toBe("true");
-    expect(lines.querySelector('li[data-feature="ci"]')!.getAttribute("data-available")).toBe("false");
-    expect(lines.querySelector('li[data-feature="ci"]')!.textContent).toContain("not in your entitlement");
+    expect(lines.querySelector('li[data-feature="federation"]')!.getAttribute("data-available")).toBe("false");
+    expect(lines.querySelector('li[data-feature="federation"]')!.textContent).toContain("not in your entitlement");
     expect(lines.querySelector('li[data-feature="org_budgets"]')!.getAttribute("data-available")).toBe("false");
     expect(screen.getByTestId("unavailable-note").textContent).toContain("aren't in your entitlement right now");
     // The tiers below are still open from before: Pro's lines read unavailable too, the free ones never.
@@ -172,7 +172,7 @@ describe("account screen", () => {
     expect(screen.getByTestId("features").querySelector('[data-tier="pro"] li[data-feature="learning"]')!.getAttribute("data-available")).toBe("false");
     expect(screen.getByTestId("features").querySelector('[data-tier="free"] li[data-feature="core"]')!.getAttribute("data-available")).toBe("true");
     // A line the entitlement lacks is no link; one it has goes where it is used (Agents for the org policy).
-    expect(within(lines).queryByRole("button", { name: /brindle CI on every repo/ })).toBeNull();
+    expect(within(lines).queryByRole("button", { name: /Org-wide federation/ })).toBeNull();
     fireEvent.click(within(lines).getByRole("button", { name: "Org policy and required review" }));
     expect(onNavigate).toHaveBeenLastCalledWith("agents");
     expect(screen.getByTestId("features").textContent).not.toMatch(/Pricing|\/ seat/);
@@ -193,7 +193,7 @@ describe("account screen", () => {
     fireEvent.click(screen.getByRole("button", { name: "Use a device code instead" }));
     await waitFor(() => expect(screen.getByTestId("sign-in-state").textContent).toContain("enter the code ABCD-EFGH"));
     expect(posts(daemon, "/account/login").at(-1)?.body).toEqual({ device: true });
-    expect(openUrl.mock.calls.map((c) => c[0])).toEqual([ACCOUNT_URL, PRICING_URL, PRICING_URL, daemon.data.loginUrl, ACCOUNT_URL, ACCOUNT_URL, `${DOCS_URL}recommended-use/`, `${DOCS_URL}commands/#ci`, ENTERPRISE_URL]);
+    expect(openUrl.mock.calls.map((c) => c[0])).toEqual([ACCOUNT_URL, PRICING_URL, PRICING_URL, daemon.data.loginUrl, ACCOUNT_URL, ACCOUNT_URL, `${DOCS_URL}recommended-use/`, `${DOCS_URL}commands/#paid-commands`, ENTERPRISE_URL]);
     stop();
   });
 

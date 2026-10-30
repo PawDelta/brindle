@@ -164,3 +164,12 @@ def test_app_command_opens_the_app_or_prints_the_download_url(monkeypatch):
     no_opener.append(True)
     missing = CliRunner().invoke(cli.app, ["app"])
     assert cli.APP_DOWNLOAD_URL in missing.output
+
+
+def test_ci_commands_work_but_are_not_listed_in_help():
+    top = CliRunner().invoke(app, ["--help"])
+    assert top.exit_code == 0, top.output
+    assert not [ln for ln in top.output.splitlines() if ln.strip("│ ").split()[:1] == ["ci"]]
+    sub = CliRunner().invoke(app, ["ci", "--help"])
+    assert sub.exit_code == 0, sub.output
+    assert "init" in sub.output

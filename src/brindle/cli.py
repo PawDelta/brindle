@@ -73,7 +73,7 @@ Run `brindle` with no arguments to open (or reopen) a supervisor chat here, with
 the live dashboard underneath. Outside a git repo it starts a scratch session;
 `brindle transfer <repo>` moves that work into a real repository later.
 
-Paid features (hosted learning, per-worktree services, team policies, CI):
+Paid features (hosted learning, per-worktree services, team policies):
 `brindle account` shows what you have and how to get the rest.""")
 agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
 app.add_typer(agent_app, name="agent")
@@ -2603,7 +2603,7 @@ def mcp() -> None:
 ci_app = typer.Typer(no_args_is_help=True,
                      help="brindle CI (brindle Team): the client the CI workflows run. "
                           "`brindle ci init` sets a repository up.")
-app.add_typer(ci_app, name="ci")
+app.add_typer(ci_app, name="ci", hidden=True)
 
 
 def _ci_call(fn, *args, **kwargs):

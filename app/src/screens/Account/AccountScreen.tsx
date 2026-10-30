@@ -362,7 +362,7 @@ function Plans({ openUrl, signedIn }: { openUrl: OpenUrl; signedIn: boolean }) {
       </header>
       <p className="text-sm" data-testid="features-summary">
         <span className="font-medium">{free.name}</span>
-        <span className="text-ink-2">, {free.price.toLowerCase()}: {free.lead.toLowerCase()}. Paid plans add per-worktree services, multi-repo sessions, agents that run in CI, and the controls and records teams need.</span>
+        <span className="text-ink-2">, {free.price.toLowerCase()}: {free.lead.toLowerCase()}. Paid plans add per-worktree services, multi-repo sessions, and the controls and records teams need.</span>
       </p>
       <table className="w-full text-sm" aria-label="Plans compared" data-testid="plans">
         <thead>
@@ -397,7 +397,7 @@ function Plans({ openUrl, signedIn }: { openUrl: OpenUrl; signedIn: boolean }) {
           </tbody>
         ))}
       </table>
-      <p className="text-xs text-ink-3">The pricing page has the full comparison, brindle CI's limits and every cap. Enterprise contracts: support@pawdelta.com.</p>
+      <p className="text-xs text-ink-3">The pricing page has the full comparison and every cap. Enterprise contracts: support@pawdelta.com.</p>
       {openError && (
         <p role="alert" className={alert}>
           The browser didn't open ({openError}): plans are at {PRICING_URL}.

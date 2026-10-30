@@ -49,6 +49,9 @@ FEATURES = (
      "`min_version`, `required_profiles`, `required_rule_packs`, `kill_switch` in your org policy (`brindle account org policy`)"),
 )
 
+# Features that work as usual for whoever has them but aren't listed by `brindle account`.
+UNLISTED = frozenset({"ci_fix", "ci", "ci_enterprise"})
+
 ENTERPRISE_CONTACT = ("Enterprise is set up with PawDelta, not bought here. Email support@pawdelta.com "
                       "with your team size and where agents will run; we'll turn it on for your org.")
 
@@ -100,10 +103,6 @@ USAGE = """usage: brindle account [<command>] [--base-url URL]
             show, or turn on/off, pooling this org's coarse learning records with
             the other orgs in its company, never with other companies
             (off by default; owner/admin to change)
-  org ci-token create <name> [--org ORG]
-                    create a CI token for brindle CI (admin+); shown once
-  org ci-token list [--org ORG]           list the org's CI tokens
-  org ci-token revoke <token_id> [--org ORG]  revoke a CI token
   license install <file>  install an offline (brindle Enterprise) license; verified with the
                     pinned keys, no network; used in air-gap mode and when not logged in
   license status    show the installed offline license and the air-gap status
@@ -621,6 +620,8 @@ class ProAccount(_OrgCommands):
             self._say("brindle Pro: not logged in. brindle is complete without it; paid plans add:")
         self._say("")
         for feature, plan, what, how in FEATURES:
+            if feature in UNLISTED:
+                continue
             if feature in have:
                 self._say(f"  ✓ {feature:<15} {what:<50} {how}")
             else:

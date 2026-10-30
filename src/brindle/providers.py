@@ -1327,7 +1327,7 @@ CODEX_INTERACTIVE_USES_PLAN = (
     "interactive Codex agents use your ChatGPT plan whatever key is set; "
     "to put them on a key, run `codex login --with-api-key`")
 CODEX_EXEC_BILLS_KEY = (
-    "headless `codex exec` runs (and Brindle-CI) bill CODEX_API_KEY instead")
+    "headless `codex exec` runs bill CODEX_API_KEY instead")
 CODEX_INTERACTIVE_IGNORES_KEYS = (
     "interactive Codex ignores OPENAI_API_KEY and CODEX_API_KEY while signed in with ChatGPT and "
     "uses your ChatGPT plan; run `codex login --with-api-key`, or use auth: subscription")

@@ -74,7 +74,7 @@ def test_doctor_codex_key_points_interactive_at_login_and_exec_bills_the_key(cod
     monkeypatch.setenv("CODEX_API_KEY", KEY)
     c = codex_check()
     assert c.level == doctor.WARN
-    assert "`codex exec` runs (and Brindle-CI) bill CODEX_API_KEY instead" in c.detail
+    assert "`codex exec` runs bill CODEX_API_KEY instead" in c.detail
     assert KEY not in c.detail
 
 
@@ -83,14 +83,14 @@ def test_doctor_warns_for_a_stored_codex_key_too(codex):
     keystore.set_key("CODEX_API_KEY", KEY)
     c = codex_check()
     assert c.level == doctor.WARN and "key store" in c.detail
-    assert "codex login --with-api-key" in c.detail and "Brindle-CI" in c.detail
+    assert "codex login --with-api-key" in c.detail and "codex exec" in c.detail
 
 
 def test_keys_set_codex_key_notes_interactive_and_exec_under_chatgpt(codex):
     chatgpt(codex)
     r = runner.invoke(app, ["keys", "set", "CODEX_API_KEY"], input=KEY + "\n")
     assert r.exit_code == 0 and KEY not in r.output
-    assert "`codex exec` runs (and Brindle-CI) bill CODEX_API_KEY instead" in r.output
+    assert "`codex exec` runs bill CODEX_API_KEY instead" in r.output
 
 
 def codex_profile(repo, auth):

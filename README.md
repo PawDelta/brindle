@@ -1047,23 +1047,17 @@ how to use them, and the next step to get the rest:
 | per-worktree services | Pro | `"services"` in `.brindle/config.json` |
 | several repos in one session | Pro | `brindle repo add <path>` |
 | settings sync across machines | Pro | `brindle account sync` |
-| Brindle-CI build fixing (the fix workflow) | Pro | `brindle ci init` |
 | learned rules from repeated review findings | Pro | `brindle rules suggest` |
 | cost (estimates, budgets, reports) | Pro | `brindle cost report` |
 | guardrails (write scope, read scope, env allowlist per profile) | Pro | `write_scope`, `read_scope`, `env_allow` in a profile |
 | org policies + audit feed | Team | `brindle account org policy` |
-| Brindle-CI (fixes builds, issues into verified pull requests, validation) | Team | `brindle ci init` |
 | org profile and rule-pack library, pinned so a repo can't loosen it | Team | `brindle account org profiles` |
 | org budgets and protected paths | Team | `budget`, `protected_paths` in your org policy (`brindle account org policy`) |
 | per-member budgets, pause, and admin messages (sidebar "Messages", the bottom bar, `brindle org messages`) | Team | `brindle org messages [--keep]` lists and marks read the notices your admins sent you; a pause refuses new workers and stops running ones |
 | audit log, air-gap | Enterprise | `brindle audit verify`, `"airgap": true` |
 | audit export | Enterprise | `"audit_export"` in `~/.brindle/config.json`, `brindle audit ship` |
 | managed models | Enterprise | `agent_setup` routes with `enforce`, and `deny_personal_keys`, in your org policy (see "Managed models" below) |
-| wider CI, cost centers, managed rollout | Enterprise | `brindle ci init --host gitlab`, `brindle cost request`, and `min_version`, required packs and the kill switch in your org policy; admins can also shut down or throttle a member, role or org remotely (it arrives within about a minute) |
-
-`brindle ci init` checks your plan before it changes anything: it refuses
-without Brindle-CI on the org you're using, and on Pro it sets up only the fix
-workflow.
+| cost centers, managed rollout | Enterprise | `brindle cost request`, and `min_version`, required packs and the kill switch in your org policy; admins can also shut down or throttle a member, role or org remotely (it arrives within about a minute) |
 
 ```sh
 brindle account            # paid features: what you have, how to use them, how to get the rest
@@ -1353,109 +1347,7 @@ brindle audit ship [--force]                       # send now; exit 1 if a sink 
 brindle audit prune [--repo PATH] [--days N]       # prune now (default: retention_days)
 ```
 
-### Brindle-CI
-
-Brindle-CI (brindle Team; build fixing alone is on Pro) brings brindle into your CI: it fixes broken builds,
-turns issues into pull requests whose checks it has verified, and reviews pull
-requests with evidence. It runs on your own CI with your own model keys; the
-hosted control plane decides what each run does and what it reports. The
-workflows call these commands:
-
-- `brindle ci init`: set a repository up in one go (the GitHub App, the secrets,
-  the workflows as a pull request, then a doctor check). Run it inside a
-  checkout of the repository. For Claude it asks whether to use an API key
-  (the `ANTHROPIC_API_KEY` secret) or Anthropic
-  [workload identity federation](https://platform.claude.com/docs/en/manage-claude/wif-reference)
-  (`--credential key|federation` answers without asking). It also creates the
-  `brindle` issue label (label an issue with it to hand it to brindle CI), and
-  commits the workflows on a `brindle/ci-setup` branch, then puts you back on
-  the branch you started on and deletes the local setup branch, so `git pull`
-  after merging the setup pull request is clean (commit or stash your changes
-  first: it refuses to start with uncommitted work). With your own cloud
-  (`--credential bedrock|vertex|foundry`, keyless GitHub OIDC) it can read the
-  IDs from the deployment template's outputs instead of asking:
-  `--from-stack NAME [--region R]` (AWS CloudFormation), `--from-terraform DIR`
-  (Google) or `--from-deployment NAME -g RG` (Azure). They are defaults for
-  `--cloud-var`, which still overrides them, and every ID is format-checked. A
-  missing `aws`, `terraform` or `az` CLI or output is an error that names the
-  `--cloud-var` to pass instead. Vertex AI and Microsoft Foundry are in
-  **preview** (not yet verified end to end): `init` refuses them unless you pass
-  `--preview` or set `BRINDLE_CI_PREVIEW_CLOUDS=1`, and `doctor` marks them
-  `(preview)`. Bedrock is generally available.
-- `brindle ci doctor`: which provider CLIs and credential names a runner has, and
-  which providers CI may use on this repository. `--models` also makes one tiny
-  call per pinned model and says why any is refused (a quota, a form not filled in).
-- `brindle ci start`: start a run for an issue, a goal text or a dispatched run,
-  or a validation of a pull request.
-- `brindle ci run`: run what was started: the supervisor and the result upload,
-  or the pull request's checks and reviews and the evidence upload.
-- `brindle ci report`: tell the service how the workflow's jobs ended.
-
-Credential names are reported, never values. CI uses API keys, cloud sign-ins
-(Bedrock, Vertex, Foundry) or identity federation only: a provider signed in
-only with a subscription (`CLAUDE_CODE_OAUTH_TOKEN`, a Codex ChatGPT login) is
-not used, on personal and organization repositories alike. Add an API key
-secret instead.
-
-Fix builds only fix the default branch's *required* status checks, and a new
-repository has none. When the default branch requires none, `brindle ci init`
-warns and, for each job in your workflows, asks whether to make it required
-(`--required-check NAME` picks one without asking, `--no-required-check` only
-warns; run without a terminal, init only makes a check required when
-`--required-check` names it). It adds the check to the branch's existing protection, or protects the
-branch with just that check. GitHub only allows branch protection on a private
-repository with a paid plan; when it refuses, init says how to require the
-check yourself (Settings > Branches, "Require status checks to pass").
-
-An Anthropic API key is either a workspace key (scoped to one workspace) or an
-organization-level key (not scoped to a workspace). An organization-level key
-needs the workspace in every request, so after the key `brindle ci init` asks for
-its workspace ID (`wrkspc_...`; leave it blank for a workspace key, or pass
-`--workspace-id`, default `$ANTHROPIC_WORKSPACE_ID`) and stores it as the Actions
-variable `ANTHROPIC_WORKSPACE_ID`. The workflow then sets
-`ANTHROPIC_CUSTOM_HEADERS="anthropic-workspace-id: <id>"`, which reaches every
-Claude Code process the run starts.
-
-With identity federation the repository stores no Anthropic key: the workflow
-exchanges GitHub's OIDC token once for a short-lived Anthropic token, as a
-Claude Console service account (billed as API, so it is allowed on
-organization repositories), and gives the job `ANTHROPIC_AUTH_TOKEN`. `brindle
-ci init` stores the rule, organization, service account and optional workspace
-IDs as the Actions variables `ANTHROPIC_FEDERATION_RULE_ID`,
-`ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID` and
-`ANTHROPIC_WORKSPACE_ID`, from `--rule-id`, `--organization-id`,
-`--service-account-id` and `--workspace-id` or else asked (defaulting to those
-environment variables). Without a terminal on stdin, init asks nothing and
-takes the options and the environment, so it can run unattended; a missing or
-malformed ID (rule `fdrl_...`, organization a UUID, service account
-`svac_...`, workspace `wrkspc_...`) stops it before it creates the CI token.
-The ID options imply `--credential federation` and can't be combined with
-`--credential key`. Create the federation rule in the Claude Console with
-subject prefix `repo:<owner>/<name>:*`, the condition
-
-```text
-claims.repository == "<owner>/<name>" && claims.workflow_ref.startsWith("<owner>/<name>/.github/workflows/brindle-ci-")
-```
-
-audience `https://api.anthropic.com`, and a token lifetime of at least 600
-seconds. The condition lets only brindle's workflows mint tokens. On pull
-requests the pull request's own copy of the validate workflow runs, so give
-write access only to people you trust (forks never get a token). Leave the `ANTHROPIC_API_KEY` secret
-unset: a key takes precedence (brindle drops an empty one before Claude Code
-starts).
-
-A federated token lives at most about ten minutes, however long the rule
-allows: Anthropic caps it at twice what remains of GitHub's OIDC token. So
-the run job doesn't rely on the workflow's one exchange: `brindle ci run`
-fetches a fresh OIDC token and exchanges it again at 70% of each token's
-life, and lends the current token to the agents through a proxy on the
-runner's loopback interface. The agents get `ANTHROPIC_BASE_URL` pointing at
-it and a random per-run secret as `ANTHROPIC_AUTH_TOKEN`; the Anthropic token
-itself stays in the `brindle ci run` process, and the GitHub token endpoint
-(`ACTIONS_ID_TOKEN_REQUEST_URL` and its token) is scrubbed before any agent or
-check starts. If the first exchange fails, the run goes on with the
-workflow's token as before; `BRINDLE_CI_FEDERATION_REFRESH=0` in the job's
-environment turns the refresh off.
+## Cleanup, merging and workspace config
 
 **Closing and cleaning up.** Press `x` on an agent in the sidebar (twice for one
 that's still running) or run `brindle close <id>` to stop it and hide it. Stopping means
@@ -1637,7 +1529,7 @@ it's signed in without a plan that includes it, is reported to its supervisor.
 | Provider | Key login (environment variables) |
 |---|---|
 | `claude` | yes: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, or Bedrock/Vertex/Foundry (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) |
-| `codex` | yes: `OPENAI_API_KEY`, `CODEX_API_KEY`. With Codex signed in with ChatGPT (checked on Codex CLI 0.162.0): interactive `codex`, which brindle runs in agent panes, ignores both keys and uses the ChatGPT plan, and only `codex login --with-api-key` switches it to a key; headless `codex exec` (Brindle-CI) bills `CODEX_API_KEY` over the login and ignores `OPENAI_API_KEY`. `brindle doctor` and `brindle keys set` say so, and `auth: api_key` on an interactive Codex profile is refused under a ChatGPT login (run `codex login --with-api-key`, or use `auth: subscription`) |
+| `codex` | yes: `OPENAI_API_KEY`, `CODEX_API_KEY`. With Codex signed in with ChatGPT (checked on Codex CLI 0.162.0): interactive `codex`, which brindle runs in agent panes, ignores both keys and uses the ChatGPT plan, and only `codex login --with-api-key` switches it to a key; headless `codex exec` bills `CODEX_API_KEY` over the login and ignores `OPENAI_API_KEY`. `brindle doctor` and `brindle keys set` say so, and `auth: api_key` on an interactive Codex profile is refused under a ChatGPT login (run `codex login --with-api-key`, or use `auth: subscription`) |
 | `antigravity` | `GEMINI_API_KEY`, only with `"modelProvider": "gemini"` in `agy`'s `settings.json` (see [Google Antigravity](#google-antigravity)); otherwise `agy`'s own browser sign-in |
 | `opencode` | whatever the model's provider takes (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...), or `opencode auth login`; its free `opencode/...` models need neither |
 
