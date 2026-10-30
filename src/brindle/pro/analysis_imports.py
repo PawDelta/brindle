@@ -7,11 +7,13 @@ skipped, and why: a file that looks like a secret (a secret-named file, or text
 over the size limit or not UTF-8. :func:`add_to_library` uploads the rest with
 through ``POST /analysis-docs/imports``, one library doc per file, in batches of
 at most 20: hashes first, then the text of only the files the server answers
-``needs_content`` for; each answer's doc id is tracked. :func:`sync_upload`
+``needs_content`` for. The server is the source of truth (it keys docs by
+folder and path, the folder id being the source id): :func:`sync_upload`
 (called by :func:`brindle.kb.sync`) re-sends a changed file (the server updates
-its doc in place) and deletes the docs of files gone from the folder;
-:func:`remove_from_library` deletes them all with the folder's
-``DELETE /analysis-docs/imports/{folder_id}`` (the folder id is the source id).
+its doc in place) and then has the server prune the docs of paths the folder no
+longer has (``.../imports/{folder_id}/prune``); :func:`remove_from_library`
+deletes them all with ``DELETE /analysis-docs/imports/{folder_id}``. The local
+upload table is only a cache of path to hash that skips files already sent.
 
 Nothing is sent in air-gap mode, without the ``analysis_docs`` entitlement, or
 when the ``import_upload`` switch resolves to off (the user's choice, the
@@ -19,22 +21,23 @@ team's and the enterprise's, :func:`analysis_policy.resolve_switch`).
 
 A folder's library state lives in the local database, so the CLI and the
 daemon agree on it: no row is *local*; otherwise ``adding``, ``in_library`` or
-``removing``. Every row (membership, each tracked upload, each queued deletion)
+``removing``. Every row (membership, each cached upload, each queued removal)
 names the identity that authorized it: the backend, user, org and scope of the
 verified sign-in (:func:`current_identity`). An operation acts only on its own
 identity's rows; after an account switch the folder is local again for the new
 identity, which needs its own explicit Add, and the other identity's rows and
-queued deletions stay untouched until it is signed in.
+queued removals stay untouched until it is signed in.
 
 Every operation on a folder (add, background sync, remove, finish removing)
 first claims it in one transaction (:func:`_claim`: an ``op`` with a token and
 a lease); a loser does nothing (a sync) or is ``Busy`` (add, remove). The holder
-does its network work, records results only while its token still matches (a doc
-sent after losing it is queued for deletion instead), then releases. Removal
-claims, flips the state and queues every tracked doc in one transaction, and the
-folder is dropped only when its queue is empty, by a draining of any source
-under that folder's own claim. :func:`sync_upload` looks at the switch before
-anything else, queued deletions included; removal is not switch-gated.
+does its network work and writes the cache only while its token still matches;
+a run that loses the claim simply stops, and the next sync converges. Removal
+claims and flips the state to ``removing``; the folder is dropped only once the
+server confirmed the folder DELETE, which every later sync retries (a removal
+for a source deleted meanwhile is kept in ``kb_import_removals``).
+:func:`sync_upload` looks at the switch before anything else, unfinished
+removals included; removal is not switch-gated.
 """
 
 from __future__ import annotations
@@ -324,19 +327,11 @@ def _renew(db: DB, source_id: str, token: str) -> bool:
                          (time.time() + LEASE, source_id, token)).rowcount == 1
 
 
-def _release(db: DB, source_id: str, token: str, *, state: str | None = None, drop: bool = False,
-             drop_if_no_queue: bool = False) -> None:
+def _release(db: DB, source_id: str, token: str, *, state: str | None = None, drop: bool = False) -> None:
     """End the claim (only if still held): optionally move to ``state`` or drop
-    the folder's row, the latter also when ``drop_if_no_queue`` and no doc of that
-    identity's waits for deletion."""
+    the folder's row."""
     with db.tx() as c:
-        row = c.execute("SELECT identity FROM kb_import_library WHERE source_id = ? AND op_token = ?",
-                        (source_id, token)).fetchone()
-        if row is None:
-            return
-        if drop or (drop_if_no_queue and not c.execute(
-                "SELECT 1 FROM kb_import_deletions WHERE source_id = ? AND identity = ?",
-                (source_id, row["identity"])).fetchone()):
+        if drop:
             c.execute("DELETE FROM kb_import_library WHERE source_id = ? AND op_token = ?", (source_id, token))
         else:
             c.execute("UPDATE kb_import_library SET op = NULL, op_token = NULL, op_until = NULL,"
@@ -413,118 +408,83 @@ def _send(snap: Snapshot, folder_id: str, items: list[tuple[str, str, bytes]]) -
         return stored
 
 
-def _delete(snap: Snapshot, doc_id: str) -> bool:
-    status, _ = _call(snap, "DELETE", f"/analysis-docs/{quote(doc_id, safe='')}")
-    return status == 200 or (status == 404 and not snap.stopped)
-
-
-def _delete_folder(db: DB, snap: Snapshot, source_id: str) -> bool:
-    """Delete every doc the identity uploaded for the folder in one request; once
-    the server confirms, the folder's queued deletions are done. False (they stay
-    queued) when it did not, or the account changed."""
+def _delete_folder(snap: Snapshot, source_id: str) -> bool:
+    """``DELETE /analysis-docs/imports/{folder_id}``: the identity's docs of the
+    folder, all at once. True once the server confirms (a 404 counts, unless the
+    account changed while it was out); False when it did not, or the account changed."""
     try:
         status, _ = _call(snap, "DELETE", f"/analysis-docs/imports/{quote(source_id, safe='')}"
                           f"?scope_kind=user&scope_id={quote(snap.ent.sub, safe='')}")
-        if not (status == 200 or (status == 404 and not snap.stopped)):
-            return False
-        with db.tx() as c:
-            c.execute("DELETE FROM kb_import_deletions WHERE source_id = ? AND identity = ?", (source_id, snap.who))
-        return True
+        return status == 200 or (status == 404 and not snap.stopped)
     except AccountChanged:
-        log.info("library deletions stopped: the sign-in changed")
+        log.info("library folder not deleted: the sign-in changed")
     except Exception:  # noqa: BLE001 - tried again on the next sync or removal
         log.info("library folder not deleted yet")
     return False
 
 
-def _drain(db: DB, snap: Snapshot, held: tuple[str, str] | None = None) -> None:
-    """Delete the snapshot identity's queued docs; each stays queued until the
-    server confirms. A doc of a folder in the library is deleted only under that
-    folder's claim, so a delete never overlaps an upload that may be adopting the
-    same doc; a folder another operation holds is left for later. ``held`` is the
-    caller's own (folder, claim token): it is renewed before each delete of that
-    folder's docs, and once it has been lost those docs stay queued for whoever
-    holds the folder now. Another identity's queue is left as
-    it is, and the drain stops (leaving the rest queued) if the account changes or
-    needs refreshing."""
-    for r in db.conn.execute("SELECT doc_id, source_id FROM kb_import_deletions WHERE identity = ?",
-                             (snap.who,)).fetchall():
-        token = None
-        try:
-            sid = r["source_id"]
-            if held and sid == held[0]:
-                if not _renew(db, sid, held[1]):
-                    continue        # the claim was lost: never delete on its authority
-            elif sid is not None and state(db, sid, snap.who) is not None:
-                token = _claim(db, sid, "sync", (ADDING, IN_LIBRARY, REMOVING), snap.who)
-                if token is None:
-                    continue
-                if not db.conn.execute("SELECT 1 FROM kb_import_deletions WHERE doc_id = ? AND identity = ?",
-                                       (r["doc_id"], snap.who)).fetchone():
-                    continue        # settled while the claim was taken
-            if _delete(snap, r["doc_id"]):
-                with db.tx() as c:
-                    c.execute("DELETE FROM kb_import_deletions WHERE doc_id = ? AND identity = ?",
-                              (r["doc_id"], snap.who))
-        except AccountChanged:
-            log.info("library deletions stopped: the sign-in changed")
-            return
-        except Exception:  # noqa: BLE001 - tried again on the next sync or removal
-            log.info("library doc not deleted yet")
-        finally:
-            if token:
-                _release(db, r["source_id"], token)
+def _prune(snap: Snapshot, source_id: str, paths: list[str]) -> int:
+    """``POST /analysis-docs/imports/{folder_id}/prune``: the server deletes the
+    identity's docs of the folder for every path not in ``paths`` (idempotent, not
+    switch-gated). Returns how many it deleted."""
+    from brindle.pro import auth
+
+    body = {"scope": {"kind": "user", "id": snap.ent.sub}, "keep_paths": paths}
+    status, got = _call(snap, "POST", f"/analysis-docs/imports/{quote(source_id, safe='')}/prune",
+                        auth.JSONBody(body))
+    if status != 200:
+        raise RuntimeError(f"not pruned (HTTP {status})")
+    deleted = got.get("deleted") if isinstance(got, dict) else 0
+    return deleted if isinstance(deleted, int) else 0
 
 
 def drain_pending(db: DB, *, client=None, store=None) -> None:
-    """Delete the signed-in identity's queued docs, whichever source (or removed
-    source) queued them, then finish every ``removing`` folder of theirs whose
-    queue is now empty, each under its own claim. Never raises."""
+    """Finish the signed-in identity's unfinished removals: every ``removing``
+    folder of theirs (under its own claim; a folder another operation holds is left
+    alone), and every removal queued for a source that has since been deleted. A
+    folder is dropped, or its queue entry cleared, only once the server confirmed
+    the DELETE. Never raises."""
     try:
         snap = _snapshot(client, store)
         who = snap.who
-        # A removing folder's DELETE covers everything the identity has under it, so it is sent only
-        # under the folder's own claim (a holder in flight is left alone), kept until the state is settled.
         for r in db.conn.execute("SELECT source_id FROM kb_import_library WHERE identity = ? AND state = ?",
                                  (who, REMOVING)).fetchall():
             token = _claim(db, r["source_id"], "remove", (REMOVING,), who)
             if token:
+                done = False
                 try:
-                    _delete_folder(db, snap, r["source_id"])
+                    done = _delete_folder(snap, r["source_id"])
+                    if done:
+                        with db.tx() as c:
+                            c.execute("DELETE FROM kb_import_uploads WHERE source_id = ? AND identity = ?",
+                                      (r["source_id"], who))
                 finally:
-                    _release(db, r["source_id"], token, drop_if_no_queue=True)
-        _drain(db, snap)
+                    _release(db, r["source_id"], token, drop=done)
         for r in db.conn.execute(
-                "SELECT source_id FROM kb_import_library l WHERE identity = ? AND state = ? AND NOT EXISTS"
-                " (SELECT 1 FROM kb_import_deletions x WHERE x.source_id = l.source_id AND x.identity = l.identity)",
-                (who, REMOVING)).fetchall():
-            token = _claim(db, r["source_id"], "remove", (REMOVING,), who)
-            if token:
-                _release(db, r["source_id"], token, drop_if_no_queue=True)
+                "SELECT source_id FROM kb_import_removals x WHERE identity = ? AND NOT EXISTS"
+                " (SELECT 1 FROM kb_import_library l WHERE l.source_id = x.source_id AND l.identity = x.identity)",
+                (who,)).fetchall():
+            if _delete_folder(snap, r["source_id"]):
+                with db.tx() as c:
+                    c.execute("DELETE FROM kb_import_removals WHERE source_id = ? AND identity = ?",
+                              (r["source_id"], who))
     except Exception:  # noqa: BLE001
-        log.info("library deletions not drained")
-
-
-def _queue_deletion(c, source_id: str, who: str, external_id: str) -> None:
-    c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity) SELECT doc_id, source_id,"
-              " identity FROM kb_import_uploads WHERE source_id = ? AND identity = ? AND external_id = ?",
-              (source_id, who, external_id))
-    c.execute("DELETE FROM kb_import_uploads WHERE source_id = ? AND identity = ? AND external_id = ?",
-              (source_id, who, external_id))
+        log.info("library removals not finished")
 
 
 def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: dict[str, str] | None = None, *,
             client=None, store=None, key_store=None, identity=None) -> dict:
     """Upload new and changed files (only those in ``only``, name to content
-    digest, when given) in batches, queue the docs of removed ones for
-    deletion, and drain the queue. ``claim`` is the caller's operation token: it
-    is renewed before each batch and checked when a doc is recorded, and the run
-    stops, queueing a new doc it just sent, once the claim is lost. ``key_store``
-    and ``identity`` are accepted for callers and unused: the import endpoint
-    files docs by folder, not by repo. ``who`` is the
-    identity the claim was made for; the sign-in must still be theirs.
-    A file that fails stays out of the tracking so the next call tries it again.
-    Raises when nothing can be attempted."""
+    digest, when given) in batches, then have the server prune the docs of files
+    the folder no longer has. The server keys docs by (folder, path), so it is the
+    source of truth; the local table is only a cache of path to hash that skips
+    files already sent. ``claim`` is the caller's operation token: it is renewed
+    before each batch and before the prune and checked when the cache is written;
+    a run that loses it simply stops (the next sync converges). ``key_store`` and
+    ``identity`` are accepted for callers and unused: the import endpoint files
+    docs by folder, not by repo. ``who`` is the identity the claim was made for;
+    the sign-in must still be theirs. A file that fails stays out of the cache so
+    the next call tries it again. Raises when nothing can be attempted."""
     result = {"uploaded": 0, "deleted": 0, "skipped": 0, "sent": False, "failed": []}
     reason = _off_reason(client, store)
     if reason is not None:
@@ -559,53 +519,39 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
             log.info("imported files not uploaded (%s: %s)", type(e).__name__, e)
             result["failed"] += [n for n, _, _ in batch]
             continue
-        for name, digest, _ in batch:
-            if name not in stored:
-                result["failed"].append(name)
-                continue
-            doc_id, how = stored[name]
-            old = known.get(name)
-            try:
-                with db.tx() as c:
-                    if lost or not _holds(c, source_id, claim):
-                        raise LookupError("this run's claim on the folder was lost")
-                    if c.execute("SELECT 1 FROM kb_import_deletions WHERE doc_id = ? AND identity = ?",
-                                 (doc_id, who)).fetchone():
-                        # still queued for deletion (e.g. the file came back while the delete failed): it
-                        # goes, and the file is sent again as a new doc by a later sync
-                        raise ValueError("this doc is queued for deletion")
-                    if old is not None and old["doc_id"] != doc_id:     # the server filed it as a new doc
-                        c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
-                                  " VALUES (?, ?, ?)", (old["doc_id"], source_id, who))
+        with db.tx() as c:      # the local cache is written only while this run still holds the folder
+            if not _holds(c, source_id, claim):
+                lost = True
+            else:
+                for name, digest, _ in batch:
+                    if name not in stored:
+                        result["failed"].append(name)
+                        continue
                     c.execute("INSERT OR REPLACE INTO kb_import_uploads (source_id, identity, external_id,"
-                              " content_hash, doc_id) VALUES (?, ?, ?, ?, ?)", (source_id, who, name, digest, doc_id))
-            except Exception as e:  # noqa: BLE001 - the server has the doc: never lose its id
-                if old is None or old["doc_id"] != doc_id:      # (an updated doc is tracked already)
-                    with db.tx() as c:      # (as is one the holder that replaced this run adopted)
-                        c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
-                                  " SELECT ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM kb_import_uploads"
-                                  " WHERE doc_id = ? AND identity = ?)", (doc_id, source_id, who, doc_id, who))
-                if isinstance(e, LookupError):      # the rest of this batch is already on the server: queue it too
-                    lost = True
-                    continue
-                result["failed"].append(name)
-                continue
-            if how != "unchanged":
-                result["uploaded"] += 1
-                result["sent"] = True
-        if snap.stopped:        # its docs are recorded under the snapshot's identity; send no more
+                              " content_hash, doc_id) VALUES (?, ?, ?, ?, ?)",
+                              (source_id, who, name, digest, stored[name][0]))
+                    if stored[name][1] != "unchanged":
+                        result["uploaded"] += 1
+                        result["sent"] = True
+        if snap.stopped:        # its docs are the snapshot's identity's; send no more
             lost = True
         if lost:
             break
-    if only is None and not lost:
-        with db.tx() as c:
-            if _holds(c, source_id, claim):
-                for name in known.keys() - sendable.keys():
-                    _queue_deletion(c, source_id, who, name)
-    count = "SELECT count(*) FROM kb_import_deletions WHERE identity = ?"
-    before = db.conn.execute(count, (who,)).fetchone()[0]
-    _drain(db, snap, (source_id, claim))
-    result["deleted"] = before - db.conn.execute(count, (who,)).fetchone()[0]
+    if not lost:
+        try:
+            if not _renew(db, source_id, claim):
+                lost = True
+            else:       # the server is the source of truth: it drops what the folder no longer has
+                result["deleted"] = _prune(snap, source_id, sorted(sendable))
+                with db.tx() as c:
+                    if _holds(c, source_id, claim):
+                        c.execute("DELETE FROM kb_import_uploads WHERE source_id = ? AND identity = ?"
+                                  f" AND external_id NOT IN ({','.join('?' * len(sendable))})",
+                                  (source_id, who, *sendable))
+        except AccountChanged:
+            lost = True
+        except Exception as e:  # noqa: BLE001 - the next sync prunes again
+            log.info("imported folder not pruned (%s)", type(e).__name__)
     with db.tx() as c:
         c.execute("UPDATE kb_import_library SET pending = ? WHERE source_id = ? AND op_token = ?",
                   (len(result["failed"]), source_id, claim))
@@ -615,11 +561,11 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
 def sync_upload(db: DB, source_id: str, repo_root: str, **deps) -> dict:
     """Bring the library up to date with an added folder (what :func:`brindle.kb.sync`
     calls). The switch is read first: while it is off, or in air-gap mode, nothing
-    is requested, queued deletions included, and the queue stays as it is. Only
+    is requested, unfinished removals included, and they stay as they are. Only
     the signed-in identity's rows are touched: a folder another identity added is
-    local to this one and gets nothing. It then drains the identity's queue
-    (finishing emptied removals), claims the folder, and does nothing when another
-    operation holds it or it is not ``in_library``. Never raises."""
+    local to this one and gets nothing. It then finishes the identity's removals,
+    claims the folder, and does nothing when another operation holds it or it is
+    not ``in_library``. Never raises."""
     nothing = {"uploaded": 0, "deleted": 0, "skipped": 0, "sent": False, "failed": []}
     claim = None
     try:
@@ -683,36 +629,29 @@ def add_to_library(db: DB, source_id: str, repo_root: str, token: str | None = N
 
 
 def remove_from_library(db: DB, source_id: str, *, client=None, store=None) -> dict:
-    """Delete the signed-in identity's docs of the folder server-side. In one
-    transaction the folder is claimed, moved to ``removing`` and every tracked doc
-    is queued for deletion; it stays ``removing`` (so the app can finish it, and
-    every later index deletes what is left) until the queue for it is empty, which
-    the holder checks before dropping it. ``left`` counts the docs not yet
-    deleted. ``Busy`` while another operation holds the folder. Removal is not
-    switch-gated: deleting reduces what is held, so it works with import_upload
-    off; in air-gap mode, or signed out, it raises and the docs stay queued."""
+    """Delete the signed-in identity's docs of the folder server-side with the
+    folder DELETE. The folder is claimed and moved to ``removing``; it stays
+    ``removing`` (so the app can finish it, and every later index retries the
+    DELETE) until the server confirms, then it is dropped. ``left`` counts the
+    docs still in the library (0 once deleted). ``Busy`` while another operation
+    holds the folder. Removal is not switch-gated: deleting reduces what is held,
+    so it works with import_upload off; in air-gap mode, or signed out, it raises
+    and the folder stays as it was."""
     _source(db, source_id)
     snap = _snapshot(client, store)
     who = snap.who
-
-    def queue_all(c) -> None:
-        c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
-                  " SELECT doc_id, source_id, identity FROM kb_import_uploads WHERE source_id = ? AND identity = ?",
-                  (source_id, who))
-        c.execute("DELETE FROM kb_import_uploads WHERE source_id = ? AND identity = ?", (source_id, who))
-
-    claim = None
-    if state(db, source_id, who) is not None:
-        claim = _claim(db, source_id, "remove", (IN_LIBRARY, REMOVING, ADDING), who, new_state=REMOVING,
-                       local=queue_all)
-        if claim is None:
-            raise Busy(source_id)
+    if state(db, source_id, who) is None:
+        return {"left": 0}
+    claim = _claim(db, source_id, "remove", (IN_LIBRARY, REMOVING, ADDING), who, new_state=REMOVING)
+    if claim is None:
+        raise Busy(source_id)
+    done = False
     try:
-        if claim:
-            _delete_folder(db, snap, source_id)
-        _drain(db, snap, (source_id, claim) if claim else None)
+        done = _delete_folder(snap, source_id)
+        if done:
+            with db.tx() as c:
+                c.execute("DELETE FROM kb_import_uploads WHERE source_id = ? AND identity = ?", (source_id, who))
     finally:
-        if claim:
-            _release(db, source_id, claim, drop_if_no_queue=True)
-    return {"left": db.conn.execute("SELECT count(*) FROM kb_import_deletions WHERE source_id = ? AND identity = ?",
-                                    (source_id, who)).fetchone()[0]}
+        _release(db, source_id, claim, drop=done)
+    return {"left": 0 if done else max(1, db.conn.execute(
+        "SELECT count(*) FROM kb_import_uploads WHERE source_id = ? AND identity = ?", (source_id, who)).fetchone()[0])}

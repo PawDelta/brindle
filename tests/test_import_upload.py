@@ -1,6 +1,7 @@
 """Adding an imported Knowledge folder to the library: secret-looking files are
 never sent, nothing is sent when the switch is off or the folder changed after
-the preview, a changed file re-uploads, and failures are surfaced and retried."""
+the preview, a changed file re-uploads, the server prunes what the folder no
+longer has, and failures are surfaced and retried."""
 import hashlib
 import itertools
 import time
@@ -18,21 +19,30 @@ from test_pro_remote_learning import login_as
 def remote(backend):
     """The backend's import contract: POST /analysis-docs/imports (per file created / updated /
     unchanged by hash, needs_content when a new file comes without text, 422 hash_mismatch or
-    bad path, at most 20 files) and DELETE /analysis-docs/imports/{folder_id}. ``docs`` lists
-    every stored version; ``posts`` the file lists of the POSTs; ``items`` the live docs."""
+    bad path, at most 20 files), POST .../imports/{folder_id}/prune and DELETE
+    /analysis-docs/imports/{folder_id}. ``docs`` lists every stored version; ``posts`` the file
+    lists of the POSTs; ``items`` the live docs, keyed by (folder, path)."""
     backend.docs, backend.deleted, backend.switches = [], [], {"import_upload": "on"}
     backend.posts, backend.items, backend.ids = [], {}, itertools.count(1)
     backend.reject = backend.fail_delete = backend.bad = False
     backend.during = backend.after_delete = None
 
-    def delete(doc_ids):
-        if backend.fail_delete:
-            return 500, {}
+    def drop(doc_ids):
         backend.deleted.extend(doc_ids)
         backend.items = {k: v for k, v in backend.items.items() if v["id"] not in doc_ids}
+
+    def delete(folder):
+        if backend.fail_delete:
+            return 500, {}
+        drop([v["id"] for k, v in backend.items.items() if k[0] == folder])
         if backend.after_delete:
             backend.after_delete()
         return 200, {}
+
+    def prune(folder, form):
+        gone = [v["id"] for k, v in backend.items.items() if k[0] == folder and k[1] not in form["keep_paths"]]
+        drop(gone)
+        return 200, {"deleted": len(gone), "kept": len([k for k in backend.items if k[0] == folder])}
 
     def store(form, headers):
         if backend.reject:
@@ -58,15 +68,13 @@ def remote(backend):
                             "version": None})
             else:
                 backend.docs.append({"folder": folder, "path": f["path"], "md": f["md"]})
-                if cur is None:
-                    cur = {"id": f"d{next(backend.ids)}", "version": 0}
-                    doc_id = cur["id"]
-                    backend.routes[f"DELETE /analysis-docs/{doc_id}"] = lambda f, h, i=doc_id: delete([i])
+                cur = cur or {"id": f"d{next(backend.ids)}", "version": 0}
                 backend.items[key] = {**cur, "hash": f["hash"], "version": cur["version"] + 1}
                 out.append({"path": f["path"], "status": "created" if cur["version"] == 0 else "updated",
                             "doc_id": cur["id"], "version": cur["version"] + 1})
         backend.routes[f"DELETE /analysis-docs/imports/{folder}?scope_kind=user&scope_id={scope['id']}"] = \
-            lambda f, h: delete([v["id"] for k, v in backend.items.items() if k[0] == folder])
+            lambda f, h: delete(folder)
+        backend.routes[f"POST /analysis-docs/imports/{folder}/prune"] = lambda f, h: prune(folder, f)
         return 200, {"folder_id": folder, "files": out}
 
     backend.routes["POST /analysis-docs/imports"] = store
@@ -95,6 +103,11 @@ def folder(tmp_path, db):
 
 def token(db, source):
     return imports.dry_run(db, source)["token"]
+
+
+def cached(db):
+    """path -> doc id of the local cache."""
+    return {r["external_id"]: r["doc_id"] for r in db.conn.execute("SELECT * FROM kb_import_uploads")}
 
 
 def test_secret_looking_files_are_never_sent(folder, remote, deps):
@@ -150,181 +163,117 @@ def test_files_go_in_batches_of_20_and_a_rejected_file_does_not_hold_back_the_re
     assert len(remote.items) == 21 and imports.in_library(db, source)       # notes.md + n00..n19; only n20 failed
 
 
-def test_a_lost_claim_queues_every_doc_of_the_batch_that_was_stored(folder, remote, deps):
+def test_a_deleted_file_is_pruned_and_a_changed_one_updates_in_place(folder, remote, deps):
     db, source, docs = folder
     (docs / "more.md").write_text("# More")
-
-    def steal():
-        with db.tx() as c:
-            c.execute("UPDATE kb_import_library SET op_token = 'other'")
-
-    remote.during = steal
-    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
-    queued = lambda: sorted(r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM kb_import_deletions"))  # noqa: E731
-    assert queued() == ["d1", "d2"] and remote.deleted == []      # both docs are accounted for, left to the holder
-    assert db.conn.execute("SELECT count(*) FROM kb_import_uploads").fetchone()[0] == 0
-
-
-def test_a_run_that_lost_its_claim_deletes_nothing_the_replacement_adopted(folder, remote, deps, monkeypatch):
-    db, source, docs = folder
-    imports.add_to_library(db, source, "/repo", token(db, source), **deps)             # d1
-    (docs / "more.md").write_text("# More")
-    send, replaced = imports._send, []
-
-    def send_then_replace(*args):      # the lease lapses after the answer and a real sync takes the folder over
-        got = send(*args)
-        if not replaced:
-            replaced.append(True)
-            with db.tx() as c:
-                c.execute("UPDATE kb_import_library SET op_until = 1")
-            imports.sync_upload(db, source, "/repo", **deps)          # adopts d2 (the answer was "unchanged")
-        return got
-
-    monkeypatch.setattr(imports, "_send", send_then_replace)
-    imports.sync_upload(db, source, "/repo", **deps)
-    assert remote.deleted == [] and sorted(v["id"] for v in remote.items.values()) == ["d1", "d2"]
-    assert sorted(r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM kb_import_uploads")) == ["d1", "d2"]
-    assert db.conn.execute("SELECT count(*) FROM kb_import_deletions").fetchone()[0] == 0
-
-
-def test_a_restored_file_is_not_adopted_while_its_old_doc_waits_for_deletion(folder, remote, deps, monkeypatch):
-    db, source, docs = folder
-    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
-    (docs / "notes.md").unlink()
-    remote.fail_delete = True
-    imports.sync_upload(db, source, "/repo", **deps)                          # d1 queued, its delete fails
-    (docs / "notes.md").write_text("# Notes\nthe TTL is too short")
-    exchange = imports._exchange
-
-    def exchange_then_drain(*args):     # the deletes recover and another sync drains right after the answer
-        got = exchange(*args)
-        remote.fail_delete = False
-        imports.drain_pending(db, client=deps["client"], store=deps["store"])
-        live.extend(v["id"] for v in remote.items.values())
-        return got
-
-    live = []
-    monkeypatch.setattr(imports, "_exchange", exchange_then_drain)
-    assert imports.sync_upload(db, source, "/repo", **deps)["failed"] == ["notes.md"]     # d1 comes back: not adopted
-    assert live == ["d1"]       # the other drain left it alone while this sync held the folder
-    monkeypatch.setattr(imports, "_exchange", exchange)
-    imports.sync_upload(db, source, "/repo", **deps)                          # d1 deleted, the file sent again
-    assert [v["id"] for v in remote.items.values()] == ["d2"]
-    assert [r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM kb_import_uploads")] == ["d2"]
-
-
-def test_a_drain_sends_no_folder_delete_while_another_operation_holds_the_folder(folder, remote, deps):
-    db, source, _ = folder
-    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
-    remote.fail_delete = True
-    imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
-    remote.fail_delete = False
-    with db.tx() as c:
-        c.execute("UPDATE kb_import_library SET op = 'add', op_token = 'held', op_until = 9e12")
-    sent = len(remote.calls)
-    imports.drain_pending(db, client=deps["client"], store=deps["store"])
-    assert not [c for c in remote.calls[sent:] if c[0].startswith("DELETE /analysis-docs/imports/")]
-    assert imports.state(db, source, imports.current_identity(deps["client"], deps["store"])) == imports.REMOVING
-
-
-def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, remote, deps, monkeypatch):
-    db, source, docs = folder
-    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
-    sync_upload = imports.sync_upload
-    monkeypatch.setattr(imports, "sync_upload", lambda d, s, r: sync_upload(d, s, r, **deps))
-    assert kb.sync(db, source, None, "/repo").get("uploaded") is None      # unchanged: nothing
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)             # d1 more, d2 notes
+    (docs / "more.md").unlink()
     (docs / "notes.md").write_text("# Notes\nthe TTL is now an hour")
-    remote.fail_delete = True
-    assert kb.sync(db, source, None, "/repo")["uploaded"] == 1             # the real indexing path
-    assert remote.docs[-1]["md"].endswith("an hour") and remote.deleted == []
-    assert remote.items[(source, "notes.md")]["version"] == 2         # updated in place: one doc, tracked by id
-    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 1}
-    KEY = "github.com/acme/app"
+    assert imports.sync_upload(db, source, "/repo", **deps) == {
+        "uploaded": 1, "deleted": 1, "skipped": 2, "sent": True, "failed": []}
+    assert remote.deleted == ["d1"] and [v["id"] for v in remote.items.values()] == ["d2"]
+    assert remote.items[(source, "notes.md")]["version"] == 2 and cached(db) == {"notes.md": "d2"}
 
-    def shown(identity=None):
-        return kb.sources(db, KEY, identity or imports.current_identity(deps["client"], deps["store"]))[0]
 
-    assert (shown()["library_state"], shown()["library_removing"]) == ("removing", 1) and remote.deleted == []
-    kb.sync(db, source, None, "/repo")                  # an index at the boundary, the DELETE still failing
-    assert (shown()["library_state"], shown()["library_removing"]) == ("removing", 1)   # "Finish removing" stays
-    remote.fail_delete, remote.switches = False, {"import_upload": "off"}
-    kb.sync(db, source, None, "/repo")                  # switch off: not even the queued deletes go
-    assert remote.deleted == [] and shown()["library_removing"] == 1
-    # Removal is not switch-gated: with the switch off, finishing it still deletes (uploads sent nothing).
-    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
-    assert remote.deleted == ["d1"] and not imports.in_library(db, source) and len(remote.docs) == 2
-    remote.switches = {"import_upload": "on"}
-    assert shown()["library_state"] == "local"
-    # Overlapping syncs with changed content, via the real sync: the second finds the first holding
-    # the folder and does nothing (a removal then is refused too); the newer content wins next time.
-    imports.add_to_library(db, source, "/repo", token(db, source), **deps)             # d2: "an hour"
+def test_overlapping_syncs_with_changed_content_converge(folder, remote, deps):
+    db, source, docs = folder
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
     (docs / "notes.md").write_text("# Notes\nv2")
     overlapped = []
 
     def overlap():
         (docs / "notes.md").write_text("# Notes\nv3")
-        overlapped.append(kb.sync(db, source, None, "/repo"))
+        overlapped.append(imports.sync_upload(db, source, "/repo", **deps))
         try:
             imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
         except imports.Busy:
             overlapped.append("busy")
 
     remote.during = overlap
-    kb.sync(db, source, None, "/repo")                  # uploads v2 into d2
-    assert "uploaded" not in overlapped[0] and overlapped[1] == "busy" and remote.deleted == ["d1"]
-    kb.sync(db, source, None, "/repo")                  # the newer v3 replaces v2 in d2
-    assert remote.docs[-1]["md"].endswith("v3") and remote.deleted == ["d1"]
-    assert db.conn.execute("SELECT doc_id FROM kb_import_uploads").fetchall()[0]["doc_id"] == "d2"
-    # A crashed add leaves `adding` with a lapsed lease: a new add and a removal take it over
-    # (a live lease would not be); no waiting, the lease is set in the past.
+    imports.sync_upload(db, source, "/repo", **deps)             # uploads v2; the second finds it holding the folder
+    assert overlapped[0]["sent"] is False and overlapped[1] == "busy"
+    imports.sync_upload(db, source, "/repo", **deps)             # the newer v3 wins on the next sync
+    assert remote.docs[-1]["md"].endswith("v3") and remote.deleted == []
+    assert list(remote.items) == [(source, "notes.md")] and cached(db) == {"notes.md": "d1"}
+
+
+def test_a_run_that_loses_its_claim_deletes_nothing_and_the_next_sync_converges(folder, remote, deps):
+    db, source, docs = folder
+    (docs / "more.md").write_text("# More")
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
+    (docs / "more.md").unlink()
+    (docs / "notes.md").write_text("# Notes\nchanged")
+
+    def steal():        # another holder took the folder and its lease has lapsed again
+        with db.tx() as c:
+            c.execute("UPDATE kb_import_library SET op = 'sync', op_token = 'other', op_until = 1")
+
+    remote.during = steal
+    sent = len(remote.calls)
+    assert imports.sync_upload(db, source, "/repo", **deps)["deleted"] == 0
+    assert not [c for c in remote.calls[sent:] if c[0].endswith("/prune")] and remote.deleted == []
+    assert len(remote.items) == 2 and sorted(cached(db)) == ["more.md", "notes.md"]     # the stale cache stays
+    assert imports.sync_upload(db, source, "/repo", **deps)["deleted"] == 1              # the next sync converges
+    assert [k[1] for k in remote.items] == ["notes.md"] and cached(db) == {"notes.md": "d2"}
+
+
+def test_removal_is_retried_while_removing_and_survives_the_source(folder, remote, deps, monkeypatch):
+    db, source, docs = folder
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
+    sync_upload = imports.sync_upload
+    monkeypatch.setattr(imports, "sync_upload", lambda d, s, r: sync_upload(d, s, r, **deps))
+    KEY = "github.com/acme/app"
+
+    def shown(identity=None):
+        return kb.sources(db, KEY, identity or imports.current_identity(deps["client"], deps["store"]))[0]
+
+    remote.fail_delete = True
+    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 1}
+    assert (shown()["library_state"], shown()["library_removing"]) == ("removing", 1) and remote.deleted == []
+    kb.sync(db, source, None, "/repo")                  # an index at the boundary, the DELETE still failing
+    assert (shown()["library_state"], shown()["library_removing"]) == ("removing", 1)   # "Finish removing" stays
+    remote.fail_delete, remote.switches = False, {"import_upload": "off"}
+    sent = len(remote.calls)
+    kb.sync(db, source, None, "/repo")                  # switch off: not even the removal is retried
+    assert remote.deleted == [] and len(remote.calls) == sent + 1       # (only the switch is read)
+    # Removal is not switch-gated: with the switch off, finishing it still deletes.
+    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
+    assert remote.deleted == ["d1"] and not imports.in_library(db, source) and shown()["library_state"] == "local"
+    # A crashed add leaves `adding` with a lapsed lease: an index leaves it be, a new add takes it over.
+    remote.switches = {"import_upload": "on"}
+
     def crashed():
         with db.tx() as c:
             c.execute("UPDATE kb_import_library SET state = 'adding', op = 'add', op_token = 'dead', op_until = 1"
                       " WHERE source_id = ?", (source,))
 
-    def tracked():
-        return [r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM kb_import_uploads")]
-
-    crashed()
-    kb.sync(db, source, None, "/repo")      # an index must not finish a removal of an adding folder
-    assert shown()["library_state"] == "adding" and tracked() == ["d2"]
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)
-    assert shown()["library_state"] == "in_library"
     crashed()
     kb.sync(db, source, None, "/repo")
-    assert shown()["library_state"] == "adding" and tracked() == ["d2"] and "d2" not in remote.deleted
-    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
-    assert shown()["library_state"] == "local" and remote.deleted[-1] == "d2"
-    # Another source's sync leaves a folder another operation holds alone (its queued delete could
-    # overlap that operation's upload); once the hold ends, a sync drains it and the folder is done.
+    assert shown()["library_state"] == "adding" and remote.deleted == ["d1"]
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
+    assert shown()["library_state"] == "in_library"
+    # Removing the source while the DELETE fails keeps the removal; another source's index finishes it.
     other = kb.add_source(db, KEY, kb.FOLDER, str(docs.parent / "other"))
     (docs.parent / "other").mkdir()
-    imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # d3
     remote.fail_delete = True
-    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 1}
+    kb.remove_source(db, source)
     remote.fail_delete = False
-    with db.tx() as c:
-        c.execute("UPDATE kb_import_library SET op = 'sync', op_token = 'held', op_until = 9e12")
+    assert db.conn.execute("SELECT count(*) FROM kb_import_removals").fetchone()[0] == 1 and remote.items
     kb.sync(db, other, None, "/repo")
-    assert remote.deleted[-1] == "d2" and (shown()["library_state"], shown()["library_removing"]) == ("removing", 1)
-    with db.tx() as c:
-        c.execute("UPDATE kb_import_library SET op = NULL, op_token = NULL, op_until = NULL")
-    kb.sync(db, other, None, "/repo")
-    assert remote.deleted[-1] == "d3" and shown()["library_state"] == "local"
-    imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # d4
-    remote.fail_delete = True
-    imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
-    remote.fail_delete = False
-    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
-    assert shown()["library_state"] == "local"
-    # An account switch: the folder is local for the new identity, which uploads nothing; the first
-    # identity's queued deletion stays untouched until it is signed in again.
-    imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # d5
+    assert not remote.items and db.conn.execute("SELECT count(*) FROM kb_import_removals").fetchone()[0] == 0
+
+
+def test_account_changes_never_move_another_identitys_folder(folder, remote, deps, monkeypatch):
+    db, source, docs = folder
+    sync_upload = imports.sync_upload
+    monkeypatch.setattr(imports, "sync_upload", lambda d, s, r: sync_upload(d, s, r, **deps))
+    KEY = "github.com/acme/app"
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
     first = imports.current_identity(deps["client"], deps["store"])
-    remote.fail_delete = True
-    imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
-    remote.fail_delete = False
-    sent, gone = len(remote.docs), len(remote.deleted)
+
+    def shown(identity=None):
+        return kb.sources(db, KEY, identity or imports.current_identity(deps["client"], deps["store"]))[0]
 
     def sign_in_as(sub, access_token=None, base=None):
         creds = deps["store"].load()
@@ -334,15 +283,21 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
         deps["store"].save(creds)
         license.clear_cache()
 
+    # An account switch: the folder is local for the new identity, which uploads nothing and deletes
+    # nothing; the first identity's unfinished removal stays untouched until it is signed in again.
+    remote.fail_delete = True
+    imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
+    remote.fail_delete = False
+    sent, gone = len(remote.docs), len(remote.deleted)
     sign_in_as("user_2")
     kb.sync(db, source, None, "/repo")
     assert (len(remote.docs), len(remote.deleted)) == (sent, gone)
     assert shown()["library_state"] == "local" and shown(first)["library_state"] == "removing"
     sign_in_as("user_1")
     kb.sync(db, source, None, "/repo")
-    assert remote.deleted[-1] == "d5" and shown()["library_state"] == "local"
-    # (a) An account switch while the folder's DELETE is out: it was sent under the first account, so its
-    # 200 is believed and the first account's queue is cleared; nothing more is sent under the new one.
+    assert len(remote.deleted) == gone + 1 and shown()["library_state"] == "local"
+    # An account switch while the folder's DELETE is out: it was sent under the first account, so its
+    # 200 is believed and the folder is dropped; nothing more is sent under the new one.
     (docs / "more.md").write_text("# More\nsecond file")
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # two docs
     remote.fail_delete = True
@@ -353,12 +308,8 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     remote.after_delete = None
     assert len(remote.deleted) == gone + 2 and shown(first)["library_state"] == "local"
     assert remote.calls[-1][0].startswith("DELETE /analysis-docs/imports/")      # the last request sent
-    assert shown()["library_state"] == "local"
     sign_in_as("user_1")
-    kb.sync(db, source, None, "/repo")
-    assert len(remote.deleted) == gone + 2 and shown()["library_state"] == "local"
-    # (b) Changed content while the first account is still in_library and the second is signed in:
-    # nothing uploads.
+    # Changed content while the first account is still in_library and the second is signed in: nothing uploads.
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)
     (docs / "notes.md").write_text("# Notes\nedited while another account is signed in")
     sent = len(remote.docs)
@@ -367,17 +318,18 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     assert len(remote.docs) == sent and shown(first)["library_state"] == "in_library"
     sign_in_as("user_1")
     imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
-    # (c) The account switches while a POST succeeds: its docs are recorded under the first account
-    # (the run then stops), so a later removal deletes every remote doc.
+    # The account switches while a POST succeeds: its docs are cached under the first account (the run
+    # then stops, without a prune), so a later removal deletes every remote doc.
     first_new = len(remote.docs)
     remote.during = lambda: sign_in_as("user_2")
+    prunes = len([c for c in remote.calls if c[0].endswith("/prune")])
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)
-    assert len(remote.docs) == first_new + 2 and len(tracked()) == 2       # the batch's answer is believed
-    mine = set(tracked())
+    assert len(remote.docs) == first_new + 2 and len(cached(db)) == 2
+    assert len([c for c in remote.calls if c[0].endswith("/prune")]) == prunes
     sign_in_as("user_1")
     imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
-    assert mine <= set(remote.deleted)
-    # (d) The account switches while the snapshot is taken (the store changes right after its one
+    assert not remote.items
+    # The account switches while the snapshot is taken (the store changes right after its one
     # read, tokens differ): the snapshot is wholly the first account's, and its first request is refused.
     sign_in_as("user_1", "token-1")
     real_load, armed = deps["store"].load, []
@@ -397,7 +349,7 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     with pytest.raises(imports.AccountChanged):
         imports._call(snap, "GET", "/me/analysis-docs/settings")
     assert len(remote.calls) == calls
-    # (e) An expiring token while the store goes to another backend's record (same user and org) and,
+    # An expiring token while the store goes to another backend's record (same user and org) and,
     # in the A/B/A case, back: the refresh sends only the record's own token to the record's own host,
     # never the other record's, and the new tokens are kept only if the store holds the record they came from.
     other = "https://other.pawdelta.test/api/brindle/v1"
@@ -479,7 +431,7 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     creds["access_expires_at"] = time.time() + 900
     deps["store"].save(creds)
     sign_in_as("user_1", "token-1", BASE)
-    # (f) A backend-only switch in the middle of a batch of deletes: nothing more is sent, rows stay queued.
+    # A backend-only switch while the folder's DELETE is out: its 200 is believed, nothing more is sent.
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # two docs
     remote.fail_delete = True
     assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 2}
@@ -494,12 +446,3 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     remote.after_delete = None
     assert len(remote.deleted) == gone + 2 and len(remote.calls) == at_switch[0]     # nothing sent after it
     assert shown(first)["library_state"] == "local"
-    sign_in_as("user_1", None, BASE)
-    kb.sync(db, source, None, "/repo")
-    assert shown()["library_state"] == "local" and len(remote.deleted) == gone + 2
-    # A file gone from the folder: its doc is deleted by id (the import API has no per-file removal).
-    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
-    (docs / "more.md").unlink()
-    gone = len(remote.deleted)
-    kb.sync(db, source, None, "/repo")
-    assert len(remote.deleted) == gone + 1 and len(tracked()) == 1 and len(remote.items) == 1
