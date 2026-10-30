@@ -3187,6 +3187,14 @@
       "path": "/v1/kb/sources/{id}"
     },
     {
+      "method": "DELETE",
+      "path": "/v1/kb/sources/{id}/library"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/kb/sources/{id}/library"
+    },
+    {
       "method": "POST",
       "path": "/v1/kb/sources/{id}/sync"
     },
