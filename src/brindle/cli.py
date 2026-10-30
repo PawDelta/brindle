@@ -2093,19 +2093,17 @@ def docs_export(doc_id: str = typer.Argument(..., help="Document id."),
                 fmt: str = typer.Option("zip", "--format", "-f", help="md, docx or zip."),
                 out: str = typer.Option(".", "--out", "-o", help="Directory to write the export into.")) -> None:
     """Download a document from your library (the server checks scope and your org's export policy)."""
-    import base64
-    import binascii
+    from brindle.pro import auth
 
     if fmt not in ("md", "docx", "zip"):
         _fail("format is md, docx or zip")
     d = _docs_call("GET", f"/analysis-docs/{doc_id}/export?format={fmt}&destination=download")
-    try:
-        data = base64.b64decode(d.get("content_b64") or "", validate=True)
-    except (binascii.Error, ValueError):
-        data = b""
+    data = d.get(auth.BINARY_KEY)
+    if not isinstance(data, bytes):
+        _fail("analysis docs: the export response was not binary")
     if not data:
         _fail("analysis docs: the export came back empty")
-    name = Path(str(d.get("filename") or f"{doc_id}.{fmt}")).name
+    name = f"{doc_id}.{fmt}"
     Path(out).mkdir(parents=True, exist_ok=True)
     (Path(out) / name).write_bytes(data)
     typer.echo(f"exported {doc_id} to {Path(out) / name}")
