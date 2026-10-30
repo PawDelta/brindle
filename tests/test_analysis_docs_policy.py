@@ -6,10 +6,10 @@ import pytest
 from brindle.pro import analysis_docs as ad
 from brindle.pro import analysis_policy as ap
 from brindle.pro._files import private_dir, write_private
-from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401
+from pro_fixtures import backend, claims, fixed_identity, pro_env, signing_key  # noqa: F401
 from test_analysis_docs import SOURCE, remote, uploader, write_doc  # noqa: F401
 from test_pro_remote_learning import login_as
-from test_pro_team import ORG, run, team  # noqa: F401
+from test_pro_team import ORG, login, run, team  # noqa: F401
 
 
 @pytest.mark.parametrize("enterprise,group_state,user,group,name,expected", [
@@ -69,6 +69,11 @@ def test_org_docs_shows_caches_and_updates_policy(team):
     assert policy == {"switches": {"store": "enforced_off", "assist": "default_on",
                                    "import_upload": "default_on"},
                       "groups": {"g": {"switches": {"share": "enforced_on"}}}}
+    login(team, claims(org_id="org_personal", plan="free", features=[]))
+    policy["switches"].pop("store")
+    team.routes["GET /me/analysis-docs/settings"] = lambda f, h: (200, {"switches": {}})
+    code, out, err = run(team, "org", "docs", "--org", ORG)
+    assert code == 0 and not err and "store: on" in out
 
 
 def test_non_admin_put_refusal_is_shown(team):

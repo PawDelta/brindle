@@ -310,11 +310,17 @@ class _OrgCommands:
             policy = analysis_policy.update(org_id, client, self.store, policy)
         user = analysis_policy.request(client, self.store, "GET", "/me/analysis-docs/settings").get("switches", {})
         ent = license.current(refresh=False, store=self.store)
+        plan = ent.plan
+        if org_id != ent.org_id:
+            target = next((o for o in self.orgs(base) if o["id"] == org_id), None)
+            if target is None or not target["plan"]:
+                raise auth.AuthError("no plan returned for the requested org", code="bad_response")
+            plan = target["plan"]
         self._say(f"Analysis-doc policy for org {org_id}: {json.dumps(policy, sort_keys=True)}")
         self._say("Your effective switches" + (f" (group {auth._sanitize(group)})" if group else "") + ":")
         for name in analysis_policy.SWITCHES:
             on = analysis_policy.resolve_switch(name, user, group=group, policy=policy,
-                                                 org=org_id, plan=ent.plan)
+                                                 org=org_id, plan=plan)
             self._say(f"  {name}: {'on' if on else 'off'}")
         return 0
 
