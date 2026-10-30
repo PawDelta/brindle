@@ -571,10 +571,14 @@ CREATE TABLE IF NOT EXISTS kb_import_library (
     source_id TEXT PRIMARY KEY REFERENCES kb_sources(id) ON DELETE CASCADE,
     added_at REAL NOT NULL,
     pending INTEGER NOT NULL DEFAULT 0,   -- files the last upload could not send
-    -- adding | in_library | removing (no row: local). Changed only by compare-and-set
-    -- (brindle.pro.analysis_imports); removing is kept until the server confirms every delete.
+    -- adding | in_library | removing (no row: local); removing is kept until the server
+    -- confirms every delete.
     state TEXT NOT NULL DEFAULT 'in_library' CHECK (state IN ('adding', 'in_library', 'removing')),
-    claimed_at REAL
+    -- The one operation working on the folder (brindle.pro.analysis_imports): claimed in a
+    -- transaction, recorded against only while op_token still matches, until op_until.
+    op TEXT CHECK (op IN ('add', 'sync', 'remove')),
+    op_token TEXT,
+    op_until REAL
 );
 -- Library docs still to delete server-side. Not tied to the source, so they
 -- outlive its removal until the server confirms each one.
