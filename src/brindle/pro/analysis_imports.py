@@ -13,7 +13,7 @@ folder and path, the folder id being the source id): :func:`sync_upload`
 its doc in place) and then has the server prune the docs of paths the folder no
 longer has (``.../imports/{folder_id}/prune``); :func:`remove_from_library`
 deletes them all with ``DELETE /analysis-docs/imports/{folder_id}``. The local
-upload table is only a cache of path to hash that skips files already sent.
+upload table only shows state (path to hash); every sync sends every file's hash.
 
 Nothing is sent in air-gap mode, without the ``analysis_docs`` entitlement, or
 when the ``import_upload`` switch resolves to off (the user's choice, the
@@ -59,6 +59,7 @@ log = logging.getLogger(__name__)
 
 SWITCH = "import_upload"
 BATCH = 20         # files per POST /analysis-docs/imports (the backend's limit)
+MAX_FILES = 10000  # paths one prune can name (the backend's limit)
 ADDING, IN_LIBRARY, REMOVING = "adding", "in_library", "removing"
 LEASE = 300.0      # seconds a claim lasts without renewal (a crashed holder's claim then lapses)
 _SECRET_NAMES = ("*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "*credential*",
@@ -69,6 +70,13 @@ _PRIVATE_KEY = re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----")
 
 class ImportUploadOff(RuntimeError):
     """Nothing may be sent: air-gap, no entitlement, or the switch is off."""
+
+
+class TooManyFiles(ValueError):
+    """The folder has more files than one library folder can hold."""
+
+    def __init__(self, count: int) -> None:
+        super().__init__(f"too many files to add ({count}, at most {MAX_FILES}); pick a smaller folder")
 
 
 class Busy(RuntimeError):
@@ -477,8 +485,8 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
     """Upload new and changed files (only those in ``only``, name to content
     digest, when given) in batches, then have the server prune the docs of files
     the folder no longer has. The server keys docs by (folder, path), so it is the
-    source of truth; the local table is only a cache of path to hash that skips
-    files already sent. ``claim`` is the caller's operation token: it is renewed
+    source of truth: every sync sends every file's hash, and the local table (path
+    to hash) only shows state, never decides what to skip. ``claim`` is the caller's operation token: it is renewed
     before each batch and before the prune and checked when the cache is written;
     a run that loses it simply stops (the next sync converges). ``key_store`` and
     ``identity`` are accepted for callers and unused: the import endpoint files
@@ -493,17 +501,14 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
     snap = _snapshot(client, store)
     if snap.who != who:
         raise RuntimeError("the signed-in account changed")
-    known = {r["external_id"]: r for r in db.conn.execute(
-        "SELECT * FROM kb_import_uploads WHERE source_id = ? AND identity = ?", (source_id, who))}
     sendable, skipped = _plan(src)
+    if len(sendable) > MAX_FILES:       # never prune a folder the server cannot take whole
+        raise TooManyFiles(len(sendable))
     result["skipped"] = len(skipped)
-    todo = []
-    for name, data in sendable.items():
-        digest = _digest(data)
-        old = known.get(name)
-        if (only is not None and only.get(name) != digest) or (old is not None and old["content_hash"] == digest):
-            continue
-        todo.append((name, digest, data))
+    # Every file's hash goes every time (the server answers unchanged or needs_content): the local
+    # cache is never what decides to skip a file, so a late stale write corrects itself next sync.
+    todo = [(name, _digest(data), data) for name, data in sendable.items()
+            if only is None or only.get(name) == _digest(data)]
     lost = False
     for start in range(0, len(todo), BATCH):
         batch = todo[start:start + BATCH]
@@ -607,6 +612,8 @@ def add_to_library(db: DB, source_id: str, repo_root: str, token: str | None = N
         raise ImportUploadOff(reason)
     who = _who(deps.get("client"), deps.get("store"))[3]
     sendable, _ = _plan(src)
+    if len(sendable) > MAX_FILES:
+        raise TooManyFiles(len(sendable))
     if token != _token(sendable):
         raise ManifestChanged(dry_run(db, source_id, client=deps.get("client"), store=deps.get("store")))
     # ADDING is listed for the add that crashed: its lease must have lapsed, as for any claim.

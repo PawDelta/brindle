@@ -181,20 +181,33 @@ def test_overlapping_syncs_with_changed_content_converge(folder, remote, deps):
     (docs / "notes.md").write_text("# Notes\nv2")
     overlapped = []
 
-    def overlap():
+    def overlap():      # during the old run's v2 content request: it is held, then its lease lapses
         (docs / "notes.md").write_text("# Notes\nv3")
-        overlapped.append(imports.sync_upload(db, source, "/repo", **deps))
+        overlapped.append(imports.sync_upload(db, source, "/repo", **deps))      # held: does nothing
         try:
             imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
         except imports.Busy:
             overlapped.append("busy")
+        with db.tx() as c:
+            c.execute("UPDATE kb_import_library SET op_until = 1")
+        overlapped.append(imports.sync_upload(db, source, "/repo", **deps))      # a real replacement uploads v3
 
     remote.during = overlap
-    imports.sync_upload(db, source, "/repo", **deps)             # uploads v2; the second finds it holding the folder
-    assert overlapped[0]["sent"] is False and overlapped[1] == "busy"
-    imports.sync_upload(db, source, "/repo", **deps)             # the newer v3 wins on the next sync
+    imports.sync_upload(db, source, "/repo", **deps)             # then the old v2 write lands over it
+    assert overlapped[0]["sent"] is False and overlapped[1] == "busy" and overlapped[2]["sent"] is True
+    assert [d["md"][-2:] for d in remote.docs[-2:]] == ["v3", "v2"]          # the server now holds stale v2
+    imports.sync_upload(db, source, "/repo", **deps)             # every sync sends hashes: v3 is restored
     assert remote.docs[-1]["md"].endswith("v3") and remote.deleted == []
     assert list(remote.items) == [(source, "notes.md")] and cached(db) == {"notes.md": "d1"}
+
+
+def test_a_folder_over_the_prune_limit_is_refused_before_anything_is_sent(folder, remote, deps, monkeypatch):
+    db, source, docs = folder
+    (docs / "more.md").write_text("# More")
+    monkeypatch.setattr(imports, "MAX_FILES", 1)
+    with pytest.raises(imports.TooManyFiles, match="pick a smaller folder"):
+        imports.add_to_library(db, source, "/repo", token(db, source), **deps)
+    assert remote.posts == [] and not imports.in_library(db, source)
 
 
 def test_a_run_that_loses_its_claim_deletes_nothing_and_the_next_sync_converges(folder, remote, deps):
