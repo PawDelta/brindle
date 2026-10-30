@@ -220,9 +220,12 @@ def decisions(db: DB, request: Request) -> Any:
 @_json
 def kb_sources(db: DB, request: Request) -> Any:
     keep = ("id", "kind", "scope", "mode", "visibility", "credential_name", "retention_days",
-            "added_at", "docs", "quarantined")
+            "added_at", "docs", "quarantined", "library_state", "library_pending", "library_removing")
+    from brindle.pro import analysis_imports
+
     return [{k: s[k] for k in keep if k in s}
-            for s in kb.sources(db, knowledge.repo_key(_need_repo(request)))]
+            for s in kb.sources(db, knowledge.repo_key(_need_repo(request)),
+                                analysis_imports.current_identity())]
 
 
 @_json

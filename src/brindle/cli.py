@@ -1356,7 +1356,7 @@ def _kb_sync_sources(db: DB, repo_root: str, ids: list[str]) -> None:
     graph = codemap.graph_path(repo_root)
     for source_id in ids:
         try:
-            counts = kb.sync(db, source_id, graph)
+            counts = kb.sync(db, source_id, graph, repo_root)
         except ValueError as e:
             _fail(str(e))
         typer.echo(f"{source_id[:8]}: " + ", ".join(f"{n} {what}" for what, n in counts.items()))

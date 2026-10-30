@@ -331,7 +331,26 @@ export interface KbSource {
   added_at?: number;
   docs?: number;
   quarantined?: boolean;
+  /* Where the folder is for the signed-in account: local (the default; it stays on this machine),
+     adding, in_library (Pro) or removing (shown until every doc is deleted). */
+  library_state?: "local" | "adding" | "in_library" | "removing";
+  /* Files of an added folder the last upload could not send. */
+  library_pending?: number;
+  /* Docs of a folder being removed from the library that the server has not deleted yet. */
+  library_removing?: number;
 }
+
+/* POST /kb/sources/{id}/library with dry_run: what adding a folder to the library would send. */
+export interface KbLibraryPlan {
+  files: { name: string; bytes: number }[];
+  skipped: { name: string; reason: string }[];
+  allowed: boolean;
+  /* Names this exact list; adding with it uploads these files only. */
+  token: string;
+}
+
+/* The answer to adding: the folder changed since the list (`changed`, with a fresh one), or it went up. */
+export type KbLibraryAdded = ({ changed: true } & KbLibraryPlan) | { changed?: undefined };
 
 /* DELETE /kb/sources/{id} (engine branch desktop/kb-sources): the source is gone. */
 export interface KbSourceRemoved {
@@ -1116,6 +1135,22 @@ export class DaemonClient {
   /* Indexes a source again (POST /kb/sources/{id}/sync?repo=): a job, done when the index is current. */
   syncKbSource(repo: string, id: string) {
     return this.post<Job>(`/kb/sources/${encodeURIComponent(id)}/sync?repo=${encodeURIComponent(repo)}`, {});
+  }
+
+  /* The files adding a folder to the library would upload, and the ones skipped; nothing is sent. */
+  kbLibraryPlan(repo: string, id: string) {
+    return this.post<KbLibraryPlan>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, { dry_run: true });
+  }
+
+  /* Uploads exactly the files `token` (from kbLibraryPlan) listed (403 not_allowed when uploading is off,
+     502 when a file was rejected). */
+  addKbToLibrary(repo: string, id: string, token: string) {
+    return this.post<KbLibraryAdded>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, { token });
+  }
+
+  /* Deletes the folder's docs from the library; the folder stays. */
+  removeKbFromLibrary(repo: string, id: string) {
+    return this.delete<{ left: number }>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, {});
   }
 
   /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.

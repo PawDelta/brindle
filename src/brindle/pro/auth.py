@@ -590,6 +590,29 @@ def refresh(client: Client, store, seen: dict | None = None, *, now: float | Non
     return got[1]
 
 
+def refresh_captured(store, record: dict, transport: Transport | None = None, *,
+                     now: float | None = None) -> dict:
+    """Refresh a credential ``record`` read earlier, all under the refresh lock like
+    :func:`refresh`: if the store no longer holds exactly ``record`` nothing is
+    sent (``AuthError`` code ``record_changed``); otherwise ``record``'s own
+    refresh token is spent at ``record``'s own ``base_url`` and the rotated pair
+    is saved at once, and only then is the entitlement fetched and the record
+    updated. If that fetch fails, the saved pair is kept and the error raised."""
+    now = time.time() if now is None else now
+    client = Client(record.get("base_url"), transport)
+    with refresh_lock():
+        if (store.load() or {}) != record:
+            raise AuthError("the stored sign-in changed", code="record_changed")
+        new = _rotate(client, store, record, now)
+        got = _fetch_entitlement(client, new["access_token"], now, new.get("org_id"))
+        if got == 401:
+            raise AuthError("backend refused a fresh access token", code="invalid_token")
+        new = {**new, "entitlement": got[0]}
+        store.save(new)
+    license.clear_cache()
+    return new
+
+
 def switch_org(client: Client, store, org_id: str | None, *,
                now: float | None = None) -> license.Entitlement:
     """Make ``org_id`` (None: the personal org) the org whose entitlement is
