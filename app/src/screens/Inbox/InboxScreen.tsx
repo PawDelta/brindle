@@ -94,7 +94,7 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
   const agents = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []), [workspaces]);
 
   // On one session: the items of any of its agents (the whole tree), none from elsewhere.
-  const inSession = (i: InboxItemDTO) => session === null || (!!i.agent_id && rootOf(agents, i.agent_id, hidden) === session);
+  const inSession = (i: InboxItemDTO) => session === null || (i.root_id ?? (i.agent_id ? rootOf(agents, i.agent_id, hidden) : null)) === session;
   const here = useMemo(() => (session === null ? inbox : inbox.filter(inSession)).filter((i) => !actions.hidden.has(itemKey(i))), [inbox, session, agents, hidden, actions.hidden]); // eslint-disable-line react-hooks/exhaustive-deps
   const sessionTitle = session === null ? null : (find(session)?.goal ?? session);
 
@@ -104,7 +104,7 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
   const groups = useMemo<Group[]>(() => {
     const bySession = new Map<string, Group>();
     for (const item of here) {
-      const root = item.agent_id ? rootOf(agents, item.agent_id, hidden) : null;
+      const root = item.root_id ?? (item.agent_id ? rootOf(agents, item.agent_id, hidden) : null);
       const key = root ?? (item.agent_id ? `ws:${item.workspace_id ?? item.agent_id}` : item.kind === "setup" ? "setup" : "org");
       let group = bySession.get(key);
       if (!group) {
@@ -127,7 +127,7 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
   }, [here, agents, hidden, find, repoOf, repos]);
 
   const sessionOf = (item: InboxItemDTO) => {
-    const root = item.agent_id ? rootOf(agents, item.agent_id, hidden) : null;
+    const root = item.root_id ?? (item.agent_id ? rootOf(agents, item.agent_id, hidden) : null);
     const repo = root ? repoOf(root) : null;
     return root && repo ? { root, repo } : null;
   };

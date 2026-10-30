@@ -126,7 +126,7 @@ class InboxItemDTO(_DTO):
     detail: str | None = None
     notice_id: str | None = None   # an org notice's: POST /inbox/{notice_id}/read
     request_id: str | None = None  # a doc request's: POST /inbox/{request_id}/dismiss
-    doc: int | None = None
+    doc: int | str | None = None   # integer kb_docs id or opaque analysis-doc library id
     section: str | None = None
     fix: str | None = None         # a setup item's: what the app's fix button repairs (codex_hook_trust)
     permission: PermissionDTO | None = None

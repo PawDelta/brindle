@@ -94,8 +94,10 @@ def _root_id(db: DB, caller: Agent | None) -> str | None:
 
 
 @mcp.tool()
-def request_doc_read(doc: int, why: str, section: str | None = None) -> str:
-    """Ask the person to read a knowledge document (id), optionally at a section.
+def request_doc_read(doc: int | str, why: str, section: str | None = None) -> str:
+    """Ask the person to read a document, optionally at a section.
+    Use an integer for a local knowledge document or a string for a server
+    analysis-doc library id (requires authorized access to that document).
     Give a one-line why. Creates a Doc to read item in their Inbox; editing
     or indexing a document alone never asks them to read it.
     """

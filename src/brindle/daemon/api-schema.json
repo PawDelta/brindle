@@ -920,6 +920,9 @@
               "type": "integer"
             },
             {
+              "type": "string"
+            },
+            {
               "type": "null"
             }
           ],

@@ -30,7 +30,7 @@ export type Route =
   | { screen: "new"; repo?: string }
   /* `session`: only what waits in that session (its root), from its bar's count. */
   | { screen: "inbox"; session?: string }
-  | { screen: "knowledge"; view?: "docs"; doc?: number; section?: string }
+  | { screen: "knowledge"; view?: "docs"; doc?: number | string; section?: string }
   | { screen: "agents" }
   /* `section`: scrolled to on opening (the sidebar's usage reading opens Account › Usage,
      a provider's problem Settings › Providers); `ask` counts the requests, so asking

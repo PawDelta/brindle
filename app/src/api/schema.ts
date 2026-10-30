@@ -173,7 +173,7 @@ export interface InboxItemDTO {
   action?: InboxActionDTO | null;
   agent_id?: string | null;
   detail?: string | null;
-  doc?: number | null;
+  doc?: number | string | null;
   fix?: string | null;
   kind: string;
   notice_id?: string | null;

@@ -38,13 +38,14 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
-  it("opens a requested document at its section, replies in the session and dismisses the request", async () => {
-    const doc: InboxItemDTO = { kind: "doc", reason: "Check the storage design.", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", request_id: "dr1", doc: 42, section: "Storage" };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [doc] });
+  it.each([42, "d1"])("opens requested document %s at its section, replies in the session and dismisses the request", async (reference) => {
+    const doc: InboxItemDTO = { kind: "doc", reason: "Check the storage design.", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", request_id: "dr1", doc: reference, section: "Storage" };
+    // A paused session remains in the sessions feed after all its agents leave the snapshot.
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: typeof reference === "string" ? "paused" : "idle" }], workspaces: typeof reference === "string" ? [] : [root, worker], inbox: [doc] });
     const { sync, onOpen, onNavigate } = mount(daemon);
     await screen.findByRole("region", { name: "Ship ls --json" });
     fireEvent.click(within(card("doc")).getByRole("button", { name: "Open" }));
-    expect(onNavigate).toHaveBeenLastCalledWith({ screen: "knowledge", view: "docs", doc: 42, section: "Storage" });
+    expect(onNavigate).toHaveBeenLastCalledWith({ screen: "knowledge", view: "docs", doc: reference, section: "Storage" });
     fireEvent.click(within(card("doc")).getByRole("button", { name: "Reply" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "w1");
     fireEvent.click(within(card("doc")).getByRole("button", { name: "Dismiss" }));
