@@ -76,14 +76,18 @@ class Doc:
 
 
 def _frontmatter(text: str) -> tuple[dict, str]:
+    import yaml
+
     m = re.match(r"^---\s*\n(.*?)\n---\s*\n?", text, re.S)
     if not m:
         return {}, text
-    out = {}
-    for line in m.group(1).splitlines():
-        k, sep, v = line.partition(":")
-        if sep and re.fullmatch(r"[A-Za-z_]+", k.strip()):
-            out[k.strip()] = v.strip().strip("\"'")
+    try:
+        data = yaml.safe_load(m.group(1))
+    except yaml.YAMLError:
+        data = None
+    data = data if isinstance(data, dict) else {}
+    out = {k: " ".join(v.split()) for k, v in data.items() if k in ("title", "question", "scope")
+           and isinstance(v, str)}
     return out, text[m.end():]
 
 
@@ -108,6 +112,13 @@ def _meta(front: dict, body: str) -> dict:
             "labels": labels}
 
 
+def _plain(root: str, path: Path) -> bool:
+    """Whether no part of ``path`` below ``root`` is a symlink, so reading it
+    stays inside the repo and matches the path the protected-path check sees."""
+    rel = path.relative_to(root)
+    return not any((Path(root) / Path(*rel.parts[:i + 1])).is_symlink() for i in range(len(rel.parts)))
+
+
 def _read(path: Path) -> str:
     with open(path, "rb") as fh:
         return fh.read(MAX_FILE).decode("utf-8", "replace")
@@ -125,9 +136,12 @@ def collect(root: str, changed: list[str]) -> list[Doc]:
     for slug in slugs:
         d = Path(root) / DELIVERABLES / slug
         try:
+            if not _plain(root, d / "main.md"):
+                continue
             main = _read(d / "main.md")
             front, body = _frontmatter(main)
-            apps = sorted((d / "appendices").glob("*.md"))[:MAX_APPENDICES]
+            apps = [a for a in sorted((d / "appendices").glob("*.md"))
+                    if _plain(root, a) and a.is_file()][:MAX_APPENDICES]
             docs.append(Doc(
                 slug=slug, title=front.get("title") or slug, body_md=main,
                 appendices=[{"name": a.name, "md": _read(a)} for a in apps],
@@ -143,7 +157,8 @@ def changed_files(path: str, base_ref: str) -> list[str]:
     """Deliverable files the branch at ``path`` adds or changes against ``base_ref``."""
     from brindle import git
 
-    return git.paths(["diff", "--name-only", "--diff-filter=AMR", f"{base_ref}...HEAD", "--", DELIVERABLES], path)
+    names = git.paths(["diff", "--name-only", "--diff-filter=AMR", f"{base_ref}...HEAD"], path)
+    return [n for n in names if n.startswith(f"{DELIVERABLES}/")]
 
 
 # -- the uploader ----------------------------------------------------------------------------------
@@ -319,12 +334,30 @@ def _session(client=None, store=None):
     return client, store
 
 
+def require_entitlement(store=None):
+    """The verified entitlement, or ``RuntimeError`` (before anything is sent)
+    in air-gap mode or without the ``analysis_docs`` feature."""
+    from brindle import airgap
+    from brindle.pro import license
+
+    if airgap.enabled():
+        raise RuntimeError("air-gap mode is on: nothing is sent")
+    try:
+        ent = license.current(refresh=False, store=store)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError("not logged in to brindle Pro (`brindle account login`)") from e
+    if FEATURE not in ent.features or ent.in_grace:
+        raise RuntimeError("your plan has no analysis doc library (the `analysis_docs` entitlement)")
+    return ent
+
+
 def api(method: str, path: str, body: dict | None = None, *, client=None, store=None) -> dict:
     """Call a Bearer endpoint; raises ``RuntimeError`` with a readable reason
     on a non-200 answer, ``auth.AuthError`` when not logged in or offline."""
     from brindle.pro import auth
 
     client, store = _session(client, store)
+    require_entitlement(store)
     status, resp = auth.authed(client, store, method, path, auth.JSONBody(body) if body is not None else None)
     if status != 200:
         raise RuntimeError(resp.get("error") if isinstance(resp, dict) and resp.get("error") else f"HTTP {status}")

@@ -2010,9 +2010,20 @@ docs_app = typer.Typer(no_args_is_help=True,
 app.add_typer(docs_app, name="docs")
 
 
+def _docs_arm() -> None:
+    """Load this repo's config first, so ``"airgap": true`` in it is in force before any request."""
+    from brindle.config import load_repo_config
+
+    try:
+        load_repo_config(git.main_repo_root(os.getcwd()))
+    except git.GitError:
+        pass
+
+
 def _docs_call(method: str, path: str, body: dict | None = None) -> dict:
     from brindle.pro import analysis_docs, auth
 
+    _docs_arm()
     try:
         return analysis_docs.api(method, path, body)
     except (auth.AuthError, RuntimeError) as e:
@@ -2031,9 +2042,14 @@ def _docs_scope(spec: str) -> tuple[str, str]:
 @docs_app.command("list")
 def docs_list() -> None:
     """List the documents in your library."""
-    from brindle.pro import license
+    from brindle.pro import analysis_docs
 
-    resp = _docs_call("GET", f"/analysis-docs?scope_kind=user&scope_id={license.current(refresh=False).sub}")
+    _docs_arm()
+    try:
+        sub = analysis_docs.require_entitlement().sub
+    except RuntimeError as e:
+        _fail(f"analysis docs: {e}")
+    resp = _docs_call("GET", f"/analysis-docs?scope_kind=user&scope_id={sub}")
     for d in resp.get("docs") or []:
         typer.echo(f"{d.get('id')}  v{d.get('version', 1)}  {d.get('title', '')}")
 
@@ -2088,6 +2104,7 @@ def docs_export(doc_id: str = typer.Argument(..., help="Document id."),
 def _docs_switch(on: bool) -> None:
     from brindle.pro import analysis_docs, auth
 
+    _docs_arm()
     try:
         analysis_docs.set_switch(on)
     except (auth.AuthError, RuntimeError) as e:

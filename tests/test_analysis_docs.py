@@ -80,3 +80,53 @@ def test_nothing_sent(case, repo, remote, fixed_identity, monkeypatch):
     up.submit(ad.collect(str(repo), [".brindle/deliverables/cache/main.md"]))
     up.flush()
     assert remote.docs == []
+
+
+def test_changed_files_finds_every_slug_and_skips_symlinks(tmp_path):
+    import os
+    import subprocess
+
+    def git(*a):
+        subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *a],
+                       check=True, capture_output=True)
+
+    git("init", "-q", "-b", "main")
+    git("commit", "-q", "--allow-empty", "-m", "base")
+    for slug in ("one", "two"):
+        d = tmp_path / ".brindle" / "deliverables" / slug
+        (d / "appendices").mkdir(parents=True)
+        (d / "main.md").write_text(MAIN.replace("question: Why is the cache slow?",
+                                                "question: >\n  Why is\n  the cache slow?"))
+    (tmp_path / "protected").mkdir()
+    (tmp_path / "protected" / "secret.md").write_text("secret")
+    os.symlink("../../../../protected/secret.md", tmp_path / ".brindle/deliverables/two/appendices/s.md")
+    git("add", "-A")
+    git("commit", "-q", "-m", "work")
+    changed = ad.changed_files(str(tmp_path), "HEAD~1")
+    docs = {d.slug: d for d in ad.collect(str(tmp_path), changed)}
+    assert sorted(docs) == ["one", "two"]
+    assert docs["two"].appendices == [] and "protected" not in "".join(docs["two"].files)
+    assert docs["one"].meta["question"] == "Why is the cache slow?"
+
+
+@pytest.mark.parametrize("case", ["airgap", "unentitled"])
+def test_docs_cli_sends_nothing(case, tmp_path, remote, monkeypatch):
+    import json
+    import subprocess
+
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    sent = []
+    monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, *a: sent.append(a) or (200, {}))
+    monkeypatch.setattr(airgap, "_armed", False)
+    login_as(remote, credentials.default_store(), features=("learning",))
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    if case == "airgap":
+        login_as(remote, credentials.default_store(), features=("analysis_docs",))
+        (tmp_path / ".brindle").mkdir()
+        (tmp_path / ".brindle" / "config.json").write_text(json.dumps({"airgap": True}))
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["docs", "show", "doc1"])
+    assert result.exit_code == 1 and sent == []
