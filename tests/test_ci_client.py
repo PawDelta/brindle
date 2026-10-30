@@ -258,6 +258,7 @@ ACTIONS = {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions.test/x",
            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "req-secret"}
 
 
+@pytest.mark.brindle_ci_guard
 def test_oidc_falls_back_to_an_unexpired_token_then_gives_up():
     clock = {"t": 1000.0}
     fail = {"on": False}
@@ -286,6 +287,7 @@ def test_jwt_exp_ignores_a_non_finite_or_non_numeric_exp():
     assert ci_client._jwt_exp("not-a-jwt") is None
 
 
+@pytest.mark.brindle_ci_guard
 def test_oidc_fetch_says_why_it_failed(monkeypatch):
     import io
     import urllib.error
@@ -402,6 +404,7 @@ def finish_after(db, adapter, n):
     return sleep
 
 
+@pytest.mark.brindle_ci_guard
 def test_escalation_plan_must_be_the_same_run(plan, ci_repo, tmp_path):
     base = head(ci_repo)
     token = plan(base_sha=base)
@@ -550,6 +553,7 @@ def test_run_continuation_checks_out_the_existing_branch(plan, ci_repo, tmp_path
     assert server.events[0]["commits"] == 1
 
 
+@pytest.mark.brindle_ci_guard
 def test_run_continuation_refuses_a_moved_branch(plan, ci_repo, tmp_path):
     tip = push_branch(ci_repo, "brindle/ci-1")
     token = plan(base_sha="3" * 40, continuation={"pr": 12})
@@ -568,6 +572,7 @@ def test_run_continuation_refuses_a_moved_branch(plan, ci_repo, tmp_path):
         ci_client.verify_plan(plan(continuation="yes"), repo=REPO)
 
 
+@pytest.mark.brindle_ci_guard
 def test_run_rejects_a_checkout_not_at_base(plan, ci_repo, tmp_path):
     token = plan(base_sha="1" * 40)
     tf = token_file(tmp_path)
@@ -577,6 +582,7 @@ def test_run_rejects_a_checkout_not_at_base(plan, ci_repo, tmp_path):
     assert not tf.exists(), "the token file is deleted whatever happens to the plan"
 
 
+@pytest.mark.brindle_ci_guard
 def test_run_ends_past_the_plan_timeout_only_when_the_server_is_unreachable(plan, ci_repo, tmp_path):
     from brindle.pro.auth import TransportError
 
@@ -608,6 +614,7 @@ def test_run_ends_past_the_plan_timeout_only_when_the_server_is_unreachable(plan
 # -- plan verification ---------------------------------------------------------------------------
 
 
+@pytest.mark.brindle_ci_guard
 def test_plan_verification_failures(plan, signing_key):  # noqa: F811
     now = time.time()
     good = plan()
@@ -642,6 +649,7 @@ def test_plan_verification_failures(plan, signing_key):  # noqa: F811
         ci_client.verify_plan("not.a.jwt", repo=REPO)
 
 
+@pytest.mark.brindle_ci_guard
 def test_plan_errors_never_quote_the_token(plan):
     bad = plan(repo="other/repo")
     with pytest.raises(CIError) as e:
@@ -657,6 +665,7 @@ def test_plan_defaults_limits(plan):
 # -- the org's protected paths and dollar budget (Team org_budgets) --------------------------------
 
 
+@pytest.mark.brindle_ci_guard
 def test_plan_org_limits_must_be_well_formed(plan):
     for over in [{"protected_paths": "infra/"}, {"protected_paths": [""]},
                  {"protected_paths": [1]}, {"protected_paths": ["x"] * 65},
@@ -676,6 +685,7 @@ def test_the_token_budget_is_priced_in_dollars(plan, monkeypatch):
     assert ci_client.token_budget_usd(c, ".") is None
 
 
+@pytest.mark.brindle_ci_guard
 def test_a_run_that_changes_a_protected_path_publishes_nothing(plan, ci_repo, tmp_path):
     base = head(ci_repo)
     token = plan(base_sha=base, protected_paths=["fix.txt"])
@@ -704,6 +714,7 @@ def test_a_run_outside_the_protected_paths_is_published(plan, ci_repo, tmp_path)
     assert b'name="bundle"' in server.results[0]
 
 
+@pytest.mark.brindle_ci_guard
 def test_an_escalation_plan_cannot_drop_the_orgs_limits(plan, ci_repo, tmp_path):
     base = head(ci_repo)
     first = plan(base_sha=base, protected_paths=["fix.txt"], budget_usd=5)
@@ -719,6 +730,7 @@ def test_an_escalation_plan_cannot_drop_the_orgs_limits(plan, ci_repo, tmp_path)
     assert ev["final_state"] == "failed" and "fix.txt" in ev["question"]
 
 
+@pytest.mark.brindle_ci_guard
 def test_a_run_stops_at_the_orgs_dollar_budget(plan, ci_repo, tmp_path, monkeypatch):
     from brindle import pricing
 
@@ -735,6 +747,7 @@ def test_a_run_stops_at_the_orgs_dollar_budget(plan, ci_repo, tmp_path, monkeypa
     assert any("org's $1.00 limit" in s for s in said)
 
 
+@pytest.mark.brindle_ci_guard
 def test_usage_the_org_budget_cant_price_counts_as_over_it(tmp_path, monkeypatch):
     from brindle import pricing
 
@@ -756,6 +769,7 @@ def sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+@pytest.mark.brindle_ci_guard
 def test_plan_instructions_by_hash_are_checked(plan):
     text = "a long issue body"
     h = sha256(text)
@@ -882,6 +896,7 @@ def test_run_keeps_the_workflow_token_when_the_exchange_fails(plan, ci_repo, tmp
     assert any("HTTP 401" in s and "using the workflow's token" in s for s in said)
 
 
+@pytest.mark.brindle_ci_guard
 def test_validate_reviewers_use_the_proxy_and_checks_see_no_secret(plan, ci_repo, tmp_path, federation):
     sha = head(ci_repo)
     vplan = plan("validation", head_sha=sha,
@@ -902,6 +917,7 @@ def test_validate_reviewers_use_the_proxy_and_checks_see_no_secret(plan, ci_repo
     assert _port_closed(review_env["ANTHROPIC_BASE_URL"])
 
 
+@pytest.mark.brindle_ci_guard
 def test_read_run_token_deletes_the_file(tmp_path):
     p = token_file(tmp_path)
     assert ci_client.read_run_token(p) == RUN_TOKEN
@@ -943,6 +959,7 @@ def validate(server, ci_repo, tmp_path, *, adapters, env=None, org=False, say=No
                          say=said.append)
 
 
+@pytest.mark.brindle_ci_guard
 def test_plan_texts_are_saved_beside_the_plan_and_rechecked(plan, ci_repo, tmp_path):
     text = "Review this pull request.\n" + "+ a diff line\n" * 2000
     h = sha256(text)
@@ -1094,6 +1111,7 @@ def test_checkout_switches_from_the_merge_commit_to_the_plans_head(repo, tmp_pat
     assert head(clone) == pr_head and said == [], "already at the head: nothing to do"
 
 
+@pytest.mark.brindle_ci_guard
 def test_checkout_never_switches_a_dirty_worktree(repo, tmp_path):
     clone, pr_head, merge = pr_checkout(repo, tmp_path)
     (clone / "app.py").write_text("changed\n")
@@ -1115,6 +1133,7 @@ def test_run_check_timeout_kills_the_whole_process_group(ci_repo):
 # -- air-gap, doctor, the CLI ------------------------------------------------------------------------
 
 
+@pytest.mark.brindle_ci_guard
 def test_airgap_refuses(plan, monkeypatch):
     monkeypatch.setenv("BRINDLE_AIRGAP", "1")
     with pytest.raises(CIError, match="air-gap mode") as e:
@@ -1126,6 +1145,7 @@ def test_airgap_refuses(plan, monkeypatch):
     assert e.value.code == "airgap" and not server.events
 
 
+@pytest.mark.brindle_ci_guard
 def test_doctor_names_credentials_but_never_values(ci_repo):
     env = {"ANTHROPIC_API_KEY": "sk-ant-very-secret", "OPENAI_API_KEY": "sk-oa-very-secret", "PATH": "/nonexistent"}
     text = ci_client.doctor(env, REPO, str(ci_repo), org=True)
@@ -1139,6 +1159,7 @@ def test_doctor_names_credentials_but_never_values(ci_repo):
     (lambda p: p.write_text("{not json"), "plan texts are malformed"),
     (lambda p: p.write_bytes(b'{"\xff": 1}'), "plan texts are malformed"),
 ])
+@pytest.mark.brindle_ci_guard
 def test_cli_run_reads_plan_texts_after_the_run_token(plan, ci_repo, tmp_path, monkeypatch, make, error):
     from typer.testing import CliRunner
 
@@ -1201,6 +1222,7 @@ def gh_repo_api(argv, *, required=(), protected=False, refuse=None, branch="main
     return GhProc("{}") if protected else GhProc(code=1, err=NOT_FOUND)
 
 
+@pytest.mark.brindle_ci_guard
 def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch, ci_entitled):
     calls = []
     Proc = GhProc
@@ -1349,6 +1371,7 @@ def test_init_federation_sets_the_variables(init_run):
     assert "forks never get a token" in text
 
 
+@pytest.mark.brindle_ci_guard
 def test_init_federation_needs_the_ids(init_run):
     """A missing ID stops init before step 3 creates the CI token, so none is left orphaned."""
     with pytest.raises(CIError, match=r"ANTHROPIC_FEDERATION_RULE_ID is required for identity federation "
@@ -1414,6 +1437,7 @@ def test_init_unattended_requires_no_check_without_the_option(init_run, ci_repo)
     ({"credential": "key", "rule_id": "fdrl_1", "service_account_id": "svac_1"},
      "--rule-id, --service-account-id configure identity federation, not --credential key"),
 ])
+@pytest.mark.brindle_ci_guard
 def test_init_rejects_bad_federation_options_first(init_run, kw, error):
     with pytest.raises(CIError, match=re.escape(error)):
         init_run(**kw)
@@ -1429,6 +1453,7 @@ def test_init_key_workspace_from_the_option_or_the_environment(init_run, kw):
     assert [c[-1] for c in calls if c[:3] == ["gh", "variable", "set"]] == ["wrkspc_1"]
 
 
+@pytest.mark.brindle_ci_guard
 def test_init_rejects_a_bad_workspace_id(init_run):
     with pytest.raises(CIError, match="workspace ID looks like wrkspc_"):
         init_run(credential="key", workspace_id="ws 1; rm")
@@ -1438,12 +1463,14 @@ def test_init_rejects_a_bad_workspace_id(init_run):
     assert not [c for c in init_run.calls if c[:2] == ["gh", "variable"]]
 
 
+@pytest.mark.brindle_ci_guard
 def test_init_rejects_an_unknown_credential_first(init_run):
     with pytest.raises(CIError, match="credential must be key or federation"):
         init_run(credential="password")
     assert not init_run.calls, "nothing ran before the bad option was caught"
 
 
+@pytest.mark.brindle_ci_guard
 def test_init_refuses_uncommitted_work_before_doing_anything(init_run, ci_repo):
     (ci_repo / "app.py").write_text("print('mine')\n")
     with pytest.raises(CIError, match=r"commit or stash your changes first \(1 uncommitted, e.g. app.py\)"):
@@ -1453,6 +1480,7 @@ def test_init_refuses_uncommitted_work_before_doing_anything(init_run, ci_repo):
     assert sh("git rev-parse --abbrev-ref HEAD", ci_repo) == "main"
 
 
+@pytest.mark.brindle_ci_guard
 def test_init_refuses_to_start_on_the_setup_branch(init_run, ci_repo):
     sh("git checkout -q -b brindle/ci-setup", ci_repo)
     with pytest.raises(CIError, match="switch off brindle/ci-setup first"):
@@ -1460,6 +1488,7 @@ def test_init_refuses_to_start_on_the_setup_branch(init_run, ci_repo):
     assert not init_run.calls
 
 
+@pytest.mark.brindle_ci_guard
 def test_init_refuses_a_symlink_where_it_writes(init_run, ci_repo, tmp_path):
     (ci_repo / ".github").mkdir()
     (ci_repo / ".github/workflows").symlink_to(tmp_path)
@@ -1469,6 +1498,7 @@ def test_init_refuses_a_symlink_where_it_writes(init_run, ci_repo, tmp_path):
     assert not init_run.calls and not list(tmp_path.glob("brindle-ci-*"))
 
 
+@pytest.mark.brindle_ci_guard
 def test_init_refuses_an_untracked_file_where_it_writes(init_run, ci_repo):
     (ci_repo / ".github/workflows").mkdir(parents=True)
     (ci_repo / ".github/workflows/brindle-ci-fix.yml").write_text("mine\n")
@@ -1587,6 +1617,7 @@ def test_init_reports_protection_without_status_checks(init_run, ci_repo):
 
 
 @pytest.mark.parametrize("url", ["https://github.com/someone/brindle.git"])
+@pytest.mark.brindle_ci_guard
 def test_init_refuses_a_checkout_of_another_repo(ci_repo, url):
     """--repo names one repository, the checkout here is another (or has no
     origin): init stops before gh or git does anything, rather than pushing

@@ -67,6 +67,7 @@ def test_a_refused_profile_is_skipped_for_the_next_in_its_tier(db, repo, monkeyp
     assert "developer-heavy" in note and "tasks moved to developer-gemini" in note and "Fix:" in note
 
 
+@pytest.mark.brindle_ci
 def test_a_refusal_recorded_in_the_run_path_shows_in_session_notes(db, repo, monkeypatch):
     """The run path and the doctor check fingerprint under the repo root, like session_event reads."""
     (repo / ".brindle").mkdir(exist_ok=True)
@@ -113,6 +114,7 @@ def test_no_next_profile_when_the_tier_is_used_up():
     assert to is None
 
 
+@pytest.mark.brindle_ci
 def test_the_session_report_carries_the_swap_and_the_alias_warning(db, repo, monkeypatch):
     warning = "Opus 5.5 not available — using Opus 4.6 for this session"
     _, root, _ = _launch_showing(monkeypatch, db, repo, [PROMPT + "\n" + warning])
@@ -162,6 +164,7 @@ def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback
     route_health.reset()
 
 
+@pytest.mark.brindle_ci
 def test_the_ci_doctor_model_check_names_each_refusal(repo, monkeypatch):
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text(json.dumps({"routing": {"heavy": ["developer-heavy"]}}))

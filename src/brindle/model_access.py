@@ -85,7 +85,7 @@ LAUNCH_CAPACITY = Cause("launch_capacity", "", "the provider refused work on cap
 # Not a refusal: the login itself lapsed, so the same call works again after the
 # provider's login command. Never recorded by ``refuse``, never retried or swapped.
 EXPIRED_LOGIN = Cause("expired_login", "", "the cloud login has expired",
-                      "run the provider's login command (`brindle ci doctor` names it)")
+                      "run the provider's login command")
 
 _EXPIRED_MARKERS = (
     "could not load google cloud credentials", "invalid_grant", "invalid_rapt",

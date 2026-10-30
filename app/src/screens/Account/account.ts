@@ -76,7 +76,6 @@ export const TIERS: Tier[] = [
       { what: "Hosted learning", key: "learning", use: { screen: "agents" } },
       { what: "Settings sync", key: "settings_sync", use: { screen: "settings" } },
       { what: "Federated cloud credentials", key: "federation", use: { url: `${DOCS_URL}commands/#paid-commands` } },
-      { what: "brindle CI on 1 repo", key: "ci_fix", use: { url: `${DOCS_URL}commands/#ci` } },
     ],
   },
   {
@@ -87,7 +86,6 @@ export const TIERS: Tier[] = [
     audience: "Teams running agents on shared code and in their pipelines.",
     lead: "Everything in Pro, plus",
     features: [
-      { what: "brindle CI on every repo", key: "ci", use: { url: `${DOCS_URL}commands/#ci` } },
       { what: "Org policy and required review", key: "team", use: { screen: "agents" } },
       { what: "Org-wide federation", key: "federation", use: { url: `${DOCS_URL}commands/#paid-commands` } },
       { what: "Budgets, alerts and throttles", key: "org_budgets", use: { screen: "spend" } },

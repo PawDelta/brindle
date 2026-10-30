@@ -25,6 +25,7 @@ WIF = "sk-ant-oat01-federated-token"
 # -- configured --------------------------------------------------------------------------------
 
 
+@pytest.mark.brindle_ci_guard
 def test_configured_needs_the_ids_and_the_actions_endpoint():
     assert ci_federation.configured({**IDS, **ACTIONS})
     assert ci_federation.configured({**IDS, **ACTIONS, "ANTHROPIC_WORKSPACE_ID": "wrkspc_1", "ANTHROPIC_API_KEY": ""})
@@ -96,6 +97,7 @@ def test_exchange_posts_the_jwt_bearer_grant(endpoint):
                     "service_account_id": "svac_1", "workspace_id": "wrkspc_1"}
 
 
+@pytest.mark.brindle_ci_guard
 def test_exchange_reports_a_refusal_without_the_token(endpoint):
     endpoint.status, endpoint.body = 401, b'{"type":"error","error":{"type":"authentication_error","message":"Authentication failed"}}'
     with pytest.raises(FederationError, match=r"HTTP 401: Authentication failed"):
@@ -106,6 +108,7 @@ def test_exchange_reports_a_refusal_without_the_token(endpoint):
 
 
 @pytest.mark.parametrize("answer", [b"not json", {"access_token": "t", "expires_in": True}])
+@pytest.mark.brindle_ci_guard
 def test_exchange_rejects_an_answer_without_a_token(endpoint, answer):
     endpoint.answer = answer
     with pytest.raises(FederationError, match="held no token"):
@@ -161,6 +164,7 @@ def make_refresher(clock, *, answers=None, expires_in=600.0):
     return r, fetched, exchanged
 
 
+@pytest.mark.brindle_ci_guard
 def test_refresher_survives_an_unexpected_error_and_names_only_its_class(caplog):
     clock = {"t": 1000.0}
     r, _, _ = make_refresher(clock, answers=["sk-ant-oat01-first", RuntimeError("body: sk-ant-oat01-leak"),
@@ -276,6 +280,7 @@ def test_proxy_swaps_the_run_secret_for_the_anthropic_token(proxy, upstream):
     assert "run-secret" not in json.dumps(headers)
 
 
+@pytest.mark.brindle_ci_guard
 def test_proxy_refuses_anything_but_the_run_secret(proxy, upstream):
     p, _ = proxy
     for auth in ({}, {"Authorization": "Bearer other"}, {"Authorization": "Bearer run-secret "},
@@ -386,6 +391,7 @@ def test_proxy_answers_502_when_the_upstream_is_down():
         call(p.base_url, "GET", "/", headers={})
 
 
+@pytest.mark.brindle_ci_guard
 def test_proxy_logs_nothing(proxy, caplog):
     p, _ = proxy
     with caplog.at_level(logging.DEBUG):
@@ -395,6 +401,7 @@ def test_proxy_logs_nothing(proxy, caplog):
     assert "in-path" not in caplog.text and "run-secret" not in caplog.text and WIF not in caplog.text
 
 
+@pytest.mark.brindle_ci_guard
 def test_proxy_has_a_random_secret_and_binds_the_loopback_only(upstream):
     a = CredentialProxy(lambda: WIF, upstream=upstream.url)
     b = CredentialProxy(lambda: WIF, upstream=upstream.url)
@@ -409,6 +416,7 @@ def test_proxy_has_a_random_secret_and_binds_the_loopback_only(upstream):
 # -- the run's federation ----------------------------------------------------------------------
 
 
+@pytest.mark.brindle_ci_guard
 def test_scrub_job_removes_job_secrets_but_the_agents_still_reach_the_proxy(upstream, monkeypatch):
     from brindle import ci_client, secrets
 

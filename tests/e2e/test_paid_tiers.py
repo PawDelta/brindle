@@ -155,6 +155,9 @@ def test_account_without_a_license_lists_every_feature_as_needing_its_plan(run, 
     assert code == 0
     assert "not logged in" in out and "brindle is complete without it" in out
     for feature, plan, _what, _how in account.FEATURES:
+        if feature in account.UNLISTED:
+            assert not [ln for ln in out.splitlines() if feature in ln.split()[:2]]
+            continue
         line = feature_line(out, feature)
         assert "✓" not in line and line.endswith(f"needs {plan.capitalize()}"), line
     assert "brindle account login" in out
@@ -167,6 +170,8 @@ def test_account_marks_exactly_the_plans_features(run, acct):
     assert code == 0
     have = set(plan_features("pro"))
     for feature, need, _what, _how in account.FEATURES:
+        if feature in account.UNLISTED:
+            continue
         line = feature_line(out, feature)
         assert line.lstrip().startswith("✓") if feature in have else line.endswith(f"needs {need.capitalize()}"), line
     assert "for a team" in out.split("Next")[-1]
