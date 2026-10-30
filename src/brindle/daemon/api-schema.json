@@ -3027,6 +3027,26 @@
       "path": "/v1/analysis-docs"
     },
     {
+      "method": "DELETE",
+      "path": "/v1/analysis-docs/destination"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/destination"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/analysis-docs/destination"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/export-config"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/policy"
+    },
+    {
       "method": "GET",
       "path": "/v1/analysis-docs/results"
     },

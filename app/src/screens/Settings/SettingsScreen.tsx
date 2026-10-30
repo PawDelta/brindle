@@ -60,6 +60,7 @@ import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { About } from "./About";
+import { TeamDestination } from "./TeamDestination";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
 import { alert, button, card, danger, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
 import { useProviders } from "../../store/providers";
@@ -1210,6 +1211,8 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
           </div>
         )}
       </Section>
+
+      <TeamDestination client={client} />
 
       <DebugLogging client={client} />
 
