@@ -24,8 +24,8 @@ it("loads only a chosen neighbourhood, joins local items by path, and opens each
   const openPath = vi.fn(async () => {});
   const props = {
     client, repo: "/repo", openPath,
-    decisions: [decision, { ...decision, id: "unrelated", topic: "Other rule", scope: ["src/cache-other/**"] }, { ...decision, id: "global", topic: "Repo rule", scope: [] }],
-    sources: [{ id: "s", kind: "folder", scope: "/repo/src/cache" }, { id: "outside", kind: "folder", scope: "/outside/src/cache" }],
+    decisions: [decision, ...["src/*", "src/cache/index.?s", "src/cache/[ij]ndex.ts", "src/cache/[!a-h]ndex.ts", "cache/**", "./src//cache/../cache/index.ts"].map((pattern, i) => ({ ...decision, id: `pattern-${i}`, topic: pattern, scope: [pattern] })), { ...decision, id: "unrelated", topic: "Other rule", scope: ["src/cache-other/**", "src/cache/index.?x", "src/cache/[!ij]ndex.ts", "src/cache"] }, { ...decision, id: "global", topic: "Repo rule", scope: [] }],
+    sources: [{ id: "s", kind: "folder", scope: "/repo/src/cache", docs: 1 }, { id: "empty", kind: "folder", scope: "/repo", docs: 0 }, { id: "literal", kind: "folder", scope: "/repo/src/*", docs: 1 }, { id: "outside", kind: "folder", scope: "/outside/src/cache" }],
   };
   const { container, rerender } = render(<MapView {...props} decisions={[]} sources={[]} />);
   await screen.findByRole("option");
@@ -36,6 +36,10 @@ it("loads only a chosen neighbourhood, joins local items by path, and opens each
   rerender(<MapView {...props} />);
   await screen.findByRole("button", { name: /Storage policy/ });
   expect(container.querySelector('[data-source="local:decision:private-d"][data-target="p"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:source:s"][data-target="p"]')).not.toBeNull();
+  expect(screen.queryByRole("button", { name: /Imported.*index.ts/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Imported.*\*/ })).toBeNull();
+  for (let i = 0; i < 6; i++) expect(container.querySelector(`[data-source="local:decision:pattern-${i}"][data-target="p"]`)).not.toBeNull();
   expect(container.querySelector('[data-kind="supersedes"]')).not.toBeNull();
   expect(screen.queryByRole("button", { name: /Other rule|Repo rule|outside/ })).toBeNull();
   expect(requests.find((r) => r.path.endsWith("/map"))?.query).toEqual({ repo: "/repo", scope_kind: "user", scope_id: "u1", paths: '["src/cache"]', depth: "1" });
@@ -43,10 +47,12 @@ it("loads only a chosen neighbourhood, joins local items by path, and opens each
   expect(JSON.stringify(requests)).not.toMatch(/private-d|Keep private|Local reason|\/repo\/src\/cache/);
   fireEvent.click(screen.getByRole("button", { name: /Storage policy/ }));
   expect(screen.getByText(decision.body)).toBeTruthy();
-  fireEvent.click(screen.getByRole("button", { name: /Imported.*index.ts/ }));
-  expect(openPath).toHaveBeenCalledWith("/repo/src/cache/index.ts");
+  fireEvent.click(screen.getByRole("button", { name: /Imported.*cache$/ }));
+  expect(openPath).toHaveBeenLastCalledWith("/repo/src/cache");
+  fireEvent.click(screen.getByRole("button", { name: /Imported.*repo$/ }));
+  expect(openPath).toHaveBeenLastCalledWith("/repo");
   rerender(<MapView {...props} sources={[{ id: "root-source", kind: "folder", scope: "/repo" }]} />);
-  expect(screen.getByRole("button", { name: /Imported.*index.ts/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Imported.*repo$/ })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: /Document.*Cache design/ }));
   expect((await screen.findByTestId("doc-body")).textContent).toContain("Durable cache");
   expect(requests.at(-1)?.path).toBe("/analysis-docs/doc1");

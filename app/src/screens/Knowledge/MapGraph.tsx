@@ -11,13 +11,79 @@ function relative(path: string, repo: string): string | null {
   const root = repo.replace(/\/+$/, "");
   if (path === root) return "";
   const p = path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
-  if (p.startsWith("/") || p.split("/").includes("..")) return null;
-  return p.replace(/^\.\//, "").replace(/\/+$/, "");
+  if (p.startsWith("/")) return null;
+  const parts: string[] = [];
+  for (const part of p.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (!parts.length) return null;
+      parts.pop();
+    } else parts.push(part);
+  }
+  return parts.join("/");
 }
 
-function covers(scope: string, path: string): boolean {
-  const pattern = scope.split("/").map((part) => part === "**" ? ".*" : part.split("*").map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*")).join("/");
-  return !scope || scope === path || path.startsWith(`${scope}/`) || new RegExp(`^${pattern}$`).test(path);
+/* Python fnmatch semantics: wildcards also match separators, brackets use
+   shell character classes, and a backslash is a literal character. */
+function fnmatch(pattern: string, path: string): boolean {
+  const chars = Array.from(pattern);
+  const tokens: (null | ((char: string) => boolean))[] = [];
+  for (let i = 0; i < chars.length; i++) {
+    const char = chars[i];
+    if (char === "*") { tokens.push(null); continue; }
+    if (char === "?") { tokens.push(() => true); continue; }
+    if (char === "[") {
+      let end = i + 1;
+      if (chars[end] === "!") end++;
+      if (chars[end] === "]") end++;
+      while (end < chars.length && chars[end] !== "]") end++;
+      if (end < chars.length) {
+        const negated = chars[i + 1] === "!";
+        const members = chars.slice(i + (negated ? 2 : 1), end);
+        tokens.push((value) => {
+          let found = false;
+          for (let j = 0; j < members.length; j++) {
+            if (j + 2 < members.length && members[j + 1] === "-") {
+              found ||= value.codePointAt(0)! >= members[j].codePointAt(0)! && value.codePointAt(0)! <= members[j + 2].codePointAt(0)!;
+              j += 2;
+            } else found ||= value === members[j];
+          }
+          return negated ? !found : found;
+        });
+        i = end;
+        continue;
+      }
+    }
+    tokens.push((value) => value === char);
+  }
+  const text = Array.from(path);
+  let previous = new Uint8Array(text.length + 1);
+  previous[0] = 1;
+  for (const token of tokens) {
+    const next = new Uint8Array(text.length + 1);
+    if (token === null) next[0] = previous[0];
+    for (let j = 1; j <= text.length; j++) {
+      next[j] = Number(token === null ? previous[j] || next[j - 1] : previous[j - 1] && token(text[j - 1]));
+    }
+    previous = next;
+  }
+  return previous[text.length] === 1;
+}
+
+/* tasks._glob_match also tries PurePath.match in both directions when **
+   occurs: a relative pattern may match the trailing path segments. */
+function decisionMatches(scope: string, path: string): boolean {
+  if (scope === path || fnmatch(scope, path) || fnmatch(path, scope)) return true;
+  if (!scope.includes("**") && !path.includes("**")) return false;
+  const suffix = (pattern: string, value: string) => {
+    const parts = pattern.split("/"), segments = value.split("/");
+    return parts.length <= segments.length && parts.every((part, i) => fnmatch(part, segments[segments.length - parts.length + i]));
+  };
+  return suffix(scope, path) || suffix(path, scope);
+}
+
+function containsPath(folder: string, path: string): boolean {
+  return !folder || folder === path || path.startsWith(`${folder}/`);
 }
 
 export function joinLocal(map: KnowledgeMap, decisions: DecisionDTO[], sources: KbSource[], repo: string): { nodes: GraphNode[]; edges: MapEdge[] } {
@@ -30,32 +96,29 @@ export function joinLocal(map: KnowledgeMap, decisions: DecisionDTO[], sources: 
     const scopes = paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
     const matches = map.nodes.filter((n) => [...(n.paths ?? []), ...(n.path ? [n.path] : [])].some((p) => {
       const path = relative(p, repo);
-      return path !== null && scopes.some((scope) => covers(scope, path));
+      return path !== null && scopes.some((scope) => decisionMatches(scope, path));
     }));
     if (!matches.length) continue;
     nodes.push(node);
     for (const match of matches) edges.push({ source: node.id, target: match.id, kind: "shared_path" });
   }
-  /* Only paths already present in this neighbourhood are considered. A source
-     contributes its matching files without enumerating or uploading the folder. */
+  /* KbSource describes a folder, not its file inventory. Represent only that
+     actual folder and open its recorded path, even when it has no documents. */
   for (const source of sources) {
     if (source.kind !== "folder" || !source.scope) continue;
     const scope = relative(source.scope, repo);
     if (scope === null) continue;
-    const imported = new Map<string, LocalNode>();
+    const node: LocalNode = { id: `local:source:${source.id}`, kind: "imported", title: source.scope.replace(/\/+$/, "").split("/").at(-1) || source.scope, source, path: source.scope };
+    let joined = false;
     for (const server of map.nodes) {
       const paths = new Set([...(server.paths ?? []), ...(server.path ? [server.path] : [])]);
-      for (const raw of paths) {
+      const matches = [...paths].some((raw) => {
         const path = relative(raw, repo);
-        if (path === null || !covers(scope, path)) continue;
-        let node = imported.get(path);
-        if (!node) {
-          node = { id: `local:source:${source.id}:${path}`, kind: "imported", title: path.split("/").at(-1) || path, source, path: `${repo.replace(/\/+$/, "")}/${path}` };
-          imported.set(path, node);
-          nodes.push(node);
-        }
-        edges.push({ source: node.id, target: server.id, kind: "shared_path" });
-      }
+        return path !== null && containsPath(scope, path);
+      });
+      if (!matches) continue;
+      if (!joined) { nodes.push(node); joined = true; }
+      edges.push({ source: node.id, target: server.id, kind: "shared_path" });
     }
   }
   return { nodes, edges };
