@@ -3088,8 +3088,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         changed = git.paths(["diff", "--name-only", f"{ws.base_branch}...HEAD"], ws.path) if ws.base_branch else []
     except git.GitError:
         changed = []
-    covering = analysis_brief.review_context(db, ws.repo_root, (worker.task or "") if worker else "",
-                                             list(dict.fromkeys([*worker_files, *changed])))
+    covering, cited = analysis_brief.review_context(db, ws.repo_root, (worker.task or "") if worker else "",
+                                                    list(dict.fromkeys([*worker_files, *changed])))
     if covering:
         task += f"\n\n{covering}"
 
@@ -3141,6 +3141,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     # which verdict replaces which goes by slot (gates.standing_reviews).
     if reviewer is not None:
         db.update_agent(reviewer.id, review_slot=slot)
+        if cited:   # the docs its brief cites, pinned at the versions it got
+            knowledge.record_receipt(db, reviewer.id, cited)
     return reviewer
 
 
@@ -3741,6 +3743,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # The turn is over: a worker's worktree is snapshotted (brindle.rewind)
         # before anything below could start its next turn.
         snapshot_turn(db, agent)
+        analysis_docs_turn(db, agent)
 
         # Claude Code shows any blocked stop as "Stop hook error" in the chat.
         # Where a person watches (an interactive agent), brindle lets the stop
@@ -3776,6 +3779,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         if payload.get("type") == "agent-turn-complete":
             db.set_status(agent_id, "idle")
             snapshot_turn(db, agent)
+            analysis_docs_turn(db, agent)
             if agent.mode == "interactive" and not db.pending_count(agent_id):
                 # What the Stop hook does for Claude Code: an autopilot
                 # supervisor that stops short is told to keep going (capped
@@ -3912,6 +3916,18 @@ def snapshot_turn(db: DB, agent: Agent) -> int | None:
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't snapshot %s's turn", agent.id)
         return None
+
+
+def analysis_docs_turn(db: DB, agent: Agent) -> None:
+    """At the end of a turn: tell the agent about analysis docs it read that
+    have changed since, and settle drafts its session still owes the server
+    (brindle.pro.analysis_docs). Never raises."""
+    try:
+        from brindle.pro import analysis_docs
+
+        analysis_docs.on_turn(db, agent)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't check %s's analysis docs", agent.id)
 
 
 def agent_for_session(db: DB, session_id: object) -> str | None:

@@ -137,13 +137,14 @@ def read_analysis_doc(doc: str) -> str:
 
 
 @mcp.tool()
-def edit_analysis_doc(doc: str, files: list[dict]) -> str:
+def edit_analysis_doc(doc: str, files: list[dict], clashed_branch: str | None = None) -> str:
     """Edit a living analysis doc you read (read_analysis_doc): ``files`` are
     its whole files ({name, md}) as they should read. The edit goes to a
     draft for your session and branch, published when the branch merges and
     dropped if it's removed unmerged. Snapshot docs aren't edited: write a
     new doc that supersedes them. A supervisor told of a clash reconciles it
-    here, and the draft publishes then."""
+    here (naming its ``clashed_branch`` when several drafts of the doc
+    clash), and the draft publishes then."""
     from brindle.pro import analysis_docs, auth
 
     db = DB()
@@ -156,7 +157,7 @@ def edit_analysis_doc(doc: str, files: list[dict]) -> str:
     except (auth.AuthError, RuntimeError):
         pass
     try:
-        return analysis_docs.save_draft(db, caller, ws.branch, doc, files)
+        return analysis_docs.save_draft(db, caller, ws.branch, doc, files, clashed_branch=clashed_branch)
     except (auth.AuthError, RuntimeError) as e:
         raise ToolError(str(e)) from e
 

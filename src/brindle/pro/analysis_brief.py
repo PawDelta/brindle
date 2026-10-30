@@ -90,41 +90,49 @@ def _fenced(block: str) -> str:
                       f"=====END UNTRUSTED REFERENCE {nonce}====="])
 
 
-def server_brief(db, task_id: str | None, task_text: str, paths: list[str] | None,
-                 client=None, store=None) -> str:
-    """The server's brief for ``task_id``, fenced, recorded in its receipt
-    (unless ``task_id`` is None); empty without the entitlement (nothing is
-    sent) or a block. Never raises."""
-    from brindle import knowledge
+def _brief(task_text: str, paths: list[str] | None, client=None, store=None) -> tuple[str, list]:
+    """The server's brief block and the ``(DOC_ITEM, doc id, version)`` it
+    cites; empty without the entitlement (nothing is sent) or a block."""
     from brindle.pro import analysis_docs
 
+    ent = _entitled(store)
+    if ent is None:
+        return "", []
+    scopes = ["user", *(["team"] if "analysis_docs_team" in ent.features else [])]
+    resp = analysis_docs.api("POST", "/analysis-docs/brief",
+                             {"task_text": task_text, "paths": paths or [], "scopes": scopes},
+                             client=client, store=store)
+    block = resp.get("block")
+    if not isinstance(block, str) or not block.strip():
+        return "", []
+    cited = [c for c in resp.get("cited") or [] if isinstance(c, dict) and isinstance(c.get("doc_id"), str)]
+    return block, [(DOC_ITEM, c["doc_id"], str(c.get("version", ""))) for c in cited]
+
+
+def server_brief(db, task_id: str, task_text: str, paths: list[str] | None,
+                 client=None, store=None) -> str:
+    """The server's brief for ``task_id``, fenced, recorded in its receipt;
+    empty without the entitlement (nothing is sent) or a block. Never raises."""
+    from brindle import knowledge
+
     try:
-        ent = _entitled(store)
-        if ent is None:
+        block, cited = _brief(task_text, paths, client, store)
+        if not block:
             return ""
-        scopes = ["user", *(["team"] if "analysis_docs_team" in ent.features else [])]
-        resp = analysis_docs.api("POST", "/analysis-docs/brief",
-                                 {"task_text": task_text, "paths": paths or [], "scopes": scopes},
-                                 client=client, store=store)
-        block = resp.get("block")
-        if not isinstance(block, str) or not block.strip():
-            return ""
-        cited = [c for c in resp.get("cited") or [] if isinstance(c, dict) and isinstance(c.get("doc_id"), str)]
-        if task_id is None:
-            return _fenced(block)
         knowledge.record_receipt(db, task_id, [
-            (BRIEF_ITEM, task_id, hashlib.sha256(block.encode()).hexdigest()),
-            *((DOC_ITEM, c["doc_id"], str(c.get("version", ""))) for c in cited)])
+            (BRIEF_ITEM, task_id, hashlib.sha256(block.encode()).hexdigest()), *cited])
         return _fenced(block)
     except Exception as e:  # noqa: BLE001 - the brief is extra context, never a reason to fail
         log.info("analysis brief skipped (%s)", type(e).__name__)
         return ""
 
 
-def review_context(db, repo_root: str, task_text: str, paths: list[str], client=None, store=None) -> str:
+def review_context(db, repo_root: str, task_text: str, paths: list[str],
+                   client=None, store=None) -> tuple[str, list]:
     """For a reviewer's brief: the decisions and analysis docs that cover the
-    branch's ``paths``, and the instruction to flag changes contradicting
-    them. Empty when there are none. Never raises."""
+    branch's ``paths``, with the instruction to flag changes contradicting
+    them (empty when there are none), and the docs' cited versions, for the
+    reviewer's receipt (its reads are pinned like a worker's). Never raises."""
     from brindle import knowledge
 
     try:
@@ -137,13 +145,17 @@ def review_context(db, repo_root: str, task_text: str, paths: list[str], client=
     if decisions:
         parts.append("Decisions recorded for this repo that cover the branch's files:\n"
                      + "\n".join(f"- {knowledge._line(d)}" for d in decisions))
-    docs = server_brief(db, None, task_text, paths, client, store)
-    if docs:
-        parts.append(docs)
+    try:
+        block, cited = _brief(task_text, paths, client, store)
+    except Exception as e:  # noqa: BLE001
+        log.info("analysis brief for review skipped (%s)", type(e).__name__)
+        block, cited = "", []
+    if block:
+        parts.append(_fenced(block))
     if not parts:
-        return ""
+        return "", []
     return "\n\n".join([*parts, "Flag as a blocker any change that contradicts these decisions or docs, "
-                                "unless the branch says why the decision or doc no longer holds."])
+                                "unless the branch says why the decision or doc no longer holds."]), cited
 
 
 def got_context(db, task_id: str) -> bool:
