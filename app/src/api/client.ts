@@ -480,6 +480,13 @@ export interface DocResults {
   without_brief: number | null;
 }
 
+export interface DocSessionSummary {
+  total: number;
+  writing: number;
+  updated: number;
+  using: number;
+}
+
 /* POST /analysis-docs/{id}/export: the file's path in a picked folder, or the file itself. */
 export interface DocExport {
   filename: string;
@@ -1103,6 +1110,10 @@ export class DaemonClient {
   async docs(query: DocsQuery = {}): Promise<{ docs: AnalysisDoc[] }> {
     const got = await this.get<{ docs?: WireListedDoc[] }>("/analysis-docs", { ...query });
     return { docs: (got.docs ?? []).map(listedDoc) };
+  }
+
+  docSessionSummary(session: string) {
+    return this.get<DocSessionSummary>("/analysis-docs/session-summary", { session });
   }
 
   async docTopics(query: { repo?: string; scope?: string } = {}): Promise<{ topics: DocTopic[] }> {

@@ -41,18 +41,43 @@ def uploader(tmp_path, remote, notices):
 
 
 @pytest.mark.parametrize("status", [200, 500])
-def test_merged_doc_uploads_and_local_copy_goes_only_after_a_200(status, tmp_path, remote, fixed_identity):
+def test_merged_doc_uploads_and_local_copy_goes_only_after_a_200(status, tmp_path, remote, fixed_identity, db,
+                                                                 monkeypatch):
+    from brindle import agents, identity_lock, mcp_server, pipeline, procs
+    from brindle.db import Agent, Workspace
+
     notices = []
     folder = write_doc(tmp_path)
     (folder / "big.md").write_text("x" * (ad.MAX_FILE + 1))     # can't go whole: neither sent nor deleted
     up, store = uploader(tmp_path, remote, notices)
     login_as(remote, store, features=("analysis_docs",))
     remote.status = status
-    up.submit(ad.collect(str(tmp_path), "feat", SOURCE))
+    ws = Workspace("proj/feat", str(tmp_path), "feat", "main", "feat", "main",
+                   str(tmp_path), None, "brindle-test", 1.0)
+    db.add_workspace(ws)
+    db.add_agent(Agent("sup", ws.id, "supervisor", "shell", None, "interactive", "processing", "", None, 1.0))
+    monkeypatch.setattr(identity_lock, "ensure_workspace", lambda *a: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "_launch", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "same_server", lambda *a, **kw: False)
+    monkeypatch.setattr(procs, "stop", lambda *a, **kw: None)
+    worker = agents.spawn(db, ws, "developer", provider_name="shell", mode="handoff", parent_id="sup")
+    monkeypatch.setattr(agents, "wait_for_result", lambda *a, **kw: "finished")
+    assert "Worker" in mcp_server._await_worker(db, worker.id, wait_seconds=0)
+    assert db.get_agent(worker.id) is None
+    docs = pipeline._deliverables(db, ws)
+    assert docs and docs[0].source == {**SOURCE, "session": "sup"}
+    up.submit(docs)
     (folder / "summary.md").write_text("edited after it was read")  # not what was sent: kept
     assert up.flush()
     sent = remote.docs[0]
-    assert sent["scope"] == {"kind": "user", "id": "user_1"} and sent["source"] == SOURCE
+    assert sent["scope"] == {"kind": "user", "id": "user_1"}
+    assert sent["source"] == {**SOURCE, "session": "sup"}
+    from brindle import knowledge
+    assert (("analysis_doc_updated", "d1", "uploaded") in knowledge.receipt(db, "sup")) == (status == 200)
+    from test_daemon_api import AUTH, _get
+    code, summary = _get("/v1/analysis-docs/session-summary", AUTH, "session=sup")
+    assert code == 200 and summary["updated"] == int(status == 200)
     assert sent["files"] == [{"name": "notes/raw.md", "md": "raw numbers"},
                              {"name": "summary.md", "md": "the TTL is too short"}]
     assert len(sent["repo_key"]) == 64 and len(notices) == 1
