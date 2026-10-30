@@ -127,8 +127,6 @@ def test_merge_uploads_the_branch_doc_only_when_it_merges(
 
 @pytest.mark.parametrize("status", [200, 403])
 def test_docs_export_writes_only_after_a_200(status, tmp_path, remote, monkeypatch):
-    import base64
-
     from typer.testing import CliRunner
 
     from brindle import git
@@ -138,11 +136,30 @@ def test_docs_export_writes_only_after_a_200(status, tmp_path, remote, monkeypat
     monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, m, url, form, headers: (
         remote.request(m, url, form, headers)))
     login_as(remote, credentials.default_store(), features=("analysis_docs",))
-    body = {"filename": "doc1.zip", "content_b64": base64.b64encode(b"PK").decode()}
     remote.routes["GET /analysis-docs/doc1/export?format=zip&destination=download"] = (
-        [(200, body) if status == 200 else (403, {"error": "destination_not_allowed"})])
+        [(200, {"content": b"PK", "content_type": "application/zip"}) if status == 200
+         else (403, {"error": "destination_not_allowed"})])
     out = tmp_path / "out"
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(app, ["docs", "export", "doc1", "--out", str(out)])
     assert (result.exit_code, out.exists() and (out / "doc1.zip").read_bytes() == b"PK") == (
         (0, True) if status == 200 else (1, False))
+
+
+def test_docs_export_writes_docx_bytes_exactly(tmp_path, remote, monkeypatch):
+    from typer.testing import CliRunner
+
+    from brindle import git
+    from brindle.cli import app
+
+    monkeypatch.setattr(git, "main_repo_root", lambda path: str(tmp_path))
+    monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, m, url, form, headers:
+                        remote.request(m, url, form, headers))
+    login_as(remote, credentials.default_store(), features=("analysis_docs",))
+    raw = b"PK\x03\x04\x00\xffdocx"
+    remote.routes["GET /analysis-docs/doc1/export?format=docx&destination=download"] = [
+        (200, {"content": raw, "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"})]
+    out = tmp_path / "out"
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["docs", "export", "doc1", "--format", "docx", "--out", str(out)])
+    assert result.exit_code == 0 and (out / "doc1.docx").read_bytes() == raw

@@ -138,13 +138,14 @@ class RawBody(dict):
 
 
 TEXT_KEY = "text"   # a text/* response body comes back under this key
+BINARY_KEY = "content"  # a non-JSON response body comes back as raw bytes
+CONTENT_TYPE_KEY = "content_type"
 
 
 class Transport(Protocol):
     def request(self, method: str, url: str, form: dict | None,
                 headers: dict) -> tuple[int, dict]:
-        """Send ``form`` (urlencoded, or JSON for a :class:`JSONBody`; None
-        for GET) to ``url``; return (status, JSON object)."""
+        """Send ``form`` and return a response object (JSON, text, or bytes)."""
 
 
 def _origin(u: urllib.parse.SplitResult) -> tuple[str, str, int | None]:
@@ -216,6 +217,8 @@ class UrllibTransport:
         ctype = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
         if ctype.startswith("text/"):
             return status, {TEXT_KEY: body.decode("utf-8", "replace")}
+        if ctype and ctype not in ("application/json", "application/problem+json") and not ctype.endswith("+json"):
+            return status, {BINARY_KEY: body, CONTENT_TYPE_KEY: ctype}
         try:
             obj = json.loads(body.decode("utf-8")) if body else {}
         except (UnicodeDecodeError, ValueError):
