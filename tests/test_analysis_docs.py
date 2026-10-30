@@ -22,7 +22,7 @@ question: Why is the cache slow?
 
 
 @pytest.fixture
-def repo(tmp_path):
+def deliv_repo(tmp_path):
     d = tmp_path / ".brindle" / "deliverables" / "cache"
     (d / "appendices").mkdir(parents=True)
     (d / "main.md").write_text(MAIN)
@@ -51,11 +51,11 @@ def uploader(tmp_path, remote, notices, **kw):
                            notice=notices.append, start_thread=False), store
 
 
-def test_merged_deliverable_uploads_once_with_notice(repo, remote, fixed_identity):
+def test_merged_deliverable_uploads_once_with_notice(deliv_repo, remote, fixed_identity):
     notices = []
-    up, store = uploader(repo, remote, notices)
+    up, store = uploader(deliv_repo, remote, notices)
     login_as(remote, store, features=("analysis_docs",))
-    docs = ad.collect(str(repo), [".brindle/deliverables/cache/main.md", ".brindle/deliverables/cache/appendices/a.md"])
+    docs = ad.collect(str(deliv_repo), [".brindle/deliverables/cache/main.md", ".brindle/deliverables/cache/appendices/a.md"])
     assert [d.slug for d in docs] == ["cache"]          # one doc per slug, however many files changed
     up.submit(docs + docs)
     assert up.flush()
@@ -69,15 +69,15 @@ def test_merged_deliverable_uploads_once_with_notice(repo, remote, fixed_identit
 
 
 @pytest.mark.parametrize("case", ["airgap", "protected", "unentitled", "off"])
-def test_nothing_sent(case, repo, remote, fixed_identity, monkeypatch):
+def test_nothing_sent(case, deliv_repo, remote, fixed_identity, monkeypatch):
     protected = (lambda files: files) if case == "protected" else (lambda files: [])
-    up, store = uploader(repo, remote, [], protected=protected)
+    up, store = uploader(deliv_repo, remote, [], protected=protected)
     login_as(remote, store, features=("learning",) if case == "unentitled" else ("analysis_docs",))
     if case == "airgap":
         monkeypatch.setattr(airgap, "enabled", lambda cfg=None: True)
     if case == "off":
         remote.switches = {"store": "off"}
-    up.submit(ad.collect(str(repo), [".brindle/deliverables/cache/main.md"]))
+    up.submit(ad.collect(str(deliv_repo), [".brindle/deliverables/cache/main.md"]))
     up.flush()
     assert remote.docs == []
 
@@ -112,17 +112,17 @@ def test_changed_files_finds_every_slug_and_skips_symlinks(tmp_path):
 @pytest.mark.parametrize("case", ["airgap", "unentitled"])
 def test_docs_cli_sends_nothing(case, tmp_path, remote, monkeypatch):
     import json
-    import subprocess
 
     from typer.testing import CliRunner
 
+    from brindle import git
     from brindle.cli import app
 
     sent = []
+    monkeypatch.setattr(git, "main_repo_root", lambda path: str(tmp_path))
     monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, *a: sent.append(a) or (200, {}))
     monkeypatch.setattr(airgap, "_armed", False)
     login_as(remote, credentials.default_store(), features=("learning",))
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     if case == "airgap":
         login_as(remote, credentials.default_store(), features=("analysis_docs",))
         (tmp_path / ".brindle").mkdir()
@@ -130,3 +130,30 @@ def test_docs_cli_sends_nothing(case, tmp_path, remote, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = CliRunner().invoke(app, ["docs", "show", "doc1"])
     assert result.exit_code == 1 and sent == []
+
+
+@pytest.mark.parametrize("checks, uploaded", [([], 2), (["exit 1"], 0)])
+def test_merge_uploads_every_changed_deliverable_only_when_it_merges(
+        checks, uploaded, db, repo, remote, tmp_path, fixed_identity, monkeypatch):
+    import json
+    from pathlib import Path
+
+    from conftest import sh
+    from brindle import pipeline, workspaces
+
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps(
+        {"auto_merge_default_branch": True, "checks": checks}))
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    for slug in ("one", "two"):
+        d = Path(ws.path) / ".brindle" / "deliverables" / slug
+        (d / "appendices").mkdir(parents=True)
+        (d / "main.md").write_text(MAIN)
+        (d / "appendices" / "a.md").write_text("raw")
+    sh("git add -A && git commit -qm docs", Path(ws.path))
+    up, store = uploader(tmp_path, remote, [])
+    login_as(remote, store, features=("analysis_docs",))
+    monkeypatch.setitem(ad._instances, ws.repo_root, up)
+    pipeline.merge(db, None, ws)
+    up.flush()
+    assert len(remote.docs) == uploaded
