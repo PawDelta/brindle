@@ -282,6 +282,9 @@ def _module_path(root: Path, path: str) -> str | None:
     while parent != root and (parent / "__init__.py").is_file():
         parts.insert(0, parent.name)
         parent = parent.parent
+    if parts and parent != file.parent and any(
+            (up / "__init__.py").is_file() for up in parent.parents if up == root or root in up.parents):
+        return None   # a namespace directory inside a package: the dotted path would be truncated
     if ((parent == file.parent and not is_test_file(path))
             or not file.is_file() or not all(p.isidentifier() for p in parts)):
         return None

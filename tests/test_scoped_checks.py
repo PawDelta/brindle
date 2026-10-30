@@ -39,6 +39,8 @@ DYNAMIC_IMPORTS = {
 }
 INTERMEDIARIES = {   # a source module between the changed one and a test
     "namespace": {"src/pkg/ns/api.py": "import pkg.pro.status\n", "tests/test_ns.py": "import pkg.ns.api\n"},
+    "mixed-namespace": {"src/pkg/ns/sub/__init__.py": "", "src/pkg/ns/sub/api.py": "import pkg.pro.status\n",
+                        "tests/test_ns.py": "import pkg.ns.sub.api\n"},   # src/pkg/ns has no __init__.py
     "relative-dynamic": {"src/pkg/dyn.py": "from importlib import import_module\nimport_module(f'.{name}', package='pkg')\n",
                          "tests/test_dyn.py": "import pkg.dyn\n"},
 }
@@ -60,6 +62,7 @@ INTERMEDIARIES = {   # a source module between the changed one and a test
      [f"{PYTEST} tests/sub/test_sub.py tests/test_api.py tests/test_direct.py tests/test_from.py tests/test_member.py "
       "tests/test_other.py || [ $? -eq 5 ]"]),   # test_api and tests/sub reach it only through pkg.api
     ("namespace", PYTEST, {"src/pkg/pro/status.py": "X = 1\n"}, [PYTEST]),   # pkg.ns.api has no module path to follow
+    ("mixed-namespace", PYTEST, {"src/pkg/pro/status.py": "X = 1\n"}, [PYTEST]),   # pkg.ns.sub.api would be truncated
     ("relative-dynamic", PYTEST, {"src/pkg/pro/status.py": "X = 1\n"},
      [f"{PYTEST} tests/sub/test_sub.py tests/test_api.py tests/test_direct.py tests/test_dyn.py tests/test_from.py "
       "tests/test_member.py || [ $? -eq 5 ]"]),   # pkg.dyn may load any module
@@ -96,7 +99,7 @@ INTERMEDIARIES = {   # a source module between the changed one and a test
     ("cap-empty", PYTEST, BOTH, [f"printf '%s\\n' {shlex.quote(EMPTY_NOTE)}"]),   # no own or namesake test: note only
     ("cap-pr", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER}, [PYTEST]),
 ], ids=["python-affected", "deleted-function", "test-helper", "lookup-failed", "fallback-unmapped", "unmapped-importers",
-        "unmapped-namespace-intermediary", "unmapped-relative-dynamic-intermediary", "import-fromlist", "import-dynamic-fromlist", "import-relative-level", "import-dynamic-level", "unmapped-test-helper", "quoted-name",
+        "unmapped-namespace-intermediary", "unmapped-mixed-namespace", "unmapped-relative-dynamic-intermediary", "import-fromlist", "import-dynamic-fromlist", "import-relative-level", "import-dynamic-level", "unmapped-test-helper", "quoted-name",
         "fallback-conftest", "fallback-pyproject", "infer", "infer-options", "infer-selects", "other-command-changed_files_env", "empty-diff",
         "non-python-only", "non-python-plus-python", "lockfile", "unset-mode", "off", "supervisor", "cap", "cap-none", "cap-empty", "cap-pr"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran):
