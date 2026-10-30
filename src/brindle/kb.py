@@ -266,7 +266,8 @@ def remove_source(db: DB, source_id: str, *, actor: str | None = None,
                   session: str | None = None) -> None:
     """Delete a source with its documents, chunks, index rows, links and
     embeddings in one transaction, and log the removal. A folder added to the
-    library has its server-side docs deleted first (best effort)."""
+    library has its docs queued for deletion first; a delete the server does
+    not confirm is kept and retried later."""
     from brindle.pro import analysis_imports
 
     if analysis_imports.in_library(db, source_id):
@@ -276,6 +277,8 @@ def remove_source(db: DB, source_id: str, *, actor: str | None = None,
             pass
     with db.tx() as c:
         src = c.execute("SELECT * FROM kb_sources WHERE id = ?", (source_id,)).fetchone()
+        c.execute("INSERT OR IGNORE INTO kb_import_deletions SELECT doc_id FROM kb_import_uploads"
+                  " WHERE source_id = ?", (source_id,))   # whatever remove_from_library could not queue
         if src is None:
             raise KeyError(source_id)
         c.execute("DELETE FROM kb_fts WHERE rowid IN (SELECT kb_chunks.rowid FROM kb_chunks"
@@ -396,7 +399,8 @@ def sources(db: DB, repo_key: str) -> list[dict]:
         "SELECT s.*, (SELECT count(*) FROM kb_docs d WHERE d.source_id = s.id AND NOT d.tombstoned) AS docs,"
         " (SELECT count(*) FROM kb_chunks c JOIN kb_docs d ON d.id = c.doc_id WHERE d.source_id = s.id"
         " AND NOT d.tombstoned AND c.quarantined IS NOT NULL) AS quarantined,"
-        " EXISTS (SELECT 1 FROM kb_import_library l WHERE l.source_id = s.id) AS in_library"
+        " EXISTS (SELECT 1 FROM kb_import_library l WHERE l.source_id = s.id) AS in_library,"
+        " COALESCE((SELECT l.pending FROM kb_import_library l WHERE l.source_id = s.id), 0) AS library_pending"
         " FROM kb_sources s WHERE s.repo_key = ? ORDER BY s.added_at", (repo_key,))]
 
 
@@ -568,5 +572,7 @@ def sync(db: DB, source_id: str, graph: Path | None = None, repo_root: str | Non
     if repo_root is not None:   # a folder added to the library re-uploads what changed
         from brindle.pro import analysis_imports
 
-        counts["library"] = analysis_imports.sync_upload(db, source_id, repo_root)
+        sent = analysis_imports.sync_upload(db, source_id, repo_root)
+        if sent["sent"] or sent["failed"]:
+            counts["uploaded"], counts["upload_failed"] = sent["uploaded"], len(sent["failed"])
     return counts

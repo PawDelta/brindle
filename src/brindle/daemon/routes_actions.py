@@ -1036,16 +1036,22 @@ def remove_kb_source(db: DB, params: dict, body: Body) -> Any:
 
 def kb_library(db: DB, params: dict, body: Body) -> Any:
     """Add an imported folder to the personal library. With ``dry_run`` true,
-    only list the files that would go and the ones skipped; nothing is sent."""
+    only list the files that would go and the ones skipped (and a ``token``
+    for that list); nothing is sent. Otherwise upload exactly the listed
+    files, or answer ``changed`` with a fresh list when the folder differs."""
     from brindle.pro import analysis_imports as imports
 
     repo, _, source_id = _kb_source(db, params, params["id"])
     try:
         if _get(body, "dry_run", bool, default=False):
             return imports.dry_run(db, source_id)
-        return imports.add_to_library(db, source_id, repo)
+        return imports.add_to_library(db, source_id, repo, _get(body, "token", required=True))
     except imports.ImportUploadOff as e:
         raise ServiceError("not_allowed", str(e), 403) from e
+    except imports.ManifestChanged as e:   # not uploaded: confirm the fresh list
+        return {"changed": True, **e.plan}
+    except imports.UploadFailed as e:
+        raise ServiceError("upstream", str(e), 502) from e
     except ValueError as e:
         raise ServiceError("invalid", str(e)) from e
 

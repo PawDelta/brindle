@@ -20,10 +20,10 @@ export function ImportedLibrary({ client, repo, source, disabled, onChanged }: {
     try {
       await what();
       after?.();
-      onChanged();
     } catch (e) {
       setError(message(e));
     } finally {
+      onChanged();
       setWorking(false);
     }
   };
@@ -32,7 +32,7 @@ export function ImportedLibrary({ client, repo, source, disabled, onChanged }: {
     <div className="flex basis-full flex-col gap-1">
       {source.in_library ? (
         <div className="flex items-center gap-s1 text-xs text-ink-3">
-          <span>In your library.</span>
+          <span>{source.library_pending ? `In your library, but ${count(source.library_pending)} did not upload yet: re-index to retry.` : "In your library."}</span>
           <button type="button" className={quiet} disabled={disabled || working} onClick={() => void run(() => client.removeKbFromLibrary(repo, source.id))}>
             Remove from library
           </button>
@@ -68,7 +68,20 @@ export function ImportedLibrary({ client, repo, source, disabled, onChanged }: {
           )}
           {!plan.allowed && <p className={notice}>Uploading imported folders is off for you, so nothing can be sent.</p>}
           <div className="flex gap-1">
-            <button type="button" className={primary} disabled={working || !plan.allowed || plan.files.length === 0} onClick={() => void run(() => client.addKbToLibrary(repo, source.id), () => setPlan(null))}>
+            <button
+              type="button"
+              className={primary}
+              disabled={working || !plan.allowed || plan.files.length === 0}
+              onClick={() =>
+                void run(async () => {
+                  const got = await client.addKbToLibrary(repo, source.id, plan.token);
+                  if (got.changed) {
+                    setPlan(got);
+                    setError("The folder changed since this list was made. Check the new list before uploading.");
+                  } else setPlan(null);
+                })
+              }
+            >
               Upload {count(plan.files.length)}
             </button>
             <button type="button" className={button} disabled={working} onClick={() => setPlan(null)}>

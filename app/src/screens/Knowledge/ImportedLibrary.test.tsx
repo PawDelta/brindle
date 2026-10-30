@@ -10,6 +10,7 @@ const PLAN = {
   files: [{ name: "notes.md", bytes: 30 }],
   skipped: [{ name: "prod-secrets.md", reason: "its name looks like a secret" }],
   allowed: true,
+  token: "tok",
 };
 
 describe("imported folder library", () => {
@@ -31,6 +32,6 @@ describe("imported folder library", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Upload 1 file" }));
     await waitFor(() => expect(calls).toHaveLength(2));
-    expect(calls[1]).toEqual({ method: "POST", body: {} });
+    expect(calls[1]).toEqual({ method: "POST", body: { token: "tok" } });
   });
 });
