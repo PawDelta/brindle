@@ -41,6 +41,7 @@ import logging
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
 
@@ -162,6 +163,53 @@ def current_identity(client=None, store=None) -> str | None:
         return None
 
 
+class AccountChanged(RuntimeError):
+    """The sign-in is no longer the one a run took its snapshot of, or its access
+    token needs refreshing: the run stops and every remaining row stays queued."""
+
+
+@dataclass
+class Snapshot:
+    """The verified identity and access token taken once when a run starts. Every
+    request of the run is sent with it, never with a reloaded sign-in."""
+    client: object
+    store: object
+    ent: object
+    who: str
+    token: str
+    expires: float
+
+
+def _snapshot(client=None, store=None) -> Snapshot:
+    """Snapshot the sign-in, refreshing an expiring access token first (before
+    anything is sent). Raises (``RuntimeError``) like :func:`_who`."""
+    from brindle.pro import auth
+
+    client, store = analysis_docs._session(client, store)
+    cur = store.load() or {}
+    if float(cur.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK and cur.get("refresh_token"):
+        auth.refresh(client, store, cur)
+        cur = store.load() or {}
+    client, store, ent, who = _who(client, store)
+    if not cur.get("access_token"):
+        raise AccountChanged("not signed in")
+    return Snapshot(client, store, ent, who, cur["access_token"], float(cur.get("access_expires_at") or 0))
+
+
+def _call(snap: Snapshot, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
+    """One request with the snapshot's token. The store must still hold the
+    snapshot's identity, before and after (a 404 is believed only then), and the
+    token must not be near its end or refused: otherwise ``AccountChanged``."""
+    from brindle.pro import auth
+
+    if current_identity(snap.client, snap.store) != snap.who or snap.expires <= time.time() + auth.ACCESS_SLACK:
+        raise AccountChanged("the signed-in account changed")
+    status, got = snap.client.call(method, path, body, token=snap.token)
+    if status == 401 or current_identity(snap.client, snap.store) != snap.who:
+        raise AccountChanged("the sign-in changed or needs refreshing")
+    return status, got
+
+
 def state(db: DB, source_id: str, who: str | None) -> str | None:
     """The folder's library state for identity ``who``, None when it is local to
     them (including another identity's folder, or no identity)."""
@@ -259,33 +307,36 @@ def _off_reason(client=None, store=None) -> str | None:
     return None
 
 
-def _post(client, store, key, ent, identity, ref, name, data):
+def _post(snap: Snapshot, key, identity, ref, name, data):
     from brindle.pro import auth
 
-    body = {"scope": {"kind": "user", "id": ent.sub}, "files": [{"name": name, "md": data.decode("utf-8")}],
+    body = {"scope": {"kind": "user", "id": snap.ent.sub}, "files": [{"name": name, "md": data.decode("utf-8")}],
             "source": {"kind": SOURCE_KIND, "ref": ref}, "repo_key": key.repo_key(identity)}
-    status, got = auth.authed(client, store, "POST", "/analysis-docs", auth.JSONBody(body))
+    status, got = _call(snap, "POST", "/analysis-docs", auth.JSONBody(body))
     doc_id = got.get("id") if isinstance(got, dict) else None
     if status != 200 or not isinstance(doc_id, str):
         raise RuntimeError(f"{name} was not stored (HTTP {status})")
     return doc_id
 
 
-def _delete(client, store, doc_id: str) -> bool:
-    from brindle.pro import auth
-
-    status, _ = auth.authed(client, store, "DELETE", f"/analysis-docs/{quote(doc_id, safe='')}", None)
+def _delete(snap: Snapshot, doc_id: str) -> bool:
+    status, _ = _call(snap, "DELETE", f"/analysis-docs/{quote(doc_id, safe='')}")
     return status in (200, 404)
 
 
-def _drain(db: DB, client, store, who: str) -> None:
-    """Delete identity ``who``'s queued docs; each stays queued until the server
-    confirms. Another identity's queue is left as it is."""
-    for r in db.conn.execute("SELECT doc_id FROM kb_import_deletions WHERE identity = ?", (who,)).fetchall():
+def _drain(db: DB, snap: Snapshot) -> None:
+    """Delete the snapshot identity's queued docs; each stays queued until the
+    server confirms. Another identity's queue is left as it is, and the drain
+    stops (leaving the rest queued) if the account changes or needs refreshing."""
+    for r in db.conn.execute("SELECT doc_id FROM kb_import_deletions WHERE identity = ?", (snap.who,)).fetchall():
         try:
-            if _delete(client, store, r["doc_id"]):
+            if _delete(snap, r["doc_id"]):
                 with db.tx() as c:
-                    c.execute("DELETE FROM kb_import_deletions WHERE doc_id = ?", (r["doc_id"],))
+                    c.execute("DELETE FROM kb_import_deletions WHERE doc_id = ? AND identity = ?",
+                              (r["doc_id"], snap.who))
+        except AccountChanged:
+            log.info("library deletions stopped: the sign-in changed")
+            return
         except Exception:  # noqa: BLE001 - tried again on the next sync or removal
             log.info("library doc not deleted yet")
 
@@ -295,8 +346,9 @@ def drain_pending(db: DB, *, client=None, store=None) -> None:
     source) queued them, then finish every ``removing`` folder of theirs whose
     queue is now empty, each under its own claim. Never raises."""
     try:
-        client, store, _, who = _who(client, store)
-        _drain(db, client, store, who)
+        snap = _snapshot(client, store)
+        who = snap.who
+        _drain(db, snap)
         done = db.conn.execute(
             "SELECT source_id FROM kb_import_library l WHERE identity = ? AND state = ? AND NOT EXISTS"
             " (SELECT 1 FROM kb_import_deletions x WHERE x.source_id = l.source_id AND x.identity = l.identity)",
@@ -332,8 +384,9 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
     if reason is not None:
         raise ImportUploadOff(reason)
     src = _source(db, source_id)
-    client, store, ent, signed_in = _who(client, store)
-    if signed_in != who:
+    snap = _snapshot(client, store)
+    client, store, ent = snap.client, snap.store, snap.ent
+    if snap.who != who:
         raise RuntimeError("the signed-in account changed")
     ident = (identity or (lambda: repo_identity(repo_root)))()
     if ident is None:
@@ -353,7 +406,10 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
             lost = True
             break
         try:
-            doc_id = _post(client, store, key, ent, ident, _ref(src), name, data)
+            doc_id = _post(snap, key, ident, _ref(src), name, data)
+        except AccountChanged:      # stop: what is left is neither sent nor marked failed
+            lost = True
+            break
         except Exception as e:  # noqa: BLE001
             log.info("imported file not uploaded (%s)", type(e).__name__)
             result["failed"].append(name)
@@ -384,7 +440,7 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
                     _queue_deletion(c, source_id, who, name)
     count = "SELECT count(*) FROM kb_import_deletions WHERE identity = ?"
     before = db.conn.execute(count, (who,)).fetchone()[0]
-    _drain(db, client, store, who)
+    _drain(db, snap)
     result["deleted"] = before - db.conn.execute(count, (who,)).fetchone()[0]
     with db.tx() as c:
         c.execute("UPDATE kb_import_library SET pending = ? WHERE source_id = ? AND op_token = ?",
@@ -472,7 +528,8 @@ def remove_from_library(db: DB, source_id: str, *, client=None, store=None) -> d
     switch-gated: deleting reduces what is held, so it works with import_upload
     off; in air-gap mode, or signed out, it raises and the docs stay queued."""
     _source(db, source_id)
-    client, store, _, who = _who(client, store)
+    snap = _snapshot(client, store)
+    who = snap.who
 
     def queue_all(c) -> None:
         c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
@@ -487,7 +544,7 @@ def remove_from_library(db: DB, source_id: str, *, client=None, store=None) -> d
         if claim is None:
             raise Busy(source_id)
     try:
-        _drain(db, client, store, who)
+        _drain(db, snap)
     finally:
         if claim:
             _release(db, source_id, claim, drop_if_no_queue=True)

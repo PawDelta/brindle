@@ -14,7 +14,10 @@ const PLAN = {
 };
 
 describe("imported folder library", () => {
-  it("sends nothing until the listed files are confirmed, then uploads", async () => {
+  it.each([
+    ["local", "Add to library"],
+    ["adding", "Resume adding"],
+  ] as const)("sends nothing until the listed files are confirmed, then uploads (%s folder)", async (library_state, start) => {
     const calls: { method: string; body: unknown }[] = [];
     const fetch: typeof globalThis.fetch = (_input, init) => {
       const body = init?.body ? JSON.parse(String(init.body)) : {};
@@ -22,9 +25,10 @@ describe("imported folder library", () => {
       return Promise.resolve(new Response(JSON.stringify(body.dry_run ? PLAN : {}), { status: 200, headers: { "Content-Type": "application/json" } }));
     };
     const client = new DaemonClient({ baseUrl: "http://daemon.test", token: "t", fetch });
-    render(<ImportedLibrary client={client} repo="/r" source={SOURCE} disabled={false} onChanged={() => {}} />);
+    render(<ImportedLibrary client={client} repo="/r" source={{ ...SOURCE, library_state }} disabled={false} onChanged={() => {}} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "Add to library" }));
+    if (library_state === "adding") expect(screen.getByRole("button", { name: "Remove" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: start }));
     const plan = await screen.findByTestId("library-plan");
     expect(within(within(plan).getByLabelText("Will upload")).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["notes.md"]);
     expect(within(within(plan).getByLabelText("Skipped")).getByText(/prod-secrets\.md/)).toBeTruthy();

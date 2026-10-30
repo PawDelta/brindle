@@ -30,9 +30,7 @@ export function ImportedLibrary({ client, repo, source, disabled, onChanged }: {
 
   return (
     <div className="flex basis-full flex-col gap-1">
-      {source.library_state === "adding" ? (
-        <p className="text-xs text-ink-3">Adding to your library…</p>
-      ) : source.library_state === "in_library" || source.library_state === "removing" ? (
+      {source.library_state === "in_library" || source.library_state === "removing" ? (
         <div className="flex items-center gap-s1 text-xs text-ink-3">
           <span>
             {source.library_state === "removing"
@@ -58,11 +56,17 @@ export function ImportedLibrary({ client, repo, source, disabled, onChanged }: {
           </button>
         </div>
       ) : (
+        /* Local, or an add that did not finish: the engine answers busy while one is still running. */
         !plan && (
-          <div>
+          <div className="flex items-center gap-1">
             <button type="button" className={quiet} disabled={disabled || working} onClick={() => void run(async () => setPlan(await client.kbLibraryPlan(repo, source.id)))}>
-              Add to library
+              {source.library_state === "adding" ? "Resume adding" : "Add to library"}
             </button>
+            {source.library_state === "adding" && (
+              <button type="button" className={quiet} disabled={disabled || working} onClick={() => void run(() => client.removeKbFromLibrary(repo, source.id))}>
+                Remove
+              </button>
+            )}
           </div>
         )
       )}

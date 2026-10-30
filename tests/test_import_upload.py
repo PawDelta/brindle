@@ -14,12 +14,14 @@ from test_pro_remote_learning import login_as
 def remote(backend):
     backend.docs, backend.deleted, backend.switches = [], [], {"import_upload": "on"}
     backend.reject = backend.fail_delete = False
-    backend.during = None
+    backend.during = backend.after_delete = None
 
     def delete(doc_id):
         if backend.fail_delete:
             return 500, {}
         backend.deleted.append(doc_id)
+        if backend.after_delete:
+            backend.after_delete()
         return 200, {}
 
     def store(form, headers):
@@ -209,3 +211,27 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     sign_in_as("user_1")
     kb.sync(db, source, None, "/repo")
     assert remote.deleted[-1] == "d7" and shown()["library_state"] == "local"
+    # (a) An account switch in the middle of a batch of deletes: the run stops, the rest stays queued
+    # (a request under the new account would be believed, so none is sent).
+    (docs / "more.md").write_text("# More\nsecond file")
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # two docs
+    remote.fail_delete = True
+    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 2}
+    remote.fail_delete, remote.after_delete = False, lambda: sign_in_as("user_2")
+    gone = len(remote.deleted)
+    kb.sync(db, source, None, "/repo")
+    remote.after_delete = None
+    # one DELETE went out; its answer raced the switch and is not believed, so both stay queued
+    assert len(remote.deleted) == gone + 1 and shown(first)["library_removing"] == 2
+    assert shown()["library_state"] == "local"
+    sign_in_as("user_1")
+    kb.sync(db, source, None, "/repo")      # the first DELETE is repeated (harmless), then the second
+    assert len(remote.deleted) == gone + 3 and shown()["library_state"] == "local"
+    # (b) Changed content while the first account is still in_library and the second is signed in:
+    # nothing uploads.
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
+    (docs / "notes.md").write_text("# Notes\nedited while another account is signed in")
+    sent = len(remote.docs)
+    sign_in_as("user_2")
+    kb.sync(db, source, None, "/repo")
+    assert len(remote.docs) == sent and shown(first)["library_state"] == "in_library"
