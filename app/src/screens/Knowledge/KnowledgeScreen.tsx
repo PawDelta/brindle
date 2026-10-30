@@ -46,6 +46,8 @@ export interface KnowledgeScreenProps {
   session?: string;
   /* Back to the session the person came from (Docs' Back to session). */
   onBackToSession?(): void;
+  /* The repo the session belongs to: Docs opens on it (else the first repo). */
+  fromRepo?: string;
 }
 
 const TABS: [KnowledgeView, string][] = [
@@ -391,8 +393,8 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
   );
 }
 
-export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBackToSession }: KnowledgeScreenProps) {
-  const pick = useRepo();
+export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
+  const pick = useRepo(fromRepo);
   const { repo, repos } = pick;
   const [tab, setTab] = useState<KnowledgeView>(view ?? (typeof doc === "number" ? "imported" : "docs"));
   const [decisions, setDecisions] = useState<DecisionDTO[] | null>(null);

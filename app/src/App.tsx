@@ -132,6 +132,7 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
           view={route.view}
           doc={route.doc}
           session={route.session}
+          fromRepo={docsFrom?.repo}
           onBackToSession={docsFrom && (() => navigate({ screen: "session", root: docsFrom.root, repo: docsFrom.repo, agent: docsFrom.root }))}
         />
       );
