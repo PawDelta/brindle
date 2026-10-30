@@ -3044,11 +3044,11 @@
     },
     {
       "method": "GET",
-      "path": "/v1/analysis-docs/policy"
+      "path": "/v1/analysis-docs/map"
     },
     {
       "method": "GET",
-      "path": "/v1/analysis-docs/map"
+      "path": "/v1/analysis-docs/policy"
     },
     {
       "method": "GET",
