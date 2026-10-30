@@ -198,9 +198,10 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     remote.fail_delete = False
     sent, gone = len(remote.docs), len(remote.deleted)
 
-    def sign_in_as(sub):
+    def sign_in_as(sub, access_token=None):
         creds = deps["store"].load()
         creds["entitlement"] = sign(remote.key, claims(features=["analysis_docs"], sub=sub))
+        creds["access_token"] = access_token or creds["access_token"]
         deps["store"].save(creds)
         license.clear_cache()
 
@@ -221,12 +222,12 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     gone = len(remote.deleted)
     kb.sync(db, source, None, "/repo")
     remote.after_delete = None
-    # one DELETE went out; its answer raced the switch and is not believed, so both stay queued
-    assert len(remote.deleted) == gone + 1 and shown(first)["library_removing"] == 2
+    # one DELETE went out under the first account and its 200 is believed; the second is never sent
+    assert len(remote.deleted) == gone + 1 and shown(first)["library_removing"] == 1
     assert shown()["library_state"] == "local"
     sign_in_as("user_1")
-    kb.sync(db, source, None, "/repo")      # the first DELETE is repeated (harmless), then the second
-    assert len(remote.deleted) == gone + 3 and shown()["library_state"] == "local"
+    kb.sync(db, source, None, "/repo")
+    assert len(remote.deleted) == gone + 2 and shown()["library_state"] == "local"
     # (b) Changed content while the first account is still in_library and the second is signed in:
     # nothing uploads.
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)
@@ -235,3 +236,34 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     sign_in_as("user_2")
     kb.sync(db, source, None, "/repo")
     assert len(remote.docs) == sent and shown(first)["library_state"] == "in_library"
+    sign_in_as("user_1")
+    imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
+    # (c) The account switches while a POST succeeds: its doc is recorded under the first account
+    # (the run then stops), so a later removal deletes every remote doc.
+    first_new = len(remote.docs)
+    remote.during = lambda: sign_in_as("user_2")
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
+    assert len(remote.docs) == first_new + 1 and len(tracked()) == 1       # the second file was never sent
+    sign_in_as("user_1")
+    imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
+    assert {f"d{n}" for n in range(first_new + 1, len(remote.docs) + 1)} <= set(remote.deleted)
+    # (d) The account switches while the snapshot is taken (the store changes right after its one
+    # read, tokens differ): the snapshot is wholly the first account's, and its first request is refused.
+    sign_in_as("user_1", "token-1")
+    real_load, armed = deps["store"].load, []
+
+    def load_then_switch():
+        record = real_load()
+        if not armed:
+            armed.append(True)
+            sign_in_as("user_2", "token-2")
+        return record
+
+    deps["store"].load = load_then_switch
+    snap = imports._snapshot(deps["client"], deps["store"])
+    del deps["store"].load
+    assert (snap.who, snap.token) == (first, "token-1")
+    calls = len(remote.calls)
+    with pytest.raises(imports.AccountChanged):
+        imports._call(snap, "GET", "/me/analysis-docs/settings")
+    assert len(remote.calls) == calls

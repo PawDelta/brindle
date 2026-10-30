@@ -178,35 +178,50 @@ class Snapshot:
     who: str
     token: str
     expires: float
+    stopped: bool = False    # the account changed during a request that was already sent
 
 
 def _snapshot(client=None, store=None) -> Snapshot:
-    """Snapshot the sign-in, refreshing an expiring access token first (before
-    anything is sent). Raises (``RuntimeError``) like :func:`_who`."""
-    from brindle.pro import auth
+    """Snapshot the sign-in: refresh an expiring access token first (before
+    anything is sent), then read the credential store once and take the token,
+    the verified entitlement, the identity and the backend from that one record.
+    Raises (``RuntimeError``) like :func:`_who`."""
+    from brindle import airgap
+    from brindle.pro import auth, license
 
     client, store = analysis_docs._session(client, store)
+    if airgap.enabled():
+        raise RuntimeError("air-gap mode is on: nothing is sent")
     cur = store.load() or {}
     if float(cur.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK and cur.get("refresh_token"):
         auth.refresh(client, store, cur)
         cur = store.load() or {}
-    client, store, ent, who = _who(client, store)
+    ent = license.verify(cur.get("entitlement") or "", issuer=client.base)
+    if analysis_docs.FEATURE not in ent.features or ent.in_grace:
+        raise RuntimeError("your plan has no analysis doc library (the `analysis_docs` entitlement)")
     if not cur.get("access_token"):
         raise AccountChanged("not signed in")
-    return Snapshot(client, store, ent, who, cur["access_token"], float(cur.get("access_expires_at") or 0))
+    return Snapshot(client, store, ent, _identity_of(client, ent), cur["access_token"],
+                    float(cur.get("access_expires_at") or 0))
 
 
 def _call(snap: Snapshot, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
-    """One request with the snapshot's token. The store must still hold the
-    snapshot's identity, before and after (a 404 is believed only then), and the
-    token must not be near its end or refused: otherwise ``AccountChanged``."""
+    """One request with the snapshot's token. Before sending, the store must
+    still hold the snapshot's identity and the token must not be near its end:
+    otherwise ``AccountChanged`` and nothing is sent. A 401 (refresh needed) also
+    raises. If the account changed while the request was out, its answer is still
+    returned (it was made with the snapshot's token, for the snapshot's account),
+    but ``snap.stopped`` is set so the run ends and a 404 is not believed."""
     from brindle.pro import auth
 
-    if current_identity(snap.client, snap.store) != snap.who or snap.expires <= time.time() + auth.ACCESS_SLACK:
+    if snap.stopped or current_identity(snap.client, snap.store) != snap.who \
+            or snap.expires <= time.time() + auth.ACCESS_SLACK:
         raise AccountChanged("the signed-in account changed")
     status, got = snap.client.call(method, path, body, token=snap.token)
-    if status == 401 or current_identity(snap.client, snap.store) != snap.who:
-        raise AccountChanged("the sign-in changed or needs refreshing")
+    if status == 401:
+        raise AccountChanged("the sign-in needs refreshing")
+    if current_identity(snap.client, snap.store) != snap.who:
+        snap.stopped = True
     return status, got
 
 
@@ -321,7 +336,7 @@ def _post(snap: Snapshot, key, identity, ref, name, data):
 
 def _delete(snap: Snapshot, doc_id: str) -> bool:
     status, _ = _call(snap, "DELETE", f"/analysis-docs/{quote(doc_id, safe='')}")
-    return status in (200, 404)
+    return status == 200 or (status == 404 and not snap.stopped)
 
 
 def _drain(db: DB, snap: Snapshot) -> None:
@@ -433,6 +448,9 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
             continue
         result["uploaded"] += 1
         result["sent"] = True
+        if snap.stopped:        # its doc is recorded under the snapshot's identity; send no more
+            lost = True
+            break
     if only is None and not lost:
         with db.tx() as c:
             if _holds(c, source_id, claim):
