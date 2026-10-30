@@ -160,8 +160,31 @@ def test_a_lost_claim_queues_every_doc_of_the_batch_that_was_stored(folder, remo
 
     remote.during = steal
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)
-    assert remote.items == {} and sorted(remote.deleted) == ["d1", "d2"]     # neither doc is left unowned
+    queued = lambda: sorted(r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM kb_import_deletions"))  # noqa: E731
+    assert queued() == ["d1", "d2"] and remote.deleted == []      # both docs are accounted for, left to the holder
     assert db.conn.execute("SELECT count(*) FROM kb_import_uploads").fetchone()[0] == 0
+
+
+def test_a_run_that_lost_its_claim_deletes_nothing_the_replacement_adopted(folder, remote, deps, monkeypatch):
+    db, source, docs = folder
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)             # d1
+    (docs / "more.md").write_text("# More")
+    send, replaced = imports._send, []
+
+    def send_then_replace(*args):      # the lease lapses after the answer and a real sync takes the folder over
+        got = send(*args)
+        if not replaced:
+            replaced.append(True)
+            with db.tx() as c:
+                c.execute("UPDATE kb_import_library SET op_until = 1")
+            imports.sync_upload(db, source, "/repo", **deps)          # adopts d2 (the answer was "unchanged")
+        return got
+
+    monkeypatch.setattr(imports, "_send", send_then_replace)
+    imports.sync_upload(db, source, "/repo", **deps)
+    assert remote.deleted == [] and sorted(v["id"] for v in remote.items.values()) == ["d1", "d2"]
+    assert sorted(r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM kb_import_uploads")) == ["d1", "d2"]
+    assert db.conn.execute("SELECT count(*) FROM kb_import_deletions").fetchone()[0] == 0
 
 
 def test_a_restored_file_is_not_adopted_while_its_old_doc_waits_for_deletion(folder, remote, deps, monkeypatch):
