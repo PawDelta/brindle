@@ -579,7 +579,7 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
     quarantined TEXT
 );
 -- Imported folders added to the personal library (brindle.pro.analysis_imports):
--- the folder, and each file sent with the library doc it became.
+-- the folder, and a cache of each file sent (path to hash, plus the doc it became).
 -- Every row names the identity that authorized it (backend, user, org, scope); a different
 -- signed-in identity sees the folder as local and leaves these rows alone.
 CREATE TABLE IF NOT EXISTS kb_import_library (
@@ -597,12 +597,12 @@ CREATE TABLE IF NOT EXISTS kb_import_library (
     op_until REAL,
     PRIMARY KEY (source_id, identity)
 );
--- Library docs still to delete server-side. Not tied to the source, so they
--- outlive its removal until the server confirms each one.
-CREATE TABLE IF NOT EXISTS kb_import_deletions (
-    doc_id TEXT PRIMARY KEY,
-    source_id TEXT,
-    identity TEXT NOT NULL
+-- Folder removals the server has not confirmed for a source that was deleted meanwhile. Not
+-- tied to the source, so they outlive it until the folder DELETE succeeds.
+CREATE TABLE IF NOT EXISTS kb_import_removals (
+    source_id TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    PRIMARY KEY (source_id, identity)
 );
 CREATE TABLE IF NOT EXISTS kb_import_uploads (
     source_id TEXT NOT NULL REFERENCES kb_sources(id) ON DELETE CASCADE,

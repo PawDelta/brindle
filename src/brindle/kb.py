@@ -266,8 +266,8 @@ def remove_source(db: DB, source_id: str, *, actor: str | None = None,
                   session: str | None = None) -> None:
     """Delete a source with its documents, chunks, index rows, links and
     embeddings in one transaction, and log the removal. A folder added to the
-    library has its docs queued for deletion first; a delete the server does
-    not confirm is kept and retried later."""
+    library is removed from it first; a removal the server does not confirm is
+    kept and retried later."""
     from brindle.pro import analysis_imports
 
     if analysis_imports.in_library(db, source_id):
@@ -277,9 +277,9 @@ def remove_source(db: DB, source_id: str, *, actor: str | None = None,
             pass
     with db.tx() as c:
         src = c.execute("SELECT * FROM kb_sources WHERE id = ?", (source_id,)).fetchone()
-        c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
-                  " SELECT doc_id, source_id, identity FROM kb_import_uploads WHERE source_id = ?",
-                  (source_id,))   # whatever remove_from_library could not queue
+        c.execute("INSERT OR IGNORE INTO kb_import_removals (source_id, identity)"
+                  " SELECT source_id, identity FROM kb_import_library WHERE source_id = ?",
+                  (source_id,))   # whatever remove_from_library could not finish
         if src is None:
             raise KeyError(source_id)
         c.execute("DELETE FROM kb_fts WHERE rowid IN (SELECT kb_chunks.rowid FROM kb_chunks"
@@ -399,7 +399,7 @@ def sources(db: DB, repo_key: str, library_identity: str | None = None) -> list[
     fields are what ``library_identity`` (brindle.pro.analysis_imports.
     current_identity) sees: ``library_state`` is local, adding, in_library or
     removing, with ``library_pending`` (files not uploaded) and
-    ``library_removing`` (docs not yet deleted); no identity sees every folder local."""
+    ``library_removing`` (docs still in the library while removing); no identity sees every folder local."""
     rows = [dict(r) for r in db.conn.execute(
         "SELECT s.*, (SELECT count(*) FROM kb_docs d WHERE d.source_id = s.id AND NOT d.tombstoned) AS docs,"
         " (SELECT count(*) FROM kb_chunks c JOIN kb_docs d ON d.id = c.doc_id WHERE d.source_id = s.id"
@@ -408,14 +408,13 @@ def sources(db: DB, repo_key: str, library_identity: str | None = None) -> list[
         " 'local') AS library_state,"
         " COALESCE((SELECT l.pending FROM kb_import_library l WHERE l.source_id = s.id AND l.identity = ?), 0)"
         " AS library_pending,"
-        " (SELECT count(*) FROM kb_import_deletions x WHERE x.source_id = s.id AND x.identity = ?)"
+        " (SELECT count(*) FROM kb_import_uploads x WHERE x.source_id = s.id AND x.identity = ?)"
         " AS library_removing"
         " FROM kb_sources s WHERE s.repo_key = ? ORDER BY s.added_at",
         (library_identity, library_identity, library_identity, repo_key))]
     for r in rows:
         r["in_library"] = r["library_state"] == "in_library"
-        if r["library_state"] != "removing":
-            r["library_removing"] = 0
+        r["library_removing"] = max(1, r["library_removing"]) if r["library_state"] == "removing" else 0
     return rows
 
 
