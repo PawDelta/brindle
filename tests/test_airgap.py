@@ -225,7 +225,6 @@ def test_learning_sends_nothing_and_suggests_nothing(on, backend, tmp_path, fixe
     assert "inactive" in learner.report()
 
 
-@pytest.mark.brindle_ci
 def test_ci_token_commands_are_refused(on, backend):
     """The org ci-token helpers are Pro paths like any other: refused before
     the transport."""

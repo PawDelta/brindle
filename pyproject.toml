@@ -80,5 +80,6 @@ pythonpath = ["tests"]
 markers = [
     "serial: run outside xdist (`pytest -m serial`); the parallel pass skips these",
     "brindle_ci: a brindle CI test; deselected unless BRINDLE_CI_TESTS=1 (tests/conftest.py marks the test_ci_* files)",
+    "brindle_ci_guard: a refusal or fail-closed test of the brindle CI commands; always runs",
     "variant(reason): an input variant that covers no new code on purpose (see scripts/check_new_tests.py)",
 ]

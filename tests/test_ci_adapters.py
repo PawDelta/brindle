@@ -125,6 +125,7 @@ def test_native_profile_may_not_redirect_another_providers_key(repo):
     "https://api.good.test@evil.test/v1",          # userinfo
     "https://api.good.test\\@evil.test/v1",        # backslash
 ])
+@pytest.mark.brindle_ci_guard
 def test_native_key_needs_a_plainly_written_url(repo, base_url):
     d = repo / ".brindle" / "agents"
     d.mkdir(parents=True)
@@ -158,6 +159,7 @@ def test_bare_native_key_reaches_loopback_only(repo):
     assert a._key_refused(load_profile("p", str(repo)), {**env, "BRINDLE_CI_NATIVE_KEYS": "MY_KEY@10.0.0.5"}) is None
 
 
+@pytest.mark.brindle_ci_guard
 def test_native_client_refuses_cross_origin_redirects():
     import urllib.error
     import urllib.request
@@ -366,6 +368,7 @@ def _config(tmp_path):
     return json.loads((tmp_path / "claude-config" / ".claude.json").read_text())
 
 
+@pytest.mark.brindle_ci_guard
 def test_prepare_refuses_a_config_that_isnt_an_object(tmp_path, repo):
     path = tmp_path / "claude-config" / ".claude.json"
     path.parent.mkdir()

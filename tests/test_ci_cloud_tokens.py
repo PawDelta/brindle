@@ -100,6 +100,7 @@ def test_azure_agents_get_ids_and_token_file(tmp_path):
 # -- which clouds a job uses ----------------------------------------------------------------------
 
 
+@pytest.mark.brindle_ci_guard
 def test_no_cloud_without_the_actions_endpoint_ids_or_with_a_static_credential():
     assert fed.cloud_token_clouds(AWS) == []
     assert fed.cloud_token_clouds({**AWS, **ACTIONS, "AWS_ROLE_ARN": ""}) == []
@@ -108,6 +109,7 @@ def test_no_cloud_without_the_actions_endpoint_ids_or_with_a_static_credential()
     assert fed.cloud_token_clouds({**AWS, **ACTIONS, "CLAUDE_CODE_USE_BEDROCK": "0"}) == []
 
 
+@pytest.mark.brindle_ci_guard
 def test_a_failed_first_fetch_leaves_the_cloud_out(tmp_path):
     def boom(*a):
         raise fed.FederationError("HTTP 500")

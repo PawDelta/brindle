@@ -459,7 +459,6 @@ def test_ci_token_create_list_revoke(team):
         f"POST /orgs/{ORG}/ci-tokens", f"GET /orgs/{ORG}/ci-tokens", f"DELETE /orgs/{ORG}/ci-tokens/{token_id}"]
 
 
-@pytest.mark.brindle_ci
 def test_ci_token_defaults_to_the_current_org_and_needs_one(team):
     code, _, err = run(team, "org", "ci-token", "list")
     assert code == 1 and "no team org selected" in err
@@ -469,7 +468,6 @@ def test_ci_token_defaults_to_the_current_org_and_needs_one(team):
     assert code == 0 and "no CI tokens" in out
 
 
-@pytest.mark.brindle_ci
 def test_ci_token_errors_and_usage(team):
     team.routes[f"POST /orgs/{ORG}/ci-tokens"] = lambda f, h: (
         403, {"error": "forbidden", "error_description": "requires the admin role"})
@@ -483,7 +481,6 @@ def test_ci_token_errors_and_usage(team):
         assert run(team, *bad)[0] == 2, bad
 
 
-@pytest.mark.brindle_ci
 def test_ci_token_create_refuses_a_response_without_a_token(team):
     team.routes[f"POST /orgs/{ORG}/ci-tokens"] = lambda f, h: (200, {"token_id": "ct_1", "name": "x"})
     code, _, err = run(team, "org", "ci-token", "create", "x", "--org", ORG)
