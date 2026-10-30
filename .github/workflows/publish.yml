@@ -49,8 +49,9 @@ jobs:
   # AWS template to the bucket named by the repository variable
   # DEPLOY_TEMPLATES_BUCKET (credentials: the repository variable
   # DEPLOY_TEMPLATES_ROLE_ARN, via OIDC). Does nothing when the bucket is unset.
+  # Off until brindle CI launches; to restore: if: startsWith(github.event.release.tag_name, 'v')
   deploy-templates:
-    if: startsWith(github.event.release.tag_name, 'v')
+    if: false
     needs: test
     runs-on: ubuntu-latest
     permissions:
