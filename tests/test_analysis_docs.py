@@ -160,3 +160,26 @@ def test_merge_uploads_every_changed_deliverable_only_when_it_merges(
     out = pipeline.merge(db, None, ws)
     up.flush()
     assert out.startswith("Merged" if gate_ok else "Not merged") and len(remote.docs) == uploaded
+
+
+@pytest.mark.parametrize("status", [200, 403])
+def test_docs_export_writes_only_after_a_200(status, tmp_path, remote, monkeypatch):
+    import base64
+
+    from typer.testing import CliRunner
+
+    from brindle import git
+    from brindle.cli import app
+
+    monkeypatch.setattr(git, "main_repo_root", lambda path: str(tmp_path))
+    monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, m, url, form, headers: (
+        remote.request(m, url, form, headers)))
+    login_as(remote, credentials.default_store(), features=("analysis_docs",))
+    body = {"filename": "doc1.zip", "content_b64": base64.b64encode(b"PK").decode()}
+    remote.routes["GET /analysis-docs/doc1/export?format=zip&destination=download"] = (
+        [(200, body) if status == 200 else (403, {"error": "destination_not_allowed"})])
+    out = tmp_path / "out"
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(app, ["docs", "export", "doc1", "--out", str(out)])
+    assert (result.exit_code, out.exists() and (out / "doc1.zip").read_bytes() == b"PK") == (
+        (0, True) if status == 200 else (1, False))

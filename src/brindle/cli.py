@@ -2090,15 +2090,25 @@ def docs_unshare(doc_id: str = typer.Argument(..., help="Document id."),
 
 @docs_app.command("export")
 def docs_export(doc_id: str = typer.Argument(..., help="Document id."),
-                out: str = typer.Option(".", "--out", "-o", help="Directory to write main.md and appendices/ into.")) -> None:
-    """Write a document (main.md and its appendices) to a directory."""
-    d = _docs_call("GET", f"/analysis-docs/{doc_id}")
-    root = Path(out)
-    (root / "appendices").mkdir(parents=True, exist_ok=True)
-    (root / "main.md").write_text(d.get("body_md", ""), encoding="utf-8")
-    for a in d.get("appendices") or []:
-        (root / "appendices" / Path(str(a.get("name"))).name).write_text(a.get("md", ""), encoding="utf-8")
-    typer.echo(f"exported {doc_id} to {root}")
+                fmt: str = typer.Option("zip", "--format", "-f", help="md, docx or zip."),
+                out: str = typer.Option(".", "--out", "-o", help="Directory to write the export into.")) -> None:
+    """Download a document from your library (the server checks scope and your org's export policy)."""
+    import base64
+    import binascii
+
+    if fmt not in ("md", "docx", "zip"):
+        _fail("format is md, docx or zip")
+    d = _docs_call("GET", f"/analysis-docs/{doc_id}/export?format={fmt}&destination=download")
+    try:
+        data = base64.b64decode(d.get("content_b64") or "", validate=True)
+    except (binascii.Error, ValueError):
+        data = b""
+    if not data:
+        _fail("analysis docs: the export came back empty")
+    name = Path(str(d.get("filename") or f"{doc_id}.{fmt}")).name
+    Path(out).mkdir(parents=True, exist_ok=True)
+    (Path(out) / name).write_bytes(data)
+    typer.echo(f"exported {doc_id} to {Path(out) / name}")
 
 
 def _docs_switch(on: bool) -> None:
