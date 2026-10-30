@@ -1322,6 +1322,141 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
     return {"messages": _said(account)}
 
 
+# -- analysis docs: brindle Pro's library, proxied (the reads are in routes_read) ----
+# Answers pass through as the server gave them, held in memory only; a file
+# reaches disk only on an export to a folder the person picked.
+
+DOC_SCOPES = {"user": "user", "team": "group", "group": "group", "enterprise": "org", "org": "org"}
+EXPORT_FORMATS = ("md", "docx", "zip")
+
+
+def _docs_entitlement(repo: str | None):
+    from brindle import config
+    from brindle.pro import analysis_docs
+
+    if repo:
+        config.load_repo_config(repo)        # its air-gap setting applies first
+    try:
+        return analysis_docs.require_entitlement()
+    except RuntimeError as e:
+        raise ServiceError("not_entitled", str(e), 402) from e
+
+
+def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | None = None,
+             query: dict[str, str] | None = None, scope: str | None = None) -> dict:
+    """One call to the library: ``scope`` is ``user`` or ``team:<id>`` /
+    ``org:<id>``. Not entitled (or in the repo's air-gap mode) is 402 before
+    anything is sent; the server's refusal is 502 with its reason; signed
+    out is 401."""
+    from urllib.parse import urlencode
+
+    from brindle.pro import analysis_docs, auth
+
+    ent = _docs_entitlement(repo)
+    query = dict(query or {})
+    if scope:
+        query.update(zip(("scope_kind", "scope_id"), doc_scope(scope, ent.sub)))
+    try:
+        return analysis_docs.api(method, path + (f"?{urlencode(query)}" if query else ""), body)
+    except (RuntimeError, auth.TransportError) as e:    # unreachable, or an answer it can't read: not signed out
+        raise ServiceError("upstream", str(e), 502) from e
+
+
+def docs_scopes(repo: str | None = None) -> list[dict]:
+    """Every scope the person reads, as the server lists them
+    (``{kind, id, name, can_share}``; their teams too, docs or not)."""
+    scopes = docs_api("GET", "/analysis-docs/scopes", repo=repo).get("scopes")
+    return [s for s in scopes or [] if isinstance(s, dict) and s.get("kind") in DOC_SCOPES.values()
+            and isinstance(s.get("id"), str)]
+
+
+def scope_spec(scope: dict) -> str:
+    """A server scope as docs_api's ``scope``: user, team:<id> or org:<id>."""
+    return "user" if scope["kind"] == "user" else f"{'team' if scope['kind'] == 'group' else 'org'}:{scope['id']}"
+
+
+def docs_everywhere(path: str, repo: str | None, query: dict[str, str]) -> list[dict]:
+    """GET ``path`` (a list the server answers per scope) in each scope of
+    :func:`docs_scopes`: the answers that came back. A scope that refuses
+    is skipped unless every one does."""
+    got, refused = [], None
+    for spec in dict.fromkeys(scope_spec(s) for s in docs_scopes(repo)):
+        try:
+            got.append(docs_api("GET", path, repo=repo, query=query, scope=spec))
+        except ServiceError as e:
+            refused = refused or e
+    if refused and not got:
+        raise refused
+    return got
+
+
+def doc_scope(spec: str, sub: str) -> tuple[str, str]:
+    """``user`` (the person's own), ``team:<id>`` or ``org:<id>`` as the server's (kind, id)."""
+    kind, _, scope_id = spec.partition(":")
+    kind = DOC_SCOPES.get(kind, "")
+    scope_id = sub if kind == "user" else scope_id
+    if not kind or not scope_id:
+        raise ServiceError("invalid", "scope is user, team:<id> or org:<id>")
+    return kind, scope_id
+
+
+def _doc_path(params: dict, *rest: str) -> str:
+    from urllib.parse import quote
+
+    return "/".join(["/analysis-docs", *(quote(p, safe="") for p in (params["id"], *rest))])
+
+
+def share_doc(db: DB, params: dict, body: Body) -> Any:
+    """Share a doc with ``scope`` (team:<id> or org:<id>; never ``user``)."""
+    kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
+    return docs_api("POST", _doc_path(params, "share"), {"scope": {"kind": kind, "id": scope_id}},
+                    repo=params.get("repo"))
+
+
+def unshare_doc(db: DB, params: dict, body: Body) -> Any:
+    """Stop sharing a doc with ``scope`` (team:<id> or org:<id>)."""
+    kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
+    return docs_api("DELETE", _doc_path(params, "share", kind, scope_id), repo=params.get("repo"))
+
+
+def delete_doc(db: DB, params: dict, body: Body) -> Any:
+    return docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
+
+
+def export_doc(db: DB, params: dict, body: Body) -> Any:
+    """The doc as ``format`` (md, docx or zip; the server renders it and
+    checks scope and the org's export policy). Markdown arrives as text; a
+    Word or zip file as bytes once the Pro transport carries them (until
+    then, a 502 saying it can't read the answer). With ``dir`` (a folder the
+    person picked) the file is written there and its path answered;
+    without, its ``filename`` and ``content_b64`` go back to the app and
+    nothing is written."""
+    import base64
+    import re
+
+    from brindle.pro import auth
+
+    fmt = _get(body, "format", default="md")
+    if fmt not in EXPORT_FORMATS:
+        raise ServiceError("invalid", "format is md, docx or zip")
+    got = docs_api("GET", _doc_path(params, "export"), repo=params.get("repo"),
+                   query={"format": fmt, "destination": "download"})
+    text = got.get(auth.TEXT_KEY)
+    data = text.encode() if isinstance(text, str) else next(
+        (v for v in got.values() if isinstance(v, (bytes, bytearray))), b"")
+    if not data:
+        raise ServiceError("upstream", "the export came back empty", 502)
+    name = f"{re.sub(r'[^A-Za-z0-9_-]+', '-', params['id']).strip('-') or 'doc'}.{fmt}"
+    folder = _get(body, "dir")
+    if folder is None:
+        return {"filename": name, "content_b64": base64.b64encode(data).decode()}
+    folder = Path(folder).expanduser()
+    if not folder.is_dir():
+        raise ServiceError("invalid", f"not a folder: {folder}")
+    (folder / name).write_bytes(data)
+    return {"filename": name, "path": str(folder / name)}
+
+
 # -- terminals: the real command in a terminal the app shows -------------------------
 # Each answers an ActionTerminalDTO: the pane and tmux server the app's own tmux
 # client attaches to, and the id for POST /terminals/{id}/input. While the same
@@ -1704,6 +1839,11 @@ ROUTES = [
     _post("/account/login", account_login),
     _post("/account/logout", account_logout),
     _post("/account/switch-org", account_switch_org),
+    # GET on these paths reads (routes_read).
+    _post("/analysis-docs/{id}/share", share_doc),
+    Route("/v1/analysis-docs/{id}/share", _endpoint(unshare_doc), methods=["DELETE"]),
+    _post("/analysis-docs/{id}/export", export_doc),
+    Route("/v1/analysis-docs/{id}", _endpoint(delete_doc), methods=["DELETE"]),
     # Like every route, refused to agent callers by the guard.
     _post("/providers/{provider}/login", provider_login),
     _post("/providers/{provider}/trust", provider_trust),

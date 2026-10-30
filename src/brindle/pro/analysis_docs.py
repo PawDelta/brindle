@@ -36,6 +36,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from brindle.pro import analysis_policy
 from brindle.pro.orgkey import OrgKeys, repo_identity
 
 log = logging.getLogger(__name__)
@@ -56,15 +57,9 @@ NOTICE = ("brindle stores your analysis docs encrypted in your personal library 
 # -- switches -----------------------------------------------------------------------------------
 
 
-def resolve_switch(name: str, user: dict | None = None) -> bool:
-    """The effective value of switch ``name``. Today: the user's own choice
-    (``"on"``/``"off"``), else the plan default (``store`` and ``standard`` on
-    for Pro, the rest off). Team and enterprise defaults and enforcement slot
-    in here, ahead of the user's choice."""
-    choice = (user or {}).get(name)
-    if choice in ("on", "off"):
-        return choice == "on"
-    return name in PLAN_DEFAULT_ON
+def resolve_switch(name: str, user: dict | None = None, *, store=None) -> bool:
+    """Resolve the switch using the cached org policy and the user's choice."""
+    return analysis_policy.resolve_switch(name, user, store=store)
 
 
 # -- reading docs --------------------------------------------------------------------------------
@@ -191,7 +186,7 @@ class AnalysisDocs:
         """Whether the user's ``store`` switch is on. Failing to read it counts as off."""
         client, store = self._deps()
         try:
-            return resolve_switch("store", fetch_switches(client, store))
+            return resolve_switch("store", fetch_switches(client, store), store=store)
         except Exception:  # noqa: BLE001
             return False
 
@@ -312,9 +307,13 @@ def _call(method: str, path: str, body: dict | None = None, *, client=None, stor
 def api(method: str, path: str, body: dict | None = None, *, client=None, store=None) -> dict:
     """Call a Bearer endpoint; raises ``RuntimeError`` with a readable reason
     on a non-200 answer, ``auth.AuthError`` when not logged in or offline."""
+    from brindle.pro import auth
+
     status, resp = _call(method, path, body, client=client, store=store)
     if status != 200:
         raise RuntimeError(resp.get("error") if isinstance(resp, dict) and resp.get("error") else f"HTTP {status}")
+    if isinstance(resp, dict) and auth.BINARY_KEY in resp:
+        return resp
     return resp if isinstance(resp, dict) else {}
 
 

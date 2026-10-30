@@ -541,3 +541,62 @@ def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     assert body["keys"] == [{"name": "OPENAI_API_KEY", "set": True, "last4": "WXYZ"},
                             {"name": "UNSET_KEY", "set": False, "last4": ""}]
     assert "1234567890" not in json.dumps(body)
+
+
+def test_docs_with_no_scope_lists_each_readable_scope_once_per_doc(brindle_home, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    from brindle.pro import analysis_docs
+
+    held = {"user:u1": [("d1", 4, ["checkout"]), ("shared", 2, ["checkout", "refunds"])],
+            "group:t-empty": [],                                    # a team of theirs with no docs yet
+            "group:t-pay": [("team-only", 3, ["refunds"])],
+            "org:o1": [("shared", 2, ["checkout", "refunds"]), ("d2", 1, ["refunds"])]}
+
+    def api(method, path, body=None, **kw):     # the server refuses a list without a scope
+        url = urlsplit(path)
+        if url.path == "/analysis-docs/scopes":
+            return {"scopes": [{"kind": k, "id": i, "name": i, "can_share": k != "user"}
+                               for k, _, i in (s.partition(":") for s in held)]}
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        docs = held[f"{q['scope_kind']}:{q['scope_id']}"]
+        return {"docs": [{"doc_id": d, "created_at": at, "topics": t} for d, at, t in docs]}
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(sub="u1"))
+    monkeypatch.setattr(analysis_docs, "api", api)
+    _, scopes = _get("/v1/analysis-docs/scopes", AUTH)
+    assert [s["id"] for s in scopes["scopes"]] == ["u1", "t-empty", "t-pay", "o1"]
+    _, listed = _get("/v1/analysis-docs", AUTH)
+    assert [d["doc_id"] for d in listed["docs"]] == ["d1", "team-only", "shared", "d2"]
+    _, topics = _get("/v1/analysis-docs/topics", AUTH)
+    assert topics["topics"] == [{"topic": "refunds", "count": 3}, {"topic": "checkout", "count": 2}]
+
+
+@pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])
+def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, enough):
+    from brindle.db import Task
+    from brindle.pro import analysis_brief
+
+    def finished(agent_id, weight, rounds, *, brief=False, files=None, repo="/r"):
+        if files:
+            db.add_task(Task(f"t-{agent_id}", repo, agent_id, None, "ws", "dev", "x", "assign", 1, None, None,
+                             json.dumps(files), None, "merged", 1.0))
+        db.add_routing_decision(repo, task_id=f"t-{agent_id}", agent_id=agent_id, weight=weight,
+                                baseline_profile="dev", profile="dev", learned=False)
+        with db.tx() as c:
+            c.execute("UPDATE routing_decisions SET review_rounds=?, outcome='merged' WHERE agent_id=?",
+                      (rounds, agent_id))
+        if brief:
+            knowledge.record_receipt(db, agent_id, [(analysis_brief.BRIEF_ITEM, agent_id, "h")])
+
+    for i in range(briefed):
+        finished(f"b{i}", "heavy", 1, brief=True)
+    for i in range(5):
+        finished(f"o{i}", "heavy", 3)
+    finished("light", "light", 0)                                      # another size
+    finished("docs", "heavy", 9, files=["docs/plan.md"])              # another kind
+    finished("elsewhere", "heavy", 9, repo="/other")                  # another repo
+    finished("alone", "advanced", 7, brief=True)                      # nothing similar to compare with
+    code, body = _get("/v1/analysis-docs/results", AUTH, "repo=/r")
+    assert code == 200 and (body["enough"], body["compared"], body["briefed"]) == (enough, briefed, briefed + 1)
+    assert (body["with_brief"], body["without_brief"]) == ((1.0, 3.0) if enough else (None, None))

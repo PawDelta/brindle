@@ -15,7 +15,10 @@
    rationale match `brindle decisions --query` makes) and the documents
    through the engine's own search (GET /v1/kb/search, the same ranking
    agents get). A repo with nothing yet gets an empty state that says how
-   knowledge gets here. Nothing here sends anyone to a terminal. */
+   knowledge gets here. Nothing here sends anyone to a terminal.
+   Four tabs: Map (still to come), Docs (the analysis-doc library, DocsView),
+   Imported (the folders above) and Decisions; the search box and the empty
+   state serve the last two. */
 
 import { useCallback, useContext, useEffect, useRef, useState, type FormEvent } from "react";
 import { DaemonError, type DaemonClient, type DecisionPut, type KbHit, type KbSource } from "../../api/client";
@@ -26,14 +29,29 @@ import { plain } from "../../api/wording";
 import { PageHeader } from "../../components/PageHeader";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
 import { alert, button, card, field, h2, mono, notice, pill, primary, quiet } from "../../components/ui";
+import type { KnowledgeView } from "../../routes";
 import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
+import { DocsView } from "./DocsView";
 
 export interface KnowledgeScreenProps {
   client: DaemonClient;
   /* The native folder picker (the app's shell); without one the path is typed. */
   pickFolder?: PickFolder;
+  /* The tab to open on (default Docs; an imported doc's number opens Imported). */
+  view?: KnowledgeView;
+  /* A library doc (its id) to open in the reader, or an imported one (its number). */
+  doc?: number | string;
+  /* Docs only of this session (its root agent id). */
+  session?: string;
 }
+
+const TABS: [KnowledgeView, string][] = [
+  ["map", "Map"],
+  ["docs", "Docs"],
+  ["imported", "Imported"],
+  ["decisions", "Decisions"],
+];
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
@@ -371,9 +389,10 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
   );
 }
 
-export function KnowledgeScreen({ client, pickFolder }: KnowledgeScreenProps) {
+export function KnowledgeScreen({ client, pickFolder, view, doc, session }: KnowledgeScreenProps) {
   const pick = useRepo();
   const { repo, repos } = pick;
+  const [tab, setTab] = useState<KnowledgeView>(view ?? (typeof doc === "number" ? "imported" : "docs"));
   const [decisions, setDecisions] = useState<DecisionDTO[] | null>(null);
   const [sources, setSources] = useState<KbSource[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -504,16 +523,46 @@ export function KnowledgeScreen({ client, pickFolder }: KnowledgeScreenProps) {
   const shown = decisions?.filter((d) => matches(d, query)) ?? [];
   const empty = decisions !== null && sources !== null && decisions.length === 0 && sources.length === 0 && !recording && !adding && !query && pending.length === 0;
   const startRecording = () => {
+    setTab("decisions");
     setRecording(true);
     setRecorded(null);
   };
+  const startAdding = () => {
+    setTab("imported");
+    setAdding(true);
+  };
+  const local = tab === "imported" || tab === "decisions";
+  const count = (t: KnowledgeView) =>
+    t === "imported" && sources ? (sources.length === 1 ? "1 folder" : `${sources.length} folders`) : t === "decisions" && decisions ? String(decisions.length) : null;
   return (
     <section className="flex flex-col gap-s3" aria-label="Knowledge">
-      <PageHeader title="Knowledge" lede="What your agents know and remember about this repo: decisions they follow, and documents they can look up.">
+      <PageHeader title="Knowledge" lede="What your agents know and remember about this repo: docs they wrote, decisions they follow, and documents they can look up.">
         <RepoSelect {...pick} />
       </PageHeader>
-      {repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
-      {loadError && (
+      <div role="tablist" aria-label="Knowledge views" className="-mt-s1 flex gap-0.5 border-b border-line text-sm">
+        {TABS.map(([t, name]) => (
+          <button
+            key={t}
+            type="button"
+            role="tab"
+            aria-selected={tab === t}
+            className={`-mb-px border-b-2 px-s1 py-1 ${tab === t ? "border-fawn font-medium text-ink" : "border-transparent text-ink-2 hover:text-ink"}`}
+            onClick={() => setTab(t)}
+          >
+            {name}
+            {count(t) && <span className="ml-1 font-mono text-xs text-ink-3">{count(t)}</span>}
+          </button>
+        ))}
+      </div>
+      {tab === "map" && (
+        <section className={`${card} flex flex-col gap-1 px-s3 py-s3`} aria-label="Map" data-testid="map">
+          <h2 className={h2}>The map is on its way</h2>
+          <p className="text-sm text-ink-2">Docs, decisions and imported folders, laid out by topic and by the paths they cover, with what connects them. Until then, Docs, Imported and Decisions each list theirs.</p>
+        </section>
+      )}
+      {tab === "docs" && <DocsView client={client} repo={repo ?? undefined} session={session} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />}
+      {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
+      {local && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
           <span>Could not load knowledge: {loadError}</span>
           <button type="button" className={button} onClick={() => void load()}>
@@ -521,7 +570,7 @@ export function KnowledgeScreen({ client, pickFolder }: KnowledgeScreenProps) {
           </button>
         </div>
       )}
-      {repo && !empty && (
+      {local && repo && !empty && (
         <input
           type="search"
           className={`${field} w-full py-s1`}
@@ -531,8 +580,8 @@ export function KnowledgeScreen({ client, pickFolder }: KnowledgeScreenProps) {
           onChange={(e) => setQuery(e.target.value)}
         />
       )}
-      {repo && empty && <EmptyState onRecord={startRecording} onAddFolder={() => setAdding(true)} />}
-      {repo && hits.state !== "idle" && (
+      {local && repo && empty && <EmptyState onRecord={startRecording} onAddFolder={startAdding} />}
+      {local && repo && hits.state !== "idle" && (
         <section className={`${card} flex flex-col gap-s1 px-s2 py-s2`} aria-label="Document hits" data-testid="hits">
           <header className="flex items-baseline gap-s1">
             <h2 className={h2}>In the documents</h2>
@@ -557,7 +606,7 @@ export function KnowledgeScreen({ client, pickFolder }: KnowledgeScreenProps) {
           )}
         </section>
       )}
-      {repo && !empty && (
+      {tab === "decisions" && repo && !empty && (
         <section className="flex flex-col gap-s1" aria-label="Decisions" data-testid="decisions">
           <header className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5">
             <h2 className={h2}>Decisions</h2>
@@ -600,7 +649,7 @@ export function KnowledgeScreen({ client, pickFolder }: KnowledgeScreenProps) {
           )}
         </section>
       )}
-      {repo && !empty && (
+      {tab === "imported" && repo && !empty && (
         <section className="flex flex-col gap-s1" aria-label="Documents" data-testid="sources">
           <header className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5">
             <h2 className={h2}>Documents</h2>
