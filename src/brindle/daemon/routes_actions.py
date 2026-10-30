@@ -1379,7 +1379,7 @@ def put_doc_destination(db: DB, params: dict, body: Body) -> Any:
     """Connect the team's export destination (``kind``, ``target``, ``credential``; admin only)."""
     payload = {"kind": _get(body, "kind", required=True),
                "target": _get(body, "target", (str, dict), required=True),    # a SharePoint site and folder, or {drive_id, folder_id?}
-               "credential": _get(body, "credential", required=True)}
+               "credential": _get(body, "credential", (str, dict), required=True)}    # a service account's JSON, or an app's ids and secret
     return docs_org_api("PUT", "destination", payload, repo=_get(body, "repo"), admin=True)
 
 

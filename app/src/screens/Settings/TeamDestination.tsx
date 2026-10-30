@@ -2,24 +2,26 @@
    (SharePoint or Google Drive), shown to owners and admins only (GET /account's
    `role`; the daemon refuses anyone else on PUT and DELETE too). It shows what
    is connected (GET /analysis-docs/destination), connects one and revokes it
-   (DELETE). SharePoint: the admin signs in in the system browser, as in
-   Knowledge's Export. Google Drive: a service account, never a person's
-   sign-in: the admin gives its JSON key and the shared drive's id (and a folder)
-   and the key goes to the server once, in the PUT, then is dropped here. Anyone else, or an engine without the routes, sees nothing. */
+   (DELETE). Both are app credentials, never a person's sign-in (that is only for
+   personal exports, Knowledge's Export): Google Drive takes a service account's
+   JSON key and a shared drive's id (and a folder); SharePoint an Entra app's
+   tenant id, client id and secret (granted Sites.Selected on one site) and that
+   site (and a folder). The secret goes to the server once, in the PUT, and is
+   dropped here; nothing is stored. Anyone else, or an engine without the routes,
+   sees nothing. */
 
-import { useEffect, useRef, useState } from "react";
-import type { DaemonClient, DocExportConfig, TeamDestination as Destination, TeamDestinationKind } from "../../api/client";
+import { useEffect, useState } from "react";
+import type { DaemonClient, TeamDestination as Destination, TeamDestinationKind } from "../../api/client";
 import { plain } from "../../api/wording";
 import { alert, button, card, field, h2, label, notice } from "../../components/ui";
-import { ExportSession, type ExportProvider } from "../Knowledge/ExportSession";
 
-export type TeamDestinationClient = Pick<DaemonClient, "account" | "docDestination" | "docExportConfig" | "setDocDestination" | "clearDocDestination">;
+export type TeamDestinationClient = Pick<DaemonClient, "account" | "docDestination" | "setDocDestination" | "clearDocDestination">;
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
-const KINDS: { kind: TeamDestinationKind; name: string; provider: ExportProvider; target: string }[] = [
-  { kind: "sharepoint", name: "SharePoint", provider: "microsoft", target: "Site id, then the folder: site-id/Docs/Analysis" },
-  { kind: "google_drive", name: "Google Drive", provider: "google", target: "" },
+const KINDS: { kind: TeamDestinationKind; name: string }[] = [
+  { kind: "sharepoint", name: "SharePoint" },
+  { kind: "google_drive", name: "Google Drive" },
 ];
 
 const when = (v: number | string | null) => {
@@ -28,21 +30,29 @@ const when = (v: number | string | null) => {
   return Number.isNaN(ms) ? null : new Date(ms).toLocaleDateString();
 };
 
-export function TeamDestination({ client, session }: { client: TeamDestinationClient; session?: ExportSession }) {
+function Field({ name, value, onChange, secret, area }: { name: string; value: string; onChange(v: string): void; secret?: boolean; area?: boolean }) {
+  return (
+    <label className="flex flex-col gap-0.5">
+      <span className={label}>{name}</span>
+      {area ? (
+        <textarea className={`${field} font-mono text-xs`} rows={3} value={value} onChange={(e) => onChange(e.target.value)} />
+      ) : (
+        <input type={secret ? "password" : "text"} autoComplete="off" className={field} value={value} onChange={(e) => onChange(e.target.value)} />
+      )}
+    </label>
+  );
+}
+
+export function TeamDestination({ client }: { client: TeamDestinationClient }) {
   const [admin, setAdmin] = useState(false);
   const [dest, setDest] = useState<Destination | null>(null);
-  const [config, setConfig] = useState<DocExportConfig | null>(null);
   const [kind, setKind] = useState<TeamDestinationKind>("sharepoint");
-  const [target, setTarget] = useState("");
-  /* Google Drive: the service account's key (held only until the PUT), the shared drive and an optional folder. */
-  const [key, setKey] = useState("");
-  const [driveId, setDriveId] = useState("");
-  const [folderId, setFolderId] = useState("");
+  /* The credentials are held only until the PUT. */
+  const [f, setF] = useState({ key: "", driveId: "", folderId: "", tenant: "", clientId: "", secret: "", site: "", folder: "" });
+  const set = (k: keyof typeof f) => (v: string) => setF((had) => ({ ...had, [k]: v }));
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const own = useRef<ExportSession | undefined>(undefined);
-  const sess = session ?? (own.current ??= new ExportSession());
 
   useEffect(() => {
     let live = true;
@@ -51,7 +61,6 @@ export function TeamDestination({ client, session }: { client: TeamDestinationCl
         if (!live || (a.role !== "owner" && a.role !== "admin")) return;
         setAdmin(true);
         client.docDestination().then((d) => live && setDest(d), () => undefined);
-        client.docExportConfig().then((c) => live && setConfig(c), () => undefined);
       },
       () => undefined,
     );
@@ -62,8 +71,6 @@ export function TeamDestination({ client, session }: { client: TeamDestinationCl
 
   if (!admin) return null;
 
-  const choice = KINDS.find((k) => k.kind === kind)!;
-  const clientId = choice.provider === "google" ? config?.google_client_id : config?.microsoft_client_id;
   const run = async (what: () => Promise<string>) => {
     setBusy(true);
     setError(null);
@@ -81,30 +88,31 @@ export function TeamDestination({ client, session }: { client: TeamDestinationCl
     run(async () => {
       let parsed: { type?: unknown; client_email?: unknown; private_key?: unknown } = {};
       try {
-        parsed = JSON.parse(key);
+        parsed = JSON.parse(f.key);
       } catch {
         /* checked below */
       }
       if (parsed.type !== "service_account" || !parsed.client_email || !parsed.private_key) throw new Error("Paste or choose the service account's JSON key.");
-      if (!driveId.trim()) throw new Error("Enter the shared drive's id.");
+      if (!f.driveId.trim()) throw new Error("Enter the shared drive's id.");
       try {
-        setDest(await client.setDocDestination({ kind: "google_drive", target: { drive_id: driveId.trim(), ...(folderId.trim() ? { folder_id: folderId.trim() } : {}) }, credential: key }));
+        setDest(await client.setDocDestination({ kind: "google_drive", target: { drive_id: f.driveId.trim(), ...(f.folderId.trim() ? { folder_id: f.folderId.trim() } : {}) }, credential: f.key }));
       } finally {
-        setKey("");
+        set("key")("");
       }
       return "Connected to Google Drive.";
     });
 
-  const connect = () =>
+  const connectSharePoint = () =>
     run(async () => {
+      const [tenant_id, client_id, client_secret, site] = [f.tenant.trim(), f.clientId.trim(), f.secret.trim(), f.site.trim()];
+      if (!tenant_id || !client_id || !client_secret) throw new Error("Enter the app's tenant id, client id and client secret.");
+      if (!site) throw new Error("Enter the site's URL or id.");
       try {
-        await sess.signIn(choice.provider, clientId!);
-        const credential = sess.credential(choice.provider)!;
-        setDest(await client.setDocDestination({ kind, target: target.trim(), credential }));
+        setDest(await client.setDocDestination({ kind: "sharepoint", target: { site, ...(f.folder.trim() ? { folder: f.folder.trim() } : {}) }, credential: { tenant_id, client_id, client_secret } }));
       } finally {
-        sess.signOut();
+        set("secret")("");
       }
-      return `Connected to ${choice.name}.`;
+      return "Connected to SharePoint.";
     });
 
   const revoke = () =>
@@ -137,7 +145,7 @@ export function TeamDestination({ client, session }: { client: TeamDestinationCl
         ) : (
           <p className="text-ink-2">No destination is connected.</p>
         )}
-        <div className="flex flex-wrap items-end gap-s1" role="group" aria-label="Connect a destination">
+        <div className="flex flex-col gap-s1" role="group" aria-label="Connect a destination">
           <label className="flex flex-col gap-0.5">
             <span className={label}>Where</span>
             <select className={field} value={kind} onChange={(e) => setKind(e.target.value as TeamDestinationKind)}>
@@ -150,48 +158,42 @@ export function TeamDestination({ client, session }: { client: TeamDestinationCl
           </label>
           {kind === "sharepoint" ? (
             <>
-              <label className="flex min-w-56 flex-1 flex-col gap-0.5">
-                <span className={label}>Target</span>
-                <input type="text" className={field} placeholder={choice.target} value={target} onChange={(e) => setTarget(e.target.value)} />
-              </label>
-              <button type="button" className={button} disabled={busy || !clientId || !target.trim()} onClick={() => void connect()}>
-                Sign in and connect
-              </button>
+              <p className="text-xs text-ink-3">Use an Entra app granted Sites.Selected on this one site. The secret is sent once and isn't kept on this machine.</p>
+              <Field name="Tenant id" value={f.tenant} onChange={set("tenant")} />
+              <Field name="Client id" value={f.clientId} onChange={set("clientId")} />
+              <Field name="Client secret" value={f.secret} onChange={set("secret")} secret />
+              <Field name="Site URL or id" value={f.site} onChange={set("site")} />
+              <Field name="Folder (optional)" value={f.folder} onChange={set("folder")} />
+              <div>
+                <button type="button" className={button} disabled={busy} onClick={() => void connectSharePoint()}>
+                  Connect
+                </button>
+              </div>
             </>
           ) : (
-            <div className="flex w-full flex-col gap-s1">
+            <>
               <p className="text-xs text-ink-3">Add the service account's email as a Content manager on the shared drive first. The key is sent once and isn't kept on this machine.</p>
-              <label className="flex flex-col gap-0.5">
-                <span className={label}>Service account JSON key</span>
-                <textarea className={`${field} font-mono text-xs`} rows={3} value={key} onChange={(e) => setKey(e.target.value)} />
-              </label>
+              <Field name="Service account JSON key" value={f.key} onChange={set("key")} area />
               <input
                 type="file"
                 accept="application/json,.json"
                 aria-label="Choose the key file"
                 onChange={(e) => {
-                  const f = e.target.files?.[0];
+                  const file = e.target.files?.[0];
                   e.target.value = "";
-                  if (f) void f.text().then(setKey);
+                  if (file) void file.text().then(set("key"));
                 }}
               />
-              <label className="flex flex-col gap-0.5">
-                <span className={label}>Shared drive id</span>
-                <input type="text" className={field} value={driveId} onChange={(e) => setDriveId(e.target.value)} />
-              </label>
-              <label className="flex flex-col gap-0.5">
-                <span className={label}>Folder id (optional)</span>
-                <input type="text" className={field} value={folderId} onChange={(e) => setFolderId(e.target.value)} />
-              </label>
+              <Field name="Shared drive id" value={f.driveId} onChange={set("driveId")} />
+              <Field name="Folder id (optional)" value={f.folderId} onChange={set("folderId")} />
               <div>
                 <button type="button" className={button} disabled={busy} onClick={() => void connectGoogle()}>
                   Connect
                 </button>
               </div>
-            </div>
+            </>
           )}
         </div>
-        {kind === "sharepoint" && config && !clientId && <p className="text-xs text-ink-3">{choice.name} sign-in isn't set up for this build.</p>}
       </div>
       {said && (
         <p role="status" className={notice}>
