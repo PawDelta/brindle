@@ -599,6 +599,77 @@ def test_docs_with_no_scope_lists_each_readable_scope_once_per_doc(brindle_home,
     assert topics["topics"] == [{"topic": "refunds", "count": 3}, {"topic": "checkout", "count": 2}]
 
 
+def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, monkeypatch):
+    from brindle import agents, knowledge
+    from brindle.pro import analysis_brief
+    from brindle.pro import analysis_docs
+
+    with db.tx() as c:
+        c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, drafter, state)"
+                  " VALUES ('r1', 'feature', 'overlap-doc', 'w1', 'open')")
+        c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, drafter, state)"
+                  " VALUES ('r1', 'feature', 'pending-doc', 'w1', 'publish')")
+    def docs_api(method, path, body=None, **kw):
+        if path == "/analysis-docs/manual-only":
+            return {"doc_id": "manual-only", "version": 3}
+        assert path == "/analysis-docs/brief"
+        return {"block": "A brief", "cited": [{"doc_id": "worker-cited", "version": 4}]}
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(features=()))
+    monkeypatch.setattr(analysis_docs, "api", docs_api)
+    analysis_docs.read_doc(db, "r1", "manual-only")
+    knowledge.record_receipt(db, "r1", [(analysis_docs.UPDATED_ITEM, "overlap-doc", "published")])
+    monkeypatch.setattr("brindle.identity_lock.ensure_workspace", lambda *a: None)
+    monkeypatch.setattr(agents, "_launch", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    worker = agents.spawn(db, db.get_workspace(seeded["ws"]), "developer", prompt="task", mode="assign",
+                          parent_id="r1", weight="heavy")
+    assert (analysis_brief.DOC_ITEM, "worker-cited", "4") in knowledge.receipt(db, worker.id)
+    knowledge.record_receipt(db, "other-session", [(analysis_brief.DOC_ITEM, "other-doc", "1")])
+
+    code, body = _get("/v1/analysis-docs/session-summary", AUTH, "session=r1")
+
+    assert code == 200
+    assert body == {"writing": 1, "updated": 1, "using": 1, "total": 2}
+@pytest.mark.parametrize("role,allowed", [("owner", True), ("admin", True), ("member", False), (None, False)])
+def test_doc_destination_is_read_by_anyone_and_changed_only_by_admins(monkeypatch, role, allowed):
+    from brindle.daemon import routes_actions
+    from brindle.pro import analysis_docs
+    from brindle.service.errors import ServiceError
+
+    sent = []
+
+    def api(method, path, body=None, **kw):
+        sent.append((method, path, body))
+        return {"kind": "sharepoint", "target_name": "Docs", "connected_at": 1}
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement",
+                        lambda store=None: SimpleNamespace(sub="u1", org_id="o1", role=role))
+    monkeypatch.setattr(analysis_docs, "api", api)
+    code, body = _get("/v1/analysis-docs/destination", AUTH)
+    assert (code, body["target_name"], sent[-1][:2]) == (200, "Docs", ("GET", "/orgs/o1/analysis-docs/destination"))
+    put = {"kind": "sharepoint", "target": "site/folder", "credential": "tok"}
+    sent.clear()
+    if allowed:
+        routes_actions.put_doc_destination(None, {}, put)
+        routes_actions.delete_doc_destination(None, {}, {})
+        assert [(m, b) for m, _, b in sent] == [("PUT", put), ("DELETE", None)]
+    else:
+        for act, args in ((routes_actions.put_doc_destination, put), (routes_actions.delete_doc_destination, {})):
+            with pytest.raises(ServiceError) as e:
+                act(None, {}, args)
+            assert e.value.http_status == 403
+        assert sent == []
+
+
+def test_doc_policy_and_export_config_are_proxied(monkeypatch):
+    from brindle.pro import analysis_docs
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement",
+                        lambda store=None: SimpleNamespace(sub="u1", org_id="o1", role="member"))
+    monkeypatch.setattr(analysis_docs, "api", lambda method, path, body=None, **kw: {"path": path})
+    assert _get("/v1/analysis-docs/policy", AUTH)[1] == {"path": "/orgs/o1/analysis-docs/policy"}
+    assert _get("/v1/analysis-docs/export-config", AUTH)[1] == {"path": "/analysis-docs/export-config"}
 @pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])
 def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, enough):
     from brindle.db import Task

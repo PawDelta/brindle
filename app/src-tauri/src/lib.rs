@@ -21,6 +21,7 @@
 mod about;
 mod daemon;
 mod engine;
+mod oauth;
 /// Every pane the webview shows, through a real tmux client on a pty.
 pub mod pty_view;
 mod setup;
@@ -195,6 +196,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_inbox_count,
             open_url,
+            oauth::oauth_listen,
+            oauth::oauth_wait,
+            oauth::oauth_cancel,
+            oauth::provider_http,
             open_local_path,
             daemon::daemon_connect,
             daemon::daemon_request,

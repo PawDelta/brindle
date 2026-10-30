@@ -228,7 +228,7 @@ export interface GoalPanelProps {
 export function GoalPanel({ client, repo, root, store, paused = false, compact = false, onReview, openUrl = openExternal, onCloseSession, onOpenDocs }: GoalPanelProps) {
   const [goal, setGoal] = useState<GoalDTO | null>(null);
   // The docs this session wrote or used; null while unknown or unreachable (the line stays hidden).
-  const [docCount, setDocCount] = useState<number | null>(null);
+  const [docSummary, setDocSummary] = useState<{ total: number; writing: number; updated: number; using: number } | null>(null);
   // An older engine's stand-in for goal_phase: its word on the session's PR.
   const readiness = usePrReadiness(client, root, store);
   const [loaded, setLoaded] = useState(false);
@@ -251,9 +251,9 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
     if (activeSession.current !== session) return Promise.resolve();
     const seq = ++requestSeq.current;
     const current = () => activeSession.current === session && seq === requestSeq.current;
-    void client.docs({ repo, session: root }).then(
-      (got) => current() && setDocCount(got.docs.length),
-      () => current() && setDocCount(null),
+    void client.docSessionSummary(root).then(
+      (got) => current() && setDocSummary(got),
+      () => current() && setDocSummary(null),
     );
     return client
       .goal(repo, root)
@@ -276,7 +276,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
     setLoadError(null);
     setActionError(null);
     setEnabling(false);
-    setDocCount(null);
+    setDocSummary(null);
     void refresh();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
@@ -383,9 +383,9 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
     ) : null;
   /* The session's docs, one quiet line under the milestones; hidden with none. */
   const docsLine =
-    docCount && docCount > 0 ? (
+    docSummary && docSummary.total > 0 ? (
       <button type="button" className={`${quiet} self-start text-xs`} data-testid="goal-docs" title="Knowledge › Docs for this session" onClick={onOpenDocs}>
-        {docCount} {docCount === 1 ? "doc" : "docs"} →
+        {docSummary.total} {docSummary.total === 1 ? "doc" : "docs"} · writing {docSummary.writing}, using {docSummary.using} →
       </button>
     ) : null;
   /* Done's step, beside the Done status: close the session, one click, nothing asked. */

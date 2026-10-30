@@ -1365,6 +1365,7 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
 
 DOC_SCOPES = {"user": "user", "team": "group", "group": "group", "enterprise": "org", "org": "org"}
 EXPORT_FORMATS = ("md", "docx", "zip")
+EXPORT_DESTINATIONS = ("download", "google_docs", "sharepoint")
 
 
 def _docs_entitlement(repo: str | None):
@@ -1397,6 +1398,30 @@ def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | No
         return analysis_docs.api(method, path + (f"?{urlencode(query)}" if query else ""), body)
     except (RuntimeError, auth.TransportError) as e:    # unreachable, or an answer it can't read: not signed out
         raise ServiceError("upstream", str(e), 502) from e
+
+
+def docs_org_api(method: str, tail: str, body: dict | None = None, *, repo: str | None = None,
+                 admin: bool = False) -> dict:
+    """``/orgs/<org>/analysis-docs/<tail>`` for the verified entitlement's org;
+    ``admin`` refuses (403, nothing sent) unless its role is owner or admin."""
+    from urllib.parse import quote
+
+    ent = _docs_entitlement(repo)
+    if admin and ent.role not in ("owner", "admin"):
+        raise ServiceError("forbidden", "only an organisation owner or admin can do this", 403)
+    return docs_api(method, f"/orgs/{quote(ent.org_id, safe='')}/analysis-docs/{tail}", body, repo=repo)
+
+
+def put_doc_destination(db: DB, params: dict, body: Body) -> Any:
+    """Connect the team's export destination (``kind``, ``target``, ``credential``; admin only)."""
+    payload = {"kind": _get(body, "kind", required=True),
+               "target": _get(body, "target", (str, dict), required=True),    # a SharePoint site and folder, or {drive_id, folder_id?}
+               "credential": _get(body, "credential", (str, dict), required=True)}    # a service account's JSON, or an app's ids and secret
+    return docs_org_api("PUT", "destination", payload, repo=_get(body, "repo"), admin=True)
+
+
+def delete_doc_destination(db: DB, params: dict, body: Body) -> Any:
+    return docs_org_api("DELETE", "destination", repo=_get(body, "repo"), admin=True)
 
 
 def docs_scopes(repo: str | None = None) -> list[dict]:
@@ -1476,8 +1501,11 @@ def export_doc(db: DB, params: dict, body: Body) -> Any:
     fmt = _get(body, "format", default="md")
     if fmt not in EXPORT_FORMATS:
         raise ServiceError("invalid", "format is md, docx or zip")
+    destination = _get(body, "destination", default="download")
+    if destination not in EXPORT_DESTINATIONS:
+        raise ServiceError("invalid", "destination is download, google_docs or sharepoint")
     got = docs_api("GET", _doc_path(params, "export"), repo=params.get("repo"),
-                   query={"format": fmt, "destination": "download"})
+                   query={"format": fmt, "destination": destination})
     text = got.get(auth.TEXT_KEY)
     data = text.encode() if isinstance(text, str) else next(
         (v for v in got.values() if isinstance(v, (bytes, bytearray))), b"")
@@ -1879,6 +1907,9 @@ ROUTES = [
     _post("/account/logout", account_logout),
     _post("/account/switch-org", account_switch_org),
     # GET on these paths reads (routes_read).
+    # Before /analysis-docs/{id}.
+    Route("/v1/analysis-docs/destination", _endpoint(put_doc_destination), methods=["PUT"]),
+    Route("/v1/analysis-docs/destination", _endpoint(delete_doc_destination), methods=["DELETE"]),
     _post("/analysis-docs/{id}/share", share_doc),
     Route("/v1/analysis-docs/{id}/share", _endpoint(unshare_doc), methods=["DELETE"]),
     _post("/analysis-docs/{id}/export", export_doc),

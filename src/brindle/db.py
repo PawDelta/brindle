@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
     port_base INTEGER,
     tmux_session TEXT NOT NULL,
     created_at REAL NOT NULL,
+    session_root TEXT,
     UNIQUE (repo_root, name)
 );
 CREATE TABLE IF NOT EXISTS agents (
@@ -648,6 +649,7 @@ class Workspace:
     port_base: int | None
     tmux_session: str
     created_at: float
+    session_root: str | None = None
 
 
 @dataclass
@@ -952,6 +954,9 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        workspace_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(workspaces)")}
+        if "session_root" not in workspace_cols:
+            self.conn.execute("ALTER TABLE workspaces ADD COLUMN session_root TEXT")
         if any(r["table"] == "kb_docs" for r in self.conn.execute("PRAGMA foreign_key_list(doc_requests)")):
             # Early local-only requests referenced kb_docs. Keep their ids and
             # titles while allowing server-only references in the same store.
@@ -1102,11 +1107,17 @@ class DB:
     def add_workspace(self, ws: Workspace) -> None:
         with self.tx() as c:
             c.execute(
-                "INSERT INTO workspaces VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO workspaces (id, repo_root, name, kind, branch, base_branch, path, port_base,"
+                " tmux_session, created_at, session_root) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (ws.id, ws.repo_root, ws.name, ws.kind, ws.branch, ws.base_branch,
-                 ws.path, ws.port_base, ws.tmux_session, ws.created_at),
+                 ws.path, ws.port_base, ws.tmux_session, ws.created_at, ws.session_root),
             )
         bus.publish_ws(self, "workspace.created", ws, workspace_kind=ws.kind, branch=ws.branch)
+
+    def set_workspace_session_root(self, workspace_id: str, session_root: str) -> None:
+        """Remember which session owns work in this workspace, even after its worker exits."""
+        with self.tx() as c:
+            c.execute("UPDATE workspaces SET session_root = ? WHERE id = ?", (session_root, workspace_id))
 
     def get_workspace(self, ws_id: str) -> Workspace | None:
         row = self.conn.execute("SELECT * FROM workspaces WHERE id=?", (ws_id,)).fetchone()
