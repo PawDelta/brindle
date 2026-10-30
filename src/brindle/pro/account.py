@@ -19,6 +19,11 @@ ENTERPRISE_URL = "https://pawdelta.com/brindle/enterprise"
 
 # The paid features: (entitlement feature, cheapest plan with it, what it is, how to use it).
 FEATURES = (
+    ("analysis_docs", "pro", "analysis deliverables and personal library",
+     "managed rules for .brindle/deliverables/<slug>/main.md"),
+    ("analysis_docs_team", "team", "shared team analysis library", "team analysis document scopes"),
+    ("analysis_docs_enterprise", "enterprise", "org analysis library and controls",
+     "enterprise analysis document policy"),
     ("learning", "pro", "hosted learning: picks the best profile per task",
      "on by itself; see `brindle learning`"),
     ("services", "pro", "per-worktree Docker services (db, cache)",

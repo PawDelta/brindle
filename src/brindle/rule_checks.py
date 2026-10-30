@@ -479,16 +479,21 @@ def run(db, ws) -> Result | None:
     if not names:
         return None
     mechanical = any(p.mechanical for p in packs)
-    if not mechanical and not scope and not protected:
+    deliverables = [p for p in packs if p.deliverables]
+    if not mechanical and not scope and not protected and not deliverables:
         return Result(names, [])
     try:
         base = workspaces.require_base(ws)
         diff = branch_diff(ws.path, base) if mechanical else None
-        files = branch_files(ws.path, base) if scope or protected else []
+        files = branch_files(ws.path, base) if scope or protected or deliverables else []
+        from brindle import deliverable_check
+
+        checked = [v for p in deliverables
+                   for v in deliverable_check.check_branch(ws.path, files, p.name)]
     except (git.GitError, workspaces.WorkspaceError) as e:
         return Result(names, [], problem=f"couldn't read the branch's diff: {e}")
     violations = check(packs, diff) if diff is not None else []
-    return Result(names, violations + check_write_scope(scope, files)
+    return Result(names, violations + checked + check_write_scope(scope, files)
                   + check_protected_paths(protected, files))
 
 

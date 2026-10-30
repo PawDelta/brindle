@@ -188,6 +188,7 @@ class RulePack:
     require_tests_for: list[str] = field(default_factory=list)
     deny_patterns: list[str] = field(default_factory=list)
     source: str = ""   # where it was read from, for `brindle profile show`
+    deliverables: bool = False  # enabled only by the verified managed analysis pack
 
     @property
     def mechanical(self) -> bool:
@@ -685,6 +686,11 @@ def load_rule_packs(profile: Profile, repo_root: str | None = None) -> list[Rule
     if repo_root and LEARNED_PACK not in profile.rules and learned_pack_path(repo_root).is_file():
         packs.append(load_rule_pack(LEARNED_PACK, repo_root))
     packs.extend(_required_packs(required))
+    from brindle.pro import analysis_rule_pack
+
+    managed = analysis_rule_pack.pack()
+    if managed is not None:
+        packs.append(managed)
     return packs
 
 
