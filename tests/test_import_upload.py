@@ -150,6 +150,48 @@ def test_files_go_in_batches_of_20_and_a_rejected_file_does_not_hold_back_the_re
     assert len(remote.items) == 21 and imports.in_library(db, source)       # notes.md + n00..n19; only n20 failed
 
 
+def test_a_lost_claim_queues_every_doc_of_the_batch_that_was_stored(folder, remote, deps):
+    db, source, docs = folder
+    (docs / "more.md").write_text("# More")
+
+    def steal():
+        with db.tx() as c:
+            c.execute("UPDATE kb_import_library SET op_token = 'other'")
+
+    remote.during = steal
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
+    assert remote.items == {} and sorted(remote.deleted) == ["d1", "d2"]     # neither doc is left unowned
+    assert db.conn.execute("SELECT count(*) FROM kb_import_uploads").fetchone()[0] == 0
+
+
+def test_a_restored_file_is_not_adopted_while_its_old_doc_waits_for_deletion(folder, remote, deps):
+    db, source, docs = folder
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
+    (docs / "notes.md").unlink()
+    remote.fail_delete = True
+    imports.sync_upload(db, source, "/repo", **deps)                          # d1 queued, its delete fails
+    (docs / "notes.md").write_text("# Notes\nthe TTL is too short")
+    assert imports.sync_upload(db, source, "/repo", **deps)["failed"] == ["notes.md"]     # d1 comes back: not adopted
+    remote.fail_delete = False
+    imports.sync_upload(db, source, "/repo", **deps)                          # d1 deleted, the file sent again
+    assert [v["id"] for v in remote.items.values()] == ["d2"]
+    assert [r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM kb_import_uploads")] == ["d2"]
+
+
+def test_a_drain_sends_no_folder_delete_while_another_operation_holds_the_folder(folder, remote, deps):
+    db, source, _ = folder
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
+    remote.fail_delete = True
+    imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
+    remote.fail_delete = False
+    with db.tx() as c:
+        c.execute("UPDATE kb_import_library SET op = 'add', op_token = 'held', op_until = 9e12")
+    sent = len(remote.calls)
+    imports.drain_pending(db, client=deps["client"], store=deps["store"])
+    assert not [c for c in remote.calls[sent:] if c[0].startswith("DELETE /analysis-docs/imports/")]
+    assert imports.state(db, source, imports.current_identity(deps["client"], deps["store"])) == imports.REMOVING
+
+
 def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, remote, deps, monkeypatch):
     db, source, docs = folder
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)

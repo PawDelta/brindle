@@ -461,18 +461,17 @@ def drain_pending(db: DB, *, client=None, store=None) -> None:
     try:
         snap = _snapshot(client, store)
         who = snap.who
+        # A removing folder's DELETE covers everything the identity has under it, so it is sent only
+        # under the folder's own claim (a holder in flight is left alone), kept until the state is settled.
         for r in db.conn.execute("SELECT source_id FROM kb_import_library WHERE identity = ? AND state = ?",
                                  (who, REMOVING)).fetchall():
-            _delete_folder(db, snap, r["source_id"])
-        _drain(db, snap)
-        done = db.conn.execute(
-            "SELECT source_id FROM kb_import_library l WHERE identity = ? AND state = ? AND NOT EXISTS"
-            " (SELECT 1 FROM kb_import_deletions x WHERE x.source_id = l.source_id AND x.identity = l.identity)",
-            (who, REMOVING)).fetchall()
-        for r in done:
             token = _claim(db, r["source_id"], "remove", (REMOVING,), who)
             if token:
-                _release(db, r["source_id"], token, drop_if_no_queue=True)
+                try:
+                    _delete_folder(db, snap, r["source_id"])
+                finally:
+                    _release(db, r["source_id"], token, drop_if_no_queue=True)
+        _drain(db, snap)
     except Exception:  # noqa: BLE001
         log.info("library deletions not drained")
 
@@ -539,8 +538,13 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
             old = known.get(name)
             try:
                 with db.tx() as c:
-                    if not _holds(c, source_id, claim):
+                    if lost or not _holds(c, source_id, claim):
                         raise LookupError("this run's claim on the folder was lost")
+                    if c.execute("SELECT 1 FROM kb_import_deletions WHERE doc_id = ? AND identity = ?",
+                                 (doc_id, who)).fetchone():
+                        # still queued for deletion (e.g. the file came back while the delete failed): it
+                        # goes, and the file is sent again as a new doc by a later sync
+                        raise ValueError("this doc is queued for deletion")
                     if old is not None and old["doc_id"] != doc_id:     # the server filed it as a new doc
                         c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
                                   " VALUES (?, ?, ?)", (old["doc_id"], source_id, who))
@@ -551,9 +555,9 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
                     with db.tx() as c:
                         c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
                                   " VALUES (?, ?, ?)", (doc_id, source_id, who))
-                if isinstance(e, LookupError):
+                if isinstance(e, LookupError):      # the rest of this batch is already on the server: queue it too
                     lost = True
-                    break
+                    continue
                 result["failed"].append(name)
                 continue
             if how != "unchanged":
