@@ -68,37 +68,48 @@ def resolve_switch(name: str, user: dict | None = None) -> bool:
 class Doc:
     files: list[dict]                                    # {name, md}, named below the docs folder
     source: dict                                         # {kind, ref}
-    paths: list[Path] = field(default_factory=list)      # the local copies, deleted after a 200
+    paths: list[tuple[Path, bytes]] = field(default_factory=list)   # each local copy and what was sent
 
 
-def _read(path: Path) -> str:
+def _read(path: Path) -> bytes | None:
+    """The whole file, or None when it is over MAX_FILE or isn't UTF-8 text."""
     with open(path, "rb") as fh:
-        return fh.read(MAX_FILE).decode("utf-8", "replace")
+        data = fh.read(MAX_FILE + 1)
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return data if len(data) <= MAX_FILE else None
 
 
 def collect(repo_root: str, branch: str, source: dict) -> list[Doc]:
-    """The doc written for ``branch`` (every document in its docs folder,
-    as a Knowledge folder source would read them), or none."""
+    """The doc written for ``branch``: every document in its docs folder (as
+    a Knowledge folder source would read them) small enough to upload whole.
+    A larger file is left out, and so never deleted."""
     from brindle import kb
     from brindle.pro.analysis_brief import docs_dir
 
     folder = docs_dir(repo_root, branch)
+    files, paths = [], []
     try:
         if folder.is_symlink() or not folder.is_dir():
             return []
-        found = kb._folder_paths(folder)[:MAX_FILES]
-        files = [{"name": name, "md": _read(p)} for name, p in found]
+        for name, p in kb._folder_paths(folder):
+            data = _read(p)
+            if data is not None and len(files) < MAX_FILES:
+                files.append({"name": name, "md": data.decode("utf-8")})
+                paths.append((p, data))
     except OSError:
         log.info("analysis doc for %s unreadable; skipped", branch)
         return []
-    return [Doc(files=files, source=source, paths=[p for _, p in found])] if files else []
+    return [Doc(files=files, source=source, paths=paths)] if files else []
 
 
 def _delete_local(doc: Doc) -> None:
     """Remove the uploaded local copies, leaving any file changed since it was read."""
-    for f, p in zip(doc.files, doc.paths):
+    for p, sent in doc.paths:
         try:
-            if _read(p) == f["md"]:
+            if _read(p) == sent:
                 p.unlink()
         except OSError:
             log.info("analysis doc copy %s not removed", p.name)

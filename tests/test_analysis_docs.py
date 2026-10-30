@@ -44,17 +44,20 @@ def uploader(tmp_path, remote, notices):
 def test_merged_doc_uploads_and_local_copy_goes_only_after_a_200(status, tmp_path, remote, fixed_identity):
     notices = []
     folder = write_doc(tmp_path)
+    (folder / "big.md").write_text("x" * (ad.MAX_FILE + 1))     # can't go whole: neither sent nor deleted
     up, store = uploader(tmp_path, remote, notices)
     login_as(remote, store, features=("analysis_docs",))
     remote.status = status
     up.submit(ad.collect(str(tmp_path), "feat", SOURCE))
+    (folder / "summary.md").write_text("edited after it was read")  # not what was sent: kept
     assert up.flush()
     sent = remote.docs[0]
     assert sent["scope"] == {"kind": "user", "id": "user_1"} and sent["source"] == SOURCE
     assert sent["files"] == [{"name": "notes/raw.md", "md": "raw numbers"},
                              {"name": "summary.md", "md": "the TTL is too short"}]
     assert len(sent["repo_key"]) == 64 and len(notices) == 1
-    assert sorted(p.name for p in folder.rglob("*.md")) == ([] if status == 200 else ["raw.md", "summary.md"])
+    assert sorted(p.name for p in folder.rglob("*.md")) == (
+        ["big.md", "summary.md"] if status == 200 else ["big.md", "raw.md", "summary.md"])
 
 
 @pytest.mark.parametrize("case", ["airgap", "unentitled", "off"])
@@ -100,10 +103,10 @@ def test_merge_uploads_the_branch_doc_only_when_it_merges(
     from brindle import codemap, codemap_docs, gates, git, pipeline, workspaces
     from brindle.db import Workspace
 
-    write_doc(tmp_path)
-    write_doc(tmp_path, "other")
+    write_doc(tmp_path, "feat/a")
+    other = write_doc(tmp_path, "feat-a")      # a branch whose name differs only in "/": its own folder
     (tmp_path / "wt").mkdir()
-    ws = Workspace("w1", str(tmp_path), "feat", "branch", "feat", "main", str(tmp_path / "wt"), None, "t", 0.0)
+    ws = Workspace("w1", str(tmp_path), "feat", "branch", "feat/a", "main", str(tmp_path / "wt"), None, "t", 0.0)
     db.add_workspace(ws)
     up, store = uploader(tmp_path, remote, [])
     login_as(remote, store, features=("analysis_docs",))
@@ -119,6 +122,7 @@ def test_merge_uploads_the_branch_doc_only_when_it_merges(
     out = pipeline.merge(db, None, ws)
     up.flush()
     assert out.startswith("Merged" if gate_ok else "Not merged") and len(remote.docs) == uploaded
+    assert len(list(other.rglob("*.md"))) == 2
 
 
 @pytest.mark.parametrize("status", [200, 403])
