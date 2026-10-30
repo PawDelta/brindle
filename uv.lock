@@ -55,7 +55,6 @@ dependencies = [
     { name = "cryptography" },
     { name = "mcp" },
     { name = "packaging" },
-    { name = "pyyaml" },
     { name = "typer" },
     { name = "wsproto" },
 ]
@@ -66,6 +65,7 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-xdist" },
     { name = "python-hcl2" },
+    { name = "pyyaml" },
 ]
 
 [package.metadata]
@@ -73,7 +73,6 @@ requires-dist = [
     { name = "cryptography", specifier = ">=42" },
     { name = "mcp", specifier = ">=2.2,<3" },
     { name = "packaging", specifier = ">=24" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "typer", specifier = ">=0.12" },
     { name = "wsproto", specifier = ">=1.2" },
 ]
@@ -84,6 +83,7 @@ dev = [
     { name = "pytest-cov", specifier = ">=7.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
     { name = "python-hcl2", specifier = ">=8.1.4" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
 ]
 
 [[package]]

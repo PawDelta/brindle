@@ -328,9 +328,11 @@ plan is approved; if it comes back with feedback, revise it and call
 
 def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: str | None,
                            provider, headless: bool, plan_first: bool = False,
-                           decisions: str = "", chunks: str = "", report_only: bool = False) -> str:
+                           decisions: str = "", chunks: str = "", report_only: bool = False,
+                           analysis: str = "") -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
-    ``task``, the ``decisions`` block that covers its files, its finish line,
+    ``task``, the ``decisions`` block that covers its files, the ``analysis``
+    doc rule and brief (large work only), its finish line,
     the WORKER_FOOTER reminder to report, and (for an interactive Claude
     worker with a finish line) the ``/goal`` wrapper. Used at spawn time, and
     again by ``resume`` to rebuild it (decisions from the brief's receipt)
@@ -338,7 +340,7 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
     from brindle import autopilot as pilot
 
     prompt = assemble([Block(TASK_AND_RULES, task), Block(DECISIONS, decisions),
-                       Block(DOCUMENT_CHUNKS, chunks)])
+                       Block(DOCUMENT_CHUNKS, chunks), Block(DOCUMENT_CHUNKS, analysis)])
     if done_when:
         prompt += f"\n\nFinish line: {done_when.strip()}"
     if plan_first:
@@ -422,12 +424,16 @@ def spawn(
         prompt = raw_task = subagent_prompt(full, prompt or "", ws, done_when)
     elif prompt and mode in ("handoff", "assign"):
         from brindle import codemap
+        from brindle.pro import analysis_brief
         prompt = decorate_worker_prompt(prompt, agent_id, ws, done_when, provider, headless,
                                         plan_first=plan_first,
                                         report_only=is_review_profile(profile.name, ws.repo_root),
                                         decisions=knowledge.brief_decisions(db, ws.repo_root, agent_id, files),
                                         chunks=knowledge.brief_chunks(db, ws.repo_root, agent_id, prompt, files,
-                                                                      codemap.graph_path(ws)))
+                                                                      codemap.graph_path(ws)),
+                                        analysis=analysis_brief.brief_context(
+                                            db, ws.repo_root, ws.branch, agent_id, prompt, files,
+                                            large=analysis_brief.large_work(weight)))
     elif prompt and mode == "review":
         prompt = raw_task = prompt + REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
 

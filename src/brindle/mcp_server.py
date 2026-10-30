@@ -1220,7 +1220,12 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     default = load_repo_config(repo_root).default_agent
     note = cost_estimate.reply_note(
         db, repo_root, [cost_estimate.TaskSpec(profile or default) for _, _, _, profile, _ in items])
-    return f"{text}\n\n{note}" if note else text
+    from brindle.pro import analysis_brief
+
+    analysis = analysis_brief.brief_context(
+        db, repo_root, found[1].branch, root_id, "\n".join([goal, *(m[0] for m in items)]), [],
+        large=analysis_brief.large_work(milestones=len(items)))
+    return "\n\n".join(p for p in (text, note, analysis) if p)
 
 
 class _ApproveChecks(BaseModel):
