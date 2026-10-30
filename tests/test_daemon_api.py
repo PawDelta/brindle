@@ -543,6 +543,33 @@ def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     assert "1234567890" not in json.dumps(body)
 
 
+def test_doc_map_proxies_only_a_neighbourhood_without_caching(brindle_home, monkeypatch):
+    from urllib.parse import parse_qs, urlencode, urlsplit
+
+    from brindle.pro import analysis_docs
+
+    calls = []
+
+    def api(method, path, body=None, **kw):
+        url = urlsplit(path)
+        calls.append((method, url.path, parse_qs(url.query), body))
+        return {"nodes": [{"id": str(len(calls)), "kind": "path", "path": "src/cache"}], "edges": []}
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(sub="u1"))
+    monkeypatch.setattr(analysis_docs, "api", api)
+    query = {"scope_kind": "group", "scope_id": "t1", "paths": json.dumps(["src/cache", "src/db"]), "depth": "1"}
+    for extra in ({"paths": "[]"}, {"paths": "broken"}, {"depth": "2"}, {"scope_id": ""}):
+        assert _get("/v1/analysis-docs/map", AUTH, urlencode(query | extra))[0] == 400
+    assert calls == []
+    for version in ("1", "2"):
+        code, body = _get("/v1/analysis-docs/map", AUTH, urlencode(query | {"local_decisions": "private"}))
+        assert code == 200 and body["nodes"][0]["id"] == version
+    assert calls == [("GET", "/analysis-docs/map", {k: [v] for k, v in query.items()}, None)] * 2
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: (_ for _ in ()).throw(RuntimeError("no plan")))
+    assert _get("/v1/analysis-docs/map", AUTH, urlencode(query))[0] == 402
+    assert len(calls) == 2
+
+
 def test_docs_with_no_scope_lists_each_readable_scope_once_per_doc(brindle_home, monkeypatch):
     from urllib.parse import parse_qs, urlsplit
 

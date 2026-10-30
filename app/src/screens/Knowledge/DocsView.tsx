@@ -180,7 +180,7 @@ interface ReaderProps {
 }
 
 /* The doc as written, and beside it what the server read from it. */
-function Reader({ client, repo, id, targets, titles, pickFolder, onBack, onDeleted, onOpen, onScopes }: ReaderProps) {
+export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, onDeleted, onOpen, onScopes }: ReaderProps) {
   const [doc, setDoc] = useState<AnalysisDocDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [menu, setMenu] = useState<"share" | "export" | "delete" | null>(null);

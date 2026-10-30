@@ -364,6 +364,27 @@ export interface DocScope {
   can_share?: boolean;
 }
 
+/* A bounded server neighbourhood. Paths are repo-relative code paths. */
+export interface MapNode {
+  id: string;
+  kind: "doc" | "path";
+  title?: string;
+  doc_id?: string;
+  path?: string;
+  paths?: string[];
+}
+
+export interface MapEdge {
+  source: string;
+  target: string;
+  kind: string;
+}
+
+export interface KnowledgeMap {
+  nodes: MapNode[];
+  edges: MapEdge[];
+}
+
 interface WireMentions {
   files?: string[];
   symbols?: string[];
@@ -1081,6 +1102,10 @@ export class DaemonClient {
   /* Every scope the person reads (their own, their teams', their org's), with or without docs. */
   docScopes(repo?: string) {
     return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
+  }
+
+  knowledgeMap(repo: string, scope: DocScope, paths: string[]) {
+    return this.get<KnowledgeMap>("/analysis-docs/map", { repo, scope_kind: scope.kind, scope_id: scope.id, paths: JSON.stringify(paths), depth: 1 });
   }
 
   async doc(id: string, repo?: string): Promise<AnalysisDocDetail> {
