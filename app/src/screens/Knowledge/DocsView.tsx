@@ -17,7 +17,7 @@ import { plain } from "../../api/wording";
 import { alert, button, card, field, h2, label, notice, pill, quiet } from "../../components/ui";
 import { Markdown } from "./Markdown";
 
-export type DocsClient = Pick<DaemonClient, "docs" | "docTopics" | "doc" | "docResults" | "shareDoc" | "unshareDoc" | "deleteDoc" | "exportDoc">;
+export type DocsClient = Pick<DaemonClient, "docs" | "docTopics" | "docScopes" | "doc" | "docResults" | "shareDoc" | "unshareDoc" | "deleteDoc" | "exportDoc">;
 
 export interface DocsViewProps {
   client: DocsClient;
@@ -34,13 +34,21 @@ const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e)
 /* A doc's scope as the daemon's filter takes it: user, team:<id> or org:<id>. */
 export function scopeSpec(s: DocScope): string {
   if (s.kind === "user") return "user";
-  return `${s.kind === "org" ? "org" : "team"}:${s.id ?? ""}`;
+  return `${s.kind === "org" ? "org" : "team"}:${s.id}`;
 }
 
+/* The server names no team or org, so a team is told apart by the start of its id. */
 export function scopeName(s: DocScope): string {
   if (s.kind === "user") return "Mine";
-  return s.name || (s.kind === "org" ? "Enterprise" : "Team");
+  return s.kind === "org" ? "Enterprise" : `Team ${s.id.slice(0, 8)}`;
 }
+
+/* `had` with each scope of `more` it lacks, in order. */
+const withScopes = (had: DocScope[], more: DocScope[]) => {
+  const seen = new Map(had.map((s) => [scopeSpec(s), s]));
+  for (const s of more) if (!seen.has(scopeSpec(s))) seen.set(scopeSpec(s), s);
+  return seen.size === had.length ? had : [...seen.values()];
+};
 
 const scopeTone = (s?: DocScope) => (!s || s.kind === "user" ? "bg-surface-2 text-ink-2" : s.kind === "org" ? "bg-branch-soft text-branch" : "bg-fawn-soft text-fawn");
 
@@ -123,7 +131,7 @@ export function ResultsPanel({ results, error, docs }: { results: DocResults | n
 }
 
 function DocCard({ d, onOpen }: { d: AnalysisDoc; onOpen(): void }) {
-  const date = shortDate(d.updated_at ?? d.created_at);
+  const date = shortDate(d.created_at);
   const findings = d.findings?.length ?? 0;
   const questions = d.open_questions?.length ?? 0;
   return (
@@ -145,13 +153,27 @@ function DocCard({ d, onOpen }: { d: AnalysisDoc; onOpen(): void }) {
   );
 }
 
-const linkTitle = (l: { title?: string; id?: string; doc_id?: string }) => l.title || l.doc_id || l.id || "a doc";
+interface ReaderProps {
+  client: DocsClient;
+  repo?: string;
+  id: string;
+  /* Scopes the person can share into (their own is left out). */
+  targets: DocScope[];
+  /* Titles of the docs listed, for its connected docs (by id). */
+  titles: Map<string, string>;
+  pickFolder?: PickFolder;
+  onBack(): void;
+  onDeleted(): void;
+  onOpen(id: string): void;
+  /* The scopes the doc turned out to be in, so the view learns teams from it. */
+  onScopes(scopes: DocScope[]): void;
+}
 
 /* The doc as written, and beside it what the server read from it. */
-function Reader({ client, repo, id, targets, pickFolder, onBack, onDeleted }: { client: DocsClient; repo?: string; id: string; targets: DocScope[]; pickFolder?: PickFolder; onBack(): void; onDeleted(): void }) {
+function Reader({ client, repo, id, targets, titles, pickFolder, onBack, onDeleted, onOpen, onScopes }: ReaderProps) {
   const [doc, setDoc] = useState<AnalysisDocDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [menu, setMenu] = useState<"share" | "export" | "delete" | null>(null);
+  const [menu, setMenu] = useState<"share" | "delete" | null>(null);
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
 
@@ -160,10 +182,11 @@ function Reader({ client, repo, id, targets, pickFolder, onBack, onDeleted }: { 
       (d) => {
         setDoc(d);
         setError(null);
+        onScopes([...(d.scope ? [d.scope] : []), ...d.shared_with]);
       },
       (e: unknown) => setError(message(e)),
     );
-  }, [client, id, repo]);
+  }, [client, id, repo, onScopes]);
   useEffect(load, [load]);
 
   const act = async (what: () => Promise<string>) => {
@@ -187,17 +210,16 @@ function Reader({ client, repo, id, targets, pickFolder, onBack, onDeleted }: { 
       return on ? `Shared with ${scopeName(s)}.` : `No longer shared with ${scopeName(s)}.`;
     });
 
-  const exportAs = (format: "md" | "docx" | "zip") =>
+  const exportMd = () =>
     act(async () => {
       if (pickFolder) {
         const dir = await pickFolder("Export the doc to a folder");
         if (!dir) return "Export cancelled.";
-        const got = await client.exportDoc(id, format, dir);
+        const got = await client.exportDoc(id, dir);
         return `Exported to ${got.path ?? got.filename}.`;
       }
-      const got = await client.exportDoc(id, format);
-      const bytes = Uint8Array.from(atob(got.content_b64 ?? ""), (c) => c.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes]));
+      const got = await client.exportDoc(id);
+      const url = URL.createObjectURL(new Blob([got.content ?? ""], { type: "text/markdown" }));
       const a = document.createElement("a");
       a.href = url;
       a.download = got.filename;
@@ -213,11 +235,15 @@ function Reader({ client, repo, id, targets, pickFolder, onBack, onDeleted }: { 
       return "Deleted.";
     });
 
-  const files = doc?.files?.length ? doc.files : doc ? [{ name: "", md: doc.body_md ?? "" }, ...(doc.appendices ?? [])] : [];
+  const files = doc?.files ?? [];
   const shared = new Set((doc?.shared_with ?? []).map(scopeSpec));
-  const shareTo = targets.filter((s) => s.kind !== "user" && (!doc?.scope || scopeSpec(doc.scope) !== scopeSpec(s)));
-  const connected = [...(doc?.related ?? []), ...(doc?.supersedes ?? []).map((l) => ({ ...l, relation: l.relation ?? "Supersedes" }))];
-  const mentions = (doc?.mentions ?? []).map((m) => (typeof m === "string" ? m : m.name ?? "")).filter(Boolean);
+  const shareTo = withScopes(targets, doc?.shared_with ?? []).filter((s) => s.kind !== "user" && (!doc?.scope || scopeSpec(doc.scope) !== scopeSpec(s)));
+  const connected: [string, string][] = [
+    ...(doc?.supersedes ?? []).map((d): [string, string] => ["Replaces", d]),
+    ...(doc?.superseded_by ? [["Replaced by", doc.superseded_by] as [string, string]] : []),
+    ...(doc?.related ?? []).map((d): [string, string] => ["Related", d]),
+  ];
+  const mentions = doc?.mentions ?? [];
 
   return (
     <section className="flex flex-col gap-s2" aria-label="Doc" data-testid="reader">
@@ -229,8 +255,8 @@ function Reader({ client, repo, id, targets, pickFolder, onBack, onDeleted }: { 
           <button type="button" className={button} disabled={!doc || busy} aria-expanded={menu === "share"} onClick={() => setMenu(menu === "share" ? null : "share")}>
             Share
           </button>
-          <button type="button" className={button} disabled={!doc || busy} aria-expanded={menu === "export"} onClick={() => setMenu(menu === "export" ? null : "export")}>
-            Export ▾
+          <button type="button" className={button} disabled={!doc || busy} title="As one Markdown file" onClick={() => void exportMd()}>
+            Export
           </button>
           <button type="button" className={`${quiet} text-sap`} disabled={!doc || busy} onClick={() => setMenu(menu === "delete" ? null : "delete")}>
             Delete
@@ -248,15 +274,6 @@ function Reader({ client, repo, id, targets, pickFolder, onBack, onDeleted }: { 
               </button>
             );
           })}
-        </div>
-      )}
-      {menu === "export" && (
-        <div className={`${card} flex flex-wrap items-center gap-1 px-s2 py-s1 text-sm`} role="group" aria-label="Export as">
-          {(["md", "docx", "zip"] as const).map((f) => (
-            <button key={f} type="button" className={button} disabled={busy} onClick={() => void exportAs(f)}>
-              {f === "md" ? "Markdown" : f === "docx" ? "Word" : "Zip with appendices"}
-            </button>
-          ))}
         </div>
       )}
       {menu === "delete" && (
@@ -326,9 +343,14 @@ function Reader({ client, repo, id, targets, pickFolder, onBack, onDeleted }: { 
               <div className={`${card} flex flex-col gap-1 px-s2 py-s1`}>
                 <span className={label}>Connected</span>
                 {connected.length > 0 && (
-                  <ul className="flex list-disc flex-col gap-0.5 pl-s2 text-ink-2">
-                    {connected.map((l, i) => (
-                      <li key={i}>{l.relation ? `${l.relation}: ${linkTitle(l)}` : linkTitle(l)}</li>
+                  <ul className="flex flex-col gap-0.5 text-ink-2">
+                    {connected.map(([relation, other]) => (
+                      <li key={`${relation}${other}`}>
+                        {relation}:{" "}
+                        <button type="button" className="text-left text-ink underline decoration-line-strong hover:decoration-ink" data-connected={other} onClick={() => onOpen(other)}>
+                          {titles.get(other) ?? other}
+                        </button>
+                      </li>
                     ))}
                   </ul>
                 )}
@@ -359,8 +381,18 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   const [results, setResults] = useState<DocResults | null>(null);
   const [resultsError, setResultsError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(doc ?? null);
-  /* Every scope seen in a listing, so its chip stays while another is picked. */
+  /* The scopes the person reads: their own and their org's, from the daemon, and any
+     team a listed or opened doc is in (the server names no one's teams), so a chip
+     stays while another is picked. */
   const [scopes, setScopes] = useState<DocScope[]>([]);
+  const learn = useCallback((more: DocScope[]) => setScopes((had) => withScopes(had, more)), []);
+
+  useEffect(() => {
+    client.docScopes(repo).then(
+      (got) => learn(got.scopes),
+      () => undefined, // without them the chips are just All and Mine
+    );
+  }, [client, repo, learn]);
 
   const load = useCallback(() => {
     let live = true;
@@ -368,13 +400,8 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
     client.docs({ repo, scope: scope || undefined, topic: topic || undefined, session }).then(
       (got) => {
         if (!live) return;
-        const docs = got.docs ?? [];
-        setListing({ state: "loaded", docs });
-        setScopes((had) => {
-          const seen = new Map(had.map((s) => [scopeSpec(s), s]));
-          for (const d of docs) if (d.scope && !seen.has(scopeSpec(d.scope))) seen.set(scopeSpec(d.scope), d.scope);
-          return [...seen.values()];
-        });
+        setListing({ state: "loaded", docs: got.docs });
+        learn(got.docs.flatMap((d) => (d.scope ? [d.scope] : [])));
       },
       (e: unknown) => live && setListing({ state: notEntitled(e) ? "unavailable" : "failed", error: message(e) }),
     );
@@ -387,7 +414,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   useEffect(() => {
     let live = true;
     client.docTopics({ repo, scope: scope || undefined }).then(
-      (got) => live && setTopics(got.topics ?? []),
+      (got) => live && setTopics(got.topics),
       () => live && setTopics([]),
     );
     return () => {
@@ -423,11 +450,15 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   if (open) {
     return (
       <Reader
+        key={open}
         client={client}
         repo={repo}
         id={open}
         targets={scopes}
+        titles={new Map(docs.map((d) => [d.id, d.title || d.id]))}
         pickFolder={pickFolder}
+        onOpen={setOpen}
+        onScopes={learn}
         onBack={() => setOpen(null)}
         onDeleted={() => {
           setOpen(null);

@@ -352,51 +352,93 @@ export interface KbHit {
   updated: string | null;
 }
 
-/* brindle Pro's analysis-doc library, proxied by the daemon (routes_read.analysis_docs):
-   the server's own shapes, passed through, so every derived field may be missing. A scope
-   is `user` (the person's own), `team:<id>` or `org:<id>`. */
+/* brindle Pro's analysis-doc library, proxied by the daemon (routes_read.analysis_docs).
+   The Wire* types are the server's own shapes (pawdelta-web pro_api.analysis_docs: _listed,
+   _view, topics); the client methods turn them into the AnalysisDoc* below. A scope is
+   {kind: user | group | org, id}; the daemon's filter spells it `user`, `team:<id>` or `org:<id>`. */
 export interface DocScope {
   kind: string;
-  id?: string;
-  name?: string;
+  id: string;
+}
+
+interface WireMentions {
+  files?: string[];
+  symbols?: string[];
+  services?: string[];
+}
+
+interface WireListedDoc {
+  doc_id: string;
+  version?: number;
+  title?: string;
+  summary?: string;
+  kind?: string;
+  findings?: string[];
+  open_questions?: string[];
+  topics?: string[];
+  mentions?: WireMentions;
+  related?: string[];
+  supersedes?: string[];
+  superseded_by?: string | null;
+  stale?: boolean;
+  used_in_briefs?: number;
+  created_at?: number;
+  scope?: DocScope;
+}
+
+interface WireDoc extends Omit<WireListedDoc, "doc_id"> {
+  id: string;
+  files?: { name: string; md: string }[];
+  /* Every scope it is shared into, its owner's (`scope`) among them. */
+  scopes?: DocScope[];
 }
 
 export interface AnalysisDoc {
   id: string;
   title?: string;
-  kind?: string | null;
+  kind?: string;
   scope?: DocScope;
-  summary?: string | null;
+  summary?: string;
   topics?: string[];
   version?: number;
-  created_at?: number | string;
-  updated_at?: number | string;
+  created_at?: number;
   used_in_briefs?: number;
   findings?: string[];
   open_questions?: string[];
-}
-
-export interface DocLink {
-  id?: string;
-  doc_id?: string;
-  title?: string;
-  relation?: string;
+  stale?: boolean;
+  /* Other docs' ids. */
+  related?: string[];
+  supersedes?: string[];
+  superseded_by?: string | null;
 }
 
 /* GET /analysis-docs/{id}: the files as written and what the server read from them. */
 export interface AnalysisDocDetail extends AnalysisDoc {
-  files?: { name: string; md: string }[];
-  body_md?: string;
-  appendices?: { name: string; md: string }[];
-  related?: DocLink[];
-  supersedes?: DocLink[];
-  mentions?: (string | { kind?: string; name?: string })[];
-  shared_with?: DocScope[];
+  files: { name: string; md: string }[];
+  /* The files, symbols and services it names, in that order. */
+  mentions: string[];
+  /* The scopes it is shared into besides its owner's. */
+  shared_with: DocScope[];
 }
 
 export interface DocTopic {
   name: string;
   count?: number;
+}
+
+const sameScope = (a: DocScope, b: DocScope) => a.kind === b.kind && a.id === b.id;
+
+export function listedDoc({ doc_id, mentions: _, ...rest }: WireListedDoc): AnalysisDoc {
+  return { ...rest, id: doc_id };
+}
+
+export function docDetail({ mentions, scopes, files, ...rest }: WireDoc): AnalysisDocDetail {
+  return {
+    ...rest,
+    files: files ?? [],
+    mentions: [...(mentions?.files ?? []), ...(mentions?.symbols ?? []), ...(mentions?.services ?? [])],
+    shared_with: (scopes ?? []).filter((s) => !rest.scope || !sameScope(s, rest.scope)),
+  };
 }
 
 /* GET /analysis-docs/results (analysis_brief.results): review rounds of finished tasks
@@ -414,11 +456,11 @@ export interface DocResults {
   without_brief: number | null;
 }
 
-/* POST /analysis-docs/{id}/export: the path written in a picked folder, or the file itself. */
+/* POST /analysis-docs/{id}/export: the Markdown file's path in a picked folder, or its text. */
 export interface DocExport {
   filename: string;
   path?: string;
-  content_b64?: string;
+  content?: string;
 }
 
 export interface DocsQuery {
@@ -1012,16 +1054,23 @@ export class DaemonClient {
 
   /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.
      A plan without it throws DaemonError "not_entitled". */
-  docs(query: DocsQuery = {}) {
-    return this.get<{ docs?: AnalysisDoc[] }>("/analysis-docs", { ...query });
+  async docs(query: DocsQuery = {}): Promise<{ docs: AnalysisDoc[] }> {
+    const got = await this.get<{ docs?: WireListedDoc[] }>("/analysis-docs", { ...query });
+    return { docs: (got.docs ?? []).map(listedDoc) };
   }
 
-  docTopics(query: { repo?: string; scope?: string } = {}) {
-    return this.get<{ topics?: DocTopic[] }>("/analysis-docs/topics", { ...query });
+  async docTopics(query: { repo?: string; scope?: string } = {}): Promise<{ topics: DocTopic[] }> {
+    const got = await this.get<{ topics?: { topic: string; count?: number }[] }>("/analysis-docs/topics", { ...query });
+    return { topics: (got.topics ?? []).map((t) => ({ name: t.topic, count: t.count })) };
   }
 
-  doc(id: string, repo?: string) {
-    return this.get<AnalysisDocDetail>(`/analysis-docs/${encodeURIComponent(id)}`, { repo });
+  /* The scopes the person can read for certain: their own, their org's (no team: the server says none). */
+  docScopes(repo?: string) {
+    return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
+  }
+
+  async doc(id: string, repo?: string): Promise<AnalysisDocDetail> {
+    return docDetail(await this.get<WireDoc>(`/analysis-docs/${encodeURIComponent(id)}`, { repo }));
   }
 
   /* Computed on this machine from its own records; needs no plan. */
@@ -1041,9 +1090,9 @@ export class DaemonClient {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, {});
   }
 
-  /* With `dir` the daemon writes the file there; without, it comes back as base64. */
-  exportDoc(id: string, format: "md" | "docx" | "zip", dir?: string) {
-    return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, dir ? { format, dir } : { format });
+  /* As Markdown: with `dir` the daemon writes the file there; without, its text comes back. */
+  exportDoc(id: string, dir?: string) {
+    return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, dir ? { dir } : {});
   }
 
   profile(name: string, repo?: string) {

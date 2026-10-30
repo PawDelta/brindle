@@ -543,6 +543,28 @@ def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     assert "1234567890" not in json.dumps(body)
 
 
+def test_docs_with_no_scope_lists_each_readable_scope_once_per_doc(brindle_home, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    from brindle.pro import analysis_docs
+
+    held = {"user:u1": [("d1", 3, ["checkout"]), ("shared", 2, ["checkout", "refunds"])],
+            "org:o1": [("shared", 2, ["checkout", "refunds"]), ("d2", 1, ["refunds"])]}
+
+    def api(method, path, body=None, **kw):     # the server refuses a list without a scope
+        q = {k: v[0] for k, v in parse_qs(urlsplit(path).query).items()}
+        docs = held[f"{q['scope_kind']}:{q['scope_id']}"]
+        return {"docs": [{"doc_id": d, "created_at": at, "topics": t} for d, at, t in docs]}
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(
+        sub="u1", org_id="o1", features={"analysis_docs", "analysis_docs_enterprise"}))
+    monkeypatch.setattr(analysis_docs, "api", api)
+    _, listed = _get("/v1/analysis-docs", AUTH)
+    assert [d["doc_id"] for d in listed["docs"]] == ["d1", "shared", "d2"]
+    _, topics = _get("/v1/analysis-docs/topics", AUTH)
+    assert topics["topics"] == [{"topic": "checkout", "count": 2}, {"topic": "refunds", "count": 2}]
+
+
 @pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])
 def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, enough):
     from brindle.db import Task

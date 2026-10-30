@@ -33,7 +33,7 @@ from brindle import (
     workspaces,
 )
 from brindle.daemon import session_review
-from brindle.daemon.routes_actions import docs_api, read_edit_target
+from brindle.daemon.routes_actions import docs_api, docs_everywhere, docs_scopes, read_edit_target
 from brindle.db import DB
 from brindle.service import inbox
 from brindle.service.dto import (
@@ -492,20 +492,45 @@ def get_cost(db: DB, request: Request) -> Any:
             "by_model": {m: bucket(b) for m, b in s.by_model.items()}}
 
 
+def _all_docs(request: Request, query: dict[str, str]) -> list[dict]:
+    """The docs of every scope of docs_scopes, each doc once, newest first."""
+    seen: dict[str, dict] = {}
+    for got in docs_everywhere("/analysis-docs", _repo(request), query):
+        for d in got.get("docs") or []:
+            if isinstance(d, dict) and isinstance(d.get("doc_id"), str):
+                seen.setdefault(d["doc_id"], d)
+    return sorted(seen.values(), key=lambda d: -float(d.get("created_at") or 0))
+
+
 @_json
 def analysis_docs(db: DB, request: Request) -> Any:
-    """The library's docs (``{"docs": [...]}``, as the server lists them),
-    filtered by ``scope`` (user, team:<id> or org:<id>; none: all), ``topic``,
-    ``kind`` and ``session``."""
+    """The library's docs (``{"docs": [...]}``, each as the server lists it),
+    filtered by ``scope`` (user, team:<id> or org:<id>; none: every scope the
+    person reads, see docs_scopes), ``topic``, ``kind`` and ``session``."""
     q = request.query_params
-    return docs_api("GET", "/analysis-docs", repo=_repo(request), scope=q.get("scope"),
-                    query={k: q[k] for k in ("topic", "kind", "session") if q.get(k)})
+    query = {k: q[k] for k in ("topic", "kind", "session") if q.get(k)}
+    if q.get("scope"):
+        return docs_api("GET", "/analysis-docs", repo=_repo(request), scope=q["scope"], query=query)
+    return {"docs": _all_docs(request, query)}
 
 
 @_json
 def analysis_doc_topics(db: DB, request: Request) -> Any:
-    return docs_api("GET", "/analysis-docs/topics", repo=_repo(request),
-                    scope=request.query_params.get("scope"))
+    """``{"topics": [{topic, count}, ...]}`` in one scope, or over every doc
+    of :func:`_all_docs` without one."""
+    scope = request.query_params.get("scope")
+    if scope:
+        return docs_api("GET", "/analysis-docs/topics", repo=_repo(request), scope=scope)
+    counts: dict[str, int] = {}
+    for d in _all_docs(request, {}):
+        for t in d.get("topics") or []:
+            counts[t] = counts.get(t, 0) + 1
+    return {"topics": [{"topic": t, "count": n} for t, n in sorted(counts.items(), key=lambda x: (-x[1], x[0]))]}
+
+
+@_json
+def analysis_doc_scopes(db: DB, request: Request) -> Any:
+    return {"scopes": docs_scopes(_repo(request))}
 
 
 @_json
@@ -590,6 +615,7 @@ ROUTES = [
     Route("/v1/analysis-docs", analysis_docs),
     # Before /analysis-docs/{id}.
     Route("/v1/analysis-docs/topics", analysis_doc_topics),
+    Route("/v1/analysis-docs/scopes", analysis_doc_scopes),
     Route("/v1/analysis-docs/results", analysis_doc_results),
     Route("/v1/analysis-docs/{id}", analysis_doc),
     Route("/v1/profiles", list_profiles),

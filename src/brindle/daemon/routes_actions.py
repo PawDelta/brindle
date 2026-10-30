@@ -1327,26 +1327,32 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
 # reaches disk only on an export to a folder the person picked.
 
 DOC_SCOPES = {"user": "user", "team": "group", "group": "group", "enterprise": "org", "org": "org"}
-EXPORT_FORMATS = ("md", "docx", "zip")
+DOCS_ENTERPRISE = "analysis_docs_enterprise"
 
 
-def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | None = None,
-             query: dict[str, str] | None = None, scope: str | None = None) -> dict:
-    """One call to the library: ``scope`` is ``user`` or ``team:<id>`` /
-    ``org:<id>`` (none: every scope the person reads). Not entitled (or in
-    the repo's air-gap mode) is 402 before anything is sent; the server's
-    refusal is 502 with its reason; signed out is 401."""
-    from urllib.parse import urlencode
-
+def _docs_entitlement(repo: str | None):
     from brindle import config
     from brindle.pro import analysis_docs
 
     if repo:
         config.load_repo_config(repo)        # its air-gap setting applies first
     try:
-        ent = analysis_docs.require_entitlement()
+        return analysis_docs.require_entitlement()
     except RuntimeError as e:
         raise ServiceError("not_entitled", str(e), 402) from e
+
+
+def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | None = None,
+             query: dict[str, str] | None = None, scope: str | None = None) -> dict:
+    """One call to the library: ``scope`` is ``user`` or ``team:<id>`` /
+    ``org:<id>``. Not entitled (or in the repo's air-gap mode) is 402 before
+    anything is sent; the server's refusal is 502 with its reason; signed
+    out is 401."""
+    from urllib.parse import urlencode
+
+    from brindle.pro import analysis_docs
+
+    ent = _docs_entitlement(repo)
     query = dict(query or {})
     if scope:
         query.update(zip(("scope_kind", "scope_id"), doc_scope(scope, ent.sub)))
@@ -1354,6 +1360,32 @@ def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | No
         return analysis_docs.api(method, path + (f"?{urlencode(query)}" if query else ""), body)
     except RuntimeError as e:
         raise ServiceError("upstream", str(e), 502) from e
+
+
+def docs_scopes(repo: str | None = None) -> list[dict]:
+    """The scopes the person can read for certain: their own, and their
+    org's when its plan has the enterprise library. The server says no
+    one's team, so a team scope is known only from a doc listed in it."""
+    ent = _docs_entitlement(repo)
+    scopes = [{"kind": "user", "id": ent.sub}]
+    if DOCS_ENTERPRISE in ent.features and ent.org_id:
+        scopes.append({"kind": "org", "id": ent.org_id})
+    return scopes
+
+
+def docs_everywhere(path: str, repo: str | None, query: dict[str, str]) -> list[dict]:
+    """GET ``path`` (a list the server answers per scope) in each scope of
+    :func:`docs_scopes`: the answers that came back. A scope that refuses
+    is skipped unless every one does."""
+    got, refused = [], None
+    for spec in (f"{s['kind']}:{s['id']}" if s["kind"] != "user" else "user" for s in docs_scopes(repo)):
+        try:
+            got.append(docs_api("GET", path, repo=repo, query=query, scope=spec))
+        except ServiceError as e:
+            refused = refused or e
+    if refused and not got:
+        raise refused
+    return got
 
 
 def doc_scope(spec: str, sub: str) -> tuple[str, str]:
@@ -1390,32 +1422,28 @@ def delete_doc(db: DB, params: dict, body: Body) -> Any:
 
 
 def export_doc(db: DB, params: dict, body: Body) -> Any:
-    """The doc as ``format`` (md, docx or zip; the server checks scope and the
-    org's export policy). With ``dir`` (a folder the person picked) the file
-    is written there and its path answered; without, its ``filename`` and
-    ``content_b64`` go back to the app and nothing is written."""
-    import base64
-    import binascii
+    """The doc as one Markdown file (the server's md export, which checks
+    scope and the org's export policy; its docx and zip are bytes the Pro
+    client can't carry yet). With ``dir`` (a folder the person picked) the
+    file is written there and its path answered; without, its ``filename``
+    and ``content`` go back to the app and nothing is written."""
+    import re
 
-    fmt = _get(body, "format", default="md")
-    if fmt not in EXPORT_FORMATS:
-        raise ServiceError("invalid", "format is md, docx or zip")
+    from brindle.pro import auth
+
     got = docs_api("GET", _doc_path(params, "export"), repo=params.get("repo"),
-                   query={"format": fmt, "destination": "download"})
-    name = Path(str(got.get("filename") or f"{params['id']}.{fmt}")).name
-    try:
-        data = base64.b64decode(got.get("content_b64") or "", validate=True)
-    except (binascii.Error, ValueError):
-        data = b""
-    if not data:
+                   query={"format": "md", "destination": "download"})
+    text = got.get(auth.TEXT_KEY)
+    if not isinstance(text, str) or not text:
         raise ServiceError("upstream", "the export came back empty", 502)
+    name = f"{re.sub(r'[^A-Za-z0-9_-]+', '-', params['id']).strip('-') or 'doc'}.md"
     folder = _get(body, "dir")
     if folder is None:
-        return {"filename": name, "content_b64": base64.b64encode(data).decode()}
+        return {"filename": name, "content": text}
     folder = Path(folder).expanduser()
     if not folder.is_dir():
         raise ServiceError("invalid", f"not a folder: {folder}")
-    (folder / name).write_bytes(data)
+    (folder / name).write_text(text)
     return {"filename": name, "path": str(folder / name)}
 
 
