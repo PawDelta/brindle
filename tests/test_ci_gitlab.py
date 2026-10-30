@@ -56,6 +56,7 @@ def host(api=None, entitled=True):
 # -- detection and the entitlement gate ---------------------------------------------------------
 
 
+@pytest.mark.brindle_ci_guard
 def test_gitlab_fails_closed_without_the_entitlement():
     with pytest.raises(CIError) as e:
         ci_hosts.get_host(env=JOB_ENV, is_entitled=lambda: False)
@@ -68,6 +69,7 @@ def test_gitlab_fails_closed_without_the_entitlement():
         ci_hosts.get_host("gitlab", {}, is_entitled=boom)
 
 
+@pytest.mark.brindle_ci_guard
 def test_entitled_uses_license_has(monkeypatch):
     seen = []
     monkeypatch.setattr(ci_hosts.license, "has", lambda f: seen.append(f) or False)
@@ -75,6 +77,7 @@ def test_entitled_uses_license_has(monkeypatch):
     assert seen == ["ci_enterprise"]
 
 
+@pytest.mark.brindle_ci_guard
 def test_unknown_host_is_refused():
     with pytest.raises(CIError):
         ci_hosts.get_host("bitbucket", {})
@@ -102,6 +105,7 @@ def test_no_id_token_means_no_header_and_junk_is_ignored():
     assert ci_hosts.GitLabOIDC({"BRINDLE_ID_TOKEN": "notajwt"}).header() == {}
 
 
+@pytest.mark.brindle_ci_guard
 def test_expired_id_token_is_not_sent():
     o = ci_hosts.GitLabOIDC({"BRINDLE_ID_TOKEN": jwt(exp=1000)}, clock=lambda: 2000.0)
     with pytest.raises(CIError) as e:
@@ -137,6 +141,7 @@ def test_api_must_be_https():
         host().comment({**JOB_ENV, "CI_API_V4_URL": "http://gitlab.example.com/api/v4"}, 1, "hi")
 
 
+@pytest.mark.brindle_ci_guard
 def test_api_failure_is_reported_without_the_token():
     with pytest.raises(CIError) as e:
         host(FakeGitLab(status=401)).comment({**JOB_ENV, "CI_JOB_TOKEN": "s3cret-job-token"}, 1, "hi")
@@ -147,6 +152,7 @@ def test_api_failure_is_reported_without_the_token():
 # -- init ---------------------------------------------------------------------------------------
 
 
+@pytest.mark.brindle_ci_guard
 def test_init_refuses_without_entitlement_and_never_overwrites(tmp_path):
     with pytest.raises(CIError):
         ci_hosts.init_gitlab(cwd=str(tmp_path), is_entitled=lambda: False)
@@ -159,6 +165,7 @@ def test_init_refuses_without_entitlement_and_never_overwrites(tmp_path):
     assert (tmp_path / ".gitlab-ci.yml").read_text() == ci_hosts.GITLAB_TEMPLATE
 
 
+@pytest.mark.brindle_ci_guard
 def test_cli_init_host_gitlab_fails_closed(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 

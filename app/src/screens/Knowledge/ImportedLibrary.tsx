@@ -4,7 +4,7 @@
 import { useState } from "react";
 import type { DaemonClient, KbLibraryPlan, KbSource } from "../../api/client";
 import { plain } from "../../api/wording";
-import { alert, button, notice, primary, quiet } from "../../components/ui";
+import { alert, button, main, notice, quiet } from "../../components/ui";
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 const count = (n: number) => (n === 1 ? "1 file" : `${n} files`);
@@ -94,7 +94,7 @@ export function ImportedLibrary({ client, repo, source, disabled, onChanged }: {
           <div className="flex gap-1">
             <button
               type="button"
-              className={primary}
+              className={main}
               disabled={working || !plan.allowed || plan.files.length === 0}
               onClick={() =>
                 void run(async () => {

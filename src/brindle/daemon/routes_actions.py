@@ -36,7 +36,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from brindle import agents, autopilot, bus, git, identity_lock, knowledge, pipeline, preflight, scratch, tmux, workspaces
+from brindle import agents, autopilot, bus, gates, git, identity_lock, knowledge, pipeline, preflight, scratch, tmux, workspaces
 from brindle import sessions as sessions_mod
 from brindle.daemon import session_review as review
 from brindle.daemon import terminal
@@ -227,6 +227,7 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
     sign-in or first-run screen (see brindle.preflight). Only opening a
     session that is running now launches nothing, so only that isn't checked."""
     repo, choice, session_id = _get(body, "repo", required=True), _get(body, "choice"), _get(body, "session_id")
+    name = _session_name(_get(body, "name"))     # checked with the rest, before anything launches
     opening = (choice == "o" and not _get(body, "branch") and not _get(body, "worktree")
                and any(s.root.id == session_id
                        for s in sessions_mod.live(db, workspaces.adopt_root(db, repo).repo_root)))
@@ -242,6 +243,9 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
     if isinstance(got, svc.Opened):
         return {"opened": SessionDTO.from_agent(got.root).to_json()}
     if isinstance(got, svc.Started):
+        got.agent.name = name
+        if name:
+            db.update_agent(got.agent.id, name=name)
         return {**got.to_json(), "notes": _notes(got.notes)}
     return got
 
@@ -265,6 +269,19 @@ def close_session(db: DB, params: dict, body: Body) -> Any:
     root, _ = _root(db, params["root"])
     closed = svc.close_session(db, root.id)
     return {"closed": [a.id for a, _ in closed], "stopped": [a.id for a, was in closed if was]}
+
+
+def _session_name(raw: str | None) -> str | None:
+    """A session's name as kept: whitespace collapsed, at most 80 characters, None when empty."""
+    return " ".join((raw or "").split())[:80] or None
+
+
+def rename_session(db: DB, params: dict, body: Body) -> Any:
+    """``name``: the session's new name; empty clears it (listed by its goal again)."""
+    root, _ = _root(db, params["root"])
+    name = _session_name(_get(body, "name"))
+    db.update_agent(root.id, name=name)
+    return {"id": root.id, "name": name}
 
 
 def handover_session(db: DB, params: dict, body: Body) -> Any:
@@ -416,7 +433,7 @@ def review_workspace(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", "only a worker's workspace (its own branch and worktree) can be reviewed")
     # With checks, a detached helper runs them first; review.submitted ends it.
     reviewer = agents.start_review(db, None, ws, _get(body, "profile"), _get(body, "focus"),
-                                   load_repo_config(ws.repo_root))
+                                   load_repo_config(ws.repo_root, branch=ws.base_branch))
     return {"reviewer": reviewer.id if reviewer else None, "checks_running": reviewer is None}
 
 
@@ -726,14 +743,22 @@ def delete_session_file(db: DB, params: dict, body: Body) -> Any:
 _SESSION_PR = "root_id = ? AND branch = ?"
 
 
-def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any:
+def _checked(db: DB, ws: Workspace, job: Job, passed: tuple[str, list[str]] | None = None,
+             checked: list[str] | None = None):
+    """The PR gate on the session checkout (gates.pr_checked), each check's start as the job's progress."""
+    return gates.pr_checked(db, ws, lambda t: bus.publish(db, "job.progress", job=job.id, text=t),
+                            passed=passed, checked=checked)
+
+
+def open_session_pr(db: DB, params: dict, body: Body) -> Any:
     """Push the session branch and open its PR (``title``, ``body``,
-    ``draft``) the way ``brindle pr`` does; refused (409, with the reasons)
-    unless the session is ready. The job's result carries the URL, which is
-    also published as ``session.pr_opened`` and recorded in ``session_prs``
-    (``auto``: brindle's own, whose row :func:`auto_pr` claimed first). When
-    gh can't open it, the URL is the compare page's and nothing is recorded
-    (brindle's own fails instead)."""
+    ``draft``) the way ``brindle pr`` does: only ever on the person's
+    request. Refused (409, with the reasons) unless the session is ready.
+    The checks run first, unless brindle's preparation recorded them passing
+    on this very HEAD (prepare_pr). The job's result carries the URL, which
+    is also published as ``session.pr_opened`` and recorded in
+    ``session_prs``. When gh can't open it, the URL is the compare page's
+    and nothing is recorded."""
     root, ws = review.session(db, params["root"])
     identity_lock.ensure(root)
     review.require_ready(db, root, ws)
@@ -741,36 +766,52 @@ def open_session_pr(db: DB, params: dict, body: Body, auto: bool = False) -> Any
     key = (root.id, ws.branch)
 
     def work(db: DB, job: Job) -> Any:
-        try:
-            identity_lock.ensure(root)      # again: the person signed in may have changed since
-            head = git.out(["rev-parse", "HEAD"], ws.path)
-            url = workspaces.open_pull_request(ws, title, draft, body=text)
-            if url is None and auto:
-                raise workspaces.WorkspaceError("pushed, but gh couldn't open the PR")
-            if url is None:     # the person opens it from the compare page: no PR to record yet
-                url = workspaces.compare_url(ws)
-            else:
-                _record_pr(db, key, url, head, auto)
-        except BaseException:
-            if auto:    # its claim goes, so the session's next turn to ready tries again
-                db.conn.execute(f"DELETE FROM session_prs WHERE {_SESSION_PR} AND url IS NULL", key)
-            raise
-        finally:
-            if auto:
-                _end_pr_work(key)
+        identity_lock.ensure(root)      # again: the person signed in may have changed since
+        # The commands brindle's preparation saw pass on its sha: any check configured since still runs.
+        prep = db.conn.execute(f"SELECT sha, checks FROM session_pr_prep WHERE {_SESSION_PR} AND state = 'passed'",
+                               key).fetchone()
+        passed = (prep["sha"], json.loads(prep["checks"] or "[]")) if prep else None
+        with _checked(db, ws, job, passed=passed) as head:
+            url = workspaces.open_pull_request(ws, title, draft, body=text, sha=head)
+        if url is None:     # the person opens it from the compare page: no PR to record yet
+            url = workspaces.compare_url(ws)
+        else:
+            _record_pr(db, key, url, head)
         return {"url": url, "keeps_merged_branches": workspaces.keeps_merged_branches(ws.repo_root)}
 
     return start_job("session.pr", work, root_id=root.id, repo_root=ws.repo_root)
 
 
-# The session branches (root id, branch) whose PR this daemon is opening or pushing
-# to now: a session_prs row with no url and no entry here was left by a daemon that
-# stopped half way. And the commit last tried on each and when, so a failed push
-# is tried again after PUSH_RETRY_SECONDS (or as soon as the session turns ready
-# again) instead of every sweep.
+def push_session_pr(db: DB, params: dict, body: Body) -> Any:
+    """Push the session's commits that aren't on its open PR yet: the
+    person's Push in the review (brindle never pushes them itself), through
+    the same checks as opening it. Refused (409) unless the session is
+    ready and its branch has a PR."""
+    root, ws = review.session(db, params["root"])
+    identity_lock.ensure(root)
+    review.require_ready(db, root, ws)
+    if (pr := review.open_pr(db, root, ws)) is None:
+        raise ServiceError("conflict", f"{ws.branch} has no PR to push to; open it first", 409)
+    key = (root.id, ws.branch)
+
+    def work(db: DB, job: Job) -> Any:
+        identity_lock.ensure(root)
+        with _checked(db, ws, job) as verified:
+            git.push(ws.path, ws.branch, sha=verified)
+        db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR}", (verified, *key))
+        bus.publish_agent(db, "session.pr_pushed", root.id, url=pr["url"], commit=verified)
+        return {"url": pr["url"], "commit": verified}
+
+    return start_job("session.push", work, root_id=root.id, repo_root=ws.repo_root)
+
+
+# The session branches (root id, branch) whose PR this daemon is preparing now, and
+# the HEAD last tried on each and when: a preparation whose checks couldn't run (the
+# checkout busy, or moved under them) is tried again after PREPARE_AGAIN_SECONDS
+# instead of every sweep.
 _PR_WORK: set[tuple[str, str]] = set()
 _PR_TRIED: dict[tuple[str, str], tuple[str, float]] = {}
-PUSH_RETRY_SECONDS = 60.0
+PREPARE_AGAIN_SECONDS = 60.0
 _PR_LOCK = threading.Lock()
 
 
@@ -787,31 +828,32 @@ def _end_pr_work(key: tuple[str, str]) -> None:
         _PR_WORK.discard(key)
 
 
-def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None, auto: bool) -> None:
-    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, auto, opened_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
+def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None) -> None:
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at)"
+                    " VALUES (?, ?, ?, ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
                     " url = excluded.url, pushed_sha = excluded.pushed_sha,"
                     # a different PR on the branch starts afresh; the same one keeps its merge
                     " merged_at = CASE WHEN url = excluded.url THEN merged_at END,"
                     " opened_at = CASE WHEN url = excluded.url THEN opened_at ELSE excluded.opened_at END",
-                    (*key, url, pushed, int(auto), time.time()))
-    bus.publish_agent(db, "session.pr_opened", key[0], url=url, auto=auto)
+                    (*key, url, pushed, time.time()))
+    bus.publish_agent(db, "session.pr_opened", key[0], url=url)
 
 
-def auto_pr(db: DB, root_id: str, opening: bool) -> Job | None:
-    """For the ready session ``root_id``, where its repo allows ``auto_pr``
-    (review.auto_pr): open its PR with the drafted title and body when it
-    just became ready (``opening``) and its branch has none yet, or push a
-    commit made since to the PR it has. Once per branch: the row is claimed
-    before the PR is opened, and a claim a stopped daemon left is first
-    matched to the PR gh finds open. Nothing while the session belongs to
-    another identity, or while this daemon is already at work on its PR."""
+def prepare_pr(db: DB, root_id: str) -> Job | None:
+    """Prepare the ready session ``root_id``'s PR for the person's approval:
+    draft its title, run the full pre-PR checks on its HEAD (gates.pr_checked,
+    pushing nothing) and record how they went in ``session_pr_prep``, which
+    the Inbox shows as "PR ready for your approval" or "PR checks failed" (a
+    failure is also told to the supervisor). Once per HEAD. Nothing once its
+    branch has a PR (new commits wait for the person's Push), while the
+    session belongs to another identity, or while this daemon is already
+    preparing it."""
     root, ws = review.session(db, root_id)
     key = (root.id, ws.branch)
-    if identity_lock.locked_by(root.id) or not _start_pr_work(key):
+    if identity_lock.locked_by(root.id) or review.open_pr(db, root, ws) or not _start_pr_work(key):
         return None
     try:
-        job = _auto_pr(db, root, ws, key, opening)
+        job = _prepare_pr(db, root, ws, key)
     except BaseException:
         _end_pr_work(key)
         raise
@@ -820,43 +862,51 @@ def auto_pr(db: DB, root_id: str, opening: bool) -> Job | None:
     return job
 
 
-def _auto_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str], opening: bool) -> Job | None:
-    row = db.conn.execute(f"SELECT url, pushed_sha FROM session_prs WHERE {_SESSION_PR}", key).fetchone()
+def _prepare_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str]) -> Job | None:
     head = git.out(["rev-parse", "HEAD"], ws.path)
-    if row and row["url"]:
-        tried, at = _PR_TRIED.get(key, (None, 0.0))
-        waiting = tried == head and not opening and time.monotonic() - at < PUSH_RETRY_SECONDS
-        if head == row["pushed_sha"] or waiting or not review.auto_pr(ws.repo_root):
-            return None
-        _PR_TRIED[key] = (head, time.monotonic())
+    row = db.conn.execute(f"SELECT sha, state FROM session_pr_prep WHERE {_SESSION_PR}", key).fetchone()
+    # A row still checking with nobody at work on it was left by a daemon that stopped half way.
+    if row and row["sha"] == head and row["state"] != "checking":
+        return None
+    tried, at = _PR_TRIED.get(key, (None, 0.0))
+    if tried == head and time.monotonic() - at < PREPARE_AGAIN_SECONDS:
+        return None
+    db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, title, prepared_at)"
+                    " VALUES (?, ?, ?, 'checking', ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
+                    " sha = excluded.sha, state = excluded.state, title = excluded.title, checks = NULL,"
+                    " check_cmd = NULL, output = NULL, prepared_at = excluded.prepared_at",
+                    (*key, head, review.draft(db, root, ws)["title"], time.time()))
 
-        def push(db: DB, job: Job) -> Any:
-            try:
-                identity_lock.ensure(root)
-                git.push(ws.path, ws.branch)
-                db.conn.execute(f"UPDATE session_prs SET pushed_sha = ? WHERE {_SESSION_PR}", (head, *key))
-            finally:
-                _end_pr_work(key)
-            bus.publish_agent(db, "session.pr_pushed", root.id, url=row["url"], commit=head)
-            return {"url": row["url"], "commit": head}
+    def settle(db: DB, state: str, sha: str, cmd: str | None = None, output: str | None = None,
+               checks: list[str] | None = None) -> None:
+        # Only the row this preparation wrote: one the sweep dropped meanwhile (not ready) stays gone.
+        db.conn.execute(f"UPDATE session_pr_prep SET state = ?, sha = ?, check_cmd = ?, output = ?, checks = ?"
+                        f" WHERE {_SESSION_PR} AND sha = ?",
+                        (state, sha, cmd, output, json.dumps(checks) if checks is not None else None, *key, head))
 
-        return start_job("session.push", push, root_id=root.id, repo_root=ws.repo_root)
-    abandoned = row is not None
-    if not (opening or abandoned) or not review.auto_pr(ws.repo_root):
-        return None
-    if abandoned and (url := workspaces.existing_pull_request(ws)):
-        _record_pr(db, key, url, None, True)     # its commits are pushed on the next sweep
-        return None
-    if not abandoned and not db.conn.execute(
-            "INSERT OR IGNORE INTO session_prs (root_id, branch, auto, opened_at) VALUES (?, ?, 1, ?)",
-            (*key, time.time())).rowcount:
-        return None
-    try:
-        d = review.draft(db, root, ws)
-        return open_session_pr(db, {"root": root.id}, {"title": d["title"], "body": d["body"]}, auto=True)
-    except BaseException:
-        db.conn.execute(f"DELETE FROM session_prs WHERE {_SESSION_PR} AND url IS NULL", key)
-        raise
+    def work(db: DB, job: Job) -> Any:
+        checked: list[str] = []
+        try:
+            identity_lock.ensure(root)
+            with _checked(db, ws, job, checked=checked) as sha:
+                settle(db, "passed", sha, checks=checked)
+        except gates.ChecksFailed as e:
+            settle(db, "failed", head, e.cmd, str(e))
+            gates.tell(db, root.id, f"[brindle PR] The pre-PR checks failed, so the session's PR waits: {e}\n"
+                       "Fix the problem; brindle checks again once the session is ready.")
+            bus.publish_agent(db, "session.pr_prepared", root.id, passed=False, check=e.cmd)
+            return {"passed": False, "check": e.cmd}
+        except BaseException:   # the checks couldn't run: tried again later, its row gone meanwhile
+            db.conn.execute(f"DELETE FROM session_pr_prep WHERE {_SESSION_PR} AND sha = ? AND state = 'checking'",
+                            (*key, head))
+            _PR_TRIED[key] = (head, time.monotonic())
+            raise
+        finally:
+            _end_pr_work(key)
+        bus.publish_agent(db, "session.pr_prepared", root.id, passed=True, commit=sha)
+        return {"passed": True, "commit": sha}
+
+    return start_job("session.pr_prepare", work, root_id=root.id, repo_root=ws.repo_root)
 
 
 # -- goal ------------------------------------------------------------------------
@@ -865,7 +915,7 @@ def _auto_pr(db: DB, root: Agent, ws: Workspace, key: tuple[str, str], opening: 
 def _autopilot_root(db: DB, body: Body) -> tuple[Agent, Workspace]:
     root, ws = _root(db, _get(body, "root", required=True))
     if db.get_autopilot(root.id) is None:
-        raise ServiceError("conflict", "autopilot isn't set up for this session", 409)
+        raise ServiceError("conflict", "no goal is set up for this session", 409)
     return root, ws
 
 
@@ -890,16 +940,9 @@ def check_goal(db: DB, params: dict, body: Body) -> Any:
 
 def enable_goal(db: DB, params: dict, body: Body) -> Any:
     root, _ = _root(db, _get(body, "root", required=True))
-    on = _get(body, "enabled", bool, required=True)
-    autopilot.set_enabled(db, root.id, on)
-    if agents.is_alive(root):
-        note = ("Autopilot is on again: keep driving toward the goal (get_progress shows where it stands)."
-                if on else "Autopilot is now off: stop driving and wait for the user's instructions.")
-        try:
-            agents.send_message(db, root.id, f"[brindle autopilot] {note}")
-        except agents.AgentError:
-            pass
-    return {"enabled": on}
+    _get(body, "enabled", bool, required=True)
+    autopilot.set_enabled(db, root.id, True)
+    return {"enabled": True}
 
 
 # -- decisions, coordinator, config, permissions -----------------------------------
@@ -937,17 +980,26 @@ def _fits(value: Any, default: Any) -> bool:
 def patch_config(db: DB, params: dict, body: Body) -> Any:
     """``values`` into ~/.brindle/config.json (scope "user") or the repo's
     .brindle/config.local.json (scope "repo"). Only the repo config's own
-    keys, each with a value of its default's type (or null)."""
+    keys, each with a value of its default's type (or null). Scope "shared"
+    is the repo's committed .brindle/config.json. ``unset`` (scope "repo" or
+    "shared") lists keys to remove from that file, clearing a project's
+    override."""
     from brindle import config
 
     scope = _get(body, "scope", default="user")
-    if scope not in ("user", "repo"):
-        raise ServiceError("invalid", "scope must be user or repo")
-    repo = _get(body, "repo", required=scope == "repo")
-    values = _get(body, "values", dict, required=True)
+    if scope not in ("user", "repo", "shared"):
+        raise ServiceError("invalid", "scope must be user, repo or shared")
+    repo = _get(body, "repo", required=scope != "user")
+    values = _get(body, "values", dict, default={})
+    unset = _get(body, "unset", list, default=[])
+    if unset and scope == "user":
+        raise ServiceError("invalid", "unset needs scope repo or shared")
+    if not values and not unset:
+        raise ServiceError("invalid", "values is required")
+    path = None
     defaults = config.RepoConfig()
     known = {f.name for f in dataclasses.fields(config.RepoConfig)}
-    if unknown := sorted(set(values) - known):
+    if unknown := sorted((set(values) | set(unset)) - known):
         raise ServiceError("invalid", f"unknown setting(s): {', '.join(unknown)}")
     for key, value in values.items():
         if not _fits(value, getattr(defaults, key)):
@@ -955,9 +1007,13 @@ def patch_config(db: DB, params: dict, body: Body) -> Any:
     for key, value in values.items():
         if scope == "user":
             path = config.set_user(key, value)
+        elif scope == "shared":
+            path = config.set_repo(repo, key, value)
         else:
             path = config.set_local(repo, key, value)
-    return {"updated": sorted(values), "path": str(path)}
+    for key in unset:
+        path = config.unset_repo(repo, key) if scope == "shared" else config.unset_local(repo, key)
+    return {"updated": sorted({*values, *unset}), "path": str(path)}
 
 
 # -- knowledge sources (brindle kb add / sync / remove) -----------------------------
@@ -1132,7 +1188,8 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
     lock_changes: dict[str, bool] = {}
     overrides: dict[str, dict[str, str | None]] = {}    # kind -> effort / instructions (None clears)
     extra: dict[str, Any] = {}      # supervisor and reviewer settings the kinds ask for
-    current = config.load_repo_config(repo).routing
+    # A user-scope change builds on the person's own lists and library, never this repo's.
+    current = config.load_repo_config(repo, user_only=scope == "user").routing
     for kind, spec in kinds.items():
         if kind not in config.ROUTING_KINDS or not isinstance(spec, dict):
             raise ServiceError("invalid", f"kind must be one of {', '.join(config.ROUTING_KINDS)}, not {kind!r}")
@@ -1170,7 +1227,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
                 extra["supervisor_profile"] = model
             if fallbacks is not None:
                 extra["supervisor_fallbacks"] = list(dict.fromkeys(fallbacks))
-    by_name = {p.name: p for p in profiles.list_profiles(repo)}
+    by_name = {p.name: p for p in profiles.list_profiles(None if scope == "user" else repo)}
     known = set(by_name)
     named = [reviewer] if reviewer is not None else []
     for value in extra.values():     # supervisor and reviewer choices and fallbacks are profiles too
@@ -1185,7 +1242,7 @@ def put_routing(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", f"no such profile(s): {', '.join(unknown)}")
     if excluded is not None and (bad := sorted(set(map(str, excluded)) - set(providers.PROVIDERS))):
         raise ServiceError("invalid", f"no such provider(s): {', '.join(bad)}")
-    policy = RoutingPolicy.load(repo)
+    policy = RoutingPolicy.load(repo, user_library=scope == "user")
     if policy.applies and policy.access.error:
         raise ServiceError("forbidden", f"routing can't be changed now: {policy.access.error}", 403)
     for name in dict.fromkeys(named):
@@ -1317,6 +1374,227 @@ def change_permissions(db: DB, params: dict, body: Body) -> Any:
         raise ServiceError("invalid", "op must be allow, deny, forget, accept or reset")
     antigravity.resync_permissions()
     return reply
+
+
+def _policy_changed() -> None:
+    from brindle import antigravity
+
+    antigravity.resync_permissions()
+
+
+def _invalid(e: ValueError) -> ServiceError:
+    return ServiceError("invalid", str(e))
+
+
+def set_permission_preset(db: DB, params: dict, body: Body) -> Any:
+    """PUT /permissions/preset {preset}: seed the store from that preset (its
+    rules replace the preset's earlier ones; the person's own and learned rules
+    stay) and record the choice. Answers the whole policy."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        store = perms.apply_preset(_get(body, "preset", required=True))
+    except ValueError as e:
+        raise _invalid(e) from e
+    _policy_changed()
+    return svc.policy_dto(store).to_json()
+
+
+def patch_permissions(db: DB, params: dict, body: Body) -> Any:
+    """PATCH /permissions {unmatched}: what a request no rule covers does (ask, allow or deny)."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        perms.set_unmatched(_get(body, "unmatched", required=True))
+    except ValueError as e:
+        raise _invalid(e) from e
+    _policy_changed()
+    return svc.policy_dto().to_json()
+
+
+def set_permission_groups(db: DB, params: dict, body: Body) -> Any:
+    """PUT /permissions/groups {groups: {group: {baseline?, subcategories?}}}:
+    change capability group baselines and subcategory answers (the rest stay).
+    Answers the whole policy."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        store = perms.set_groups(_get(body, "groups", dict, required=True))
+    except ValueError as e:
+        raise _invalid(e) from e
+    _policy_changed()
+    return svc.policy_dto(store).to_json()
+
+
+def _rule_fields(body: Body) -> dict[str, Any]:
+    """The rule fields a body may set (make_rule's), validated for type."""
+    out: dict[str, Any] = {}
+    for key in ("kind", "match", "match_type", "decision", "label"):
+        value = _get(body, key)
+        if value is not None:
+            out[key] = value
+    for key in ("limits",):
+        value = _get(body, key, dict)
+        if value is not None or key in body:
+            out[key] = value
+    if "expires" in body:
+        out["expires"] = _get(body, "expires", (int, float))
+    if "minutes" in body:    # a timed rule: expires this many minutes from now
+        minutes = _get(body, "minutes", (int, float))
+        out["expires"] = time.time() + minutes * 60 if minutes else None
+    return out
+
+
+def create_permission_rule(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/rules {kind, match, match_type?, decision, limits?, minutes?|expires?, label?}."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    fields = _rule_fields(body)
+    for key in ("kind", "match", "decision"):
+        if key not in fields:
+            raise ServiceError("invalid", f"{key} is required")
+    try:
+        rule = perms.add_rule(fields.pop("kind"), fields.pop("match"), fields.pop("decision"),
+                              fields.pop("match_type", "exact"), **fields)
+    except ValueError as e:
+        raise _invalid(e) from e
+    _policy_changed()
+    return svc.rule_dto(rule).to_json()
+
+
+def update_permission_rule(db: DB, params: dict, body: Body) -> Any:
+    """PUT /permissions/rules/{id}: change any of a rule's fields (a preset's rule becomes the person's)."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        rule = perms.update_rule(params["id"], **_rule_fields(body))
+    except ValueError as e:
+        raise _invalid(e) from e
+    if rule is None:
+        raise ServiceError("not_found", f"no rule {params['id']}", 404)
+    _policy_changed()
+    return svc.rule_dto(rule).to_json()
+
+
+def delete_permission_rule(db: DB, params: dict, body: Body) -> Any:
+    from brindle import permissions as perms
+
+    gone = perms.forget(params["id"])
+    if gone is None:
+        raise ServiceError("not_found", f"no rule {params['id']}", 404)
+    _policy_changed()
+    return {"deleted": params["id"], "describe": gone}
+
+
+def add_permission_exception(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/rules/{id}/exceptions {kind, match, match_type?}: except those requests from the rule."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        rule = perms.add_exclusion(params["id"], _get(body, "kind", required=True), _get(body, "match", required=True),
+                                   _get(body, "match_type", default="exact"))
+    except ValueError as e:
+        raise _invalid(e) from e
+    if rule is None:
+        raise ServiceError("not_found", f"no rule {params['id']}", 404)
+    _policy_changed()
+    return svc.rule_dto(rule).to_json()
+
+
+def _saved_fields(body: Body) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key in ("kind", "pattern", "decision", "scope", "level", "life", "session", "repo", "note"):
+        value = _get(body, key)
+        if value is not None or key in body:
+            out[key] = value
+    if "minutes" in body:
+        out["minutes"] = _get(body, "minutes", (int, float))
+    if "request" in body:
+        out["request"] = _get(body, "request", dict)
+    return out
+
+
+def create_saved_action(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/saved {kind, pattern, decision, scope?, level?, request?, life?, minutes?, session?, repo?, note?}."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    fields = _saved_fields(body)
+    for key in ("kind", "pattern", "decision"):
+        if not fields.get(key):
+            raise ServiceError("invalid", f"{key} is required")
+    try:
+        action = perms.save_action(fields.pop("kind"), fields.pop("pattern"), fields.pop("decision"),
+                                   **{k: v for k, v in fields.items() if v is not None})
+    except ValueError as e:
+        raise _invalid(e) from e
+    return svc.saved_dto(action).to_json()
+
+
+def update_saved_action(db: DB, params: dict, body: Body) -> Any:
+    """PUT /permissions/saved/{id}: change its scope, pattern, decision or how long it lasts (a timed one restarts)."""
+    from brindle import permissions as perms
+    from brindle.service import permissions as svc
+
+    try:
+        action = perms.update_saved_action(params["id"], **_saved_fields(body))
+    except ValueError as e:
+        raise _invalid(e) from e
+    if action is None:
+        raise ServiceError("not_found", f"no saved action {params['id']}", 404)
+    return svc.saved_dto(action).to_json()
+
+
+def delete_saved_action(db: DB, params: dict, body: Body) -> Any:
+    from brindle import permissions as perms
+
+    gone = perms.delete_saved_action(params["id"])
+    if gone is None:
+        raise ServiceError("not_found", f"no saved action {params['id']}", 404)
+    return {"deleted": params["id"]}
+
+
+def decide_asks(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/asks/decide {key, scope, mode, minutes?}: one decision
+    on an Inbox item (GET /permissions/asks). ``mode``: once | session | timed |
+    forever | deny | always-deny; ``scope``: one of the item's scope values."""
+    from brindle import permission_grants
+    from brindle.service import permissions as svc
+
+    minutes = _get(body, "minutes", (int, float))
+    result = permission_grants.decide_group(db, _get(body, "key", required=True), _get(body, "scope", required=True),
+                                            _get(body, "mode", required=True), minutes)
+    return svc.decision_dto(result).to_json()
+
+
+def allow_all_asks(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/asks/allow-all {repo?, forever?}: the stall notice's
+    automated fix: allow everything waiting that its own policy permits, one
+    grant per item at the general scope where every request's policy allows
+    it, an exact grant where only that is permitted."""
+    from brindle import permission_grants
+    from brindle.service import permissions as svc
+
+    result = permission_grants.allow_all(db, _get(body, "repo"), _get(body, "forever", bool, False))
+    return svc.plan_dto(result).to_json()
+
+
+def unblock_asks(db: DB, params: dict, body: Body) -> Any:
+    """POST /permissions/asks/unblock {repo?, forever?}: except the blocked
+    requests from the deny rules that block them (a rule for them where
+    unmatched actions are denied), then allow them."""
+    from brindle import permission_grants
+    from brindle.service import permissions as svc
+
+    result = permission_grants.unblock_denied(db, _get(body, "repo"), _get(body, "forever", bool, False))
+    _policy_changed()
+    return svc.plan_dto(result).to_json()
 
 
 # -- account ---------------------------------------------------------------------
@@ -1564,7 +1842,8 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
     """The provider CLI's own sign-in (``claude auth login``, ``codex login``, ...).
     ``method``: how to sign in, where the CLI has a flag for it (see
     picker.LOGIN_METHODS); its own default otherwise."""
-    from brindle import picker
+    from brindle import cloud_login, company_login, picker, providers
+    from brindle.config import brindle_home
     from brindle.pro.team_policy import CLI_NAMES
 
     provider = params["provider"]
@@ -1574,15 +1853,51 @@ def provider_login(db: DB, params: dict, body: Body) -> Any:
     methods = picker.LOGIN_METHODS.get(provider, {})
     if method is not None and method not in methods:
         raise ServiceError("invalid", f"{provider} sign-in methods: {', '.join(methods) or 'none'}")
+    repo, profile = _get(body, "repo"), _get(body, "profile")
+    if bool(repo) != bool(profile):
+        raise ServiceError("invalid", "repo and profile must be supplied together")
+    # "Try again" in the app: end the sign-in still running and start a fresh one.
+    restart = _get(body, "restart", bool, False)
+    identity = agents.consent_identity(db, repo, profile, provider, _get(body, "session")) if repo else (
+        company_login.stored_env() if provider == "claude" else {})
+    if ((provider == "claude" and not providers.claude_org_managed()) or
+            (provider == "opencode" and identity.get("BRINDLE_CLOUD_ROUTE"))):
+        route = cloud_login.provider_from_env({**os.environ, **identity})
+        if route in ("bedrock", "vertex", "azure"):
+            command = cloud_login.login_command(identity)
+            if method or command is None:
+                raise ServiceError("invalid", "Refresh this profile's configured cloud credentials directly")
+            browser = picker._wsl_browser_env()
+            full = {**os.environ, **identity}
+            env = {**{k: full[k] for k in cloud_login.IDENTITY_ENV if k in full}, **identity,
+                   "BRINDLE_HOME": str(brindle_home()),
+                   **({"BROWSER": browser["BROWSER"]} if browser else {})}
+            return terminal.open_action(f"login cloud-{cloud_login.action_key(identity)}",
+                                        cloud_login.interactive_command(),
+                                        env=env, restart=restart)
     from brindle import provider_homes
 
     browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
     # The CLI signs in to brindle's config home for it, which brindle uses from then on.
     env = {**provider_homes.login_env(provider), **({"BROWSER": browser["BROWSER"]} if browser else {})}
-    # "Try again" in the app: end the sign-in still running and start a fresh one.
-    restart = _get(body, "restart", bool, False)
     return terminal.open_action(f"login {provider}", picker._login_command(provider, method), env=env,
                                 restart=restart)
+
+
+def profile_preflight(db: DB, params: dict, body: Body) -> Any:
+    """Explicitly check the launch identity named by a preflight action.
+
+    Unlike the read-only GET probe, this may run the configured cloud CLI.
+    The POST uses the same profile and session resolution as sign-in.
+    """
+    provider = params["provider"]
+    if provider not in preflight.PROVIDERS:
+        raise ServiceError("invalid", "unknown provider")
+    repo, profile = _get(body, "repo", required=True), _get(body, "profile", required=True)
+    session = _get(body, "session")
+    identity = agents.consent_identity(db, repo, profile, provider, session)
+    launch = {"repo": repo, "profile": profile, **({"session": session} if session else {})}
+    return [i.to_json() for i in preflight.check(provider, repo, env=identity, launch=launch)]
 
 
 def provider_trust(db: DB, params: dict, body: Body) -> Any:
@@ -1668,6 +1983,99 @@ def turn_off_provider(db: DB, params: dict, body: Body) -> Any:
     return providers_install.turn_off(_known_provider(params))
 
 
+def provider_logout(db: DB, params: dict, body: Body) -> Any:
+    """Sign brindle's own copy of the provider out (Claude Code, Codex only);
+    the person's own CLI login is not touched. Answers the provider's row."""
+    from brindle import providers_install
+
+    provider = _known_provider(params)
+    if provider not in providers_install.SIGN_OUT:
+        raise ServiceError("invalid", f"sign out is offered for {', '.join(providers_install.SIGN_OUT)}")
+    try:
+        return providers_install.sign_out(provider)
+    except providers_install.InstallError as e:
+        raise ServiceError("logout_failed", str(e), 422) from None
+
+
+def put_provider_connection(db: DB, params: dict, body: Body) -> Any:
+    """How the provider connects (brindle.connections), into
+    ~/.brindle/config.json: ``method`` auto | sign_in | api_key | cloud, and
+    for cloud ``cloud`` (the route) and ``settings`` (its non-secret
+    variables, e.g. AWS_PROFILE and AWS_REGION). A choice the org's policy
+    decides instead is refused (403) with the reason. Answers GET's shape."""
+    from brindle import connections
+    from brindle.service.dto import ProviderConnectionDTO
+
+    provider, repo = params["provider"], _get(body, "repo")
+    try:
+        connections.choose(provider, _get(body, "method", required=True), _get(body, "cloud"),
+                           _get(body, "settings", dict), repo)
+        return ProviderConnectionDTO(**connections.view(provider, repo, db)).to_json()
+    except connections.Invalid as e:
+        raise ServiceError("invalid", str(e)) from None
+    except connections.Refused as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+
+
+def _streamed(db: DB, job: Job):
+    """A ``run`` for a cloud CLI's sign-in: no terminal input, its output
+    (the URL or device code to confirm in the browser) as ``job.progress``."""
+    def run(argv: list[str], env=None, pass_fds=()) -> subprocess.CompletedProcess:
+        with subprocess.Popen(argv, env=env, pass_fds=pass_fds, stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              start_new_session=True) as proc:
+            for line in proc.stdout:
+                bus.publish(db, "job.progress", job=job.id, text=line.rstrip("\n"))
+        return subprocess.CompletedProcess(argv, proc.returncode)
+    return run
+
+
+def provider_cloud_sign_in(db: DB, params: dict, body: Body) -> Any:
+    """The cloud sign-in for the provider's saved cloud route, a first one or
+    a renewal, as a job (202): the CLI's output arrives as ``job.progress``,
+    and the result says what happened: "signed in", "failed", "waiting" (one
+    is already running for this login) or "manual"."""
+    from brindle import connections, picker
+
+    provider = params["provider"]
+    try:
+        connections.sign_in_target(provider)
+    except connections.Invalid as e:
+        raise ServiceError("invalid", str(e)) from None
+    except connections.Refused as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+    browser = picker._wsl_browser_env()      # WSL with no Linux browser: open it in Windows'
+
+    def work(db: DB, job: Job) -> Any:
+        return connections.sign_in(provider, run=_streamed(db, job),
+                                   say=lambda text: bus.publish(db, "job.progress", job=job.id, text=text),
+                                   extra_env={"BROWSER": browser["BROWSER"]} if browser else None)
+
+    return start_job("provider.cloud_sign_in", work, provider=provider)
+
+
+def provider_sign_out(db: DB, params: dict, body: Body) -> Any:
+    """Sign brindle's own copy of Codex out (providers_install.sign_out; the
+    person's own login is not touched), as a job (202), so that an API key
+    its ChatGPT login kept out (the connection's ``blocked_by``
+    "codex_login") is used. The result is the connection, as GET answers it."""
+    from brindle import connections, providers_install
+    from brindle.service.dto import ProviderConnectionDTO
+
+    provider, repo = params["provider"], _get(body, "repo")
+    if provider != "codex":
+        raise ServiceError("invalid", "sign-out is for codex, whose ChatGPT login keeps a key from being used")
+
+    def work(db: DB, job: Job) -> Any:
+        try:
+            providers_install.sign_out_only(provider)
+        except providers_install.InstallError as e:
+            raise ServiceError("logout_failed", str(e), 422) from None
+        return ProviderConnectionDTO(**connections.view(provider, repo, db)).to_json()
+
+    return start_job("provider.sign_out", work, provider=provider)
+
+
 def terminal_input(db: DB, params: dict, body: Body) -> Any:
     """Type ``text``, one line the person typed or pasted in the app (a
     sign-in's code), into the action terminal ``id``, then Enter unless
@@ -1721,6 +2129,55 @@ def put_key(db: DB, params: dict, body: Body) -> Any:
     except Exception:  # noqa: BLE001 - no traceback: its frames held the value
         raise ServiceError("internal", "couldn't store the key", 500) from None
     return {"name": name, "last4": value.strip()[-4:], "set": True}
+
+
+def delete_key(db: DB, params: dict, body: Body) -> Any:
+    """``brindle keys unset NAME``. GEMINI_API_KEY also gives agy back the
+    modelProvider brindle replaced for it (connections.key_removed)."""
+    from brindle import connections, keys_cmds, keystore
+
+    name = params["name"]
+    try:
+        keys_cmds.remove(name)
+    except keystore.KeyNameError as e:
+        raise ServiceError("invalid", str(e)) from None
+    except keystore.CredentialError as e:
+        raise ServiceError("not_stored", str(e), 422) from None
+    connections.key_removed(name)
+    return {"name": name, "set": False}
+
+
+def retest_key(db: DB, params: dict, body: Body) -> Any:
+    """Re-check the stored key with its provider; the reply says how it came out."""
+    from brindle import keys_cmds, keystore
+
+    name = params["name"]
+    try:
+        status = keys_cmds.retest(name)
+        checked_at = keystore.get_record(name).get("checked_at")
+    except keystore.KeyNameError as e:
+        raise ServiceError("invalid", str(e)) from None
+    except keystore.CredentialError as e:
+        raise ServiceError("not_found", str(e), 404) from None
+    return {"name": name, "status": status, "checked_at": checked_at}
+
+
+def import_key(db: DB, params: dict, body: Body) -> Any:
+    """Store the daemon's environment value of ``name``, as a save would (never returned)."""
+    from brindle import keys_cmds, keystore
+
+    name, repo = params["name"], _get(body, "repo")
+    try:
+        last4 = keys_cmds.import_env(name, repo)
+    except keystore.KeyNameError as e:
+        raise ServiceError("invalid", str(e)) from None
+    except keys_cmds.PolicyDenied as e:
+        raise ServiceError("forbidden", str(e), 403) from None
+    except keystore.CredentialError as e:
+        raise ServiceError("not_stored", str(e), 422) from None
+    except Exception:  # noqa: BLE001 - no traceback: its frames held the value
+        raise ServiceError("internal", "couldn't store the key", 500) from None
+    return {"name": name, "last4": last4, "set": True}
 
 
 def set_key(db: DB, params: dict, body: Body) -> Any:
@@ -1896,11 +2353,13 @@ ROUTES = [
     _post("/sessions/{root}/continue", continue_session),
     _post("/sessions/{root}/pause", pause_session),
     _post("/sessions/{root}/close", close_session),
+    _post("/sessions/{root}/rename", rename_session),
     _post("/sessions/{root}/handover", handover_session),
     _post("/sessions/{root}/transfer", transfer_session),
     # GET on the file path reads (routes_read); agent callers are refused by the guard.
     Route("/v1/sessions/{root:path}/file", _endpoint(put_session_file), methods=["PUT"]),
     Route("/v1/sessions/{root:path}/file", _endpoint(delete_session_file), methods=["DELETE"]),
+    _post("/sessions/{root:path}/pr/push", push_session_pr),
     _post("/sessions/{root:path}/pr", open_session_pr),
     _post("/inbox/{id}/{action}", inbox_action),
     _post("/agents/{id}/message", message_agent),
@@ -1933,6 +2392,20 @@ ROUTES = [
     _post("/debug/log", post_debug_log),
     _post("/profiles", create_profile),
     _post("/permissions", change_permissions),
+    # The permission policy (brindle.permissions, brindle.permission_grants); agents never get here.
+    Route("/v1/permissions", _endpoint(patch_permissions), methods=["PATCH"]),
+    Route("/v1/permissions/preset", _endpoint(set_permission_preset), methods=["PUT"]),
+    Route("/v1/permissions/groups", _endpoint(set_permission_groups), methods=["PUT"]),
+    _post("/permissions/rules", create_permission_rule),
+    Route("/v1/permissions/rules/{id}", _endpoint(update_permission_rule), methods=["PUT"]),
+    Route("/v1/permissions/rules/{id}", _endpoint(delete_permission_rule), methods=["DELETE"]),
+    _post("/permissions/rules/{id}/exceptions", add_permission_exception),
+    _post("/permissions/saved", create_saved_action),
+    Route("/v1/permissions/saved/{id}", _endpoint(update_saved_action), methods=["PUT"]),
+    Route("/v1/permissions/saved/{id}", _endpoint(delete_saved_action), methods=["DELETE"]),
+    _post("/permissions/asks/decide", decide_asks),
+    _post("/permissions/asks/allow-all", allow_all_asks),
+    _post("/permissions/asks/unblock", unblock_asks),
     _post("/account/login", account_login),
     _post("/account/logout", account_logout),
     _post("/account/switch-org", account_switch_org),
@@ -1947,13 +2420,21 @@ ROUTES = [
     Route("/v1/analysis-docs/{id}", _endpoint(delete_doc), methods=["DELETE"]),
     # Like every route, refused to agent callers by the guard.
     _post("/providers/{provider}/login", provider_login),
+    _post("/providers/{provider}/preflight", profile_preflight),
+    _post("/providers/{provider}/logout", provider_logout),
     _post("/providers/{provider}/trust", provider_trust),
     _post("/providers/{provider}/consent", provider_consent),
     _post("/providers/{provider}/install", install_provider),
     _post("/providers/{provider}/use-mine", use_provider_install),
+    Route("/v1/providers/{provider}/connection", _endpoint(put_provider_connection), methods=["PUT"]),
+    _post("/providers/{provider}/cloud-sign-in", provider_cloud_sign_in),
+    _post("/providers/{provider}/sign-out", provider_sign_out),
     Route("/v1/providers/{provider}", _endpoint(turn_off_provider), methods=["DELETE"]),
     _post("/keys/{name}/set", set_key),
     Route("/v1/keys/{name}", _endpoint(put_key), methods=["PUT"]),
+    Route("/v1/keys/{name}", _endpoint(delete_key), methods=["DELETE"]),
+    _post("/keys/{name}/test", retest_key),
+    _post("/keys/{name}/import", import_key),
     _post("/terminals/{id}/input", terminal_input),
     _post("/terminals/shell", shell_terminal),
     Route("/v1/terminals/{id}", _endpoint(close_terminal), methods=["DELETE"]),

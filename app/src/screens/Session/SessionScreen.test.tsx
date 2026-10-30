@@ -134,6 +134,7 @@ const fake = vi.hoisted(() => {
 
 vi.mock("@xterm/xterm", () => ({ Terminal: fake.Xterm }));
 vi.mock("@xterm/addon-fit", () => ({ FitAddon: fake.Addon }));
+vi.mock("@xterm/addon-web-links", () => ({ WebLinksAddon: fake.Addon }));
 vi.mock("@xterm/addon-webgl", () => ({ WebglAddon: fake.Webgl }));
 
 beforeEach(() => {
@@ -155,7 +156,7 @@ const drawnLive = "\x1b[H\x1b[2J$ claude\r\nhello\x1b[2;3H";
 const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship ls --json" };
 
 /* Under the app the sidebar's tree picks the agent and the route carries it;
-   here a row of buttons stands in for the tree. */
+   here a row of buttons stands in for the tree, and one for the sidebar's Changes row. */
 function Harness({ client, root, repo, refresh, store, agents, onOpen }: {
   client: DaemonClient;
   root: string;
@@ -174,6 +175,9 @@ function Harness({ client, root, repo, refresh, store, agents, onOpen }: {
             {id}
           </button>
         ))}
+        <button type="button" data-testid="open-changes" onClick={() => setPicked((p) => ({ ...p, sheet: p.sheet?.kind === "changes" ? null : { kind: "changes" } }))}>
+          Changes
+        </button>
       </div>
       <SessionScreen client={client} root={root} repo={repo} refresh={refresh} store={store} agent={picked.agent} sheet={picked.sheet} onSelect={(agent, sheet) => setPicked({ agent, sheet })} onOpen={onOpen} />
     </>
@@ -210,6 +214,152 @@ const surface = () => screen.getByTestId("provider-surface");
 const title = () => screen.getByTestId("surface-title").textContent;
 
 describe("SessionScreen", () => {
+  it("shows live session changes before PR readiness in the chat's place, goes back to the chat with ← Chat or Esc keeping drafts, and edits hunks in either layout", async () => {
+    let holdDiff: Promise<void> | null = null;
+    let diffReads = 0;
+    const { daemon, sync, term } = mount({ sup1: live, w1: live }, {
+      workspaces: [{ ...root, branch: "brindle/session-18" }, worker],
+      sessionReview: { sup1: { ready: false, reasons: ["work in progress"], branch: "brindle/session-18", base: "main", diff: "" } },
+      sessionBase: { sup1: { "src/a.ts": "old\ncontext\n" } },
+      sessionFiles: { sup1: { "src/a.ts": "new\ncontext\n", "docs/readme.md": "hello\n" } },
+    }, (daemon) => async (input, init) => {
+      if (String(input).endsWith("/sessions/sup1/diff")) {
+        diffReads++;
+        if (holdDiff) await holdDiff;
+      }
+      return daemon.fetch(input, init);
+    });
+    await waitFor(() => expect(term().written).toBe(drawnLive));
+    // The chat alone: no tabs, no changes, no way back to show.
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByTestId("session-changes")).toBeNull();
+    expect(screen.queryByTestId("back-to-chat")).toBeNull();
+    const openChanges = () => fireEvent.click(screen.getByTestId("open-changes"));
+    // The diff is read before Changes is first opened, and again on a git status event.
+    await waitFor(() => expect(diffReads).toBeGreaterThan(0));
+    pick("w1");
+    const terminal = term();
+    const readsBefore = diffReads;
+    daemon.data.sessionFiles.sup1["docs/readme.md"] = "hello\nworld\n";
+    daemon.send({ type: "git", workspace_id: root.id, status: { branch: "brindle/session-18", base: "main", ahead: 0, behind: 0, dirty_files: ["docs/readme.md"], unpushed: 0 } });
+    await waitFor(() => expect(diffReads).toBeGreaterThan(readsBefore));
+    openChanges();
+    const changes = () => within(screen.getByTestId("session-changes"));
+    const summary = () => changes().getByTestId("changes-summary").textContent;
+    await waitFor(() => expect(summary()).toBe("2 files changed against main · +3 −1"));
+    // In the chat's place: the chat is hidden, not gone, and the bar offers the way back.
+    expect(screen.getByTestId("back-to-chat").textContent).toBe("← Chat");
+    expect(shownAgent()).toBe("w1");
+    const files = await changes().findByRole("navigation", { name: "Changed files" });
+    fireEvent.click(within(files).getByRole("button", { name: "src/" }));
+    expect(within(files).queryByTitle("src/a.ts")).toBeNull();
+    fireEvent.click(within(files).getByRole("button", { name: "src/" }));
+    fireEvent.click(within(files).getByTitle("src/a.ts"));
+    await waitFor(() => expect(changes().getByRole("button", { name: /@@/ })).toHaveProperty("disabled", false));
+    fireEvent.click(changes().getByRole("button", { name: "Split" }));
+    const split = changes().getByTestId("split-diff");
+    expect(within(split).getByLabelText("Old version").textContent).toContain("old");
+    expect(within(split).getByLabelText("New version").textContent).toContain("new");
+    daemon.publish("agent.status", { root_id: "sup1", agent_id: "sup1", payload: { status: "processing" } });
+    await waitFor(() => expect(changes().getByRole("button", { name: /@@/ })).toHaveProperty("disabled", true));
+    expect(changes().getByTestId("split-diff")).toBeTruthy();
+    daemon.publish("agent.status", { root_id: "sup1", agent_id: "sup1", payload: { status: "idle" } });
+    await waitFor(() => expect(changes().getByRole("button", { name: /@@/ })).toHaveProperty("disabled", false));
+    fireEvent.click(changes().getByRole("button", { name: /@@/ }));
+    fireEvent.change(changes().getByRole("textbox"), { target: { value: "edited\ncontext\nextra" } });
+    fireEvent.click(changes().getByRole("button", { name: /Save/ }));
+    await waitFor(() => expect(daemon.sessionEdits).toHaveLength(1));
+    expect(daemon.data.sessionFiles.sup1["src/a.ts"]).toBe("edited\ncontext\nextra\n");
+    await waitFor(() => expect(summary()).toContain("+4 −1"));
+    fireEvent.click(changes().getByRole("button", { name: "Unified" }));
+    await waitFor(() => expect(changes().queryByTestId("hunk-editor")).toBeNull());
+    expect(changes().getByTestId("hunk").textContent).toContain("+edited");
+    expect(changes().queryByTestId("split-diff")).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    // Esc taken by an edit box closes only the box.
+    const shown = () => !screen.getByTestId("session-changes").hidden;
+    await waitFor(() => expect(changes().getByRole("button", { name: /@@/ })).toHaveProperty("disabled", false));
+    fireEvent.click(changes().getByRole("button", { name: /@@/ }));
+    fireEvent.keyDown(changes().getByRole("textbox"), { key: "Escape" });
+    expect(changes().queryByTestId("hunk-editor")).toBeNull();
+    expect(shown()).toBe(true);
+
+    // An unsaved draft; ← Chat: the changes are hidden (kept, with the draft), the same chat is back (never torn
+    // down), and the way back goes with them.
+    fireEvent.click(changes().getByRole("button", { name: /@@/ }));
+    fireEvent.change(changes().getByRole("textbox"), { target: { value: "keep this draft" } });
+    fireEvent.click(screen.getByTestId("back-to-chat"));
+    expect(shown()).toBe(false);
+    expect(screen.getByTestId("session-changes").className).toContain("hidden");
+    expect(screen.queryByTestId("back-to-chat")).toBeNull();
+    expect(term()).toBe(terminal);
+    expect(terminal.disposed).toBe(false);
+    expect(shownAgent()).toBe("w1");
+    // Reopened, the draft is as it was left.
+    openChanges();
+    expect(shown()).toBe(true);
+    expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
+    // Esc (not in a box) goes back to the chat the same way; the draft stays through it too.
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(shown()).toBe(false);
+    expect(term()).toBe(terminal);
+    expect(terminal.disposed).toBe(false);
+    openChanges();
+    expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
+    fireEvent.click(screen.getByTestId("back-to-chat"));
+    // An external amend can change content without changing any git-status field.
+    vi.useFakeTimers();
+    try {
+      // Opened under the fake clock, so the periodic refresh runs on it.
+      await act(async () => {
+        openChanges();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      daemon.data.sessionFiles.sup1["docs/readme.md"] = "amended\nsecond\nthird\n";
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(summary()).toContain("+5 −1");
+      fireEvent.click(changes().getByTitle("docs/readme.md"));
+      expect(changes().getByTestId("hunk").textContent).toContain("+amended");
+      fireEvent.click(changes().getByTitle("src/a.ts"));
+      expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
+
+      // Periodic and opening refreshes share one in-flight request and one queued refresh.
+      let release!: () => void;
+      holdDiff = new Promise<void>((resolve) => { release = resolve; });
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      const pendingReads = diffReads;
+      fireEvent.click(screen.getByTestId("back-to-chat"));
+      await act(async () => {
+        openChanges();
+        await vi.advanceTimersByTimeAsync(10_000);
+      });
+      expect(diffReads).toBe(pendingReads);
+      holdDiff = null;
+      await act(async () => { release(); await vi.advanceTimersByTimeAsync(0); });
+      expect(diffReads).toBe(pendingReads + 1);
+
+      // Opening Changes reads immediately, without advancing the periodic clock.
+      fireEvent.click(screen.getByTestId("back-to-chat"));
+      daemon.data.sessionFiles.sup1["docs/readme.md"] = "on activation\n";
+      await act(async () => {
+        openChanges();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(summary()).toContain("+3 −1");
+      expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
+      fireEvent.click(changes().getByTitle("docs/readme.md"));
+      expect(changes().getByTestId("hunk").textContent).toContain("+on activation");
+      cleanup();
+      const stoppedReads = diffReads;
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(diffReads).toBe(stoppedReads);
+    } finally {
+      vi.useRealTimers();
+      sync.stop();
+    }
+  });
+
   it("shows the selected agent's pane, bare, named by provider and agent, through a tmux client on its window, and types into it as is", async () => {
     const { daemon, sync, term } = mount({ sup1: live, w1: { ...live, screen: "worker" } });
     await waitFor(() => expect(shownAgent()).toBe("sup1"));
@@ -676,6 +826,13 @@ describe("SessionScreen", () => {
     expect(fake.Xterm.all).toHaveLength(0);
     expect(screen.getByTestId("session-status").textContent).toContain("paused");
     expect(screen.getByTestId("session-bar").textContent).not.toContain("Refactor the cache"); // the goal is the sidebar's
+    // A paused session's changes open too, read-only; ← Chat brings the card back.
+    fireEvent.click(screen.getByTestId("open-changes"));
+    await within(screen.getByTestId("session-changes")).findByRole("navigation", { name: "Changed files" });
+    expect(screen.getByTestId("new-file")).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByTestId("back-to-chat"));
+    expect(screen.getByTestId("session-changes").hidden).toBe(true);
+    expect(screen.getByTestId("state-card")).toBeTruthy();
 
     // Continue, from the bar this time, is refused until Claude Code's preflight is settled: the engine's items
     // as native UI on the surface, no launch.

@@ -109,13 +109,22 @@ def probe_version(path: str) -> str | None:
 
 
 def signed_in(provider: str) -> bool | None:
-    """True where it is cheap to know: a key in the environment, a recent
-    status check that said so, or (Codex) its auth file existing, never read.
-    None when it isn't known without running the CLI."""
+    """Confirm the CLI's login, including one just finished in the desktop.
+
+    Pending logins are checked in their destination home before accepting
+    cached evidence from elsewhere. None means the CLI gave no answer.
+    """
     from brindle import providers
 
+    pending = provider_homes.confirm_login(provider)
+    if pending is not None:
+        return pending
+    if provider_homes.signed_out(provider):      # the person signed brindle's copy out; a key still works, the row says not signed in
+        return False
     if any(os.environ.get(k) for k in providers._ENV_AUTH.get(provider, ())):
         return True
+    if providers.signed_out(provider) is not None:
+        return False
     if providers.seen_signed_in(provider):
         return True
     if provider == "codex" and os.path.exists(providers.codex_auth_path()):
@@ -187,6 +196,37 @@ def turn_off(provider: str) -> dict[str, Any]:
     _check(provider)
     _set(provider, {"off": True})
     return status(provider)
+
+
+SIGN_OUT = {"claude": ("auth", "logout"), "codex": ("logout",)}
+
+
+def sign_out(provider: str) -> dict[str, Any]:
+    """Sign brindle's own copy of ``provider`` out (``claude auth logout``,
+    ``codex logout``), run with brindle's config home and never the person's
+    own CLI login. The provider's row afterwards."""
+    sign_out_only(provider)
+    return status(provider)
+
+
+def sign_out_only(provider: str) -> None:
+    """What sign_out does, without reading the provider's row back."""
+    from brindle import providers
+    from brindle.company_login import run_cmd
+
+    _check(provider)
+    args = SIGN_OUT.get(provider)
+    path = found(provider)
+    if args is None or path is None:
+        raise InstallError(f"can't sign {NAMES[provider]} out from brindle")
+    where = provider_homes.home(provider)
+    if where is None:
+        raise InstallError(f"{NAMES[provider]} has no sign-in of brindle's own")
+    code, out = run_cmd([path, *args], env={**os.environ, **provider_homes.logout_env(provider)})
+    if code != 0:
+        raise InstallError(f"{NAMES[provider]} sign-out failed: {out.strip()[-200:]}")
+    provider_homes.mark_signed_out(provider)
+    providers.invalidate_signed_in(provider)
 
 
 def status(provider: str) -> dict[str, Any]:

@@ -7,8 +7,11 @@ seconds to minutes, and it sits on the critical path of every branch.
 
 With ``pipeline`` on (the default), brindle runs those stages itself:
 
-1. A worker reports (``report_result``). brindle starts the review at once
-   and runs the repo's checks in the background.
+1. A worker reports (``report_result``). brindle gets the branch reviewed at
+   once (``agents.start_review``): with ``checks`` configured, a detached
+   ``_review-after-checks`` process runs them first and then starts the
+   reviewer with their results in its prompt; with none, the reviewer starts
+   right away.
 2. The reviewer approves: the branch is ready. brindle merges every ready
    branch of the same base (through the same gates ``merge_workspace``
    uses), the one whose hunks overlap the others' least first and the rest
@@ -191,7 +194,7 @@ def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
     merge or remove event from ``actor``."""
     _publish(db, ws, worker, actor, **event)
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
         worker = worker or agents.workspace_worker(db, ws)
     except Exception:
         return
@@ -265,7 +268,7 @@ def on_workspace_cleanup(db: DB, ws: Workspace) -> None:
     a verdict as ``no_verdict`` and any worker abandoned without a report as
     ``removed_unmerged`` (if not already sent)."""
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except Exception:
         cfg = RepoConfig()
     merged = bool(db.merged_sha(ws.id))
@@ -294,7 +297,7 @@ def note_removed_merged(db: DB, ws: Workspace, actor: Agent | None = None,
     bus.publish_ws(db, "pipeline.removed", ws, agent_id=worker.id if worker else None,
                    actor=actor.id if actor else None, branch=ws.branch, merged=True)
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
         worker = worker or agents.workspace_worker(db, ws)
     except Exception:
         return
@@ -364,7 +367,7 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
     """Start the review of a reported branch. Returns whether the pipeline
     took the report (so the caller doesn't forward it to the supervisor)."""
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         return False
     if not enabled(cfg, worker, ws):
@@ -391,7 +394,7 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
     return True
 
 
-def review_state(db: DB, ws: Workspace) -> str | None:
+def review_state(db: DB, ws: Workspace, *, head_reader=None) -> str | None:
     """#186: where the branch in ``ws`` stands in review, so silence can be
     told apart: ``waiting for checks`` (a check slot), ``checks running``,
     ``reviewer running (id)``, nothing at work on a branch in review, the
@@ -399,7 +402,16 @@ def review_state(db: DB, ws: Workspace) -> str | None:
     approved), or ``merge failed: why``. None when the branch has no worker,
     is merged, or has not been through review."""
     worker = piped_worker(db, ws)
-    if worker is None or db.merged_sha(ws.id):
+    if worker is None:
+        return None
+    merged = db.merged_sha(ws.id)
+    if not (worker.pipeline or worker.merge_failed or merged or db.last_review(ws.id)):
+        return None   # an ordinary idle worker needs no git inspection on redraw
+    try:
+        sha = head_reader() if head_reader is not None else gates.head(ws)
+    except git.GitError:
+        return None   # a removed worktree has no current review to display
+    if sha is None or merged == sha:
         return None
     if worker.merge_failed and not worker.pipeline:
         why = " ".join(worker.merge_failed.split())
@@ -408,15 +420,18 @@ def review_state(db: DB, ws: Workspace) -> str | None:
     if worker.pipeline == "ready":
         merging = f"merging, {checks}" if gates.marked("merge-run", ws.id) else "waiting to merge"
         return f"approved, {merging}"
+    # Use the same standing verdicts as the merge gate, for this commit only.
+    # A recorded verdict may precede the asynchronous pipeline transition.
+    review = gates.verdict(db, ws.id, sha)
     if worker.pipeline == "reviewing":
         if review_running(ws.id):
             return checks
         for a in db.list_agents(ws.id):
-            if a.mode == "review" and a.status != "done" and a.result is None \
-                    and a.dismissed_at is None:
+            if a.mode == "review" and a.status not in ("paused", "done") and a.result is None \
+                    and a.dismissed_at is None and a.review_sha == sha:
                 return f"reviewer running ({a.id})"
-        return "waiting for review: nothing is checking or reviewing it"
-    review = db.last_review(ws.id)
+        if review is None:
+            return "waiting for review: nothing is checking or reviewing it"
     if review is None:
         return None
     return f"{'approved' if review.approved else 'changes requested'} at {review.sha[:8]}"
@@ -431,7 +446,7 @@ def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Wor
         # With a second review both calls carry a concrete profile, so the
         # reviewer dedupe compares profiles and neither can swallow the other.
         first = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task) if second else None
-        started = agents.start_review(db, parent, ws, first, None, cfg)   # with checks: after they finish
+        started = agents.start_review(db, parent, ws, first, None, cfg, slot="")
         if second:
             try:
                 agents.start_review(db, parent, ws, second, None, cfg, second=True)
@@ -449,9 +464,6 @@ def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Wor
                   f"Its report: {agents.first_line(result)}", result), worker.id)
 
 
-RESTART_REVIEW_AFTER = 120.0   # seconds a reported branch may wait with nothing checking or reviewing it
-
-
 def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
     """#186/#190: ``worker`` reported and its branch has waited in review
     since ``since`` with nothing at work on it: no check run (stopped with
@@ -461,15 +473,33 @@ def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
     if worker.review_restarted == since or review_running(ws.id):
         return False
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         return False
     parent = db.get_agent(worker.parent_id) if worker.parent_id else None
     if parent is None or not enabled(cfg, worker, ws):
         return False
-    db.update_agent(worker.id, review_restarted=since)
-    _start_review(db, cfg, parent, worker, ws, worker.result or "")
-    return True
+    with agents.review_dispatch_lock(ws.id):
+        current = db.get_agent(worker.id)
+        if (current is None or current.pipeline != "reviewing"
+                or current.reviewing_since != worker.reviewing_since
+                or current.review_restarted == since or review_running(ws.id)):
+            return False
+        # A short configured delay can expire before the detached helper's
+        # launch grace. Reusing that claim must not consume its one recovery.
+        try:
+            second = second_profile(db, cfg, current, ws)
+            first = agents.default_review_profile(cfg, current, db, ws.repo_root, current.task) if second else None
+            profile = agents._review_profile(db, ws, first, cfg)
+            sha = gates.head(ws)
+            if agents._live_reviewer(db, ws, sha, profile) or (
+                    cfg.checks and agents._review_pending(ws.id, profile, sha)):
+                return False
+        except agents.AgentError:
+            pass   # _start_review reports an unavailable reviewer through the usual escalation
+        db.update_agent(worker.id, review_restarted=since)
+        _start_review(db, cfg, parent, current, ws, current.result or "")
+        return True
 
 
 def review_claim(db: DB, ws: Workspace) -> float | None:
@@ -713,7 +743,7 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     ):
         return False
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         cfg = RepoConfig()
     if not os.path.isdir(ws.path):
@@ -775,7 +805,8 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
             agents.request_review(
                 db, parent, ws, profile, focus="\n\n".join(focus_parts),
                 cfg=cfg, check_summary=check_summary,
-                second=bool(db.review_slot(reviewer.id)),   # in the stopped reviewer's place
+                second=bool(_review_slot(db, reviewer)),   # in the stopped reviewer's place
+                slot="" if db.review_slot(reviewer.id) == "" else None,
             )
             agents.close_later(reviewer.id)
             return True
@@ -793,11 +824,22 @@ def has_supervisor_action(summary: str) -> bool:
     """Parse review summary for actionable supervisor findings.
     Distinguishes empty or negated sections (e.g. 'Needs supervisor action: None.')
     from actual items requiring escalation."""
-    m = re.search(r"(?:^|[^\w])needs[-_ ]*supervisor(?:[-_ ]*action)?\s*[:\n\-*]*\s*(.*)", summary, re.IGNORECASE)
-    if not m:
-        return False
-    # Capture text under this section until the next header/section
-    rest = summary[m.start(1):]
+    # A blocker the reviewer calls out of scope for the worker (a bug in code
+    # its task doesn't cover) is the same escalation: another fix round
+    # can't settle it. That one only counts as a finding label ("Out of
+    # scope: ..." opening a line), not as a phrase in prose ("not out of
+    # scope"). Each section is judged on its own: an empty one mustn't hide
+    # an actionable one after it.
+    starts = [m.start(1) for m in re.finditer(
+        r"(?:^|[^\w])needs[-_ ]*supervisor(?:[-_ ]*action)?\s*[:\n\-*]*\s*(.*)", summary, re.IGNORECASE)]
+    starts += [m.start(1) for m in re.finditer(
+        r"^[ \t>*#\-]*out[-_ ]*of[-_ ]*scope\*{0,2}[ \t]*(?::|\n)[\s*]*(.*)",
+        summary, re.IGNORECASE | re.MULTILINE)]
+    return any(_actionable_section(summary[start:]) for start in starts)
+
+
+def _actionable_section(rest: str) -> bool:
+    """Whether the section text starting at ``rest`` has something for the supervisor."""
     next_sec = re.search(r"\n\s*(?:#+\s*|[A-Z][a-zA-Z\s]{1,20}:)", rest)
     section_text = rest[:next_sec.start()] if next_sec else rest
     cleaned = re.sub(r"[^\w]+", " ", section_text).strip().lower()
@@ -836,7 +878,7 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
         return False, False
     parent_id = worker.parent_id
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         cfg = RepoConfig()
     if not worker.pipeline:
@@ -914,19 +956,23 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
         return True, True
     needs_sup = has_supervisor_action(summary)
     rounds = (worker.pipeline_rounds or 0) + 1
-    if not needs_sup and rounds <= cfg.review_rounds and agents.is_alive(worker):
+    if not needs_sup and rounds <= cfg.review_rounds:
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
-        try:
-            agents.send_message(
-                db, worker.id,
-                f"Review of your branch (round {rounds} of {cfg.review_rounds}) requested "
-                f"changes:\n\n{summary}\n\nFix what's valid, commit, and call report_result "
-                "again; brindle will have it reviewed again.",
-                sender_id=reviewer.id,
-            )
+        fix = (f"Review of your branch (round {rounds} of {cfg.review_rounds}) requested "
+               f"changes:\n\n{summary}\n\nFix what's valid, commit, and call report_result "
+               "again; brindle will have it reviewed again.")
+        if agents.is_alive(worker):
+            try:
+                agents.send_message(db, worker.id, fix, sender_id=reviewer.id)
+                return True, False
+            except agents.AgentError:
+                pass
+        # It exited once it reported (a worker usually has by the time a
+        # review comes back), or just before the message reached it: its fix
+        # round starts it again on its branch.
+        current = db.get_agent(worker.id) or worker
+        if not agents.is_alive(current) and agents.reopen_worker(db, current, ws, fix):
             return True, False
-        except agents.AgentError:
-            pass
     if not needs_sup and _retry_on_heavy(db, worker, ws, cfg,
                        f"the review still asked for changes after {rounds - 1} fix round(s): "
                        f"{summary}", report):
@@ -1009,7 +1055,7 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
     parent_id = worker.parent_id
     parent = db.get_agent(parent_id) if parent_id else None
     try:
-        cfg = load_repo_config(ws.repo_root)
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
         cfg = RepoConfig()
     report = worker.result or ""
@@ -1364,7 +1410,7 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
     settled = _settled(db, ws)
     if settled:
         return settled
-    cfg = load_repo_config(ws.repo_root)
+    cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     pilot = autopilot.for_agent(db, caller.id) if caller else None
     review = cfg.review if cfg.review is not None else bool(pilot and pilot.enabled)
 
@@ -1379,7 +1425,7 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
                 return (f"Not merged: {busy.id} is still working on {ws.branch}; "
                         "retry once it reports.")
         sync_result = workspaces.sync_with_base(ws)
-    except git.GitError as e:
+    except (git.GitError, workspaces.WorkspaceError) as e:
         return _settled(db, ws) or f"Not merged: {e}"
     if sync_result.status == "conflict":
         if conflicts_out is not None:
@@ -1419,7 +1465,7 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
         deliverables = _deliverables(db, ws)
         # git.merge_into serializes merges into one checkout (checkout_lock).
         target = workspaces.merge_back(db, ws, squash=squash)
-    except git.GitError as e:
+    except (git.GitError, workspaces.WorkspaceError) as e:
         return _settled(db, ws) or f"Not merged: {e}"
     db.set_merged(ws.id, report.sha)
     _upload_deliverables(db, ws, deliverables)

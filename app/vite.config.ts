@@ -23,6 +23,9 @@ export default defineConfig({
   },
   test: {
     environment: "jsdom",
+    // Screen tests drive a fake engine through several renders; on a machine running many
+    // agents at once some take 6-7s, so 5s made them fail at random.
+    testTimeout: 15_000,
     include: ["src/**/*.test.{ts,tsx}", "scripts/**/*.test.{ts,mjs}"],
   },
 });

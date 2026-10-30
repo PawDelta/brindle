@@ -1,7 +1,7 @@
 /* The calm empty state, and the New session composer: where the app lands
    with no session to show, and where "New session" goes. One composer:
    what brindle should work on, in which repo, and Start (branch, CLI and
-   autopilot behind Options). A start with sessions already running in the
+   session name behind Options). A start with sessions already running in the
    repo answers a conflict, and the person picks what to do (open one, a
    new worktree, or pause it and start fresh); a start the engine refuses
    with 409 {preflight} (the CLI needs a sign-in, a key, a trust or a
@@ -18,8 +18,9 @@ import type { PickFolder } from "../../api/open";
 import type { SessionDTO } from "../../api/schema";
 import Logo from "../../components/Logo";
 import { Preflight } from "../../components/Preflight";
+import { ProjectCombobox } from "../../components/ProjectCombobox";
 import { ProjectPicker } from "../../components/ProjectPicker";
-import { alert, button, card, field, mono, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, main, mono, quiet } from "../../components/ui";
 import { isPaused } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
 
@@ -125,9 +126,8 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
   const [prompt, setPrompt] = useState("");
   const [options, setOptions] = useState(false);
   const [branch, setBranch] = useState("");
+  const [sessionName, setSessionName] = useState("");
   const [provider, setProvider] = useState("");
-  // "" leaves it to the repo's `autopilot` config.
-  const [autopilot, setAutopilot] = useState<"" | "on" | "off">("");
   const [providers, setProviders] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -180,14 +180,16 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     const ok = await start({
-      autopilot: autopilot ? autopilot === "on" : undefined,
+      autopilot: true,
       prompt: prompt.trim() || undefined,
       branch: branch.trim() || undefined,
       provider: provider || undefined,
+      name: sessionName.trim() || undefined,
     });
     if (ok) {
       setPrompt("");
       setBranch("");
+      setSessionName("");
     }
   };
 
@@ -211,13 +213,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
       </div>
       <div className="flex flex-wrap items-center gap-s1">
         {repos.length > 1 ? (
-          <select className={field} aria-label="Repo" value={repo} onChange={(e) => setRepo(e.target.value)}>
-            {repos.map((r) => (
-              <option key={r.repo_root} value={r.repo_root}>
-                {r.name}
-              </option>
-            ))}
-          </select>
+          <ProjectCombobox repos={repos} value={repo} onChange={setRepo} />
         ) : (
           <span className="text-sm text-ink-2">
             in <span className="font-medium text-ink">{repos[0]?.name}</span>
@@ -232,12 +228,13 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
         </button>
         <span className="flex-1" />
         <span className="text-xs text-ink-3">⌘↵</span>
-        <button type="submit" disabled={busy || !repo} className={primary}>
+        <button type="submit" disabled={busy || !repo} className={main}>
           Start
         </button>
       </div>
       {options && (
         <div className="flex flex-wrap items-center gap-s1 border-t border-line pt-s1">
+          <input className={`${field} w-48`} placeholder="Session name (optional)" aria-label="Session name" value={sessionName} onChange={(e) => setSessionName(e.target.value)} />
           <input className={`${field} w-48 font-mono`} placeholder="Branch (its own worktree)" aria-label="Branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
           {providers.length > 0 && (
             <select className={field} aria-label="Supervisor CLI" value={provider} onChange={(e) => setProvider(e.target.value)}>
@@ -249,11 +246,6 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
               ))}
             </select>
           )}
-          <select className={field} aria-label="Autopilot" value={autopilot} onChange={(e) => setAutopilot(e.target.value as "" | "on" | "off")}>
-            <option value="">autopilot: repo default</option>
-            <option value="on">autopilot on</option>
-            <option value="off">autopilot off</option>
-          </select>
         </div>
       )}
       {pending && <ConflictChoice conflict={pending.conflict} onChoose={(key, session) => start(pending.fields, { key, session })} onCancel={() => setPending(null)} />}
@@ -307,7 +299,7 @@ function ConflictChoice({ conflict, onChoose, onCancel }: { conflict: SessionCon
         <label key={s.id} className="flex items-center gap-s1">
           <input type="radio" name="conflict-session" checked={picked === s.id} onChange={() => setPicked(s.id)} />
           <span className={mono}>{s.id}</span>
-          <span className="text-ink-2">{s.goal || s.status}</span>
+          <span className="text-ink-2">{s.name || s.goal || s.status}</span>
         </label>
       ))}
       <div className="flex flex-wrap gap-s1">

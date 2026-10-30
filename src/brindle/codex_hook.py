@@ -73,6 +73,20 @@ def _home_key(home: Path) -> str:
     return os.path.realpath(home)
 
 
+def _runnable_script(script: str) -> bool:
+    if not os.access(script, os.X_OK):
+        return False
+    try:
+        with open(script, "rb") as f:
+            first = f.readline(4096)
+    except OSError:
+        return False
+    if first.startswith(b"#!"):
+        interpreter = first[2:].split(maxsplit=1)
+        return bool(interpreter) and os.access(os.fsdecode(interpreter[0]), os.X_OK)
+    return True
+
+
 def _stable_invocation() -> list[str]:
     """brindle_invocation, with the interpreter named the same however brindle
     was started (a venv's ``python`` and ``python3`` are the same program,
@@ -87,8 +101,12 @@ def _stable_invocation() -> list[str]:
     # replaces the other's and the next launch of either stops at "Hooks need review".
     script = os.path.join(os.path.dirname(exe), "brindle")
     if len(argv) == 1:
-        return [os.path.realpath(exe)]
-    if argv[1:] == ["-P", "-m", "brindle"] and os.access(script, os.X_OK):
+        if _runnable_script(exe):
+            return [os.path.realpath(exe)]
+        # Older bundled engines carry a console script with a CI-only shebang.
+        exe = os.path.join(os.path.dirname(os.path.realpath(exe)), "python3")
+        argv = [exe, "-P", "-m", "brindle"]
+    if argv[1:] == ["-P", "-m", "brindle"] and _runnable_script(script):
         return [os.path.realpath(script)]
     plain = os.path.join(os.path.dirname(exe), "python")
     try:

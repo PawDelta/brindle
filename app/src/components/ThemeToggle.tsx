@@ -23,7 +23,7 @@ export function applyTheme(theme: Theme): void {
   else html.dataset.theme = theme;
 }
 
-export function ThemeToggle({ className = "" }: { className?: string }) {
+export function ThemeToggle({ className = "", choices = false }: { className?: string; choices?: boolean }) {
   const [theme, setTheme] = useState<Theme>(readTheme);
   useEffect(() => {
     applyTheme(theme);
@@ -35,6 +35,17 @@ export function ThemeToggle({ className = "" }: { className?: string }) {
     }
   }, [theme]);
   const next = ORDER[(ORDER.indexOf(theme) + 1) % ORDER.length];
+  if (choices) {
+    return (
+      <div role="group" aria-label="Theme" className="flex items-center gap-1">
+        {(["dark", "light", "system"] as Theme[]).map((choice) => (
+          <button key={choice} type="button" aria-pressed={theme === choice} className={`flex-1 rounded-md px-2 py-1 text-[11px] hover:text-ink ${theme === choice ? "bg-surface-2 text-ink" : "text-ink-3"}`} onClick={() => setTheme(choice)}>
+            {choice.charAt(0).toUpperCase() + choice.slice(1)}
+          </button>
+        ))}
+      </div>
+    );
+  }
   return (
     <button
       type="button"

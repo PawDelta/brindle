@@ -618,7 +618,8 @@ export const data: Partial<DaemonData> = {
   ],
   account: {
     signed_in: true,
-    name: "sam@example.com",
+    name: "Sam Rivera",
+    email: "sam@example.com",
     plan: "pro",
     org_id: "org_7f3a9c2e",
     status: "active",

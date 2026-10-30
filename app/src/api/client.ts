@@ -7,11 +7,26 @@
 import type {
   AccountDTO,
   AgentDTO,
+  AllowAllPlanDTO,
+  AskDecisionDTO,
+  AskGroupDTO,
+  CloudOptionsDTO,
   DecisionDTO,
   GoalDTO,
   InboxItemDTO,
+  OrgApprovalPolicyDTO,
+  OrgAssignmentDTO,
+  OrgAssignmentRequestDTO,
+  OrgPermissionsDTO,
+  OrgPolicyRequestDTO,
+  PermissionLimitsDTO,
+  PermissionPolicyDTO,
+  PermissionRuleDTO,
+  PreflightItemDTO,
   ProfileDTO,
+  ProviderConnectionDTO,
   RoutingDTO,
+  SavedActionDTO,
   SessionDTO,
   WorkspaceDTO,
 } from "./schema";
@@ -119,13 +134,13 @@ export interface KeyStored {
   set: boolean;
 }
 
-/* GET /providers/{p}/preflight (engine branch desktop/provider-preflight;
-   stubbed in the fake daemon until it merges): what a provider's CLI needs
+/* GET /providers/{p}/preflight: what a provider's CLI needs
    before brindle can launch it, each a thing the app can settle natively:
    a sign-in (ProviderSignIn), a key (PUT /keys/{name}), the CLI's trust of
    the folder, or a consent it asks for once. A start or continue that
    would launch a provider with an item still open is refused with 409
-   {error: {code: "preflight"}, preflight: PreflightDTO}. */
+   {error: {code: "preflight"}, preflight: PreflightItemDTO[]}.
+   The client adapts those unresolved items to the card's PreflightDTO. */
 export type PreflightKind = "signin" | "key" | "trust" | "consent";
 
 export interface PreflightItem {
@@ -136,12 +151,28 @@ export interface PreflightItem {
   done: boolean;
   /* The key's name (kind "key"). */
   key_name?: string | null;
+  action?: PreflightItemDTO["action"];
 }
 
 export interface PreflightDTO {
   provider: string;
   ok: boolean;
   items: PreflightItem[];
+}
+
+/* The engine sends only unresolved items. The desktop's original contract
+   grouped items with done flags; keep both shapes at the API boundary. */
+function preflightResult(value: PreflightDTO | PreflightItemDTO[], provider = ""): PreflightDTO {
+  if (!Array.isArray(value)) return value;
+  return {
+    provider: provider || value[0]?.provider || "",
+    ok: value.length === 0,
+    items: value.map((item) => ({
+      ...item, kind: item.kind as PreflightKind, label: item.title, done: false,
+      key_name: item.kind === "key" && item.action?.name === "set_key"
+        ? item.action.path.match(/^\/v1\/keys\/([A-Z][A-Z0-9_]*)$/)?.[1] : undefined,
+    })),
+  };
 }
 
 /* GET /workspaces/{id}/file?path= (engine branch desktop/review-edit,
@@ -172,20 +203,20 @@ export interface FileEdited {
    no worker running or task queued, nothing waiting on the person, the
    branch committed and ahead of its base), and `reasons`, what is missing
    in plain words (none when ready). `session.pr_ready` arrives on the bus
-   when it flips. `pr`: once brindle has opened the PR itself (the engine's
-   auto-PR setting, branch desktop/auto-pr; stubbed in the fake daemon until
-   it merges), where it is. */
+   when it flips. `pr`: once the person has opened the PR, where it is and
+   `unpushed`, how many session commits aren't on it yet (brindle never
+   pushes them itself: pushSessionPr does). */
 export interface SessionReadiness {
   root_id: string;
   ready: boolean;
   reasons: string[];
-  pr?: { url: string } | null;
+  pr?: { url: string; unpushed: number } | null;
 }
 
 /* GET /sessions/{root}/diff (session_review.diff): the session branch
    against its PR base, each file with its hunks. The engine attributes each
    file and hunk to whoever wrote it (`authors`, `workers`); the app never
-   shows that. 409 "not_ready" (with `reasons`) unless the session is ready. */
+   shows that. Available independently of PR readiness. */
 export interface SessionHunk {
   header: string;
   old_start: number;
@@ -215,6 +246,14 @@ export interface SessionDiff {
   head: string;
   files: SessionFileDiff[];
   workers?: unknown[];
+}
+
+/* GET /sessions/{root}/tree (routes_read.session_tree): the session
+   checkout's tracked files, paths only, and its branch. */
+export interface SessionTree {
+  root_id: string;
+  branch: string;
+  files: string[];
 }
 
 /* GET /sessions/{root}/pr/draft (session_review.draft): the PR's title and
@@ -596,11 +635,49 @@ export interface KeyInfo {
   name: string;
   set: boolean;
   last4: string;
+  provider?: string | null;
+  /* How the last check came out; null while no key is stored. */
+  status?: "verified" | "rejected" | "unchecked" | null;
+  checked_at?: number | null;
+  /* Where to get a key. */
+  key_page?: string | null;
+  /* Storing it makes a signed-in subscription's agents bill the key instead. */
+  bills?: boolean;
+  personal_keys_denied?: boolean;
+  /* Set in the daemon's environment but not stored (POST /keys/{name}/import). */
+  importable?: boolean;
+}
+
+/* Whether the provider can launch the way it connects (engine branch
+   feat/connection-readiness): when not, why, and the one action that fixes it. */
+export interface ConnectionReady {
+  ok: boolean;
+  reason: string | null;
+  action: "install" | "sign_in" | "sign_out" | "renew" | "set_key" | null;
+}
+
+/* GET /providers/{p}/connection with its readiness: `blocked_by` "codex_login"
+   when Codex's ChatGPT login wins over its API key, and the agents that
+   stopped on this provider's credentials. */
+export type ProviderConnection = ProviderConnectionDTO & {
+  ready?: ConnectionReady | null;
+  blocked_by?: "codex_login" | null;
+  stopped_agents?: { id: string; name: string; profile: string }[];
+};
+
+export interface KeyTested {
+  name: string;
+  status: "verified" | "rejected" | "unchecked";
+  checked_at: number | null;
 }
 
 export interface Config {
   user: Record<string, unknown>;
   repo?: Record<string, unknown>;
+  /* Settings this project's own files set over the person's: key -> the file's scope. */
+  overrides?: Record<string, "local" | "repo">;
+  /* What the repo's local file itself sets for the keys whose effective value unions every scope's (rules). */
+  local?: Record<string, unknown>;
   keys: KeyInfo[];
 }
 
@@ -631,12 +708,15 @@ export interface DecisionRecorded {
 
 /* PATCH /config (routes_actions.patch_config): `values` into
    ~/.brindle/config.json ("user") or the repo's gitignored
-   .brindle/config.local.json ("repo"); only the repo config's own keys,
-   each a value of its default's type, or null to unset it. */
+   .brindle/config.local.json ("repo") or its committed .brindle/config.json
+   ("shared"); only the repo config's own keys,
+   each a value of its default's type, or null to unset it. `unset` (scope
+   "repo") removes keys from the local file: a project's override, cleared. */
 export interface ConfigPatch {
-  scope: "user" | "repo";
+  scope: "user" | "repo" | "shared";
   repo?: string;
-  values: Record<string, unknown>;
+  values?: Record<string, unknown>;
+  unset?: string[];
 }
 
 export interface ConfigUpdated {
@@ -681,6 +761,88 @@ export type PermissionChange =
   | { op: "reset" };
 
 export type PermissionChanged = { rule: string; describe: string } | { reset: true };
+
+/* The permission policy (engine: brindle/permissions.py, brindle/permission_grants.py;
+   routes in daemon/routes_read.py and routes_actions.py). Nothing is built in:
+   every rule, the chosen preset's included, can be edited or removed. */
+export type PermissionPreset = "autonomous" | "permissive" | "standard" | "secure";
+/* What a request no rule covers does. */
+export type PermissionUnmatched = "ask" | "allow" | "deny";
+/* GET /permissions/report (permission_asks.report): how often requests asked over the last `days`, and why. */
+export interface PermissionReport {
+  days: number;
+  decisions: number;
+  asks: number;
+  ask_rate: number;
+  avg_wait_seconds: number | null;
+  causes: { reason: string; count: number; kinds: string[]; avg_wait_seconds: number | null; example: string }[];
+}
+export type PermissionDecision = "allow" | "deny" | "ask";
+export type PermissionKind = "read" | "write" | "edit" | "bash" | "fetch" | "mcp" | "other";
+/* A saved action's kind: a request kind, or a git push. */
+export type SavedActionKind = PermissionKind | "push";
+/* exact | prefix | glob, or a named matcher: tracked, check, git-readonly, git-push, git-force (a force
+   flag, a +refspec or a branch deletion), push ("<source> → <destination>[ @ <remote>]", @default for
+   the repo's default branch; a saved push action's pattern always carries its remote), worktree,
+   readonly-pipeline, rm-destructive. */
+export type PermissionMatchType = "exact" | "prefix" | "glob" | "tracked" | "check" | "git-readonly" | "git-push"
+  | "git-force" | "push" | "worktree" | "readonly-pipeline" | "rm-destructive";
+export type PermissionLife = "session" | "time" | "forever";
+/* How far a saved push approval may reach, narrowest first. */
+export type PermissionLevel = "branch" | "destination" | "remote" | "repository" | "all";
+
+/* POST /permissions/rules and PUT /permissions/rules/{id}: a PUT changes only the fields given
+   (a preset's rule becomes the person's). `minutes` makes a timed rule, expiring that long from
+   now; `expires: null` clears one. `limits` belongs to an ask rule. */
+export interface PermissionRulePut {
+  kind?: PermissionKind;
+  match?: string;
+  match_type?: PermissionMatchType;
+  decision?: PermissionDecision;
+  label?: string;
+  limits?: PermissionLimitsDTO | null;
+  minutes?: number | null;
+  expires?: number | null;
+}
+
+/* POST /permissions/rules/{id}/exceptions: requests the rule stops applying to (a deny's exception). */
+export interface PermissionExceptionPut {
+  kind: PermissionKind;
+  match: string;
+  match_type?: "exact" | "prefix" | "glob";
+}
+
+/* POST /permissions/saved and PUT /permissions/saved/{id}: a saved allow or deny with its
+   structured scope. A timed one (`life` "time") takes `minutes` and restarts its expiry on
+   every PUT; one for a session takes `session` (the root agent); `repo` null means every repo. */
+export interface SavedActionPut {
+  kind?: SavedActionKind;
+  pattern?: string;
+  decision?: "allow" | "deny";
+  scope?: string;
+  level?: PermissionLevel | null;
+  request?: Record<string, unknown>;
+  life?: PermissionLife;
+  minutes?: number | null;
+  session?: string | null;
+  repo?: string | null;
+  note?: string;
+}
+
+/* POST /permissions/asks/decide: one decision on an Inbox item (AskGroupDTO.key). `scope` is one
+   of the item's scope values; `mode` once | session | timed (with `minutes`) | forever | deny |
+   always-deny, from the item's `modes`. */
+export interface AskDecide {
+  key: string;
+  scope: string;
+  mode: "once" | "session" | "timed" | "forever" | "deny" | "always-deny";
+  minutes?: number;
+}
+
+export interface PermissionDeleted {
+  deleted: string;
+  describe?: string;
+}
 
 /* What an account action said (the CLI's own lines). */
 export interface AccountSaid {
@@ -744,6 +906,8 @@ export interface StartSession {
   /* The supervisor's CLI (claude, codex ...); the repo's default when omitted. */
   provider?: string;
   prompt?: string;
+  /* The new session's name, kept with it (listed instead of its goal). */
+  name?: string;
   watch?: boolean;
   /* The repo's default when omitted. */
   autopilot?: boolean;
@@ -943,6 +1107,12 @@ export class DaemonClient {
     return this.post<ContinueResult>(`/sessions/${encodeURIComponent(root)}/continue`);
   }
 
+  /* POST /sessions/{root}/rename (routes_actions.rename_session): an empty
+     name clears it, and the session is listed by its goal again. */
+  renameSession(root: string, name: string) {
+    return this.post<{ id: string; name: string | null }>(`/sessions/${encodeURIComponent(root)}/rename`, { name });
+  }
+
   /* The ids of the agents it paused. */
   pauseSession(root: string) {
     return this.post<{ paused: string[] }>(`/sessions/${encodeURIComponent(root)}/pause`);
@@ -972,7 +1142,7 @@ export class DaemonClient {
     return this.get<SessionReadiness>(`${this.sessionPath(root)}/pr/readiness`);
   }
 
-  /* The session branch against its PR base (throws DaemonError "not_ready" with `reasons` until it is). */
+  /* The session branch against its PR base, including work still in progress. */
   sessionDiff(root: string) {
     return this.get<SessionDiff>(`${this.sessionPath(root)}/diff`);
   }
@@ -980,6 +1150,11 @@ export class DaemonClient {
   /* The PR's title and body as brindle drafts them. */
   prDraft(root: string) {
     return this.get<PrDraft>(`${this.sessionPath(root)}/pr/draft`);
+  }
+
+  /* Every tracked file of the session's checkout. */
+  sessionTree(root: string) {
+    return this.get<SessionTree>(`${this.sessionPath(root)}/tree`);
   }
 
   /* Any file of the session's checkout, with the blob the edit below takes. */
@@ -999,6 +1174,11 @@ export class DaemonClient {
   /* Pushes the session branch and opens its PR: a job whose result carries the URL. */
   openSessionPr(root: string, body: OpenSessionPr = {}) {
     return this.post<Job>(`${this.sessionPath(root)}/pr`, body);
+  }
+
+  /* Pushes the session's commits not on its open PR yet, through the same checks: a job. */
+  pushSessionPr(root: string) {
+    return this.post<Job>(`${this.sessionPath(root)}/pr/push`, {});
   }
 
   snapshot(repo?: string) {
@@ -1068,12 +1248,25 @@ export class DaemonClient {
   }
 
   /* What a provider's CLI still needs before brindle can launch it. */
-  preflight(provider: string) {
-    return this.get<PreflightDTO>(`/providers/${encodeURIComponent(provider)}/preflight`);
+  async preflight(provider: string, repo?: string | null, context?: Record<string, unknown> | null) {
+    const path = `/providers/${encodeURIComponent(provider)}/preflight`;
+    const result = context?.repo && context?.profile
+      ? await this.post<PreflightItemDTO[]>(path, context)
+      : await this.get<PreflightDTO | PreflightItemDTO[]>(path, { repo });
+    return preflightResult(result, provider);
   }
 
   /* A trust or consent item settled by the person here. */
-  settlePreflight(provider: string, item: string) {
+  async settlePreflight(provider: string, item: string, action?: PreflightItemDTO["action"], repo?: string | null) {
+    if (action?.name === "check") return this.preflight(provider, repo, action.body);
+    if (action) {
+      await this.request(this.url(action.path.replace(/^\/v1(?=\/)/, "")), {
+        method: action.method,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...action.body, accept: true }),
+      });
+      return this.preflight(provider, repo);
+    }
     return this.post<PreflightDTO>(`/providers/${encodeURIComponent(provider)}/preflight/${encodeURIComponent(item)}`, { accept: true });
   }
 
@@ -1270,6 +1463,97 @@ export class DaemonClient {
     return this.post<PermissionChanged>("/permissions", body);
   }
 
+  /* The permission policy: the chosen preset, the unmatched setting, every rule
+     with its 24-hour prompt count, and the saved actions. */
+  permissions() {
+    return this.get<PermissionPolicyDTO>("/permissions");
+  }
+
+  /* The ask rate and top causes of permission asks over the last `days` (default 7). */
+  permissionReport(days?: number) {
+    return this.get<PermissionReport>(`/permissions/report${days ? `?days=${days}` : ""}`);
+  }
+
+  /* Start over from a preset; the person's own and learned rules stay. Answers the whole policy. */
+  setPermissionPreset(preset: PermissionPreset) {
+    return this.put<PermissionPolicyDTO>("/permissions/preset", { preset });
+  }
+
+  /* PUT /permissions/groups: change capability group baselines and subcategory answers
+     (allow | ask | deny | inherit); the rest stay. Answers the whole policy. */
+  setPermissionGroups(groups: Record<string, { baseline?: string; subcategories?: Record<string, string> }>) {
+    return this.put<PermissionPolicyDTO>("/permissions/groups", { groups });
+  }
+
+  setPermissionUnmatched(unmatched: PermissionUnmatched) {
+    return this.patch<PermissionPolicyDTO>("/permissions", { unmatched });
+  }
+
+  createPermissionRule(body: PermissionRulePut & { kind: PermissionKind; match: string; decision: PermissionDecision }) {
+    return this.post<PermissionRuleDTO>("/permissions/rules", body);
+  }
+
+  updatePermissionRule(id: string, body: PermissionRulePut) {
+    return this.put<PermissionRuleDTO>(`/permissions/rules/${encodeURIComponent(id)}`, body);
+  }
+
+  deletePermissionRule(id: string) {
+    return this.delete<PermissionDeleted>(`/permissions/rules/${encodeURIComponent(id)}`, {});
+  }
+
+  addPermissionException(id: string, body: PermissionExceptionPut) {
+    return this.post<PermissionRuleDTO>(`/permissions/rules/${encodeURIComponent(id)}/exceptions`, body);
+  }
+
+  createSavedAction(body: SavedActionPut & { kind: SavedActionKind; pattern: string; decision: "allow" | "deny" }) {
+    return this.post<SavedActionDTO>("/permissions/saved", body);
+  }
+
+  updateSavedAction(id: string, body: SavedActionPut) {
+    return this.put<SavedActionDTO>(`/permissions/saved/${encodeURIComponent(id)}`, body);
+  }
+
+  deleteSavedAction(id: string) {
+    return this.delete<PermissionDeleted>(`/permissions/saved/${encodeURIComponent(id)}`, {});
+  }
+
+  /* The requests waiting on the person, one item per kind and general form (`repo` narrows). */
+  permissionAsks(repo?: string) {
+    return this.get<AskGroupDTO[]>("/permissions/asks", { repo });
+  }
+
+  decidePermissionAsks(body: AskDecide) {
+    return this.post<AskDecisionDTO>("/permissions/asks/decide", body);
+  }
+
+  /* What allowing everything waiting would grant, within each request's own policy. */
+  permissionAllowAllPlan(repo?: string, forever = false) {
+    return this.get<AllowAllPlanDTO>("/permissions/asks/plan", { repo, forever: forever ? "1" : undefined });
+  }
+
+  permissionAllowAll(repo?: string, forever = false) {
+    return this.post<AllowAllPlanDTO>("/permissions/asks/allow-all", { repo, forever });
+  }
+
+  /* Except the blocked requests from the deny rules that block them, then allow them. */
+  permissionUnblock(repo?: string, forever = false) {
+    return this.post<AllowAllPlanDTO>("/permissions/asks/unblock", { repo, forever });
+  }
+
+  /* The organization's approval administration (routes_org_permissions): its members' roles
+     and the approval policy. */
+  orgPermissions() {
+    return this.get<OrgPermissionsDTO>("/org-permissions");
+  }
+
+  assignOrgRole(body: OrgAssignmentRequestDTO) {
+    return this.put<OrgAssignmentDTO>("/org-permissions/role-assignment", body);
+  }
+
+  saveOrgApprovalPolicy(body: OrgPolicyRequestDTO) {
+    return this.put<OrgApprovalPolicyDTO>("/org-permissions/policy", body);
+  }
+
   /* Starts a sign-in as a job: a job.progress event carries the URL to open
      in the system browser (or, with `device`, the code to type); job.done
      means the daemon stored the tokens. */
@@ -1300,15 +1584,19 @@ export class DaemonClient {
     return this.get<RulePackInfo[]>("/rules", { repo });
   }
 
-  config(repo?: string) {
-    return this.get<Config>("/config", { repo });
+  /* `keys: false`: without the stored keys, which take the engine the longest to read. */
+  config(repo?: string, opts: { keys?: boolean } = {}) {
+    return this.get<Config>("/config", { repo, keys: opts.keys === false ? 0 : undefined });
   }
 
   /* Which profiles each weight tier tries, the reviewer, the excluded
      providers (each with the scope it comes from) and every profile's
-     model, provider, availability and cost tier. */
-  routing(repo: string) {
-    return this.get<RoutingDTO>("/routing", { repo });
+     model, provider, availability and cost tier. `scope: "user"`: the
+     person's own settings and library, as every repo starts from them (`repo`
+     still gives the org policy). `learned: false`: each kind's `learned` is
+     null, without the seconds working it out takes. */
+  routing(repo: string, opts: { scope?: "user"; learned?: boolean } = {}) {
+    return this.get<RoutingDTO>("/routing", { repo, scope: opts.scope, learned: opts.learned === false ? 0 : undefined });
   }
 
   putRouting(body: RoutingPut) {
@@ -1330,8 +1618,8 @@ export class DaemonClient {
      claude's claudeai / console / sso, codex's device). `restart`: a login
      still running is ended and the CLI started afresh, rather than its
      terminal handed back (Try again). */
-  providerLogin(provider: string, method?: string, restart = false) {
-    return this.post<ActionTerminal>(`/providers/${encodeURIComponent(provider)}/login`, { ...(method ? { method } : {}), ...(restart ? { restart } : {}) });
+  providerLogin(provider: string, method?: string, restart = false, context?: Record<string, unknown> | null) {
+    return this.post<ActionTerminal>(`/providers/${encodeURIComponent(provider)}/login`, { ...context, ...(method ? { method } : {}), ...(restart ? { restart } : {}) });
   }
 
   /* Each provider CLI as brindle detects it: where it is, its version, whether it's signed in. */
@@ -1351,6 +1639,43 @@ export class DaemonClient {
      installed (brindle never uninstalls); answers the provider, now off. */
   removeProvider(provider: string) {
     return this.delete<ProviderInstalled>(`/providers/${encodeURIComponent(provider)}`, {});
+  }
+
+  /* Signs brindle's own copy of Claude Code or Codex out (`claude auth logout`,
+     `codex logout`); the person's own CLI login stays. Answers the provider, not signed in. */
+  signOutProvider(provider: string) {
+    return this.post<ProviderInstalled>(`/providers/${encodeURIComponent(provider)}/logout`, {});
+  }
+
+  /* How the provider connects (brindle.connections): its own sign-in, an API
+     key or the person's cloud, and for a cloud its settings and login. */
+  providerConnection(provider: string, repo?: string) {
+    return this.get<ProviderConnection>(`/providers/${encodeURIComponent(provider)}/connection`, { repo });
+  }
+
+  /* Saves how the provider connects: `method` auto | sign_in | api_key | cloud,
+     and for cloud the route (`cloud`) and its non-secret `settings`. 403 when
+     the org decides instead, with why. */
+  setProviderConnection(provider: string, choice: { method: string; cloud?: string; settings?: Record<string, string>; repo?: string }) {
+    return this.put<ProviderConnection>(`/providers/${encodeURIComponent(provider)}/connection`, choice);
+  }
+
+  /* Signs Codex's ChatGPT login out so its API key is used (ready.action
+     "sign_out"), a job like cloudSignIn: job.done's result is the connection after. */
+  codexSignOut() {
+    return this.post<Job>("/providers/codex/sign-out", {});
+  }
+
+  /* What this machine's cloud CLIs are set up with: AWS profiles, gcloud, the Azure tenant, usual regions. */
+  cloudOptions() {
+    return this.get<CloudOptionsDTO>("/cloud/options");
+  }
+
+  /* The cloud sign-in (or its renewal) for the provider's saved route, a job
+     (provider.cloud_sign_in): the CLI's lines as job.progress, job.done's
+     result {result: "signed in" | "failed" | "waiting" | "manual"}. */
+  cloudSignIn(provider: string) {
+    return this.post<Job>(`/providers/${encodeURIComponent(provider)}/cloud-sign-in`, {});
   }
 
   /* Runs `path`, one of the copies found, and turns the provider back on
@@ -1381,6 +1706,21 @@ export class DaemonClient {
      the answer carries the last four characters and never the value. */
   putKey(name: string, value: string, repo?: string) {
     return this.put<KeyStored>(`/keys/${encodeURIComponent(name)}`, repo ? { value, repo } : { value });
+  }
+
+  /* `brindle keys unset NAME` (DELETE /keys/{name}). */
+  deleteKey(name: string) {
+    return this.delete<{ name: string; set: false }>(`/keys/${encodeURIComponent(name)}`, {});
+  }
+
+  /* Re-checks the stored key with its provider (POST /keys/{name}/test). */
+  testKey(name: string) {
+    return this.post<KeyTested>(`/keys/${encodeURIComponent(name)}/test`);
+  }
+
+  /* Stores the daemon's own environment value of `name` (POST /keys/{name}/import). */
+  importKey(name: string, repo?: string) {
+    return this.post<KeyStored>(`/keys/${encodeURIComponent(name)}/import`, repo ? { repo } : {});
   }
 
   /* `brindle keys set NAME` in a terminal of the daemon's: the value is typed
@@ -1489,10 +1829,13 @@ export class DaemonClient {
     }
     const body: unknown = await response.json().catch(() => undefined);
     if (!response.ok) {
-      const got = body as { error?: { code?: string; message?: string }; conflict?: SessionConflict; preflight?: PreflightDTO; reasons?: string[] } | undefined;
+      const got = body as { error?: { code?: string; message?: string }; conflict?: SessionConflict; preflight?: PreflightDTO | PreflightItemDTO[]; reasons?: string[] } | undefined;
       if (got?.conflict) throw new DaemonError("conflict", got.conflict.message, response.status, got.conflict);
       const err = got?.error;
-      if (got?.preflight) throw new DaemonError("preflight", err?.message ?? `${got.preflight.provider} needs setting up first`, response.status, undefined, got.preflight);
+      if (got?.preflight) {
+        const preflight = preflightResult(got.preflight);
+        throw new DaemonError("preflight", err?.message ?? `${preflight.provider} needs setting up first`, response.status, undefined, preflight);
+      }
       throw new DaemonError(err?.code ?? "http", err?.message ?? response.statusText, response.status, undefined, undefined, Array.isArray(got?.reasons) ? got.reasons : undefined);
     }
     return body as T;

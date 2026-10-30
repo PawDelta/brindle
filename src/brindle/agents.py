@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 
 from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
@@ -54,6 +54,8 @@ WORKER_FOOTER = """
 ---
 You are running as a brindle worker (agent id {agent_id}) on branch `{branch}`.
 {guidance}
+Run only the tests that cover your change (a test file or a `-k` filter), not
+the full suite: brindle's merge gate runs the full suite on your branch.
 Before you finish, check your work against the task and its finish line, item
 by item: each behaviour it asks for needs a test that would fail without your
 change, and a requirement with no such test isn't done yet. If the task turns
@@ -178,7 +180,7 @@ def worker_guidance(ws: Workspace, report_only: bool = False) -> str:
     from brindle.config import load_repo_config
 
     try:
-        checks = load_repo_config(ws.repo_root).checks
+        checks = load_repo_config(ws.repo_root, branch=ws.base_branch).checks
     except ValueError:
         checks = []
     parts = (codemap.guidance(ws), "" if report_only else test_guidance(checks),
@@ -291,12 +293,20 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
             # env is the top layer (managed_env is the same route's, from managed_models).
             profile_env = {k: v for k, v in profile_env.items() if company_identity.profile_may_set(k)}
             env = {**homes, **recovery_keys, **profile_env, **managed_env, **enforced, **env}
+        if guarded is not None:
+            from brindle import cloud_login
+
+            env.update(cloud_login.profile_env(guarded, env))
     if agent is not None and preload_tools(agent, ws):
         # Claude Code defers MCP tools and loads them on demand, which costs a
         # worker an extra round trip at the moment it's told to report (and
         # some never get there). Workers and reviewers only have brindle's own
         # tools, so loading them all up front is cheap.
         env["ENABLE_TOOL_SEARCH"] = "false"
+    # Agents run pytest outside brindle's check slots: cap their xdist workers
+    # so a few of them don't each start one per core. Passed explicitly, since
+    # a pane can inherit an older tmux environment; a profile's value still wins.
+    env.setdefault("PYTEST_XDIST_AUTO_NUM_WORKERS", os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS", "2"))
     return env
 
 
@@ -382,8 +392,8 @@ def spawn(
     from the first launch. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``; their brief carries the
     accepted decisions covering ``files``, and for large work (heavy/advanced,
-    or ``analysis_doc`` asked for) the analysis-doc rule and brief. With ``autopilot``, the
-    agent is a session root that drives toward a goal (see brindle.autopilot);
+    or ``analysis_doc`` asked for) the analysis-doc rule and brief. An
+    interactive root always drives toward a goal (see brindle.autopilot);
     with ``claim_goals`` it claims a hand-written ``.brindle/goals.md``."""
     from brindle import autopilot as pilot
     from brindle import identity_lock
@@ -472,7 +482,7 @@ def spawn(
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):
         db.update_agent(agent_id, plan_first=1)
         agent.plan_first = 1
-    if autopilot:
+    if parent_id is None and mode == "interactive":
         plan = pilot.enable(db, agent_id, ws, claim=claim_goals)
         if plan and not prompt:
             prompt = agent.task = pilot.kickoff(plan, agent_id)
@@ -506,15 +516,15 @@ def _pause_when_done(agent_id: str, argv: list[str]) -> list[str]:
     return ["/bin/sh", "-c", script, "brindle-agent", *argv]
 
 
-def _guarded_profile(agent: Agent, ws: Workspace | None):
+def _guarded_profile(agent: Agent, ws: Workspace | None, load=None):
     """``agent``'s profile with its guardrails as they apply (cleared, with a
     warning, without the Pro feature: see guardrails.effective); None when
-    it can't be loaded."""
+    it can't be loaded. ``load``: what loads it (default load_profile)."""
     from brindle import guardrails
     from brindle.profiles import ProfileError
 
     try:
-        return guardrails.effective(load_profile(agent.profile, ws.repo_root if ws else None))
+        return guardrails.effective(load() if load else load_profile(agent.profile, ws.repo_root if ws else None))
     except (KeyError, ProfileError):
         return None
 
@@ -654,29 +664,39 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     from brindle import inbox
 
     argv = inbox.without_launcher_inbox(argv)
-    tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
-    env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
-    with secrets.org_key(org_env):
-        target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
-                                 tag=(AGENT_TAG, agent.id),
-                                 keep=credentials,
-                                 **({"allow": allow} if allow is not None else {}),
-                                 **({"deny": deny} if deny else {}))
-    agent.__dict__.pop("_pane_environment", None)
-    # The pane id only means anything on the server that issued it (a
-    # resumed agent may come back on a different one), so record both.
-    server = tmux.current_server()
-    db.update_agent(agent.id, tmux_window=target, tmux_server=server)
-    agent.tmux_window, agent.tmux_server = target, server
-    if get_provider(agent.provider).startup_prompts and not agent.headless:
-        from brindle import prompt_answer
-
-        prompt_answer.launched(db, agent)
+    # The sidebar splits the window after the CLI's pane exists: hold the CLI
+    # until then, or a resumed chat drew its conversation at the full width
+    # and was resized under it, which Claude Code shows as a blank screen (#264).
+    gate = None
     if watch_pane:
-        try:
-            _ensure_sidebar(db, root_of(db, agent.id), ws, target)
-        except Exception:
-            pass
+        argv, gate = tmux.gated(argv)
+    tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
+    try:
+        env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
+        with secrets.org_key(org_env):
+            target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
+                                     tag=(AGENT_TAG, agent.id),
+                                     keep=credentials,
+                                     **({"allow": allow} if allow is not None else {}),
+                                     **({"deny": deny} if deny else {}))
+        agent.__dict__.pop("_pane_environment", None)
+        # The pane id only means anything on the server that issued it (a
+        # resumed agent may come back on a different one), so record both.
+        server = tmux.current_server()
+        db.update_agent(agent.id, tmux_window=target, tmux_server=server)
+        agent.tmux_window, agent.tmux_server = target, server
+        if get_provider(agent.provider).startup_prompts and not agent.headless:
+            from brindle import prompt_answer
+
+            prompt_answer.launched(db, agent)
+        if watch_pane:
+            try:
+                _ensure_sidebar(db, root_of(db, agent.id), ws, target)
+            except Exception:
+                pass
+    finally:
+        if gate:
+            tmux.open_gate(gate)
     tmux.apply_theme(ws.tmux_session)
     return target
 
@@ -943,6 +963,7 @@ def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tup
     blanked so the launcher's own copy doesn't count), whether the org's own
     key signs it in (no login to check), and the denied names. ``agent`` need
     not be recorded yet: a launch about to happen is checked the same way."""
+    from brindle import cloud_login
     from brindle.pro import managed_models
 
     if m is _UNREAD:
@@ -956,7 +977,8 @@ def launch_identity(agent: Agent, ws: Workspace, profile=None, m=_UNREAD) -> tup
     org_key = managed_models.has_org_key(m, agent.provider)
     prov_creds = set() if org_key else secrets.agent_credentials(agent.provider, profile.name, ws.repo_root)
     eff_env = _window_environment(agent, ws, m)[0]
-    probe_env = {**launch_env, **{k: eff_env[k] for k in prov_creds if k in eff_env}}
+    names = prov_creds | (cloud_login.IDENTITY_ENV if agent.provider in ("claude", "opencode") else frozenset())
+    probe_env = {**launch_env, **{k: eff_env[k] for k in names if k in eff_env}}
     return {**probe_env, **{k: "" for k in secrets.pane_deny(deny, probe_env)}}, org_key, deny
 
 
@@ -985,7 +1007,8 @@ def launch_blockers(agent: Agent, ws: Workspace, profile=None, m=_UNREAD, *, ide
     session = credentials_session(agent)
     if session:
         launch["session"] = session
-    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch)
+    return preflight.check(agent.provider, ws.repo_root, env=env, signed_in=org_key, launch=launch,
+                           check_cloud=not keys_only)
 
 
 def credentials_session(agent: Agent) -> str | None:
@@ -1119,10 +1142,11 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane, m=m)
         return
     if provider.prompt_after_ready:
-        # Typed in once it's ready, after a warm-up carrying its instructions:
+        # Typed in once it's ready, after a warm-up carrying its instructions
+        # on both fresh starts and resumes:
         # agy connects its MCP servers only once a conversation has started,
         # so the task must arrive as a second turn (see brindle.antigravity).
-        for text in ((provider.warmup(profile) if not resume else None), prompt):
+        for text in (provider.warmup(profile), prompt):
             if text:
                 db.enqueue(agent.id, text, None)
         prompt = None
@@ -1529,6 +1553,9 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     if any(a.id == root_id for a in candidates):
         from brindle import autopilot as pilot
 
+        root = db.get_agent(root_id)
+        if root and root.parent_id is None and root.mode == "interactive":
+            db.add_autopilot(root_id)
         pilot.reload_goals_file(db, root_id)   # edits the person made to this session's goal file
     resumed = []
     for a in candidates:
@@ -1550,26 +1577,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         ref = a.session_ref if provider.name in ("claude", "antigravity", "opencode", "native") and a.session_ref else None
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
-        if ref:
-            prompt = None
-        elif a.task and a.mode in ("handoff", "assign") and provider.launches_process:
-            # a.task is the raw task now (see decorate_worker_prompt); a fresh
-            # start needs the same decoration it got the first time. A row
-            # from before this change stored the already-decorated text, so
-            # it gets decorated a second time here; harmless, if redundant.
-            from brindle.pro import analysis_brief
-
-            prompt = decorate_worker_prompt(
-                a.task, a.id, ws, a.done_when, provider, bool(a.headless),
-                plan_first=bool(a.plan_first) and a.plan_state != "approved",
-                report_only=is_review_profile(a.profile, ws.repo_root),
-                decisions=knowledge.replay_decisions(db, a.id),
-                chunks=knowledge.replay_chunks(db, a.id),
-                analysis=analysis_brief.brief_context(
-                    db, ws.repo_root, ws.branch, a.id, a.task, None,
-                    large=analysis_brief.got_context(db, a.id))) + RESUME_NOTE
-        else:
-            prompt = (a.task + RESUME_NOTE) if a.task else None
+        prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE)
         if a.dismissed_at is not None:
             db.update_agent(a.id, dismissed_at=None)  # running again: show it again
         _launch(db, a, ws, prompt=prompt, resume=ref,
@@ -1587,6 +1595,28 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     if resumed:
         bus.publish_agent(db, "session.resumed", root_id, agents=[a.id for a in resumed])
     return resumed
+
+
+def _fresh_start_prompt(db: DB, a: Agent, ws: Workspace, provider, note: str) -> str | None:
+    """What an agent restarting without its old conversation is told: its
+    task, followed by ``note``."""
+    if a.task and a.mode in ("handoff", "assign") and provider.launches_process:
+        # a.task is the raw task now (see decorate_worker_prompt); a fresh
+        # start needs the same decoration it got the first time. A row
+        # from before this change stored the already-decorated text, so
+        # it gets decorated a second time here; harmless, if redundant.
+        from brindle.pro import analysis_brief
+
+        return decorate_worker_prompt(
+            a.task, a.id, ws, a.done_when, provider, bool(a.headless),
+            plan_first=bool(a.plan_first) and a.plan_state != "approved",
+            report_only=is_review_profile(a.profile, ws.repo_root),
+            decisions=knowledge.replay_decisions(db, a.id),
+            chunks=knowledge.replay_chunks(db, a.id),
+            analysis=analysis_brief.brief_context(
+                db, ws.repo_root, ws.branch, a.id, a.task, None,
+                large=analysis_brief.got_context(db, a.id))) + note
+    return (a.task + note) if a.task else None
 
 
 def get(db: DB, agent_id: str) -> Agent:
@@ -1884,6 +1914,11 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
     if not provider.uses_hooks:
         tmux.paste(agent.tmux_window, text, lead=message_lead(db, agent, sender_id),
                    server=server_of(agent))
+        if not (condensed or notice):
+            # Direct deliveries need the same durable history as queued ones,
+            # including supervisor spec updates used by the next reviewer.
+            kept = db.enqueue_held(agent.id, body, sender_id, publish=False)
+            db.mark_delivered(kept)
         return "delivered"
     message_id = db.enqueue(agent.id, text, sender_id, notice=notice)
     from brindle import login_pause
@@ -2040,23 +2075,18 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
 
 def flush(db: DB, agent_id: str) -> bool:
     """Deliver the agent's oldest pending message: through its inbox if it
-    has one, else typed into its pane once it's idle. A chat with a live
+    has one, else typed into its pane once it's idle (or while busy, for a
+    CLI that holds mid-turn input: see _flush_midturn). A chat with a live
     waiter (brindle.wake) is left to it, and one that runs a waiter never
     uses the inbox. Returns True if something was delivered."""
     from brindle import inbox
     from brindle import launch_health
-    from brindle import login_pause
     from brindle import wake
 
     agent = db.get_agent(agent_id)
-    if agent is None or agent.headless:
-        return False  # its runner takes messages from the inbox itself
-    if login_pause.holding(db, agent_id):
-        return False  # its session waits on an expired cloud login; resuming flushes it
-    waits = wake.enabled(agent)
-    if waits and wake.live(agent):
-        return False  # its waiter hands the queue over (brindle.wake)
-    if not waits and inbox.usable(agent):
+    if _delivery_held(db, agent):
+        return False
+    if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
             baseline = launch_health.before_delivery(db, agent)
@@ -2069,11 +2099,48 @@ def flush(db: DB, agent_id: str) -> bool:
                 break
         if delivered:
             return True
-    if db.pending_count(agent_id) == 0:
+    # One paste into the pane at a time, whichever path: the idle claim alone
+    # leaves the agent busy for a second sender's mid-turn paste while the
+    # first is still typing, reordering or merging the two.
+    with delivery_lock(agent_id):
+        return _flush_pane(db, agent_id)
+
+
+def delivery_lock(agent_id: str):
+    """Held across processes by whoever types a queued message into
+    ``agent_id``'s pane (``flush``), from the look at its state to the end of
+    the paste. A lock file under the brindle home, so a holder that dies gives
+    it back; re-entrant within a thread."""
+    from brindle import pipeline
+
+    return pipeline._reentrant_lock("deliver-" + hashlib.sha1(agent_id.encode()).hexdigest()[:16])
+
+
+def _delivery_held(db: DB, agent: Agent | None) -> bool:
+    """Whether ``flush`` must leave the queue alone: the agent is gone or
+    headless (its runner takes messages from the inbox itself), its session
+    waits on an expired cloud login (resuming flushes it), or a live waiter
+    hands the queue over (brindle.wake)."""
+    from brindle import login_pause
+    from brindle import wake
+
+    return (agent is None or agent.headless or login_pause.holding(db, agent.id)
+            or (wake.enabled(agent) and wake.live(agent)))
+
+
+def _flush_pane(db: DB, agent_id: str) -> bool:
+    """``flush``'s typed delivery, under its delivery_lock. The queue and the
+    agent are read afresh: while it waited, another sender may have delivered,
+    or the session been paused."""
+    from brindle import launch_health
+
+    if _delivery_held(db, db.get_agent(agent_id)) or db.pending_count(agent_id) == 0:
         return False
     claimed_at = db.claim_idle(agent_id)
     if claimed_at is None:
-        return False
+        return _flush_midturn(db, agent_id)
+    agent = db.get_agent(agent_id)
+    assert agent is not None
     if _paste_blocked(agent):
         # Leave it queued: the next flush (a later message, or a resumed
         # session's start-up) gets another chance.
@@ -2083,8 +2150,6 @@ def flush(db: DB, agent_id: str) -> bool:
     if not msg:
         db.set_status(agent_id, "idle", only_if="processing")
         return False
-    agent = db.get_agent(agent_id)
-    assert agent is not None
     from brindle import antigravity
     warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
     try:
@@ -2098,6 +2163,34 @@ def flush(db: DB, agent_id: str) -> bool:
         raise
     if not warmup:
         launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
+    return True
+
+
+def _flush_midturn(db: DB, agent_id: str) -> bool:
+    """``_flush_pane`` for a busy interactive chat whose CLI keeps input typed
+    mid-turn until its current step finishes (Codex, agy): the oldest queued
+    message goes in now instead of at the turn-end notify or Stop. Never into
+    an approval prompt ('waiting', or one on screen the hooks haven't
+    reported), where the keys would answer it."""
+    agent = db.get_agent(agent_id)
+    if (agent is None or agent.status != "processing" or agent.mode != "interactive"
+            or not get_provider(agent.provider).types_midturn):
+        return False
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=40, server=server_of(agent))
+    except tmux.TmuxError:
+        return False
+    if get_provider(agent.provider).screen_state(screen) == "waiting" or _paste_blocked(agent):
+        return False
+    msg = db.pop_pending(agent_id)
+    if not msg:
+        return False
+    try:
+        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
+                   server=server_of(agent))
+    except BaseException:
+        db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
+        raise
     return True
 
 
@@ -2266,7 +2359,7 @@ def warm_checks(ws: Workspace) -> None:
     from brindle.providers import brindle_invocation
 
     try:
-        if not load_repo_config(ws.repo_root).checks or git.dirty_files(ws.path):
+        if not load_repo_config(ws.repo_root, branch=ws.base_branch).checks or git.dirty_files(ws.path):
             return
     except (ValueError, git.GitError):
         return
@@ -2843,7 +2936,7 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) 
 
 def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                  focus: str | None = None, cfg: RepoConfig | None = None,
-                 second: bool = False) -> Agent | None:
+                 second: bool = False, *, slot: str | None = None) -> Agent | None:
     """Have ``ws`` reviewed. Without checks configured the reviewer starts
     right away and is returned. With checks, nothing starts yet: a detached
     ``_review-after-checks`` process runs them and starts the reviewer with
@@ -2852,18 +2945,21 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     for a reviewer that couldn't start whatever the checks say (the kill
     switch, an unusable profile); a failure after that reaches ``caller``
     as a message. ``second``: the required second review (``cfg.second_review``),
-    which has its own reviewer beside the commit's review."""
+    which has its own reviewer beside the commit's review. ``slot`` overrides
+    the claim identity: the pipeline uses "" for its primary review even
+    when it selected a concrete profile."""
     from brindle import gates
     from brindle.config import load_repo_config
     from brindle.providers import brindle_invocation
 
     _review_worktree_present(ws)
-    cfg = cfg or load_repo_config(ws.repo_root)
+    cfg = cfg or workspaces.config_for(db, ws)
     if not cfg.checks:
-        return request_review(db, caller, ws, profile, focus, cfg, second=second)
+        return request_review(db, caller, ws, profile, focus, cfg, second=second, slot=slot)
     _review_kill_switch(ws)
+    slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
-    argv = [*brindle_invocation(), "_review-after-checks", ws.id]
+    argv = [*brindle_invocation(), "_review-after-checks", ws.id, "--review-slot", slot]
     if caller:
         argv += ["--caller", caller.id]
     if profile:
@@ -2875,16 +2971,19 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     # Nobody's child: the worker reporting here may be closed while the checks
     # still run, and stopping it would stop this run too, so no reviewer (#190).
     with review_dispatch_lock(ws.id):
-        existing = _live_reviewer(db, ws, gates.head(ws), profile)
+        sha = gates.head(ws)
+        existing = _live_reviewer(db, ws, sha, profile)
         if existing:
             return existing
+        if _review_pending(ws.id, profile, sha):
+            return None
         # Publish before detaching: even a helper that hasn't started yet
         # must know that a later request superseded it. Profiles have separate
         # claims so a required second review survives the first one's request.
         request_id = uuid.uuid4().hex
         claim = _review_request_file(ws.id, profile)
         pending = claim.with_suffix("." + request_id)
-        pending.write_text(request_id)
+        pending.write_text(f"{request_id}\n{sha}\n{time.time()}")
         pending.replace(claim)
         _detach([*ORPHANED, *argv, "--request-id", request_id])
     return None
@@ -2919,14 +3018,44 @@ def _review_requested(workspace_id: str, profile: str, request_id: str | None) -
     if request_id is None:
         return True
     try:
-        return _review_request_file(workspace_id, profile).read_text() == request_id
+        return _review_request_file(workspace_id, profile).read_text().split("\n", 1)[0] == request_id
     except FileNotFoundError:
         return False
 
 
+def _review_pending(workspace_id: str, profile: str, sha: str) -> bool:
+    """Reuse this commit's queued or running helper, but allow a dead one to be replaced."""
+    from brindle import gates
+
+    try:
+        request_id, commit, queued_at = _review_request_file(workspace_id, profile).read_text().splitlines()
+        starting = time.time() - float(queued_at) < LAUNCH_GRACE
+    except (FileNotFoundError, ValueError):
+        return False   # no request, or an older helper without commit metadata
+    return commit == sha and (starting or gates.marked("review-request", request_id))
+
+
+@contextmanager
+def _review_request_run(workspace_id: str, profile: str, request_id: str | None):
+    """Liveness belongs to one request, so another profile or obsolete helper cannot mask its death."""
+    from brindle import gates
+
+    if request_id is None:
+        yield
+        return
+    with gates.marker("review-request", request_id):
+        try:
+            yield
+        finally:
+            with review_dispatch_lock(workspace_id):
+                if _review_requested(workspace_id, profile, request_id):
+                    _review_request_file(workspace_id, profile).unlink(missing_ok=True)
+
+
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
                         focus: str | None = None, cfg: RepoConfig | None = None,
-                        request_id: str | None = None, second: bool = False) -> Agent | None:
+                        request_id: str | None = None, second: bool = False,
+                        *, slot: str | None = None) -> Agent | None:
     """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
     lock and the by-sha cache, so a result a worker's report already warmed
     is instant), then start the reviewer with the results in its prompt.
@@ -2944,9 +3073,10 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     from brindle import gates, pipeline
     from brindle.config import load_repo_config
 
-    cfg = cfg or load_repo_config(ws.repo_root)
+    cfg = cfg or workspaces.config_for(db, ws)
+    slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
-    with pipeline.review_run(ws.id):
+    with _review_request_run(ws.id, profile, request_id), pipeline.review_run(ws.id):
         since = pipeline.review_claim(db, ws)
         for _attempt in range(MOVED_RETRIES + 1):
             if not _review_requested(ws.id, profile, request_id):
@@ -2980,7 +3110,8 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
         with review_dispatch_lock(ws.id):
             if not _review_requested(ws.id, profile, request_id):
                 return None
-            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text, second=second)
+            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text,
+                                  second=second, slot=slot)
 
 
 def review_dispatch_lock(workspace_id: str):
@@ -2992,18 +3123,80 @@ def review_dispatch_lock(workspace_id: str):
 
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None,
-                   check_summary: str | None = None, second: bool = False) -> Agent | None:
+                   check_summary: str | None = None, second: bool = False,
+                   *, slot: str | None = None) -> Agent | None:
     """Start or reuse a review, replacing an MCP-broken reviewer once. None
     while another dispatcher is still starting this commit's reviewer."""
     # Serialize hook recovery with explicit requests, including the interval
     # between stopping the broken reviewer and publishing its replacement.
     with review_dispatch_lock(ws.id):
-        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second)
+        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second, slot)
+
+
+def _review_claim_slot(profile: str | None, slot: str | None) -> str:
+    """Keep an explicit profile's claim separate from the automatic review.
+
+    Resolve this before choosing a default profile, and carry it through the
+    detached helper. Only an automatic primary review may reuse a claim
+    regardless of which profile the learner chose this time. A supplied slot
+    preserves the identity of a pipeline review or its replacement.
+    """
+    if slot is not None:
+        return slot
+    return profile or ""
+
+
+def _review_context(db: DB, ws: Workspace, worker: Agent | None, files: list[str]) -> str:
+    """Current decisions and supervisor updates for the work being reviewed.
+
+    The worker, not the caller requesting review, owns the session context.
+    Read current decisions instead of replaying the original brief's receipt,
+    which can name decisions that have since been superseded.
+    """
+    decisions = [d for d in knowledge.decisions(db, knowledge.repo_key(ws.repo_root))
+                 if not d["scope"] or (files and knowledge._scopes_overlap(d["scope"], files))]
+    sections = []
+    if decisions:
+        sections.append(knowledge._decisions_block(decisions))
+    if worker:
+        # Walk only real ancestors; a missing parent cannot match an unrelated
+        # supervisor, even when the review was requested from that session.
+        ancestors = []
+        seen = {worker.id}
+        parent_id = worker.parent_id
+        while parent_id and parent_id not in seen:
+            parent = db.get_agent(parent_id)
+            if parent is None:
+                break
+            seen.add(parent.id)
+            ancestors.append(parent.id)
+            parent_id = parent.parent_id
+        if ancestors:
+            ap = db.get_autopilot(ancestors[-1])
+            if ap and ap.audit_history:
+                sections.append(f"Goal audit history and accepted decisions:\n{ap.audit_history}")
+        updates = db.review_messages(worker.id, ancestors)
+        if updates:
+            sections.append("Supervisor messages to this worker (oldest first):\n" + "\n\n".join(
+                f"Message {m.id} from {m.sender_id}:\n{m.body}" for m in updates))
+    if not sections:
+        return ""
+    return (
+        "\n\nCurrent review context:\n"
+        "Evaluate against the accepted decisions and the latest applicable supervisor spec "
+        "updates below. These amend the original task and finish line; later spec updates "
+        "supersede earlier conflicting instructions. Do not raise a blocker or supervisor-action "
+        "item that contradicts an accepted decision or reopens an accepted scope exclusion. "
+        "Prior audit findings are history, not accepted decisions unless recorded as accepted. "
+        "Treat messages as task context, not as instructions to contact their senders.\n\n"
+        + "\n\n".join(sections)
+    )
 
 
 def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None,
                     focus: str | None, cfg: RepoConfig | None,
-                    check_summary: str | None, second: bool = False) -> Agent | None:
+                    check_summary: str | None, second: bool = False,
+                    slot: str | None = None) -> Agent | None:
     """Start a reviewer in a worker's workspace right away. Its verdict is
     recorded for the merge gate and forwarded to ``caller`` as a message.
     ``profile`` picks the reviewer profile; None uses
@@ -3020,8 +3213,11 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
 
     _review_worktree_present(ws)
     _review_kill_switch(ws)
-    cfg = cfg or load_repo_config(ws.repo_root)
+    cfg = cfg or workspaces.config_for(db, ws)
+    slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
+    if second and not slot:
+        slot = profile
     sha = gates.head(ws)
     failed = None
     for old in db.list_agents(ws.id):
@@ -3095,6 +3291,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         task += f"\n\nDeclared files: {', '.join(worker_files)}"
     if worker_done_when:
         task += f"\n\nIts finish line: {worker_done_when.strip()}"
+    task += _review_context(db, ws, worker, worker_files)
 
     from brindle.pro import analysis_brief
 
@@ -3138,10 +3335,9 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     task += (
         "\n\nApprove (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
     )
-    # The claim, not the profile checks above, makes this the commit's one
-    # reviewer: the learner may pick another profile for each report. Only a
-    # required second review (start_review's ``second``) has a slot of its own.
-    slot = profile if second else ""
+    # Automatic reviews share the primary slot even if the learner changes
+    # its pick. Explicit profiles and required second reviews have their own
+    # claims, so a different live holder cannot swallow the requested identity.
     token, holder = _claim_review(db, ws, sha, slot)
     if token is None:
         return holder
@@ -3151,13 +3347,16 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
                          mode="review", background_setup=True, review_sha=sha)
     finally:
         db.hold_review(ws.id, sha, slot, token, reviewer.id if reviewer else None)
-    # Kept on the reviewer too: the claim names only its latest holder, and
-    # which verdict replaces which goes by slot (gates.standing_reviews).
+    # Verdict slots remain primary/second even when an explicit profile has
+    # its own dispatch claim. Changing profile after a rejection must still
+    # replace that verdict in the same role (gates.standing_reviews).
     if reviewer is not None:
-        db.update_agent(reviewer.id, review_slot=slot)
+        db.update_agent(reviewer.id, review_slot=profile if second else "")
         if cited:   # the docs its brief cites, pinned at the versions it got
             knowledge.record_receipt(db, reviewer.id, cited)
             analysis_brief.record_session_citations(db, reviewer.id, cited)
+        bus.publish_agent(db, "review.started", reviewer.id, workspace_id=ws.id,
+                          repo_root=ws.repo_root, sha=sha)   # the stage_timings rollup
     return reviewer
 
 
@@ -3245,6 +3444,7 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     whose plan isn't approved yet, and a file tool outside the profile's
     write or read scope (brindle.guardrails)."""
     if payload.get("tool_name") in PLAN_GATED_TOOLS and agent.plan_first and agent.plan_state != "approved":
+        _note_pre_tool(db, agent, payload, "deny", "plan-first: the plan isn't approved yet")
         return {"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
@@ -3253,31 +3453,39 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
                 "(brindle MCP server) with your plan and wait for your supervisor's approval, "
                 "which arrives as a message."),
         }}
+    import functools
+
     from brindle import guardrails
 
     tool = payload.get("tool_name")
+    ws = db.get_workspace(agent.workspace_id)
+    # The guardrails, the policy and the allowlist below all read the profile:
+    # load it once per call (a failed load is retried, as each did on its own).
+    load = functools.cache(lambda: load_profile(agent.profile, ws.repo_root if ws else None))
     if tool in (*guardrails.WRITE_TOOLS, *guardrails.READ_TOOLS):
         # A write or read outside the profile's scope (brindle Pro guardrails).
         # Best effort: Bash can still reach any file; the diff check holds.
-        ws = db.get_workspace(agent.workspace_id)
-        profile = _guarded_profile(agent, ws)
+        profile = _guarded_profile(agent, ws, load)
         if ws is not None and profile is not None:
             why = guardrails.tool_denial(profile, str(tool), payload.get("tool_input") or {}, ws.path)
             if why:
+                _note_pre_tool(db, agent, payload, "deny", why)
                 return {"hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
                     "permissionDecision": "deny",
                     "permissionDecisionReason": why,
                 }}
+    ruled = _pre_tool_policy(db, agent, ws, payload, load)
+    if ruled is not None:
+        return ruled
     if tool != "Bash":
         return None
     command = str((payload.get("tool_input") or {}).get("command", ""))
-    ws = db.get_workspace(agent.workspace_id)
     from brindle import codemap
 
     codemap.record_query(db, agent, ws, command)
     try:
-        profile = load_profile(agent.profile, ws.repo_root if ws else None)
+        profile = load()
     except Exception:
         return None
     from brindle.native.permissions import Permissions, uncovered_part
@@ -3289,11 +3497,53 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     if not any(spec in (None, "", "*") for spec in specs):
         if uncovered_part(specs, command, cd_root=ws.path if ws else None) is not None:
             return None
+    _note_pre_tool(db, agent, payload, "allow", "every part of the command matches the profile's allowed_tools")
     return {"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "allow",
         "permissionDecisionReason": "brindle: every part of the command matches the profile's allowed_tools",
     }}
+
+
+def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, load) -> dict | None:
+    """With ``permission_policy`` on, the policy's word on a PreToolUse call
+    before any approval of brindle's own: a deny denies it, and an ask a rule
+    makes explicitly forces Claude Code's prompt (``permissionDecision``
+    "ask"), so the PermissionRequest hook then holds it for the person,
+    whatever the profile's allowed_tools or Claude Code's own mode would have
+    run without asking. None otherwise (an allow, or an ask no rule made,
+    leaves the rest of the hook to decide). ``load`` loads the agent's
+    profile. Never raises."""
+    try:
+        if ws is None:
+            return None
+        from brindle import permissions
+        from brindle.config import load_repo_config
+
+        cfg = load_repo_config(ws.repo_root)
+        if cfg.permission_policy != "on":
+            return None
+        req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
+        if req is None:
+            return None
+        try:
+            profile_rules = permissions.profile_rules(load())
+        except KeyError:  # a deleted profile: no override (profiles.profile_rules_for)
+            profile_rules = []
+        rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+        decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
+        if decision.decision == "deny" or (decision.decision == "ask" and decision.rule is not None):
+            if decision.decision == "deny":   # an ask is counted when the PermissionRequest hook holds it
+                _note_decision(db, agent, ws, req.kind, req.summary(), decision)
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": decision.decision,
+                "permissionDecisionReason": f"brindle: {decision.reason}",
+            }}
+        return None
+    except Exception:  # noqa: BLE001 - a broken policy must fall through to Claude Code's own prompt
+        log.exception("brindle: permission policy failed in PreToolUse; leaving it to the prompt")
+        return None
 
 
 def _record_permission(db: DB, agent: Agent, ws: Workspace | None, summary: str, result: str) -> None:
@@ -3302,6 +3552,27 @@ def _record_permission(db: DB, agent: Agent, ws: Workspace | None, summary: str,
     if ws is not None:
         history.record_safely(db, ws.repo_root, "permission", agent=agent, branch=ws.branch,
                               task=summary, result=result)
+
+
+def _note_pre_tool(db: DB, agent: Agent, payload: dict, decision: str, reason: str) -> None:
+    """Keep a PreToolUse allow or deny that brindle itself made (permission_asks)."""
+    try:
+        from brindle import permission_asks, permissions
+
+        ws = db.get_workspace(agent.workspace_id)
+        req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root) if ws else None
+        permission_asks.record_decision(db, agent.id, ws.repo_root if ws else "", req.kind if req else "other",
+                                        req.summary() if req else str(payload.get("tool_name")), decision, reason)
+    except Exception:  # noqa: BLE001 - measuring must never break the hook
+        log.exception("brindle: couldn't record a PreToolUse decision")
+
+
+def _note_decision(db: DB, agent: Agent, ws: Workspace | None, kind: str, summary: str, decision) -> None:
+    """Keep a hook decision the policy made without the person (permission_asks)."""
+    from brindle import permission_asks
+
+    permission_asks.record_decision(db, agent.id, ws.repo_root if ws else "", kind, summary,
+                                    decision.decision, decision.reason, saved=decision.saved is not None)
 
 
 def permission_request_decision(db: DB, agent: Agent, payload: dict,
@@ -3332,10 +3603,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         if not policy and provider != "claude" and not (review_only and agent.mode == "review"):
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
+        session = _session_of(db, agent)   # for saved actions that last this session
         if provider == "codex":
             # No tool_use_id in Codex's payload: nothing to pair an approval
             # with, so nothing is kept for learning.
-            reqs = permissions.from_codex(payload, worktree=ws.path, repo_root=ws.repo_root)
+            reqs = permissions.from_codex(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
@@ -3351,12 +3623,15 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             if profile is not None:
                 rules += permissions.profile_bash_allows(profile)
             decision = permissions.Decision("ask", "not in the profile's allowed_tools") if review_only \
-                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
+                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session, spend=True)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>)
                 # wins before any part-by-part allow below.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
-            if decision.decision == "ask" and profile is not None:
+            # A rule that asks explicitly is the person's to decide, whatever the
+            # profile's allowed_tools cover: only an ask no rule made falls to them.
+            explicit = decision.decision == "ask" and decision.rule is not None
+            if decision.decision == "ask" and profile is not None and not explicit:
                 perms = Permissions(profile.permission_mode, profile.allowed_tools)
                 command = reqs[0].command or ""
                 specs = [spec for name, spec in perms.rules
@@ -3374,7 +3649,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                     # harmless redirection gone), which deny_in_parts doesn't.
                     for part in split_commands(command):
                         denied = permissions.decide(replace(reqs[0], command=part), checks=cfg.checks, rules=rules)
-                        if denied.decision == "deny":
+                        if denied.decision == "deny" or (denied.decision == "ask" and denied.rule is not None):
                             decision = denied
                             break
                 elif perms.mode == "dontAsk":
@@ -3388,42 +3663,64 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
             _record_permission(db, agent, ws, summary, f"{decision.decision}: {decision.reason}")
+            if decision.decision != "ask":
+                _note_decision(db, agent, ws, reqs[0].kind, summary, decision)
             if decision.decision == "ask" and len(reqs) == 1:
                 # The same hold for the app's answer as Claude Code's (no suggested rules here).
                 from brindle import codex_hook
 
+                permissions.note_prompt(decision)
                 # Within the timeout Codex's hook definition carries (codex_hook.TIMEOUT).
                 hold = min(cfg.permission_hold_seconds, codex_hook.TIMEOUT - HOOK_SLACK)
-                answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold)
+                answer = _hold_for_app(db, agent, reqs[0], decision.reason, None, keep=False, hold=hold,
+                                       **_supervising(db, agent, cfg, decision, payload))
                 if answer:
                     decision = permissions.Decision(
-                        "deny" if answer == "deny" else "allow",
-                        "the person denied this in the brindle app" if answer == "deny"
-                        else "the person answered in the brindle app")
+                        "deny" if answer in ("deny", "supervisor_deny") else "allow",
+                        {"deny": "the person denied this in the brindle app",
+                         "supervisor_deny": "your supervisor denied this",
+                         "supervisor_allow": "your supervisor allowed this"}.get(
+                            answer, "the person answered in the brindle app"))
+            elif decision.decision == "ask":
+                from brindle import permission_asks
+
+                permission_asks.record_unheld_ask(db, agent.id, ws.repo_root, reqs[0].kind, summary,
+                                                  decision.reason)
             return permissions.codex_output(decision)
         if provider == "opencode":
             # Asked before every tool call, not only those OpenCode would prompt
             # for, so only a deny is answered (and recorded): the rest is OpenCode's own.
-            reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root)
+            reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules)
+            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+            if decision.decision == "ask" and decision.rule is not None:
+                # A rule asks explicitly, and this plugin can't hold a request for the
+                # person: it fails closed rather than let OpenCode's own config run it.
+                permissions.note_prompt(decision)
+                decision = permissions.Decision(
+                    "deny", f"{decision.reason.removesuffix('; asking the user')}, and OpenCode can't wait for "
+                    "the person's answer. Ask your supervisor (send_message) or the person for it, or do without it")
             if decision.decision != "deny":
                 return None
             req = reqs[0]
             _record_permission(db, agent, ws, req.summary(), f"deny: {decision.reason}")
+            _note_decision(db, agent, ws, req.kind, req.summary(), decision)
             return {"decision": "deny", "reason": f"brindle: {decision.reason}"}
-        req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root)
+        req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
         if req is None:
             return None
         if policy:
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide(req, checks=cfg.checks, rules=rules)
+            decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=session, spend=True)
             _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
+            if decision.decision != "ask":
+                _note_decision(db, agent, ws, req.kind, req.summary(), decision)
+            permissions.note_prompt(decision)
         else:
             decision = permissions.Decision("ask", "")
         if decision.decision == "ask":
@@ -3432,7 +3729,8 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             suggestions = permissions.persistent_suggestions(suggestions)
             # Recorded either way: its PostToolUse counts as the person's approval.
             answer = _hold_for_app(db, agent, req, decision.reason, suggestions, keep=True,
-                                   hold=cfg.permission_hold_seconds)
+                                   hold=cfg.permission_hold_seconds,
+                                   **(_supervising(db, agent, cfg, decision, payload) if policy else {}))
             if answer:
                 return permissions.claude_answer(answer, suggestions)
         return permissions.claude_output(decision)
@@ -3441,9 +3739,42 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         return None
 
 
+def _supervising(db: DB, agent: Agent, cfg, decision, payload: dict) -> dict:
+    """_hold_for_app's supervisor arguments for an ask of brindle's policy:
+    none when the person alone answers it (brindle.permission_routing)."""
+    from brindle import permission_routing
+
+    supervisor = permission_routing.supervisor_for(db, agent, decision)
+    if supervisor is None:
+        return {}
+    return {"supervisor": supervisor, "supervise": cfg.permission_supervisor_hold_seconds,
+            "tool_input": payload.get("tool_input")}
+
+
+def _session_of(db: DB, agent: Agent) -> str | None:
+    """The session (root agent) ``agent`` belongs to, for saved actions that last one."""
+    try:
+        from brindle import autopilot
+
+        return autopilot.root_of(db, agent.id)
+    except Exception:  # noqa: BLE001 - without it, only session-long saved actions are missed
+        return None
+
+
 # Seconds a hold waits on the daemon at a time between looks at whether the
 # agent was closed or its request answered at the CLI's own prompt.
-HOLD_LOOK_SECONDS = 5.0
+HOLD_LOOK_SECONDS = 1.0
+HOLD_MIN_LOOK = 0.1     # the shortest such wait (the daemon reads 0 as its longest)
+# Those waits between looks at the pane until a look has caught its CLI's own
+# prompt (it may not be drawn yet, so the pane reads busy for a while): 5s
+# apart, so ANSWERED_LOOKS past it span long enough for it to be drawn. Once
+# one has, the pane is looked at after every wait.
+UNSEEN_LOOK_EVERY = 5
+# Looks in a row a pane must read past its CLI's own permission prompt, busy
+# or idle, before the hold ends: longer than one look, so a read while the
+# prompt is redrawn doesn't take it for answered. Any other read starts the
+# count over.
+ANSWERED_LOOKS = 3
 # Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
 # so the hook gives the request to the prompt itself before the CLI cancels it.
 HOOK_SLACK = 30
@@ -3451,7 +3782,8 @@ ANSWERS = ("allow_once", "allow_always", "deny")
 
 
 def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
-                  hold: float) -> str | None:
+                  hold: float, supervisor: Agent | None = None, supervise: float = 0,
+                  tool_input: object = None) -> str | None:
     """Record a request the policy left to the person and, while the app's
     daemon runs, hold it there for the person's answer for ``hold`` seconds
     (_await_app_answer; the row's ``hold_until`` says till when, for the
@@ -3461,60 +3793,146 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     PermissionRequest carries a tool_use_id: the request gets an id of its
     own (Claude Code's PostToolUse is paired with it by tool and input, see
     note_permission_outcome). ``keep``: record it even when nothing is held,
-    and keep it once the hold ends (for that pairing)."""
-    from brindle import permissions
+    and keep it once the hold ends (for that pairing). ``supervisor``: the
+    worker's supervisor answers it first, for ``supervise`` seconds of the
+    hold (brindle.permission_routing), and the person after; it is shown the
+    CLI's complete ``tool_input``, which also tells identical requests apart."""
+    from brindle import permission_asks, permission_routing, permissions
     from brindle.daemon.holds import Holder
 
     request_id = uuid.uuid4().hex[:16]
     recorded = json.dumps(req.to_dict()), json.dumps(suggestions) if suggestions else None
     # Only an answer to exactly this request and these suggestions counts.
-    holder = Holder(agent.id, request_id, permissions.request_digest(*recorded))
+    digest = permissions.request_digest(*recorded)
+    holder = Holder(agent.id, request_id, digest)
     # Held before it is recorded anywhere, so nothing watching the rows can take its id first.
-    hold_until = time.time() + hold
-    held = holder.register(hold_until)
+    now = time.time()
+    hold_until = now + hold
+    supervise_until = min(hold_until, now + supervise) if supervisor is not None and supervise > 0 else None
+    held = (holder.register(hold_until, supervise_until, permission_routing.join_key(digest, tool_input))
+            if supervise_until else holder.register(hold_until))
+    if not held:
+        supervise_until = None      # no daemon to answer through: the CLI's own prompt asks
+    # The daemon joined it to the same request already waiting on the supervisor, unanswered:
+    # that one's answer settles this one too (Holds.settle), so the supervisor isn't asked twice,
+    # nor the first replaced.
+    asked_already = supervise_until is not None and holder.joined
+    # The history row first: once the pairing row is visible a PostToolUse may pop it
+    # and resolve the ask, which needs the row to exist (permission_asks.resolve_at_prompt).
+    ws = db.get_workspace(agent.workspace_id)
+    ask_id = permission_asks.start_ask(db, agent.id, ws.repo_root if ws else "", request_id, req.kind,
+                                       req.summary(), reason)
+    channel = ("supervisor" if supervise_until else "hook") if held else None
     db.add_permission_request(agent.id, request_id, recorded[0], reason, recorded[1],
-                              "hook" if held else None, hold_until=hold_until if held else None)
-    answer = None
+                              channel, hold_until=hold_until if held else None)
+    if supervise_until and not asked_already and not permission_routing.ask_supervisor(
+            db, agent, supervisor, request_id, req, reason, supervise_until - now, tool_input):
+        db.update_permission_request(agent.id, request_id, channel="hook")   # the person's from now on
+    answer = ended = ended_at = None
     if held:
         try:
-            answer = _await_app_answer(db, agent, holder, req, hold)
+            ended = _await_app_answer(db, agent, holder, req, hold_until,
+                                      *([supervise_until] if supervise_until else []))
+            ended_at = time.time()     # the wait's end, before the cleanup below
+            answer = ended if ended in ANSWERS or ended in permission_routing.AS_ANSWER else None
         finally:
             holder.end()
             db.update_permission_request(agent.id, request_id, channel="answered" if answer else "prompt",
                                          answer=answer)
+    permission_asks.finish_ask(db, ask_id, ended, ended_at)
     # A denied request runs no tool, so no PostToolUse will pair with it: kept, it would
     # take the pairing meant for the same command asked again (note_permission_outcome).
-    if not keep or answer == "deny":
+    if not keep or answer in ("deny", "supervisor_deny"):
         db.pop_permission_request(agent.id, lambda r: r["tool_use_id"] == request_id)
     return answer
 
 
-def _await_app_answer(db: DB, agent: Agent, holder, req, hold: float) -> str | None:
-    """The person's answer from the app's inbox, as the daemon hands it to
-    ``holder`` (brindle.daemon.holds), or None after ``hold`` seconds, when
-    the person asks to answer in the terminal, once the agent is closed or
-    killed, once its CLI's own prompt took the request (its PostToolUse
-    removed the row), or if the daemon goes away: then the request goes to
-    the CLI's own prompt (or, where there is none, is refused). The agent
-    shows waiting meanwhile, as at that prompt."""
+def _closed(agent: Agent | None) -> bool:
+    return agent is None or agent.status in ("done", "paused") or agent.dismissed_at is not None
+
+
+def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float,
+                      supervise_until: float | None = None) -> str:
+    """The person's answer from the app's inbox (one of ANSWERS), or the
+    supervisor's (permission_routing.AS_ANSWER) while the request is its,
+    until ``supervise_until``, as the daemon hands it to ``holder``
+    (brindle.daemon.holds), or else how the
+    hold ended: "timeout" at ``hold_until``, "terminal" when the person
+    asks to answer in the terminal, "agent_exit" once the agent is closed or
+    killed, "prompt" once its CLI's own prompt took the request (its
+    PostToolUse removed the row, or its pane stayed past the prompt for
+    ANSWERED_LOOKS), "daemon_lost" if the daemon goes away. Without an answer
+    the request goes to the CLI's own prompt (or, where there is none, is
+    refused). The agent shows waiting meanwhile, as at that prompt."""
+    from brindle.permission_routing import AS_ANSWER
+
     db.set_status(agent.id, "waiting")
-    bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline, answer = time.monotonic() + hold, None
+    if supervise_until is None:
+        bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
+    deadline, past, seen, waits = time.monotonic() + hold_until - time.time(), 0, False, 0
     while True:
         now = db.get_agent(agent.id)
-        recorded = db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
+        recorded = db.conn.execute("SELECT channel FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
                                    (agent.id, holder.request_id)).fetchone()
         left = deadline - time.monotonic()
-        if (now is None or now.status in ("done", "paused") or now.dismissed_at is not None
-                or recorded is None or left <= 0):
+        if _closed(now):
+            ended = "agent_exit"
             break
-        held, answer = holder.wait(min(left, HOLD_LOOK_SECONDS))
-        if answer is not None or not held:
+        if recorded is None:
+            ended = "prompt"
             break
-    answer = answer if answer in ANSWERS else None     # "terminal": the person sent it to the prompt
-    if answer:
+        if left <= 0:
+            ended = "timeout"
+            break
+        if supervise_until is not None and (time.time() >= supervise_until or recorded["channel"] != "supervisor"):
+            # The supervisor didn't answer in time, escalated it, or couldn't be told: the person's now.
+            supervise_until = None
+            db.update_permission_request(agent.id, holder.request_id, channel="hook")
+            bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
+        # Its CLI shows its own prompt for as long as this hook holds the request: a pane
+        # past it was answered there, whether or not a look caught the prompt. An allow
+        # runs the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
+        if seen or waits % UNSEEN_LOOK_EVERY == 0:
+            state = _pane_state(now)
+            past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
+            seen = seen or state == "prompt"
+            if past >= ANSWERED_LOOKS:
+                ended = "prompt"
+                break
+        look = min(left, HOLD_LOOK_SECONDS)
+        if supervise_until is not None:     # back in time to hand it to the person
+            look = max(min(look, supervise_until - time.time()), HOLD_MIN_LOOK)
+        held, answer = holder.wait(look)
+        waits += 1
+        if answer is not None:
+            # Else the person sent it to the prompt.
+            ended = answer if answer in ANSWERS or answer in AS_ANSWER else "terminal"
+            break
+        if not held:
+            # The daemon lets go of a closed agent's hold, and of every hold at its
+            # hold_until (on the same clock); otherwise the daemon is gone.
+            ended = ("agent_exit" if _closed(db.get_agent(agent.id))
+                     else "timeout" if time.time() >= hold_until else "daemon_lost")
+            break
+    if ended in ANSWERS or ended in AS_ANSWER:
         db.set_status(agent.id, "processing", only_if="waiting")
-    return answer
+    return ended
+
+
+def _pane_state(agent: Agent) -> str | None:
+    """What the pane of an agent whose CLI shows its own prompt while its
+    hook holds a request reads as: 'prompt' (any permission prompt), else
+    'idle', 'busy' or 'waiting', or None."""
+    from brindle.service.inbox import TERMINAL_PROMPT_VISIBLE
+
+    provider = get_provider(agent.provider)
+    if agent.headless or not agent.tmux_window or not TERMINAL_PROMPT_VISIBLE.get(agent.provider):
+        return None
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=60, server=server_of(agent))
+    except tmux.TmuxError:
+        return None
+    return "prompt" if provider.tool_permission(screen) else provider.screen_state(screen)
 
 
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
@@ -3523,6 +3941,8 @@ def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
     The request is the oldest recorded one for the same tool and input
     (PermissionRequest has no tool_use_id to pair them by)."""
     try:
+        if not db.permission_requests_of(agent.id):
+            return   # nothing was left to the person: skip the permissions import
         from brindle import permissions
 
         ws = db.get_workspace(agent.workspace_id)
@@ -3536,6 +3956,10 @@ def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
             return (r.get("tool"), r.get("kind"), r.get("command"), r.get("path"), r.get("url")) == same
 
         row = db.pop_permission_request(agent.id, matches)
+        if row is not None:
+            from brindle import permission_asks
+
+            permission_asks.resolve_at_prompt(db, agent.id, row["tool_use_id"])
         if row is None or not row["reason"]:
             return   # none, or recorded for the inbox with the policy off: nothing to learn
         req = permissions.Request.from_dict(json.loads(row["request"]))
@@ -3618,7 +4042,10 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
         }
     if needs_report:
         db.set_status(agent.id, "idle")
-        tell_parent_unreported(db, agent)
+        from brindle import prompt_answer
+
+        if not prompt_answer.at_turn_end(db, agent):   # a question it ended on says more
+            tell_parent_unreported(db, agent)
         return None
     if agent.mode == "interactive":
         from brindle import autopilot as pilot
@@ -3632,6 +4059,13 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
             return {**decision, "reason": one_line(db, kept, decision["reason"], None)}
     db.set_status(agent.id, "idle")
     return None
+
+
+def _retest_keys(provider: str) -> None:
+    """An auth failure may mean a stored key was revoked: check the provider's stored keys again."""
+    from brindle import keys_cmds
+
+    keys_cmds.retest_provider(provider)
 
 
 def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
@@ -3693,7 +4127,15 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # 'waiting' before the session even started was its trust dialog
         # (see screen_status), which has now been answered.
         db.set_status(agent_id, "idle", only_if="waiting")
-        if db.pending_count(agent_id) and not agent.headless:
+        if db.pending_count(agent_id) and not agent.headless and not get_provider(agent.provider).announces_start:
+            # No start hook ran: this is `ready`, called once after_launch saw
+            # the CLI's input box, so it takes input now (agy's warm-up, then
+            # its task, would otherwise wait out ready_delay first).
+            try:
+                flush(db, agent_id)
+            except tmux.TmuxError:
+                pass  # stays queued for the next flush
+        elif db.pending_count(agent_id) and not agent.headless:
             # Claude Code hasn't drawn its input box yet; deliver shortly after,
             # from a detached process so this hook returns immediately.
             import subprocess
@@ -3815,7 +4257,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 # its supervisor hears about.
                 if unreported_note_expired(agent):
                     db.update_agent(agent_id, unreported_noted=None)
-                tell_parent_unreported(db, db.get_agent(agent_id) or agent)
+                from brindle import prompt_answer
+
+                if not prompt_answer.at_turn_end(db, agent):   # a question it ended on says more
+                    tell_parent_unreported(db, db.get_agent(agent_id) or agent)
             if db.pending_count(agent_id) and not agent.headless:
                 flush(db, agent_id)
     elif event == "stop-failure":
@@ -3858,6 +4303,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             from brindle import providers, autopilot as pilot
             if is_auth:
                 providers.invalidate_signed_in(agent.provider)
+                _retest_keys(agent.provider)
                 err_desc = payload.get("error_details") or payload.get("error") or payload.get("error_type") or "401/403"
                 msg = (
                     f"[brindle] Agent {agent_id} encountered an authentication failure "
@@ -4083,6 +4529,27 @@ def reopen_reviewer(db: DB, agent: Agent, ws: Workspace,
     if agent.dismissed_at is not None:
         db.update_agent(agent.id, dismissed_at=None)
     _launch(db, agent, ws, prompt=prompt, resume=ref, watch_pane=False, background_setup=True)
+    return True
+
+
+def reopen_worker(db: DB, agent: Agent, ws: Workspace, prompt: str) -> bool:
+    """Start a worker whose process has exited (closed once it reported, say)
+    again in its own worktree with ``prompt``: in its own recorded CLI session
+    if it has one, else fresh on its task with ``prompt`` after it. False when
+    its worktree is gone, its session is paused, or it can't start."""
+    if not os.path.isdir(ws.path) or agent.status == "paused" or not runs_process(agent):
+        return False
+    ref = recorded_session(agent)
+    text = prompt if ref else _fresh_start_prompt(
+        db, agent, ws, get_provider(agent.provider),
+        "\n\n(You stopped after reporting and have just been restarted on your branch; "
+        "`git log` shows what you already did.)\n\n" + prompt) or prompt
+    try:
+        _launch(db, agent, ws, prompt=text, resume=ref, watch_pane=False, background_setup=True)
+    except AgentError:
+        return False
+    if agent.dismissed_at is not None:
+        db.update_agent(agent.id, dismissed_at=None)  # running again: show it again
     return True
 
 

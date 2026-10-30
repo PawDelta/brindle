@@ -6,6 +6,7 @@
    anything: Claude Code's sign-in is only read. */
 
 import { Channel, invoke } from "@tauri-apps/api/core";
+import type { StartStep } from "./engine";
 import { connectDaemon, decodeBinary } from "./tauri";
 
 /* The tools setup.rs looks for, in its order: brindle's own needs, then the optional agent CLIs. */
@@ -46,6 +47,8 @@ export interface Setup {
   detect(): Promise<Detection>;
   /* Find the daemon, starting it: rejects with why it can't. */
   connect(): Promise<unknown>;
+  /* What the start a connect waits on is doing now; null when none is under way. */
+  startStep?(): Promise<StartStep | null>;
   /* Start the install; rejects when one is already running. */
   install(): Promise<void>;
   /* Watch the install: what it printed so far, then live, then its exit, until closed. */
@@ -56,6 +59,7 @@ export function tauriSetup(): Setup {
   return {
     detect: () => invoke<Detection>("setup_detect"),
     connect: connectDaemon,
+    startStep: () => invoke<StartStep | null>("daemon_start_step"),
     install: () => invoke<void>("setup_install_start"),
     attach(pane) {
       let closed = false;

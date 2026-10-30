@@ -10,7 +10,7 @@
 import { useDaemon } from "../../api/context";
 import type { InboxItemDTO } from "../../api/schema";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
-import { primary, quiet } from "../../components/ui";
+import { button, quiet } from "../../components/ui";
 import { useAppState } from "../../store/useStore";
 import type { Route } from "../../routes";
 import { CloudLoginStatus, useCloudLogin } from "./CloudSignIn";
@@ -50,7 +50,7 @@ export function ItemActions({ item, actions, onGo, onNavigate, repo, onDone, com
       <div className="flex flex-wrap items-center gap-1">
         {item.kind === "doc" && (
           <>
-            <button type="button" className={`${primary} ${size}`} disabled={item.doc == null || !onNavigate} onClick={() => onNavigate?.({ screen: "knowledge", view: "docs", doc: item.doc!, section: item.section ?? undefined })}>Open</button>
+            <button type="button" className={`${button} ${size}`} disabled={item.doc == null || !onNavigate} onClick={() => onNavigate?.({ screen: "knowledge", view: "docs", doc: item.doc!, section: item.section ?? undefined })}>Open</button>
             {onGo && <button type="button" className={`${quiet} ${size}`} onClick={onGo}>Reply</button>}
             <button type="button" className={`${quiet} ${size}`} disabled={actions.busy.has(key)} onClick={() => actions.now(item, "dismiss")}>Dismiss</button>
           </>
@@ -67,7 +67,7 @@ export function ItemActions({ item, actions, onGo, onNavigate, repo, onDone, com
           />
         )}
         {item.kind === "login" && (
-          <button type="button" className={`${primary} ${size}`} disabled={cloud.busy} onClick={cloud.start}>
+          <button type="button" className={`${button} ${size}`} disabled={cloud.busy} onClick={cloud.start}>
             Sign in to brindle
           </button>
         )}

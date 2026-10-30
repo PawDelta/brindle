@@ -3,8 +3,9 @@
 ``auto`` (the default): a key from the environment or `brindle keys` wins, else
 the CLI's own login. ``subscription``: no stored key goes into the pane and the
 provider's exported keys are taken out, so the CLI's login is used. ``api_key``:
-the agent doesn't start without a key. An org's ``deny_personal_keys`` wins
-over all three (see :mod:`brindle.pro.managed_models`).
+the agent doesn't start without a key. ``cloud`` removes model API keys so the
+configured cloud login is used. An org's ``deny_personal_keys`` wins over these
+choices (see :mod:`brindle.pro.managed_models`).
 """
 
 from __future__ import annotations
@@ -32,6 +33,10 @@ def deny_names(provider: str, auth: str, m, org_managed: bool = False) -> tuple[
     deny = list(m.denied_keys) if m is not None else []
     extra = (CLAUDE_CREDENTIALS if provider == "claude" and org_managed else ()) + (
         API_KEYS.get(provider, ()) if auth == "subscription" else ())
+    if auth == "cloud":
+        from brindle.cloud_login import CLOUD_KEYS
+
+        extra += CLOUD_KEYS + (CLAUDE_CREDENTIALS if provider == "claude" else ())
     if provider == "claude" and not org_managed:
         # An enforced company identity: nothing but the checked route picks the account.
         from brindle import company_identity

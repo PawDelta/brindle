@@ -10,6 +10,8 @@ immediately rather than queued.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import os
 import re
@@ -87,6 +89,27 @@ class LaunchContext:
     mcp_recovery: bool = False  # a fresh reviewer after a failed MCP connection
 
 
+def _uv_cache_env(ctx: LaunchContext) -> dict[str, str]:
+    """uv's cache inside the worktree, so a sandboxed worker's `uv run`
+    needs no write access outside it. uv writes a `*` .gitignore into its
+    cache, so it never shows as uncommitted work. A profile's own
+    ``env.UV_CACHE_DIR`` wins."""
+    if not ctx.cwd or "UV_CACHE_DIR" in (ctx.profile.env or {}):
+        return {}
+    return {"UV_CACHE_DIR": os.path.join(ctx.cwd, ".uv-cache")}
+
+
+def _venv_path_env(ctx: LaunchContext) -> dict[str, str]:
+    """The worktree's .venv/bin first on PATH, so `python -m pytest` and
+    `pytest` run the project's venv without `uv run`: under Codex's macOS
+    sandbox uv panics reading the system configuration (proxy lookup)."""
+    venv_bin = os.path.join(ctx.cwd or "", ".venv", "bin")
+    if not ctx.cwd or not os.path.isdir(venv_bin):
+        return {}
+    base = (ctx.profile.env or {}).get("PATH", os.environ.get("PATH", ""))
+    return {"PATH": os.pathsep.join(p for p in (venv_bin, base) if p)}
+
+
 class Provider:
     name = "base"
     uses_hooks = False
@@ -101,6 +124,9 @@ class Provider:
     # how long to give it after its input box appears.
     prompt_after_ready = False
     ready_delay = 3
+    # Whether input typed into its pane mid-turn waits in the CLI until the
+    # current step finishes, so a queued message can go in while it's busy.
+    types_midturn = False
     # False for providers whose work happens outside brindle (see Subagent):
     # no process, no tmux window; the caller records the result itself.
     launches_process = True
@@ -490,16 +516,31 @@ def _replace_text(config: str, text: str, mode: int) -> None:
             pass
 
 
+def _policy_on(cwd: str | None) -> bool:
+    """Whether the repo ``cwd`` belongs to runs brindle's permission policy."""
+    from brindle.config import load_repo_config
+
+    try:
+        return bool(cwd) and load_repo_config(cwd).permission_policy == "on"
+    except Exception:  # noqa: BLE001 - never stop a launch over this
+        return False
+
+
 def _pre_tool_matcher(ctx: "LaunchContext") -> str:
     """Which tools Claude Code's PreToolUse hook sees: Bash always, the edit
-    tools for a plan_first worker, and the file tools a profile's write or
-    read scope covers (brindle.guardrails; already cleared without the Pro
-    feature, see agents._profile_for)."""
-    from brindle import guardrails
+    tools for a plan_first worker, every tool the permission policy rules on
+    (the file, fetch and MCP tools, by name pattern: agents._pre_tool_policy
+    denies or forces the prompt there) when the policy is on, and the file
+    tools a profile's write or read scope covers (brindle.guardrails;
+    already cleared without the Pro feature, see agents._profile_for)."""
+    from brindle import guardrails, permissions
 
     tools = ["Bash"]
     if ctx.plan_first:
         tools += ["Edit", "Write", "NotebookEdit"]
+    if _policy_on(ctx.cwd):
+        tools += [t for t in permissions.CLAUDE_KINDS if t not in tools]
+        tools.append(permissions.MCP_TOOL_PATTERN)
     for t in guardrails.hook_matcher(ctx.profile).split("|"):
         if t and t not in tools:
             tools.append(t)
@@ -693,7 +734,7 @@ class ClaudeCode(Provider):
             # report_result/submit_review. --settings env is applied before MCP
             # servers connect. Not agents.agent_env: that feeds the launch
             # fingerprint and would reset stored refusals.
-            "env": {"MCP_TIMEOUT": self._mcp_timeout(ctx)},
+            "env": {"MCP_TIMEOUT": self._mcp_timeout(ctx), **_uv_cache_env(ctx)},
             # Claude Code runs the person's gcpAuthRefresh (often `gcloud auth
             # application-default login`) whenever its own ADC probe fails, once
             # per process: across a session's many panes that opens a Google
@@ -1286,7 +1327,7 @@ CODEX_INTERACTIVE_USES_PLAN = (
     "interactive Codex agents use your ChatGPT plan whatever key is set; "
     "to put them on a key, run `codex login --with-api-key`")
 CODEX_EXEC_BILLS_KEY = (
-    "headless `codex exec` runs (and Brindle-CI) bill CODEX_API_KEY instead")
+    "headless `codex exec` runs bill CODEX_API_KEY instead")
 CODEX_INTERACTIVE_IGNORES_KEYS = (
     "interactive Codex ignores OPENAI_API_KEY and CODEX_API_KEY while signed in with ChatGPT and "
     "uses your ChatGPT plan; run `codex login --with-api-key`, or use auth: subscription")
@@ -1335,18 +1376,40 @@ def offer_agy_gemini(confirm, say) -> None:
     say(f"set \"modelProvider\": \"gemini\" in {path}")
 
 
+def agy_model_provider() -> str | None:
+    """agy's ``modelProvider`` setting, or None when it has none (or the file
+    can't be read)."""
+    try:
+        data = _read_json(agy_settings_path())
+    except (OSError, ValueError):
+        return None
+    value = data.get("modelProvider") if isinstance(data, dict) else None
+    return value if isinstance(value, str) else None
+
+
 def set_agy_gemini() -> None:
     """Set ``"modelProvider": "gemini"`` in agy's settings, keeping every other
     key; the file is created (0600, in a 0700 directory) when absent. Raises
     OSError/ValueError when the file can't be read or written."""
+    set_agy_model_provider("gemini")
+
+
+def set_agy_model_provider(value: str | None) -> None:
+    """Set agy's ``modelProvider`` to ``value`` (None: take it out), keeping
+    every other key, as set_agy_gemini does."""
     path = agy_settings_path()
     try:
         data = _read_json(path)
     except FileNotFoundError:
+        if value is None:
+            return
         data = {}
     if not isinstance(data, dict):
         raise ValueError(f"{path} isn't a JSON object")
-    data["modelProvider"] = "gemini"
+    if value is None:
+        data.pop("modelProvider", None)
+    else:
+        data["modelProvider"] = value
     parent = os.path.dirname(path)
     if parent and not os.path.isdir(parent):
         os.makedirs(parent, mode=0o700, exist_ok=True)
@@ -1381,6 +1444,27 @@ def _auth_probe(argv: list[str], env: dict[str, str] | None = None) -> tuple[int
     return out.returncode, (out.stdout or "") + (out.stderr or "")
 
 
+_no_probes: contextvars.ContextVar[bool] = contextvars.ContextVar("no_sign_in_probes", default=False)
+
+
+@contextlib.contextmanager
+def no_sign_in_probes():
+    """Within this block no provider's status command runs (each can take up
+    to its timeout, and a signed-out answer is never kept): signed_out
+    answers from an earlier probe, else None, as for any sign-in that can't
+    be told. For a read that must answer at once and is read again after."""
+    token = _no_probes.set(True)
+    try:
+        yield
+    finally:
+        _no_probes.reset(token)
+
+
+def probing() -> bool:
+    """Whether a sign-in may be probed here (not inside no_sign_in_probes)."""
+    return not _no_probes.get()
+
+
 def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     """Why ``provider``'s CLI can't run an agent because it isn't signed in,
     or None when it is, or when that can't be told (a provider with no status
@@ -1401,7 +1485,10 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
     inv = _last_invalidated(provider)
     if seen and seen > inv and time.time() - seen < SIGNED_IN_TTL:
         return None
+    if not probing():
+        return None
     reason = None
+    confirmed = False
     if provider == "claude":
         res = _auth_probe([claude_binary(), "auth", "status"], full_env)
         if res:
@@ -1409,11 +1496,13 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
                 data = json.loads(res[1])
             except ValueError:
                 data = None
+            confirmed = isinstance(data, dict) and data.get("loggedIn") is True
             if isinstance(data, dict) and data.get("loggedIn") is False:
                 reason = ("Claude Code isn't signed in: run `claude auth login` "
                           "(or start `claude` and log in), then try again")
     elif provider == "codex":
         res = _auth_probe([codex_binary(), "login", "status"], full_env)
+        confirmed = bool(res) and res[0] == 0
         if res and res[0] != 0 and "not logged in" in res[1].lower():
             reason = "Codex isn't signed in: run `codex login`, then try again"
     elif provider == "antigravity":
@@ -1424,6 +1513,7 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
         from brindle import antigravity
 
         res = _auth_probe([antigravity.binary(), "models"], full_env)
+        confirmed = bool(res) and res[0] == 0
         if res and res[0] != 0:
             text = res[1].lower()
             if "gemini_api_key" in text and "not set" in text:
@@ -1439,9 +1529,10 @@ def signed_out(provider: str, env: dict[str, str] | None = None) -> str | None:
         # OpenCode has no sign-in of its own to miss: its free models need
         # none, and other providers' keys and logins are its config's.
         res = (0, "")
+        confirmed = True
     else:
         return None
-    if reason is None and res is not None:
+    if confirmed:
         _SIGNED_IN[key] = time.time()
     return reason
 
@@ -1481,6 +1572,7 @@ class Codex(Provider):
     uses_hooks = True
     announces_turns = False
     announces_start = False
+    types_midturn = True
     # The MCP connection alone can take 120s under load. The launch observer
     # must not abandon readiness before that connection has had its budget.
     STARTUP_SECONDS = 150
@@ -1582,6 +1674,9 @@ class Codex(Provider):
             # machine; without it a worker can start without brindle's tools (#159).
             "-c", "mcp_servers.brindle.startup_timeout_sec=120",
             "-c", f"notify={json.dumps(notify)}",
+            # Only this launch's shell commands; the person's config.toml is untouched.
+            *(a for k, v in {**_uv_cache_env(ctx), **_venv_path_env(ctx)}.items()
+              for a in ("-c", f"shell_environment_policy.set.{k}={json.dumps(v)}")),
         ]
         # brindle's permission policy, when it's on and the person has trusted
         # brindle's hook once (`brindle permissions install-codex-hook`; see
@@ -1600,10 +1695,8 @@ class Codex(Provider):
             argv += ["-c", f"model_reasoning_effort={json.dumps(ctx.profile.effort)}"]
         if ctx.resume:
             argv += ["resume", ctx.resume]
-            if ctx.initial_prompt:
-                argv.append(ctx.initial_prompt)
-            return argv
-        # Codex has no system-prompt flag; lead the first message with the profile.
+        # Codex has no system-prompt flag; lead each launch's message with the
+        # profile, including when resuming a conversation.
         first = "\n\n".join(p for p in (ctx.profile.prompt, ctx.initial_prompt) if p)
         if first:
             argv.append(first)
@@ -1679,6 +1772,7 @@ class Antigravity(Provider):
     # the agent never sees brindle's tools in that first turn.
     prompt_after_ready = True
     ready_delay = 5
+    types_midturn = True
 
     def warmup(self, profile: Profile) -> str | None:
         from brindle import antigravity

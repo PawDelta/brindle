@@ -619,8 +619,13 @@ def checkout_lock(path: str | Path, timeout: float | None = None):
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
-def push(path: str | Path, branch: str) -> None:
-    run(["push", "--set-upstream", "origin", branch], path)
+def push(path: str | Path, branch: str, sha: str | None = None) -> None:
+    """Push ``branch``; with ``sha``, exactly that commit to it."""
+    if sha is None:
+        run(["push", "--set-upstream", "origin", branch], path)
+        return
+    run(["push", "origin", f"{sha}:refs/heads/{branch}"], path)
+    run(["branch", "--set-upstream-to", f"origin/{branch}", branch], path, check=False)
 
 
 def remote_web_url(root: str | Path) -> str | None:

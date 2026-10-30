@@ -15,7 +15,14 @@ import type { PtyStatus, PtyViewHandlers, PtyViewOpener, PtyViews, PtyViewTarget
 import type {
   AccountDTO,
   AgentDTO,
+  AskDTO,
+  AskGroupDTO,
+  AskResultDTO,
   DecisionDTO,
+  OrgControlViewDTO,
+  PermissionPolicyDTO,
+  PermissionRuleDTO,
+  SavedActionDTO,
   GoalDTO,
   InboxItemDTO,
   ProfileDTO,
@@ -28,10 +35,11 @@ import type {
   RoutingTierDTO,
   SessionDTO,
   WorkspaceDTO,
+  CloudOptionsDTO,
 } from "../api/schema";
 import { LOGIN_PROVIDERS } from "../api/client";
 import { hunksOf, parseDiff } from "../screens/Branch/parseDiff";
-import type { AccountInfo, Cost, DebugEntry, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
+import type { AccountInfo, ConnectionReady, Cost, DebugEntry, ProviderConnection, DebugState, Diff, DoctorCheck, KbHit, KbSource, KeyInfo, KindExtras, Meta, PreflightItem, ProfileDetail, ProviderInstalled, Repo, RoutingScope, RulePackInfo, Usage, UserSettings } from "../api/client";
 
 export const BASE_URL = "http://127.0.0.1:47321";
 export const TOKEN = "test-token";
@@ -90,6 +98,12 @@ export interface DaemonData {
      DELETE /providers/{p} turns a row off (state "off": still found,
      unused); POST /providers/{p}/use-mine or an install turns it back on. */
   providers: ProviderInstalled[];
+  /* GET / PUT /providers/{p}/connection (brindle.connections): how each
+     provider connects. A provider with none listed connects "auto" (its own
+     sign-in). `clouds` per provider follows connections.ROUTES. */
+  connections: Record<string, Partial<Omit<ProviderConnection, "provider">>>;
+  /* GET /cloud/options: what this machine's cloud CLIs are set up with. */
+  cloudOptions: CloudOptionsDTO;
   /* Every profile as GET /routing describes it (`excluded` is worked out
      from the excluded providers). */
   routingProfiles: RoutingProfile[];
@@ -146,8 +160,8 @@ export interface DaemonData {
      brindle judges it ready for a PR and why not, its branch and base, and
      its diff against the base as a unified patch (GET /sessions/{root}/diff
      splits it into files and hunks as the engine does; 409 not_ready until
-     ready). `pr`: the PR brindle opened itself (the engine's auto-PR,
-     branch desktop/auto-pr; stubbed here). A session with no entry reads
+     ready). `pr`: the PR the person opened, with how many session commits
+     aren't pushed to it yet (POST .../pr/push pushes them). A session with no entry reads
      as not ready. readyForPr() flips one and puts session.pr_ready on the bus. */
   sessionReview: Record<string, SessionReviewData>;
   /* Root agent id → path → the file as the session's checkout has it (GET,
@@ -159,7 +173,33 @@ export interface DaemonData {
      shows in the next read; a new file joins the list, a deleted one
      leaves it); without one, sessionReview's fixed patch is served. */
   sessionBase: Record<string, Record<string, string>>;
+  /* The person's permission store (permissions.Store, GET /permissions):
+     the preset, the unmatched setting, every rule and saved action, and
+     per-rule prompt counts over the last day. */
+  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }>; org_controls?: OrgControlViewDTO[] };
+  /* GET /permissions/asks: the requests hooks hold, grouped
+     (permission_grants.groups). A decision takes its requests out of these
+     and out of `inbox` (the hold's answer). */
+  asks: AskGroupDTO[];
 }
+
+/* permissions.PRESETS, a few rules each (the engine's are longer): the
+   routine allows, a credential deny, the destructive deny and the push
+   into the default branch, which asks within each preset's limits. */
+const presetRule = (id: string, kind: string, match: string, match_type: string, decision: string, limits?: PermissionRuleDTO["limits"]): PermissionRuleDTO =>
+  ({ id, kind, match, match_type, decision, source: "preset", created: 0, describe: match_type === "exact" || match_type === "prefix" || match_type === "glob" || match_type === "push" ? `${kind} ${match_type} '${match}'` : match, limits: limits ?? null, exclusions: [] });
+const pushDefault = (limits: PermissionRuleDTO["limits"]) => presetRule("d-push-default", "bash", "* → @default", "push", "ask", limits);
+const ROUTINE = () => [
+  presetRule("d-tracked", "read", "a file git tracks in the worktree or repo root", "tracked", "allow"),
+  presetRule("d-ssh", "read", "~/.ssh*", "glob", "deny"),
+  presetRule("d-git-force", "bash", "a git command with a force flag, or a push that forces or deletes a branch", "git-force", "deny"),
+];
+export const FAKE_PRESETS: Record<string, { rules: () => PermissionRuleDTO[]; unmatched: string; description: string }> = {
+  autonomous: { rules: () => [...ROUTINE(), pushDefault({ max_scope: "all", life: "forever" })], unmatched: "allow", description: "Agents work without stopping. Everything runs automatically except pushes into the default branch and destructive actions." },
+  permissive: { rules: () => [...ROUTINE(), pushDefault({ max_scope: "remote", life: "forever" })], unmatched: "ask", description: "Fewer interruptions for trusted teams." },
+  standard: { rules: () => [...ROUTINE(), pushDefault({ max_scope: "destination", life: "time", minutes: 30 })], unmatched: "ask", description: "Routine reads and everyday commands run freely. Changes and sensitive actions ask within a defined scope." },
+  secure: { rules: () => [...ROUTINE(), pushDefault({ max_scope: "branch", life: "time", minutes: 15 })], unmatched: "deny", description: "Narrow scopes, 15-minute approvals and a deny for anything no rule covers." },
+};
 
 /* A unified diff of two texts, as git prints it for one file: an LCS of
    their lines, the changes in hunks with three lines of context. */
@@ -207,7 +247,7 @@ export interface SessionReviewData {
   branch: string;
   base: string;
   diff: string;
-  pr?: { url: string } | null;
+  pr?: { url: string; unpushed: number } | null;
 }
 
 /* Permission rules as POST /permissions keeps them (permissions.Rule.to_dict). */
@@ -236,8 +276,6 @@ const REPO_CONFIG_TYPES: Record<string, "string" | "number" | "boolean" | "list"
   overlap: "any", coordinator: "boolean", protected_paths: "list", pool_size: "any", add_dirs: "list",
   worker_extra_read_dirs: "list", services: "list", local_models: "boolean", delete_merged_branches: "boolean",
   pr_footer: "boolean", sidebar: "string", rules: "list", learning: "string", learning_candidates: "list",
-  // Engine branch desktop/auto-pr (stubbed until it merges): brindle opens a ready session's PR itself.
-  auto_pr: "boolean",
 };
 
 /* config.load_repo_config: the command lists come from the repo's files only
@@ -258,6 +296,16 @@ export function mergeCommands(shared: unknown, local: unknown): string[] {
   return base;
 }
 
+/* routes_read.get_config's `overrides`: the keys the repo's own files set (config.setting_source). */
+function configOverrides(files: { repo: Record<string, unknown>; local: Record<string, unknown> }): Record<string, "local" | "repo"> {
+  const out: Record<string, "local" | "repo"> = {};
+  for (const key of Object.keys(REPO_CONFIG_TYPES)) {
+    if (key in files.local) out[key] = "local";
+    else if (key in files.repo) out[key] = "repo";
+  }
+  return out;
+}
+
 function effectiveConfig(files: { user: Record<string, unknown>; repo: Record<string, unknown>; local: Record<string, unknown> }): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const key of REPO_ONLY_LISTS) out[key] = mergeCommands(files.repo[key], files.local[key]);
@@ -270,6 +318,8 @@ function effectiveConfig(files: { user: Record<string, unknown>; repo: Record<st
       }
     }
   }
+  // config.load_repo_config: rules are the union of every scope's, not the nearest one's.
+  out.rules = [...new Set([files.user, files.repo, files.local].flatMap((f) => (Array.isArray(f.rules) ? f.rules.map(String) : [])))];
   return out;
 }
 
@@ -364,6 +414,25 @@ function actionCommand(kind: string, name: string): string[] {
 /* keystore.check_name: a key agents may be given; brindle's own token never. */
 const KEY_NAME = /^[A-Z][A-Z0-9_]{2,}$/;
 const RESERVED_KEYS = new Set(["BRINDLE_TOKEN"]);
+/* key_check: the keys checked with their provider when stored, and where to get each. */
+const KEY_CHECKED = new Set(["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"]);
+const KEY_PAGES: Record<string, string> = {
+  ANTHROPIC_API_KEY: "https://console.anthropic.com/settings/keys",
+  OPENAI_API_KEY: "https://platform.openai.com/api-keys",
+  OPENROUTER_API_KEY: "https://openrouter.ai/keys",
+  GEMINI_API_KEY: "https://aistudio.google.com/apikey",
+};
+/* keystore.provider_of. */
+const KEY_PROVIDER: Record<string, string> = { ANTHROPIC_API_KEY: "claude", OPENAI_API_KEY: "codex", CODEX_API_KEY: "codex", GEMINI_API_KEY: "antigravity" };
+/* The keys each provider reads (pane_auth.API_KEYS; OpenCode its model providers'). */
+const FAKE_PROVIDER_KEYS: Record<string, string[]> = {
+  claude: ["ANTHROPIC_API_KEY"],
+  codex: ["OPENAI_API_KEY", "CODEX_API_KEY"],
+  antigravity: ["GEMINI_API_KEY"],
+  opencode: ["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"],
+};
+/* connections.ROUTES: the clouds each provider can go through. */
+const CLOUD_ROUTES: Record<string, string[]> = { claude: ["bedrock", "vertex", "foundry"], opencode: ["vertex", "azure"] };
 
 /* picker.LOGIN_METHODS: the ways a CLI's sign-in can be asked for, by flag. */
 const LOGIN_METHODS: Record<string, string[]> = { claude: ["claudeai", "console", "sso"], codex: ["device"] };
@@ -588,6 +657,9 @@ export class FakeDaemon {
   /* The engine is dead (`die()`): every request is refused and every socket
      closes at once, until `revive()` brings it back as a new process. */
   dead = false;
+  /* Hold PUT /permissions/preset until pendingPreset() is called. */
+  holdPreset = false;
+  pendingPreset: (() => void) | null = null;
   /* Hold a sign-in after its URL went out, until completeLogin(): the browser hasn't come back yet. */
   deferLogin = false;
   private pendingLogins: Array<{ job: string; finish(): void }> = [];
@@ -611,6 +683,25 @@ export class FakeDaemon {
   shellPanes: PtyViewTarget[] = [];
   /* The keys PUT /keys/{name} stored, in order (never their values). */
   readonly keysStored: string[] = [];
+  /* Keys their provider refuses (key_check.evaluate REJECTED): a save is
+     refused 422, a test reads rejected. */
+  readonly rejectedKeys = new Set<string>();
+  /* Keys set in the daemon's environment, for POST /keys/{name}/import (GET /config's `importable`). */
+  readonly shellKeys = new Set<string>();
+  /* The cloud sign-ins POST /providers/{p}/cloud-sign-in started, by provider; held until completeCloudSignIn(). */
+  readonly cloudSignIns: string[] = [];
+  private pendingCloudSignIns: Array<(result: string) => void> = [];
+  /* Hold each PUT /keys/{name} (the provider's check of the key), and with holdConnections each
+     PUT /providers/{p}/connection, until releaseKeys(): applied and answered then, in order. */
+  holdKeys = false;
+  holdConnections = false;
+  private pendingKeys: Array<() => void> = [];
+  releaseKeys(): void {
+    for (const answer of this.pendingKeys.splice(0)) answer();
+  }
+  /* Codex is signed in to ChatGPT, which wins over its API key (blocked_by "codex_login") until POST /providers/codex/sign-out. */
+  codexChatGPT = false;
+  codexSignOuts = 0;
   /* The knowledge sources synced and removed, in order, and how many documents an index finds in a folder. */
   readonly kbSyncs: string[] = [];
   readonly kbRemovals: string[] = [];
@@ -623,6 +714,8 @@ export class FakeDaemon {
   readonly sessionEdits: { root: string; path: string; content: string | null }[] = [];
   /* The PRs POST /sessions/{root}/pr opened, in order, with their URLs. */
   readonly prs: { root: string; title?: string; body?: string; draft?: boolean; url: string }[] = [];
+  /* The sessions POST /sessions/{root}/pr/push pushed to their PR, in order. */
+  readonly prPushes: string[] = [];
   events: BusEvent[] = [];
   readonly requests: Request[] = [];
   readonly sockets: FakeSocket[] = [];
@@ -657,6 +750,16 @@ export class FakeDaemon {
       files: {},
       preflight: {},
       providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" } }),
+      connections: {},
+      cloudOptions: {
+        aws_profiles: [
+          { name: "default", sso: false, region: "us-west-2" },
+          { name: "work-sso", sso: true, region: "us-east-1" },
+        ],
+        gcloud: { adc: true, project: "my-project", region: "us-central1" },
+        azure: null,
+        regions: { bedrock: ["us-east-1", "us-west-2", "eu-central-1"], vertex: ["global", "us-central1", "europe-west1"] },
+      },
       routingProfiles: [],
       routingConfig: { user: {}, repo: {}, local: {} },
       routingByRepo: {},
@@ -681,6 +784,8 @@ export class FakeDaemon {
       sessionReview: {},
       sessionFiles: {},
       sessionBase: {},
+      policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} },
+      asks: [],
       ...data,
     };
   }
@@ -720,12 +825,13 @@ export class FakeDaemon {
     this.publish("autopilot.done", { root_id: root, agent_id: root, payload: {} });
   }
 
-  /* GET /sessions/{root}/pr/readiness, /diff, /pr/draft, /file (routes_read). */
+  /* GET /sessions/{root}/pr/readiness, /diff, /tree, /pr/draft, /file (routes_read). */
   private sessionReviewRead(root: string, what: string, query: Record<string, string>): Response {
     const d = this.data;
     const session = d.sessions.find((s) => s.id === root);
     if (!session) return error("not_found", `no session ${root}`, 404);
-    const review = d.sessionReview[root] ?? { ready: false, reasons: ["autopilot isn't on for this session, so there is no goal to judge it by"], branch: "", base: "", diff: "" };
+    const workspace = d.workspaces.find((ws) => ws.id === session.workspace_id);
+    const review = d.sessionReview[root] ?? { ready: false, reasons: ["autopilot isn't on for this session, so there is no goal to judge it by"], branch: workspace?.branch ?? "", base: workspace?.base_branch ?? "main", diff: "" };
     if (what === "pr/readiness") return json({ root_id: root, ready: review.ready, reasons: review.reasons, pr: review.pr ?? null });
     if (what === "file") {
       const content = d.sessionFiles[root]?.[query.path ?? ""];
@@ -733,7 +839,8 @@ export class FakeDaemon {
       if (content === undefined) return error("not_found", `no file ${query.path} in the session's checkout`, 404);
       return json({ path: query.path, content, base: fakeBlob(content) });
     }
-    if (!review.ready) return json({ error: { code: "not_ready", message: `the session isn't ready for a PR: ${review.reasons.join("; ")}` }, reasons: review.reasons }, 409);
+    // The checkout's files as `git ls-files` lists them: sessionFiles' paths, sorted.
+    if (what === "tree") return json({ root_id: root, branch: review.branch, files: Object.keys(d.sessionFiles[root] ?? {}).sort() });
     if (what === "diff") {
       // From the base and the checkout as they stand, when the base is known: the diff follows every edit.
       const base = d.sessionBase[root];
@@ -749,6 +856,7 @@ export class FakeDaemon {
       }));
       return json({ root_id: root, branch: review.branch, base: review.base, base_sha: "b".repeat(40), head: `h${this.nextId}`.padEnd(40, "0"), files, workers: [] });
     }
+    if (!review.ready) return json({ error: { code: "not_ready", message: `the session isn't ready for a PR: ${review.reasons.join("; ")}` }, reasons: review.reasons }, 409);
     if (what === "pr/draft") {
       const goal = d.goal?.root_id === root ? d.goal : null;
       const titles = goal?.milestones?.map((m) => `- ${m.title}`) ?? [];
@@ -873,13 +981,136 @@ export class FakeDaemon {
     if (typeof value !== "string" || !value.trim()) return error("invalid", "value must be a non-empty string", 400);
     if (!KEY_NAME.test(name) || RESERVED_KEYS.has(name)) return error("invalid", `${name} isn't a key agents can be given`, 400);
     if (this.data.routingPolicy?.deny_personal_keys) return error("forbidden", `org ${this.data.routingPolicy.org_id} doesn't allow personal API keys`, 403);
+    // keys_cmds.store: checked with its provider first; a key it refuses isn't stored.
+    if (this.rejectedKeys.has(name)) return error("not_stored", `${name} not stored: the provider rejected this key (401 unauthorized); check that you copied all of it`, 422);
     const last4 = value.trim().slice(-4);
     const keys = this.data.config.keys;
     const at = keys.findIndex((k) => k.name === name);
-    if (at >= 0) keys[at] = { name, set: true, last4 };
-    else keys.push({ name, set: true, last4 });
+    const stored: KeyInfo = { ...keys[at], name, set: true, last4, status: KEY_CHECKED.has(name) ? "verified" : "unchecked", checked_at: Date.now() / 1000 };
+    if (at >= 0) keys[at] = stored;
+    else keys.push(stored);
     this.keysStored.push(name);
     return json({ name, last4, set: true });
+  }
+
+  /* routes_read.get_config's keys: each with its provider, check and key page, importable while only the shell has it. */
+  private keyInfos(): KeyInfo[] {
+    const keys = [...this.data.config.keys];
+    for (const name of this.shellKeys) if (!keys.some((k) => k.name === name)) keys.push({ name, set: false, last4: "" });
+    return keys.map((k) => ({ provider: KEY_PROVIDER[k.name] ?? null, key_page: KEY_PAGES[k.name] ?? null, status: k.set ? (k.status ?? "unchecked") : null, ...k, importable: !k.set && this.shellKeys.has(k.name) }));
+  }
+
+  /* routes_actions.delete_key: `brindle keys unset NAME`. */
+  private deleteKey(name: string): Response {
+    const keys = this.data.config.keys;
+    const at = keys.findIndex((k) => k.name === name);
+    if (at >= 0) keys[at] = { name, set: false, last4: "" };
+    return json({ name, set: false });
+  }
+
+  /* routes_actions.retest_key: the stored key checked with its provider again. */
+  private testKey(name: string): Response {
+    const k = this.data.config.keys.find((x) => x.name === name && x.set);
+    if (!k) return error("not_found", `no ${name} is stored`, 404);
+    k.status = this.rejectedKeys.has(name) ? "rejected" : "verified";
+    k.checked_at = Date.now() / 1000;
+    return json({ name, status: k.status, checked_at: k.checked_at });
+  }
+
+  /* routes_actions.import_key: the daemon's environment value, stored as a save would. */
+  private importKey(name: string, body: Record<string, unknown>): Response {
+    if (!this.shellKeys.has(name)) return error("invalid", `${name} isn't set in the daemon's environment`, 400);
+    const stored = this.putKey(name, { ...body, value: `sk-from-shell-${name.slice(0, 4)}` });
+    if (stored.ok) this.shellKeys.delete(name);
+    return stored;
+  }
+
+  /* routes_read.provider_connection (connections.view, with feat/connection-readiness's
+     ready, blocked_by and stopped_agents). Readiness follows the row, the keys and the
+     login unless a test sets `ready` itself. */
+  private connectionDto(provider: string): ProviderConnection {
+    const c = this.data.connections[provider] ?? {};
+    const method = c.method ?? "auto";
+    const row = this.data.providers.find((r) => r.provider === provider);
+    const stored = (FAKE_PROVIDER_KEYS[provider] ?? []).some((n) => this.data.config.keys.some((k) => k.name === n && k.set));
+    const blocked = provider === "codex" && method === "api_key" && this.codexChatGPT;
+    const not = (reason: string, action: ConnectionReady["action"]): ConnectionReady => ({ ok: false, reason, action });
+    const ready: ConnectionReady =
+      c.ready ??
+      (!row || row.state !== "installed" || !row.path
+        ? not(`${CLI_NAMES[provider] ?? provider} isn't installed`, "install")
+        : method === "api_key"
+          ? !stored
+            ? not("no API key is stored", "set_key")
+            : blocked
+              ? not("Codex's ChatGPT login is used instead of the API key", "sign_out")
+              : { ok: true, reason: null, action: null }
+          : method === "cloud"
+            ? c.login?.valid
+              ? { ok: true, reason: null, action: null }
+              : not("the cloud login has expired", "renew")
+            : row.signed_in === true || (method === "auto" && stored)
+              ? { ok: true, reason: null, action: null }
+              : not("not signed in", "sign_in"));
+    return { provider, method: "auto", choice: null, cloud: null, settings: {}, login: null, managed: null, stopped_agents: [], ...c, clouds: CLOUD_ROUTES[provider] ?? [], ready, blocked_by: blocked ? "codex_login" : null };
+  }
+
+  private connectionOf(provider: string): Response {
+    if (!(INSTALLABLE as readonly string[]).includes(provider)) return error("invalid", `provider must be one of ${INSTALLABLE.join(", ")}`, 400);
+    return json(this.connectionDto(provider));
+  }
+
+  /* POST /providers/codex/sign-out (feat/connection-readiness): Codex's ChatGPT login signed out, a job; job.done's result is the connection after. */
+  private codexSignOut(): Response {
+    const job = `job${this.nextJob++}`;
+    this.codexSignOuts++;
+    setTimeout(() => {
+      this.codexChatGPT = false;
+      this.publish("job.done", { payload: { job, job_kind: "provider.sign_out", provider: "codex", result: this.connectionDto("codex") } });
+    }, 0);
+    return json({ job, kind: "provider.sign_out" }, 202);
+  }
+
+  /* routes_actions.put_provider_connection (connections.choose): the method, and for cloud a route the provider has and its settings. */
+  private putConnection(provider: string, body: Record<string, unknown>): Response {
+    if (!(INSTALLABLE as readonly string[]).includes(provider)) return error("invalid", `provider must be one of ${INSTALLABLE.join(", ")}`, 400);
+    const method = String(body.method ?? "");
+    if (!["auto", "sign_in", "api_key", "cloud"].includes(method)) return error("invalid", "method must be one of auto, sign_in, api_key, cloud", 400);
+    const managed = this.data.connections[provider]?.managed;
+    if (managed) return error("forbidden", managed, 403);
+    if (method === "cloud") {
+      const routes = CLOUD_ROUTES[provider] ?? [];
+      if (!routes.includes(String(body.cloud))) return error("invalid", routes.length ? `${provider} clouds: ${routes.join(", ")}` : `${provider} can't connect through a cloud in brindle yet`, 400);
+      const settings = (body.settings ?? {}) as Record<string, string>;
+      const choice = { method, cloud: String(body.cloud), settings };
+      this.data.connections[provider] = { ...this.data.connections[provider], method, choice, cloud: choice.cloud, settings, login: { valid: false, expired: false } };
+    } else {
+      if (body.cloud != null || body.settings != null) return error("invalid", "cloud and settings go with method cloud", 400);
+      const kept = { stopped_agents: this.data.connections[provider]?.stopped_agents ?? [] };
+      this.data.connections[provider] = method === "auto" ? kept : { ...kept, method, choice: { method, settings: {} }, cloud: null, settings: {}, login: null };
+    }
+    return this.connectionOf(provider);
+  }
+
+  /* routes_actions.provider_cloud_sign_in: the saved route's cloud login, a job; held until completeCloudSignIn(). */
+  private cloudSignIn(provider: string): Response {
+    const c = this.data.connections[provider];
+    if (c?.method !== "cloud" || !c.cloud) return error("invalid", `${provider} doesn't connect through a cloud: choose one first`, 400);
+    const job = `job${this.nextJob++}`;
+    this.cloudSignIns.push(provider);
+    setTimeout(() => {
+      this.publish("job.progress", { payload: { job, text: "https://device.sso.us-east-1.amazonaws.com/?user_code=ABCD-EFGH" } });
+      this.pendingCloudSignIns.push((result) => {
+        if (result === "signed in") this.data.connections[provider] = { ...c, login: { valid: true, expired: false, expires_at: Date.now() / 1000 + 8 * 3600 } };
+        this.publish("job.done", { payload: { job, job_kind: "provider.cloud_sign_in", provider, result: { provider, cloud: c.cloud, result, exit_code: result === "signed in" ? 0 : 1 } } });
+      });
+    }, 0);
+    return json({ job, kind: "provider.cloud_sign_in" }, 202);
+  }
+
+  /* The browser comes back from the cloud sign-ins started so far: how each went. */
+  completeCloudSignIn(result = "signed in"): void {
+    for (const finish of this.pendingCloudSignIns.splice(0)) finish(result);
   }
 
   /* Finish the upgrades held by deferUpgrade: the command prints its last lines and exits. */
@@ -977,6 +1208,14 @@ export class FakeDaemon {
     if (!(INSTALLABLE as readonly string[]).includes(provider)) return error("invalid", `provider must be one of ${INSTALLABLE.join(", ")}`, 400);
     this.removedProviders.push(provider);
     this.data.providers = this.data.providers.map((r) => (r.provider === provider ? { ...r, state: "off" } : r));
+    return json(this.data.providers.find((r) => r.provider === provider));
+  }
+
+  /* routes_actions.provider_logout (POST /providers/{p}/logout): brindle's own
+     copy of Claude Code or Codex signed out; answers the provider, not signed in. */
+  private signOutProvider(provider: string): Response {
+    if (provider !== "claude" && provider !== "codex") return error("invalid", "sign out is offered for claude, codex", 400);
+    this.data.providers = this.data.providers.map((r) => (r.provider === provider ? { ...r, signed_in: false } : r));
     return json(this.data.providers.find((r) => r.provider === provider));
   }
 
@@ -1171,6 +1410,11 @@ export class FakeDaemon {
     }
     if ((m = path.match(/^\/providers\/([^/]+)\/install$/))) return this.installProvider(m[1]);
     if ((m = path.match(/^\/providers\/([^/]+)\/use-mine$/))) return this.pickProviderInstall(m[1], body);
+    if ((m = path.match(/^\/providers\/([^/]+)\/logout$/))) return this.signOutProvider(m[1]);
+    if ((m = path.match(/^\/providers\/([^/]+)\/cloud-sign-in$/))) return this.cloudSignIn(m[1]);
+    if (path === "/providers/codex/sign-out") return this.codexSignOut();
+    if ((m = path.match(/^\/keys\/([^/]+)\/test$/))) return this.testKey(m[1]);
+    if ((m = path.match(/^\/keys\/([^/]+)\/import$/))) return this.importKey(m[1], body);
     if (path === "/repos/clone") return this.cloneRepo(body);
     if (path === "/repos/open") return this.openRepo(body);
     if (path === "/terminals/shell") return this.openShell(body);
@@ -1250,9 +1494,10 @@ export class FakeDaemon {
   /* routes_actions.patch_config: `values` into the user's file or the repo's local one. */
   private patchConfig(body: Record<string, unknown>): Response {
     const scope = body.scope ?? "user";
-    if (scope !== "user" && scope !== "repo") return error("invalid", "scope must be user or repo", 400);
-    if (scope === "repo" && typeof body.repo !== "string") return error("invalid", "repo is required", 400);
-    const values = body.values;
+    if (scope !== "user" && scope !== "repo" && scope !== "shared") return error("invalid", "scope must be user, repo or shared", 400);
+    if (scope !== "user" && typeof body.repo !== "string") return error("invalid", "repo is required", 400);
+    const unset = Array.isArray(body.unset) ? (body.unset as string[]) : [];
+    const values = body.values ?? (unset.length > 0 ? {} : null);
     if (values == null) return error("invalid", "values is required", 400);
     if (typeof values !== "object" || Array.isArray(values)) return error("invalid", "values has the wrong type", 400);
     const entries = Object.entries(values as Record<string, unknown>);
@@ -1263,9 +1508,10 @@ export class FakeDaemon {
       if (!fits(value, type)) return error("invalid", `${key} must be a ${type === "number" ? "int" : type === "boolean" ? "bool" : type === "string" ? "str" : type}`, 400);
     }
     // config.set_user / set_local store the value as given: a null is a stored null, not an unset.
-    const file = scope === "user" ? this.data.config.user : this.data.config.local;
+    const file = scope === "user" ? this.data.config.user : scope === "shared" ? this.data.config.repo : this.data.config.local;
     for (const [key, value] of entries) file[key] = value;
-    return json({ updated: entries.map(([k]) => k).sort(), path: scope === "user" ? "/home/u/.brindle/config.json" : `${String(body.repo)}/.brindle/config.local.json` });
+    for (const key of unset) delete file[key];
+    return json({ updated: [...entries.map(([k]) => k), ...unset].sort(), path: scope === "user" ? "/home/u/.brindle/config.json" : `${String(body.repo)}/.brindle/${scope === "shared" ? "config.json" : "config.local.json"}` });
   }
 
   /* Engine branch desktop/kb-sources: a folder added to the repo's knowledge
@@ -1397,6 +1643,242 @@ export class FakeDaemon {
     return error("invalid", "op must be allow, deny, forget, accept or reset", 400);
   }
 
+  /* GET /permissions (service/permissions.policy_dto). */
+  private policyDTO(): PermissionPolicyDTO {
+    const p = this.data.policy;
+    const now = Date.now() / 1000;
+    return {
+      preset: p.preset,
+      unmatched: p.unmatched,
+      presets: Object.entries(FAKE_PRESETS).map(([name, x]) => ({ name, description: x.description, unmatched: x.unmatched, current: name === p.preset })),
+      rules: p.rules.map((r) => ({ ...r, prompts: p.prompts[r.id] ?? 0, expired: r.expires != null && r.expires <= now })),
+      saved: p.saved.map((s) => ({ ...s, expired: s.expires != null && s.expires <= now })),
+      prompt_counts: { ...p.prompts },
+      groups: Object.entries(p.groups ?? {}).map(([name, g]) => ({ name, ...g })),
+      org_controls: p.org_controls ?? [],
+    };
+  }
+
+  /* permissions.make_rule over `base`, with the fields a body gives (routes_actions._rule_fields). */
+  private ruleWith(base: PermissionRuleDTO, body: Record<string, unknown>): PermissionRuleDTO | string {
+    const r: PermissionRuleDTO = { ...base };
+    const fields = r as unknown as Record<string, unknown>;
+    for (const key of ["kind", "match", "match_type", "decision", "label"]) if (typeof body[key] === "string") fields[key] = body[key];
+    if ("limits" in body) r.limits = (body.limits as PermissionRuleDTO["limits"]) ?? null;
+    if ("expires" in body) r.expires = (body.expires as number | null) ?? null;
+    if ("minutes" in body) r.expires = typeof body.minutes === "number" && body.minutes ? Date.now() / 1000 + body.minutes * 60 : null;
+    if (!PERMISSION_KINDS.includes(r.kind)) return `unknown kind '${r.kind}': one of ${PERMISSION_KINDS.join(", ")}`;
+    if (!["allow", "deny", "ask"].includes(r.decision)) return "decision must be allow, deny or ask";
+    if (!r.match) return "empty match";
+    if (r.decision !== "ask") r.limits = null;
+    if (r.limits?.life === "time" && !(Number(r.limits.minutes) > 0)) return "limits need a positive 'minutes' for life 'time'";
+    r.describe = [...MATCH_TYPES, "push"].includes(r.match_type) ? `${r.kind} ${r.match_type} '${r.match}'` : r.match;
+    return r;
+  }
+
+  /* permissions.update_saved_action's checks and _stamp over `base`. */
+  private savedWith(base: SavedActionDTO, body: Record<string, unknown>): SavedActionDTO | string {
+    const s: SavedActionDTO = { ...base };
+    const fields = s as unknown as Record<string, unknown>;
+    for (const key of ["kind", "pattern", "decision", "scope", "level", "life", "session", "repo", "note", "minutes", "request"]) if (key in body) fields[key] = body[key];
+    if (!["allow", "deny"].includes(s.decision)) return "decision must be allow or deny";
+    if (!s.pattern) return "empty pattern";
+    if (s.life === "time") {
+      if (!(Number(s.minutes) > 0)) return "a timed saved action needs positive minutes";
+      s.expires = Date.now() / 1000 + Number(s.minutes) * 60;
+    } else {
+      s.minutes = null;
+      s.expires = null;
+    }
+    if (s.life !== "session") s.session = null;
+    else if (!s.session) return "a saved action for this session needs the session";
+    return s;
+  }
+
+  private nextSaved = 1;
+
+  private saveGrant(g: AskGroupDTO, scope: AskGroupDTO["general"], decision: string, life: string, minutes: number | null): SavedActionDTO {
+    const rep = g.items[0];
+    const s: SavedActionDTO = {
+      id: `s${this.nextSaved++}`, kind: g.kind, pattern: scope.pattern, decision, scope: scope.value, level: scope.level ?? null,
+      request: { tool: rep.tool, command: rep.exact }, life, minutes: life === "time" ? minutes : null,
+      expires: life === "time" && minutes ? Date.now() / 1000 + minutes * 60 : null, session: life === "session" ? rep.root_id : null,
+      repo: scope.value === "all" ? null : g.repo, created: Date.now() / 1000, note: scope.label,
+    };
+    this.data.policy.saved.push(s);
+    return s;
+  }
+
+  /* The holds answered (service/inbox.answer_permission): out of the asks and the inbox, and the bus says so. */
+  private settleAsks(hits: AskDTO[]): AskResultDTO[] {
+    const gone = (a: AskDTO) => hits.some((h) => h.agent_id === a.agent_id && h.request_id === a.request_id);
+    this.data.asks = this.data.asks.map((g) => ({ ...g, items: g.items.filter((a) => !gone(a)) })).filter((g) => g.items.length > 0);
+    this.data.inbox = this.data.inbox.filter((i) => !(i.kind === "permission" && hits.some((h) => h.agent_id === i.agent_id && h.request_id === i.permission?.request_id)));
+    for (const a of hits) this.publish("permission.answered", { agent_id: a.agent_id, payload: { request_id: a.request_id, cleared: true } });
+    return hits.map((a) => ({ agent_id: a.agent_id, request_id: a.request_id, exact: a.exact }));
+  }
+
+  /* permission_grants.plan_allow_all, a grant per item at its general scope within its rule's lifetime. */
+  private planAllowAll(repo: string | undefined, forever: boolean) {
+    const result = (a: AskDTO, why: string) => ({ agent_id: a.agent_id, request_id: a.request_id, exact: a.exact, why });
+    const grants: { group: AskGroupDTO; mode: string; minutes: number | null }[] = [];
+    const skipped: AskResultDTO[] = [];
+    for (const g of this.data.asks.filter((x) => !repo || x.repo === repo)) {
+      const life = g.limits?.life;
+      if (g.blocked) skipped.push(...g.items.map((a) => result(a, "blocked by a deny rule")));
+      else if (forever && (life === "time" || life === "session")) skipped.push(...g.items.map((a) => result(a, "outside its own limits")));
+      else grants.push({ group: g, mode: forever || life === "forever" ? "forever" : life === "time" ? "timed" : "session", minutes: life === "time" && !forever ? (g.limits?.minutes ?? null) : null });
+    }
+    const dto = {
+      grants: grants.map((e) => ({ group: e.group.key, kind: e.group.kind, scope: e.group.general, mode: e.mode, minutes: e.minutes, requests: e.group.items.map((a) => a.request_id) })),
+      resumes: grants.reduce((n, e) => n + e.group.items.length, 0),
+      skipped,
+    };
+    return { grants, dto };
+  }
+
+  /* The permission policy's routes (routes_read get_permissions,
+     get_permission_asks, get_permission_plan; routes_actions' preset,
+     unmatched, rules, exceptions, saved actions and asks), or null for any
+     other path. POST /permissions itself is changePermissions'. */
+  private permissionRoute(method: string, path: string, body: Record<string, unknown>, query: Record<string, string>): Response | null {
+    if (!path.startsWith("/permissions") || (path === "/permissions" && method === "POST")) return null;
+    const p = this.data.policy;
+    let m: RegExpMatchArray | null;
+    if (path === "/permissions" && method === "GET") return json(this.policyDTO());
+    if (path === "/permissions" && method === "PATCH") {
+      if (!["ask", "allow", "deny"].includes(String(body.unmatched))) return error("invalid", "unmatched must be one of ask, allow, deny", 400);
+      p.unmatched = String(body.unmatched);
+      return json(this.policyDTO());
+    }
+    if (path === "/permissions/report" && method === "GET") {
+      // permission_asks.report: the 24-hour prompt counts stand in for a week's asks.
+      const asks = Object.values(p.prompts).reduce((n, c) => n + c, 0);
+      const decisions = asks + 20;
+      return json({ days: Number(query.days ?? 7), decisions, asks, ask_rate: asks / decisions, avg_wait_seconds: null, causes: asks ? [{ reason: "bash: git push to the default branch", count: asks, kinds: ["bash"], avg_wait_seconds: null, example: "git push origin main" }] : [] });
+    }
+    if (path === "/permissions/groups" && method === "PUT") {
+      // routes_actions.set_permission_groups: the named groups' baselines and subcategory answers change, the rest stay.
+      const changes = body.groups as Record<string, { baseline?: string; subcategories?: Record<string, string> }> | undefined;
+      if (!changes || typeof changes !== "object") return error("invalid", "groups is required", 400);
+      const groups = { ...p.groups };
+      for (const [name, c] of Object.entries(changes)) {
+        const was = groups[name] ?? { baseline: p.unmatched, subcategories: {} };
+        groups[name] = { baseline: c.baseline ?? was.baseline, subcategories: { ...was.subcategories, ...c.subcategories } };
+      }
+      p.groups = groups;
+      return json(this.policyDTO());
+    }
+    if (path === "/permissions/preset" && method === "PUT") {
+      const preset = FAKE_PRESETS[String(body.preset)];
+      if (!preset) return error("invalid", `unknown preset '${String(body.preset)}': one of ${Object.keys(FAKE_PRESETS).join(", ")}`, 400);
+      p.preset = String(body.preset);
+      p.unmatched = preset.unmatched;
+      p.rules = [...preset.rules(), ...p.rules.filter((r) => r.source !== "preset")];
+      return json(this.policyDTO());
+    }
+    if (path === "/permissions/rules" && method === "POST") {
+      for (const key of ["kind", "match", "decision"]) if (typeof body[key] !== "string" || !body[key]) return error("invalid", `${key} is required`, 400);
+      const matchType = typeof body.match_type === "string" ? body.match_type : "exact";
+      const base: PermissionRuleDTO = { id: ruleId(String(body.kind), matchType, String(body.match), String(body.decision)), kind: "", match: "", match_type: matchType, decision: "", source: "user", created: Date.now() / 1000, describe: "", exclusions: [] };
+      const rule = this.ruleWith(base, body);
+      if (typeof rule === "string") return error("invalid", rule, 400);
+      p.rules = [...p.rules.filter((r) => r.id !== rule.id), rule];
+      return json({ ...rule, prompts: 0, expired: false });
+    }
+    if ((m = path.match(/^\/permissions\/rules\/([^/]+)\/exceptions$/)) && method === "POST") {
+      const id = m[1];
+      const old = p.rules.find((r) => r.id === id);
+      if (!old) return error("not_found", `no rule ${id}`, 404);
+      const matchType = typeof body.match_type === "string" ? body.match_type : "exact";
+      const rule = { ...old, exclusions: [...(old.exclusions ?? []), { kind: String(body.kind), match: String(body.match), match_type: matchType, describe: `${String(body.kind)} ${matchType} '${String(body.match)}'` }] };
+      p.rules = p.rules.map((r) => (r.id === id ? rule : r));
+      return json(rule);
+    }
+    if ((m = path.match(/^\/permissions\/rules\/([^/]+)$/))) {
+      const id = m[1];
+      const old = p.rules.find((r) => r.id === id);
+      if (!old) return error("not_found", `no rule ${id}`, 404);
+      if (method === "DELETE") {
+        p.rules = p.rules.filter((r) => r.id !== id);
+        return json({ deleted: id, describe: `${old.decision} ${old.describe} (${old.source})` });
+      }
+      const rule = this.ruleWith({ ...old, source: old.source === "preset" ? "user" : old.source }, body);
+      if (typeof rule === "string") return error("invalid", rule, 400);
+      p.rules = p.rules.map((r) => (r.id === id ? rule : r));
+      return json({ ...rule, prompts: p.prompts[id] ?? 0 });
+    }
+    if (path === "/permissions/saved" && method === "POST") {
+      for (const key of ["kind", "pattern", "decision"]) if (!body[key]) return error("invalid", `${key} is required`, 400);
+      const s = this.savedWith({ id: `s${this.nextSaved++}`, kind: "", pattern: "", decision: "", scope: "exact", life: "forever", created: Date.now() / 1000 }, body);
+      if (typeof s === "string") return error("invalid", s, 400);
+      p.saved.push(s);
+      return json({ ...s, expired: false });
+    }
+    if ((m = path.match(/^\/permissions\/saved\/([^/]+)$/))) {
+      const id = m[1];
+      const old = p.saved.find((s) => s.id === id);
+      if (!old) return error("not_found", `no saved action ${id}`, 404);
+      if (method === "DELETE") {
+        p.saved = p.saved.filter((s) => s.id !== id);
+        return json({ deleted: id });
+      }
+      const s = this.savedWith(old, body);
+      if (typeof s === "string") return error("invalid", s, 400);
+      p.saved = p.saved.map((x) => (x.id === id ? s : x));
+      return json({ ...s, expired: false });
+    }
+    const repo = (typeof body.repo === "string" ? body.repo : undefined) ?? query.repo;
+    if (path === "/permissions/asks" && method === "GET") return json(this.data.asks.filter((g) => !repo || g.repo === repo));
+    if (path === "/permissions/asks/plan" && method === "GET") return json(this.planAllowAll(repo, query.forever === "1").dto);
+    if (path === "/permissions/asks/decide" && method === "POST") {
+      const g = this.data.asks.find((x) => x.key === body.key);
+      if (!g) return error("not_found", "no such Inbox item any more: fetch the asks again", 404);
+      const scope = g.scopes.find((s) => s.value === body.scope);
+      if (!scope) return error("invalid", `scope must be one of ${g.scopes.map((s) => s.value).join(", ")}`, 400);
+      const mode = String(body.mode);
+      if (!["once", "session", "timed", "forever", "deny", "always-deny"].includes(mode)) return error("invalid", "mode must be one of once, session, timed, forever, deny, always-deny", 400);
+      const minutes = typeof body.minutes === "number" ? body.minutes : null;
+      if (mode === "timed" && !(Number(minutes) > 0)) return error("invalid", "a timed grant needs positive minutes", 400);
+      const stopping = mode === "deny" || mode === "always-deny";
+      if (g.blocked && !stopping) return error("conflict", "nothing in this scope can be approved: blocked by a deny rule", 409);
+      const cap = g.limits?.life === "time" ? g.limits.minutes : null;
+      if (mode === "timed" && cap != null && minutes! > cap) return error("conflict", `nothing in this scope can be approved: over its ${cap} minute limit`, 409);
+      const hits = (mode === "once" || mode === "deny") && scope.value === "exact" ? [g.items[0]] : g.items;
+      const life = { session: "session", timed: "time", forever: "forever", "always-deny": "forever" }[mode as "session"];
+      const grant = life ? this.saveGrant(g, scope, mode === "always-deny" ? "deny" : "allow", life, minutes) : null;
+      const done = this.settleAsks(hits);
+      return json({ mode, scope, grant, resumed: stopping ? [] : done, stopped: stopping ? done : [], skipped: [], failed: [] });
+    }
+    if (path === "/permissions/asks/allow-all" && method === "POST") {
+      const { grants, dto } = this.planAllowAll(repo, body.forever === true);
+      const saved = grants.map((e) => this.saveGrant(e.group, e.group.general, "allow", { session: "session", timed: "time", forever: "forever" }[e.mode as "session"], e.minutes));
+      const resumed = this.settleAsks(grants.flatMap((e) => e.group.items));
+      return json({ ...dto, saved, resumed, failed: [] });
+    }
+    if (path === "/permissions/asks/unblock" && method === "POST") {
+      const blocked = this.data.asks.filter((g) => g.blocked && (!repo || g.repo === repo));
+      let excepted = 0;
+      let added = 0;
+      for (const g of blocked) {
+        const rule = p.rules.find((r) => r.id === g.rule);
+        for (const a of g.items) {
+          const kind = g.kind === "push" ? "bash" : g.kind;
+          if (rule) {
+            rule.exclusions = [...(rule.exclusions ?? []), { kind, match: a.exact, match_type: "exact", describe: `${kind} exact '${a.exact}'` }];
+            excepted++;
+          } else {
+            p.rules.push({ id: ruleId(kind, "exact", a.exact, "ask"), kind, match: a.exact, match_type: "exact", decision: "ask", source: "user", created: Date.now() / 1000, describe: `${kind} exact '${a.exact}'`, exclusions: [] });
+            added++;
+          }
+        }
+      }
+      const resumed = this.settleAsks(blocked.flatMap((g) => g.items));
+      return json({ grants: [], resumes: resumed.length, skipped: [], saved: [], resumed, failed: [], excepted, added, locked: [] });
+    }
+    return error("not_found", `no route ${method} ${path}`, 404);
+  }
+
   /* routes_actions.account_login: a job; its progress carries the authorize
      URL (the app opens it), or the device code's lines; job.done once the
      tokens are stored. */
@@ -1427,7 +1909,9 @@ export class FakeDaemon {
 
   /* The three settings files a repo is read with: the user's, and the repo's own
      shared and local ones where it has them. */
-  private routingFiles(repo: string): Record<RoutingScope, RoutingFile> {
+  private routingFiles(repo: string, userOnly = false): Record<RoutingScope, RoutingFile> {
+    // config.load_repo_config(user_only=True): the person's file alone.
+    if (userOnly) return { user: this.data.routingConfig.user, repo: {}, local: {} };
     const own = this.data.routingByRepo[repo];
     if (!own) return this.data.routingConfig;
     own.repo ??= {};
@@ -1444,9 +1928,10 @@ export class FakeDaemon {
   /* GET /routing (routes_read.get_routing): each tier's list and the scope it
      comes from, as load_repo_config reads them (local over repo over user over
      the default, per tier), the reviewer and the excluded providers likewise
-     (config.setting_source), and every profile with `excluded` from the latter. */
-  private routing(repo: string): RoutingDTO {
-    const files = this.routingFiles(repo);
+     (config.setting_source), and every profile with `excluded` from the latter.
+     `userOnly` (scope=user): the user's file alone; `learn` false (learned=0): no learned picks. */
+  private routing(repo: string, userOnly = false, learn = true): RoutingDTO {
+    const files = this.routingFiles(repo, userOnly);
     const precedence: RoutingScope[] = ["local", "repo", "user"];
     const byName = new Map(this.data.routingProfiles.map((p) => [p.name, p]));
     const refusals = new Map(this.data.routingProfiles.map((p) => [p.name, this.refusal(p)]));
@@ -1473,7 +1958,7 @@ export class FakeDaemon {
     const lockedIn = precedence.find((s) => files[s].routing_locked !== undefined);
     const locked = new Set(lockedIn ? files[lockedIn].routing_locked : []);
     const kind = (k: string, names: string[]): RoutingKindDTO & KindExtras => {
-      const learned = this.data.learned[k];
+      const learned = learn ? this.data.learned[k] : undefined;
       return {
         model: names[0] ?? null,
         fallbacks: names.slice(1),
@@ -1558,7 +2043,8 @@ export class FakeDaemon {
     const extras: Record<string, KindExtras> = {};
     const kindFallbacks: Record<string, string[]> = {};
     let supervisor: string | null = null;
-    const current = this.routing(repo);
+    // A user-scope change builds on the user's own lists.
+    const current = this.routing(repo, scope === "user");
     for (const [k, spec] of Object.entries((kinds ?? {}) as Record<string, unknown>)) {
       if (!ROUTING_KINDS.includes(k) || typeof spec !== "object" || spec === null) return error("invalid", `kind must be one of ${ROUTING_KINDS.join(", ")}, not '${k}'`, 400);
       const { model, fallbacks, locked, effort, instructions } = spec as Record<string, unknown>;
@@ -1822,6 +2308,15 @@ export class FakeDaemon {
     if (auth !== `Bearer ${this.token}`) {
       return error("unauthorized", "missing or wrong token (see ~/.brindle/daemon.json)", 401);
     }
+    const policy = this.permissionRoute(method, path, (body ?? {}) as Record<string, unknown>, query);
+    if (policy) {
+      if (method === "PUT" && path === "/permissions/preset" && this.holdPreset) {
+        return new Promise<Response>((resolve) => {
+          this.pendingPreset = () => resolve(policy);
+        });
+      }
+      return policy;
+    }
     if (method === "POST" && /^\/sessions(\/|$)/.test(path)) return this.write(path, (body ?? {}) as Record<string, unknown>);
     if (method === "PUT" || method === "DELETE") {
       const sessionFile = path.match(/^\/sessions\/([^/]+)\/file$/);
@@ -1832,10 +2327,15 @@ export class FakeDaemon {
       if (method === "DELETE" && provider) return this.removeProvider(provider[1]);
       const terminal = path.match(/^\/terminals\/([^/]+)$/);
       if (method === "DELETE" && terminal) return this.closeTerminal(terminal[1]);
+      const key = path.match(/^\/keys\/([^/]+)$/);
+      if (method === "DELETE" && key) return this.deleteKey(key[1]);
       if (method === "DELETE") return error("not_found", `no route DELETE ${path}`, 404);
+      const connection = path.match(/^\/providers\/([^/]+)\/connection$/);
+      if (connection && this.holdConnections) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>))));
+      if (connection) return this.putConnection(connection[1], (body ?? {}) as Record<string, unknown>);
       if (path === "/routing") return this.putRouting((body ?? {}) as Record<string, unknown>);
       if (path === "/debug") return this.putDebug((body ?? {}) as Record<string, unknown>);
-      const key = path.match(/^\/keys\/([^/]+)$/);
+      if (key && this.holdKeys) return new Promise<Response>((resolve) => this.pendingKeys.push(() => resolve(this.putKey(key[1], (body ?? {}) as Record<string, unknown>))));
       if (key) return this.putKey(key[1], (body ?? {}) as Record<string, unknown>);
       const file = path.match(/^\/workspaces\/(.+)\/file$/);
       if (file) return this.editFile(file[1], (body ?? {}) as Record<string, unknown>);
@@ -1956,12 +2456,15 @@ export class FakeDaemon {
       case "/profiles":
         return json((repo && d.profilesByRepo[repo]) || d.profiles);
       case "/routing":
-        return needRepo() ?? json(this.routing(repo));
+        return needRepo() ?? json(this.routing(repo, query.scope === "user", query.learned !== "0"));
       case "/rules":
         return needRepo() ?? json(d.rulePacks);
       case "/config":
         // The repo's config comes only when a repo is asked for (routes_read.get_config).
-        return json(repo ? { user: d.config.user, repo: effectiveConfig(d.config), keys: d.config.keys } : { user: d.config.user, keys: d.config.keys });
+        // `keys=0` leaves the stored keys out, as the engine does.
+        return json(((keys) => (repo ? { user: d.config.user, repo: effectiveConfig(d.config), overrides: configOverrides(d.config), local: "rules" in d.config.local ? { rules: d.config.local.rules } : {}, keys } : { user: d.config.user, keys }))(query.keys === "0" ? [] : this.keyInfos()));
+      case "/cloud/options":
+        return json(d.cloudOptions);
       case "/user-settings":
         return json(d.userSettings);
       case "/debug":
@@ -2010,7 +2513,10 @@ export class FakeDaemon {
       return json(d.providers);
     }
     if ((m = path.match(/^\/providers\/([^/]+)\/preflight$/))) return json(this.preflightOf(m[1]));
-    if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
+    if ((m = path.match(/^\/providers\/([^/]+)\/connection$/))) return this.connectionOf(m[1]);
+    if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|tree|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
+    // The doc library, as an engine not signed in to a plan answers it (routes_actions._docs_entitlement).
+    if (path === "/analysis-docs") return error("not_entitled", "analysis docs need brindle Pro", 402);
     return error("not_found", `no route ${path}`, 404);
   };
 
@@ -2189,6 +2695,7 @@ export class FakeDaemon {
         created_at: Date.now() / 1000,
         status_since: null,
         goal: null,
+        name: typeof body.name === "string" && body.name.trim() ? body.name.trim() : null,
       };
       // GET /sessions shows the goal line (the start prompt); the start reply has none.
       d.sessions = [...d.sessions, { ...session, goal: prompt ?? null }];
@@ -2217,6 +2724,21 @@ export class FakeDaemon {
         this.pendingLaunch = () => resolve(launched());
       });
     }
+    const prPush = path.match(/^\/sessions\/([^/]+)\/pr\/push$/);
+    if (prPush) {
+      // routes_actions.push_session_pr: only to the PR the person opened; its commits pushed, session.pr_pushed.
+      const root = prPush[1];
+      const review = d.sessionReview[root];
+      if (!review?.pr) return error("conflict", "the session has no PR to push to; open it first", 409);
+      const job = `job${this.nextJob++}`;
+      review.pr = { ...review.pr, unpushed: 0 };
+      this.prPushes.push(root);
+      setTimeout(() => {
+        this.publish("session.pr_pushed", { root_id: root, agent_id: root, payload: { url: review.pr?.url } });
+        this.publish("job.done", { root_id: root, agent_id: root, payload: { job, job_kind: "session.push", result: { url: review.pr?.url } } });
+      }, 0);
+      return json({ job, kind: "session.push" }, 202);
+    }
     const pr = path.match(/^\/sessions\/([^/]+)\/pr$/);
     if (pr) {
       // routes_actions.open_session_pr: refused with the reasons unless ready; a job whose result carries the URL.
@@ -2227,9 +2749,18 @@ export class FakeDaemon {
       const job = `job${this.nextJob++}`;
       const url = `https://github.com/example/proj/pull/${this.prs.length + 1}`;
       this.prs.push({ root, title: body.title as string | undefined, body: body.body as string | undefined, draft: body.draft as boolean | undefined, url });
+      review.pr = { url, unpushed: 0 };
       this.setGoalPhase(root, "pr_open", url);
       setTimeout(() => this.publish("job.done", { root_id: root, agent_id: root, payload: { job, job_kind: "session.pr", result: { url, keeps_merged_branches: true } } }), 0);
       return json({ job, kind: "session.pr" }, 202);
+    }
+    const rename = path.match(/^\/sessions\/([^/]+)\/rename$/);
+    if (rename) {
+      // routes_actions.rename_session: the name is trimmed; empty clears it.
+      if (!d.sessions.some((s) => s.id === rename[1])) return error("not_found", `no agent ${rename[1]}`, 404);
+      const name = String(body.name ?? "").trim().replace(/\s+/g, " ") || null;
+      d.sessions = d.sessions.map((s) => (s.id === rename[1] ? { ...s, name } : s));
+      return json({ id: rename[1], name });
     }
     const handover = path.match(/^\/sessions\/([^/]+)\/handover$/);
     if (handover) {

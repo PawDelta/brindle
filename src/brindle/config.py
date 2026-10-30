@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -104,8 +105,10 @@ class RepoConfig:
     fetch: bool = True
     auto_update: bool = False          # upgrade the PyPI tool at session start
     # Autopilot and merge gates.
-    autopilot: bool = True             # `brindle` starts the supervisor with autopilot on
+    autopilot: bool = True             # deprecated; the goal driver is always on
     checks: list[str] = field(default_factory=list)  # must pass in a branch before it merges
+    scoped_checks: str | None = None   # "off" or "infer"; None: not chosen (acts as "infer", see brindle.check_scope.inferred)
+    scoped_checks_max_files: int = 40  # a worker branch whose scoped tests exceed this runs only its own and namesake tests (0: no cap)
     review: bool | None = None         # require a reviewer's approval (None: only under autopilot)
     reviewer: str = "reviewer"         # agent profile that reviews branches
     review_profile: str | None = None  # force request_review's profile (skips its automatic cross-model pick)
@@ -122,6 +125,7 @@ class RepoConfig:
     graphify_auto_refresh: bool = True  # rebuild untracked code maps automatically; queries work when false
     stale_after: int = 30              # minutes before an idle, reported worker is closed; 0: never
     pipeline: bool = True              # brindle reviews and merges reported branches itself (brindle.pipeline)
+    review_start_delay: int = 60       # seconds before recovering a reported branch with no review in progress
     goal_audit: bool = True            # an adversarial reviewer checks a finished goal against the original request before it counts as reached
     review_rounds: int = 2             # fix-and-re-review rounds the pipeline runs before asking the supervisor
     # Retry a failed heavy task once on developer-heavy (Fable) before asking the supervisor.
@@ -155,6 +159,9 @@ class RepoConfig:
     #   Native       brindle's own loop: no timeout but this; no prompt of its
     #                own, so on timeout the call is refused.
     permission_hold_seconds: int = 86400
+    # Seconds of that hold a worker's ask (one no person-only rule makes) waits on
+    # its supervisor's answer before the person sees it (brindle.permission_routing).
+    permission_supervisor_hold_seconds: int = 120
     # "brindle": agy agents run with --dangerously-skip-permissions and
     # brindle's hook allows or denies every call (see brindle.antigravity).
     # "prompt": agy asks as usual. None (unset): "brindle" for agents brindle
@@ -189,9 +196,6 @@ class RepoConfig:
     local_models: bool = True
     delete_merged_branches: bool = True  # removing a worktree deletes its branch once fully merged into its base
     pr_footer: bool = True             # `brindle pr` ends the PR body with one "built with brindle" line
-    # Open a session's PR on its own once it is ready (never where the org's policy
-    # requires a human review; see brindle.daemon.session_review.auto_pr).
-    auto_pr: bool = False
     sidebar: str = "left"              # where the dashboard sits: "left" of the chat or "bottom"
     # Standing rules for the supervisor ("fix review findings without asking", ...):
     # ~/.brindle/config.json's, then the repo's, then config.local.json's, all kept.
@@ -239,16 +243,40 @@ def _merge_commands(shared: list[str], local: object) -> list[str]:
     return shared
 
 
-def _read_json(path: Path) -> dict:
-    if not path.is_file():
+def _read_json(path: Path, text: str | None = None) -> dict:
+    if text is None and not path.is_file():
         return {}
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8") if text is None else text)
     except json.JSONDecodeError as e:
         raise ValueError(f"{path}: invalid JSON ({e})") from e
     if not isinstance(data, dict):
         raise ValueError(f"{path}: expected a JSON object")
     return data
+
+
+def _read_shared(root: Path, branch: str | None) -> dict:
+    """The shared config as committed on ``branch`` (the branch a session's
+    workers are cut from and merge into), not whatever the checkout at
+    ``root`` has checked out; the working tree's file when there's no
+    branch or it isn't committed there."""
+    path = root / CONFIG_DIR / CONFIG_FILE
+    if branch:
+        try:
+            proc = subprocess.run(["git", "show", f"{branch}:{CONFIG_DIR}/{CONFIG_FILE}"], cwd=root,
+                                  capture_output=True, text=True)
+        except OSError:
+            proc = None
+        if proc is not None and proc.returncode == 0:
+            return _read_json(Path(f"{branch}:{CONFIG_DIR}/{CONFIG_FILE}"), proc.stdout)
+    return _read_json(path)
+
+
+def workspace_config(ws, *, session: bool = False) -> RepoConfig:
+    """``load_repo_config`` for workspace ``ws``, reading the shared file
+    from its base branch (see ``_read_shared``). A session's own workspace
+    (``session``) reads its own branch; its workers' base is that branch."""
+    return load_repo_config(ws.repo_root, branch=ws.branch if session and ws.kind == "worktree" else ws.base_branch)
 
 
 def config_root(path: str | Path) -> Path:
@@ -299,9 +327,17 @@ def _memory_gb() -> float:
         return 0.0
 
 
+def check_xdist_workers(slots: int) -> int:
+    """pytest-xdist workers each of ``slots`` concurrent checks may start, so
+    that all the slots together stay within the logical cores."""
+    return max(1, (os.cpu_count() or 1) // max(1, slots))
+
+
 def host_check_concurrency() -> int:
     """Check runs at once when the repo doesn't say: half the logical cores and
-    RAM for ``CHECK_RAM_GB`` per run, never below 2 or above the cap (#169)."""
+    RAM for ``CHECK_RAM_GB`` per run, never below 2 or above the cap (#169).
+    Each run's xdist workers are capped by ``check_xdist_workers``, so the
+    slots share the cores instead of each taking all of them."""
     cores = os.cpu_count() or 1
     by_ram = int(_memory_gb() // CHECK_RAM_GB)
     return max(2, min(cores // 2, by_ram, CHECK_CONCURRENCY_CAP))
@@ -329,26 +365,31 @@ def kind_overrides(found: object) -> dict[str, dict[str, str]]:
     return out
 
 
-def load_repo_config(repo_root: str | Path) -> RepoConfig:
+def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: str | None = None) -> RepoConfig:
+    """The settings for ``repo_root``: its local file over its shared one over
+    the person's ~/.brindle/config.json. ``user_only``: the person's file
+    alone, as every repo starts from it (the app's Agents tab). ``branch``:
+    read the shared file as committed there (see ``_read_shared``)."""
     base = config_root(repo_root) / CONFIG_DIR
-    shared = _read_json(base / CONFIG_FILE)
-    local = _read_json(base / LOCAL_CONFIG_FILE)
+    shared = {} if user_only else _read_shared(base.parent, branch)
+    local = {} if user_only else _read_json(base / LOCAL_CONFIG_FILE)
     user = user_settings()
 
     cfg = RepoConfig()
     for key in ("setup", "teardown", "copy", "checks", "add_dirs", "worker_extra_read_dirs", "protected_paths"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
-    for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "autopilot", "review",
+    for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",
-                "review_rounds", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
-                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "auto_pr", "plan_first", "learning",
+                "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
+                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
-                "permission_hold_seconds", "agy_approvals",
+                "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
-                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks"):
+                "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks", "scoped_checks",
+                "scoped_checks_max_files"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])
@@ -389,7 +430,8 @@ def load_repo_config(repo_root: str | Path) -> RepoConfig:
             cfg.routing_overrides.setdefault(kind, {}).update(fields)
     from brindle import worker_models
 
-    worker_models.apply(cfg, user, str(repo_root))   # the models picked on the picker's workers screen
+    # The models picked on the picker's workers screen (the person's own profiles, for user_only).
+    worker_models.apply(cfg, user, str(repo_root), user_library=user_only)
     for source in (shared, local):  # per weight, so a repo can override one and keep the rest
         second = source.get("second_review")
         if isinstance(second, dict):
@@ -457,6 +499,13 @@ _USER_WRITE = threading.Lock()
 
 def set_user(key: str, value: object) -> Path:
     """Set one key in ``~/.brindle/config.json`` (other keys are kept)."""
+    return update_user(key, lambda _: value)
+
+
+def update_user(key: str, change) -> Path:
+    """Set one key in ``~/.brindle/config.json`` to ``change(its value now)``,
+    read and written under the one writer lock, so a change to part of a
+    nested setting never loses another made at the same time."""
     path = user_config_path()
     if os.environ.get("BRINDLE_AGENT_ID"):
         # A brindle agent's CLI call must not change the person's own settings.
@@ -465,7 +514,7 @@ def set_user(key: str, value: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with _USER_WRITE:   # daemon actions run in threads: one read-modify-replace at a time
         data = _read_json(path)
-        data[key] = value
+        data[key] = change(data.get(key))
         # A unique temp file replaced into place, so a reader never sees half a file.
         fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
         try:
@@ -507,15 +556,33 @@ def _sync_setting(key: str) -> None:
         pass
 
 
+_REPO_WRITE = threading.Lock()
+
+
+def _change_json(path: Path, change) -> None:
+    """Read ``path``, apply ``change`` to its dict and replace the file, one at a
+    time (daemon actions run in threads) through a unique temp file in the same
+    directory, so a reader never sees half a file and no write is lost."""
+    with _REPO_WRITE:
+        data = _read_json(path)
+        change(data)
+        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2) + "\n")
+            os.replace(tmp, path)
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise
+
+
 def set_local(repo_root: str | Path, key: str, value: object) -> Path:
     """Set one key in ``.brindle/config.local.json`` (gitignored: this person's
     own settings; other keys are kept)."""
     base = config_root(repo_root) / CONFIG_DIR
     base.mkdir(parents=True, exist_ok=True)
     path = base / LOCAL_CONFIG_FILE
-    data = _read_json(path)
-    data[key] = value
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    _change_json(path, lambda data: data.__setitem__(key, value))
     ignore = base / ".gitignore"
     if not ignore.exists():
         ignore.write_text(f"{LOCAL_CONFIG_FILE}\n", encoding="utf-8")
@@ -527,9 +594,24 @@ def set_repo(repo_root: str | Path, key: str, value: object) -> Path:
     everyone's settings; other keys are kept)."""
     path = scope_paths(repo_root)["repo"]
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = _read_json(path)
-    data[key] = value
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    _change_json(path, lambda data: data.__setitem__(key, value))
+    return path
+
+
+def unset_local(repo_root: str | Path, key: str) -> Path:
+    """Remove one key from ``.brindle/config.local.json`` (other keys are kept),
+    so the repo's shared file or the person's own value reads through again."""
+    path = scope_paths(repo_root)["local"]
+    if path.exists():
+        _change_json(path, lambda data: data.pop(key, None))
+    return path
+
+
+def unset_repo(repo_root: str | Path, key: str) -> Path:
+    """Remove one key from the repo's committed ``.brindle/config.json``."""
+    path = scope_paths(repo_root)["repo"]
+    if path.exists():
+        _change_json(path, lambda data: data.pop(key, None))
     return path
 
 
@@ -546,6 +628,13 @@ def setting_source(repo_root: str | Path, key: str) -> str:
     ("local", then "repo", then "user"), or "default"."""
     paths = scope_paths(repo_root)
     return next((s for s in ("local", "repo", "user") if key in _read_json(paths[s])), "default")
+
+
+def local_values(repo_root: str | Path, keys: tuple[str, ...]) -> dict:
+    """What the repo's local file itself sets for ``keys``: the effective
+    config unions ``rules`` across scopes, so editing them needs the file's own list."""
+    local = _read_json(scope_paths(repo_root)["local"])
+    return {k: local[k] for k in keys if k in local}
 
 
 def write_template(repo_root: str | Path, values: dict | None = None) -> Path:

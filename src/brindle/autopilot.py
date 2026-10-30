@@ -1,6 +1,6 @@
 """Autopilot: the supervisor as a project manager that keeps going.
 
-A session with autopilot on has a goal broken into milestones. Each milestone
+A session has a goal broken into milestones. Each milestone
 has a check command that brindle runs itself (exit 0 means done), so progress
 is verified rather than claimed. The supervisor splits milestones into tasks,
 hands them to workers, gets their branches reviewed and merged (through the
@@ -47,7 +47,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config
+from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config, workspace_config
 from brindle import bus, escapes, knowledge
 from brindle.db import DB, Agent, Autopilot, Milestone, Workspace, check_state
 from brindle.profiles import load_profile
@@ -58,6 +58,8 @@ GOALS_FILE = "goals.md"
 GOALS_DIR = "goals"          # .brindle/goals/<session id>.md: each session's own goal
 MAX_NUDGES = 3
 NUDGE_BACKOFF = 900.0        # seconds before the same reminder is repeated when nothing has changed
+QUESTION_REMINDER_DELAY = 3600.0   # seconds before one reminder of an open need_user question
+QUESTION_REMINDER_HEAD = "[brindle autopilot] The question for the user is still open"
 NUDGE_HEAD = "[brindle autopilot] The goal isn't reached yet, and no workers are running."
 WAIT_ENDED_HEAD = "[brindle autopilot] The job you were waiting on has ended"
 MAX_GOAL_CHARS = 4000        # Claude Code's limit for a /goal condition
@@ -128,8 +130,6 @@ to be asked each step.
   appears. If several are given, the first to finish ends the wait. An existing
   wait is kept if you call again. Keep working on independent steps meanwhile.
 - When a milestone passes, tell the user in one line.
-- If a message says autopilot is off, stop driving: wait for the user's
-  instructions.
 """
 
 DELEGATIONS = ("conservative", "balanced", "fast")
@@ -571,7 +571,7 @@ def sync_goals_file(db: DB, root_id: str) -> None:
     """Write each milestone's status back to the session's own goal file. What
     goes in it is only passed/failed/pending, a short sha and a date; loading
     it never trusts a status line. Does nothing for a session with no file,
-    with autopilot off (a handover switches the old session's off), paused,
+    paused,
     or whose milestones no longer match the file (the person edited it: the
     edit is taken up when the session resumes). Never raises: a file we
     can't write must not fail a check."""
@@ -579,7 +579,7 @@ def sync_goals_file(db: DB, root_id: str) -> None:
         _adopt_legacy(db, root_id)
         ap = db.get_autopilot(root_id)
         root = db.get_agent(root_id)
-        if not ap or not ap.enabled or not ap.goal or root is None \
+        if not ap or not ap.goal or root is None \
                 or root.status in ("paused", "done"):
             return
         path = session_goals_path(db, root_id)
@@ -620,7 +620,7 @@ def for_agent(db: DB, agent_id: str) -> Autopilot | None:
 
 
 def enable(db: DB, root_id: str, ws: Workspace, *, claim: bool = True) -> Plan | None:
-    """Turn autopilot on for a new session. With ``claim``, a hand-written
+    """Initialize a new session's goal driver. With ``claim``, a hand-written
     ``.brindle/goals.md`` becomes this session's goal (and file), and is returned."""
     db.add_autopilot(root_id)
     plan = _claim_seed(db, root_id, ws) if claim else None
@@ -630,12 +630,9 @@ def enable(db: DB, root_id: str, ws: Workspace, *, claim: bool = True) -> Plan |
 
 
 def set_enabled(db: DB, root_id: str, on: bool) -> None:
-    db.add_autopilot(root_id, enabled=on)
-    fields: dict[str, object] = {"enabled": int(on), "nudges": 0}
-    ap = db.get_autopilot(root_id)
-    if on and ap and ap.state in ("blocked", "stalled"):
-        fields.update(state="running", note=None, question=None)
-    db.update_autopilot(root_id, **fields)
+    """Deprecated compatibility entry point; pausing stops a session."""
+    db.add_autopilot(root_id)
+    db.update_autopilot(root_id, enabled=1)
 
 
 def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]:
@@ -1128,8 +1125,9 @@ def need_user(db: DB, root_id: str, question: str, ask: bool = False) -> None:
     question (``ask``) holds only the work that depends on it, until the
     supervisor says it's answered."""
     note = question.strip()[:500]
+    now = time.time()
     db.update_autopilot(root_id, state="blocked", note=note, nudges=0,
-                        question=note if ask else None)
+                        question=note if ask else None, nudged_time=now)
     bus.publish_agent(db, "autopilot.need_user", root_id, question=note, ask=ask)
 
 
@@ -1186,7 +1184,8 @@ def held(ap: Autopilot) -> bool:
 
 
 def answered(db: DB, root_id: str) -> None:
-    db.update_autopilot(root_id, state="running", note=None, question=None, nudges=0)
+    db.update_autopilot(root_id, state="running", note=None, question=None, nudges=0,
+                        nudged_at=None, nudged_time=None)
     bus.publish_agent(db, "autopilot.answered", root_id)
 
 
@@ -1201,7 +1200,8 @@ def user_spoke(db: DB, agent: Agent) -> None:
     ap = db.get_autopilot(agent.id)
     if ap and ap.state in ("blocked", "stalled"):
         asked = held(ap)
-        db.update_autopilot(agent.id, state="running", note=None, question=None, nudges=0)
+        db.update_autopilot(agent.id, state="running", note=None, question=None, nudges=0,
+                            nudged_at=None, nudged_time=None)
         if asked:
             bus.publish_agent(db, "autopilot.answered", agent.id)
     elif ap:
@@ -1229,20 +1229,22 @@ def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,
     """Run one check command. Returns (passed, the tail of its output).
     ``cancel``, if given, is polled while the command runs; when it turns
     true the command is killed and ``CheckCancelled`` is raised."""
+    proc = subprocess.Popen(
+        cmd, shell=True, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True,
+    )
     if cancel is None:
         try:
-            proc = subprocess.run(
-                cmd, shell=True, cwd=cwd, env={**os.environ, **env}, capture_output=True,
-                text=True, timeout=timeout, stdin=subprocess.DEVNULL,
-            )
+            stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            try:
+                proc.communicate(timeout=KILL_WAIT)
+            except subprocess.TimeoutExpired:
+                pass   # a grandchild still holds the pipes; don't hang on it
             return False, f"$ {cmd}\n(timed out after {timeout}s)"
-        stdout, stderr, returncode = proc.stdout, proc.stderr, proc.returncode
+        returncode = proc.returncode
     else:
-        proc = subprocess.Popen(
-            cmd, shell=True, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True,
-        )
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -1328,7 +1330,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
     ap = db.get_autopilot(root_id)
     if ap and ap.state == "done":
         return progress(db, root_id, in_flight=False)
-    cfg = cfg or load_repo_config(ws.repo_root)
+    cfg = cfg or workspace_config(ws, session=True)
     ms = db.milestones(root_id)
     if not ms:
         raise AutopilotError("no milestones yet: record the goal with set_goal first")
@@ -1381,7 +1383,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
             # Cached by commit when the checkout is clean, so a check that
             # already passed at this HEAD (as a merge gate, say) isn't re-run.
             try:
-                ok, out = gates.run_checked(db, checkout, m.check_cmd, workspaces.workspace_env(checkout),
+                ok, out = gates.run_checked(db, checkout, m.check_cmd, workspaces.workspace_env(checkout, repo_cfg),
                                             repo_cfg.check_timeout)
             except Exception as e:
                 db.record_check(m.id, False, f"$ {m.check_cmd}\n(crashed: {e})", sha,
@@ -1587,7 +1589,7 @@ def start_audit(db: DB, root_id: str, ws: Workspace, cfg: RepoConfig | None = No
         if ap.audit_sha == head:
             return None
         agents.close(db, running.id)
-    cfg = cfg or load_repo_config(ws.repo_root)
+    cfg = cfg or workspace_config(ws, session=True)
     profile = agents.default_review_profile(cfg, db.get_agent(root_id), db, ws.repo_root, ap.goal)
     auditor = agents.spawn(db, ws, profile, prompt=audit_prompt(db, ap, head), parent_id=root_id,
                            mode="review", background_setup=True)
@@ -1742,8 +1744,8 @@ def progress(db: DB, root_id: str, *, in_flight: bool = True) -> str:
     """
     ap = db.get_autopilot(root_id)
     if ap is None:
-        return "Autopilot is not set up for this session."
-    head = f"Autopilot {'on' if ap.enabled else 'off'}"
+        return "No goal is set up for this session."
+    head = "Goal progress"
     if not ap.goal:
         return (f"{head}. No goal yet: call set_goal with a goal and milestones derived from the "
                 "user's request (ask what we're building only if there is no request).")
@@ -1919,7 +1921,7 @@ def limit_reached(db: DB, agent: Agent) -> None:
     Claude limit, with a reset time known, stops that provider's workers and
     resumes on its own; any other provider's just blocks and names it."""
     ap = db.get_autopilot(root_of(db, agent.id))
-    if not ap or not ap.enabled:
+    if not ap:
         return
     u = usage() if agent.provider == "claude" else None
     if u and isinstance(u.get("resets_at"), (int, float)):
@@ -2006,7 +2008,7 @@ def usage_sweep(db: DB, now: float | None = None) -> list[str]:
         if root.mode != "interactive" or root.status in ("paused", "done"):
             continue
         ap = db.get_autopilot(root.id)
-        if ap is None or not ap.enabled:
+        if ap is None:
             continue
         if ap.state == "running" and ap.goal:
             ws = db.get_workspace(root.workspace_id)
@@ -2041,7 +2043,7 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     """The supervisor is about to stop. Returns a "block" decision telling it
     to keep going, or None to let it stop."""
     ap = db.get_autopilot(agent.id)
-    if ap is None or not ap.enabled or not ap.goal:
+    if ap is None or not ap.goal:
         return None
     from brindle import agents, login_pause
 
@@ -2062,6 +2064,17 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
                 return None
         else:
             return None
+    elif held(ap):
+        now = time.time()
+        start = ap.nudged_time or ap.created_at
+        if (start is not None and start > 0
+                and now - start >= QUESTION_REMINDER_DELAY
+                and not db.outstanding(agent.id, QUESTION_REMINDER_HEAD)):
+            db.update_autopilot(agent.id, nudged_time=-now)
+            reason = (f"{QUESTION_REMINDER_HEAD}: {ap.question}. "
+                      "When they have answered, call need_user(answered=true).")
+            return {"decision": "block", "reason": reason}
+        return None
     elif ap.state != "running":
         # An open need_user question included (#209): reminding the supervisor
         # of it re-armed on anything that woke the chat, a nudge every ~2 s.
@@ -2090,7 +2103,8 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if any(agents.runs_process(a) for a in working
             if getattr(a, "plan_state", None) != "proposed"):
         return None  # their results arrive as messages and wake it up
-    if db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD):
+    if (db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD)
+            or db.outstanding(agent.id, QUESTION_REMINDER_HEAD)):
         return None  # (#209) the last reminder is still queued or unread: never pile up another
     now = time.time()
     if (ap.nudged_at == ap.progress and ap.nudged_time is not None
@@ -2283,7 +2297,7 @@ def goal_reminder(db: DB, caller_id: str) -> str | None:
     if root_of(db, caller_id) != caller_id:
         return None
     ap = db.get_autopilot(caller_id)
-    return GOAL_REMINDER if ap and ap.enabled and not ap.goal else None
+    return GOAL_REMINDER if ap and ap.state == "running" and not ap.goal else None
 
 
 def worker_goal(prompt: str, done_when: str, branch: str) -> str | None:

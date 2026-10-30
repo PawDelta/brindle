@@ -34,6 +34,8 @@ export interface ProvidersFeed {
   dismiss(provider: string): void;
   /* Takes the provider out of brindle (DELETE /providers/{p}); the CLI stays installed. */
   remove(provider: string): Promise<void>;
+  /* Signs brindle's own copy of the provider out (POST /providers/{p}/logout); the rows are read again. */
+  signOut(provider: string): Promise<void>;
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -47,6 +49,7 @@ const NONE: ProvidersFeed = {
   turnOn: () => Promise.resolve(),
   dismiss: () => undefined,
   remove: () => Promise.resolve(),
+  signOut: () => Promise.resolve(),
 };
 
 export const ProvidersContext = createContext<ProvidersFeed | null>(null);
@@ -103,6 +106,14 @@ function Feed({ client, children, pollMs }: { client: DaemonClient; children: Re
     [client, reload],
   );
 
+  const signOut = useCallback(
+    async (provider: string) => {
+      await client.signOutProvider(provider);
+      await reload();
+    },
+    [client, reload],
+  );
+
   const turnOn = useCallback(
     async (provider: string, path: string) => {
       await client.pickProviderInstall(provider, path);
@@ -122,6 +133,6 @@ function Feed({ client, children, pollMs }: { client: DaemonClient; children: Re
     return () => clearInterval(timer);
   }, [reload, pollMs]);
 
-  const feed = useMemo<ProvidersFeed>(() => ({ rows, error, reload, installs, install: start, turnOn, dismiss: forget, remove }), [rows, error, reload, installs, start, turnOn, forget, remove]);
+  const feed = useMemo<ProvidersFeed>(() => ({ rows, error, reload, installs, install: start, turnOn, dismiss: forget, remove, signOut }), [rows, error, reload, installs, start, turnOn, forget, remove, signOut]);
   return <ProvidersContext.Provider value={feed}>{children}</ProvidersContext.Provider>;
 }

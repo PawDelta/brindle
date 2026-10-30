@@ -8,14 +8,15 @@
 # red `local-ci` status on the commit, naming the legs it ran.
 #
 # An app-v* tag signs and publishes a desktop app release (app-release.yml),
-# and agents push with the owner's login: such a push (or deletion) is refused
-# unless BRINDLE_RELEASE_TAG_OK=1, which SKIP_LOCAL_CI doesn't bypass.
+# and so does the release/desktop branch (a staff build), and agents push
+# with the owner's login: such a push (or deletion) is refused unless
+# BRINDLE_RELEASE_TAG_OK=1, which SKIP_LOCAL_CI doesn't bypass.
 refs="$(cat)"
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
   case "$remote_ref" in
-    refs/tags/app-v*)
+    refs/tags/app-v*|refs/heads/release/desktop)
       if [ "${BRINDLE_RELEASE_TAG_OK:-}" != 1 ]; then
-        echo "pre-push: ${remote_ref#refs/tags/} is an app release tag; set BRINDLE_RELEASE_TAG_OK=1 to push it" >&2
+        echo "pre-push: ${remote_ref#refs/*/} publishes a desktop app build; set BRINDLE_RELEASE_TAG_OK=1 to push it" >&2
         exit 1
       fi ;;
   esac

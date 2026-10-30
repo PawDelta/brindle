@@ -4,9 +4,9 @@ field names are the engine's own and the drift test keeps them in step."""
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt
 
 from brindle.db import Agent, Autopilot, Milestone
 from brindle.profiles import Profile
@@ -18,6 +18,94 @@ class _DTO(BaseModel):
 
     def to_json(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
+
+
+class OrgIdentityDTO(_DTO):
+    sub: str
+    org_id: str
+    role: str | None
+    policy_role: str | None
+
+
+class OrgRoleDTO(_DTO):
+    name: str
+    builtin: bool
+    permissions: list[str]
+    holders: list[str] = []
+    okta_group: str | None = None
+    team_weight: float = 1
+
+
+class OrgMemberDTO(_DTO):
+    sub: str
+    email: str
+    role: str
+    policy_role: str | None = None
+
+
+class OrgControlDTO(_DTO):
+    """team_policy.OrgControl: Block (deny) or Ask for one grouping
+    (permission_grants.ORG_GROUPINGS) or one pattern ("<kind> <match_type> <match>")."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    decision: Literal["deny", "ask"]
+    reason: Annotated[str, Field(max_length=300)] = ""
+    group: str | None = None
+    rule: str | None = None
+
+
+class OrgGrantPolicyDTO(_DTO):
+    """Account GrantPolicy (account-api 8fd09374); a complete replacement block."""
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    allow: StrictBool
+    kinds: list[Literal["read", "write", "edit", "bash", "fetch", "mcp", "other"]]
+    overridable: list[Literal["git-push", "env"]]
+    max_minutes: Annotated[StrictInt, Field(ge=1, le=1440)]
+    max_uses: Annotated[StrictInt, Field(ge=1, le=1000)]
+    deny: list[str] = []
+    allow_persistent: StrictBool = False
+    lifetimes: list[Literal["session", "time", "forever"]] = ["session", "time"]
+    scopes: list[Literal["branch", "remote", "repo", "all"]] = ["branch"]
+    controls: list[OrgControlDTO] = []
+    org_name: Annotated[str, Field(max_length=100)] = ""
+
+
+class OrgApprovalPolicyDTO(_DTO):
+    version: int
+    permission_grants: OrgGrantPolicyDTO | None
+    roles: dict[str, OrgGrantPolicyDTO | None]
+
+
+class OrgPermissionsDTO(_DTO):
+    identity: OrgIdentityDTO
+    roles: list[OrgRoleDTO]
+    members: list[OrgMemberDTO]
+    inventory_error: str | None = None
+    policy: OrgApprovalPolicyDTO
+    can_edit_policy: bool
+    policy_readonly_reason: str | None
+
+
+class OrgAssignmentRequestDTO(_DTO):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    org_id: str
+    actor_sub: str
+    sub: Annotated[str, Field(min_length=1, max_length=128)]
+    role: Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,31}$")]
+
+
+class OrgAssignmentDTO(_DTO):
+    org_id: str
+    sub: str
+    role: str
+
+
+class OrgPolicyRequestDTO(_DTO):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    org_id: str
+    actor_sub: str
+    if_version: Annotated[StrictInt, Field(ge=0)]
+    role: str | None
+    permission_grants: OrgGrantPolicyDTO | None
 
 
 class NativeSubagentDTO(_DTO):
@@ -73,11 +161,13 @@ class SessionDTO(_DTO):
     created_at: float
     status_since: float | None = None
     goal: str | None = None
+    name: str | None = None      # the person's name for the session; shown instead of the goal
 
     @classmethod
     def from_agent(cls, a: Agent, goal: str | None = None) -> SessionDTO:
         return cls(id=a.id, workspace_id=a.workspace_id, profile=a.profile, status=a.status,
-                   mode=a.mode, created_at=a.created_at, status_since=a.status_since, goal=goal)
+                   mode=a.mode, created_at=a.created_at, status_since=a.status_since, goal=goal,
+                   name=a.name)
 
 
 class PermissionChoiceDTO(_DTO):
@@ -318,6 +408,7 @@ class AccountOrgDTO(_DTO):
 class AccountDTO(_DTO):
     signed_in: bool
     name: str | None = None
+    email: str | None = None
     plan: str | None = None
     orgs: list[AccountOrgDTO] = []
 
@@ -350,3 +441,292 @@ class PreflightItemDTO(_DTO):
     detail: str
     action: PreflightActionDTO | None = None
     link: str | None = None
+
+
+# -- how each provider connects (brindle.connections) -------------------------------------------
+
+
+class CloudLoginDTO(_DTO):
+    """A cloud login's state (brindle.cloud_login.status): ``valid`` now,
+    ``expires_at`` (epoch seconds, None when unknown), ``expired`` when only
+    ``renew_command`` (the person) can renew it."""
+    valid: bool
+    expired: bool
+    expires_at: float | None = None
+    renew_command: str = ""
+    note: str = ""
+
+
+class ProviderChoiceDTO(_DTO):
+    """The person's saved choice (PUT /providers/{p}/connection)."""
+    method: str
+    cloud: str | None = None
+    settings: dict[str, str] = {}
+
+
+class ConnectionReadyDTO(_DTO):
+    """Whether an agent of the provider would launch with its method now
+    (connections.ready); if not, ``reason`` and the ``action`` the app can
+    offer: install | sign_in | sign_out | renew | set_key."""
+    ok: bool
+    reason: str | None = None
+    action: Literal["install", "sign_in", "sign_out", "renew", "set_key"] | None = None
+
+
+class StoppedAgentDTO(_DTO):
+    """An agent stopped because the provider's credentials were refused (failed_why auth)."""
+    id: str
+    name: str
+    profile: str
+
+
+class ProviderConnectionDTO(_DTO):
+    """How a provider connects now: ``method`` auto | sign_in | api_key |
+    cloud | org (the org decides, with no cloud route here), and for cloud the
+    route (``cloud``: bedrock, vertex, foundry, azure), its non-secret
+    ``settings`` (variable -> value) and the ``login`` it uses. An org's route
+    wins over ``choice``, the person's saved choice; ``managed`` says why.
+    ``clouds``: the routes the person can choose for this provider.
+    ``blocked_by`` "codex_login": Codex's ChatGPT login keeps an API key from
+    being used until POST /providers/codex/sign-out."""
+    provider: str
+    method: str
+    choice: ProviderChoiceDTO | None = None
+    cloud: str | None = None
+    settings: dict[str, str] = {}
+    login: CloudLoginDTO | None = None
+    managed: str | None = None
+    clouds: list[str] = []
+    ready: ConnectionReadyDTO
+    blocked_by: Literal["codex_login"] | None = None
+    stopped_agents: list[StoppedAgentDTO] = []
+
+
+class AwsProfileDTO(_DTO):
+    name: str
+    sso: bool
+    region: str | None = None
+
+
+class GcloudOptionsDTO(_DTO):
+    adc: bool
+    project: str | None = None
+    region: str | None = None
+
+
+class AzureOptionsDTO(_DTO):
+    tenant_id: str
+    subscription_id: str | None = None
+    subscription_name: str | None = None
+
+
+class CloudOptionsDTO(_DTO):
+    """What this machine's cloud CLIs are set up with, read from their files
+    (never a secret): AWS profiles, gcloud's application-default login and
+    default project, the Azure CLI's signed-in tenant (None when signed out),
+    and the usual ``regions`` per route."""
+    aws_profiles: list[AwsProfileDTO]
+    gcloud: GcloudOptionsDTO
+    azure: AzureOptionsDTO | None = None
+    regions: dict[str, list[str]] = {}
+
+
+# -- permissions (brindle.permissions, brindle.permission_grants) ------------------------------
+
+
+class PermissionLimitsDTO(_DTO):
+    """An ask rule's limits on saved approvals: how far (``max_scope``, a
+    LEVELS entry for pushes or a pattern) and how long (``life`` session |
+    time | forever, with ``minutes`` for time)."""
+    max_scope: str | None = None
+    life: str | None = None
+    minutes: float | None = None
+
+
+class PermissionExceptionDTO(_DTO):
+    """Requests a rule doesn't apply to (a deny's exception): matched like a rule."""
+    kind: str
+    match: str
+    match_type: str
+    describe: str
+
+
+class PermissionRuleDTO(_DTO):
+    """One rule of the person's store (GET /permissions). ``decision`` allow |
+    deny | ask; ``source`` preset | user | learned; ``match_type`` exact |
+    prefix | glob or a named matcher (permissions.BUILTIN_MATCHERS; a
+    ``push`` rule's match is "<source> → <destination>"). ``repo_root``: the
+    one repo it applies in (None: every repo). ``prompts``: asks it caused
+    in the last day."""
+    id: str
+    kind: str
+    match: str
+    match_type: str
+    decision: str
+    source: str
+    describe: str
+    created: float = 0.0
+    label: str = ""
+    limits: PermissionLimitsDTO | None = None
+    expires: float | None = None
+    expired: bool = False
+    exclusions: list[PermissionExceptionDTO] = []
+    repo_root: str | None = None
+    prompts: int = 0
+
+
+class PermissionPresetDTO(_DTO):
+    name: str                # autonomous | permissive | standard | secure
+    description: str
+    unmatched: str           # what the preset does with a request no rule covers
+    current: bool
+
+
+class SavedActionDTO(_DTO):
+    """A decision saved from the Inbox (permissions.SavedAction). ``kind``: a
+    permissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,
+    general, repository, ...) and ``pattern`` what it covers; ``request`` the
+    exact request it was saved from; ``life`` session | time | forever."""
+    id: str
+    kind: str
+    pattern: str
+    decision: str            # allow | deny
+    scope: str
+    level: str | None = None
+    request: dict[str, Any] = {}
+    life: str = "forever"
+    minutes: float | None = None
+    expires: float | None = None
+    expired: bool = False
+    session: str | None = None
+    repo: str | None = None
+    created: float = 0.0
+    note: str = ""
+
+
+class PermissionGroupDTO(_DTO):
+    """A capability group (brindle.permission_groups): what it answers for a
+    request no rule covers, unless one of its subcategories says otherwise."""
+    name: str                # files | shell | git | network | mcp
+    baseline: str            # allow | ask | deny
+    subcategories: dict[str, str] = {}   # subcategory -> inherit | allow | ask | deny
+
+
+class PermissionPolicyDTO(_DTO):
+    """GET /permissions: the chosen preset, the unmatched setting, every rule
+    (editable, the preset's included), the saved actions, per-rule prompt
+    counts ("unmatched" for asks no rule caused) and the capability groups."""
+    preset: str | None
+    unmatched: str
+    presets: list[PermissionPresetDTO]
+    rules: list[PermissionRuleDTO]
+    saved: list[SavedActionDTO]
+    prompt_counts: dict[str, int] = {}
+    groups: list[PermissionGroupDTO] = []
+    # What the person's org sets over all of it (locked rows; GET /permissions?repo=).
+    org_controls: list[OrgControlViewDTO] = []
+
+
+class AskScopeDTO(_DTO):
+    """One rung of an ask's scope ladder: ``value`` exact | general |
+    repository | remote | server | all, ``pattern`` what a grant of it covers."""
+    value: str
+    pattern: str
+    label: str
+    level: str | None = None
+
+
+class AskResultDTO(_DTO):
+    agent_id: str
+    request_id: str
+    exact: str
+    why: str | None = None
+
+
+class AskDTO(_DTO):
+    """One pending request, generalized. ``blocked``: a deny rule covers it
+    (its ``rule``); else ``rule`` is the ask rule that asked, with its
+    ``limits`` (None: no rule covers it, and unmatched actions ask)."""
+    agent_id: str
+    root_id: str
+    request_id: str
+    digest: str
+    repo: str
+    kind: str
+    tool: str
+    exact: str
+    summary: str
+    waiting_since: float
+    worker: str = ""
+    blocked: bool = False
+    rule: str | None = None
+    limits: PermissionLimitsDTO | None = None
+    reason: str = ""
+    # Why the worker's supervisor, which had it first, left it to the person
+    # ("Supervisor escalated: ...", "Supervisor didn't answer in 2 min"); "" when it never had it.
+    escalation: str = ""
+
+
+class OrgControlViewDTO(_DTO):
+    """An org control as a member sees it (permission_grants.org_control_view):
+    the org's name, what it covers in plain words, Block (deny) or Ask, and why."""
+    name: str
+    what: str
+    decision: str = "ask"
+    reason: str = ""
+
+
+class AskGroupDTO(_DTO):
+    """GET /permissions/asks: one Inbox item per repo, kind and general form,
+    generalized from its oldest request. ``policy``: the tightest limits
+    among its requests (a deny blocks the whole item). ``modes``: what
+    POST /permissions/asks/decide accepts for it. ``org``: the org control
+    that asks for (or blocks) it, when one does."""
+    key: str
+    repo: str
+    kind: str
+    title: str
+    general: AskScopeDTO
+    scopes: list[AskScopeDTO]
+    items: list[AskDTO]
+    blocked: bool = False
+    rule: str | None = None
+    limits: PermissionLimitsDTO | None = None
+    modes: list[str] = []
+    org: OrgControlViewDTO | None = None
+
+
+class AskDecisionDTO(_DTO):
+    """POST /permissions/asks/decide: what one decision did."""
+    mode: str
+    scope: AskScopeDTO
+    grant: SavedActionDTO | None = None
+    resumed: list[AskResultDTO] = []
+    stopped: list[AskResultDTO] = []
+    skipped: list[AskResultDTO] = []
+    failed: list[AskResultDTO] = []
+
+
+class AllowAllGrantDTO(_DTO):
+    group: str
+    kind: str
+    scope: AskScopeDTO
+    mode: str
+    minutes: float | None = None
+    requests: list[str] = []
+
+
+class AllowAllPlanDTO(_DTO):
+    """GET /permissions/asks/plan (what allowing everything waiting would
+    grant) and the result of POST /permissions/asks/allow-all and
+    /unblock (``saved``, ``resumed``, ``failed`` filled in; ``excepted``,
+    ``added``, ``locked`` for unblock)."""
+    grants: list[AllowAllGrantDTO]
+    resumes: int
+    skipped: list[AskResultDTO] = []
+    saved: list[SavedActionDTO] = []
+    resumed: list[AskResultDTO] = []
+    failed: list[AskResultDTO] = []
+    excepted: int | None = None
+    added: int | None = None
+    locked: list[AskResultDTO] = []

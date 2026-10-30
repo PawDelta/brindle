@@ -5,6 +5,7 @@
    `tauriSocket` carry the path to the shell, which adds the real ones. */
 
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { DaemonClient } from "./client";
 import type { WebSocketFactory, WebSocketLike } from "./events";
 
@@ -139,6 +140,83 @@ export interface AppUpdater {
 
 export const appUpdater: AppUpdater = {
   install: () => invoke<string | null>("app_update_install"),
+  restart: () => invoke<void>("app_restart"),
+};
+
+/* App updates as the shell has them (src-tauri/src/updates.rs UpdateStatus):
+   this build's version; whether it installs updates by itself (a release;
+   not an rc or a staff build); an update installed and waiting for the
+   restart; the version this launch was updated to, until dismissed; when
+   this machine last checked (seconds since the epoch); a check under way. */
+export interface AppUpdateStatus {
+  version: string;
+  automatic: boolean;
+  pending: string | null;
+  updated: string | null;
+  last_checked: number | null;
+  checking: boolean;
+}
+
+/* The shell's own updates, for the Inbox and Settings' About: `status` now,
+   `check` (Check now: check and install, answering the status after),
+   `restart` into an installed update, `dismiss` "Updated to brindle X", and
+   `watch` each change the shell announces (an install in the background),
+   resolving once it listens, to a function that stops watching. */
+export interface AppUpdates {
+  status: () => Promise<AppUpdateStatus>;
+  check: () => Promise<AppUpdateStatus>;
+  restart: () => Promise<void>;
+  dismiss: () => Promise<void>;
+  watch: (on: (status: AppUpdateStatus) => void) => Promise<() => void>;
+}
+
+export const appUpdates: AppUpdates = {
+  status: () => invoke<AppUpdateStatus>("app_update_status"),
+  check: () => invoke<AppUpdateStatus>("app_update_check"),
+  restart: () => invoke<void>("app_restart"),
+  dismiss: () => invoke<void>("app_update_dismiss"),
+  watch: (on) => listen<AppUpdateStatus>("app-update", (e) => on(e.payload)),
+};
+
+/* What's new in brindle `version`: its release notes on the site. */
+export const releaseNotesUrl = (version: string) => `https://pawdelta.com/brindle/changelog/#${encodeURIComponent(version)}`;
+
+/* How the shell's release-branch install goes (src-tauri/src/updates.rs
+   ReleaseProgress): the build found, the bytes downloaded so far (of
+   `total`, when known), installing. */
+export type ReleaseProgress =
+  | { kind: "found"; version: string }
+  | { kind: "downloading"; downloaded: number; total: number | null }
+  | { kind: "installing" };
+
+/* Settings' staff-only "Install latest release-branch build"
+   (app_release_build_install, src-tauri/src/updates.rs): `install` installs
+   the release/desktop pipeline's latest build, telling `progress` how it
+   goes, and answers its version, or null when this build is it already or
+   newer; `restart` starts the app again on it. The shell picks the feed and
+   checks staff itself; nothing here names a URL. */
+export interface ReleaseBuildUpdater {
+  install: (progress: (p: ReleaseProgress) => void) => Promise<string | null>;
+  restart: () => Promise<void>;
+  /* Staff on a release-branch build: install the stable feed's build over it
+     (app_return_to_stable), checked against the production key; same answers. */
+  /* The stable version it would install (app_stable_check), or null when
+     there is none to return to; the person confirms that version, and the
+     install (app_return_to_stable) refuses if the feed now names another. */
+  checkStable: () => Promise<string | null>;
+  returnToStable: (progress: (p: ReleaseProgress) => void, version: string) => Promise<string | null>;
+}
+
+function release(cmd: string, progress: (p: ReleaseProgress) => void, args: Record<string, unknown> = {}) {
+  const onProgress = new Channel<ReleaseProgress>();
+  onProgress.onmessage = progress;
+  return invoke<string | null>(cmd, { onProgress, ...args });
+}
+
+export const releaseBuildUpdater: ReleaseBuildUpdater = {
+  install: (progress) => release("app_release_build_install", progress),
+  checkStable: () => invoke<string | null>("app_stable_check"),
+  returnToStable: (progress, version) => release("app_return_to_stable", progress, { version }),
   restart: () => invoke<void>("app_restart"),
 };
 

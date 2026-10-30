@@ -23,9 +23,12 @@ class RoutingPolicy:
     managed: managed_models.Managed | None
     repo_root: str
     _runs: dict = field(default_factory=dict)
+    user_library: bool = False      # profile names are the person's, never the repo's own
 
     @classmethod
-    def load(cls, repo_root: str) -> RoutingPolicy:
+    def load(cls, repo_root: str, *, user_library: bool = False) -> RoutingPolicy:
+        """The policy for ``repo_root``; ``user_library``: judging the
+        person's own profiles (scope "user"), under the same policy."""
         acc = team_policy.access(repo_root)
         managed = None
         if acc.org_id is not None and acc.error is None:
@@ -33,7 +36,7 @@ class RoutingPolicy:
                 managed = managed_models.current(repo_root)
             except managed_models.ManagedUnavailable as e:
                 acc = team_policy.Access(org_id=acc.org_id, error=str(e))
-        return cls(acc, managed, repo_root)
+        return cls(acc, managed, repo_root, user_library=user_library)
 
     @property
     def applies(self) -> bool:
@@ -44,7 +47,7 @@ class RoutingPolicy:
         if profile not in self._runs:
             from brindle.policy import _profile_fields
 
-            self._runs[profile] = _profile_fields(profile, self.repo_root)
+            self._runs[profile] = _profile_fields(profile, self.repo_root, user_library=self.user_library)
         return self._runs[profile]
 
     def runs(self, profile: str) -> tuple[str | None, str | None]:

@@ -10,17 +10,49 @@ export interface ApiSchema {
   AccountOrgDTO: AccountOrgDTO;
   ActionTerminalDTO: ActionTerminalDTO;
   AgentDTO: AgentDTO;
+  AllowAllGrantDTO: AllowAllGrantDTO;
+  AllowAllPlanDTO: AllowAllPlanDTO;
+  AskDTO: AskDTO;
+  AskDecisionDTO: AskDecisionDTO;
+  AskGroupDTO: AskGroupDTO;
+  AskResultDTO: AskResultDTO;
+  AskScopeDTO: AskScopeDTO;
+  AwsProfileDTO: AwsProfileDTO;
+  AzureOptionsDTO: AzureOptionsDTO;
+  CloudLoginDTO: CloudLoginDTO;
+  CloudOptionsDTO: CloudOptionsDTO;
+  ConnectionReadyDTO: ConnectionReadyDTO;
   DecisionDTO: DecisionDTO;
+  GcloudOptionsDTO: GcloudOptionsDTO;
   GoalDTO: GoalDTO;
   InboxActionDTO: InboxActionDTO;
   InboxItemDTO: InboxItemDTO;
   MilestoneDTO: MilestoneDTO;
   NativeSubagentDTO: NativeSubagentDTO;
+  OrgApprovalPolicyDTO: OrgApprovalPolicyDTO;
+  OrgAssignmentDTO: OrgAssignmentDTO;
+  OrgAssignmentRequestDTO: OrgAssignmentRequestDTO;
+  OrgControlDTO: OrgControlDTO;
+  OrgControlViewDTO: OrgControlViewDTO;
+  OrgGrantPolicyDTO: OrgGrantPolicyDTO;
+  OrgIdentityDTO: OrgIdentityDTO;
+  OrgMemberDTO: OrgMemberDTO;
+  OrgPermissionsDTO: OrgPermissionsDTO;
+  OrgPolicyRequestDTO: OrgPolicyRequestDTO;
+  OrgRoleDTO: OrgRoleDTO;
   PermissionChoiceDTO: PermissionChoiceDTO;
   PermissionDTO: PermissionDTO;
+  PermissionExceptionDTO: PermissionExceptionDTO;
+  PermissionGroupDTO: PermissionGroupDTO;
+  PermissionLimitsDTO: PermissionLimitsDTO;
+  PermissionPolicyDTO: PermissionPolicyDTO;
+  PermissionPresetDTO: PermissionPresetDTO;
+  PermissionRuleDTO: PermissionRuleDTO;
   PreflightActionDTO: PreflightActionDTO;
   PreflightItemDTO: PreflightItemDTO;
   ProfileDTO: ProfileDTO;
+  ProviderChoiceDTO: ProviderChoiceDTO;
+  ProviderConnectionDTO: ProviderConnectionDTO;
   RoutingDTO: RoutingDTO;
   RoutingKindDTO: RoutingKindDTO;
   RoutingLockDTO: RoutingLockDTO;
@@ -30,7 +62,9 @@ export interface ApiSchema {
   RoutingTierDTO: RoutingTierDTO;
   RoutingTierModelDTO: RoutingTierModelDTO;
   RuleDTO: RuleDTO;
+  SavedActionDTO: SavedActionDTO;
   SessionDTO: SessionDTO;
+  StoppedAgentDTO: StoppedAgentDTO;
   WorkspaceDTO: WorkspaceDTO;
 }
 /**
@@ -38,6 +72,7 @@ export interface ApiSchema {
  * via the `definition` "AccountDTO".
  */
 export interface AccountDTO {
+  email?: string | null;
   name?: string | null;
   orgs?: AccountOrgDTO[];
   plan?: string | null;
@@ -103,6 +138,252 @@ export interface NativeSubagentDTO {
   ended_at?: number | null;
   id: string;
   started_at: number;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AllowAllGrantDTO".
+ */
+export interface AllowAllGrantDTO {
+  group: string;
+  kind: string;
+  minutes?: number | null;
+  mode: string;
+  requests?: string[];
+  scope: AskScopeDTO;
+}
+/**
+ * One rung of an ask's scope ladder: ``value`` exact | general |
+ * repository | remote | server | all, ``pattern`` what a grant of it covers.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AskScopeDTO".
+ */
+export interface AskScopeDTO {
+  label: string;
+  level?: string | null;
+  pattern: string;
+  value: string;
+}
+/**
+ * GET /permissions/asks/plan (what allowing everything waiting would
+ * grant) and the result of POST /permissions/asks/allow-all and
+ * /unblock (``saved``, ``resumed``, ``failed`` filled in; ``excepted``,
+ * ``added``, ``locked`` for unblock).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AllowAllPlanDTO".
+ */
+export interface AllowAllPlanDTO {
+  added?: number | null;
+  excepted?: number | null;
+  failed?: AskResultDTO[];
+  grants: AllowAllGrantDTO[];
+  locked?: AskResultDTO[];
+  resumed?: AskResultDTO[];
+  resumes: number;
+  saved?: SavedActionDTO[];
+  skipped?: AskResultDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AskResultDTO".
+ */
+export interface AskResultDTO {
+  agent_id: string;
+  exact: string;
+  request_id: string;
+  why?: string | null;
+}
+/**
+ * A decision saved from the Inbox (permissions.SavedAction). ``kind``: a
+ * permissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,
+ * general, repository, ...) and ``pattern`` what it covers; ``request`` the
+ * exact request it was saved from; ``life`` session | time | forever.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "SavedActionDTO".
+ */
+export interface SavedActionDTO {
+  created?: number;
+  decision: string;
+  expired?: boolean;
+  expires?: number | null;
+  id: string;
+  kind: string;
+  level?: string | null;
+  life?: string;
+  minutes?: number | null;
+  note?: string;
+  pattern: string;
+  repo?: string | null;
+  request?: {
+    [k: string]: unknown;
+  };
+  scope: string;
+  session?: string | null;
+}
+/**
+ * One pending request, generalized. ``blocked``: a deny rule covers it
+ * (its ``rule``); else ``rule`` is the ask rule that asked, with its
+ * ``limits`` (None: no rule covers it, and unmatched actions ask).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AskDTO".
+ */
+export interface AskDTO {
+  agent_id: string;
+  blocked?: boolean;
+  digest: string;
+  escalation?: string;
+  exact: string;
+  kind: string;
+  limits?: PermissionLimitsDTO | null;
+  reason?: string;
+  repo: string;
+  request_id: string;
+  root_id: string;
+  rule?: string | null;
+  summary: string;
+  tool: string;
+  waiting_since: number;
+  worker?: string;
+}
+/**
+ * An ask rule's limits on saved approvals: how far (``max_scope``, a
+ * LEVELS entry for pushes or a pattern) and how long (``life`` session |
+ * time | forever, with ``minutes`` for time).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionLimitsDTO".
+ */
+export interface PermissionLimitsDTO {
+  life?: string | null;
+  max_scope?: string | null;
+  minutes?: number | null;
+}
+/**
+ * POST /permissions/asks/decide: what one decision did.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AskDecisionDTO".
+ */
+export interface AskDecisionDTO {
+  failed?: AskResultDTO[];
+  grant?: SavedActionDTO | null;
+  mode: string;
+  resumed?: AskResultDTO[];
+  scope: AskScopeDTO;
+  skipped?: AskResultDTO[];
+  stopped?: AskResultDTO[];
+}
+/**
+ * GET /permissions/asks: one Inbox item per repo, kind and general form,
+ * generalized from its oldest request. ``policy``: the tightest limits
+ * among its requests (a deny blocks the whole item). ``modes``: what
+ * POST /permissions/asks/decide accepts for it. ``org``: the org control
+ * that asks for (or blocks) it, when one does.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AskGroupDTO".
+ */
+export interface AskGroupDTO {
+  blocked?: boolean;
+  general: AskScopeDTO;
+  items: AskDTO[];
+  key: string;
+  kind: string;
+  limits?: PermissionLimitsDTO | null;
+  modes?: string[];
+  org?: OrgControlViewDTO | null;
+  repo: string;
+  rule?: string | null;
+  scopes: AskScopeDTO[];
+  title: string;
+}
+/**
+ * An org control as a member sees it (permission_grants.org_control_view):
+ * the org's name, what it covers in plain words, Block (deny) or Ask, and why.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgControlViewDTO".
+ */
+export interface OrgControlViewDTO {
+  decision?: string;
+  name: string;
+  reason?: string;
+  what: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AwsProfileDTO".
+ */
+export interface AwsProfileDTO {
+  name: string;
+  region?: string | null;
+  sso: boolean;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AzureOptionsDTO".
+ */
+export interface AzureOptionsDTO {
+  subscription_id?: string | null;
+  subscription_name?: string | null;
+  tenant_id: string;
+}
+/**
+ * A cloud login's state (brindle.cloud_login.status): ``valid`` now,
+ * ``expires_at`` (epoch seconds, None when unknown), ``expired`` when only
+ * ``renew_command`` (the person) can renew it.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "CloudLoginDTO".
+ */
+export interface CloudLoginDTO {
+  expired: boolean;
+  expires_at?: number | null;
+  note?: string;
+  renew_command?: string;
+  valid: boolean;
+}
+/**
+ * What this machine's cloud CLIs are set up with, read from their files
+ * (never a secret): AWS profiles, gcloud's application-default login and
+ * default project, the Azure CLI's signed-in tenant (None when signed out),
+ * and the usual ``regions`` per route.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "CloudOptionsDTO".
+ */
+export interface CloudOptionsDTO {
+  aws_profiles: AwsProfileDTO[];
+  azure?: AzureOptionsDTO | null;
+  gcloud: GcloudOptionsDTO;
+  regions?: {
+    [k: string]: string[];
+  };
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "GcloudOptionsDTO".
+ */
+export interface GcloudOptionsDTO {
+  adc: boolean;
+  project?: string | null;
+  region?: string | null;
+}
+/**
+ * Whether an agent of the provider would launch with its method now
+ * (connections.ready); if not, ``reason`` and the ``action`` the app can
+ * offer: install | sign_in | sign_out | renew | set_key.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ConnectionReadyDTO".
+ */
+export interface ConnectionReadyDTO {
+  action?: ("install" | "sign_in" | "sign_out" | "renew" | "set_key") | null;
+  ok: boolean;
+  reason?: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -222,6 +503,208 @@ export interface PermissionChoiceDTO {
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgApprovalPolicyDTO".
+ */
+export interface OrgApprovalPolicyDTO {
+  permission_grants: OrgGrantPolicyDTO | null;
+  roles: {
+    [k: string]: OrgGrantPolicyDTO | null;
+  };
+  version: number;
+}
+/**
+ * Account GrantPolicy (account-api 8fd09374); a complete replacement block.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgGrantPolicyDTO".
+ */
+export interface OrgGrantPolicyDTO {
+  allow: boolean;
+  allow_persistent?: boolean;
+  controls?: OrgControlDTO[];
+  deny?: string[];
+  kinds: ("read" | "write" | "edit" | "bash" | "fetch" | "mcp" | "other")[];
+  lifetimes?: ("session" | "time" | "forever")[];
+  max_minutes: number;
+  max_uses: number;
+  org_name?: string;
+  overridable: ("git-push" | "env")[];
+  scopes?: ("branch" | "remote" | "repo" | "all")[];
+}
+/**
+ * team_policy.OrgControl: Block (deny) or Ask for one grouping
+ * (permission_grants.ORG_GROUPINGS) or one pattern ("<kind> <match_type> <match>").
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgControlDTO".
+ */
+export interface OrgControlDTO {
+  decision: "deny" | "ask";
+  group?: string | null;
+  reason?: string;
+  rule?: string | null;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgAssignmentDTO".
+ */
+export interface OrgAssignmentDTO {
+  org_id: string;
+  role: string;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgAssignmentRequestDTO".
+ */
+export interface OrgAssignmentRequestDTO {
+  actor_sub: string;
+  org_id: string;
+  role: string;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgIdentityDTO".
+ */
+export interface OrgIdentityDTO {
+  org_id: string;
+  policy_role: string | null;
+  role: string | null;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgMemberDTO".
+ */
+export interface OrgMemberDTO {
+  email: string;
+  policy_role?: string | null;
+  role: string;
+  sub: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgPermissionsDTO".
+ */
+export interface OrgPermissionsDTO {
+  can_edit_policy: boolean;
+  identity: OrgIdentityDTO;
+  inventory_error?: string | null;
+  members: OrgMemberDTO[];
+  policy: OrgApprovalPolicyDTO;
+  policy_readonly_reason: string | null;
+  roles: OrgRoleDTO[];
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgRoleDTO".
+ */
+export interface OrgRoleDTO {
+  builtin: boolean;
+  holders?: string[];
+  name: string;
+  okta_group?: string | null;
+  permissions: string[];
+  team_weight?: number;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "OrgPolicyRequestDTO".
+ */
+export interface OrgPolicyRequestDTO {
+  actor_sub: string;
+  if_version: number;
+  org_id: string;
+  permission_grants: OrgGrantPolicyDTO | null;
+  role: string | null;
+}
+/**
+ * Requests a rule doesn't apply to (a deny's exception): matched like a rule.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionExceptionDTO".
+ */
+export interface PermissionExceptionDTO {
+  describe: string;
+  kind: string;
+  match: string;
+  match_type: string;
+}
+/**
+ * A capability group (brindle.permission_groups): what it answers for a
+ * request no rule covers, unless one of its subcategories says otherwise.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionGroupDTO".
+ */
+export interface PermissionGroupDTO {
+  baseline: string;
+  name: string;
+  subcategories?: {
+    [k: string]: string;
+  };
+}
+/**
+ * GET /permissions: the chosen preset, the unmatched setting, every rule
+ * (editable, the preset's included), the saved actions, per-rule prompt
+ * counts ("unmatched" for asks no rule caused) and the capability groups.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionPolicyDTO".
+ */
+export interface PermissionPolicyDTO {
+  groups?: PermissionGroupDTO[];
+  org_controls?: OrgControlViewDTO[];
+  preset: string | null;
+  presets: PermissionPresetDTO[];
+  prompt_counts?: {
+    [k: string]: number;
+  };
+  rules: PermissionRuleDTO[];
+  saved: SavedActionDTO[];
+  unmatched: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionPresetDTO".
+ */
+export interface PermissionPresetDTO {
+  current: boolean;
+  description: string;
+  name: string;
+  unmatched: string;
+}
+/**
+ * One rule of the person's store (GET /permissions). ``decision`` allow |
+ * deny | ask; ``source`` preset | user | learned; ``match_type`` exact |
+ * prefix | glob or a named matcher (permissions.BUILTIN_MATCHERS; a
+ * ``push`` rule's match is "<source> → <destination>"). ``repo_root``: the
+ * one repo it applies in (None: every repo). ``prompts``: asks it caused
+ * in the last day.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PermissionRuleDTO".
+ */
+export interface PermissionRuleDTO {
+  created?: number;
+  decision: string;
+  describe: string;
+  exclusions?: PermissionExceptionDTO[];
+  expired?: boolean;
+  expires?: number | null;
+  id: string;
+  kind: string;
+  label?: string;
+  limits?: PermissionLimitsDTO | null;
+  match: string;
+  match_type: string;
+  prompts?: number;
+  repo_root?: string | null;
+  source: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PreflightActionDTO".
  */
 export interface PreflightActionDTO {
@@ -263,6 +746,58 @@ export interface ProfileDTO {
   name: string;
   permission_mode?: string | null;
   provider: string;
+}
+/**
+ * The person's saved choice (PUT /providers/{p}/connection).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ProviderChoiceDTO".
+ */
+export interface ProviderChoiceDTO {
+  cloud?: string | null;
+  method: string;
+  settings?: {
+    [k: string]: string;
+  };
+}
+/**
+ * How a provider connects now: ``method`` auto | sign_in | api_key |
+ * cloud | org (the org decides, with no cloud route here), and for cloud the
+ * route (``cloud``: bedrock, vertex, foundry, azure), its non-secret
+ * ``settings`` (variable -> value) and the ``login`` it uses. An org's route
+ * wins over ``choice``, the person's saved choice; ``managed`` says why.
+ * ``clouds``: the routes the person can choose for this provider.
+ * ``blocked_by`` "codex_login": Codex's ChatGPT login keeps an API key from
+ * being used until POST /providers/codex/sign-out.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "ProviderConnectionDTO".
+ */
+export interface ProviderConnectionDTO {
+  blocked_by?: "codex_login" | null;
+  choice?: ProviderChoiceDTO | null;
+  cloud?: string | null;
+  clouds?: string[];
+  login?: CloudLoginDTO | null;
+  managed?: string | null;
+  method: string;
+  provider: string;
+  ready: ConnectionReadyDTO;
+  settings?: {
+    [k: string]: string;
+  };
+  stopped_agents?: StoppedAgentDTO[];
+}
+/**
+ * An agent stopped because the provider's credentials were refused (failed_why auth).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "StoppedAgentDTO".
+ */
+export interface StoppedAgentDTO {
+  id: string;
+  name: string;
+  profile: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -420,6 +955,7 @@ export interface SessionDTO {
   goal?: string | null;
   id: string;
   mode: string;
+  name?: string | null;
   profile: string;
   status: string;
   status_since?: number | null;

@@ -21,10 +21,10 @@
    provider session on the supervisor; clicking an agent opens the session
    on that agent. Keys, as in the CLI: ↑ ↓ (or j k) move, Enter opens, ⌘1-9
    jump to a session, ⌘N starts one. Knowledge, Agents,
-   Settings and Account as small links at the foot, on one line, with the
-   engine connection and the theme switch under them, and between those two,
-   only while a provider is near its limit, a few warm words that open
-   Account › Usage (design/usage/A4), and beside them only while a provider
+   and Settings as small links at the foot, on one line with an initials
+   button that opens Account and the terminal switch. Theme choices live
+   in Settings. Above the row,
+   the most-used weekly allowance opens Account › Usage; beside it, while a provider
    has a problem (signed out, an install failed), a few more that open
    Settings › Providers (design/connect/); no providers block anywhere else
    in the sidebar. There is no right-hand panel: this is
@@ -32,19 +32,20 @@
    as the accent (styles.css .side-*). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
-import type { DaemonClient } from "../api/client";
+import type { DaemonClient, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
 import type { OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
 import { readLastSession, routeSession, sameRoute, type Route, type SessionRef } from "../routes";
+import { pruneShown, seenKey } from "../screens/Inbox/items";
 import { goalPhase, useGoal } from "../screens/Session/GoalPanel";
 import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
+import { waitingCount } from "../store/appUpdates";
 import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
-import { nearReading, nowSeconds } from "../screens/Account/usage";
+import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
-import type { AppState } from "../store/store";
 import { providerProblems, type ProviderProblem } from "../api/providers";
 import { useProviders } from "../store/providers";
 import { useUsage } from "../store/usage";
@@ -53,7 +54,6 @@ import Logo from "./Logo";
 import { Preflight } from "./Preflight";
 import { SessionContext } from "./SessionContext";
 import { TerminalToggle } from "./TerminalPanel";
-import { ThemeToggle } from "./ThemeToggle";
 
 export interface SidebarProps {
   route: Route;
@@ -64,59 +64,83 @@ export interface SidebarProps {
   openUrl?: OpenUrl;
 }
 
-const CONNECTION: Record<AppState["connection"], { label: string; dot: string }> = {
-  idle: { label: "no engine", dot: "bg-ink-3" },
-  connecting: { label: "connecting…", dot: "bg-fawn" },
-  open: { label: "connected", dot: "bg-pass" },
-  closed: { label: "reconnecting…", dot: "bg-sap" },
-  unauthorized: { label: "token refused", dot: "bg-sap" },
-};
+const weeklyWindow = (provider: ProviderUsage) => (provider.known ? planWindows(provider).find((window) => window.minutes === 10080) : undefined);
 
-/* `brief`: the usage reading needs the room, so a connection that is
-   simply open says so with its dot alone (the words stay for a screen
-   reader); any other state keeps its words. */
-function ConnectionBadge({ brief = false }: { brief?: boolean }) {
-  const connection = useAppState((s) => s.connection);
-  const { label, dot } = CONNECTION[connection];
+function WeeklyMeter({ provider }: { provider: ProviderUsage }) {
+  const window = weeklyWindow(provider);
+  if (!window) return <span className="text-ink-3">—</span>;
   return (
-    <span className="flex flex-none items-center gap-1.5 text-[11.5px] text-ink-3" data-testid="connection">
-      <span className={`size-[7px] rounded-full ${dot}`} />
-      daemon<span className={brief && connection === "open" ? "sr-only" : ""}> · {label}</span>
+    <span className="inline-flex items-center gap-1 font-mono">
+      <span role="progressbar" aria-label={`${providerName(provider.provider)} weekly usage`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={window.used} className="flex h-[3px] w-8 overflow-hidden rounded-full bg-line">
+        <span className="h-full bg-current" style={{ width: `${Math.max(0, Math.min(100, window.used))}%` }} />
+      </span>
+      {Math.round(window.used)}%
     </span>
   );
 }
 
-/* The status line's reading while a provider is near its limit, or null. */
-function useNearReading() {
-  const { usage } = useUsage();
-  return usage ? nearReading(usage.near, nowSeconds()) : null;
-}
-
-/* A few warm words in the status line while a provider is near its limit
-   (design/usage/A4): the worst one in the fewest words, "Claude 88% ·
-   5:10pm" or "Antigravity limit · 7:18pm", "+N" in the line's dim colour
-   when others are near too, opening Account › Usage. Nothing otherwise.
-   While it is there the daemon's "· connected" gives way to it (as the
-   design's uptime does), and an over-long reading ends in an ellipsis
-   rather than wrapping. */
 /* Each click is its own request, so a second one with Account open scrolls back to Usage. */
 let usageAsks = 0;
-function UsageReading({ reading, navigate }: { reading: ReturnType<typeof useNearReading> } & Pick<SidebarProps, "navigate">) {
-  if (!reading) return null;
+function UsageReading({ provider, warning, navigate }: { provider?: ProviderUsage; warning: boolean } & Pick<SidebarProps, "navigate">) {
+  const window = provider && weeklyWindow(provider);
   return (
     <button
       type="button"
-      className="group ml-auto inline-flex min-w-0 flex-[0_1_auto] items-baseline gap-1 font-mono text-[10.5px] font-medium text-sap"
+      className={`inline-flex min-w-0 items-center gap-1 truncate font-mono text-[10.5px] hover:underline ${warning ? "text-sap" : "text-ink-3"}`}
       aria-label="Open Account › Usage"
       data-testid="usage-reading"
-      data-provider={reading.provider}
+      data-provider={provider?.provider}
       onClick={() => navigate({ screen: "account", section: "usage", ask: ++usageAsks })}
     >
-      <span className="min-w-0 overflow-hidden text-ellipsis group-hover:underline group-hover:underline-offset-2">{reading.text}</span>
-      {reading.more > 0 && (
-        <span className="flex-none font-normal text-ink-3" data-testid="usage-more">
-          +{reading.more}
-        </span>
+      {provider ? (
+        <>
+          <span>{providerName(provider.provider)}</span>
+          <WeeklyMeter provider={provider} />
+          {window?.resets_at != null && <span className="truncate">· resets {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</span>}
+        </>
+      ) : "Usage unavailable"}
+    </button>
+  );
+}
+
+function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
+  const client = useContext(DaemonContext);
+  const store = useStore();
+  const connection = useAppState((s) => s.connection);
+  const account = useAppState((s) => s.account);
+  useEffect(() => {
+    let current = true;
+    const previous = store.getState().account;
+    if (client && (connection === "open" || connection === "idle")) {
+      void client.account().then(
+        (next) => {
+          // An Account-page reload may have superseded this initial read.
+          if (current && store.getState().account === previous) store.dispatch({ type: "account", account: next });
+        },
+        () => undefined,
+      );
+    }
+    return () => { current = false; };
+  }, [client, connection, store]);
+  const name = account?.signed_in ? account.name?.trim() : "";
+  const email = account?.signed_in ? account.email?.trim() : "";
+  const initials = name
+    ? name.split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0]).join("").toUpperCase()
+    : email?.split("@")[0]?.slice(0, 1).toUpperCase();
+  return (
+    <button
+      type="button"
+      aria-label="Open Account"
+      aria-current={route.screen === "account" ? "page" : undefined}
+      title={account?.signed_in ? name || email || "Signed in" : "Sign in"}
+      className={`flex size-7 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] ${account?.signed_in ? "text-ink-2" : "text-ink-3"} hover:bg-surface-2`}
+      onClick={() => navigate({ screen: "account" })}
+    >
+      {initials || (
+        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="8" r="3.5" />
+          <path d="M5 21v-2a7 7 0 0 1 14 0v2" />
+        </svg>
       )}
     </button>
   );
@@ -151,8 +175,10 @@ function ProviderProblemLine({ problems, navigate }: { problems: ProviderProblem
   );
 }
 
-/* The mockup's rows: the keyboard's cursor, the repo heading, the foot's links. */
-const CURSOR = "ring-1 ring-inset ring-branch";
+/* The mockup's rows: the keyboard's cursor (a tone, not a box; the branch
+   ring comes back while the list has keyboard focus), the repo heading, the
+   foot's links. */
+const CURSOR = "bg-surface-2 in-focus-visible:ring-1 in-focus-visible:ring-inset in-focus-visible:ring-branch";
 const REPO_HEADING = "px-s1 pb-1 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3";
 const FOOT_LINK = "text-[11.5px] text-ink-3 hover:text-ink";
 
@@ -300,7 +326,7 @@ function RowClose({ root, done, onClose, list }: { root: string; done: boolean; 
       type="button"
       className={
         done
-          ? "mt-[4px] shrink-0 whitespace-nowrap rounded-full bg-pass-soft px-1.5 py-px text-[10.5px] font-medium text-pass hover:opacity-80"
+          ? "mt-[4px] shrink-0 whitespace-nowrap rounded-sm px-1.5 py-px text-[10.5px] font-medium text-ink-2 hover:text-ink"
           : "mt-[4px] w-[18px] shrink-0 rounded-sm text-center text-[12px] leading-none text-ink-3 opacity-0 hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
       }
       aria-label={done ? `Done: close session ${root}` : `Close session ${root}`}
@@ -363,7 +389,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
         >
           <Dot tone={busy > 0 ? "work" : "idle"} className="mt-[6px]" />
           <span className="min-w-0 flex-1">
-            <span className="line-clamp-2 text-[13px] leading-[1.35] text-ink">{session.goal || <span className="italic text-ink-3">No goal set</span>}</span>
+            <span className="line-clamp-2 text-[13px] leading-[1.35] text-ink">{session.name || session.goal || <span className="italic text-ink-3">No goal set</span>}</span>
             <span className="block truncate text-[11.5px] text-ink-3">
               <span className="font-mono text-[11px]">{root}</span> · {session.mode} · {agents} agent{agents === 1 ? "" : "s"}
               {busy > 0 && ` · ${busy} working`}
@@ -412,7 +438,7 @@ function ResumeButton({ client, root, repo, navigate, refresh }: { client: Daemo
     <>
       <button
         type="button"
-        className="mt-[4px] shrink-0 whitespace-nowrap rounded-full border border-line-strong px-1.5 py-px text-[10.5px] font-medium text-ink-2 hover:text-ink disabled:opacity-50"
+        className="mt-[4px] shrink-0 whitespace-nowrap rounded-sm border border-line-strong px-1.5 py-px text-[10.5px] font-medium text-ink-2 hover:text-ink disabled:opacity-50"
         title="Continue the session and open its chat"
         data-testid={`session-resume-${root}`}
         disabled={recovery.busy}
@@ -457,7 +483,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
       >
         <Dot tone={session.status === "failed" ? "fail" : "paused"} className="mt-[6px]" />
         <span className="min-w-0 flex-1">
-          <span className="block truncate text-[13px] leading-[1.35] text-ink-3">{session.goal || <span className="italic">No goal set</span>}</span>
+          <span className="block truncate text-[13px] leading-[1.35] text-ink-3">{session.name || session.goal || <span className="italic">No goal set</span>}</span>
           <span className="block truncate text-[11.5px] text-ink-3">
             <span className="font-mono text-[11px]">{root}</span> · {session.status}
             {age !== "just now" && ` ${age}`}
@@ -472,26 +498,38 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
 
 /* "Inbox · N" at the very top (design/options-v3/C2b-inbox-only): the one
    entry about what needs a person, everything else about attention being
-   the Inbox page's. "empty" when nothing waits. */
+   the Inbox page's. "empty" when nothing waits. The app's own update item
+   counts too (store/appUpdates.ts). */
 function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
-  const total = useAppState((s) => s.inbox.length);
+  const total = useAppState(waitingCount);
   const on = route.screen === "inbox";
+  // A count that rose since last drawn: the pill glows once (a new key restarts the animation).
+  // The sidebar is always there: an item that leaves the inbox while the page is closed is new when it returns.
+  const inbox = useAppState((s) => s.inbox);
+  const synced = useAppState((s) => s.synced);
+  useEffect(() => {
+    if (synced) pruneShown(inbox.map(seenKey));
+  }, [inbox, synced]);
+  const last = useRef(total);
+  const [pulse, setPulse] = useState(0);
+  useEffect(() => {
+    if (total > last.current) setPulse((p) => p + 1);
+    last.current = total;
+  }, [total]);
   return (
     <button
       type="button"
-      className={`mx-1 flex items-center gap-s1 rounded-[7px] border bg-surface px-[10px] py-[7px] text-left text-[12.5px] ${on ? "border-branch" : "border-line hover:border-line-strong"} ${total > 0 ? "font-semibold text-ink" : "font-medium text-ink-3"}`}
+      className={`mx-1 flex items-center gap-s1 rounded-md border border-transparent py-[7px] pl-2 pr-[10px] text-left text-[12.5px] ${on ? "bg-surface-2" : "hover:bg-surface-2"} ${total > 0 ? "font-semibold text-ink" : "font-medium text-ink-3"}`}
       aria-current={on ? "page" : undefined}
       data-testid="inbox-link"
       onClick={() => navigate({ screen: "inbox" })}
     >
       <span className="flex-1">Inbox</span>
       {total > 0 ? (
-        <span className="side-nb" data-testid="inbox-badge" aria-label={`${total} needing you`}>
+        <span key={pulse} className="side-nb" data-pulse={pulse > 0 || undefined} data-testid="inbox-badge" aria-label={`${total} needing you`}>
           {total}
         </span>
-      ) : (
-        <span className="font-mono text-[11.5px] font-medium text-ink-3">empty</span>
-      )}
+      ) : null}
     </button>
   );
 }
@@ -555,7 +593,9 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   const [pausedOpen, setPausedOpen] = useState(readPausedOpen);
   const list = useRef<HTMLElement>(null);
   const noRefresh = useCallback(() => Promise.resolve(), []);
-  const reading = useNearReading();
+  const { usage } = useUsage();
+  const mostUsed = usage?.providers.filter((provider) => weeklyWindow(provider)).sort((a, b) => weeklyWindow(b)!.used - weeklyWindow(a)!.used)[0];
+  const warning = !!mostUsed && (mostUsed.limited || planWindows(mostUsed).some((window) => window.used >= WARN));
   const { rows: providerRows, installs } = useProviders();
   const problems = useMemo(() => providerProblems(providerRows, installs), [providerRows, installs]);
 
@@ -671,7 +711,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
 
   let index = 0;
   return (
-    <aside className="side flex w-[352px] shrink-0 flex-col gap-[10px] border-r border-line bg-canvas-2px-[12px] pb-[12px] pt-[14px] text-[13px] text-ink" aria-label="Sidebar">
+    <aside className="side flex w-[352px] shrink-0 flex-col gap-[10px] border-r border-line bg-canvas-2 px-[12px] pb-[12px] pt-[14px] text-[13px] text-ink" aria-label="Sidebar">
       <div className="flex items-center gap-s1 px-1.5 pb-1">
         <Logo className="text-[17px]" />
         <span className="flex-1" />
@@ -710,9 +750,15 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
             if (here.length === 0 && rested.length === 0) return null;
             return (
               <div key={repo.repo_root} className="flex flex-col" data-testid={`repo-${repo.name}`}>
-                <div className={`${REPO_HEADING} truncate`} title={repo.repo_root}>
+                <button
+                  type="button"
+                  className={`${REPO_HEADING} truncate text-left hover:text-ink`}
+                  title={`${repo.repo_root}: project settings`}
+                  aria-label={`Project settings for ${repo.name}`}
+                  onClick={() => navigate({ screen: "project-settings", repo: repo.repo_root })}
+                >
                   {repo.name}
-                </div>
+                </button>
                 <ul className="flex flex-col gap-px">
                   {here.map(({ session }) => (
                     <SessionRows
@@ -759,23 +805,20 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         )}
         {repos && repos.length > 0 && live.length === 0 && <p className="px-s1 text-xs text-ink-3">Nothing running. Start a session, or continue a recent one.</p>}
       </nav>
-      <nav aria-label="Pages" className="flex flex-nowrap items-center gap-x-[10px] whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="pages">
-        {page({ screen: "knowledge" }, "Knowledge")}
-        {page({ screen: "agents" }, "Agents")}
-        {page({ screen: "settings" }, "Settings")}
-        {page({ screen: "account" }, "Account")}
-      </nav>
-      <div className="flex items-center justify-between gap-[10px] whitespace-nowrap px-s1 pt-0.5" data-testid="status-line">
-        <ConnectionBadge brief={reading !== null || problems.length > 0} />
-        {(problems.length > 0 || reading) && (
-          <span className="ml-auto flex min-w-0 flex-[0_1_auto] items-baseline gap-[10px]">
-            <ProviderProblemLine problems={problems} navigate={navigate} />
-            <UsageReading reading={reading} navigate={navigate} />
-          </span>
-        )}
-        <TerminalToggle />
-        <ThemeToggle className="flex flex-none items-center gap-1 rounded-md text-[11.5px] lowercase text-ink-3 hover:text-ink" />
+      <div className="flex min-h-4 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
+        <UsageReading provider={mostUsed} warning={warning} navigate={navigate} />
+        <ProviderProblemLine problems={problems} navigate={navigate} />
       </div>
+      <nav aria-label="Pages" className="flex h-10 shrink-0 flex-nowrap items-center gap-1 whitespace-nowrap px-s1" data-testid="pages">
+        <AccountButton route={route} navigate={navigate} />
+        {page({ screen: "knowledge" }, "Knowledge")}
+        <span aria-hidden className="text-ink-3">·</span>
+        {page({ screen: "agents" }, "Agents")}
+        <span aria-hidden className="text-ink-3">·</span>
+        {page({ screen: "settings" }, "Settings")}
+        <span className="flex-1" />
+        <TerminalToggle />
+      </nav>
     </aside>
   );
 }

@@ -251,8 +251,9 @@ def _tokens(command: str, word_pattern: re.Pattern[str] | None = None) -> list[t
     to bash, a plain word to interactive zsh: either way a quote after it
     pairs differently). An fd number written against a redirection (the 2
     of ``2>&1``) belongs to it and is dropped. With ``word_pattern``, each
-    unquoted, unescaped word character must match it; quoted and escaped
-    characters are literal arguments, not shell syntax."""
+    unquoted, unescaped word character must match it, except a literal tilde
+    or caret embedded in a word. Quoted and escaped characters are literal arguments,
+    not shell syntax."""
     out: list[tuple[bool, str]] = []
     word: list[str] | None = None  # None between words
     quoted = False
@@ -289,7 +290,8 @@ def _tokens(command: str, word_pattern: re.Pattern[str] | None = None) -> list[t
         elif c == '"':
             j = i + 1
             while j < n and command[j] != '"':
-                if _expands(command, j):
+                # Inside double quotes $' and $" start nothing: "^$" ends in a literal $.
+                if _expands(command, j) and command[j + 1:j + 2] not in ("'", '"'):
                     return None
                 if command[j] == "\\" and j + 1 < n and command[j + 1] in '"\\$`\n':
                     word.append(command[j + 1] if command[j + 1] != "\n" else "")
@@ -307,7 +309,11 @@ def _tokens(command: str, word_pattern: re.Pattern[str] | None = None) -> list[t
             i += 2
         else:
             if word_pattern is not None and not word_pattern.fullmatch(c):
-                return None
+                # HEAD~1 and HEAD^ are literal revision arguments. Keep
+                # leading shell expansions and assignment positions closed.
+                prefix = "".join(word)
+                if c not in "~^" or not prefix or prefix[-1] in "=:":
+                    return None
             word.append(c)
             i += 1
     if word is not None and (word or quoted):

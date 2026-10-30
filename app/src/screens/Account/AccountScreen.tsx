@@ -21,10 +21,10 @@ import type { OpenUrl } from "../../api/open";
 import { plain } from "../../api/wording";
 import { PageHeader } from "../../components/PageHeader";
 import { RepoSelect, useRepo } from "../../components/RepoSelect";
-import { alert, button, card, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
+import { alert, button, card, chip, field, h2, label, main, mono, notice, pill, quiet } from "../../components/ui";
 import { useSessions } from "../../store/sessions";
 import { useUsage } from "../../store/usage";
-import { useAppState } from "../../store/useStore";
+import { useAppState, useStore } from "../../store/useStore";
 import { useJob } from "../Branch/useJob";
 import { UsageSection } from "./UsageSection";
 import { ACCOUNT_URL, PLANS, PLAN_GUIDE_URL, PLAN_LABEL, PRICING_URL, TIERS, UPGRADE_URL, dollars, entitled, nextPlan, paid, planHas, planOf, tierOf, tokens, when, type FeatureUse, type Plan, type TierFeature } from "./account";
@@ -78,7 +78,7 @@ function SignIn({ client, openUrl, onDone }: { client: DaemonClient; openUrl: Op
       <p className="text-sm text-ink-2">brindle is complete without an account. A brindle Pro plan adds hosted learning, cost reports, Docker services per worktree and more, listed below.</p>
       {!busy && (
         <div className="flex flex-wrap items-center gap-s1">
-          <button type="button" className={primary} onClick={() => begin(false)}>
+          <button type="button" className={main} onClick={() => begin(false)}>
             Sign in with your browser
           </button>
           <button type="button" className={quiet} onClick={() => begin(true)}>
@@ -156,7 +156,7 @@ function PlanCard({ account, client, openUrl, onChanged }: { account: AccountInf
     <section className={`${card} flex flex-col gap-s1 px-s2 py-s2`} aria-label="Plan" data-testid="plan">
       <header className="flex flex-wrap items-center gap-s1">
         <h2 className={h2}>{account.name ?? "Signed in"}</h2>
-        <span className={`${pill} ${plan === "free" ? "bg-surface-2 text-ink-2" : "bg-branch-soft text-branch"}`} data-testid="plan-pill">
+        <span className={`${pill} text-ink-2`} data-testid="plan-pill">
           brindle {PLAN_LABEL[plan]}
         </span>
         <span className="flex-1" />
@@ -263,7 +263,7 @@ function PlanLine({ f, features, dim = false, onUse }: { f: TierFeature; feature
       </span>
       <span>
         {use ? (
-          <button type="button" className="text-left underline decoration-line-strong underline-offset-2 hover:text-branch" onClick={() => onUse(use)} data-use={"screen" in use ? use.screen : "site"}>
+          <button type="button" className="text-left underline decoration-line-strong underline-offset-2 hover:text-ink" onClick={() => onUse(use)} data-use={"screen" in use ? use.screen : "site"}>
             {f.what}
             {"url" in use && <span className="text-ink-3"> ↗</span>}
           </button>
@@ -292,14 +292,14 @@ function PaidPlan({ plan, features, openUrl, onUse }: { plan: Plan; features: st
     <section className={`${card} flex flex-col gap-s1 px-s2 py-s2`} aria-label="Your plan" data-testid="features">
       <header className="flex flex-wrap items-baseline gap-s1">
         <h2 className={h2}>{tier.name}</h2>
-        <span className={`${pill} bg-branch-soft text-branch`}>{tier.label}</span>
+        <span className={`${pill} text-ink-2`}>{tier.label}</span>
         <span className="flex-1" />
         <button type="button" className={`${quiet} text-xs`} onClick={() => open(PLAN_GUIDE_URL[plan])} data-testid="plan-guide">
           Get the most from {PLAN_LABEL[plan]} ↗
         </button>
         {/* A paying customer may still move up a tier, quietly: a text link, no comparison, no banner. */}
         {next && (
-          <button type="button" className={`${quiet} text-xs text-branch`} onClick={() => open(UPGRADE_URL[next])} data-testid="upgrade-next">
+          <button type="button" className={`${quiet} text-xs`} onClick={() => open(UPGRADE_URL[next])} data-testid="upgrade-next">
             Upgrade to {PLAN_LABEL[next]} ↗
           </button>
         )}
@@ -344,7 +344,7 @@ function PaidPlan({ plan, features, openUrl, onUse }: { plan: Plan; features: st
 /* The plans for someone on the free one (signed in or not): the free plan
    in a sentence, the pricing page's four cards as columns over its lists
    (theirs highlighted), and the site's own way to upgrade. */
-function Plans({ openUrl }: { openUrl: OpenUrl }) {
+function Plans({ openUrl, signedIn }: { openUrl: OpenUrl; signedIn: boolean }) {
   const [openError, setOpenError] = useState<string | null>(null);
   const open = (url: string) => void openUrl(url).catch((e: unknown) => setOpenError(message(e)));
   const free = tierOf("free");
@@ -356,20 +356,20 @@ function Plans({ openUrl }: { openUrl: OpenUrl }) {
         <button type="button" className={button} onClick={() => open(PRICING_URL)} data-testid="pricing">
           Pricing ↗
         </button>
-        <button type="button" className={primary} onClick={() => open(ACCOUNT_URL)} data-testid="upgrade">
+        <button type="button" className={signedIn ? main : button} onClick={() => open(ACCOUNT_URL)} data-testid="upgrade">
           Upgrade to Pro ↗
         </button>
       </header>
       <p className="text-sm" data-testid="features-summary">
         <span className="font-medium">{free.name}</span>
-        <span className="text-ink-2">, {free.price.toLowerCase()}: {free.lead.toLowerCase()}. Paid plans add per-worktree services, multi-repo sessions, agents that run in CI, and the controls and records teams need.</span>
+        <span className="text-ink-2">, {free.price.toLowerCase()}: {free.lead.toLowerCase()}. Paid plans add per-worktree services, multi-repo sessions, and the controls and records teams need.</span>
       </p>
       <table className="w-full text-sm" aria-label="Plans compared" data-testid="plans">
         <thead>
           <tr>
             <th className="py-1 text-left font-normal text-ink-3" />
             {TIERS.map((t) => (
-              <th key={t.plan} className={`w-24 py-1 text-center ${t.plan === "free" ? "rounded-t-md bg-branch-soft text-branch" : "font-medium text-ink-2"}`} data-plan={t.plan} data-current={t.plan === "free" || undefined}>
+              <th key={t.plan} className={`w-24 py-1 text-center ${t.plan === "free" ? "rounded-t-md bg-pass-soft text-pass" : "font-medium text-ink-2"}`} data-plan={t.plan} data-current={t.plan === "free" || undefined}>
                 {t.label}
                 <span className="block text-xs font-normal text-ink-3">{t.price}</span>
                 {t.plan === "free" && <span className="block text-xs font-normal">yours</span>}
@@ -388,7 +388,7 @@ function Plans({ openUrl }: { openUrl: OpenUrl }) {
               <tr key={f.what} className="border-t border-line">
                 <td className="py-1 pr-s2 text-ink-2">{f.what}</td>
                 {TIERS.map((t) => (
-                  <td key={t.plan} className={`py-1 text-center ${t.plan === "free" ? "bg-branch-soft" : ""}`} aria-label={planHas(t.plan, tier) ? `${t.label}: included` : `${t.label}: not included`}>
+                  <td key={t.plan} className={`py-1 text-center ${t.plan === "free" ? "bg-pass-soft" : ""}`} aria-label={planHas(t.plan, tier) ? `${t.label}: included` : `${t.label}: not included`}>
                     <span className={planHas(t.plan, tier) ? "text-pass" : "text-ink-3"}>{planHas(t.plan, tier) ? "✓" : "–"}</span>
                   </td>
                 ))}
@@ -397,7 +397,7 @@ function Plans({ openUrl }: { openUrl: OpenUrl }) {
           </tbody>
         ))}
       </table>
-      <p className="text-xs text-ink-3">The pricing page has the full comparison, brindle CI's limits and every cap. Enterprise contracts: support@pawdelta.com.</p>
+      <p className="text-xs text-ink-3">The pricing page has the full comparison and every cap. Enterprise contracts: support@pawdelta.com.</p>
       {openError && (
         <p role="alert" className={alert}>
           The browser didn't open ({openError}): plans are at {PRICING_URL}.
@@ -465,7 +465,7 @@ function Spend({ client, openUrl, signedIn, paying, revision }: { client: Daemon
         <>
           <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Days">
             {DAYS.map((d) => (
-              <button key={d} type="button" className={`${pill} border ${days === d ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2 hover:bg-surface-2"}`} aria-pressed={days === d} onClick={() => setDays(d)}>
+              <button key={d} type="button" className={`${chip} border ${days === d ? "border-pass/55 bg-pass-soft text-pass" : "border-line text-ink-2 hover:bg-surface-2"}`} aria-pressed={days === d} onClick={() => setDays(d)}>
                 {d} days
               </button>
             ))}
@@ -509,6 +509,7 @@ function Spend({ client, openUrl, signedIn, paying, revision }: { client: Daemon
 }
 
 export function AccountScreen({ client, openUrl, onNavigate, section, ask }: AccountScreenProps) {
+  const store = useStore();
   const spend = useRef<HTMLDivElement>(null);
   const usageRef = useRef<HTMLElement>(null);
   const { reload: reloadUsage } = useUsage();
@@ -542,12 +543,13 @@ export function AccountScreen({ client, openUrl, onNavigate, section, ask }: Acc
       client.account(repo).then(
         (a) => {
           setAccount(a);
+          store.dispatch({ type: "account", account: a });
           setRevision((n) => n + 1);
           setLoadError(null);
         },
         (e: unknown) => setLoadError(message(e)),
       ),
-    [client, repo],
+    [client, repo, store],
   );
   // On start, and again when the stream (re)opens: a sign-in from the CLI changes it too.
   useEffect(() => {
@@ -595,7 +597,7 @@ export function AccountScreen({ client, openUrl, onNavigate, section, ask }: Acc
       )}
       {/* Usage is the providers' own allowance, signed in or not. */}
       <UsageSection ref={usageRef} />
-      {account && (paying ? <PaidPlan plan={plan} features={account.features} openUrl={openUrl} onUse={use} /> : <Plans openUrl={openUrl} />)}
+      {account && (paying ? <PaidPlan plan={plan} features={account.features} openUrl={openUrl} onUse={use} /> : <Plans openUrl={openUrl} signedIn={account.signed_in} />)}
     </section>
   );
 }

@@ -43,6 +43,18 @@
         }
       },
       "properties": {
+        "email": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Email"
+        },
         "name": {
           "anyOf": [
             {
@@ -370,6 +382,1499 @@
       "title": "AgentDTO",
       "type": "object"
     },
+    "AllowAllGrantDTO": {
+      "$defs": {
+        "AskScopeDTO": {
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "properties": {
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "value",
+            "pattern",
+            "label"
+          ],
+          "title": "AskScopeDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "group": {
+          "title": "Group",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "minutes": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minutes"
+        },
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "requests": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Requests",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/AskScopeDTO"
+        }
+      },
+      "required": [
+        "group",
+        "kind",
+        "scope",
+        "mode"
+      ],
+      "title": "AllowAllGrantDTO",
+      "type": "object"
+    },
+    "AllowAllPlanDTO": {
+      "$defs": {
+        "AllowAllGrantDTO": {
+          "properties": {
+            "group": {
+              "title": "Group",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            },
+            "mode": {
+              "title": "Mode",
+              "type": "string"
+            },
+            "requests": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Requests",
+              "type": "array"
+            },
+            "scope": {
+              "$ref": "#/$defs/AskScopeDTO"
+            }
+          },
+          "required": [
+            "group",
+            "kind",
+            "scope",
+            "mode"
+          ],
+          "title": "AllowAllGrantDTO",
+          "type": "object"
+        },
+        "AskResultDTO": {
+          "properties": {
+            "agent_id": {
+              "title": "Agent Id",
+              "type": "string"
+            },
+            "exact": {
+              "title": "Exact",
+              "type": "string"
+            },
+            "request_id": {
+              "title": "Request Id",
+              "type": "string"
+            },
+            "why": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Why"
+            }
+          },
+          "required": [
+            "agent_id",
+            "request_id",
+            "exact"
+          ],
+          "title": "AskResultDTO",
+          "type": "object"
+        },
+        "AskScopeDTO": {
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "properties": {
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "value",
+            "pattern",
+            "label"
+          ],
+          "title": "AskScopeDTO",
+          "type": "object"
+        },
+        "SavedActionDTO": {
+          "description": "A decision saved from the Inbox (permissions.SavedAction). ``kind``: a\npermissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,\ngeneral, repository, ...) and ``pattern`` what it covers; ``request`` the\nexact request it was saved from; ``life`` session | time | forever.",
+          "properties": {
+            "created": {
+              "default": 0.0,
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "title": "Decision",
+              "type": "string"
+            },
+            "expired": {
+              "default": false,
+              "title": "Expired",
+              "type": "boolean"
+            },
+            "expires": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "life": {
+              "default": "forever",
+              "title": "Life",
+              "type": "string"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo"
+            },
+            "request": {
+              "additionalProperties": true,
+              "default": {},
+              "title": "Request",
+              "type": "object"
+            },
+            "scope": {
+              "title": "Scope",
+              "type": "string"
+            },
+            "session": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Session"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "pattern",
+            "decision",
+            "scope"
+          ],
+          "title": "SavedActionDTO",
+          "type": "object"
+        }
+      },
+      "description": "GET /permissions/asks/plan (what allowing everything waiting would\ngrant) and the result of POST /permissions/asks/allow-all and\n/unblock (``saved``, ``resumed``, ``failed`` filled in; ``excepted``,\n``added``, ``locked`` for unblock).",
+      "properties": {
+        "added": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Added"
+        },
+        "excepted": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Excepted"
+        },
+        "failed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Failed",
+          "type": "array"
+        },
+        "grants": {
+          "items": {
+            "$ref": "#/$defs/AllowAllGrantDTO"
+          },
+          "title": "Grants",
+          "type": "array"
+        },
+        "locked": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Locked",
+          "type": "array"
+        },
+        "resumed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Resumed",
+          "type": "array"
+        },
+        "resumes": {
+          "title": "Resumes",
+          "type": "integer"
+        },
+        "saved": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SavedActionDTO"
+          },
+          "title": "Saved",
+          "type": "array"
+        },
+        "skipped": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Skipped",
+          "type": "array"
+        }
+      },
+      "required": [
+        "grants",
+        "resumes"
+      ],
+      "title": "AllowAllPlanDTO",
+      "type": "object"
+    },
+    "AskDTO": {
+      "$defs": {
+        "PermissionLimitsDTO": {
+          "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
+          "properties": {
+            "life": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Life"
+            },
+            "max_scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Scope"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            }
+          },
+          "title": "PermissionLimitsDTO",
+          "type": "object"
+        }
+      },
+      "description": "One pending request, generalized. ``blocked``: a deny rule covers it\n(its ``rule``); else ``rule`` is the ask rule that asked, with its\n``limits`` (None: no rule covers it, and unmatched actions ask).",
+      "properties": {
+        "agent_id": {
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "blocked": {
+          "default": false,
+          "title": "Blocked",
+          "type": "boolean"
+        },
+        "digest": {
+          "title": "Digest",
+          "type": "string"
+        },
+        "escalation": {
+          "default": "",
+          "title": "Escalation",
+          "type": "string"
+        },
+        "exact": {
+          "title": "Exact",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionLimitsDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "repo": {
+          "title": "Repo",
+          "type": "string"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "root_id": {
+          "title": "Root Id",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        },
+        "summary": {
+          "title": "Summary",
+          "type": "string"
+        },
+        "tool": {
+          "title": "Tool",
+          "type": "string"
+        },
+        "waiting_since": {
+          "title": "Waiting Since",
+          "type": "number"
+        },
+        "worker": {
+          "default": "",
+          "title": "Worker",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id",
+        "root_id",
+        "request_id",
+        "digest",
+        "repo",
+        "kind",
+        "tool",
+        "exact",
+        "summary",
+        "waiting_since"
+      ],
+      "title": "AskDTO",
+      "type": "object"
+    },
+    "AskDecisionDTO": {
+      "$defs": {
+        "AskResultDTO": {
+          "properties": {
+            "agent_id": {
+              "title": "Agent Id",
+              "type": "string"
+            },
+            "exact": {
+              "title": "Exact",
+              "type": "string"
+            },
+            "request_id": {
+              "title": "Request Id",
+              "type": "string"
+            },
+            "why": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Why"
+            }
+          },
+          "required": [
+            "agent_id",
+            "request_id",
+            "exact"
+          ],
+          "title": "AskResultDTO",
+          "type": "object"
+        },
+        "AskScopeDTO": {
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "properties": {
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "value",
+            "pattern",
+            "label"
+          ],
+          "title": "AskScopeDTO",
+          "type": "object"
+        },
+        "SavedActionDTO": {
+          "description": "A decision saved from the Inbox (permissions.SavedAction). ``kind``: a\npermissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,\ngeneral, repository, ...) and ``pattern`` what it covers; ``request`` the\nexact request it was saved from; ``life`` session | time | forever.",
+          "properties": {
+            "created": {
+              "default": 0.0,
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "title": "Decision",
+              "type": "string"
+            },
+            "expired": {
+              "default": false,
+              "title": "Expired",
+              "type": "boolean"
+            },
+            "expires": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "life": {
+              "default": "forever",
+              "title": "Life",
+              "type": "string"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo"
+            },
+            "request": {
+              "additionalProperties": true,
+              "default": {},
+              "title": "Request",
+              "type": "object"
+            },
+            "scope": {
+              "title": "Scope",
+              "type": "string"
+            },
+            "session": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Session"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "pattern",
+            "decision",
+            "scope"
+          ],
+          "title": "SavedActionDTO",
+          "type": "object"
+        }
+      },
+      "description": "POST /permissions/asks/decide: what one decision did.",
+      "properties": {
+        "failed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Failed",
+          "type": "array"
+        },
+        "grant": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SavedActionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "mode": {
+          "title": "Mode",
+          "type": "string"
+        },
+        "resumed": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Resumed",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/AskScopeDTO"
+        },
+        "skipped": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Skipped",
+          "type": "array"
+        },
+        "stopped": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/AskResultDTO"
+          },
+          "title": "Stopped",
+          "type": "array"
+        }
+      },
+      "required": [
+        "mode",
+        "scope"
+      ],
+      "title": "AskDecisionDTO",
+      "type": "object"
+    },
+    "AskGroupDTO": {
+      "$defs": {
+        "AskDTO": {
+          "description": "One pending request, generalized. ``blocked``: a deny rule covers it\n(its ``rule``); else ``rule`` is the ask rule that asked, with its\n``limits`` (None: no rule covers it, and unmatched actions ask).",
+          "properties": {
+            "agent_id": {
+              "title": "Agent Id",
+              "type": "string"
+            },
+            "blocked": {
+              "default": false,
+              "title": "Blocked",
+              "type": "boolean"
+            },
+            "digest": {
+              "title": "Digest",
+              "type": "string"
+            },
+            "escalation": {
+              "default": "",
+              "title": "Escalation",
+              "type": "string"
+            },
+            "exact": {
+              "title": "Exact",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PermissionLimitsDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            },
+            "repo": {
+              "title": "Repo",
+              "type": "string"
+            },
+            "request_id": {
+              "title": "Request Id",
+              "type": "string"
+            },
+            "root_id": {
+              "title": "Root Id",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            },
+            "summary": {
+              "title": "Summary",
+              "type": "string"
+            },
+            "tool": {
+              "title": "Tool",
+              "type": "string"
+            },
+            "waiting_since": {
+              "title": "Waiting Since",
+              "type": "number"
+            },
+            "worker": {
+              "default": "",
+              "title": "Worker",
+              "type": "string"
+            }
+          },
+          "required": [
+            "agent_id",
+            "root_id",
+            "request_id",
+            "digest",
+            "repo",
+            "kind",
+            "tool",
+            "exact",
+            "summary",
+            "waiting_since"
+          ],
+          "title": "AskDTO",
+          "type": "object"
+        },
+        "AskScopeDTO": {
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "properties": {
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": [
+            "value",
+            "pattern",
+            "label"
+          ],
+          "title": "AskScopeDTO",
+          "type": "object"
+        },
+        "OrgControlViewDTO": {
+          "description": "An org control as a member sees it (permission_grants.org_control_view):\nthe org's name, what it covers in plain words, Block (deny) or Ask, and why.",
+          "properties": {
+            "decision": {
+              "default": "ask",
+              "title": "Decision",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            },
+            "what": {
+              "title": "What",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "what"
+          ],
+          "title": "OrgControlViewDTO",
+          "type": "object"
+        },
+        "PermissionLimitsDTO": {
+          "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
+          "properties": {
+            "life": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Life"
+            },
+            "max_scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Scope"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            }
+          },
+          "title": "PermissionLimitsDTO",
+          "type": "object"
+        }
+      },
+      "description": "GET /permissions/asks: one Inbox item per repo, kind and general form,\ngeneralized from its oldest request. ``policy``: the tightest limits\namong its requests (a deny blocks the whole item). ``modes``: what\nPOST /permissions/asks/decide accepts for it. ``org``: the org control\nthat asks for (or blocks) it, when one does.",
+      "properties": {
+        "blocked": {
+          "default": false,
+          "title": "Blocked",
+          "type": "boolean"
+        },
+        "general": {
+          "$ref": "#/$defs/AskScopeDTO"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/$defs/AskDTO"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionLimitsDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "modes": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Modes",
+          "type": "array"
+        },
+        "org": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrgControlViewDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "repo": {
+          "title": "Repo",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        },
+        "scopes": {
+          "items": {
+            "$ref": "#/$defs/AskScopeDTO"
+          },
+          "title": "Scopes",
+          "type": "array"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "repo",
+        "kind",
+        "title",
+        "general",
+        "scopes",
+        "items"
+      ],
+      "title": "AskGroupDTO",
+      "type": "object"
+    },
+    "AskResultDTO": {
+      "properties": {
+        "agent_id": {
+          "title": "Agent Id",
+          "type": "string"
+        },
+        "exact": {
+          "title": "Exact",
+          "type": "string"
+        },
+        "request_id": {
+          "title": "Request Id",
+          "type": "string"
+        },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Why"
+        }
+      },
+      "required": [
+        "agent_id",
+        "request_id",
+        "exact"
+      ],
+      "title": "AskResultDTO",
+      "type": "object"
+    },
+    "AskScopeDTO": {
+      "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+      "properties": {
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Level"
+        },
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "pattern",
+        "label"
+      ],
+      "title": "AskScopeDTO",
+      "type": "object"
+    },
+    "AwsProfileDTO": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        },
+        "sso": {
+          "title": "Sso",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "sso"
+      ],
+      "title": "AwsProfileDTO",
+      "type": "object"
+    },
+    "AzureOptionsDTO": {
+      "properties": {
+        "subscription_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subscription Id"
+        },
+        "subscription_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Subscription Name"
+        },
+        "tenant_id": {
+          "title": "Tenant Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tenant_id"
+      ],
+      "title": "AzureOptionsDTO",
+      "type": "object"
+    },
+    "CloudLoginDTO": {
+      "description": "A cloud login's state (brindle.cloud_login.status): ``valid`` now,\n``expires_at`` (epoch seconds, None when unknown), ``expired`` when only\n``renew_command`` (the person) can renew it.",
+      "properties": {
+        "expired": {
+          "title": "Expired",
+          "type": "boolean"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At"
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        },
+        "renew_command": {
+          "default": "",
+          "title": "Renew Command",
+          "type": "string"
+        },
+        "valid": {
+          "title": "Valid",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "valid",
+        "expired"
+      ],
+      "title": "CloudLoginDTO",
+      "type": "object"
+    },
+    "CloudOptionsDTO": {
+      "$defs": {
+        "AwsProfileDTO": {
+          "properties": {
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "region": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Region"
+            },
+            "sso": {
+              "title": "Sso",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "sso"
+          ],
+          "title": "AwsProfileDTO",
+          "type": "object"
+        },
+        "AzureOptionsDTO": {
+          "properties": {
+            "subscription_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Subscription Id"
+            },
+            "subscription_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Subscription Name"
+            },
+            "tenant_id": {
+              "title": "Tenant Id",
+              "type": "string"
+            }
+          },
+          "required": [
+            "tenant_id"
+          ],
+          "title": "AzureOptionsDTO",
+          "type": "object"
+        },
+        "GcloudOptionsDTO": {
+          "properties": {
+            "adc": {
+              "title": "Adc",
+              "type": "boolean"
+            },
+            "project": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Project"
+            },
+            "region": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Region"
+            }
+          },
+          "required": [
+            "adc"
+          ],
+          "title": "GcloudOptionsDTO",
+          "type": "object"
+        }
+      },
+      "description": "What this machine's cloud CLIs are set up with, read from their files\n(never a secret): AWS profiles, gcloud's application-default login and\ndefault project, the Azure CLI's signed-in tenant (None when signed out),\nand the usual ``regions`` per route.",
+      "properties": {
+        "aws_profiles": {
+          "items": {
+            "$ref": "#/$defs/AwsProfileDTO"
+          },
+          "title": "Aws Profiles",
+          "type": "array"
+        },
+        "azure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AzureOptionsDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "gcloud": {
+          "$ref": "#/$defs/GcloudOptionsDTO"
+        },
+        "regions": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "title": "Regions",
+          "type": "object"
+        }
+      },
+      "required": [
+        "aws_profiles",
+        "gcloud"
+      ],
+      "title": "CloudOptionsDTO",
+      "type": "object"
+    },
+    "ConnectionReadyDTO": {
+      "description": "Whether an agent of the provider would launch with its method now\n(connections.ready); if not, ``reason`` and the ``action`` the app can\noffer: install | sign_in | sign_out | renew | set_key.",
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "enum": [
+                "install",
+                "sign_in",
+                "sign_out",
+                "renew",
+                "set_key"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Action"
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        }
+      },
+      "required": [
+        "ok"
+      ],
+      "title": "ConnectionReadyDTO",
+      "type": "object"
+    },
     "DecisionDTO": {
       "properties": {
         "body": {
@@ -419,6 +1924,43 @@
         "created_at"
       ],
       "title": "DecisionDTO",
+      "type": "object"
+    },
+    "GcloudOptionsDTO": {
+      "properties": {
+        "adc": {
+          "title": "Adc",
+          "type": "boolean"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Project"
+        },
+        "region": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Region"
+        }
+      },
+      "required": [
+        "adc"
+      ],
+      "title": "GcloudOptionsDTO",
       "type": "object"
     },
     "GoalDTO": {
@@ -1204,6 +2746,1254 @@
       "title": "NativeSubagentDTO",
       "type": "object"
     },
+    "OrgApprovalPolicyDTO": {
+      "$defs": {
+        "OrgControlDTO": {
+          "additionalProperties": false,
+          "description": "team_policy.OrgControl: Block (deny) or Ask for one grouping\n(permission_grants.ORG_GROUPINGS) or one pattern (\"<kind> <match_type> <match>\").",
+          "properties": {
+            "decision": {
+              "enum": [
+                "deny",
+                "ask"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "group": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Group"
+            },
+            "reason": {
+              "default": "",
+              "maxLength": 300,
+              "title": "Reason",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "decision"
+          ],
+          "title": "OrgControlDTO",
+          "type": "object"
+        },
+        "OrgGrantPolicyDTO": {
+          "additionalProperties": false,
+          "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
+          "properties": {
+            "allow": {
+              "title": "Allow",
+              "type": "boolean"
+            },
+            "allow_persistent": {
+              "default": false,
+              "title": "Allow Persistent",
+              "type": "boolean"
+            },
+            "controls": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/OrgControlDTO"
+              },
+              "title": "Controls",
+              "type": "array"
+            },
+            "deny": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Deny",
+              "type": "array"
+            },
+            "kinds": {
+              "items": {
+                "enum": [
+                  "read",
+                  "write",
+                  "edit",
+                  "bash",
+                  "fetch",
+                  "mcp",
+                  "other"
+                ],
+                "type": "string"
+              },
+              "title": "Kinds",
+              "type": "array"
+            },
+            "lifetimes": {
+              "default": [
+                "session",
+                "time"
+              ],
+              "items": {
+                "enum": [
+                  "session",
+                  "time",
+                  "forever"
+                ],
+                "type": "string"
+              },
+              "title": "Lifetimes",
+              "type": "array"
+            },
+            "max_minutes": {
+              "maximum": 1440,
+              "minimum": 1,
+              "title": "Max Minutes",
+              "type": "integer"
+            },
+            "max_uses": {
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Max Uses",
+              "type": "integer"
+            },
+            "org_name": {
+              "default": "",
+              "maxLength": 100,
+              "title": "Org Name",
+              "type": "string"
+            },
+            "overridable": {
+              "items": {
+                "enum": [
+                  "git-push",
+                  "env"
+                ],
+                "type": "string"
+              },
+              "title": "Overridable",
+              "type": "array"
+            },
+            "scopes": {
+              "default": [
+                "branch"
+              ],
+              "items": {
+                "enum": [
+                  "branch",
+                  "remote",
+                  "repo",
+                  "all"
+                ],
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "allow",
+            "kinds",
+            "overridable",
+            "max_minutes",
+            "max_uses"
+          ],
+          "title": "OrgGrantPolicyDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "permission_grants": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrgGrantPolicyDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "roles": {
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/OrgGrantPolicyDTO"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "title": "Roles",
+          "type": "object"
+        },
+        "version": {
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "permission_grants",
+        "roles"
+      ],
+      "title": "OrgApprovalPolicyDTO",
+      "type": "object"
+    },
+    "OrgAssignmentDTO": {
+      "properties": {
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "sub": {
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "org_id",
+        "sub",
+        "role"
+      ],
+      "title": "OrgAssignmentDTO",
+      "type": "object"
+    },
+    "OrgAssignmentRequestDTO": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_sub": {
+          "title": "Actor Sub",
+          "type": "string"
+        },
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "role": {
+          "pattern": "^[a-z][a-z0-9_-]{0,31}$",
+          "title": "Role",
+          "type": "string"
+        },
+        "sub": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "org_id",
+        "actor_sub",
+        "sub",
+        "role"
+      ],
+      "title": "OrgAssignmentRequestDTO",
+      "type": "object"
+    },
+    "OrgControlDTO": {
+      "additionalProperties": false,
+      "description": "team_policy.OrgControl: Block (deny) or Ask for one grouping\n(permission_grants.ORG_GROUPINGS) or one pattern (\"<kind> <match_type> <match>\").",
+      "properties": {
+        "decision": {
+          "enum": [
+            "deny",
+            "ask"
+          ],
+          "title": "Decision",
+          "type": "string"
+        },
+        "group": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Group"
+        },
+        "reason": {
+          "default": "",
+          "maxLength": 300,
+          "title": "Reason",
+          "type": "string"
+        },
+        "rule": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rule"
+        }
+      },
+      "required": [
+        "decision"
+      ],
+      "title": "OrgControlDTO",
+      "type": "object"
+    },
+    "OrgControlViewDTO": {
+      "description": "An org control as a member sees it (permission_grants.org_control_view):\nthe org's name, what it covers in plain words, Block (deny) or Ask, and why.",
+      "properties": {
+        "decision": {
+          "default": "ask",
+          "title": "Decision",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "what": {
+          "title": "What",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "what"
+      ],
+      "title": "OrgControlViewDTO",
+      "type": "object"
+    },
+    "OrgGrantPolicyDTO": {
+      "$defs": {
+        "OrgControlDTO": {
+          "additionalProperties": false,
+          "description": "team_policy.OrgControl: Block (deny) or Ask for one grouping\n(permission_grants.ORG_GROUPINGS) or one pattern (\"<kind> <match_type> <match>\").",
+          "properties": {
+            "decision": {
+              "enum": [
+                "deny",
+                "ask"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "group": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Group"
+            },
+            "reason": {
+              "default": "",
+              "maxLength": 300,
+              "title": "Reason",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "decision"
+          ],
+          "title": "OrgControlDTO",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
+      "properties": {
+        "allow": {
+          "title": "Allow",
+          "type": "boolean"
+        },
+        "allow_persistent": {
+          "default": false,
+          "title": "Allow Persistent",
+          "type": "boolean"
+        },
+        "controls": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/OrgControlDTO"
+          },
+          "title": "Controls",
+          "type": "array"
+        },
+        "deny": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Deny",
+          "type": "array"
+        },
+        "kinds": {
+          "items": {
+            "enum": [
+              "read",
+              "write",
+              "edit",
+              "bash",
+              "fetch",
+              "mcp",
+              "other"
+            ],
+            "type": "string"
+          },
+          "title": "Kinds",
+          "type": "array"
+        },
+        "lifetimes": {
+          "default": [
+            "session",
+            "time"
+          ],
+          "items": {
+            "enum": [
+              "session",
+              "time",
+              "forever"
+            ],
+            "type": "string"
+          },
+          "title": "Lifetimes",
+          "type": "array"
+        },
+        "max_minutes": {
+          "maximum": 1440,
+          "minimum": 1,
+          "title": "Max Minutes",
+          "type": "integer"
+        },
+        "max_uses": {
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Uses",
+          "type": "integer"
+        },
+        "org_name": {
+          "default": "",
+          "maxLength": 100,
+          "title": "Org Name",
+          "type": "string"
+        },
+        "overridable": {
+          "items": {
+            "enum": [
+              "git-push",
+              "env"
+            ],
+            "type": "string"
+          },
+          "title": "Overridable",
+          "type": "array"
+        },
+        "scopes": {
+          "default": [
+            "branch"
+          ],
+          "items": {
+            "enum": [
+              "branch",
+              "remote",
+              "repo",
+              "all"
+            ],
+            "type": "string"
+          },
+          "title": "Scopes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "allow",
+        "kinds",
+        "overridable",
+        "max_minutes",
+        "max_uses"
+      ],
+      "title": "OrgGrantPolicyDTO",
+      "type": "object"
+    },
+    "OrgIdentityDTO": {
+      "properties": {
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "policy_role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Policy Role"
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Role"
+        },
+        "sub": {
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sub",
+        "org_id",
+        "role",
+        "policy_role"
+      ],
+      "title": "OrgIdentityDTO",
+      "type": "object"
+    },
+    "OrgMemberDTO": {
+      "properties": {
+        "email": {
+          "title": "Email",
+          "type": "string"
+        },
+        "policy_role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Policy Role"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "sub": {
+          "title": "Sub",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sub",
+        "email",
+        "role"
+      ],
+      "title": "OrgMemberDTO",
+      "type": "object"
+    },
+    "OrgPermissionsDTO": {
+      "$defs": {
+        "OrgApprovalPolicyDTO": {
+          "properties": {
+            "permission_grants": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/OrgGrantPolicyDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "roles": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OrgGrantPolicyDTO"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "title": "Roles",
+              "type": "object"
+            },
+            "version": {
+              "title": "Version",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "version",
+            "permission_grants",
+            "roles"
+          ],
+          "title": "OrgApprovalPolicyDTO",
+          "type": "object"
+        },
+        "OrgControlDTO": {
+          "additionalProperties": false,
+          "description": "team_policy.OrgControl: Block (deny) or Ask for one grouping\n(permission_grants.ORG_GROUPINGS) or one pattern (\"<kind> <match_type> <match>\").",
+          "properties": {
+            "decision": {
+              "enum": [
+                "deny",
+                "ask"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "group": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Group"
+            },
+            "reason": {
+              "default": "",
+              "maxLength": 300,
+              "title": "Reason",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "decision"
+          ],
+          "title": "OrgControlDTO",
+          "type": "object"
+        },
+        "OrgGrantPolicyDTO": {
+          "additionalProperties": false,
+          "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
+          "properties": {
+            "allow": {
+              "title": "Allow",
+              "type": "boolean"
+            },
+            "allow_persistent": {
+              "default": false,
+              "title": "Allow Persistent",
+              "type": "boolean"
+            },
+            "controls": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/OrgControlDTO"
+              },
+              "title": "Controls",
+              "type": "array"
+            },
+            "deny": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Deny",
+              "type": "array"
+            },
+            "kinds": {
+              "items": {
+                "enum": [
+                  "read",
+                  "write",
+                  "edit",
+                  "bash",
+                  "fetch",
+                  "mcp",
+                  "other"
+                ],
+                "type": "string"
+              },
+              "title": "Kinds",
+              "type": "array"
+            },
+            "lifetimes": {
+              "default": [
+                "session",
+                "time"
+              ],
+              "items": {
+                "enum": [
+                  "session",
+                  "time",
+                  "forever"
+                ],
+                "type": "string"
+              },
+              "title": "Lifetimes",
+              "type": "array"
+            },
+            "max_minutes": {
+              "maximum": 1440,
+              "minimum": 1,
+              "title": "Max Minutes",
+              "type": "integer"
+            },
+            "max_uses": {
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Max Uses",
+              "type": "integer"
+            },
+            "org_name": {
+              "default": "",
+              "maxLength": 100,
+              "title": "Org Name",
+              "type": "string"
+            },
+            "overridable": {
+              "items": {
+                "enum": [
+                  "git-push",
+                  "env"
+                ],
+                "type": "string"
+              },
+              "title": "Overridable",
+              "type": "array"
+            },
+            "scopes": {
+              "default": [
+                "branch"
+              ],
+              "items": {
+                "enum": [
+                  "branch",
+                  "remote",
+                  "repo",
+                  "all"
+                ],
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "allow",
+            "kinds",
+            "overridable",
+            "max_minutes",
+            "max_uses"
+          ],
+          "title": "OrgGrantPolicyDTO",
+          "type": "object"
+        },
+        "OrgIdentityDTO": {
+          "properties": {
+            "org_id": {
+              "title": "Org Id",
+              "type": "string"
+            },
+            "policy_role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Policy Role"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Role"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub",
+            "org_id",
+            "role",
+            "policy_role"
+          ],
+          "title": "OrgIdentityDTO",
+          "type": "object"
+        },
+        "OrgMemberDTO": {
+          "properties": {
+            "email": {
+              "title": "Email",
+              "type": "string"
+            },
+            "policy_role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Policy Role"
+            },
+            "role": {
+              "title": "Role",
+              "type": "string"
+            },
+            "sub": {
+              "title": "Sub",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sub",
+            "email",
+            "role"
+          ],
+          "title": "OrgMemberDTO",
+          "type": "object"
+        },
+        "OrgRoleDTO": {
+          "properties": {
+            "builtin": {
+              "title": "Builtin",
+              "type": "boolean"
+            },
+            "holders": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Holders",
+              "type": "array"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "okta_group": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Okta Group"
+            },
+            "permissions": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Permissions",
+              "type": "array"
+            },
+            "team_weight": {
+              "default": 1,
+              "title": "Team Weight",
+              "type": "number"
+            }
+          },
+          "required": [
+            "name",
+            "builtin",
+            "permissions"
+          ],
+          "title": "OrgRoleDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "can_edit_policy": {
+          "title": "Can Edit Policy",
+          "type": "boolean"
+        },
+        "identity": {
+          "$ref": "#/$defs/OrgIdentityDTO"
+        },
+        "inventory_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Inventory Error"
+        },
+        "members": {
+          "items": {
+            "$ref": "#/$defs/OrgMemberDTO"
+          },
+          "title": "Members",
+          "type": "array"
+        },
+        "policy": {
+          "$ref": "#/$defs/OrgApprovalPolicyDTO"
+        },
+        "policy_readonly_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Policy Readonly Reason"
+        },
+        "roles": {
+          "items": {
+            "$ref": "#/$defs/OrgRoleDTO"
+          },
+          "title": "Roles",
+          "type": "array"
+        }
+      },
+      "required": [
+        "identity",
+        "roles",
+        "members",
+        "policy",
+        "can_edit_policy",
+        "policy_readonly_reason"
+      ],
+      "title": "OrgPermissionsDTO",
+      "type": "object"
+    },
+    "OrgPolicyRequestDTO": {
+      "$defs": {
+        "OrgControlDTO": {
+          "additionalProperties": false,
+          "description": "team_policy.OrgControl: Block (deny) or Ask for one grouping\n(permission_grants.ORG_GROUPINGS) or one pattern (\"<kind> <match_type> <match>\").",
+          "properties": {
+            "decision": {
+              "enum": [
+                "deny",
+                "ask"
+              ],
+              "title": "Decision",
+              "type": "string"
+            },
+            "group": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Group"
+            },
+            "reason": {
+              "default": "",
+              "maxLength": 300,
+              "title": "Reason",
+              "type": "string"
+            },
+            "rule": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Rule"
+            }
+          },
+          "required": [
+            "decision"
+          ],
+          "title": "OrgControlDTO",
+          "type": "object"
+        },
+        "OrgGrantPolicyDTO": {
+          "additionalProperties": false,
+          "description": "Account GrantPolicy (account-api 8fd09374); a complete replacement block.",
+          "properties": {
+            "allow": {
+              "title": "Allow",
+              "type": "boolean"
+            },
+            "allow_persistent": {
+              "default": false,
+              "title": "Allow Persistent",
+              "type": "boolean"
+            },
+            "controls": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/OrgControlDTO"
+              },
+              "title": "Controls",
+              "type": "array"
+            },
+            "deny": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Deny",
+              "type": "array"
+            },
+            "kinds": {
+              "items": {
+                "enum": [
+                  "read",
+                  "write",
+                  "edit",
+                  "bash",
+                  "fetch",
+                  "mcp",
+                  "other"
+                ],
+                "type": "string"
+              },
+              "title": "Kinds",
+              "type": "array"
+            },
+            "lifetimes": {
+              "default": [
+                "session",
+                "time"
+              ],
+              "items": {
+                "enum": [
+                  "session",
+                  "time",
+                  "forever"
+                ],
+                "type": "string"
+              },
+              "title": "Lifetimes",
+              "type": "array"
+            },
+            "max_minutes": {
+              "maximum": 1440,
+              "minimum": 1,
+              "title": "Max Minutes",
+              "type": "integer"
+            },
+            "max_uses": {
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Max Uses",
+              "type": "integer"
+            },
+            "org_name": {
+              "default": "",
+              "maxLength": 100,
+              "title": "Org Name",
+              "type": "string"
+            },
+            "overridable": {
+              "items": {
+                "enum": [
+                  "git-push",
+                  "env"
+                ],
+                "type": "string"
+              },
+              "title": "Overridable",
+              "type": "array"
+            },
+            "scopes": {
+              "default": [
+                "branch"
+              ],
+              "items": {
+                "enum": [
+                  "branch",
+                  "remote",
+                  "repo",
+                  "all"
+                ],
+                "type": "string"
+              },
+              "title": "Scopes",
+              "type": "array"
+            }
+          },
+          "required": [
+            "allow",
+            "kinds",
+            "overridable",
+            "max_minutes",
+            "max_uses"
+          ],
+          "title": "OrgGrantPolicyDTO",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "actor_sub": {
+          "title": "Actor Sub",
+          "type": "string"
+        },
+        "if_version": {
+          "minimum": 0,
+          "title": "If Version",
+          "type": "integer"
+        },
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "permission_grants": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OrgGrantPolicyDTO"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "role": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Role"
+        }
+      },
+      "required": [
+        "org_id",
+        "actor_sub",
+        "if_version",
+        "role",
+        "permission_grants"
+      ],
+      "title": "OrgPolicyRequestDTO",
+      "type": "object"
+    },
+    "OrgRoleDTO": {
+      "properties": {
+        "builtin": {
+          "title": "Builtin",
+          "type": "boolean"
+        },
+        "holders": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Holders",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "okta_group": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Okta Group"
+        },
+        "permissions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Permissions",
+          "type": "array"
+        },
+        "team_weight": {
+          "default": 1,
+          "title": "Team Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name",
+        "builtin",
+        "permissions"
+      ],
+      "title": "OrgRoleDTO",
+      "type": "object"
+    },
     "PermissionChoiceDTO": {
       "properties": {
         "choice": {
@@ -1406,6 +4196,773 @@
         "via"
       ],
       "title": "PermissionDTO",
+      "type": "object"
+    },
+    "PermissionExceptionDTO": {
+      "description": "Requests a rule doesn't apply to (a deny's exception): matched like a rule.",
+      "properties": {
+        "describe": {
+          "title": "Describe",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "match": {
+          "title": "Match",
+          "type": "string"
+        },
+        "match_type": {
+          "title": "Match Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "match",
+        "match_type",
+        "describe"
+      ],
+      "title": "PermissionExceptionDTO",
+      "type": "object"
+    },
+    "PermissionGroupDTO": {
+      "description": "A capability group (brindle.permission_groups): what it answers for a\nrequest no rule covers, unless one of its subcategories says otherwise.",
+      "properties": {
+        "baseline": {
+          "title": "Baseline",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "subcategories": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Subcategories",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "baseline"
+      ],
+      "title": "PermissionGroupDTO",
+      "type": "object"
+    },
+    "PermissionLimitsDTO": {
+      "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
+      "properties": {
+        "life": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Life"
+        },
+        "max_scope": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Scope"
+        },
+        "minutes": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minutes"
+        }
+      },
+      "title": "PermissionLimitsDTO",
+      "type": "object"
+    },
+    "PermissionPolicyDTO": {
+      "$defs": {
+        "OrgControlViewDTO": {
+          "description": "An org control as a member sees it (permission_grants.org_control_view):\nthe org's name, what it covers in plain words, Block (deny) or Ask, and why.",
+          "properties": {
+            "decision": {
+              "default": "ask",
+              "title": "Decision",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "reason": {
+              "default": "",
+              "title": "Reason",
+              "type": "string"
+            },
+            "what": {
+              "title": "What",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "what"
+          ],
+          "title": "OrgControlViewDTO",
+          "type": "object"
+        },
+        "PermissionExceptionDTO": {
+          "description": "Requests a rule doesn't apply to (a deny's exception): matched like a rule.",
+          "properties": {
+            "describe": {
+              "title": "Describe",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "match",
+            "match_type",
+            "describe"
+          ],
+          "title": "PermissionExceptionDTO",
+          "type": "object"
+        },
+        "PermissionGroupDTO": {
+          "description": "A capability group (brindle.permission_groups): what it answers for a\nrequest no rule covers, unless one of its subcategories says otherwise.",
+          "properties": {
+            "baseline": {
+              "title": "Baseline",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "subcategories": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "title": "Subcategories",
+              "type": "object"
+            }
+          },
+          "required": [
+            "name",
+            "baseline"
+          ],
+          "title": "PermissionGroupDTO",
+          "type": "object"
+        },
+        "PermissionLimitsDTO": {
+          "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
+          "properties": {
+            "life": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Life"
+            },
+            "max_scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Scope"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            }
+          },
+          "title": "PermissionLimitsDTO",
+          "type": "object"
+        },
+        "PermissionPresetDTO": {
+          "properties": {
+            "current": {
+              "title": "Current",
+              "type": "boolean"
+            },
+            "description": {
+              "title": "Description",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "unmatched": {
+              "title": "Unmatched",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "description",
+            "unmatched",
+            "current"
+          ],
+          "title": "PermissionPresetDTO",
+          "type": "object"
+        },
+        "PermissionRuleDTO": {
+          "description": "One rule of the person's store (GET /permissions). ``decision`` allow |\ndeny | ask; ``source`` preset | user | learned; ``match_type`` exact |\nprefix | glob or a named matcher (permissions.BUILTIN_MATCHERS; a\n``push`` rule's match is \"<source> \u2192 <destination>\"). ``repo_root``: the\none repo it applies in (None: every repo). ``prompts``: asks it caused\nin the last day.",
+          "properties": {
+            "created": {
+              "default": 0.0,
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "title": "Decision",
+              "type": "string"
+            },
+            "describe": {
+              "title": "Describe",
+              "type": "string"
+            },
+            "exclusions": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PermissionExceptionDTO"
+              },
+              "title": "Exclusions",
+              "type": "array"
+            },
+            "expired": {
+              "default": false,
+              "title": "Expired",
+              "type": "boolean"
+            },
+            "expires": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "label": {
+              "default": "",
+              "title": "Label",
+              "type": "string"
+            },
+            "limits": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PermissionLimitsDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            },
+            "prompts": {
+              "default": 0,
+              "title": "Prompts",
+              "type": "integer"
+            },
+            "repo_root": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo Root"
+            },
+            "source": {
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "match",
+            "match_type",
+            "decision",
+            "source",
+            "describe"
+          ],
+          "title": "PermissionRuleDTO",
+          "type": "object"
+        },
+        "SavedActionDTO": {
+          "description": "A decision saved from the Inbox (permissions.SavedAction). ``kind``: a\npermissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,\ngeneral, repository, ...) and ``pattern`` what it covers; ``request`` the\nexact request it was saved from; ``life`` session | time | forever.",
+          "properties": {
+            "created": {
+              "default": 0.0,
+              "title": "Created",
+              "type": "number"
+            },
+            "decision": {
+              "title": "Decision",
+              "type": "string"
+            },
+            "expired": {
+              "default": false,
+              "title": "Expired",
+              "type": "boolean"
+            },
+            "expires": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "level": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Level"
+            },
+            "life": {
+              "default": "forever",
+              "title": "Life",
+              "type": "string"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "pattern": {
+              "title": "Pattern",
+              "type": "string"
+            },
+            "repo": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Repo"
+            },
+            "request": {
+              "additionalProperties": true,
+              "default": {},
+              "title": "Request",
+              "type": "object"
+            },
+            "scope": {
+              "title": "Scope",
+              "type": "string"
+            },
+            "session": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Session"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "pattern",
+            "decision",
+            "scope"
+          ],
+          "title": "SavedActionDTO",
+          "type": "object"
+        }
+      },
+      "description": "GET /permissions: the chosen preset, the unmatched setting, every rule\n(editable, the preset's included), the saved actions, per-rule prompt\ncounts (\"unmatched\" for asks no rule caused) and the capability groups.",
+      "properties": {
+        "groups": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionGroupDTO"
+          },
+          "title": "Groups",
+          "type": "array"
+        },
+        "org_controls": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/OrgControlViewDTO"
+          },
+          "title": "Org Controls",
+          "type": "array"
+        },
+        "preset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Preset"
+        },
+        "presets": {
+          "items": {
+            "$ref": "#/$defs/PermissionPresetDTO"
+          },
+          "title": "Presets",
+          "type": "array"
+        },
+        "prompt_counts": {
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "default": {},
+          "title": "Prompt Counts",
+          "type": "object"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/PermissionRuleDTO"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "saved": {
+          "items": {
+            "$ref": "#/$defs/SavedActionDTO"
+          },
+          "title": "Saved",
+          "type": "array"
+        },
+        "unmatched": {
+          "title": "Unmatched",
+          "type": "string"
+        }
+      },
+      "required": [
+        "preset",
+        "unmatched",
+        "presets",
+        "rules",
+        "saved"
+      ],
+      "title": "PermissionPolicyDTO",
+      "type": "object"
+    },
+    "PermissionPresetDTO": {
+      "properties": {
+        "current": {
+          "title": "Current",
+          "type": "boolean"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "unmatched": {
+          "title": "Unmatched",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "unmatched",
+        "current"
+      ],
+      "title": "PermissionPresetDTO",
+      "type": "object"
+    },
+    "PermissionRuleDTO": {
+      "$defs": {
+        "PermissionExceptionDTO": {
+          "description": "Requests a rule doesn't apply to (a deny's exception): matched like a rule.",
+          "properties": {
+            "describe": {
+              "title": "Describe",
+              "type": "string"
+            },
+            "kind": {
+              "title": "Kind",
+              "type": "string"
+            },
+            "match": {
+              "title": "Match",
+              "type": "string"
+            },
+            "match_type": {
+              "title": "Match Type",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "match",
+            "match_type",
+            "describe"
+          ],
+          "title": "PermissionExceptionDTO",
+          "type": "object"
+        },
+        "PermissionLimitsDTO": {
+          "description": "An ask rule's limits on saved approvals: how far (``max_scope``, a\nLEVELS entry for pushes or a pattern) and how long (``life`` session |\ntime | forever, with ``minutes`` for time).",
+          "properties": {
+            "life": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Life"
+            },
+            "max_scope": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Scope"
+            },
+            "minutes": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Minutes"
+            }
+          },
+          "title": "PermissionLimitsDTO",
+          "type": "object"
+        }
+      },
+      "description": "One rule of the person's store (GET /permissions). ``decision`` allow |\ndeny | ask; ``source`` preset | user | learned; ``match_type`` exact |\nprefix | glob or a named matcher (permissions.BUILTIN_MATCHERS; a\n``push`` rule's match is \"<source> \u2192 <destination>\"). ``repo_root``: the\none repo it applies in (None: every repo). ``prompts``: asks it caused\nin the last day.",
+      "properties": {
+        "created": {
+          "default": 0.0,
+          "title": "Created",
+          "type": "number"
+        },
+        "decision": {
+          "title": "Decision",
+          "type": "string"
+        },
+        "describe": {
+          "title": "Describe",
+          "type": "string"
+        },
+        "exclusions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PermissionExceptionDTO"
+          },
+          "title": "Exclusions",
+          "type": "array"
+        },
+        "expired": {
+          "default": false,
+          "title": "Expired",
+          "type": "boolean"
+        },
+        "expires": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PermissionLimitsDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "match": {
+          "title": "Match",
+          "type": "string"
+        },
+        "match_type": {
+          "title": "Match Type",
+          "type": "string"
+        },
+        "prompts": {
+          "default": 0,
+          "title": "Prompts",
+          "type": "integer"
+        },
+        "repo_root": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repo Root"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "match",
+        "match_type",
+        "decision",
+        "source",
+        "describe"
+      ],
+      "title": "PermissionRuleDTO",
       "type": "object"
     },
     "PreflightActionDTO": {
@@ -1616,6 +5173,292 @@
         "provider"
       ],
       "title": "ProfileDTO",
+      "type": "object"
+    },
+    "ProviderChoiceDTO": {
+      "description": "The person's saved choice (PUT /providers/{p}/connection).",
+      "properties": {
+        "cloud": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cloud"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "settings": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Settings",
+          "type": "object"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "title": "ProviderChoiceDTO",
+      "type": "object"
+    },
+    "ProviderConnectionDTO": {
+      "$defs": {
+        "CloudLoginDTO": {
+          "description": "A cloud login's state (brindle.cloud_login.status): ``valid`` now,\n``expires_at`` (epoch seconds, None when unknown), ``expired`` when only\n``renew_command`` (the person) can renew it.",
+          "properties": {
+            "expired": {
+              "title": "Expired",
+              "type": "boolean"
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Expires At"
+            },
+            "note": {
+              "default": "",
+              "title": "Note",
+              "type": "string"
+            },
+            "renew_command": {
+              "default": "",
+              "title": "Renew Command",
+              "type": "string"
+            },
+            "valid": {
+              "title": "Valid",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "valid",
+            "expired"
+          ],
+          "title": "CloudLoginDTO",
+          "type": "object"
+        },
+        "ConnectionReadyDTO": {
+          "description": "Whether an agent of the provider would launch with its method now\n(connections.ready); if not, ``reason`` and the ``action`` the app can\noffer: install | sign_in | sign_out | renew | set_key.",
+          "properties": {
+            "action": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "install",
+                    "sign_in",
+                    "sign_out",
+                    "renew",
+                    "set_key"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Action"
+            },
+            "ok": {
+              "title": "Ok",
+              "type": "boolean"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            }
+          },
+          "required": [
+            "ok"
+          ],
+          "title": "ConnectionReadyDTO",
+          "type": "object"
+        },
+        "ProviderChoiceDTO": {
+          "description": "The person's saved choice (PUT /providers/{p}/connection).",
+          "properties": {
+            "cloud": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Cloud"
+            },
+            "method": {
+              "title": "Method",
+              "type": "string"
+            },
+            "settings": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "title": "Settings",
+              "type": "object"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "title": "ProviderChoiceDTO",
+          "type": "object"
+        },
+        "StoppedAgentDTO": {
+          "description": "An agent stopped because the provider's credentials were refused (failed_why auth).",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "profile": {
+              "title": "Profile",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "profile"
+          ],
+          "title": "StoppedAgentDTO",
+          "type": "object"
+        }
+      },
+      "description": "How a provider connects now: ``method`` auto | sign_in | api_key |\ncloud | org (the org decides, with no cloud route here), and for cloud the\nroute (``cloud``: bedrock, vertex, foundry, azure), its non-secret\n``settings`` (variable -> value) and the ``login`` it uses. An org's route\nwins over ``choice``, the person's saved choice; ``managed`` says why.\n``clouds``: the routes the person can choose for this provider.\n``blocked_by`` \"codex_login\": Codex's ChatGPT login keeps an API key from\nbeing used until POST /providers/codex/sign-out.",
+      "properties": {
+        "blocked_by": {
+          "anyOf": [
+            {
+              "const": "codex_login",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Blocked By"
+        },
+        "choice": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProviderChoiceDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "cloud": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cloud"
+        },
+        "clouds": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Clouds",
+          "type": "array"
+        },
+        "login": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CloudLoginDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "managed": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Managed"
+        },
+        "method": {
+          "title": "Method",
+          "type": "string"
+        },
+        "provider": {
+          "title": "Provider",
+          "type": "string"
+        },
+        "ready": {
+          "$ref": "#/$defs/ConnectionReadyDTO"
+        },
+        "settings": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Settings",
+          "type": "object"
+        },
+        "stopped_agents": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/StoppedAgentDTO"
+          },
+          "title": "Stopped Agents",
+          "type": "array"
+        }
+      },
+      "required": [
+        "provider",
+        "method",
+        "ready"
+      ],
+      "title": "ProviderConnectionDTO",
       "type": "object"
     },
     "RoutingDTO": {
@@ -2583,6 +6426,126 @@
       "title": "RuleDTO",
       "type": "object"
     },
+    "SavedActionDTO": {
+      "description": "A decision saved from the Inbox (permissions.SavedAction). ``kind``: a\npermissions.KINDS entry or ``push``; ``scope`` the ladder rung (exact,\ngeneral, repository, ...) and ``pattern`` what it covers; ``request`` the\nexact request it was saved from; ``life`` session | time | forever.",
+      "properties": {
+        "created": {
+          "default": 0.0,
+          "title": "Created",
+          "type": "number"
+        },
+        "decision": {
+          "title": "Decision",
+          "type": "string"
+        },
+        "expired": {
+          "default": false,
+          "title": "Expired",
+          "type": "boolean"
+        },
+        "expires": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "title": "Kind",
+          "type": "string"
+        },
+        "level": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Level"
+        },
+        "life": {
+          "default": "forever",
+          "title": "Life",
+          "type": "string"
+        },
+        "minutes": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Minutes"
+        },
+        "note": {
+          "default": "",
+          "title": "Note",
+          "type": "string"
+        },
+        "pattern": {
+          "title": "Pattern",
+          "type": "string"
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Repo"
+        },
+        "request": {
+          "additionalProperties": true,
+          "default": {},
+          "title": "Request",
+          "type": "object"
+        },
+        "scope": {
+          "title": "Scope",
+          "type": "string"
+        },
+        "session": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Session"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "pattern",
+        "decision",
+        "scope"
+      ],
+      "title": "SavedActionDTO",
+      "type": "object"
+    },
     "SessionDTO": {
       "properties": {
         "created_at": {
@@ -2608,6 +6571,18 @@
         "mode": {
           "title": "Mode",
           "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
         },
         "profile": {
           "title": "Profile",
@@ -2643,6 +6618,30 @@
         "created_at"
       ],
       "title": "SessionDTO",
+      "type": "object"
+    },
+    "StoppedAgentDTO": {
+      "description": "An agent stopped because the provider's credentials were refused (failed_why auth).",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "profile": {
+          "title": "Profile",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "profile"
+      ],
+      "title": "StoppedAgentDTO",
       "type": "object"
     },
     "WorkspaceDTO": {
@@ -3096,6 +7095,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/cloud/options"
+    },
+    {
+      "method": "GET",
       "path": "/v1/config"
     },
     {
@@ -3168,6 +7171,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/holds/{id}/supervise"
+    },
+    {
+      "method": "POST",
       "path": "/v1/holds/{id}/wait"
     },
     {
@@ -3207,20 +7214,112 @@
       "path": "/v1/kb/sources/{id}/sync"
     },
     {
+      "method": "DELETE",
+      "path": "/v1/keys/{name}"
+    },
+    {
       "method": "PUT",
       "path": "/v1/keys/{name}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/keys/{name}/import"
     },
     {
       "method": "POST",
       "path": "/v1/keys/{name}/set"
     },
     {
+      "method": "POST",
+      "path": "/v1/keys/{name}/test"
+    },
+    {
       "method": "GET",
       "path": "/v1/meta"
     },
     {
+      "method": "GET",
+      "path": "/v1/org-permissions"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/org-permissions/policy"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/org-permissions/role-assignment"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/permissions"
+    },
+    {
+      "method": "PATCH",
+      "path": "/v1/permissions"
+    },
+    {
       "method": "POST",
       "path": "/v1/permissions"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/permissions/asks"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/asks/allow-all"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/asks/decide"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/permissions/asks/plan"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/asks/unblock"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/permissions/groups"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/permissions/preset"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/permissions/report"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/rules"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/permissions/rules/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/permissions/rules/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/rules/{id}/exceptions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/permissions/saved"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/permissions/saved/{id}"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/permissions/saved/{id}"
     },
     {
       "method": "GET",
@@ -3244,6 +7343,18 @@
     },
     {
       "method": "POST",
+      "path": "/v1/providers/{provider}/cloud-sign-in"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/providers/{provider}/connection"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/providers/{provider}/connection"
+    },
+    {
+      "method": "POST",
       "path": "/v1/providers/{provider}/consent"
     },
     {
@@ -3255,8 +7366,20 @@
       "path": "/v1/providers/{provider}/login"
     },
     {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/logout"
+    },
+    {
       "method": "GET",
       "path": "/v1/providers/{provider}/preflight"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/preflight"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/providers/{provider}/sign-out"
     },
     {
       "method": "POST",
@@ -3323,8 +7446,16 @@
       "path": "/v1/sessions/{root:path}/pr/draft"
     },
     {
+      "method": "POST",
+      "path": "/v1/sessions/{root:path}/pr/push"
+    },
+    {
       "method": "GET",
       "path": "/v1/sessions/{root:path}/pr/readiness"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions/{root:path}/tree"
     },
     {
       "method": "POST",
@@ -3341,6 +7472,10 @@
     {
       "method": "POST",
       "path": "/v1/sessions/{root}/pause"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{root}/rename"
     },
     {
       "method": "POST",

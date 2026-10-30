@@ -98,10 +98,7 @@ describe("GoalPanel", () => {
     expect(screen.getByText("npm run build")).toBeTruthy();
     expect(daemon.requests.find((r) => r.path === "/goal")?.query).toMatchObject({ repo: REPO, root: ROOT });
 
-    fireEvent.click(screen.getByRole("switch"));
-    await waitFor(() => expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true"));
-    expect(daemon.requests.find((r) => r.path === "/goal/enabled")?.body).toEqual({ root: ROOT, enabled: true });
-    expect(daemon.data.goal?.enabled).toBe(true);
+    expect(screen.queryByRole("switch")).toBeNull();
     sync.stop();
   });
 
@@ -114,16 +111,8 @@ describe("GoalPanel", () => {
     const daemon = new FakeDaemon({ goal: structuredClone(goal) });
     const store = createAppStore();
     render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} />);
-    await waitFor(() => expect(screen.getByText("1 of 2 passed")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("1 of 2 milestones complete")).toBeTruthy());
     expect(screen.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
-  });
-
-  it("offers no autopilot switch for a paused session", async () => {
-    const daemon = new FakeDaemon({ goal: structuredClone(goal) });
-    const store = createAppStore();
-    render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} paused />);
-    await waitFor(() => expect(screen.getByText("Ship the Goal screen")).toBeTruthy());
-    expect(screen.queryByRole("switch")).toBeNull();
   });
 
   it("opens the session's docs from its goal line, filtered; Back to session returns, clearing the chip shows all; no docs hides the line", async () => {
@@ -218,7 +207,7 @@ describe("GoalPanel", () => {
     const store = createAppStore();
     const sync = startSync({ client: daemon.client(), store, connect: daemon.connect });
     render(<GoalPanel client={client} repo={REPO} root={ROOT} store={store} />);
-    await waitFor(() => expect(screen.getByText("1 of 2 passed")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("1 of 2 milestones complete")).toBeTruthy());
 
     // An autopilot event starts a refresh (an event also marks the store stale, so there
     // can be a second); their responses are held, so they carry the old goal.
@@ -232,41 +221,13 @@ describe("GoalPanel", () => {
     finished.milestones!.forEach((m) => (m.status = "passed"));
     daemon.data.goal = finished;
     daemon.publish("autopilot.progress", { repo_root: REPO, root_id: ROOT });
-    await waitFor(() => expect(screen.getByText("2 of 2 passed")).toBeTruthy());
+    await waitFor(() => expect(screen.getByText("2 of 2 milestones complete")).toBeTruthy());
 
     // The older response arrives last; it must not win.
     held.forEach((release) => release());
     await flush();
-    expect(screen.getByText("2 of 2 passed")).toBeTruthy();
-    expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("false");
+    expect(screen.getByText("2 of 2 milestones complete")).toBeTruthy();
     sync.stop();
-  });
-
-  it("keeps the first session on screen when an earlier session's action answers late", async () => {
-    const sessionA: GoalDTO = { ...structuredClone(goal), root_id: "A", goal: "Goal A" };
-    const sessionB: GoalDTO = { ...structuredClone(goal), root_id: "B", goal: "Goal B" };
-    const daemon = new FakeDaemon({ goal: structuredClone(sessionA) });
-    const { client, state, held } = holdingClient(daemon, "/v1/goal/enabled");
-    const store = createAppStore();
-    const { rerender } = render(<GoalPanel client={client} repo={REPO} root="A" store={store} />);
-    await waitFor(() => expect(screen.getByText("Goal A")).toBeTruthy());
-
-    // Toggling for session A: its answer is held.
-    state.hold = true;
-    fireEvent.click(screen.getByRole("switch"));
-    await waitFor(() => expect(held).toHaveLength(1));
-
-    // The panel moves to session B, which loads its own goal.
-    daemon.data.goal = structuredClone(sessionB);
-    rerender(<GoalPanel client={client} repo={REPO} root="B" store={store} />);
-    await waitFor(() => expect(screen.getByText("Goal B")).toBeTruthy());
-
-    // Session A's answer arrives last: session B stays on screen.
-    held.forEach((release) => release());
-    await flush();
-    expect(screen.getByText("Goal B")).toBeTruthy();
-    expect(screen.queryByText("Goal A")).toBeNull();
-    expect(screen.queryByText("No goal set for this session.")).toBeNull();
   });
 
   /* One row per state (and the engine's phase): the milestone under test shows its label in
@@ -313,17 +274,18 @@ describe("GoalPanel", () => {
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
     await waitFor(() => expect(sidebar.getAllByTestId("milestone")).toHaveLength(3));
     expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now", "now"]);
-    const bars = Array.from(sidebar.getByRole("progressbar").querySelectorAll("b"));
-    expect(bars.map((b) => b.dataset.now)).toEqual(["false", "true", "true"]);
+    expect(sidebar.queryByRole("progressbar")).toBeNull();
+    expect(sidebar.getByTestId("goal-line").textContent).toContain("1 of 3 milestones complete");
   });
 
-  /* One row per goal phase: the panel's one status in both views, and the step that phase has (Ready for PR's
-     Review & open PR, PR open's link), nothing of either in any other phase. */
+  /* One row per goal phase: the panel's one status in both views, and the step that phase has (PR open's link,
+     Done's Close session), nothing of either in any other phase. Ready for PR is only its label: the session's
+     ready notice offers the PR. */
   const PR = "https://github.com/example/proj/pull/7";
-  it.each<[string, string, "review" | "pr" | "close" | null]>([
+  it.each<[string, string, "pr" | "close" | null]>([
     ["in_progress", "In progress", null],
     ["in_review", "In review", null],
-    ["ready_for_pr", "Ready for PR", "review"],
+    ["ready_for_pr", "Ready for PR", null],
     ["pr_open", "PR open", "pr"],
     ["done", "Done", "close"],
   ])("shows the goal phase %s as '%s', with its own step", async (phase, label, step) => {
@@ -334,23 +296,21 @@ describe("GoalPanel", () => {
     const openUrl = vi.fn(() => Promise.resolve());
 
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} compact onReview={onReview} openUrl={openUrl} onCloseSession={onCloseSession} />);
-    await waitFor(() => expect(sidebar.getByTestId("goal-phase").textContent).toBe(label));
-    expect(sidebar.getByRole("region", { name: "Goal" }).dataset.phase).toBe(phase);
-    expect(!!sidebar.queryByTestId("goal-review")).toBe(step === "review");
+    await waitFor(() => expect(sidebar.getByRole("region", { name: "Goal" }).dataset.phase).toBe(phase));
+    // The sidebar's count line names only the steps after In progress; Done is the green count itself.
+    expect(sidebar.queryByTestId("goal-phase")?.textContent ?? null).toBe(phase === "in_progress" || phase === "done" ? null : label);
+    expect(sidebar.queryByTestId("goal-review")).toBeNull();
     expect(!!sidebar.queryByTestId("goal-pr")).toBe(step === "pr");
     expect(!!sidebar.queryByTestId("goal-close")).toBe(step === "close");
     if (step === "close") {
-      // Done's step sits on the Done status's line, a primary button, and closes in one click.
+      // Done's step sits under the milestones, a quiet text button, and closes in one click.
       const close = sidebar.getByRole("button", { name: "Close session" });
-      expect(close.parentElement).toBe(sidebar.getByTestId("goal-line").parentElement);
-      expect(close.className).toContain("bg-branch");
+      expect(sidebar.getByTestId("goal-line").contains(close)).toBe(false);
+      expect(sidebar.getByRole("list", { name: "Milestones" }).compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(close.className).toContain("text-ink-3");
       fireEvent.click(close);
       expect(onCloseSession).toHaveBeenCalledTimes(1);
       expect(sidebar.queryByRole("dialog")).toBeNull();
-    }
-    if (step === "review") {
-      fireEvent.click(sidebar.getByTestId("goal-review"));
-      expect(onReview).toHaveBeenCalledTimes(1);
     }
     if (step === "pr") {
       fireEvent.click(sidebar.getByTestId("goal-pr"));
@@ -363,7 +323,7 @@ describe("GoalPanel", () => {
 
     const full = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} onReview={onReview} openUrl={openUrl} onCloseSession={onCloseSession} />);
     await waitFor(() => expect(full.getByTestId("goal-phase").textContent).toBe(label));
-    expect(!!full.queryByTestId("goal-review")).toBe(step === "review");
+    expect(full.queryByTestId("goal-review")).toBeNull();
     expect(!!full.queryByTestId("goal-pr")).toBe(step === "pr");
     expect(!!full.queryByTestId("goal-close")).toBe(step === "close");
     if (step === "close") {
@@ -377,25 +337,29 @@ describe("GoalPanel", () => {
   it("offers no Close session at Done when there is nothing to close it with", async () => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), goal_phase: "done" } });
     render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
-    await waitFor(() => expect(screen.getByTestId("goal-phase").textContent).toBe("Done"));
+    await waitFor(() => expect(screen.getByRole("region", { name: "Goal" }).dataset.phase).toBe("done"));
     expect(screen.queryByTestId("goal-close")).toBeNull();
   });
 
   /* A Done goal as the panel draws it, from the engine's DTO alone: Done, the title (the full view's; the
      sidebar's pane names it above), every milestone listed and checked, nothing of a PR or of no milestones. */
   async function expectDone(view: ReturnType<typeof render>, compact: boolean) {
-    await waitFor(() => expect(view.getByTestId("goal-phase").textContent).toBe("Done"));
+    await waitFor(() => expect(view.getByRole("region", { name: "Goal" }).dataset.phase).toBe("done"));
     const items = [...within(view.getByRole("list", { name: "Milestones" })).getAllByTestId("milestone")];
     if (compact) {
       expect(items.map((li) => li.dataset.state)).toEqual(["done", "done"]);
       expect(items.map((li) => li.textContent)).toEqual(["✓Client wiredDone", "✓Screen rendersDone"]);
-      expect(view.getByTestId("goal-line").textContent).toBe("2 of 2 passed · Done");
+      expect(view.getByTestId("goal-line").textContent).toBe("2 of 2 milestones complete");
+      expect(view.getByTestId("goal-line").className).toContain("text-pass");
+      expect(view.queryByTestId("goal-phase")).toBeNull();
+      expect(view.queryByRole("progressbar")).toBeNull();
     } else {
+      expect(view.getByTestId("goal-phase").textContent).toBe("Done");
       expect(view.getByRole("heading", { name: "Ship the Goal screen" })).toBeTruthy();
       expect(items.map((li) => li.textContent)).toEqual([expect.stringContaining("✓1. Client wiredDone"), expect.stringContaining("✓2. Screen rendersDone")]);
       expect(view.queryByTestId("milestone-now")).toBeNull();
+      expect(view.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("100");
     }
-    expect(view.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("100");
     expect(view.container.textContent).not.toContain("No milestones yet");
     expect(view.queryByTestId("goal-review")).toBeNull();
     expect(view.queryByTestId("goal-pr")).toBeNull();
@@ -406,7 +370,7 @@ describe("GoalPanel", () => {
     const store = createAppStore();
     const sync = startSync({ client: daemon.client(), store, connect: daemon.connect });
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} compact />);
-    await waitFor(() => expect(sidebar.getByTestId("goal-phase").textContent).toBe("In progress"));
+    await waitFor(() => expect(sidebar.getByRole("region", { name: "Goal" }).dataset.phase).toBe("in_progress"));
     // The engine keeps the reached goal: its title and milestones, all passed, goal_phase done.
     daemon.completeGoal(ROOT);
     expect(daemon.data.goal).toMatchObject({ goal: "Ship the Goal screen", goal_phase: "done" });
@@ -437,7 +401,7 @@ describe("GoalPanel", () => {
   it("says a finished goal is finished, not that it has no milestones, when it never listed any", async () => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), goal_phase: "done", milestones: [] } });
     render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
-    await waitFor(() => expect(screen.getByTestId("goal-phase").textContent).toBe("Done"));
+    await waitFor(() => expect(screen.getByRole("region", { name: "Goal" }).dataset.phase).toBe("done"));
     expect(document.body.textContent).not.toContain("No milestones yet");
   });
 
@@ -448,7 +412,7 @@ describe("GoalPanel", () => {
     ["every milestone passed, not yet ready", { state: "done", milestones: goal.milestones!.map((m) => ({ ...m, status: "passed" })) }, { state: "not_ready" }, "in_review"],
     ["every milestone passed, no PR judging at all", { state: "done", milestones: goal.milestones!.map((m) => ({ ...m, status: "passed" })) }, {}, "done"],
     ["ready", { state: "done" }, { state: "ready" }, "ready_for_pr"],
-    ["a PR brindle opened", { state: "done" }, { state: "ready", pr: { url: PR } }, "pr_open"],
+    ["an open PR", { state: "done" }, { state: "ready", pr: { url: PR, unpushed: 0 } }, "pr_open"],
   ])("falls back without goal_phase: %s", (_, fields, readiness, phase) => {
     const older: GoalDTO = { ...structuredClone(goal), goal_phase: undefined, ...fields };
     expect(goalPhase(older, { ...UNKNOWN, ...readiness }).phase).toBe(phase);

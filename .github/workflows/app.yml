@@ -55,6 +55,40 @@ jobs:
           git diff --exit-code -- app/src/api/schema.ts \
             || { echo "::error::app/src/api/schema.ts is stale: run npm --prefix app run gen:api and commit it"; exit 1; }
 
+  e2e:
+    # The flows in Chromium over the fake daemon (app/e2e/flows.e2e.ts). pty, scroll and
+    # terminal e2e need a real Claude Code, tmux or the Rust bridge, so they aren't run here.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install
+        run: npm --prefix app ci
+      - name: Playwright version
+        id: playwright
+        run: echo "version=$(npm --prefix app ls @playwright/test --json | jq -r '.dependencies["@playwright/test"].version')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: browsers
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - name: Install browser
+        if: steps.browsers.outputs.cache-hit != 'true'
+        run: npx --prefix app playwright install --with-deps chromium
+      # A cached browser still needs the system libraries the runner image lacks.
+      - name: Install browser system libraries
+        if: steps.browsers.outputs.cache-hit == 'true'
+        run: npx --prefix app playwright install-deps chromium
+      - name: E2E
+        run: npm --prefix app run test:e2e -- --project=chromium e2e/flows.e2e.ts
+
   rust:
     # macOS, where the app runs: the pane-view tests drive a real tmux, and need
     # a current one (Ubuntu 22.04's apt tmux is too old for three of them).

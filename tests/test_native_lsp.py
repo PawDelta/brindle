@@ -199,8 +199,8 @@ def test_server_failure_preserves_write_and_reaps_process(tmp_path, server, fail
 @pytest.mark.parametrize("stop", ["idle", "error", "signal"])
 def test_runner_owns_servers_across_turns(tmp_path, server, monkeypatch, stop):
     (tmp_path / "a.py").write_text("good")
-    worker = SimpleNamespace(workspace_id="w", mode="chat")
-    workspace = SimpleNamespace(path=str(tmp_path))
+    worker = SimpleNamespace(workspace_id="w", mode="chat", profile="developer")
+    workspace = SimpleNamespace(path=str(tmp_path), repo_root=str(tmp_path))
     profile = SimpleNamespace(write_scope=None, read_scope=None, permission_mode="plan",
                               allowed_tools=[], prompt="", context_tokens=None)
     pending = [SimpleNamespace(body="read"), SimpleNamespace(body="finish")]
@@ -213,6 +213,9 @@ def test_runner_owns_servers_across_turns(tmp_path, server, monkeypatch, stop):
     monkeypatch.setattr(runner, "endpoint_for", lambda _: SimpleNamespace(model="test", base_url="local"))
     monkeypatch.setattr(runner, "brindle_tools", lambda *a: [])
     monkeypatch.setattr(runner, "_drain", lambda *a: [])
+    from brindle import config, profiles
+    monkeypatch.setattr(config, "load_repo_config", lambda _: config.RepoConfig())
+    monkeypatch.setattr(profiles, "profile_rules_for", lambda *a: [])
     from brindle import launch_health
     monkeypatch.setattr(launch_health, "before_delivery", lambda *a: None)
     monkeypatch.setattr(launch_health, "delivered", lambda *a: None)

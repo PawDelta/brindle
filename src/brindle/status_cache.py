@@ -20,6 +20,7 @@ across processes.
 
 from __future__ import annotations
 
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -62,6 +63,35 @@ def _common_gitdir(worktree_gitdir: Path) -> Path:
         return worktree_gitdir
     rel = commondir_file.read_text().strip()
     return (worktree_gitdir / rel).resolve()
+
+
+def read_head(path: str | Path) -> str | None:
+    """Read the current commit for rendering without launching git.
+
+    Follow loose or packed refs in the common gitdir of a linked worktree;
+    detached HEADs live in its private gitdir. An unavailable or unsupported
+    ref is unknown, never evidence of an old commit still being current.
+    Merge gates continue to resolve HEAD through git itself.
+    """
+    try:
+        private = _worktree_gitdir(Path(path))
+        common = _common_gitdir(private)
+        value = (private / "HEAD").read_text().strip()
+        seen = set()
+        while value.startswith("ref: "):
+            ref = value[5:]
+            if ref in seen or not ref.startswith("refs/") or ".." in Path(ref).parts:
+                return None
+            seen.add(ref)
+            directory = private if ref.startswith(("refs/bisect/", "refs/worktree/", "refs/rewritten/")) else common
+            try:
+                value = (directory / ref).read_text().strip()
+            except FileNotFoundError:
+                value = next((line.partition(" ")[0] for line in (common / "packed-refs").read_text().splitlines()
+                              if line.partition(" ")[2] == ref), "")
+        return value if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value) else None
+    except (OSError, ValueError, IndexError):
+        return None
 
 
 def _ref_file(common_gitdir: Path, ref: str) -> Path:

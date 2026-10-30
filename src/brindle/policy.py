@@ -119,14 +119,17 @@ def _decide(what: str, cfg: RepoConfig, repo_root: str, ask) -> Decision:
     return deny(d if isinstance(d, str) else f"the policy plugin gave no decision on this {what}")
 
 
-def _profile_fields(profile: str | None, repo_root: str) -> tuple[str | None, str | None]:
-    """(provider, model) of ``profile``, best effort."""
+def _profile_fields(profile: str | None, repo_root: str, *,
+                    user_library: bool = False) -> tuple[str | None, str | None]:
+    """(provider, model) of ``profile``, best effort. ``user_library``: the
+    person's profile of that name, never the repo's own (the company route
+    is still the repo's)."""
     if not profile:
         return None, None
     try:
         from brindle.profiles import load_profile
 
-        p = load_profile(profile, repo_root)
+        p = load_profile(profile, None if user_library else repo_root)
         model = p.model
         if p.provider == "claude":
             from brindle import company_login
@@ -135,7 +138,7 @@ def _profile_fields(profile: str | None, repo_root: str) -> tuple[str | None, st
         if not model:
             try:
                 from brindle.autopilot import effective_profile_model
-                model = effective_profile_model(p, repo_root) or None
+                model = effective_profile_model(p, None if user_library else repo_root) or None
             except Exception:
                 pass
         if not model:

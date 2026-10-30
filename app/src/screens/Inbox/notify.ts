@@ -12,6 +12,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
 import type { InboxItemDTO } from "../../api/schema";
+import { waitingCount } from "../../store/appUpdates";
 import type { AppStore } from "../../store/store";
 import { itemKey, kindLabel } from "./items";
 
@@ -27,25 +28,34 @@ export function watchInbox(store: AppStore, sink: InboxSink): () => void {
   let seen: Set<string> | null = null;
   let last: InboxItemDTO[] | null = null;
   let lastEvent = store.getState().lastEventId;
+  let counted: number | null = null;
 
   const check = () => {
-    const { inbox, synced, recent, lastEventId } = store.getState();
+    const state = store.getState();
+    const { inbox, synced, recent, lastEventId } = state;
     if (lastEventId !== lastEvent) {
       for (const e of recent.filter((e) => e.id > lastEvent && e.kind === "session.pr_ready")) {
         sink.notify(READY_TITLE, `${e.root_id ?? e.agent_id ?? "a session"}: every milestone passed and nothing is running. Review its changes and open the PR.`);
       }
       lastEvent = lastEventId;
     }
-    if (!synced || inbox === last) return;
-    last = inbox;
-    const keys = new Set(inbox.map(itemKey));
-    if (seen) {
-      for (const item of inbox) {
-        if (!seen.has(itemKey(item))) sink.notify(kindLabel(item), describe(item));
+    if (!synced) return;
+    if (inbox !== last) {
+      last = inbox;
+      const keys = new Set(inbox.map(itemKey));
+      if (seen) {
+        for (const item of inbox) {
+          if (!seen.has(itemKey(item))) sink.notify(kindLabel(item), describe(item));
+        }
       }
+      seen = keys;
     }
-    seen = keys;
-    sink.count(inbox.length);
+    // The badge counts the app's own update item too (store/appUpdates.ts).
+    const count = waitingCount(state);
+    if (count !== counted) {
+      counted = count;
+      sink.count(count);
+    }
   };
 
   check();

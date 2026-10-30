@@ -45,6 +45,7 @@ def never(q, d):
 @pytest.mark.parametrize("name, bad, looks", [
     ("GCP_WORKLOAD_IDENTITY_PROVIDER", "projects/1/providers/x", "projects/N/locations/global"),
 ])
+@pytest.mark.brindle_ci_guard
 def test_malformed_ids_stop_before_anything_runs(init_run, name, bad, looks):
     cloud = ci_client.cloud_of(name) or "bedrock"
     with pytest.raises(CIError, match=re.escape(f"{name} looks like ")) as e:
@@ -53,6 +54,7 @@ def test_malformed_ids_stop_before_anything_runs(init_run, name, bad, looks):
     assert not init_run.calls, "nothing ran before the bad ID was caught"
 
 
+@pytest.mark.brindle_ci_guard
 def test_unattended_without_the_ids_names_the_missing_variable(init_run):
     with pytest.raises(CIError, match=r"AWS_ROLE_ARN is required for --credential bedrock "
                                       r"\(pass --cloud-var NAME=VALUE or set \$AWS_ROLE_ARN\)"):
@@ -65,6 +67,7 @@ def test_a_cloud_variable_answers_the_credential_question(init_run):
     assert variables(calls) == BEDROCK
 
 
+@pytest.mark.brindle_ci_guard
 def test_cloud_variables_dont_mix_with_other_credentials(init_run):
     with pytest.raises(CIError, match="configures bedrock or vertex or foundry, not --credential key"):
         init_run(credential="key", cloud_vars=BEDROCK)
@@ -195,6 +198,7 @@ def test_a_missing_output_names_what_to_pass_instead(monkeypatch):
     assert "no tenantId output" in result.output and "--cloud-var AZURE_CLIENT_ID" in result.output
 
 
+@pytest.mark.brindle_ci_guard
 def test_from_options_need_their_own_cloud(monkeypatch):
     fake_clis(monkeypatch)
     result, got = cli_init(monkeypatch, "--from-stack", "s", "--credential", "vertex")
@@ -230,6 +234,7 @@ def test_a_preview_cloud_is_set_up_with_the_flag(init_run, cloud):
         f"{cloud} is a preview for Brindle-CI: it isn't verified end to end yet"]
 
 
+@pytest.mark.brindle_ci_guard
 def test_the_enterprise_default_of_a_preview_cloud_is_refused_without_the_flag(init_run):
     managed = lambda cwd: ("vertex", {})  # noqa: E731 - the org policy names vertex
     with pytest.raises(CIError, match="in preview"):

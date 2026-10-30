@@ -55,6 +55,7 @@ def test_a_personal_token_is_still_denied_unless_it_is_the_proxys(proxy):
     assert "ANTHROPIC_AUTH_TOKEN" in secrets.pane_deny(secrets.PERSONAL_KEYS, {})
 
 
+@pytest.mark.brindle_ci
 def test_federation_apply_registers_the_proxy_and_stop_clears_it():
     from brindle import ci_federation
 

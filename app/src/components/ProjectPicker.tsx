@@ -12,7 +12,7 @@ import type { PickFolder } from "../api/open";
 import { plain } from "../api/wording";
 import { useJob } from "../screens/Branch/useJob";
 import { ProgressCard } from "./ProgressCard";
-import { alert, button, card, field, mono, primary } from "./ui";
+import { alert, button, card, field, mono } from "./ui";
 
 export interface ProjectPickerProps {
   client: DaemonClient;
@@ -80,7 +80,7 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
           <p className="font-semibold">Open a folder</p>
           <p className="text-sm text-ink-2">A project already on this Mac: brindle works in it where it is.</p>
           <div className="mt-auto pt-s1">
-            <button type="button" className={primary} disabled={!pickFolder || opening || busy} onClick={() => void openFolder()}>
+            <button type="button" className={button} disabled={!pickFolder || opening || busy} onClick={() => void openFolder()}>
               Open a folder…
             </button>
           </div>
@@ -103,7 +103,7 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
             )}
           </p>
           <div className="mt-auto pt-s1">
-            <button type="submit" className={primary} disabled={!url.trim() || busy}>
+            <button type="submit" className={button} disabled={!url.trim() || busy}>
               Clone
             </button>
           </div>

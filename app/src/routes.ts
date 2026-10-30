@@ -23,7 +23,9 @@ export interface SessionRef {
    the engine says the session is ready for one. Nothing else ever lies
    over a session: what waits on the person is acted on from the Inbox's
    cards or in the agent's own terminal. */
-export type SheetRef = { kind: "review" };
+/* What lies over a session's chat: the review sheet (an open PR's Review changes), or the session's
+   changes in the chat's place (the sidebar's Changes row). */
+export type SheetRef = { kind: "review" } | { kind: "changes" };
 
 /* Knowledge's tabs. */
 export type KnowledgeView = "map" | "docs" | "imported" | "decisions";
@@ -40,8 +42,11 @@ export type Route =
   | { screen: "agents" }
   /* `section`: scrolled to on opening (the sidebar's usage reading opens Account › Usage,
      a provider's problem Settings › Providers); `ask` counts the requests, so asking
-     again while the page is open scrolls again. */
-  | { screen: "settings"; section?: "providers"; ask?: number }
+     again while the page is open scrolls again; `rule`: a permission rule to open in its
+     editor, from the Inbox's permission items. */
+  | { screen: "settings"; section?: "providers" | "permissions"; ask?: number; rule?: string }
+  /* One repo's checks, rules and overrides of the person's settings (from its sidebar heading or Settings). */
+  | { screen: "project-settings"; repo?: string }
   | { screen: "account"; section?: "usage"; ask?: number }
   | ({ screen: "session"; agent?: string; sheet?: SheetRef } & SessionRef);
 

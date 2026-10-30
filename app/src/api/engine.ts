@@ -70,6 +70,20 @@ export async function connectOnceStarted<T>(connect: () => Promise<T>, live: () 
   }
 }
 
+/* What the shell's engine start is doing while connect waits
+   (src-tauri/src/daemon.rs daemon_start_step), and for how many seconds:
+   stopping the daemon of the build from before an update (or another
+   install's), or waiting for the one it started to answer. */
+export type StartStep = { step: "stopping" | "starting"; pid: number; secs: number };
+
+/* "Starting brindle…" in the words of what the start is doing. */
+export function startingLine(step: StartStep | null | undefined): string {
+  if (!step) return "Starting brindle…";
+  const took = step.secs >= 1 ? ` ${step.secs}s` : "";
+  if (step.step === "stopping") return `Stopping the engine that ran before (pid ${step.pid})…${took}`;
+  return `Starting the engine…${took}`;
+}
+
 /* The banner's upgrade for a daemon that couldn't start because its brindle
    is too old to have one, with the version the shell named; null for any
    other reason. No daemon answered, so nothing of its meta but the version. */

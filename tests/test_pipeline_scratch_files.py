@@ -31,7 +31,7 @@ def test_untracked_scratch_file_does_not_block_review(db, repo, monkeypatch, pro
     if tracked_edit:
         (Path(ws.path) / "new.py").write_text("edited, not committed\n")
     started = []
-    monkeypatch.setattr(pipeline, "load_repo_config", lambda root_: RepoConfig(pipeline=True))
+    monkeypatch.setattr(pipeline, "load_repo_config", lambda root_, **kw: RepoConfig(pipeline=True))
     monkeypatch.setattr(pipeline, "second_profile", lambda *a, **kw: None)
     monkeypatch.setattr(agents, "default_review_profile", lambda *a, **kw: None)
     monkeypatch.setattr(agents, "start_review", lambda *a, **kw: started.append(1))

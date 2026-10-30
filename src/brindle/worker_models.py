@@ -57,24 +57,25 @@ def find(model_id: object) -> Model | None:
     return next((m for m in CATALOG if m.id == model_id), None)
 
 
-def runs(m: Model, repo_root: str | None = None) -> tuple[str | None, str | None]:
+def runs(m: Model, repo_root: str | None = None, *, user_library: bool = False) -> tuple[str | None, str | None]:
     """(provider, model) of the profile ``m`` runs on, resolved as check_assign
     resolves them; a hosted pick whose profile isn't written yet runs what
-    :func:`profile_text` will write."""
+    :func:`profile_text` will write. ``user_library``: the person's profile
+    of that name, never the repo's own."""
     from brindle.policy import _profile_fields
 
-    provider, model = _profile_fields(m.profile, repo_root or "")
+    provider, model = _profile_fields(m.profile, repo_root or "", user_library=user_library)
     if provider is None and m.how == KEY:
         return "native", m.model
     return provider, model
 
 
-def allowed(acc, m: Model, repo_root: str | None = None) -> bool:
+def allowed(acc, m: Model, repo_root: str | None = None, *, user_library: bool = False) -> bool:
     """Whether ``acc`` (``team_policy.access``) would let a worker start on
     ``m``'s profile; never a hosted-key model when personal keys are denied."""
     if m.how == KEY and acc.deny_personal_keys:
         return False
-    return acc.allows_profile(m.profile, *runs(m, repo_root))
+    return acc.allows_profile(m.profile, *runs(m, repo_root, user_library=user_library))
 
 
 def offered(acc, tier: str, repo_root: str | None = None) -> list[Model]:
@@ -125,21 +126,23 @@ _signed_in: tuple[float, list[str]] | None = None
 _applying = threading.local()
 
 
-def apply(cfg, user: dict, repo_root: str | None = None) -> None:
+def apply(cfg, user: dict, repo_root: str | None = None, *, user_library: bool = False) -> None:
     """Route each size the person picked a model for to that model's profile
     (``cfg.routing[size] = [profile]``). A pick that isn't ready, isn't allowed
-    by the org policy now, or is gone from the catalog, leaves the built-in routing for that size and says so once."""
+    by the org policy now, or is gone from the catalog, leaves the built-in routing for that size and says so once.
+    ``user_library``: a pick's profile is the person's, never the repo's own
+    of that name (the org policy is still the repo's)."""
     # Judging a pick loads its profile, which loads the repo config again: that inner load keeps its routing.
     if getattr(_applying, "on", False):
         return
     _applying.on = True
     try:
-        _apply(cfg, user, repo_root)
+        _apply(cfg, user, repo_root, user_library)
     finally:
         _applying.on = False
 
 
-def _apply(cfg, user: dict, repo_root: str | None) -> None:
+def _apply(cfg, user: dict, repo_root: str | None, user_library: bool = False) -> None:
     global _signed_in
     from brindle import doctor
     from brindle.config import user_config_path
@@ -152,21 +155,35 @@ def _apply(cfg, user: dict, repo_root: str | None) -> None:
     from brindle.pro import team_policy
 
     acc = team_policy.access(repo_root)      # the policy may have narrowed since the pick; unreadable: nothing
+    from brindle import providers
+
     now = time.monotonic()
-    if _signed_in is None or now >= _signed_in[0]:
-        _signed_in = (now + SIGNED_IN_TTL, doctor.signed_in_providers())
-    signed_in = _signed_in[1]
+    fresh = _signed_in is not None and now < _signed_in[0]
+    if fresh or providers.probing():
+        if not fresh:
+            _signed_in = (now + SIGNED_IN_TTL, doctor.signed_in_providers())
+        signed_in = _signed_in[1]
+    else:
+        # No probe allowed here (providers.no_sign_in_probes) and none kept: an
+        # installed CLI counts, as a sign-in that can't be told does, and nothing is kept.
+        signed_in = doctor.signin_providers()
 
     def is_ready(m: Model) -> bool:
+        if m.how == KEY and not providers.probing():
+            # Can't be told without reading the credential store (a `security`
+            # run on macOS): ready, as a can't-be-told sign-in is; a later read checks.
+            return True
         if m.how != LOCAL:
             return ready(m, signed_in)
         key = m.model or ""
+        if not providers.probing():
+            return True     # can't be told without the HTTP probe of Ollama: a later read makes it
         if not _local_ready.get(key) and ready(m, signed_in):   # an HTTP probe of Ollama: cached once ready
             _local_ready[key] = True
         return _local_ready.get(key, False)
 
     for tier, m in picks.items():
-        if m is not None and tier in m.tiers and allowed(acc, m, repo_root) and is_ready(m):
+        if m is not None and tier in m.tiers and allowed(acc, m, repo_root, user_library=user_library) and is_ready(m):
             cfg.routing[tier] = [m.profile]
             cfg.routing_sources[tier] = str(user_config_path())
         elif (tier, str(user.get(f"routing_{tier}"))) not in _warned:

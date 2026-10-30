@@ -1,4 +1,5 @@
 import { act, cleanup, render } from "@testing-library/react";
+import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
 import { COPIED_SHOWN, COPY_KEY, COPY_OR_INTERRUPT, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
@@ -435,6 +436,43 @@ it("off a Mac, ⌘V pastes the app's clipboard, and an Edit > Paste after it pas
   // And nothing more, however long on.
   await settled(PASTE_WAIT + 50);
   expect(written).toHaveLength(2);
+});
+
+it("pastes after a press anywhere in the view, its margin too: the press gives xterm.js the keyboard, so ⌘V's paste reaches the pane", async () => {
+  const { written, opened, view, term } = mount();
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+  await parsed(term());
+  // A press on the view outside xterm.js's own element (its margin, the strip under its last row, the mask): the
+  // webview would leave the focus on the page, where the paste went, pasting nothing.
+  const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+  act(() => void view.getByTestId("terminal").dispatchEvent(press));
+  // ⌘V's paste, on whatever has the focus.
+  webviewPaste(document.activeElement!, "pasted ✓");
+  await settled();
+  expect(written).toEqual(["\x1b[200~pasted ✓\x1b[201~"]);
+  expect(press.defaultPrevented, "the press's default doesn't take the focus off the view again").toBe(true);
+});
+
+it("opens a link Ctrl-clicked (⌘-clicked on a Mac) in the system browser, a URL the pane prints or a program's OSC 8 hyperlink; a plain click opens nothing", async () => {
+  const urls: string[] = [];
+  let handlers: PtyViewHandlers | undefined;
+  const open: PtyViewOpener = (_at, _size, h) => ((handlers = h), { write() {}, resize() {}, focus() {}, close() {} });
+  render(<PtyTerminal at={{ server: "brindle", target: "s:@1" }} open={open} openUrl={(url) => (urls.push(url), Promise.resolve())} />);
+  const term = xterms.at(-1)!;
+  act(() => handlers!.onData(new TextEncoder().encode("see https://example.com/docs?a=1.\r\n\x1b]8;;https://example.com/osc\x07a link\x1b]8;;\x07")));
+  await parsed(term);
+  // The links xterm.js finds on a row (1-based), as hovering it would.
+  const providers = (term as unknown as { _core: { _linkProviderService: { linkProviders: ILinkProvider[] } } })._core._linkProviderService.linkProviders;
+  const linksOn = (y: number) => Promise.all(providers.map((p) => new Promise<ILink[]>((ok) => p.provideLinks(y, (l) => ok(l ?? []))))).then((l) => l.flat());
+  const click = (link: ILink, mods: MouseEventInit = {}) => link.activate(new MouseEvent("mouseup", mods), link.text);
+  const [url] = await linksOn(1);
+  expect(url.text).toBe("https://example.com/docs?a=1");
+  click(url);
+  expect(urls).toEqual([]);
+  click(url, { ctrlKey: true });
+  const [osc] = await linksOn(2);
+  click(osc, { ctrlKey: true });
+  expect(urls).toEqual(["https://example.com/docs?a=1", "https://example.com/osc"]);
 });
 
 it("tells the view it was focused or clicked, so the window takes its size, typing nothing", () => {

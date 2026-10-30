@@ -29,10 +29,13 @@ async function banner(client: DaemonClient, onRetry?: () => void) {
 }
 
 describe("EngineBanner", () => {
-  it("shows nothing for an engine in range", async () => {
+  it("shows daemon health for an engine in range", async () => {
     const { status, view } = await banner(new FakeDaemon().client());
     expect(status.state).toBe("ok");
-    expect(view.container.innerHTML).toBe("");
+    expect(view.queryByTestId("engine-health")).toBeNull();
+    expect(view.queryByTestId("engine-banner")).toBeNull();
+    const reconnecting = render(<EngineBanner status={status} connection="connecting" />);
+    expect(reconnecting.getByTestId("connection").textContent).toBe("daemon · connecting…");
   });
 
   it("offers the upgrade for an older engine: a button when the app can ask the engine, the command otherwise", async () => {
