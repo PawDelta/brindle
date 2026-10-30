@@ -389,6 +389,9 @@ def spawn(
     from brindle import identity_lock
 
     identity_lock.ensure_workspace(db, ws)   # no new agent in another identity's worktree
+    session_root = pilot.root_of(db, parent_id) if parent_id else None
+    if session_root:
+        db.set_workspace_session_root(ws.id, session_root)
     profile = load_profile(profile_name, ws.repo_root)
     if (profile.name == "coordinator") != (mode == "coordinator"):
         # Only the sweep starts a coordinator (brindle.coordinator.wake).
@@ -415,7 +418,7 @@ def spawn(
         analysis = analysis_brief.brief_context(
             db, ws.repo_root, ws.branch, agent_id, prompt or "", files,
             large=analysis_brief.large_work(weight, requested=analysis_doc),
-            **({"session_id": pilot.root_of(db, parent_id)} if parent_id else {}))
+            **({"session_id": session_root} if session_root else {}))
     if not provider.launches_process:
         if mode not in ("handoff", "assign"):
             raise AgentError(
@@ -2654,6 +2657,7 @@ def delegate(
             created = workspaces.create(
                 db, caller_ws.path, branch, base, fetch=False, start=start,
                 apply_prefix=False, reuse_registered=True,
+                session_root=pilot.root_of(db, caller.id) if caller else None,
             )
             if created.setup and not created.setup.ok:
                 raise AgentError(f"workspace setup failed:\n{created.setup.log}")

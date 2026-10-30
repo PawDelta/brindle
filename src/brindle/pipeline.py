@@ -1343,8 +1343,8 @@ def _deliverables(db: DB, ws: Workspace) -> list:
     try:
         from brindle.pro import analysis_docs
 
-        worker = agents.workspace_worker(db, ws)
-        session = autopilot.root_of(db, worker.id) if worker else None
+        workspace = db.get_workspace(ws.id)
+        session = (workspace.session_root if workspace else None) or ws.session_root
         source = {"kind": "task", "ref": ws.branch, **({"session": session} if session else {})}
         return analysis_docs.collect(ws.repo_root, ws.branch, source)
     except Exception:  # noqa: BLE001 - the library is a side effect of merging
