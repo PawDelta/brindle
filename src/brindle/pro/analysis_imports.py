@@ -5,10 +5,13 @@
 skipped, and why: a file that looks like a secret (a secret-named file, or text
 :func:`brindle.kb.redact` would change), text held back as an injection, a file
 over the size limit or not UTF-8. :func:`add_to_library` uploads the rest with
-source kind ``import``, one library doc per file; :func:`sync_upload` (called by
-:func:`brindle.kb.sync`) re-uploads a changed file, replacing its old doc, and
-deletes the docs of files gone from the folder; :func:`remove_from_library`
-deletes them all server-side.
+through ``POST /analysis-docs/imports``, one library doc per file, in batches of
+at most 20: hashes first, then the text of only the files the server answers
+``needs_content`` for; each answer's doc id is tracked. :func:`sync_upload`
+(called by :func:`brindle.kb.sync`) re-sends a changed file (the server updates
+its doc in place) and deletes the docs of files gone from the folder;
+:func:`remove_from_library` deletes them all with the folder's
+``DELETE /analysis-docs/imports/{folder_id}`` (the folder id is the source id).
 
 Nothing is sent in air-gap mode, without the ``analysis_docs`` entitlement, or
 when the ``import_upload`` switch resolves to off (the user's choice, the
@@ -48,12 +51,11 @@ from urllib.parse import quote
 from brindle import kb
 from brindle.db import DB
 from brindle.pro import analysis_docs, analysis_policy
-from brindle.pro.orgkey import OrgKeys, repo_identity
 
 log = logging.getLogger(__name__)
 
 SWITCH = "import_upload"
-SOURCE_KIND = "import"
+BATCH = 20         # files per POST /analysis-docs/imports (the backend's limit)
 ADDING, IN_LIBRARY, REMOVING = "adding", "in_library", "removing"
 LEASE = 300.0      # seconds a claim lasts without renewal (a crashed holder's claim then lapses)
 _SECRET_NAMES = ("*.pem", "*.key", "*.p12", "*.pfx", "id_rsa*", "id_ed25519*", "*credential*",
@@ -364,21 +366,75 @@ def _off_reason(client=None, store=None) -> str | None:
     return None
 
 
-def _post(snap: Snapshot, key, identity, ref, name, data):
+class Rejected(RuntimeError):
+    """The backend refused a batch as invalid (422: a bad path or a hash that does
+    not match its text), so sending the same batch again is pointless."""
+
+
+def _post_batch(snap: Snapshot, folder_id: str, files: list[dict]) -> dict[str, dict]:
+    """One ``POST /analysis-docs/imports``: ``{path: the file's result}``."""
     from brindle.pro import auth
 
-    body = {"scope": {"kind": "user", "id": snap.ent.sub}, "files": [{"name": name, "md": data.decode("utf-8")}],
-            "source": {"kind": SOURCE_KIND, "ref": ref}, "repo_key": key.repo_key(identity)}
-    status, got = _call(snap, "POST", "/analysis-docs", auth.JSONBody(body))
-    doc_id = got.get("id") if isinstance(got, dict) else None
-    if status != 200 or not isinstance(doc_id, str):
-        raise RuntimeError(f"{name} was not stored (HTTP {status})")
-    return doc_id
+    body = {"scope": {"kind": "user", "id": snap.ent.sub}, "folder_id": folder_id, "files": files}
+    status, got = _call(snap, "POST", "/analysis-docs/imports", auth.JSONBody(body))
+    results = got.get("files") if isinstance(got, dict) else None
+    if status == 422:
+        raise Rejected(got.get("error") if isinstance(got, dict) and got.get("error") else "rejected")
+    if status != 200 or not isinstance(results, list):
+        raise RuntimeError(f"not stored (HTTP {status})")
+    return {r["path"]: r for r in results if isinstance(r, dict) and isinstance(r.get("path"), str)}
+
+
+def _exchange(snap: Snapshot, folder_id: str, items: list[tuple[str, str, bytes]]) -> dict[str, tuple[str, str]]:
+    """Send a batch of (path, hash, content): hashes first, then the content of
+    only the files the server asks for. ``{path: (doc id, status)}`` of those it
+    stored or already had; a file missing from it was not stored."""
+    got = _post_batch(snap, folder_id, [{"path": n, "hash": h} for n, h, _ in items])
+    need = [i for i in items if (got.get(i[0]) or {}).get("status") == "needs_content"]
+    if need:
+        got.update(_post_batch(snap, folder_id, [{"path": n, "hash": h, "md": d.decode("utf-8")}
+                                                 for n, h, d in need]))
+    return {n: (r["doc_id"], r["status"]) for n, _, _ in items
+            if (r := got.get(n)) and r.get("status") in ("created", "updated", "unchanged")
+            and isinstance(r.get("doc_id"), str)}
+
+
+def _send(snap: Snapshot, folder_id: str, items: list[tuple[str, str, bytes]]) -> dict[str, tuple[str, str]]:
+    """:func:`_exchange`, but a rejected batch is retried one file at a time so
+    one bad file does not hold back the rest."""
+    try:
+        return _exchange(snap, folder_id, items)
+    except Rejected:
+        if len(items) == 1:
+            return {}
+        stored: dict[str, tuple[str, str]] = {}
+        for item in items:
+            stored.update(_send(snap, folder_id, [item]))
+        return stored
 
 
 def _delete(snap: Snapshot, doc_id: str) -> bool:
     status, _ = _call(snap, "DELETE", f"/analysis-docs/{quote(doc_id, safe='')}")
     return status == 200 or (status == 404 and not snap.stopped)
+
+
+def _delete_folder(db: DB, snap: Snapshot, source_id: str) -> bool:
+    """Delete every doc the identity uploaded for the folder in one request; once
+    the server confirms, the folder's queued deletions are done. False (they stay
+    queued) when it did not, or the account changed."""
+    try:
+        status, _ = _call(snap, "DELETE", f"/analysis-docs/imports/{quote(source_id, safe='')}"
+                          f"?scope_kind=user&scope_id={quote(snap.ent.sub, safe='')}")
+        if not (status == 200 or (status == 404 and not snap.stopped)):
+            return False
+        with db.tx() as c:
+            c.execute("DELETE FROM kb_import_deletions WHERE source_id = ? AND identity = ?", (source_id, snap.who))
+        return True
+    except AccountChanged:
+        log.info("library deletions stopped: the sign-in changed")
+    except Exception:  # noqa: BLE001 - tried again on the next sync or removal
+        log.info("library folder not deleted yet")
+    return False
 
 
 def _drain(db: DB, snap: Snapshot) -> None:
@@ -405,6 +461,9 @@ def drain_pending(db: DB, *, client=None, store=None) -> None:
     try:
         snap = _snapshot(client, store)
         who = snap.who
+        for r in db.conn.execute("SELECT source_id FROM kb_import_library WHERE identity = ? AND state = ?",
+                                 (who, REMOVING)).fetchall():
+            _delete_folder(db, snap, r["source_id"])
         _drain(db, snap)
         done = db.conn.execute(
             "SELECT source_id FROM kb_import_library l WHERE identity = ? AND state = ? AND NOT EXISTS"
@@ -429,10 +488,12 @@ def _queue_deletion(c, source_id: str, who: str, external_id: str) -> None:
 def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: dict[str, str] | None = None, *,
             client=None, store=None, key_store=None, identity=None) -> dict:
     """Upload new and changed files (only those in ``only``, name to content
-    digest, when given), queue the docs of changed-away and removed ones for
+    digest, when given) in batches, queue the docs of removed ones for
     deletion, and drain the queue. ``claim`` is the caller's operation token: it
-    is renewed before each upload and checked when a doc is recorded, and the run
-    stops, queueing a doc it just sent, once the claim is lost. ``who`` is the
+    is renewed before each batch and checked when a doc is recorded, and the run
+    stops, queueing a new doc it just sent, once the claim is lost. ``key_store``
+    and ``identity`` are accepted for callers and unused: the import endpoint
+    files docs by folder, not by repo. ``who`` is the
     identity the claim was made for; the sign-in must still be theirs.
     A file that fails stays out of the tracking so the next call tries it again.
     Raises when nothing can be attempted."""
@@ -442,56 +503,65 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
         raise ImportUploadOff(reason)
     src = _source(db, source_id)
     snap = _snapshot(client, store)
-    client, store, ent = snap.client, snap.store, snap.ent
     if snap.who != who:
         raise RuntimeError("the signed-in account changed")
-    ident = (identity or (lambda: repo_identity(repo_root)))()
-    if ident is None:
-        raise RuntimeError("this folder's repo has no identity to file the docs under")
-    key = OrgKeys(store=store, client=client, key_store=key_store).get(ent.org_id)
     known = {r["external_id"]: r for r in db.conn.execute(
         "SELECT * FROM kb_import_uploads WHERE source_id = ? AND identity = ?", (source_id, who))}
     sendable, skipped = _plan(src)
     result["skipped"] = len(skipped)
-    lost = False
+    todo = []
     for name, data in sendable.items():
         digest = _digest(data)
         old = known.get(name)
         if (only is not None and only.get(name) != digest) or (old is not None and old["content_hash"] == digest):
             continue
+        todo.append((name, digest, data))
+    lost = False
+    for start in range(0, len(todo), BATCH):
+        batch = todo[start:start + BATCH]
         if not _renew(db, source_id, claim):
             lost = True
             break
         try:
-            doc_id = _post(snap, key, ident, _ref(src), name, data)
+            stored = _send(snap, source_id, batch)
         except AccountChanged:      # stop: what is left is neither sent nor marked failed
             lost = True
             break
         except Exception as e:  # noqa: BLE001
-            log.info("imported file not uploaded (%s)", type(e).__name__)
-            result["failed"].append(name)
+            log.info("imported files not uploaded (%s: %s)", type(e).__name__, e)
+            result["failed"] += [n for n, _, _ in batch]
             continue
-        try:
-            with db.tx() as c:
-                if not _holds(c, source_id, claim):
-                    raise LookupError("this run's claim on the folder was lost")
-                if old is not None:
-                    _queue_deletion(c, source_id, who, name)
-                c.execute("INSERT INTO kb_import_uploads (source_id, identity, external_id, content_hash, doc_id)"
-                          " VALUES (?, ?, ?, ?, ?)", (source_id, who, name, digest, doc_id))
-        except Exception as e:  # noqa: BLE001 - the server has the doc: never lose its id
-            with db.tx() as c:
-                c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
-                          " VALUES (?, ?, ?)", (doc_id, source_id, who))
-            if isinstance(e, LookupError):
-                lost = True
-                break
-            result["failed"].append(name)
-            continue
-        result["uploaded"] += 1
-        result["sent"] = True
-        if snap.stopped:        # its doc is recorded under the snapshot's identity; send no more
+        for name, digest, _ in batch:
+            if name not in stored:
+                result["failed"].append(name)
+                continue
+            doc_id, how = stored[name]
+            old = known.get(name)
+            try:
+                with db.tx() as c:
+                    if not _holds(c, source_id, claim):
+                        raise LookupError("this run's claim on the folder was lost")
+                    if old is not None and old["doc_id"] != doc_id:     # the server filed it as a new doc
+                        c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
+                                  " VALUES (?, ?, ?)", (old["doc_id"], source_id, who))
+                    c.execute("INSERT OR REPLACE INTO kb_import_uploads (source_id, identity, external_id,"
+                              " content_hash, doc_id) VALUES (?, ?, ?, ?, ?)", (source_id, who, name, digest, doc_id))
+            except Exception as e:  # noqa: BLE001 - the server has the doc: never lose its id
+                if old is None or old["doc_id"] != doc_id:      # (an updated doc is tracked already)
+                    with db.tx() as c:
+                        c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
+                                  " VALUES (?, ?, ?)", (doc_id, source_id, who))
+                if isinstance(e, LookupError):
+                    lost = True
+                    break
+                result["failed"].append(name)
+                continue
+            if how != "unchanged":
+                result["uploaded"] += 1
+                result["sent"] = True
+        if snap.stopped:        # its docs are recorded under the snapshot's identity; send no more
             lost = True
+        if lost:
             break
     if only is None and not lost:
         with db.tx() as c:
@@ -604,6 +674,8 @@ def remove_from_library(db: DB, source_id: str, *, client=None, store=None) -> d
         if claim is None:
             raise Busy(source_id)
     try:
+        if claim:
+            _delete_folder(db, snap, source_id)
         _drain(db, snap)
     finally:
         if claim:

@@ -73,6 +73,9 @@ def _serve(backend: str) -> None:
     from backend.pro_api.signing import Keyring, LocalSigner
     from backend.pro_api.store import MemoryStore
 
+    from backend.pro_api import routes
+    routes.LIMITS["bearer_ip"] = (100_000, 60)  # every test calls from 127.0.0.1: the per-address limit is no check here
+
     os.environ.update(api.ENV)
     os.environ["BRINDLE_TEAM_PRICE_ID"] = orgs.TEAM_PRICE
     os.environ["BRINDLE_ENTERPRISE_PRICE_ID"] = tiers.ENTERPRISE_PRICE
@@ -244,6 +247,52 @@ def uploaded(session: str) -> str:
     assert status == 200, got
     assert len(got["docs"]) == 1, got
     return got["docs"][0]["doc_id"]
+
+
+@pytest.mark.variant("end to end against a live backend; skipped in CI")
+def test_import_upload_and_removal(sign_in, db, tmp_path):
+    """Add to library, change a file and re-sync, remove: brindle's own client
+    (analysis_imports) against the backend's import endpoints."""
+    from brindle import kb
+    from brindle.pro import analysis_docs
+    from brindle.pro import analysis_imports as imports
+
+    sign_in("team-admin")           # not "pro": the backend limits entitlement fetches per user
+    assert {s["name"]: s["on"] for s in analysis_docs.switch_states()}["import_upload"]   # on by default
+    folder = tmp_path / "imported"
+    (folder / "notes").mkdir(parents=True)
+    (folder / "notes" / "a.md").write_text("# Import A\n\nFirst imported note.\n")
+    (folder / "notes" / "b.md").write_text("# Import B\n\nSecond imported note.\n")
+    source = kb.add_source(db, "github.com/e2e/imports", kb.FOLDER, str(folder))
+
+    def tracked() -> dict[str, str]:
+        return {r["external_id"]: r["doc_id"] for r in db.conn.execute("SELECT * FROM kb_import_uploads")}
+
+    def doc(doc_id: str) -> tuple[int, dict]:
+        return analysis_docs._call("GET", f"/analysis-docs/{doc_id}")
+
+    plan = imports.dry_run(db, source)
+    assert plan["allowed"] and [f["name"] for f in plan["files"]] == ["notes/a.md", "notes/b.md"]
+    assert imports.add_to_library(db, source, str(tmp_path), plan["token"])["uploaded"] == 2
+    ids = tracked()
+    assert sorted(ids) == ["notes/a.md", "notes/b.md"] and imports.state(
+        db, source, imports.current_identity()) == imports.IN_LIBRARY
+    for doc_id in ids.values():
+        status, got = doc(doc_id)
+        assert status == 200 and got["version"] == 1, got
+    assert imports.sync_upload(db, source, str(tmp_path))["sent"] is False         # nothing changed: nothing sent
+
+    (folder / "notes" / "a.md").write_text("# Import A\n\nFirst imported note, edited.\n")
+    assert imports.sync_upload(db, source, str(tmp_path))["uploaded"] == 1
+    assert tracked() == ids                                                        # updated in place
+    status, got = doc(ids["notes/a.md"])
+    assert status == 200 and got["version"] == 2 and "edited" in got["files"][0]["md"], got
+    assert doc(ids["notes/b.md"])[1]["version"] == 1
+
+    assert imports.remove_from_library(db, source) == {"left": 0}
+    assert not imports.in_library(db, source) and tracked() == {}
+    for doc_id in ids.values():
+        assert doc(doc_id)[0] == 404
 
 
 @pytest.mark.variant("end to end against a live backend; skipped in CI")
@@ -459,29 +508,3 @@ def test_versions_and_shared_editing_draft_publish(sign_in, db, tmp_path):
     assert analysis_docs._newer(db, other.id) == [(doc_id, 1, 2)]
     assert "now at 2" in analysis_docs.stale_before_result(db, other.id)
 
-
-@pytest.mark.variant("end to end against a live backend; skipped in CI")
-def test_import_upload_and_removal(sign_in):
-    """The client side of import upload is not on this branch yet: the
-    endpoints are called through brindle's Pro transport directly (client path not checked)."""
-    import hashlib
-
-    from brindle.pro import analysis_docs
-
-    ent = sign_in("pro")
-    assert {s["name"]: s["on"] for s in analysis_docs.switch_states()}["import_upload"]   # on by default
-    files =[{"path": p, "md": md, "hash": hashlib.sha256(md.encode()).hexdigest()}
-             for p, md in (("notes/a.md", "# Import A\n\nFirst imported note.\n"),
-                           ("notes/b.md", "# Import B\n\nSecond imported note.\n"))]
-    scope = {"kind": "user", "id": ent.sub}
-    got = analysis_docs.api("POST", "/analysis-docs/imports", {"scope": scope, "folder_id": "e2e-folder",
-                                                               "files": files})
-    assert got["counts"]["created"] == 2, got
-    again = analysis_docs.api("POST", "/analysis-docs/imports", {
-        "scope": scope, "folder_id": "e2e-folder", "files": [{k: f[k] for k in ("path", "hash")} for f in files]})
-    assert again["counts"]["unchanged"] == 2, again
-    gone = analysis_docs.api("DELETE", f"/analysis-docs/imports/e2e-folder?scope_kind=user&scope_id={ent.sub}")
-    assert gone == {"folder_id": "e2e-folder", "deleted": 2}
-    for f in got["files"]:
-        status, _ = analysis_docs._call("GET", f"/analysis-docs/{f['doc_id']}")
-        assert status == 404
