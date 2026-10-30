@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DaemonClient } from "../../api/client";
+import { DaemonClient, type AnalysisDoc } from "../../api/client";
 import type { GoalDTO, MilestoneDTO } from "../../api/schema";
 import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
@@ -12,6 +12,7 @@ import { UNKNOWN, type Readiness } from "./review";
 afterEach(cleanup);
 
 const ROOT = "proj";
+const doc = (id: string): AnalysisDoc => ({ id });
 
 /* progress is the engine's activity counter, not the completion: 7 must not
    show as 7 of anything. */
@@ -111,6 +112,27 @@ describe("GoalPanel", () => {
     render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} paused />);
     await waitFor(() => expect(screen.getByText("Ship the Goal screen")).toBeTruthy());
     expect(screen.queryByRole("switch")).toBeNull();
+  });
+
+  it("links the session's docs line to its filtered docs, and hides it with no docs", async () => {
+    const daemon = new FakeDaemon({ goal: structuredClone(goal) });
+    const store = createAppStore();
+    const client = daemon.client();
+    const docs = vi.spyOn(client, "docs").mockResolvedValue({ docs: [doc("d1"), doc("d2")] });
+    const onOpenDocs = vi.fn();
+    const { unmount } = render(<GoalPanel client={client} repo={REPO} root={ROOT} store={store} onOpenDocs={onOpenDocs} />);
+    const line = await screen.findByTestId("goal-docs");
+    expect(docs).toHaveBeenCalledWith({ repo: REPO, session: ROOT });
+    expect(line.textContent).toContain("2 docs");
+    fireEvent.click(line);
+    expect(onOpenDocs).toHaveBeenCalledOnce();
+    unmount();
+
+    docs.mockResolvedValue({ docs: [] });
+    render(<GoalPanel client={client} repo={REPO} root={ROOT} store={store} onOpenDocs={onOpenDocs} />);
+    await waitFor(() => expect(screen.getByText("Ship the Goal screen")).toBeTruthy());
+    await flush();
+    expect(screen.queryByTestId("goal-docs")).toBeNull();
   });
 
   it("shows an initial load error with a retry that loads the goal", async () => {
