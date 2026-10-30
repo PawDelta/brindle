@@ -21,7 +21,7 @@ import re
 READ_ONLY = {"Read", "Glob", "Grep", "Diagnostics", "Definition", "References"}
 # brindle's own tools, as the native loop names them (the MCP server's names
 # are the same, prefixed mcp__brindle__).
-BRINDLE_TOOLS = {"report_result", "submit_review", "send_message", "workspace_diff"}
+BRINDLE_TOOLS = {"report_result", "submit_review", "send_message", "workspace_diff", "read_analysis_doc"}
 EDITS = {"Edit", "Write"}
 _RULE = re.compile(r"^(\w+)(?:\((.*)\))?$")
 _SEPARATORS = {"&&", "||", ";", ";;", "|", "|&", "&", "\n"}

@@ -1,17 +1,30 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DaemonClient } from "../../api/client";
-import type { GoalDTO, MilestoneDTO } from "../../api/schema";
+import App from "../../App";
+import { DaemonClient, type AnalysisDoc } from "../../api/client";
+import { PtyViewsProvider } from "../../api/ptyView";
+import type { GoalDTO, MilestoneDTO, SessionDTO } from "../../api/schema";
 import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
 import { BASE_URL, FakeDaemon, TOKEN, flush } from "../../test/fakeDaemon";
-import { REPO } from "../../test/fixtures";
+import { REPO, root } from "../../test/fixtures";
+import { standInViews } from "../../test/panes";
 import { GoalPanel, completion, goalPhase, outputTail } from "./GoalPanel";
 import { UNKNOWN, type Readiness } from "./review";
+
+vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
 afterEach(cleanup);
 
 const ROOT = "proj";
+/* The App-level test's session: the App routes to it by its root agent id. */
+const APP_ROOT = "sup1";
+const OTHER_REPO = "/home/u/other";
+const appSession: SessionDTO = { id: APP_ROOT, workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: Date.now() / 1000 - 600, goal: "Ship the Goal screen" };
+const libDoc = (id: string): AnalysisDoc => ({ id, title: `Doc ${id}`, kind: "investigation", topics: [], findings: [], open_questions: [], related: [], supersedes: [] });
+/* The app as the shell shows it: its panes through pty views (stand-ins here). */
+const renderApp = (app: ReactElement) => render(<PtyViewsProvider value={standInViews}>{app}</PtyViewsProvider>);
 
 /* progress is the engine's activity counter, not the completion: 7 must not
    show as 7 of anything. */
@@ -111,6 +124,43 @@ describe("GoalPanel", () => {
     render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} paused />);
     await waitFor(() => expect(screen.getByText("Ship the Goal screen")).toBeTruthy());
     expect(screen.queryByRole("switch")).toBeNull();
+  });
+
+  it("opens the session's docs from its goal line, filtered; Back to session returns, clearing the chip shows all; no docs hides the line", async () => {
+    // Two repos: the session is in the second, the one Knowledge would open on by default is the first.
+    const other = { ...root, id: "other", name: "other", path: OTHER_REPO };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER_REPO, name: "other" }], sessions: [{ ...appSession, workspace_id: "other" }], workspaces: [other], goal: { ...structuredClone(goal), root_id: APP_ROOT } });
+    const client = daemon.client();
+    // Docs exist only in the session's repo; the first repo has none.
+    const docs = vi.spyOn(client, "docs").mockImplementation(async (query = {}) => {
+      if (query.repo !== OTHER_REPO) return { docs: [] };
+      return { docs: query.session ? [libDoc("d1"), libDoc("d2")] : [libDoc("d1"), libDoc("d2"), libDoc("d3")] };
+    });
+    const cards = () => screen.getByTestId("docs").querySelectorAll("li[data-doc]").length;
+    const sync = startSync({ client, store: createAppStore(), connect: daemon.connect });
+    renderApp(<App store={createAppStore()} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: OTHER_REPO }} />);
+    fireEvent.click(await screen.findByTestId("goal-docs"));
+    await waitFor(() => expect(cards()).toBe(2));
+    expect(screen.getByTestId("session-filter").textContent).toContain(APP_ROOT);
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear session filter" }));
+    await waitFor(() => expect(cards()).toBe(3));
+    expect(screen.queryByText(`Session ${APP_ROOT}`)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to session" }));
+    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
+    expect(screen.queryByTestId("docs")).toBeNull();
+    sync.stop();
+    cleanup();
+
+    // With no docs for the session, the goal line is hidden.
+    docs.mockResolvedValue({ docs: [] });
+    const again = startSync({ client, store: createAppStore(), connect: daemon.connect });
+    renderApp(<App store={createAppStore()} client={client} refresh={again.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: OTHER_REPO }} />);
+    await waitFor(() => expect(daemon.requests.some((r) => r.path === "/goal")).toBe(true));
+    await flush();
+    expect(screen.queryByTestId("goal-docs")).toBeNull();
+    again.stop();
   });
 
   it("shows an initial load error with a retry that loads the goal", async () => {
