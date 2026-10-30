@@ -1,15 +1,15 @@
 """What large work gets from the analysis-doc library: nothing for small work;
 otherwise the rule and a docs folder, plus the server's block, verbatim and
 fenced, recorded in the task's receipt (Pro), or the folder as a Knowledge
-source (free tier). Reached through assign, a fresh resume and a goal."""
+source (free tier). Reached through assign, requeue, a fresh resume and a goal,
+on database rows with git faked."""
 import asyncio
 import time
 
 import pytest
 
-from conftest import sh
-from brindle import agents, autopilot, kb, knowledge, mcp_server, workspaces
-from brindle.db import Agent
+from brindle import agents, autopilot, kb, knowledge, mcp_server, tasks
+from brindle.db import Agent, Task, Workspace
 from brindle.pro import analysis_brief as ab
 from brindle.pro import auth, credentials
 from pro_fixtures import backend, pro_env, signing_key  # noqa: F401 - fixtures
@@ -18,9 +18,17 @@ from test_pro_remote_learning import login_as
 FOLDER = "Docs folder: "
 
 
+@pytest.fixture(autouse=True)
+def no_git(monkeypatch):
+    monkeypatch.setattr(knowledge, "repo_key", lambda root: str(root))
+
+
 @pytest.fixture
-def boss(db, repo, monkeypatch):
-    ws = workspaces.adopt_root(db, str(repo))
+def boss(db, tmp_path, monkeypatch):
+    (tmp_path / "repo").mkdir()
+    ws = Workspace("r/main", str(tmp_path / "repo"), "main", "main", "main", None, str(tmp_path / "repo"),
+                   None, "brindle_r_main", time.time())
+    db.add_workspace(ws)
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                        "@0", None, time.time()))
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
@@ -51,10 +59,17 @@ def test_brief_only_for_large_work(weight, plan, db, backend, tmp_path):
         assert [s["scope"] for s in sources] == [str(ab.docs_dir(repo, "feat/x").parent.resolve())]
 
 
-def test_explicitly_requested_subagent_task_gets_the_rule(db, boss):
-    asyncio.run(mcp_server.assign("subagent", "Fix a typo", branch="feat/typo", analysis_doc=True))
+@pytest.mark.parametrize("via", ["assign", "requeue"])
+def test_explicitly_requested_subagent_task_gets_the_rule(via, db, boss):
+    if via == "assign":
+        asyncio.run(mcp_server.assign("subagent", "Fix a typo", isolate=False, analysis_doc=True))
+    else:
+        db.add_task(Task("t1", boss.repo_root, None, "boss", boss.id, "subagent", "Fix a typo", "assign",
+                         0, None, None, None, None, "cancelled", time.time()))
+        db.update_task("t1", analysis_doc=1)
+        tasks.requeue(db, db.get_agent("boss"), boss, "t1", depends_on=[])   # starts at once
     [worker] = [a for a in db.list_agents() if a.provider == "subagent"]
-    assert f"{FOLDER}{ab.docs_dir(boss.repo_root, 'feat/typo')}" in worker.task
+    assert f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in worker.task
 
 
 def test_fresh_resume_gives_the_rule_again(db, boss, monkeypatch, tmp_path):
@@ -68,7 +83,8 @@ def test_fresh_resume_gives_the_rule_again(db, boss, monkeypatch, tmp_path):
     assert FOLDER in launched[0]["prompt"]
 
 
-def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, boss, repo, backend, monkeypatch):
+def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, boss, backend, monkeypatch):
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
     backend.routes["POST /analysis-docs/brief"] = [(200, {"block": "known: the cache", "cited": []})]
     monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, *a: backend.request(*a))
     login_as(backend, credentials.default_store(), features=("analysis_docs",))
@@ -78,6 +94,6 @@ def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, bo
     autopilot.set_goal(db, "boss", "Settings page", milestones)   # the same goal again: no second brief
     queued = [r[0] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss'")]
     assert len(queued) == 1 and "\nknown: the cache\n" in queued[0]
-    db.update_autopilot("boss", audit_sha=sh("git rev-parse HEAD", repo))
+    db.update_autopilot("boss", audit_sha="abc123")
     out = autopilot.record_audit(db, "boss", True, "all there")
     assert f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in out

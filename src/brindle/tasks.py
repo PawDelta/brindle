@@ -523,12 +523,13 @@ def enqueue(
         profile=profile, task_text=task_text, mode=mode, isolate=int(isolate),
         branch=branch, done_when=done_when, files=_dumps(files),
         depends_on=_dumps(depends_on), state="pending", created_at=time.time(), weight=weight,
+        analysis_doc=1 if analysis_doc else None,
     )
     db.add_task(t)
     if plan_first is not None:
         db.update_task(t.id, plan_first=int(plan_first))
     if analysis_doc:
-        db.update_task(t.id, analysis_doc=1)
+        db.update_task(t.id, analysis_doc=1)   # add_task writes the original columns only
     bus.publish(db, "task.queued", repo_root=t.repo_root, task_id=t.id, caller_id=t.caller_id,
                 depends_on=depends_on or [])
     return t
