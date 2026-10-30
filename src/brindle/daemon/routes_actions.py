@@ -993,7 +993,7 @@ def _kb_sync_job(kind: str, repo: str, source_id: str) -> Job:
 
     def work(db: DB, job: Job) -> Any:
         try:
-            return kb.sync(db, source_id, codemap.graph_path(repo))
+            return kb.sync(db, source_id, codemap.graph_path(repo), repo)
         except ValueError as e:
             raise ServiceError("invalid", str(e)) from None
         finally:
@@ -1032,6 +1032,43 @@ def remove_kb_source(db: DB, params: dict, body: Body) -> Any:
     _, _, source_id = _kb_source(db, params, params["id"])
     kb.remove_source(db, source_id)
     return {"removed": source_id}
+
+
+def kb_library(db: DB, params: dict, body: Body) -> Any:
+    """Add an imported folder to the personal library. With ``dry_run`` true,
+    only list the files that would go and the ones skipped (and a ``token``
+    for that list); nothing is sent. Otherwise upload exactly the listed
+    files, or answer ``changed`` with a fresh list when the folder differs."""
+    from brindle.pro import analysis_imports as imports
+
+    repo, _, source_id = _kb_source(db, params, params["id"])
+    try:
+        if _get(body, "dry_run", bool, default=False):
+            return imports.dry_run(db, source_id)
+        return imports.add_to_library(db, source_id, repo, _get(body, "token", required=True))
+    except imports.ImportUploadOff as e:
+        raise ServiceError("not_allowed", str(e), 403) from e
+    except imports.ManifestChanged as e:   # not uploaded: confirm the fresh list
+        return {"changed": True, **e.plan}
+    except imports.UploadFailed as e:
+        raise ServiceError("upstream", str(e), 502) from e
+    except imports.Busy as e:
+        raise ServiceError("busy", "this folder is being uploaded or removed already", 409) from e
+    except ValueError as e:
+        raise ServiceError("invalid", str(e)) from e
+
+
+def unlibrary_kb_source(db: DB, params: dict, body: Body) -> Any:
+    """Remove an imported folder's docs from the library (the folder stays)."""
+    from brindle.pro import analysis_imports as imports
+
+    _, _, source_id = _kb_source(db, params, params["id"])
+    try:
+        return imports.remove_from_library(db, source_id)
+    except imports.Busy as e:
+        raise ServiceError("busy", "this folder is being uploaded or removed already", 409) from e
+    except (RuntimeError, ValueError) as e:
+        raise ServiceError("upstream", str(e), 502) from e
 
 
 PERMISSION_MODES = ("default", "auto")
@@ -1856,6 +1893,8 @@ ROUTES = [
     _post("/kb/sources", add_kb_source),
     Route("/v1/kb/sources/{id}", _endpoint(remove_kb_source), methods=["DELETE"]),
     _post("/kb/sources/{id}/sync", sync_kb_source),
+    _post("/kb/sources/{id}/library", kb_library),
+    Route("/v1/kb/sources/{id}/library", _endpoint(unlibrary_kb_source), methods=["DELETE"]),
     Route("/v1/config", _endpoint(patch_config), methods=["PATCH"]),
     # Agents never get here: the guard refuses them (see brindle.daemon.auth).
     Route("/v1/user-settings", _endpoint(patch_user_settings), methods=["PATCH"]),

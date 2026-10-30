@@ -578,6 +578,40 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
     text TEXT NOT NULL,
     quarantined TEXT
 );
+-- Imported folders added to the personal library (brindle.pro.analysis_imports):
+-- the folder, and each file sent with the library doc it became.
+-- Every row names the identity that authorized it (backend, user, org, scope); a different
+-- signed-in identity sees the folder as local and leaves these rows alone.
+CREATE TABLE IF NOT EXISTS kb_import_library (
+    source_id TEXT NOT NULL REFERENCES kb_sources(id) ON DELETE CASCADE,
+    identity TEXT NOT NULL,
+    added_at REAL NOT NULL,
+    pending INTEGER NOT NULL DEFAULT 0,   -- files the last upload could not send
+    -- adding | in_library | removing (no row: local); removing is kept until the server
+    -- confirms every delete.
+    state TEXT NOT NULL DEFAULT 'in_library' CHECK (state IN ('adding', 'in_library', 'removing')),
+    -- The one operation working on the folder (brindle.pro.analysis_imports): claimed in a
+    -- transaction, recorded against only while op_token still matches, until op_until.
+    op TEXT CHECK (op IN ('add', 'sync', 'remove')),
+    op_token TEXT,
+    op_until REAL,
+    PRIMARY KEY (source_id, identity)
+);
+-- Library docs still to delete server-side. Not tied to the source, so they
+-- outlive its removal until the server confirms each one.
+CREATE TABLE IF NOT EXISTS kb_import_deletions (
+    doc_id TEXT PRIMARY KEY,
+    source_id TEXT,
+    identity TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kb_import_uploads (
+    source_id TEXT NOT NULL REFERENCES kb_sources(id) ON DELETE CASCADE,
+    identity TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    doc_id TEXT NOT NULL,
+    PRIMARY KEY (source_id, identity, external_id)
+);
 -- Only an explicit session request creates a document inbox item.
 CREATE TABLE IF NOT EXISTS doc_requests (
     id TEXT PRIMARY KEY,
