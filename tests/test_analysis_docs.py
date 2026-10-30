@@ -82,16 +82,11 @@ def test_nothing_sent(case, deliv_repo, remote, fixed_identity, monkeypatch):
     assert remote.docs == []
 
 
-def test_changed_files_finds_every_slug_and_skips_symlinks(tmp_path):
+def test_changed_files_finds_every_slug_and_skips_symlinks(tmp_path, monkeypatch):
     import os
-    import subprocess
 
-    def git(*a):
-        subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@t", *a],
-                       check=True, capture_output=True)
+    from brindle import git
 
-    git("init", "-q", "-b", "main")
-    git("commit", "-q", "--allow-empty", "-m", "base")
     for slug in ("one", "two"):
         d = tmp_path / ".brindle" / "deliverables" / slug
         (d / "appendices").mkdir(parents=True)
@@ -100,8 +95,9 @@ def test_changed_files_finds_every_slug_and_skips_symlinks(tmp_path):
     (tmp_path / "protected").mkdir()
     (tmp_path / "protected" / "secret.md").write_text("secret")
     os.symlink("../../../../protected/secret.md", tmp_path / ".brindle/deliverables/two/appendices/s.md")
-    git("add", "-A")
-    git("commit", "-q", "-m", "work")
+    monkeypatch.setattr(git, "paths", lambda args, cwd: [
+        "protected/secret.md", "src/x.py", *(f".brindle/deliverables/{s}/{f}" for s in ("one", "two")
+                                             for f in ("main.md", "appendices/s.md"))])
     changed = ad.changed_files(str(tmp_path), "HEAD~1")
     docs = {d.slug: d for d in ad.collect(str(tmp_path), changed)}
     assert sorted(docs) == ["one", "two"]
