@@ -105,6 +105,9 @@ USAGE = """usage: brindle account [<command>] [--base-url URL]
             show, or turn on/off, pooling this org's coarse learning records with
             the other orgs in its company, never with other companies
             (off by default; owner/admin to change)
+  org docs [<switch> <state>] [--group ID] [--org ORG]
+            show analysis-doc policy and your effective switches, or set a switch
+            (admin): off, default_on, enforced_on, enforced_off
   org ci-token create <name> [--org ORG]
                     create a CI token for brindle CI (admin+); shown once
   org ci-token list [--org ORG]           list the org's CI tokens
@@ -289,6 +292,30 @@ class _OrgCommands:
             org_profiles.fetch_library(org_id, client, self.store)
         except org_profiles.LibraryUnavailable:
             pass
+        return 0
+
+    def cmd_org_docs(self, base: str | None, *setting: str, org: str | None = None,
+                     group: str | None = None) -> int:
+        import json
+
+        from brindle.pro import analysis_policy
+
+        org_id = self._team_org(org) if org else self._current_org_required()
+        client = self._client(base)
+        policy = analysis_policy.fetch(org_id, client, self.store)
+        if setting:
+            switches = policy["switches"] if group is None else policy["groups"].setdefault(
+                group, {"switches": {}})["switches"]
+            switches[setting[0]] = setting[1]
+            policy = analysis_policy.update(org_id, client, self.store, policy)
+        user = analysis_policy.request(client, self.store, "GET", "/me/analysis-docs/settings").get("switches", {})
+        ent = license.current(refresh=False, store=self.store)
+        self._say(f"Analysis-doc policy for org {org_id}: {json.dumps(policy, sort_keys=True)}")
+        self._say("Your effective switches" + (f" (group {auth._sanitize(group)})" if group else "") + ":")
+        for name in analysis_policy.SWITCHES:
+            on = analysis_policy.resolve_switch(name, user, group=group, policy=policy,
+                                                 org=org_id, plan=ent.plan)
+            self._say(f"  {name}: {'on' if on else 'off'}")
         return 0
 
     def cmd_org_learning_share(self, base: str | None, *state: str, org: str | None = None) -> int:
@@ -494,7 +521,8 @@ class ProAccount(_OrgCommands):
             opts = {"team": _take(args, "--team", value=False),
                     "enterprise": _take(args, "--enterprise", value=False),
                     "trial": _take(args, "--trial", value=False), "seats": _take(args, "--seats"),
-                    "org": _take(args, "--org"), "admin": _take(args, "--admin", value=False),
+                    "org": _take(args, "--org"), "group": _take(args, "--group"),
+                    "admin": _take(args, "--admin", value=False),
                     "device": _take(args, "--device", value=False),
                     "pack": _take(args, "--pack", value=False),
                     "pinned": _take(args, "--pinned", value=False), "name": _take(args, "--name"),
@@ -521,6 +549,9 @@ class ProAccount(_OrgCommands):
             "org": (sub in ("list", "policy") and len(rest) <= 1)
             or (sub in ("use", "invite", "join") and len(rest) == 2)
             or (sub == "learning-share" and len(rest) <= 2 and rest[1:] in ([], ["on"], ["off"]))
+            or (sub == "docs" and (len(rest) == 1 or (len(rest) == 3
+                and rest[1] in ("store", "share", "assist", "prompt_analysis", "import_upload")
+                and rest[2] in ("off", "default_on", "enforced_on", "enforced_off"))))
             or (sub == "company" and (rest[1:] in ([], ["unlink"])
                                       or (len(rest) == 3 and rest[1] == "link")))
             or (sub == "member" and len(rest) == 4 and rest[1] == "policy-role")
@@ -535,6 +566,7 @@ class ProAccount(_OrgCommands):
         }.get(cmd, False)
         flags_ok = {"upgrade": ("team", "enterprise", "trial", "seats", "org"), "portal": ("org",), "seats": ("org",), "login": ("device",), "route": ("reset",),
                     "org": ("org", "admin") if sub == "invite"
+                    else ("org", "group") if sub == "docs"
                     else ("org",) if sub in ("ci-token", "learning-share", "company", "member")
                     else ("org", "pack", "pinned", "name") if sub == "profiles" and rest[1:2] == ["push"]
                     else ("org", "pack") if sub == "profiles" and rest[1:2] == ["rm"]
@@ -553,6 +585,8 @@ class ProAccount(_OrgCommands):
                     return self.cmd_org_ci_token(base, *rest[1:], org=opts["org"])
                 if sub == "learning-share":
                     return self.cmd_org_learning_share(base, *rest[1:], org=opts["org"])
+                if sub == "docs":
+                    return self.cmd_org_docs(base, *rest[1:], org=opts["org"], group=opts["group"])
                 if sub == "profiles":
                     return self.cmd_org_profiles(base, *rest[1:], org=opts["org"],
                                                  pack=bool(opts["pack"]), pinned=bool(opts["pinned"]),
