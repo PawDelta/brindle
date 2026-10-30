@@ -914,6 +914,21 @@
           "default": null,
           "title": "Detail"
         },
+        "doc": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doc"
+        },
         "fix": {
           "anyOf": [
             {
@@ -957,6 +972,18 @@
           "title": "Reason",
           "type": "string"
         },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        },
         "root_id": {
           "anyOf": [
             {
@@ -968,6 +995,18 @@
           ],
           "default": null,
           "title": "Root Id"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
         },
         "workspace_id": {
           "anyOf": [

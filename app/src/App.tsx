@@ -133,7 +133,7 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
     case "new":
       return <NewSession key={route.repo} client={client} onOpen={openSession} initialRepo={route.repo} pickFolder={pickFolder} refresh={refresh} />;
     case "inbox":
-      return <InboxScreen client={client} refresh={refresh} onOpen={openSession} session={route.session ?? null} onShowAll={() => navigate({ screen: "inbox" })} />;
+      return <InboxScreen client={client} refresh={refresh} onOpen={openSession} onNavigate={navigate} session={route.session ?? null} onShowAll={() => navigate({ screen: "inbox" })} />;
     case "session":
       return (
         <SessionScreen

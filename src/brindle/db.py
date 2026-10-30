@@ -565,6 +565,16 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
     text TEXT NOT NULL,
     quarantined TEXT
 );
+-- Only an explicit session request creates a document inbox item.
+CREATE TABLE IF NOT EXISTS doc_requests (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    doc_id BLOB NOT NULL,          -- integer local id or opaque server string id, without coercion
+    title TEXT,
+    section TEXT,
+    why TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS kb_chunks_doc ON kb_chunks(doc_id);
 CREATE TABLE IF NOT EXISTS kb_links (
     chunk_id TEXT NOT NULL REFERENCES kb_chunks(id) ON DELETE CASCADE,
@@ -895,6 +905,19 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        if any(r["table"] == "kb_docs" for r in self.conn.execute("PRAGMA foreign_key_list(doc_requests)")):
+            # Early local-only requests referenced kb_docs. Keep their ids and
+            # titles while allowing server-only references in the same store.
+            with self.tx() as c:
+                c.execute("ALTER TABLE doc_requests RENAME TO local_doc_requests")
+                c.execute("CREATE TABLE doc_requests (id TEXT PRIMARY KEY,"
+                          " agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,"
+                          " doc_id BLOB NOT NULL, title TEXT, section TEXT, why TEXT NOT NULL,"
+                          " created_at REAL NOT NULL)")
+                c.execute("INSERT INTO doc_requests SELECT r.id, r.agent_id, r.doc_id, d.title,"
+                          " r.section, r.why, r.created_at FROM local_doc_requests r"
+                          " JOIN kb_docs d ON d.id = r.doc_id")
+                c.execute("DROP TABLE local_doc_requests")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(agents)")}
         for col, kind in (("status_since", "REAL"), ("task", "TEXT"), ("session_ref", "TEXT"),
                           ("stop_blocked", "INTEGER"), ("headless", "INTEGER"),
