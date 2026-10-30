@@ -289,6 +289,11 @@ def test_import_upload_and_removal(sign_in, db, tmp_path):
     assert status == 200 and got["version"] == 2 and "edited" in got["files"][0]["md"], got
     assert doc(ids["notes/b.md"])[1]["version"] == 1
 
+    (folder / "notes" / "b.md").unlink()                                           # gone from the folder: pruned
+    assert imports.sync_upload(db, source, str(tmp_path))["deleted"] == 1
+    assert doc(ids["notes/b.md"])[0] == 404 and doc(ids["notes/a.md"])[0] == 200
+    assert tracked() == {"notes/a.md": ids["notes/a.md"]}
+
     assert imports.remove_from_library(db, source) == {"left": 0}
     assert not imports.in_library(db, source) and tracked() == {}
     for doc_id in ids.values():
