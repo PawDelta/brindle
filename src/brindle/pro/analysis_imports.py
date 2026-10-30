@@ -20,6 +20,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 import re
+import threading
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -165,24 +166,65 @@ def _drain(db: DB, client, store) -> None:
             if _delete(client, store, r["doc_id"]):
                 with db.tx() as c:
                     c.execute("DELETE FROM kb_import_deletions WHERE doc_id = ?", (r["doc_id"],))
-        except Exception:  # noqa: BLE001 - retried on the next upload or removal
+        except Exception:  # noqa: BLE001 - tried again on the next sync or removal
             log.info("library doc not deleted yet")
 
 
+def drain_pending(db: DB, *, client=None, store=None) -> None:
+    """Delete every queued doc, whatever source (or removed source) queued it,
+    and finish the removal of a folder whose queue is now empty. Never raises."""
+    try:
+        if db.conn.execute("SELECT 1 FROM kb_import_deletions").fetchone():
+            client, store = analysis_docs._session(client, store)
+            _drain(db, client, store)
+        with db.tx() as c:
+            c.execute("DELETE FROM kb_import_library WHERE removing = 1 AND NOT EXISTS (SELECT 1"
+                      " FROM kb_import_deletions x WHERE x.source_id = kb_import_library.source_id)")
+    except Exception:  # noqa: BLE001
+        log.info("library deletions not drained")
+
+
 def _queue_deletion(c, source_id: str, external_id: str) -> None:
-    c.execute("INSERT OR IGNORE INTO kb_import_deletions SELECT doc_id FROM kb_import_uploads"
-              " WHERE source_id = ? AND external_id = ?", (source_id, external_id))
+    c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id) SELECT doc_id, source_id"
+              " FROM kb_import_uploads WHERE source_id = ? AND external_id = ?", (source_id, external_id))
     c.execute("DELETE FROM kb_import_uploads WHERE source_id = ? AND external_id = ?",
               (source_id, external_id))
 
 
-def _upload(db: DB, source_id: str, repo_root: str, only: dict[str, str] | None = None, *, client=None,
-            store=None, key_store=None, identity=None) -> dict:
+# One add, upload or removal at a time for a source; a second background trigger finds
+# the work in flight and leaves it be.
+_locks: dict[str, threading.Lock] = {}
+_locks_guard = threading.Lock()
+
+
+class Busy(RuntimeError):
+    """An upload or removal of this folder is already running."""
+
+
+def _lock(source_id: str) -> threading.Lock:
+    with _locks_guard:
+        return _locks.setdefault(source_id, threading.Lock())
+
+
+def _upload(db: DB, source_id: str, repo_root: str, only: dict[str, str] | None = None, *,
+            wait: bool = True, **deps) -> dict:
     """Upload new and changed files (only those in ``only``, name to content
     digest, when given), queue the docs of changed-away and removed ones for
     deletion, and drain the queue. A file that fails stays out of the
-    tracking so the next call retries it; the rest keep their progress.
-    Raises when nothing can be attempted."""
+    tracking so the next call tries it again; the rest keep their progress.
+    Raises when nothing can be attempted, or ``Busy`` when not ``wait``ing
+    for a run already in flight."""
+    lock = _lock(source_id)
+    if not lock.acquire(blocking=wait):
+        raise Busy(source_id)
+    try:
+        return _upload_locked(db, source_id, repo_root, only, **deps)
+    finally:
+        lock.release()
+
+
+def _upload_locked(db: DB, source_id: str, repo_root: str, only: dict[str, str] | None = None, *,
+                   client=None, store=None, key_store=None, identity=None) -> dict:
     result = {"uploaded": 0, "deleted": 0, "skipped": 0, "sent": False, "failed": []}
     reason = _off_reason(client, store)
     if reason is not None:
@@ -210,11 +252,18 @@ def _upload(db: DB, source_id: str, repo_root: str, only: dict[str, str] | None 
             log.info("imported file not uploaded (%s)", type(e).__name__)
             result["failed"].append(name)
             continue
-        with db.tx() as c:
-            if old is not None:
-                _queue_deletion(c, source_id, name)
-            c.execute("INSERT INTO kb_import_uploads (source_id, external_id, content_hash, doc_id)"
-                      " VALUES (?, ?, ?, ?)", (source_id, name, digest, doc_id))
+        try:
+            with db.tx() as c:
+                if old is not None:
+                    _queue_deletion(c, source_id, name)
+                c.execute("INSERT INTO kb_import_uploads (source_id, external_id, content_hash, doc_id)"
+                          " VALUES (?, ?, ?, ?)", (source_id, name, digest, doc_id))
+        except Exception:  # noqa: BLE001 - the server has the doc: never lose its id
+            with db.tx() as c:
+                c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id) VALUES (?, ?)",
+                          (doc_id, source_id))
+            result["failed"].append(name)
+            continue
         result["uploaded"] += 1
         result["sent"] = True
     if only is None:
@@ -234,8 +283,11 @@ def sync_upload(db: DB, source_id: str, repo_root: str, **deps) -> dict:
     """Bring the library up to date with an added folder (what :func:`brindle.kb.sync`
     calls). Nothing for a folder not added or when sending is off; never raises."""
     nothing = {"uploaded": 0, "deleted": 0, "skipped": 0, "sent": False, "failed": []}
+    drain_pending(db, client=deps.get("client"), store=deps.get("store"))
     try:
-        return _upload(db, source_id, repo_root, **deps) if in_library(db, source_id) else nothing
+        row = db.conn.execute("SELECT removing FROM kb_import_library WHERE source_id = ?",
+                              (source_id,)).fetchone()
+        return _upload(db, source_id, repo_root, wait=False, **deps) if row and not row["removing"] else nothing
     except Exception as e:  # noqa: BLE001
         log.info("imported folder not uploaded (%s)", type(e).__name__)
         return nothing
@@ -265,6 +317,9 @@ def add_to_library(db: DB, source_id: str, repo_root: str, token: str | None = N
     sendable, _ = _plan(src)
     if token != _token(sendable):
         raise ManifestChanged(dry_run(db, source_id))
+    if db.conn.execute("SELECT 1 FROM kb_import_library WHERE source_id = ? AND removing = 1",
+                       (source_id,)).fetchone():
+        raise UploadFailed("this folder is still being removed from the library: finish removing it first")
     with db.tx() as c:
         c.execute("INSERT OR IGNORE INTO kb_import_library (source_id, added_at) VALUES (?, ?)",
                   (source_id, time.time()))
@@ -283,15 +338,24 @@ def add_to_library(db: DB, source_id: str, repo_root: str, token: str | None = N
 
 
 def remove_from_library(db: DB, source_id: str, *, client=None, store=None) -> dict:
-    """Forget the folder's docs and delete them server-side. They are queued
-    first, so a delete the server does not confirm is retried by the next
-    upload or removal; ``left`` counts those."""
+    """Delete the folder's docs server-side. They are queued first; the folder
+    stays marked as being removed (so the app can finish it, and every later
+    index deletes what is left) until the server has confirmed every delete.
+    ``left`` counts the docs not yet deleted."""
     _source(db, source_id)
-    with db.tx() as c:
-        c.execute("INSERT OR IGNORE INTO kb_import_deletions SELECT doc_id FROM kb_import_uploads"
-                  " WHERE source_id = ?", (source_id,))
-        c.execute("DELETE FROM kb_import_uploads WHERE source_id = ?", (source_id,))
-        c.execute("DELETE FROM kb_import_library WHERE source_id = ?", (source_id,))
-    client, store = analysis_docs._session(client, store)
-    _drain(db, client, store)
-    return {"left": db.conn.execute("SELECT count(*) FROM kb_import_deletions").fetchone()[0]}
+    lock = _lock(source_id)
+    if not lock.acquire(blocking=False):
+        raise Busy(source_id)
+    try:
+        with db.tx() as c:
+            c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id) SELECT doc_id, source_id"
+                      " FROM kb_import_uploads WHERE source_id = ?", (source_id,))
+            c.execute("DELETE FROM kb_import_uploads WHERE source_id = ?", (source_id,))
+            c.execute("UPDATE kb_import_library SET removing = 1 WHERE source_id = ?", (source_id,))
+        client, store = analysis_docs._session(client, store)
+        _drain(db, client, store)
+        drain_pending(db, client=client, store=store)
+    finally:
+        lock.release()
+    return {"left": db.conn.execute("SELECT count(*) FROM kb_import_deletions WHERE source_id = ?",
+                                    (source_id,)).fetchone()[0]}

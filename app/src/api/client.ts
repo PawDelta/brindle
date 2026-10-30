@@ -335,6 +335,8 @@ export interface KbSource {
   in_library?: boolean;
   /* Files of an added folder the last upload could not send. */
   library_pending?: number;
+  /* Docs of a folder being removed from the library that the server has not deleted yet. */
+  library_removing?: number;
 }
 
 /* POST /kb/sources/{id}/library with dry_run: what adding a folder to the library would send. */
@@ -1084,7 +1086,7 @@ export class DaemonClient {
 
   /* Deletes the folder's docs from the library; the folder stays. */
   removeKbFromLibrary(repo: string, id: string) {
-    return this.delete<unknown>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, {});
+    return this.delete<{ left: number }>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, {});
   }
 
   /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.

@@ -570,12 +570,14 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
 CREATE TABLE IF NOT EXISTS kb_import_library (
     source_id TEXT PRIMARY KEY REFERENCES kb_sources(id) ON DELETE CASCADE,
     added_at REAL NOT NULL,
-    pending INTEGER NOT NULL DEFAULT 0   -- files the last upload could not send
+    pending INTEGER NOT NULL DEFAULT 0,   -- files the last upload could not send
+    removing INTEGER NOT NULL DEFAULT 0   -- being removed; kept until the server confirms every delete
 );
 -- Library docs still to delete server-side. Not tied to the source, so they
 -- outlive its removal until the server confirms each one.
 CREATE TABLE IF NOT EXISTS kb_import_deletions (
-    doc_id TEXT PRIMARY KEY
+    doc_id TEXT PRIMARY KEY,
+    source_id TEXT
 );
 CREATE TABLE IF NOT EXISTS kb_import_uploads (
     source_id TEXT NOT NULL REFERENCES kb_sources(id) ON DELETE CASCADE,

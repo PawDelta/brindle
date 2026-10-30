@@ -14,6 +14,7 @@ from test_pro_remote_learning import login_as
 def remote(backend):
     backend.docs, backend.deleted, backend.switches = [], [], {"import_upload": "on"}
     backend.reject = backend.fail_delete = False
+    backend.during = None
 
     def delete(doc_id):
         if backend.fail_delete:
@@ -24,6 +25,9 @@ def remote(backend):
     def store(form, headers):
         if backend.reject:
             return 500, {}
+        if backend.during:
+            during, backend.during = backend.during, None
+            during()
         backend.docs.append(dict(form))
         doc_id = f"d{len(backend.docs)}"
         backend.routes[f"DELETE /analysis-docs/{doc_id}"] = lambda f, h: delete(doc_id)
@@ -62,7 +66,10 @@ def test_secret_looking_files_are_never_sent(folder, remote, deps):
     plan = imports.dry_run(db, source)
     assert [f["name"] for f in plan["files"]] == ["notes.md"]
     assert {s["name"] for s in plan["skipped"]} == {"prod-secrets.md", "setup.md"}
+    overlapping = []      # an index starting while the add is mid-upload leaves it be
+    remote.during = lambda: overlapping.append(imports.sync_upload(db, source, "/repo", **deps))
     imports.add_to_library(db, source, "/repo", plan["token"], **deps)
+    assert overlapping[0]["sent"] is False and len(overlapping) == 1
     assert [d["files"][0]["name"] for d in remote.docs] == ["notes.md"]
     assert remote.docs[0]["source"] == {"kind": "import", "ref": "imported"}
 
@@ -106,8 +113,10 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     remote.fail_delete = True
     assert kb.sync(db, source, None, "/repo")["uploaded"] == 1             # the real indexing path
     assert remote.docs[-1]["files"][0]["md"].endswith("an hour") and remote.deleted == []
-    imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
-    assert not imports.in_library(db, source) and remote.deleted == []     # both docs still queued
+    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 2}
+    shown = kb.sources(db, "github.com/acme/app")[0]
+    assert (shown["in_library"], shown["library_removing"]) == (0, 2) and remote.deleted == []
     remote.fail_delete = False
-    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
-    assert sorted(remote.deleted) == ["d1", "d2"]
+    kb.sync(db, source, None, "/repo")                  # the next index finishes the removal
+    assert sorted(remote.deleted) == ["d1", "d2"] and not imports.in_library(db, source)
+    assert kb.sources(db, "github.com/acme/app")[0]["library_removing"] == 0

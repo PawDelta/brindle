@@ -1052,6 +1052,8 @@ def kb_library(db: DB, params: dict, body: Body) -> Any:
         return {"changed": True, **e.plan}
     except imports.UploadFailed as e:
         raise ServiceError("upstream", str(e), 502) from e
+    except imports.Busy as e:
+        raise ServiceError("busy", "this folder is being uploaded or removed already", 409) from e
     except ValueError as e:
         raise ServiceError("invalid", str(e)) from e
 
@@ -1063,6 +1065,8 @@ def unlibrary_kb_source(db: DB, params: dict, body: Body) -> Any:
     _, _, source_id = _kb_source(db, params, params["id"])
     try:
         return imports.remove_from_library(db, source_id)
+    except imports.Busy as e:
+        raise ServiceError("busy", "this folder is being uploaded or removed already", 409) from e
     except (RuntimeError, ValueError) as e:
         raise ServiceError("upstream", str(e), 502) from e
 

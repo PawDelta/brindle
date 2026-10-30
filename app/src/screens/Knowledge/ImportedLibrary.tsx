@@ -30,11 +30,27 @@ export function ImportedLibrary({ client, repo, source, disabled, onChanged }: {
 
   return (
     <div className="flex basis-full flex-col gap-1">
-      {source.in_library ? (
+      {source.in_library || source.library_removing ? (
         <div className="flex items-center gap-s1 text-xs text-ink-3">
-          <span>{source.library_pending ? `In your library, but ${count(source.library_pending)} did not upload yet: re-index to retry.` : "In your library."}</span>
-          <button type="button" className={quiet} disabled={disabled || working} onClick={() => void run(() => client.removeKbFromLibrary(repo, source.id))}>
-            Remove from library
+          <span>
+            {source.library_removing
+              ? `Removal unfinished: ${count(source.library_removing)} still in your library.`
+              : source.library_pending
+                ? `In your library, but ${count(source.library_pending)} did not upload yet: re-index to try again.`
+                : "In your library."}
+          </span>
+          <button
+            type="button"
+            className={quiet}
+            disabled={disabled || working}
+            onClick={() =>
+              void run(async () => {
+                const { left } = await client.removeKbFromLibrary(repo, source.id);
+                if (left > 0) setError(`${count(left)} could not be deleted from your library yet. Use Finish removing to try again.`);
+              })
+            }
+          >
+            {source.library_removing ? "Finish removing" : "Remove from library"}
           </button>
         </div>
       ) : (
