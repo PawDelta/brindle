@@ -154,7 +154,9 @@ def _claim(db: DB, source_id: str, op: str, allowed: tuple[str | None, ...], *, 
         row = c.execute("SELECT state, op, op_until FROM kb_import_library WHERE source_id = ?",
                         (source_id,)).fetchone()
         current = row["state"] if row else None
-        if current not in allowed or (row and row["op"] and (row["op_until"] or 0) >= now):
+        # A crashed add leaves `adding` behind; once its lease ran out a new add or a removal takes it over.
+        takeover = current == ADDING and op in ("add", "remove")
+        if (current not in allowed and not takeover) or (row and row["op"] and (row["op_until"] or 0) >= now):
             return None
         if row is None:
             c.execute("INSERT INTO kb_import_library (source_id, added_at, state, op, op_token, op_until)"
@@ -418,6 +420,9 @@ def remove_from_library(db: DB, source_id: str, *, client=None, store=None) -> d
     checks before dropping it. ``left`` counts the docs not yet deleted.
     ``Busy`` while another operation holds the folder."""
     _source(db, source_id)
+    # Removal is not switch-gated: deleting reduces what is held, so it works with import_upload off.
+    # Only air-gap mode blocks the network; the docs then stay queued.
+    from brindle import airgap
 
     def queue_all(c) -> None:
         c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id) SELECT doc_id, source_id"
@@ -430,8 +435,9 @@ def remove_from_library(db: DB, source_id: str, *, client=None, store=None) -> d
         if claim is None:
             raise Busy(source_id)
     try:
-        client, store = analysis_docs._session(client, store)
-        _drain(db, client, store)
+        if not airgap.enabled():
+            client, store = analysis_docs._session(client, store)
+            _drain(db, client, store)
     finally:
         if claim:
             _release(db, source_id, claim, drop_if_no_queue=True)

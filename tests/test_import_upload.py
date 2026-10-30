@@ -122,9 +122,10 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     remote.fail_delete, remote.switches = False, {"import_upload": "off"}
     kb.sync(db, source, None, "/repo")                  # switch off: not even the queued deletes go
     assert remote.deleted == [] and kb.sources(db, "github.com/acme/app")[0]["library_removing"] == 2
+    # Removal is not switch-gated: with the switch off, finishing it still deletes (uploads sent nothing).
+    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
+    assert sorted(remote.deleted) == ["d1", "d2"] and not imports.in_library(db, source) and len(remote.docs) == 2
     remote.switches = {"import_upload": "on"}
-    kb.sync(db, source, None, "/repo")                  # the next index finishes the removal
-    assert sorted(remote.deleted) == ["d1", "d2"] and not imports.in_library(db, source)
     assert kb.sources(db, "github.com/acme/app")[0]["library_removing"] == 0
     # Overlapping syncs with changed content, via the real sync: the second finds the first holding
     # the folder and does nothing (a removal then is refused too); the newer content wins next time.
@@ -147,3 +148,16 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     kb.sync(db, source, None, "/repo")                  # the newer v3 (d5) replaces v2
     assert remote.docs[-1]["files"][0]["md"].endswith("v3") and remote.deleted == ["d3", "d4"]
     assert db.conn.execute("SELECT doc_id FROM kb_import_uploads").fetchall()[0]["doc_id"] == "d5"
+    # A crashed add leaves `adding` with a lapsed lease: a new add and a removal take it over
+    # (a live lease would not be); no waiting, the lease is set in the past.
+    def crashed():
+        with db.tx() as c:
+            c.execute("UPDATE kb_import_library SET state = 'adding', op = 'add', op_token = 'dead', op_until = 1"
+                      " WHERE source_id = ?", (source,))
+
+    crashed()
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)
+    assert imports.state(db, source) == "in_library"
+    crashed()
+    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
+    assert imports.state(db, source) is None and remote.deleted[-1] == "d5"
