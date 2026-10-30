@@ -18,11 +18,17 @@ identity nothing is sent.
 
 The ``brindle docs`` commands (:func:`api`, :func:`set_switch`) talk to the
 same endpoints for listing, showing, deleting, sharing and exporting.
+
+Sessions also read and edit docs already in the library (see "shared
+editing" below): reads are pinned to a version, edits of a living doc go to a
+server-side draft published on merge, and a session is told when a doc it
+read has a newer version.
 """
 
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import queue
 import threading
@@ -288,14 +294,22 @@ def require_entitlement(store=None):
     return ent
 
 
-def api(method: str, path: str, body: dict | None = None, *, client=None, store=None) -> dict:
-    """Call a Bearer endpoint; raises ``RuntimeError`` with a readable reason
-    on a non-200 answer, ``auth.AuthError`` when not logged in or offline."""
+def _call(method: str, path: str, body: dict | None = None, *, client=None, store=None) -> tuple[int, dict]:
+    """Call a Bearer endpoint once entitled: ``(status, response)``."""
     from brindle.pro import auth
 
     client, store = _session(client, store)
     require_entitlement(store)
     status, resp = auth.authed(client, store, method, path, auth.JSONBody(body) if body is not None else None)
+    return status, resp if isinstance(resp, dict) else {}
+
+
+def api(method: str, path: str, body: dict | None = None, *, client=None, store=None) -> dict:
+    """Call a Bearer endpoint; raises ``RuntimeError`` with a readable reason
+    on a non-200 answer, ``auth.AuthError`` when not logged in or offline."""
+    from brindle.pro import auth
+
+    status, resp = _call(method, path, body, client=client, store=store)
     if status != 200:
         raise RuntimeError(resp.get("error") if isinstance(resp, dict) and resp.get("error") else f"HTTP {status}")
     if isinstance(resp, dict) and auth.BINARY_KEY in resp:
@@ -312,3 +326,293 @@ def set_switch(on: bool, *, client=None, store=None) -> dict:
     """Set the user's ``store`` switch, keeping the others."""
     switches = {**fetch_switches(client, store), "store": "on" if on else "off"}
     return api("PUT", "/me/analysis-docs/settings", {"switches": switches}, client=client, store=store)
+
+
+# -- shared editing ----------------------------------------------------------------------------------
+#
+# The server holds every doc as a chain of versions. A session reads a doc at
+# a version (pinned in its receipt) and edits a living doc in a draft on the
+# server tied to its session and branch, on top of that version. The draft
+# publishes when the branch merges and is dropped when the branch is removed
+# unmerged. The server combines edits to different sections; a clash on the
+# same section is kept as a draft and sent to the session's supervisor to
+# reconcile. Snapshot docs are never edited: new work supersedes them.
+#
+# Each draft is a row of its own (``analysis_drafts``: session, branch, doc,
+# the workspace it was saved in and its drafter), apart from the agent and
+# workspace rows, which may go first (a finished handoff's worker is
+# removed before its branch merges). Its state: "open" while the branch is
+# unmerged, "clash" once sent to the supervisor, and "publish" or "drop"
+# while the server hasn't confirmed that yet (owed: sent again at the end of
+# any agent's turn, :func:`on_turn`, whatever became of its session).
+
+TOLD_ITEM = "analysis_doc_told"        # the newest version of a doc the agent was told about
+CHECKED_ITEM = "analysis_docs_checked"  # when the agent's reads were last checked
+CHECK_EVERY = 300.0                    # seconds between an agent's checks of its reads
+SNAPSHOT = ("{doc} is a snapshot doc: it is never edited. Write a new doc for this work instead; "
+            "it supersedes the old one.")
+
+
+def _doc_path(doc_id: str, tail: str = "") -> str:
+    from urllib.parse import quote
+
+    return f"/analysis-docs/{quote(doc_id, safe='')}{tail}"
+
+
+def _pins(db, agent_id: str, kind: str) -> dict[str, str]:
+    from brindle import knowledge
+
+    return {item: value for k, item, value in knowledge.receipt(db, agent_id) if k == kind}
+
+
+def _version(value) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def read_doc(db, agent_id: str, doc_id: str, *, client=None, store=None) -> dict:
+    """``doc_id`` at its newest version, pinned: the version is recorded as
+    what ``agent_id`` read (as a brief's citations are)."""
+    from brindle import knowledge
+    from brindle.pro.analysis_brief import DOC_ITEM
+
+    doc = api("GET", _doc_path(doc_id), client=client, store=store)
+    knowledge.record_receipt(db, agent_id, [(DOC_ITEM, doc_id, str(doc.get("version", "")))])
+    return doc
+
+
+def drafts(db, session: str) -> dict[tuple[str, str], dict]:
+    """The session's drafts: ``(branch, doc id)`` -> ``{"state", "by"}``."""
+    rows = db.conn.execute("SELECT branch, doc_id, state, drafter FROM analysis_drafts WHERE session = ?",
+                           (session,)).fetchall()
+    return {(r["branch"], r["doc_id"]): {"state": r["state"], "by": r["drafter"]} for r in rows}
+
+
+def _set_draft(db, session: str, branch: str, doc_id: str, state: str, by: str,
+               workspace_id: str | None = None) -> None:
+    """Record the draft's state; ``workspace_id`` is kept from its first save."""
+    with db.tx() as c:
+        c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, workspace_id, drafter, state)"
+                  " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (session, branch, doc_id) DO UPDATE SET"
+                  " state = excluded.state, drafter = excluded.drafter,"
+                  " workspace_id = COALESCE(excluded.workspace_id, workspace_id)",
+                  (session, branch, doc_id, workspace_id, by, state))
+
+
+def _forget_draft(db, session: str, branch: str, doc_id: str) -> None:
+    with db.tx() as c:
+        c.execute("DELETE FROM analysis_drafts WHERE session = ? AND branch = ? AND doc_id = ?",
+                  (session, branch, doc_id))
+
+
+def save_draft(db, agent, branch: str, doc_id: str, files: list[dict], *, clashed_branch: str | None = None,
+               client=None, store=None) -> str:
+    """Put ``agent``'s edit of ``doc_id`` in its session's draft for
+    ``branch``, on top of the version it read. When the session's supervisor
+    reconciles a clash (on ``clashed_branch``, which may be left out when
+    only one draft of the doc clashes), that draft is rebased instead and
+    published at once (its branch has merged). Raises ``RuntimeError`` with
+    the reason."""
+    from brindle import autopilot
+    from brindle.pro.analysis_brief import DOC_ITEM
+
+    base = _version(_pins(db, agent.id, DOC_ITEM).get(doc_id))
+    if base is None:
+        raise RuntimeError(f"read {doc_id} first: an edit goes on top of the version you read")
+    session = autopilot.root_of(db, agent.id)
+    clashed = sorted(b for (b, d), s in drafts(db, session).items()
+                     if d == doc_id and s.get("state") == "clash") if session == agent.id else []
+    if clashed_branch is not None and clashed_branch not in clashed:
+        raise RuntimeError(f"no clashed draft of {doc_id} on {clashed_branch}")
+    if clashed_branch is None and len(clashed) > 1:
+        raise RuntimeError(f"drafts of {doc_id} clash on branches {', '.join(clashed)}: name the one "
+                           "to reconcile (clashed_branch)")
+    target = clashed_branch or (clashed[0] if clashed else None)
+    body = {"session": session, "branch": target or branch, "base_version": base, "files": files}
+    status, resp = _call("PUT", _doc_path(doc_id, "/drafts"), body, client=client, store=store)
+    if status == 409 and resp.get("error") == "snapshot":
+        raise RuntimeError(SNAPSHOT.format(doc=doc_id))
+    if status != 200:
+        raise RuntimeError(resp.get("error") or f"HTTP {status}")
+    if target:
+        state = _settle(db, session, target, doc_id, "publish", agent.id, client, store)
+        return {"done": f"Reconciled {doc_id} on {target}: published.",
+                "clash": f"{doc_id} on {target} still clashes: see the message sent to you."
+                }.get(state, f"Reconciled {doc_id} on {target}; brindle sends it again until the server takes it.")
+    _set_draft(db, session, branch, doc_id, "open", agent.id, agent.workspace_id)
+    return f"Draft of {doc_id} saved on version {base}; it publishes when {branch} merges."
+
+
+def owed(db) -> dict[tuple[str, str, str], dict]:
+    """The unconfirmed publishes and drops: ``(session, branch, doc id)`` ->
+    ``{"op", "by"}``."""
+    rows = db.conn.execute("SELECT session, branch, doc_id, state, drafter FROM analysis_drafts"
+                           " WHERE state IN ('publish', 'drop')").fetchall()
+    return {(r["session"], r["branch"], r["doc_id"]): {"op": r["state"], "by": r["drafter"]} for r in rows}
+
+
+def _settle(db, session: str, branch: str, doc_id: str, op: str, by: str, client=None, store=None) -> str:
+    """``op`` ("publish" or "drop") the session's draft of ``doc_id`` on
+    ``branch``: owed (its state) until the server confirms. Returns "done",
+    "clash" (the session's supervisor is told to reconcile it, never the
+    person; with no session left, the draft is dropped instead) or the op
+    still owed. Never raises."""
+    from brindle import gates, knowledge
+
+    _set_draft(db, session, branch, doc_id, op, by)
+    try:
+        status, resp = _call("POST", _doc_path(doc_id, f"/drafts/{op}"), {"session": session, "branch": branch},
+                             client=client, store=store)
+    except Exception as e:  # noqa: BLE001 - owed: settled at a later turn
+        log.info("analysis doc draft not settled (%s)", type(e).__name__)
+        return op
+    if status == 200:
+        _forget_draft(db, session, branch, doc_id)
+        version = _version(resp.get("version"))
+        if op == "publish" and version is not None:   # the drafter made this version: nothing to tell it
+            knowledge.record_receipt(db, by, [(TOLD_ITEM, doc_id, str(version))])
+            tell_readers(db, doc_id, version)
+        return "done"
+    if op == "publish" and status == 409 and resp.get("error") == "clash":
+        if db.get_agent(session) is None:   # the session is gone: nobody is left to reconcile it
+            return _settle(db, session, branch, doc_id, "drop", by, client, store)
+        clashes = [c for c in resp.get("clashes") or [] if isinstance(c, dict)]
+        where = ", ".join(json.dumps(str(c.get("section", ""))) for c in clashes) or "a section"
+        newest = max((_version(c.get("version")) or 0 for c in clashes), default=0)
+        _set_draft(db, session, branch, doc_id, "clash", by)
+        gates.tell(db, session,
+                   f"[brindle] Your session's edit of analysis doc {doc_id} on branch {branch} clashes "
+                   f"with version {newest or 'newer'} on {where}. Reconcile it: read the doc again "
+                   f"(read_analysis_doc) and save the combined text with edit_analysis_doc "
+                   f"(clashed_branch {json.dumps(branch)}); it publishes then.")
+        return "clash"
+    log.info("analysis doc draft not settled (HTTP %s)", status)
+    return op
+
+
+def _branch_drafts(db, ws, state: str) -> list[tuple[str, str, str]]:
+    """``(session, doc id, drafter)`` of each draft saved in ``ws`` on its
+    branch in ``state``: by the draft's own row, so it doesn't matter whether
+    the agents that saved it are still there."""
+    rows = db.conn.execute("SELECT session, doc_id, drafter FROM analysis_drafts"
+                           " WHERE workspace_id = ? AND branch = ? AND state = ?",
+                           (ws.id, ws.branch, state)).fetchall()
+    return [(r["session"], r["doc_id"], r["drafter"]) for r in rows]
+
+
+def publish_drafts(db, ws, *, client=None, store=None) -> None:
+    """``ws``'s branch merged: publish its drafts. Never raises."""
+    for session, doc_id, by in _branch_drafts(db, ws, "open"):
+        _settle(db, session, ws.branch, doc_id, "publish", by, client, store)
+
+
+def drop_drafts(db, ws, *, client=None, store=None) -> None:
+    """``ws`` is being removed unmerged: drop its drafts. Never raises."""
+    for session, doc_id, by in _branch_drafts(db, ws, "open"):
+        _settle(db, session, ws.branch, doc_id, "drop", by, client, store)
+
+
+def settle_owed(db, *, client=None, store=None) -> None:
+    """Send again every publish and drop the server hasn't confirmed yet,
+    whatever became of the session that owes it."""
+    for (session, branch, doc_id), d in owed(db).items():
+        if d.get("op") in ("publish", "drop"):
+            _settle(db, session, branch, doc_id, d["op"], d.get("by", session), client, store)
+
+
+def _tell_stale(db, agent_id: str, doc_id: str, version: int) -> bool:
+    """Tell ``agent_id`` once that ``doc_id``, which it read at an older
+    version, now has ``version``. Only the session is told, never the person."""
+    from brindle import gates, knowledge
+    from brindle.pro.analysis_brief import DOC_ITEM
+
+    read = _version(_pins(db, agent_id, DOC_ITEM).get(doc_id))
+    told = _version(_pins(db, agent_id, TOLD_ITEM).get(doc_id))
+    if read is None or version <= max(read, told or 0):
+        return False
+    knowledge.record_receipt(db, agent_id, [(TOLD_ITEM, doc_id, str(version))])
+    gates.tell(db, agent_id, f"[brindle] Analysis doc {doc_id}, which you read at version {read}, now has "
+                             f"version {version}. Read it again (read_analysis_doc) before you rely on it.")
+    return True
+
+
+def tell_readers(db, doc_id: str, version: int) -> None:
+    """Tell each running agent that read ``doc_id`` before ``version``."""
+    from brindle.pro.analysis_brief import DOC_ITEM
+
+    rows = db.conn.execute("SELECT task_id FROM context_receipts WHERE item_kind = ? AND item_id = ?",
+                           (DOC_ITEM, doc_id)).fetchall()
+    for (agent_id,) in rows:
+        agent = db.get_agent(agent_id)
+        if agent is not None and agent.result is None:
+            _tell_stale(db, agent_id, doc_id, version)
+
+
+def _newer(db, agent_id: str, client=None, store=None) -> list[tuple[str, int, int]]:
+    """``(doc id, version read, newest version)`` of each doc ``agent_id``
+    read that has a newer version (``POST /analysis-docs/versions``)."""
+    from brindle.pro.analysis_brief import DOC_ITEM
+
+    read = {d: v for d, v in ((d, _version(v)) for d, v in _pins(db, agent_id, DOC_ITEM).items()) if v is not None}
+    if not read:
+        return []
+    versions = api("POST", "/analysis-docs/versions", {"ids": sorted(read)}, client=client, store=store)
+    return [(d, read[d], _version(v)) for d, v in sorted((versions.get("versions") or {}).items())
+            if d in read and _version(v) is not None and _version(v) > read[d]]
+
+
+def check_reads(db, agent_id: str, *, client=None, store=None) -> None:
+    """Tell ``agent_id`` about the docs it read that changed since."""
+    for doc_id, _, version in _newer(db, agent_id, client, store):
+        _tell_stale(db, agent_id, doc_id, version)
+
+
+def stale_before_result(db, agent_id: str, *, client=None, store=None) -> str | None:
+    """Before ``agent_id``'s result (a report or a review verdict) is
+    accepted: why it can't be yet, when a doc it read has a newer version
+    it hasn't read. None to go ahead, also when the server can't be asked
+    (the docs are context, never a reason to hold work up)."""
+    from brindle import knowledge
+
+    try:
+        newer = _newer(db, agent_id, client, store)
+    except Exception as e:  # noqa: BLE001
+        log.info("analysis doc reads not checked (%s)", type(e).__name__)
+        return None
+    if not newer:
+        return None
+    knowledge.record_receipt(db, agent_id, [(TOLD_ITEM, d, str(v)) for d, _, v in newer])
+    docs = ", ".join(f"{d} (you read version {r}, it is now at {v})" for d, r, v in newer)
+    return (f"Not recorded yet: analysis docs you read have changed: {docs}. Read them again "
+            "(read_analysis_doc), check your result still holds, then submit it again.")
+
+
+def on_turn(db, agent, now: float | None = None) -> None:
+    """At the end of ``agent``'s turn, at most every CHECK_EVERY seconds:
+    tell it about docs it read that changed since (here or elsewhere), and
+    send what any session still owes the server. Nothing is sent without
+    reads to check or anything owed. Never raises."""
+    import time
+
+    from brindle import knowledge
+    from brindle.pro.analysis_brief import DOC_ITEM
+
+    any_owed = bool(owed(db))
+    if not any_owed and not _pins(db, agent.id, DOC_ITEM):
+        return
+    now = time.time() if now is None else now
+    try:
+        last = float(_pins(db, agent.id, CHECKED_ITEM).get("reads", "0"))
+    except ValueError:
+        last = 0.0
+    if now - last < CHECK_EVERY:
+        return
+    knowledge.record_receipt(db, agent.id, [(CHECKED_ITEM, "reads", str(now))])
+    try:
+        check_reads(db, agent.id)
+    except Exception as e:  # noqa: BLE001
+        log.info("analysis doc reads not checked (%s)", type(e).__name__)
+    if any_owed:
+        settle_owed(db)
