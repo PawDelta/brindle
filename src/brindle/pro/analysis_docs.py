@@ -466,7 +466,8 @@ def _settle(db, session: str, branch: str, doc_id: str, op: str, by: str, client
     """``op`` ("publish" or "drop") the session's draft of ``doc_id`` on
     ``branch``: owed (queued in OWED) until the server confirms. Returns
     "done", "clash" (the session's supervisor is told to reconcile it, never
-    the person) or ``op`` (still owed). Never raises."""
+    the person; with no session left, the draft is dropped instead) or the
+    op still owed. Never raises."""
     from brindle import gates, knowledge
 
     key = json.dumps([session, branch, doc_id])
@@ -487,6 +488,8 @@ def _settle(db, session: str, branch: str, doc_id: str, op: str, by: str, client
             tell_readers(db, doc_id, version)
         return "done"
     if op == "publish" and status == 409 and resp.get("error") == "clash":
+        if db.get_agent(session) is None:   # the session is gone: nobody is left to reconcile it
+            return _settle(db, session, branch, doc_id, "drop", by, client, store)
         clashes = [c for c in resp.get("clashes") or [] if isinstance(c, dict)]
         where = ", ".join(json.dumps(str(c.get("section", ""))) for c in clashes) or "a section"
         newest = max((_version(c.get("version")) or 0 for c in clashes), default=0)

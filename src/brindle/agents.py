@@ -2187,12 +2187,14 @@ def condense(head: str, *body: str) -> str:
 
 
 def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
-                  removed: tuple[Agent, Workspace] | None = None) -> str:
+                  removed: tuple[Agent, Workspace] | None = None, docs_checked: bool = False) -> str:
     """Record a worker's or reviewer's result. A piped worker's report goes
     to the pipeline (which reviews and merges the branch); otherwise, and
     with ``forward``, it's sent to the parent as a message. ``removed`` is a
     reviewer and workspace the pipeline has just removed, loaded before that:
-    the result is then only recorded in the history."""
+    the result is then only recorded in the history. A first result waits
+    while an analysis doc the agent read has a newer version it hasn't read
+    (unless the caller already checked: ``docs_checked``)."""
     from brindle import history, pipeline, pricing, usage as usage_mod
 
     if removed and db.get_agent(agent_id) is None:
@@ -2201,6 +2203,10 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
         agent = get(db, agent_id)
         ws = db.get_workspace(agent.workspace_id)
     first = agent.result is None
+    if first and not removed and not docs_checked:
+        stale = stale_analysis_docs(db, agent.id)
+        if stale:
+            return stale
     db.set_result(agent.id, result)
     if ws:
         bus.publish_agent(db, "agent.reported", agent.id, workspace_id=ws.id,
@@ -2345,7 +2351,7 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
         return "Only a reviewer started with request_review can submit a review."
     if is_auditor:   # the completion audit, not a branch review
         text = autopilot.record_audit(db, root_id, approved, summary)
-        report_result(db, caller.id, text, forward=False)
+        report_result(db, caller.id, text, forward=False, docs_checked=True)   # the audit is recorded
         try:
             send_message(db, root_id, text, sender_id=caller.id)
         except (AgentError, tmux.TmuxError):

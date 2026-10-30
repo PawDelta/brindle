@@ -80,20 +80,25 @@ def states(db, session_id="sup"):
     return {key: d["state"] for key, d in ad.drafts(db, session_id).items()}
 
 
-@pytest.mark.parametrize("outcome", ["merged", "removed", "server down, then the session is gone"])
+GONE = "server down, then the session is gone"
+GONE_CLASH = "server down, then the session is gone and the draft clashes"
+
+
+@pytest.mark.parametrize("outcome", ["merged", "removed", GONE, GONE_CLASH])
 def test_draft_publishes_on_merge_and_is_dropped_unmerged(outcome, db, remote, told, tmp_path, monkeypatch):
     sup, worker, ws = session(db, tmp_path)
     ad.save_draft(db, worker, ws.branch, "d1", FILES)
     assert calls(remote, "PUT /analysis-docs/d1/drafts") == [
         {"session": "sup", "branch": "feat/a", "base_version": 1, "files": FILES}]
-    if outcome == "server down, then the session is gone":
-        remote.routes["POST /analysis-docs/d1/drafts/publish"] = [(503, {}), (200, {"version": 2})]
+    if outcome in (GONE, GONE_CLASH):
+        remote.routes["POST /analysis-docs/d1/drafts/publish"] = [(503, {}), (200, {"version": 2}) if outcome == GONE
+                                                                  else (409, {"error": "clash", "clashes": []})]
     if outcome == "removed":
         pipeline.on_workspace_cleanup(db, ws)
     else:
         merge(db, ws, tmp_path, monkeypatch)
         pipeline.on_workspace_cleanup(db, ws)      # removing a merged branch drops nothing
-    if outcome == "server down, then the session is gone":
+    if outcome in (GONE, GONE_CLASH):
         assert ad.owed(db) == {("sup", "feat/a", "d1"): {"op": "publish", "by": "w1a"}}
         db.delete_workspace(ws.id)
         db.delete_workspace(sup.workspace_id)       # its agents go with it
@@ -102,8 +107,8 @@ def test_draft_publishes_on_merge_and_is_dropped_unmerged(outcome, db, remote, t
     published = calls(remote, "POST /analysis-docs/d1/drafts/publish")
     dropped = calls(remote, "POST /analysis-docs/d1/drafts/drop")
     draft = {"session": "sup", "branch": "feat/a"}
-    assert (published, dropped) == {"merged": ([draft], []), "removed": ([], [draft]),
-                                    "server down, then the session is gone": ([draft, draft], [])}[outcome]
+    assert (published, dropped) == {"merged": ([draft], []), "removed": ([], [draft]), GONE: ([draft, draft], []),
+                                    GONE_CLASH: ([draft, draft], [draft])}[outcome]   # no one left to reconcile
     assert states(db) == {} and ad.owed(db) == {} and told == []
 
 
@@ -132,7 +137,7 @@ def test_each_branchs_clash_goes_to_the_supervisor_to_reconcile(db, remote, told
 
 @pytest.mark.parametrize("how", ["published here", "changed elsewhere"])
 def test_a_changed_doc_tells_only_the_session_that_read_it(how, db, remote, told, tmp_path, monkeypatch):
-    sup, reader, _ = session(db, tmp_path)
+    sup, reader, ws = session(db, tmp_path)
     if how == "published here":
         other_ws = workspace(db, tmp_path, "w2", "feat/b")
         other = add(db, other_ws, "w2a")
@@ -147,6 +152,16 @@ def test_a_changed_doc_tells_only_the_session_that_read_it(how, db, remote, told
     about_d1 = [(to, text) for to, text in told if "d1" in text]
     assert [to for to, _ in about_d1] == ["w1a"] and "version 2" in about_d1[0][1]
     assert db.conn.execute("SELECT COUNT(*) FROM doc_requests").fetchone()[0] == 0   # nothing for the person
+    if how == "changed elsewhere":                  # its report waits until it reads the new version
+        from brindle.native import runner
+
+        [report] = [t for t in runner.brindle_tools(db, reader.id, ws, "assign") if t.name == "report_result"]
+        report.run({"result": "done"})
+        assert db.get_agent(reader.id).result is None
+        remote.version = 2
+        ad.read_doc(db, reader.id, "d1")
+        report.run({"result": "done"})
+        assert db.get_agent(reader.id).result == "done"
 
 
 def test_reviewer_brief_has_the_docs_and_decisions_and_a_stale_doc_holds_the_verdict(
