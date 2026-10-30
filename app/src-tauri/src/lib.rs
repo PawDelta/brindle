@@ -180,6 +180,7 @@ pub fn run() {
             oauth::oauth_listen,
             oauth::oauth_wait,
             oauth::oauth_cancel,
+            oauth::provider_http,
             daemon::daemon_connect,
             daemon::daemon_request,
             daemon::daemon_stream_open,

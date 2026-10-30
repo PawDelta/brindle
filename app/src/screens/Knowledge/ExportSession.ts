@@ -32,8 +32,23 @@ export const shellDeps: ExportDeps = {
   },
   wait: (port) => invoke<string>("oauth_wait", { port }),
   cancel: (port) => void invoke("oauth_cancel", { port }).catch(() => undefined),
-  fetch: (input, init) => globalThis.fetch(input, init),
+  fetch: providerFetch,
 };
+
+/* The webview's CSP lets it reach no outside host, so provider calls go through the
+   shell (`provider_http`, which only talks to Google's and Microsoft's hosts). */
+async function providerFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  if (!isTauri()) throw new Error("Signing in to Google or Microsoft needs the brindle desktop app.");
+  const body = init.body;
+  const bytes = body == null ? undefined : body instanceof Blob ? new Uint8Array(await body.arrayBuffer()) : new TextEncoder().encode(String(body));
+  const reply = await invoke<{ status: number; body: string }>("provider_http", {
+    method: init.method ?? "GET",
+    url: String(input),
+    headers: Object.entries((init.headers ?? {}) as Record<string, string>),
+    body: bytes ? Array.from(bytes) : null,
+  });
+  return new Response(reply.body, { status: reply.status });
+}
 
 const PROVIDERS = {
   google: {

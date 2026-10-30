@@ -140,16 +140,15 @@ export function ExportMenu({ client, id, title, repo, pickFolder, onSaid, sessio
           </button>
         )}
         {microsoft && (
-          <button type="button" className={button} disabled={busy || sites !== null} onClick={() => void findSites()} aria-expanded={sites !== null}>
+          <button type="button" className={button} disabled={busy} onClick={() => void findSites()} aria-expanded={sites !== null}>
             SharePoint
           </button>
         )}
       </div>
       {microsoft && (
         <div className="flex flex-wrap items-center gap-1" aria-label="SharePoint site and folder">
-          {sites === null ? (
-            <input type="search" className={`${field} min-w-48`} aria-label="Find a SharePoint site" placeholder="Site name, then press SharePoint" value={search} onChange={(e) => setSearch(e.target.value)} />
-          ) : (
+          <input type="search" className={`${field} min-w-48`} aria-label="Find a SharePoint site" placeholder="Site name, then press SharePoint" value={search} onChange={(e) => setSearch(e.target.value)} />
+          {sites !== null && sites.length > 0 && (
             <>
               <select className={field} aria-label="SharePoint site" value={site} onChange={(e) => setSite(e.target.value)}>
                 {sites.map((s) => (

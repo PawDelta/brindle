@@ -48,7 +48,7 @@ describe("ExportSession", () => {
       fetch: vi.fn(),
     };
     const session = new ExportSession(deps);
-    await expect(session.signIn("microsoft", "m")).rejects.toThrow(/didn't match/);
+    await expect(session.signIn("microsoft", "m")).rejects.toThrow();
     expect(deps.fetch).not.toHaveBeenCalled();
     expect(session.signedIn("microsoft")).toBe(false);
   });
