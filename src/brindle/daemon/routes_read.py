@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import os
 import time
@@ -515,6 +516,24 @@ def analysis_docs(db: DB, request: Request) -> Any:
 
 
 @_json
+def analysis_doc_map(db: DB, request: Request) -> Any:
+    """Proxy one path neighbourhood without storing its response locally."""
+    q = request.query_params
+    try:
+        paths = json.loads(q.get("paths", "[]"))
+    except (ValueError, TypeError) as e:
+        raise ServiceError("bad_request", "paths must be a JSON array", 400) from e
+    if (not isinstance(paths, list) or not paths
+            or any(not isinstance(p, str) or not p.strip() for p in paths)
+            or q.get("depth", "1") != "1"
+            or q.get("scope_kind") not in ("user", "group", "org") or not q.get("scope_id")):
+        raise ServiceError("bad_request", "choose a scope and code paths at depth 1", 400)
+    return docs_api("GET", "/analysis-docs/map", repo=_repo(request),
+                    query={"scope_kind": q["scope_kind"], "scope_id": q["scope_id"],
+                           "paths": json.dumps(paths), "depth": "1"})
+
+
+@_json
 def analysis_doc_topics(db: DB, request: Request) -> Any:
     """``{"topics": [{topic, count}, ...]}`` in one scope, or over every doc
     of :func:`_all_docs` without one."""
@@ -633,6 +652,7 @@ ROUTES = [
     Route("/v1/analysis-docs", analysis_docs),
     # Before /analysis-docs/{id}.
     Route("/v1/analysis-docs/topics", analysis_doc_topics),
+    Route("/v1/analysis-docs/map", analysis_doc_map),
     Route("/v1/analysis-docs/scopes", analysis_doc_scopes),
     Route("/v1/analysis-docs/results", analysis_doc_results),
     Route("/v1/analysis-docs/policy", analysis_doc_policy),

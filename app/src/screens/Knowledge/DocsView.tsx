@@ -28,6 +28,8 @@ export interface DocsViewProps {
   /* A doc to open in the reader on arrival. */
   doc?: string;
   pickFolder?: PickFolder;
+  /* Back to the session the person came from; the filter's chip clears only the filter. */
+  onBack?(): void;
 }
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -179,7 +181,7 @@ interface ReaderProps {
 }
 
 /* The doc as written, and beside it what the server read from it. */
-function Reader({ client, repo, id, targets, titles, pickFolder, onBack, onDeleted, onOpen, onScopes }: ReaderProps) {
+export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, onDeleted, onOpen, onScopes }: ReaderProps) {
   const [doc, setDoc] = useState<AnalysisDocDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [menu, setMenu] = useState<"share" | "export" | "delete" | null>(null);
@@ -365,7 +367,7 @@ function Reader({ client, repo, id, targets, titles, pickFolder, onBack, onDelet
 
 type Listing = { state: "loading" } | { state: "loaded"; docs: AnalysisDoc[] } | { state: "unavailable"; error: string } | { state: "failed"; error: string };
 
-export function DocsView({ client, repo, session: initialSession, doc, pickFolder }: DocsViewProps) {
+export function DocsView({ client, repo, session: initialSession, doc, pickFolder, onBack }: DocsViewProps) {
   const [scope, setScope] = useState("");
   const [topic, setTopic] = useState("");
   const [kind, setKind] = useState("");
@@ -484,13 +486,24 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   return (
     <section className="flex flex-col gap-s2" aria-label="Docs" data-testid="docs">
       <ResultsPanel results={results} error={resultsError} docs={docs} />
-      {session && (
-        <p className={`${notice} flex flex-wrap items-center justify-between gap-s1`} data-testid="session-filter">
-          <span>Showing the docs one session wrote or used.</span>
-          <button type="button" className={quiet} onClick={() => setSession(undefined)}>
-            Show all docs
-          </button>
-        </p>
+      {(session || onBack) && (
+        <div className="flex flex-wrap items-center gap-s1" data-testid="session-filter">
+          {session && (
+            <span className={`${pill} inline-flex items-center gap-1 bg-branch-soft text-branch`}>
+              Session {session}
+              <button type="button" className="rounded-sm hover:text-ink" aria-label="Clear session filter" onClick={() => setSession(undefined)}>
+                ×
+              </button>
+            </span>
+          )}
+          {session && <span className="text-xs text-ink-3">Showing the docs one session wrote or used.</span>}
+          <span className="flex-1" />
+          {onBack && (
+            <button type="button" className={`${quiet} text-xs`} onClick={onBack}>
+              Back to session
+            </button>
+          )}
+        </div>
       )}
       <div className="flex flex-wrap items-center justify-between gap-s1">
         <input type="search" className={`${field} min-w-56 flex-1`} aria-label="Search docs" placeholder="Search docs: titles, summaries, topics…" value={query} onChange={(e) => setQuery(e.target.value)} />

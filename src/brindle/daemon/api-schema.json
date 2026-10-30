@@ -3048,6 +3048,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/analysis-docs/map"
+    },
+    {
+      "method": "GET",
       "path": "/v1/analysis-docs/results"
     },
     {
