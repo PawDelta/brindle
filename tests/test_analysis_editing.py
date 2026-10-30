@@ -137,6 +137,7 @@ def test_each_branchs_clash_goes_to_the_supervisor_to_reconcile(db, remote, told
     assert calls(remote, "PUT /analysis-docs/d1/drafts")[-1] == {
         "session": "sup", "branch": "feat/b", "base_version": 3, "files": FILES}
     assert calls(remote, "POST /analysis-docs/d1/drafts/publish")[-1] == {"session": "sup", "branch": "feat/b"}
+    assert (ad.UPDATED_ITEM, "d1", "published") in knowledge.receipt(db, "sup")
     assert states(db) == {("feat/a", "d1"): "clash"}
 
 

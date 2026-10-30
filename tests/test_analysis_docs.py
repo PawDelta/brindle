@@ -41,18 +41,21 @@ def uploader(tmp_path, remote, notices):
 
 
 @pytest.mark.parametrize("status", [200, 500])
-def test_merged_doc_uploads_and_local_copy_goes_only_after_a_200(status, tmp_path, remote, fixed_identity):
+def test_merged_doc_uploads_and_local_copy_goes_only_after_a_200(status, tmp_path, remote, fixed_identity, db):
     notices = []
     folder = write_doc(tmp_path)
     (folder / "big.md").write_text("x" * (ad.MAX_FILE + 1))     # can't go whole: neither sent nor deleted
     up, store = uploader(tmp_path, remote, notices)
     login_as(remote, store, features=("analysis_docs",))
     remote.status = status
-    up.submit(ad.collect(str(tmp_path), "feat", SOURCE))
+    up.submit(ad.collect(str(tmp_path), "feat", {**SOURCE, "session": "sup"}))
     (folder / "summary.md").write_text("edited after it was read")  # not what was sent: kept
     assert up.flush()
     sent = remote.docs[0]
-    assert sent["scope"] == {"kind": "user", "id": "user_1"} and sent["source"] == SOURCE
+    assert sent["scope"] == {"kind": "user", "id": "user_1"}
+    assert sent["source"] == {**SOURCE, "session": "sup"}
+    from brindle import knowledge
+    assert (("analysis_doc_updated", "d1", "uploaded") in knowledge.receipt(db, "sup")) == (status == 200)
     assert sent["files"] == [{"name": "notes/raw.md", "md": "raw numbers"},
                              {"name": "summary.md", "md": "the TTL is too short"}]
     assert len(sent["repo_key"]) == 64 and len(notices) == 1

@@ -515,6 +515,24 @@ def analysis_docs(db: DB, request: Request) -> Any:
 
 
 @_json
+def analysis_doc_session_summary(db: DB, request: Request) -> Any:
+    """Session-local counts; never consults the library's aggregate usage."""
+    from brindle.pro import analysis_brief, analysis_docs as docs
+
+    session = request.query_params.get("session")
+    if not session:
+        raise ServiceError("invalid", "session is required", 400)
+    drafts = docs.drafts(db, session)
+    writing = {doc_id for (_, doc_id), item in drafts.items() if item["state"] == "open"}
+    cited = {doc_id for kind, doc_id, _ in knowledge.receipt(db, session) if kind == analysis_brief.DOC_ITEM}
+    updated = {doc_id for kind, doc_id, _ in knowledge.receipt(db, session) if kind == docs.UPDATED_ITEM}
+    updated.update(doc_id for (_, doc_id), item in drafts.items() if item["state"] == "publish")
+    updated.difference_update(writing)
+    return {"writing": len(writing), "updated": len(updated), "using": len(cited),
+            "total": len(writing | updated | cited)}
+
+
+@_json
 def analysis_doc_topics(db: DB, request: Request) -> Any:
     """``{"topics": [{topic, count}, ...]}`` in one scope, or over every doc
     of :func:`_all_docs` without one."""
@@ -613,6 +631,7 @@ ROUTES = [
     Route("/v1/kb/sources", kb_sources),
     Route("/v1/kb/search", kb_search),
     Route("/v1/analysis-docs", analysis_docs),
+    Route("/v1/analysis-docs/session-summary", analysis_doc_session_summary),
     # Before /analysis-docs/{id}.
     Route("/v1/analysis-docs/topics", analysis_doc_topics),
     Route("/v1/analysis-docs/scopes", analysis_doc_scopes),

@@ -572,6 +572,25 @@ def test_docs_with_no_scope_lists_each_readable_scope_once_per_doc(brindle_home,
     assert topics["topics"] == [{"topic": "refunds", "count": 3}, {"topic": "checkout", "count": 2}]
 
 
+def test_analysis_doc_session_summary_counts_local_session_records(db):
+    from brindle import knowledge
+    from brindle.pro import analysis_brief
+
+    with db.tx() as c:
+        c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, drafter, state)"
+                  " VALUES ('r1', 'feature', 'writing-doc', 'w1', 'open')")
+        c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, drafter, state)"
+                  " VALUES ('r1', 'feature', 'published-doc', 'w1', 'publish')")
+    knowledge.record_receipt(db, "r1", [(analysis_brief.DOC_ITEM, "cited-doc", "3"),
+                                         ("analysis_doc_updated", "uploaded-doc", "uploaded")])
+    knowledge.record_receipt(db, "other-session", [(analysis_brief.DOC_ITEM, "other-doc", "1")])
+
+    code, body = _get("/v1/analysis-docs/session-summary", AUTH, "session=r1")
+
+    assert code == 200
+    assert body == {"writing": 1, "updated": 2, "using": 1, "total": 4}
+
+
 @pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])
 def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, enough):
     from brindle.db import Task

@@ -1337,13 +1337,16 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
         return _merge(db, caller, ws, squash, conflicts_out, waiting_on_checks)
 
 
-def _deliverables(ws: Workspace) -> list:
+def _deliverables(db: DB, ws: Workspace) -> list:
     """The analysis doc written for the branch, read before the merge
     (brindle Pro's doc library); empty on any failure."""
     try:
         from brindle.pro import analysis_docs
 
-        return analysis_docs.collect(ws.repo_root, ws.branch, {"kind": "task", "ref": ws.branch})
+        worker = agents.workspace_worker(db, ws)
+        session = autopilot.root_of(db, worker.id) if worker else None
+        source = {"kind": "task", "ref": ws.branch, **({"session": session} if session else {})}
+        return analysis_docs.collect(ws.repo_root, ws.branch, source)
     except Exception:  # noqa: BLE001 - the library is a side effect of merging
         return []
 
@@ -1413,7 +1416,7 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
         if gates.head(ws) != report.sha:
             return (f"Not merged: {ws.branch} got new commits while the gates ran. "
                     "Call merge_workspace again to check the new commits.")
-        deliverables = _deliverables(ws)
+        deliverables = _deliverables(db, ws)
         # git.merge_into serializes merges into one checkout (checkout_lock).
         target = workspaces.merge_back(db, ws, squash=squash)
     except git.GitError as e:

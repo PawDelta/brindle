@@ -42,6 +42,7 @@ from brindle.pro.orgkey import OrgKeys, repo_identity
 log = logging.getLogger(__name__)
 
 FEATURE = "analysis_docs"
+UPDATED_ITEM = "analysis_doc_updated"
 QUEUE_SIZE = 64
 FLUSH_AT_EXIT = 2.0
 SEND_WAIT = 8.0
@@ -203,10 +204,21 @@ class AnalysisDocs:
             client, store = self._deps()
             body = {"scope": {"kind": "user", "id": ent.sub}, "files": doc.files, "source": doc.source,
                     "repo_key": key.repo_key(identity)}
-            status, _ = auth.authed(client, store, "POST", "/analysis-docs", auth.JSONBody(body))
+            status, resp = auth.authed(client, store, "POST", "/analysis-docs", auth.JSONBody(body))
             if status != 200:
                 log.info("analysis doc not stored (HTTP %s)", status)
                 return
+            session = doc.source.get("session")
+            doc_id = (resp.get("doc_id") or resp.get("id")) if isinstance(resp, dict) else None
+            if isinstance(session, str) and session and isinstance(doc_id, str):
+                from brindle import knowledge
+                from brindle.db import DB
+
+                db = DB()
+                try:
+                    knowledge.record_receipt(db, session, [(UPDATED_ITEM, doc_id, "uploaded")])
+                finally:
+                    db.conn.close()
             _delete_local(doc)
         except Exception as e:  # noqa: BLE001
             log.info("analysis doc not sent (%s)", type(e).__name__)
@@ -470,6 +482,10 @@ def _settle(db, session: str, branch: str, doc_id: str, op: str, by: str, client
         return op
     if status == 200:
         _forget_draft(db, session, branch, doc_id)
+        if op == "publish":
+            from brindle import knowledge
+
+            knowledge.record_receipt(db, session, [(UPDATED_ITEM, doc_id, "published")])
         version = _version(resp.get("version"))
         if op == "publish" and version is not None:   # the drafter made this version: nothing to tell it
             knowledge.record_receipt(db, by, [(TOLD_ITEM, doc_id, str(version))])

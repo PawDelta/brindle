@@ -3032,6 +3032,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/analysis-docs/session-summary"
+    },
+    {
+      "method": "GET",
       "path": "/v1/analysis-docs/scopes"
     },
     {
