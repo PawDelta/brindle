@@ -152,16 +152,24 @@ def test_a_changed_doc_tells_only_the_session_that_read_it(how, db, remote, told
     about_d1 = [(to, text) for to, text in told if "d1" in text]
     assert [to for to, _ in about_d1] == ["w1a"] and "version 2" in about_d1[0][1]
     assert db.conn.execute("SELECT COUNT(*) FROM doc_requests").fetchone()[0] == 0   # nothing for the person
-    if how == "changed elsewhere":                  # its report waits until it reads the new version
-        from brindle.native import runner
+    if how == "changed elsewhere":                  # a native worker's report waits until it reads it again
+        from brindle.native import NativeAgent, Permissions, Toolbox, runner
+        from brindle.native.client import Reply, ToolCall
 
-        [report] = [t for t in runner.brindle_tools(db, reader.id, ws, "assign") if t.name == "report_result"]
-        report.run({"result": "done"})
-        assert db.get_agent(reader.id).result is None
         remote.version = 2
-        ad.read_doc(db, reader.id, "d1")
-        report.run({"result": "done"})
-        assert db.get_agent(reader.id).result == "done"
+        calls_ = [("report_result", {"result": "done"}), ("read_analysis_doc", {"doc": "d1"}),
+                  ("report_result", {"result": "done"})]
+        replies = [Reply("", [ToolCall(str(i), name, args)], "tool_calls") for i, (name, args) in enumerate(calls_)]
+        held = []
+
+        class Model:
+            def complete(self, system, messages, specs, **kw):
+                held.append(db.get_agent(reader.id).result)
+                return replies.pop(0) if replies else Reply("finished", [], "stop")
+
+        toolbox = Toolbox().add(*runner.brindle_tools(db, reader.id, ws, "assign"))
+        NativeAgent(Model(), toolbox, Permissions("default", []), "").run("go")
+        assert held == [None, None, None, "done"]   # unset after the first report, set once it read d1 again
 
 
 def test_reviewer_brief_has_the_docs_and_decisions_and_a_stale_doc_holds_the_verdict(
