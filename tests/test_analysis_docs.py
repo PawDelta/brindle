@@ -132,28 +132,35 @@ def test_docs_cli_sends_nothing(case, tmp_path, remote, monkeypatch):
     assert result.exit_code == 1 and sent == []
 
 
-@pytest.mark.parametrize("checks, uploaded", [([], 2), (["exit 1"], 0)])
+@pytest.mark.parametrize("gate_ok, uploaded", [(True, 2), (False, 0)])
 def test_merge_uploads_every_changed_deliverable_only_when_it_merges(
-        checks, uploaded, db, repo, remote, tmp_path, fixed_identity, monkeypatch):
-    import json
-    from pathlib import Path
+        gate_ok, uploaded, db, remote, tmp_path, fixed_identity, monkeypatch):
+    from brindle import codemap, codemap_docs, gates, git, pipeline, workspaces
+    from brindle.db import Workspace
 
-    from conftest import sh
-    from brindle import pipeline, workspaces
-
-    (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "config.json").write_text(json.dumps(
-        {"auto_merge_default_branch": True, "checks": checks}))
-    ws = workspaces.create(db, str(repo), "feat").workspace
+    wt = tmp_path / "wt"
+    names = []
     for slug in ("one", "two"):
-        d = Path(ws.path) / ".brindle" / "deliverables" / slug
+        d = wt / ".brindle" / "deliverables" / slug
         (d / "appendices").mkdir(parents=True)
         (d / "main.md").write_text(MAIN)
         (d / "appendices" / "a.md").write_text("raw")
-    sh("git add -A && git commit -qm docs", Path(ws.path))
+        names.append(f".brindle/deliverables/{slug}/main.md")
+    ws = Workspace("w1", str(tmp_path), "feat", "branch", "feat", "main", str(wt), None, "t", 0.0)
+    db.add_workspace(ws)
     up, store = uploader(tmp_path, remote, [])
     login_as(remote, store, features=("analysis_docs",))
     monkeypatch.setitem(ad._instances, ws.repo_root, up)
-    pipeline.merge(db, None, ws)
+    monkeypatch.setattr(git, "base_ref", lambda path, base: base)
+    monkeypatch.setattr(git, "ahead_behind", lambda path, ref: (0, 1))
+    monkeypatch.setattr(ad, "changed_files", lambda path, base: names)
+    monkeypatch.setattr(gates, "head", lambda w: "abc123")
+    monkeypatch.setattr(workspaces, "sync_with_base", lambda w: workspaces.SyncResult("up_to_date"))
+    monkeypatch.setattr(gates, "run", lambda *a, **k: gates.Report(sha="abc123") if gate_ok
+                        else gates.Report().fail("checks failed"))
+    monkeypatch.setattr(workspaces, "merge_back", lambda *a, **k: str(tmp_path))
+    monkeypatch.setattr(codemap, "refresh_later", lambda *a, **k: None)
+    monkeypatch.setattr(codemap_docs, "docs_refresh_note", lambda *a, **k: None)
+    out = pipeline.merge(db, None, ws)
     up.flush()
-    assert len(remote.docs) == uploaded
+    assert out.startswith("Merged" if gate_ok else "Not merged") and len(remote.docs) == uploaded
