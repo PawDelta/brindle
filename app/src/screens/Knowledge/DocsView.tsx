@@ -15,9 +15,10 @@ import { DaemonError, type AnalysisDoc, type AnalysisDocDetail, type DaemonClien
 import type { PickFolder } from "../../api/open";
 import { plain } from "../../api/wording";
 import { alert, button, card, field, h2, label, notice, pill, quiet } from "../../components/ui";
+import { ExportMenu, type ExportClient } from "./ExportMenu";
 import { Markdown } from "./Markdown";
 
-export type DocsClient = Pick<DaemonClient, "docs" | "docTopics" | "docScopes" | "doc" | "docResults" | "shareDoc" | "unshareDoc" | "deleteDoc" | "exportDoc">;
+export type DocsClient = Pick<DaemonClient, "docs" | "docTopics" | "docScopes" | "doc" | "docResults" | "shareDoc" | "unshareDoc" | "deleteDoc"> & ExportClient;
 
 export interface DocsViewProps {
   client: DocsClient;
@@ -220,25 +221,6 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
       return on ? `Shared with ${scopeName(s)}.` : `No longer shared with ${scopeName(s)}.`;
     });
 
-  const exportAs = (format: "md" | "docx" | "zip") =>
-    act(async () => {
-      if (pickFolder) {
-        const dir = await pickFolder("Export the doc to a folder");
-        if (!dir) return "Export cancelled.";
-        const got = await client.exportDoc(id, format, dir);
-        return `Exported to ${got.path ?? got.filename}.`;
-      }
-      const got = await client.exportDoc(id, format);
-      const bytes = Uint8Array.from(atob(got.content_b64 ?? ""), (c) => c.charCodeAt(0));
-      const url = URL.createObjectURL(new Blob([bytes]));
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = got.filename;
-      a.click();
-      URL.revokeObjectURL(url);
-      return `Exported ${got.filename}.`;
-    });
-
   const remove = () =>
     act(async () => {
       await client.deleteDoc(id);
@@ -290,15 +272,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
           })}
         </div>
       )}
-      {menu === "export" && (
-        <div className={`${card} flex flex-wrap items-center gap-1 px-s2 py-s1 text-sm`} role="group" aria-label="Export as">
-          {(["md", "docx", "zip"] as const).map((f) => (
-            <button key={f} type="button" className={button} disabled={busy} onClick={() => void exportAs(f)}>
-              {f === "md" ? "Markdown" : f === "docx" ? "Word" : "Zip with appendices"}
-            </button>
-          ))}
-        </div>
-      )}
+      {menu === "export" && <ExportMenu client={client} id={id} title={doc?.title} repo={repo} pickFolder={pickFolder} onSaid={setSaid} />}
       {menu === "delete" && (
         <div role="alert" className={`${alert} flex flex-wrap items-center justify-between gap-s1`}>
           <span>Delete this doc from the library? Briefs stop using it. This can't be undone.</span>

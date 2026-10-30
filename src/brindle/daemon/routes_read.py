@@ -34,7 +34,7 @@ from brindle import (
     workspaces,
 )
 from brindle.daemon import session_review
-from brindle.daemon.routes_actions import docs_api, docs_everywhere, docs_scopes, read_edit_target
+from brindle.daemon.routes_actions import docs_api, docs_everywhere, docs_org_api, docs_scopes, read_edit_target
 from brindle.db import DB
 from brindle.service import inbox
 from brindle.service.dto import (
@@ -570,6 +570,24 @@ def analysis_doc_scopes(db: DB, request: Request) -> Any:
 
 
 @_json
+def analysis_doc_policy(db: DB, request: Request) -> Any:
+    """The org's doc policy, including ``export_destinations`` (a subset of download, google_docs, sharepoint)."""
+    return docs_org_api("GET", "policy", repo=_repo(request))
+
+
+@_json
+def analysis_doc_export_config(db: DB, request: Request) -> Any:
+    """``{google_client_id, microsoft_client_id}`` for the app's in-app sign-in (either may be null)."""
+    return docs_api("GET", "/analysis-docs/export-config", repo=_repo(request))
+
+
+@_json
+def analysis_doc_destination(db: DB, request: Request) -> Any:
+    """The team's export destination: ``{kind, target_name, connected_at}``, kind null when none."""
+    return docs_org_api("GET", "destination", repo=_repo(request))
+
+
+@_json
 def analysis_doc_results(db: DB, request: Request) -> Any:
     """How tasks with a doc brief went against similar ones without, from
     this machine's records (analysis_brief.results); nothing is sent."""
@@ -655,6 +673,9 @@ ROUTES = [
     Route("/v1/analysis-docs/map", analysis_doc_map),
     Route("/v1/analysis-docs/scopes", analysis_doc_scopes),
     Route("/v1/analysis-docs/results", analysis_doc_results),
+    Route("/v1/analysis-docs/policy", analysis_doc_policy),
+    Route("/v1/analysis-docs/export-config", analysis_doc_export_config),
+    Route("/v1/analysis-docs/destination", analysis_doc_destination),
     Route("/v1/analysis-docs/{id}", analysis_doc),
     Route("/v1/profiles", list_profiles),
     Route("/v1/profiles/{name}", get_profile),
