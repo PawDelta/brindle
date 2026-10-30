@@ -7,8 +7,11 @@ seconds to minutes, and it sits on the critical path of every branch.
 
 With ``pipeline`` on (the default), brindle runs those stages itself:
 
-1. A worker reports (``report_result``). brindle starts the review at once
-   and runs the repo's checks in the background.
+1. A worker reports (``report_result``). brindle gets the branch reviewed at
+   once (``agents.start_review``): with ``checks`` configured, a detached
+   ``_review-after-checks`` process runs them first and then starts the
+   reviewer with their results in its prompt; with none, the reviewer starts
+   right away.
 2. The reviewer approves: the branch is ready. brindle merges every ready
    branch of the same base (through the same gates ``merge_workspace``
    uses), the one whose hunks overlap the others' least first and the rest
