@@ -414,7 +414,8 @@ def spawn(
 
         analysis = analysis_brief.brief_context(
             db, ws.repo_root, ws.branch, agent_id, prompt or "", files,
-            large=analysis_brief.large_work(weight, requested=analysis_doc))
+            large=analysis_brief.large_work(weight, requested=analysis_doc),
+            **({"session_id": pilot.root_of(db, parent_id)} if parent_id else {}))
     if not provider.launches_process:
         if mode not in ("handoff", "assign"):
             raise AgentError(

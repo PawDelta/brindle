@@ -114,7 +114,7 @@ def _brief(task_text: str, paths: list[str] | None, client=None, store=None) -> 
 
 
 def server_brief(db, task_id: str, task_text: str, paths: list[str] | None,
-                 client=None, store=None) -> str:
+                 client=None, store=None, session_id: str | None = None) -> str:
     """The server's brief for ``task_id``, fenced, recorded in its receipt;
     empty without the entitlement (nothing is sent) or a block. Never raises."""
     from brindle import knowledge
@@ -125,18 +125,19 @@ def server_brief(db, task_id: str, task_text: str, paths: list[str] | None,
             return ""
         knowledge.record_receipt(db, task_id, [
             (BRIEF_ITEM, task_id, hashlib.sha256(block.encode()).hexdigest()), *cited])
-        record_session_citations(db, task_id, cited)
+        record_session_citations(db, task_id, cited, session_id=session_id)
         return _fenced(block)
     except Exception as e:  # noqa: BLE001 - the brief is extra context, never a reason to fail
         log.info("analysis brief skipped (%s)", type(e).__name__)
         return ""
 
 
-def record_session_citations(db, agent_id: str, cited: list[tuple[str, str, str]]) -> None:
+def record_session_citations(db, agent_id: str, cited: list[tuple[str, str, str]], *,
+                             session_id: str | None = None) -> None:
     """Keep brief citations in a session-level receipt alongside per-agent pins."""
     from brindle import autopilot, knowledge
 
-    root = autopilot.root_of(db, agent_id)
+    root = session_id or autopilot.root_of(db, agent_id)
     knowledge.record_receipt(db, root, [(SESSION_DOC_ITEM, doc_id, version)
                                         for kind, doc_id, version in cited if kind == DOC_ITEM])
 
@@ -232,7 +233,8 @@ def got_context(db, task_id: str) -> bool:
 
 
 def brief_context(db, repo_root: str, branch: str, task_id: str, task_text: str,
-                  paths: list[str] | None, *, large: bool, client=None, store=None) -> str:
+                  paths: list[str] | None, *, large: bool, client=None, store=None,
+                  session_id: str | None = None) -> str:
     """The analysis-doc part of a worker's brief: empty unless ``large``.
     Never raises; a failed server brief leaves just the rule."""
     if not large:
@@ -245,4 +247,6 @@ def brief_context(db, repo_root: str, branch: str, task_id: str, task_text: str,
     except Exception:  # noqa: BLE001 - extra context, never a reason to fail a spawn
         log.info("analysis doc rule not added", exc_info=True)
         return ""
-    return "\n\n".join(p for p in (rule, server_brief(db, task_id, task_text, paths, client, store)) if p)
+    kwargs = {"session_id": session_id} if session_id is not None else {}
+    return "\n\n".join(p for p in (rule, server_brief(db, task_id, task_text, paths,
+                                                   client, store, **kwargs)) if p)
