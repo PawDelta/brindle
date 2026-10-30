@@ -270,27 +270,48 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     with pytest.raises(imports.AccountChanged):
         imports._call(snap, "GET", "/me/analysis-docs/settings")
     assert len(remote.calls) == calls
-    # (e) An expiring token across a backend switch (same user and org, another host): the refresh
-    # token is sent to neither host, because the store no longer holds the record it was read from.
+    # (e) An expiring token while the store goes to another backend's record (same user and org) and,
+    # in the A/B/A case, back: the refresh sends only the record's own token to the record's own host,
+    # never the other record's, and the new tokens are kept only if the store holds the record they came from.
     other = "https://other.pawdelta.test/api/brindle/v1"
-    sign_in_as("user_1", "token-1", BASE)
-    creds = deps["store"].load()
-    creds["access_expires_at"] = 1
-    deps["store"].save(creds)
-    armed.clear()
+    real_request, entry = remote.request, {}
 
-    def load_then_other_backend():
-        record = real_load()
-        if not armed:
-            armed.append(True)
-            sign_in_as("user_1", "token-3", other)
-        return record
+    def expiring_login():
+        login_as(remote, deps["store"], features=("analysis_docs",))
+        creds = deps["store"].load()
+        creds["access_expires_at"] = 1
+        deps["store"].save(creds)
+        entry["a"] = deps["store"].load()
+        entry["b"] = {**entry["a"], "base_url": other, "refresh_token": "rt-b", "access_token": "token-b",
+                      "entitlement": sign(remote.key, claims(features=["analysis_docs"], sub="user_1", iss=other))}
+        return len(remote.calls)
 
-    deps["store"].load = load_then_other_backend
+    def refresh_bodies(since):
+        return [c[1]["refresh_token"] for c in remote.calls[since:] if c[0] == "POST /token/refresh"]
+
+    def interleaved(back):
+        def request(method, url, form, headers):
+            if url.endswith("/token/refresh"):
+                deps["store"].save(entry["b"])             # A, then B while the refresh is out
+            got = real_request(method, url, form, headers)
+            if "/entitlement" in url:                      # the fake backend's entitlement has no library feature
+                got = (got[0], {**got[1], "entitlement": sign(remote.key, claims(features=["analysis_docs"]))})
+                if back:
+                    deps["store"].save(entry["a"])         # and A again before the new tokens are saved
+            return got
+        remote.request = request
+
+    since = expiring_login()                               # B stays: the new tokens are discarded
+    interleaved(back=False)
     with pytest.raises(imports.AccountChanged):
         imports._snapshot(deps["client"], deps["store"])
-    del deps["store"].load
-    assert len(remote.calls) == calls
+    assert refresh_bodies(since) == [entry["a"]["refresh_token"]] and deps["store"].load() == entry["b"]
+    since = expiring_login()                               # A, B, A: the same record is back, so they are kept
+    interleaved(back=True)
+    snap = imports._snapshot(deps["client"], deps["store"])
+    del remote.request
+    assert refresh_bodies(since) == [entry["a"]["refresh_token"]] and snap.who == first
+    assert snap.token != entry["a"]["access_token"] and deps["store"].load()["access_token"] == snap.token
     creds = deps["store"].load()
     creds["access_expires_at"] = time.time() + 900
     deps["store"].save(creds)

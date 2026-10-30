@@ -229,11 +229,12 @@ def _snapshot(client=None, store=None) -> Snapshot:
     if pinned is None or client.base != base:
         raise AccountChanged("the stored sign-in does not match the backend in use")
     if float(rec.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK and rec.get("refresh_token"):
-        # The refresh token goes only to this record's backend, and only while the store still holds this record.
-        auth.refresh(_Pinned(client, store, pinned), store, rec)
-        rec = store.load() or {}
-        if _pin_identity(rec) != pinned:
+        # The record's own refresh token goes to the record's own backend, without reading the store; the
+        # new tokens are kept only if the store still holds the record they came from.
+        new = auth.refresh_record(rec, client.transport)
+        if not auth.save_if_unchanged(store, rec, new):
             raise AccountChanged("the sign-in changed while it was refreshed")
+        rec = new
     ent = license.verify(rec.get("entitlement") or "", issuer=base)
     if analysis_docs.FEATURE not in ent.features or ent.in_grace:
         raise RuntimeError("your plan has no analysis doc library (the `analysis_docs` entitlement)")
@@ -241,27 +242,6 @@ def _snapshot(client=None, store=None) -> Snapshot:
         raise AccountChanged("not signed in")
     return Snapshot(client, store, ent, _identity(base, ent.sub, ent.org_id), rec["access_token"],
                     float(rec.get("access_expires_at") or 0))
-
-
-class _Pinned:
-    """A client whose every request first checks that the store still holds the
-    record (backend, user, org) it was pinned to, so a refresh token is never sent
-    after the sign-in changed."""
-
-    def __init__(self, client, store, who: str) -> None:
-        self.client, self.store, self.who = client, store, who
-        self.base = client.base
-
-    def call(self, method, path, form=None, token=None, headers=None):
-        if _pin_identity(self.store.load() or {}) != self.who:
-            raise AccountChanged("the sign-in changed")
-        return self.client.call(method, path, form, token, headers)
-
-    def post(self, path, form, token=None):
-        return self.call("POST", path, form, token)
-
-    def get(self, path, token=None):
-        return self.call("GET", path, None, token)
 
 
 def _call(snap: Snapshot, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
