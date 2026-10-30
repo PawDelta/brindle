@@ -719,6 +719,9 @@ def report_result(result: str) -> str:
         return "Not running as a brindle agent; nothing to report to."
     if coordinator.is_coordinator(caller):
         return coordinator.finish(db, caller, result)
+    stale = agents.stale_analysis_docs(db, caller.id) if caller.result is None else None
+    if stale:
+        return stale
     return agents.report_result(db, caller.id, result)
 
 

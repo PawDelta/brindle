@@ -2356,6 +2356,9 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
     # whatever the verdict set off is done.
     if caller.result is not None:
         return "Your review was already recorded. You're done."
+    stale = stale_analysis_docs(db, caller.id)
+    if stale:
+        return stale
     # Recorded without the branch's merge lock: a merge holds it while the
     # repo's checks run, for minutes, and a verdict waiting on it left the
     # reviewer's call hanging until its CLI gave up on it, never recorded.
@@ -3915,6 +3918,19 @@ def snapshot_turn(db: DB, agent: Agent) -> int | None:
         return rewind.snapshot(db, agent, ws) if ws else None
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't snapshot %s's turn", agent.id)
+        return None
+
+
+def stale_analysis_docs(db: DB, agent_id: str) -> str | None:
+    """Why ``agent_id``'s result can't be accepted yet: analysis docs it read
+    have newer versions it hasn't read (brindle.pro.analysis_docs). None to
+    go ahead. Never raises."""
+    try:
+        from brindle.pro import analysis_docs
+
+        return analysis_docs.stale_before_result(db, agent_id)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't check %s's analysis docs", agent_id)
         return None
 
 

@@ -80,28 +80,31 @@ def states(db, session_id="sup"):
     return {key: d["state"] for key, d in ad.drafts(db, session_id).items()}
 
 
-@pytest.mark.parametrize("outcome", ["merged", "removed", "server down at merge"])
+@pytest.mark.parametrize("outcome", ["merged", "removed", "server down, then the session is gone"])
 def test_draft_publishes_on_merge_and_is_dropped_unmerged(outcome, db, remote, told, tmp_path, monkeypatch):
     sup, worker, ws = session(db, tmp_path)
     ad.save_draft(db, worker, ws.branch, "d1", FILES)
     assert calls(remote, "PUT /analysis-docs/d1/drafts") == [
         {"session": "sup", "branch": "feat/a", "base_version": 1, "files": FILES}]
-    if outcome == "server down at merge":
+    if outcome == "server down, then the session is gone":
         remote.routes["POST /analysis-docs/d1/drafts/publish"] = [(503, {}), (200, {"version": 2})]
     if outcome == "removed":
         pipeline.on_workspace_cleanup(db, ws)
     else:
         merge(db, ws, tmp_path, monkeypatch)
         pipeline.on_workspace_cleanup(db, ws)      # removing a merged branch drops nothing
-    if outcome == "server down at merge":
-        assert states(db) == {("feat/a", "d1"): "publish"}   # still owed after the branch is gone
-        agents.handle_hook(db, "sup", "stop", {})            # the supervisor's next turn ends: sent again
+    if outcome == "server down, then the session is gone":
+        assert ad.owed(db) == {("sup", "feat/a", "d1"): {"op": "publish", "by": "w1a"}}
+        db.delete_workspace(ws.id)
+        db.delete_workspace(sup.workspace_id)       # its agents go with it
+        other = add(db, workspace(db, tmp_path, "w9", "feat/z"), "other")
+        agents.handle_hook(db, other.id, "stop", {})   # any session's turn ends: the queue is sent
     published = calls(remote, "POST /analysis-docs/d1/drafts/publish")
     dropped = calls(remote, "POST /analysis-docs/d1/drafts/drop")
     draft = {"session": "sup", "branch": "feat/a"}
     assert (published, dropped) == {"merged": ([draft], []), "removed": ([], [draft]),
-                                    "server down at merge": ([draft, draft], [])}[outcome]
-    assert states(db) == {} and told == []
+                                    "server down, then the session is gone": ([draft, draft], [])}[outcome]
+    assert states(db) == {} and ad.owed(db) == {} and told == []
 
 
 def test_each_branchs_clash_goes_to_the_supervisor_to_reconcile(db, remote, told, tmp_path, monkeypatch):
@@ -146,7 +149,8 @@ def test_a_changed_doc_tells_only_the_session_that_read_it(how, db, remote, told
     assert db.conn.execute("SELECT COUNT(*) FROM doc_requests").fetchone()[0] == 0   # nothing for the person
 
 
-def test_reviewer_brief_has_the_docs_and_decisions_for_its_paths(db, repo, remote, told, monkeypatch):
+def test_reviewer_brief_has_the_docs_and_decisions_and_a_stale_doc_holds_the_verdict(
+        db, repo, remote, told, monkeypatch):
     key = knowledge.repo_key(str(repo))
     knowledge.record_decision(db, key, "Cache TTL", "Keep the TTL at 60s", paths=["src/auth.py"])
     knowledge.record_decision(db, key, "Docs style", "Plain prose", paths=["docs/**"])
@@ -169,5 +173,11 @@ def test_reviewer_brief_has_the_docs_and_decisions_for_its_paths(db, repo, remot
     assert "Keep the TTL at 60s" in prompt and "Plain prose" not in prompt
     assert "The cache design doc says TTL 60s." in prompt
     assert calls(remote, "POST /analysis-docs/brief")[0]["paths"] == ["src/auth.py"]
-    ad.tell_readers(db, "d1", 2)                    # its read is pinned: a newer version reaches it
-    assert [to for to, _ in told] == ["rev1"]
+    remote.version = 2                              # d1 changes before the verdict
+    remote.routes["POST /analysis-docs/versions"] = lambda f, h: (200, {"versions": {"d1": remote.version}})
+    monkeypatch.setattr(agents, "finish_review", lambda *a, **k: None)
+    agents.submit_review(db, "rev1", True, "looks right")
+    assert db.get_agent("rev1").result is None      # held: it read version 1
+    ad.read_doc(db, "rev1", "d1")
+    agents.submit_review(db, "rev1", True, "still right")
+    assert db.get_agent("rev1").result is not None
