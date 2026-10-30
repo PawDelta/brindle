@@ -27,12 +27,18 @@ export interface SessionRef {
    changes in the chat's place (the sidebar's Changes row). */
 export type SheetRef = { kind: "review" } | { kind: "changes" };
 
+/* Knowledge's tabs. */
+export type KnowledgeView = "map" | "docs" | "imported" | "decisions";
+
 export type Route =
   /* `repo`: the project to start in (one just picked, as the first launch ends). */
   | { screen: "new"; repo?: string }
   /* `session`: only what waits in that session (its root), from its bar's count. */
   | { screen: "inbox"; session?: string }
-  | { screen: "knowledge" }
+  /* `doc`: a library doc's id (opened in the Docs reader) or an imported doc's number;
+     `session`: Docs only of that session (its root), from the session's goal panel;
+     `from`: the session the person came from, for Docs' Back to session. */
+  | { screen: "knowledge"; view?: KnowledgeView; doc?: number | string; section?: string; session?: string; from?: SessionRef }
   | { screen: "agents" }
   /* `section`: scrolled to on opening (the sidebar's usage reading opens Account › Usage,
      a provider's problem Settings › Providers); `ask` counts the requests, so asking

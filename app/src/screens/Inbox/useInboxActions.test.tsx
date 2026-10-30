@@ -1,5 +1,6 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DaemonError } from "../../api/client";
 import type { InboxItemDTO } from "../../api/schema";
 import { FakeDaemon } from "../../test/fakeDaemon";
 import { root } from "../../test/fixtures";
@@ -48,5 +49,29 @@ describe("inbox actions", () => {
     const shown = { ...plan, detail: "1. Keep the plan.\n2. Also delete the database." };
     act(() => out.actions!.run(shown, "approve", { feedback: "" }));
     await waitFor(() => expect(daemon.requests.filter((r) => r.method === "POST").map((r) => r.path)).toEqual(["/inbox/sup1/approve"]));
+  });
+
+  it("drops the card and refetches when the engine says nothing waits on it any more, but keeps it for another refusal", async () => {
+    const daemon = new FakeDaemon({ workspaces: [root], inbox: [plan] });
+    let refused = "sup1 has no plan awaiting a decision";
+    const client = daemon.client();
+    vi.spyOn(client, "inboxAction").mockImplementation(() => Promise.reject(new DaemonError("conflict", refused, 409)));
+    let refreshes = 0;
+    const out: { actions?: InboxActions } = {};
+    const inbox = [plan];   // one array: a new one each render would read as a fresh snapshot
+    function Probe() {
+      out.actions = useInboxActions(client, () => Promise.resolve(void refreshes++), 0, inbox);
+      return <p data-testid="note">{out.actions.notes["plan:sup1:proj"]?.text ?? ""}|{[...out.actions.hidden].join()}</p>;
+    }
+    render(<Probe />);
+    act(() => out.actions!.run(plan, "approve", {}));
+    await waitFor(() => expect(refreshes).toBe(1));
+    expect(screen.getByTestId("note").textContent).toBe("|plan:sup1:proj");
+    // A refusal about the action itself still brings the card back with the message.
+    refused = "sup1's plan couldn't be sent: its pane is gone";
+    cleanup();
+    render(<Probe />);
+    act(() => out.actions!.run(plan, "approve", {}));
+    await waitFor(() => expect(screen.getByTestId("note").textContent).toBe(`${refused}|`));
   });
 });

@@ -370,7 +370,26 @@ export interface KbSource {
   added_at?: number;
   docs?: number;
   quarantined?: boolean;
+  /* Where the folder is for the signed-in account: local (the default; it stays on this machine),
+     adding, in_library (Pro) or removing (shown until every doc is deleted). */
+  library_state?: "local" | "adding" | "in_library" | "removing";
+  /* Files of an added folder the last upload could not send. */
+  library_pending?: number;
+  /* Docs of a folder being removed from the library that the server has not deleted yet. */
+  library_removing?: number;
 }
+
+/* POST /kb/sources/{id}/library with dry_run: what adding a folder to the library would send. */
+export interface KbLibraryPlan {
+  files: { name: string; bytes: number }[];
+  skipped: { name: string; reason: string }[];
+  allowed: boolean;
+  /* Names this exact list; adding with it uploads these files only. */
+  token: string;
+}
+
+/* The answer to adding: the folder changed since the list (`changed`, with a fresh one), or it went up. */
+export type KbLibraryAdded = ({ changed: true } & KbLibraryPlan) | { changed?: undefined };
 
 /* DELETE /kb/sources/{id} (engine branch desktop/kb-sources): the source is gone. */
 export interface KbSourceRemoved {
@@ -389,6 +408,191 @@ export interface KbHit {
   updated_at: number | null;
   /* The document's last update as a date, or null. */
   updated: string | null;
+}
+
+/* brindle Pro's analysis-doc library, proxied by the daemon (routes_read.analysis_docs).
+   The Wire* types are the server's own shapes (pawdelta-web pro_api.analysis_docs: _listed,
+   _view, topics); the client methods turn them into the AnalysisDoc* below. A scope is
+   {kind: user | group | org, id}; the daemon's filter spells it `user`, `team:<id>` or `org:<id>`. */
+export interface DocScope {
+  kind: string;
+  id: string;
+  /* From GET /analysis-docs/scopes only: the team's or org's name, and whether the person may share into it. */
+  name?: string;
+  can_share?: boolean;
+}
+
+/* A bounded server neighbourhood. Paths are repo-relative code paths. */
+export interface MapNode {
+  id: string;
+  kind: "doc" | "path";
+  title?: string;
+  doc_id?: string;
+  path?: string;
+  paths?: string[];
+}
+
+export interface MapEdge {
+  source: string;
+  target: string;
+  kind: string;
+}
+
+export interface KnowledgeMap {
+  nodes: MapNode[];
+  edges: MapEdge[];
+}
+
+interface WireMentions {
+  files?: string[];
+  symbols?: string[];
+  services?: string[];
+}
+
+interface WireListedDoc {
+  doc_id: string;
+  version?: number;
+  title?: string;
+  summary?: string;
+  kind?: string;
+  findings?: string[];
+  open_questions?: string[];
+  topics?: string[];
+  mentions?: WireMentions;
+  related?: string[];
+  supersedes?: string[];
+  superseded_by?: string | null;
+  stale?: boolean;
+  used_in_briefs?: number;
+  created_at?: number;
+  scope?: DocScope;
+}
+
+interface WireDoc extends Omit<WireListedDoc, "doc_id"> {
+  id: string;
+  files?: { name: string; md: string }[];
+  /* Every scope it is shared into, its owner's (`scope`) among them. */
+  scopes?: DocScope[];
+}
+
+export interface AnalysisDoc {
+  id: string;
+  title?: string;
+  kind?: string;
+  scope?: DocScope;
+  summary?: string;
+  topics?: string[];
+  version?: number;
+  created_at?: number;
+  used_in_briefs?: number;
+  findings?: string[];
+  open_questions?: string[];
+  stale?: boolean;
+  /* Other docs' ids. */
+  related?: string[];
+  supersedes?: string[];
+  superseded_by?: string | null;
+}
+
+/* GET /analysis-docs/{id}: the files as written and what the server read from them. */
+export interface AnalysisDocDetail extends AnalysisDoc {
+  files: { name: string; md: string }[];
+  /* The files, symbols and services it names, in that order. */
+  mentions: string[];
+  /* The scopes it is shared into besides its owner's. */
+  shared_with: DocScope[];
+}
+
+export interface DocTopic {
+  name: string;
+  count?: number;
+}
+
+const sameScope = (a: DocScope, b: DocScope) => a.kind === b.kind && a.id === b.id;
+
+export function listedDoc({ doc_id, mentions: _, ...rest }: WireListedDoc): AnalysisDoc {
+  return { ...rest, id: doc_id };
+}
+
+export function docDetail({ mentions, scopes, files, ...rest }: WireDoc): AnalysisDocDetail {
+  return {
+    ...rest,
+    files: files ?? [],
+    mentions: [...(mentions?.files ?? []), ...(mentions?.symbols ?? []), ...(mentions?.services ?? [])],
+    shared_with: (scopes ?? []).filter((s) => !rest.scope || !sameScope(s, rest.scope)),
+  };
+}
+
+/* GET /analysis-docs/results (analysis_brief.results): review rounds of finished tasks
+   whose brief got a doc block, against similar ones (same repo, kind and size) without;
+   the averages are null until each side has `minimum` tasks. */
+export interface DocResults {
+  days: number;
+  minimum: number;
+  enough: boolean;
+  briefed: number;
+  large: number;
+  compared: number;
+  similar: number;
+  with_brief: number | null;
+  without_brief: number | null;
+}
+
+export interface DocSessionSummary {
+  total: number;
+  writing: number;
+  updated: number;
+  using: number;
+}
+
+/* POST /analysis-docs/{id}/export: the file's path in a picked folder, or the file itself. */
+export interface DocExport {
+  filename: string;
+  path?: string;
+  content_b64?: string;
+}
+
+export type ExportDestination = "download" | "google_docs" | "sharepoint";
+
+/* GET /analysis-docs/policy (the rest of the org's policy passes through untouched). */
+export interface DocPolicy {
+  export_destinations?: ExportDestination[];
+}
+
+export type DocSwitchName = "store" | "share" | "assist" | "prompt_analysis" | "import_upload";
+
+/* GET /analysis-docs/switches: one of the person's own switches. `choice` is
+   theirs (null while unset), `on` what applies, `locked` whether their org
+   enforces it (`org` then says which way). */
+export interface DocSwitch {
+  name: DocSwitchName;
+  on: boolean;
+  choice: "on" | "off" | null;
+  locked: boolean;
+  org: "enforced_on" | "enforced_off" | null;
+}
+
+/* GET /analysis-docs/export-config */
+export interface DocExportConfig {
+  google_client_id: string | null;
+  microsoft_client_id: string | null;
+}
+
+export type TeamDestinationKind = "sharepoint" | "google_drive";
+
+/* GET /analysis-docs/destination */
+export interface TeamDestination {
+  kind: TeamDestinationKind | null;
+  target_name: string | null;
+  connected_at: number | string | null;
+}
+
+export interface DocsQuery {
+  repo?: string;
+  scope?: string;
+  topic?: string;
+  kind?: string;
+  session?: string;
 }
 
 /* GET /profiles/{name} (routes_read.get_profile): a profile as `brindle
@@ -745,7 +949,7 @@ export interface SessionConflict {
 /* POST /inbox/{id}/{action} (daemon/routes_actions.py inbox_action).
    "permission" (engine branch desktop/permission-items) takes {request,
    digest, choice}: the person's answer to the request the item showed. */
-export type InboxAction = "answer" | "approve" | "reject" | "accept" | "decline" | "review" | "merge" | "read" | "permission";
+export type InboxAction = "answer" | "approve" | "reject" | "accept" | "decline" | "review" | "merge" | "read" | "permission" | "dismiss";
 
 /* What an action answers: a message or status, a reviewer, or a job id. */
 export interface InboxActionResult {
@@ -1124,6 +1328,106 @@ export class DaemonClient {
   /* Indexes a source again (POST /kb/sources/{id}/sync?repo=): a job, done when the index is current. */
   syncKbSource(repo: string, id: string) {
     return this.post<Job>(`/kb/sources/${encodeURIComponent(id)}/sync?repo=${encodeURIComponent(repo)}`, {});
+  }
+
+  /* The files adding a folder to the library would upload, and the ones skipped; nothing is sent. */
+  kbLibraryPlan(repo: string, id: string) {
+    return this.post<KbLibraryPlan>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, { dry_run: true });
+  }
+
+  /* Uploads exactly the files `token` (from kbLibraryPlan) listed (403 not_allowed when uploading is off,
+     502 when a file was rejected). */
+  addKbToLibrary(repo: string, id: string, token: string) {
+    return this.post<KbLibraryAdded>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, { token });
+  }
+
+  /* Deletes the folder's docs from the library; the folder stays. */
+  removeKbFromLibrary(repo: string, id: string) {
+    return this.delete<{ left: number }>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, {});
+  }
+
+  /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.
+     A plan without it throws DaemonError "not_entitled". */
+  async docs(query: DocsQuery = {}): Promise<{ docs: AnalysisDoc[] }> {
+    const got = await this.get<{ docs?: WireListedDoc[] }>("/analysis-docs", { ...query });
+    return { docs: (got.docs ?? []).map(listedDoc) };
+  }
+
+  docSessionSummary(session: string) {
+    return this.get<DocSessionSummary>("/analysis-docs/session-summary", { session });
+  }
+
+  async docTopics(query: { repo?: string; scope?: string } = {}): Promise<{ topics: DocTopic[] }> {
+    const got = await this.get<{ topics?: { topic: string; count?: number }[] }>("/analysis-docs/topics", { ...query });
+    return { topics: (got.topics ?? []).map((t) => ({ name: t.topic, count: t.count })) };
+  }
+
+  /* Every scope the person reads (their own, their teams', their org's), with or without docs. */
+  docScopes(repo?: string) {
+    return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
+  }
+
+  knowledgeMap(repo: string, scope: DocScope, paths: string[]) {
+    return this.get<KnowledgeMap>("/analysis-docs/map", { repo, scope_kind: scope.kind, scope_id: scope.id, paths: JSON.stringify(paths), depth: 1 });
+  }
+
+  async doc(id: string, repo?: string): Promise<AnalysisDocDetail> {
+    return docDetail(await this.get<WireDoc>(`/analysis-docs/${encodeURIComponent(id)}`, { repo }));
+  }
+
+  /* Computed on this machine from its own records; needs no plan. */
+  docResults(repo?: string) {
+    return this.get<DocResults>("/analysis-docs/results", { repo });
+  }
+
+  shareDoc(id: string, scope: string) {
+    return this.post<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
+  }
+
+  unshareDoc(id: string, scope: string) {
+    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
+  }
+
+  deleteDoc(id: string) {
+    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, {});
+  }
+
+  /* With `dir` the daemon writes the file there; without, it comes back as base64. */
+  exportDoc(id: string, format: "md" | "docx" | "zip", dir?: string, destination: ExportDestination = "download") {
+    return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, { format, destination, ...(dir ? { dir } : {}) });
+  }
+
+  /* The org's doc policy: which export destinations it allows. */
+  docPolicy(repo?: string) {
+    return this.get<DocPolicy>("/analysis-docs/policy", { repo });
+  }
+
+  /* The person's own doc switches, and which their org has locked. */
+  async docSwitches(repo?: string) {
+    return (await this.get<{ switches: DocSwitch[] }>("/analysis-docs/switches", { repo })).switches;
+  }
+
+  /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked. */
+  async setDocSwitch(name: DocSwitchName, on: boolean) {
+    return (await this.put<{ switches: DocSwitch[] }>("/analysis-docs/switches", { name, on })).switches;
+  }
+
+  /* The public client ids for the in-app Google / Microsoft sign-in; null hides that button. */
+  docExportConfig(repo?: string) {
+    return this.get<DocExportConfig>("/analysis-docs/export-config", { repo });
+  }
+
+  /* The team's export destination (kind null when none). Changing it is admin only. */
+  docDestination(repo?: string) {
+    return this.get<TeamDestination>("/analysis-docs/destination", { repo });
+  }
+
+  setDocDestination(body: { kind: TeamDestinationKind; target: { drive_id: string; folder_id?: string } | { site: string; folder?: string }; credential: string | { tenant_id: string; client_id: string; client_secret: string } }) {
+    return this.put<TeamDestination>("/analysis-docs/destination", body);
+  }
+
+  clearDocDestination() {
+    return this.delete<unknown>("/analysis-docs/destination", {});
   }
 
   profile(name: string, repo?: string) {

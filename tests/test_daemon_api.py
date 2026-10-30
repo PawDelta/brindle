@@ -635,3 +635,162 @@ def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     monkeypatch.setattr(worker_models, "_signed_in", None)
     _, bare = _get("/v1/config", AUTH, f"repo={seeded['repo']}&keys=0")
     assert bare["keys"] == [] and "repo" in bare and reads == [] and probed == []
+
+
+def test_doc_map_proxies_only_a_neighbourhood_without_caching(brindle_home, monkeypatch):
+    from urllib.parse import parse_qs, urlencode, urlsplit
+
+    from brindle.pro import analysis_docs
+
+    calls = []
+
+    def api(method, path, body=None, **kw):
+        url = urlsplit(path)
+        calls.append((method, url.path, parse_qs(url.query), body))
+        return {"nodes": [{"id": str(len(calls)), "kind": "path", "path": "src/cache"}], "edges": []}
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(sub="u1"))
+    monkeypatch.setattr(analysis_docs, "api", api)
+    query = {"scope_kind": "group", "scope_id": "t1", "paths": json.dumps(["src/cache", "src/db"]), "depth": "1"}
+    for extra in ({"paths": "[]"}, {"paths": "broken"}, {"depth": "2"}, {"scope_id": ""}):
+        assert _get("/v1/analysis-docs/map", AUTH, urlencode(query | extra))[0] == 400
+    assert calls == []
+    for version in ("1", "2"):
+        code, body = _get("/v1/analysis-docs/map", AUTH, urlencode(query | {"local_decisions": "private"}))
+        assert code == 200 and body["nodes"][0]["id"] == version
+    upstream = query | {"paths": "src/cache,src/db"}       # the server splits its list on commas
+    assert calls == [("GET", "/analysis-docs/map", {k: [v] for k, v in upstream.items()}, None)] * 2
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: (_ for _ in ()).throw(RuntimeError("no plan")))
+    assert _get("/v1/analysis-docs/map", AUTH, urlencode(query))[0] == 402
+    assert len(calls) == 2
+
+
+def test_docs_with_no_scope_lists_each_readable_scope_once_per_doc(brindle_home, monkeypatch):
+    from urllib.parse import parse_qs, urlsplit
+
+    from brindle.pro import analysis_docs
+
+    held = {"user:u1": [("d1", 4, ["checkout"]), ("shared", 2, ["checkout", "refunds"])],
+            "group:t-empty": [],                                    # a team of theirs with no docs yet
+            "group:t-pay": [("team-only", 3, ["refunds"])],
+            "org:o1": [("shared", 2, ["checkout", "refunds"]), ("d2", 1, ["refunds"])]}
+
+    def api(method, path, body=None, **kw):     # the server refuses a list without a scope
+        url = urlsplit(path)
+        if url.path == "/analysis-docs/scopes":
+            return {"scopes": [{"kind": k, "id": i, "name": i, "can_share": k != "user"}
+                               for k, _, i in (s.partition(":") for s in held)]}
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
+        docs = held[f"{q['scope_kind']}:{q['scope_id']}"]
+        return {"docs": [{"doc_id": d, "created_at": at, "topics": t} for d, at, t in docs]}
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(sub="u1"))
+    monkeypatch.setattr(analysis_docs, "api", api)
+    _, scopes = _get("/v1/analysis-docs/scopes", AUTH)
+    assert [s["id"] for s in scopes["scopes"]] == ["u1", "t-empty", "t-pay", "o1"]
+    _, listed = _get("/v1/analysis-docs", AUTH)
+    assert [d["doc_id"] for d in listed["docs"]] == ["d1", "team-only", "shared", "d2"]
+    _, topics = _get("/v1/analysis-docs/topics", AUTH)
+    assert topics["topics"] == [{"topic": "refunds", "count": 3}, {"topic": "checkout", "count": 2}]
+
+
+def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, monkeypatch):
+    from brindle import agents, knowledge
+    from brindle.pro import analysis_brief
+    from brindle.pro import analysis_docs
+
+    with db.tx() as c:
+        c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, drafter, state)"
+                  " VALUES ('r1', 'feature', 'overlap-doc', 'w1', 'open')")
+        c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, drafter, state)"
+                  " VALUES ('r1', 'feature', 'pending-doc', 'w1', 'publish')")
+    def docs_api(method, path, body=None, **kw):
+        if path == "/analysis-docs/manual-only":
+            return {"doc_id": "manual-only", "version": 3}
+        assert path == "/analysis-docs/brief"
+        return {"block": "A brief", "cited": [{"doc_id": "worker-cited", "version": 4}]}
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement",
+                        lambda store=None: SimpleNamespace(sub="u1", features=()))
+    monkeypatch.setattr(analysis_docs, "api", docs_api)
+    analysis_docs.read_doc(db, "r1", "manual-only")
+    knowledge.record_receipt(db, "r1", [(analysis_docs.UPDATED_ITEM, "overlap-doc", "published")])
+    monkeypatch.setattr("brindle.identity_lock.ensure_workspace", lambda *a: None)
+    monkeypatch.setattr(agents, "_launch", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    worker = agents.spawn(db, db.get_workspace(seeded["ws"]), "developer", prompt="task", mode="assign",
+                          parent_id="r1", weight="heavy")
+    assert (analysis_brief.DOC_ITEM, "worker-cited", "4") in knowledge.receipt(db, worker.id)
+    knowledge.record_receipt(db, "other-session", [(analysis_brief.DOC_ITEM, "other-doc", "1")])
+
+    code, body = _get("/v1/analysis-docs/session-summary", AUTH, "session=r1")
+
+    assert code == 200
+    assert body == {"writing": 1, "updated": 1, "using": 1, "total": 2}
+@pytest.mark.parametrize("role,allowed", [("owner", True), ("admin", True), ("member", False), (None, False)])
+def test_doc_destination_is_read_by_anyone_and_changed_only_by_admins(monkeypatch, role, allowed):
+    from brindle.daemon import routes_actions
+    from brindle.pro import analysis_docs
+    from brindle.service.errors import ServiceError
+
+    sent = []
+
+    def api(method, path, body=None, **kw):
+        sent.append((method, path, body))
+        return {"kind": "sharepoint", "target_name": "Docs", "connected_at": 1}
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement",
+                        lambda store=None: SimpleNamespace(sub="u1", org_id="o1", role=role))
+    monkeypatch.setattr(analysis_docs, "api", api)
+    code, body = _get("/v1/analysis-docs/destination", AUTH)
+    assert (code, body["target_name"], sent[-1][:2]) == (200, "Docs", ("GET", "/orgs/o1/analysis-docs/destination"))
+    put = {"kind": "sharepoint", "target": "site/folder", "credential": "tok"}
+    sent.clear()
+    if allowed:
+        routes_actions.put_doc_destination(None, {}, put)
+        routes_actions.delete_doc_destination(None, {}, {})
+        assert [(m, b) for m, _, b in sent] == [("PUT", put), ("DELETE", None)]
+    else:
+        for act, args in ((routes_actions.put_doc_destination, put), (routes_actions.delete_doc_destination, {})):
+            with pytest.raises(ServiceError) as e:
+                act(None, {}, args)
+            assert e.value.http_status == 403
+        assert sent == []
+
+
+def test_doc_policy_and_export_config_are_proxied(monkeypatch):
+    from brindle.pro import analysis_docs
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement",
+                        lambda store=None: SimpleNamespace(sub="u1", org_id="o1", role="member"))
+    monkeypatch.setattr(analysis_docs, "api", lambda method, path, body=None, **kw: {"path": path})
+    assert _get("/v1/analysis-docs/policy", AUTH)[1] == {"path": "/orgs/o1/analysis-docs/policy"}
+    assert _get("/v1/analysis-docs/export-config", AUTH)[1] == {"path": "/analysis-docs/export-config"}
+@pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])
+def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, enough):
+    from brindle.db import Task
+    from brindle.pro import analysis_brief
+
+    def finished(agent_id, weight, rounds, *, brief=False, files=None, repo="/r"):
+        if files:
+            db.add_task(Task(f"t-{agent_id}", repo, agent_id, None, "ws", "dev", "x", "assign", 1, None, None,
+                             json.dumps(files), None, "merged", 1.0))
+        db.add_routing_decision(repo, task_id=f"t-{agent_id}", agent_id=agent_id, weight=weight,
+                                baseline_profile="dev", profile="dev", learned=False)
+        with db.tx() as c:
+            c.execute("UPDATE routing_decisions SET review_rounds=?, outcome='merged' WHERE agent_id=?",
+                      (rounds, agent_id))
+        if brief:
+            knowledge.record_receipt(db, agent_id, [(analysis_brief.BRIEF_ITEM, agent_id, "h")])
+
+    for i in range(briefed):
+        finished(f"b{i}", "heavy", 1, brief=True)
+    for i in range(5):
+        finished(f"o{i}", "heavy", 3)
+    finished("light", "light", 0)                                      # another size
+    finished("docs", "heavy", 9, files=["docs/plan.md"])              # another kind
+    finished("elsewhere", "heavy", 9, repo="/other")                  # another repo
+    finished("alone", "advanced", 7, brief=True)                      # nothing similar to compare with
+    code, body = _get("/v1/analysis-docs/results", AUTH, "repo=/r")
+    assert code == 200 and (body["enough"], body["compared"], body["briefed"]) == (enough, briefed, briefed + 1)
+    assert (body["with_brief"], body["without_brief"]) == ((1.0, 3.0) if enough else (None, None))

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import os
 import time
@@ -36,7 +37,9 @@ from brindle import (
     workspaces,
 )
 from brindle.daemon import session_review
-from brindle.daemon.routes_actions import read_edit_target
+from brindle.daemon.routes_actions import (
+    doc_switches, docs_api, docs_everywhere, docs_org_api, docs_scopes, read_edit_target,
+)
 from brindle.db import DB
 from brindle.pro import license
 from brindle.service import inbox
@@ -231,9 +234,12 @@ def decisions(db: DB, request: Request) -> Any:
 @_json
 def kb_sources(db: DB, request: Request) -> Any:
     keep = ("id", "kind", "scope", "mode", "visibility", "credential_name", "retention_days",
-            "added_at", "docs", "quarantined")
+            "added_at", "docs", "quarantined", "library_state", "library_pending", "library_removing")
+    from brindle.pro import analysis_imports
+
     return [{k: s[k] for k in keep if k in s}
-            for s in kb.sources(db, knowledge.repo_key(_need_repo(request)))]
+            for s in kb.sources(db, knowledge.repo_key(_need_repo(request)),
+                                analysis_imports.current_identity())]
 
 
 @_json
@@ -667,6 +673,125 @@ def get_cost(db: DB, request: Request) -> Any:
             "by_model": {m: bucket(b) for m, b in s.by_model.items()}}
 
 
+def _all_docs(request: Request, query: dict[str, str]) -> list[dict]:
+    """The docs of every scope of docs_scopes, each doc once, newest first."""
+    seen: dict[str, dict] = {}
+    for got in docs_everywhere("/analysis-docs", _repo(request), query):
+        for d in got.get("docs") or []:
+            if isinstance(d, dict) and isinstance(d.get("doc_id"), str):
+                seen.setdefault(d["doc_id"], d)
+    return sorted(seen.values(), key=lambda d: -float(d.get("created_at") or 0))
+
+
+@_json
+def analysis_docs(db: DB, request: Request) -> Any:
+    """The library's docs (``{"docs": [...]}``, each as the server lists it),
+    filtered by ``scope`` (user, team:<id> or org:<id>; none: every scope the
+    person reads, see docs_scopes), ``topic``, ``kind`` and ``session``."""
+    q = request.query_params
+    query = {k: q[k] for k in ("topic", "kind", "session") if q.get(k)}
+    if q.get("scope"):
+        return docs_api("GET", "/analysis-docs", repo=_repo(request), scope=q["scope"], query=query)
+    return {"docs": _all_docs(request, query)}
+
+
+@_json
+def analysis_doc_session_summary(db: DB, request: Request) -> Any:
+    """Session-local counts; never consults the library's aggregate usage."""
+    from brindle.pro import analysis_brief, analysis_docs as docs
+
+    session = request.query_params.get("session")
+    if not session:
+        raise ServiceError("invalid", "session is required", 400)
+    drafts = docs.drafts(db, session)
+    writing = {doc_id for (_, doc_id), item in drafts.items() if item["state"] == "open"}
+    cited = {doc_id for kind, doc_id, _ in knowledge.receipt(db, session)
+             if kind == analysis_brief.SESSION_DOC_ITEM}
+    updated = {doc_id for kind, doc_id, _ in knowledge.receipt(db, session) if kind == docs.UPDATED_ITEM}
+    return {"writing": len(writing), "updated": len(updated), "using": len(cited),
+            "total": len(writing | updated | cited)}
+
+
+@_json
+def analysis_doc_map(db: DB, request: Request) -> Any:
+    """Proxy one path neighbourhood without storing its response locally."""
+    q = request.query_params
+    try:
+        paths = json.loads(q.get("paths", "[]"))
+    except (ValueError, TypeError) as e:
+        raise ServiceError("bad_request", "paths must be a JSON array", 400) from e
+    if (not isinstance(paths, list) or not paths
+            or any(not isinstance(p, str) or not p.strip() for p in paths)
+            or q.get("depth", "1") != "1"
+            or q.get("scope_kind") not in ("user", "group", "org") or not q.get("scope_id")):
+        raise ServiceError("bad_request", "choose a scope and code paths at depth 1", 400)
+    return docs_api("GET", "/analysis-docs/map", repo=_repo(request),
+                    query={"scope_kind": q["scope_kind"], "scope_id": q["scope_id"],
+                           "paths": ",".join(paths), "depth": "1"})    # the server's list is comma-separated
+
+
+@_json
+def analysis_doc_topics(db: DB, request: Request) -> Any:
+    """``{"topics": [{topic, count}, ...]}`` in one scope, or over every doc
+    of :func:`_all_docs` without one."""
+    scope = request.query_params.get("scope")
+    if scope:
+        return docs_api("GET", "/analysis-docs/topics", repo=_repo(request), scope=scope)
+    counts: dict[str, int] = {}
+    for d in _all_docs(request, {}):
+        for t in d.get("topics") or []:
+            counts[t] = counts.get(t, 0) + 1
+    return {"topics": [{"topic": t, "count": n} for t, n in sorted(counts.items(), key=lambda x: (-x[1], x[0]))]}
+
+
+@_json
+def analysis_doc_scopes(db: DB, request: Request) -> Any:
+    return {"scopes": docs_scopes(_repo(request))}
+
+
+@_json
+def analysis_doc_switches(db: DB, request: Request) -> Any:
+    """The person's own switches, and which their org has locked (see routes_actions.doc_switches)."""
+    return doc_switches(_repo(request))
+
+
+@_json
+def analysis_doc_policy(db: DB, request: Request) -> Any:
+    """The org's doc policy, including ``export_destinations`` (a subset of download, google_docs, sharepoint)."""
+    return docs_org_api("GET", "policy", repo=_repo(request))
+
+
+@_json
+def analysis_doc_export_config(db: DB, request: Request) -> Any:
+    """``{google_client_id, microsoft_client_id}`` for the app's in-app sign-in (either may be null)."""
+    return docs_api("GET", "/analysis-docs/export-config", repo=_repo(request))
+
+
+@_json
+def analysis_doc_destination(db: DB, request: Request) -> Any:
+    """The team's export destination: ``{kind, target_name, connected_at}``, kind null when none."""
+    return docs_org_api("GET", "destination", repo=_repo(request))
+
+
+@_json
+def analysis_doc_results(db: DB, request: Request) -> Any:
+    """How tasks with a doc brief went against similar ones without, from
+    this machine's records (analysis_brief.results); nothing is sent."""
+    from brindle.pro import analysis_brief
+
+    days = int(request.query_params.get("days") or analysis_brief.RESULTS_DAYS)
+    return analysis_brief.results(db, _repo(request), days)
+
+
+@_json
+def analysis_doc(db: DB, request: Request) -> Any:
+    """One doc: its files, what the server read from it and how often briefs used it."""
+    from urllib.parse import quote
+
+    return docs_api("GET", f"/analysis-docs/{quote(request.path_params['id'], safe='')}",
+                    repo=_repo(request))
+
+
 USAGE_NEAR_PERCENT = 80.0
 USAGE_NEAR_RESET_SECONDS = 3600
 
@@ -728,6 +853,18 @@ ROUTES = [
     Route("/v1/decisions", decisions),
     Route("/v1/kb/sources", kb_sources),
     Route("/v1/kb/search", kb_search),
+    Route("/v1/analysis-docs", analysis_docs),
+    Route("/v1/analysis-docs/session-summary", analysis_doc_session_summary),
+    # Before /analysis-docs/{id}.
+    Route("/v1/analysis-docs/topics", analysis_doc_topics),
+    Route("/v1/analysis-docs/map", analysis_doc_map),
+    Route("/v1/analysis-docs/scopes", analysis_doc_scopes),
+    Route("/v1/analysis-docs/results", analysis_doc_results),
+    Route("/v1/analysis-docs/policy", analysis_doc_policy),
+    Route("/v1/analysis-docs/switches", analysis_doc_switches),
+    Route("/v1/analysis-docs/export-config", analysis_doc_export_config),
+    Route("/v1/analysis-docs/destination", analysis_doc_destination),
+    Route("/v1/analysis-docs/{id}", analysis_doc),
     Route("/v1/profiles", list_profiles),
     Route("/v1/profiles/{name}", get_profile),
     Route("/v1/rules", list_rules),

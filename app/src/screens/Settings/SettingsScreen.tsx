@@ -77,6 +77,8 @@ import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PRO
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import { About } from "./About";
+import { DocSwitches } from "./DocSwitches";
+import { TeamDestination } from "./TeamDestination";
 import { OrgApprovals } from "./OrgApprovals";
 import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
@@ -1598,6 +1600,10 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
           </div>
         )}
       </Section>
+
+      <DocSwitches client={client} />
+
+      <TeamDestination client={client} />
 
       {staff && (
         <Section id="staff" title="Staff only" blurb="Internal tools for Brindle staff. Not shown to customers." staff testId="staff-only">

@@ -70,6 +70,7 @@ export const TIERS: Tier[] = [
     audience: "One person running many agents on real backends.",
     lead: "Everything in Developer Core, plus",
     features: [
+      { what: "Analysis deliverables and personal library", key: "analysis_docs" },
       { what: "Multi-repo sessions", key: "multi_repo", use: { url: `${DOCS_URL}commands/#paid-commands` } },
       { what: "A coordinator that holds and orders queued work across sessions", key: "coordinator", use: { url: `${DOCS_URL}commands/#paid-commands` } },
       { what: "Per-worktree databases", key: "services", use: { url: `${DOCS_URL}config/` } },
@@ -86,6 +87,7 @@ export const TIERS: Tier[] = [
     audience: "Teams running agents on shared code and in their pipelines.",
     lead: "Everything in Pro, plus",
     features: [
+      { what: "Shared team analysis library", key: "analysis_docs_team" },
       { what: "Org policy and required review", key: "team", use: { screen: "agents" } },
       { what: "Org-wide federation", key: "federation", use: { url: `${DOCS_URL}commands/#paid-commands` } },
       { what: "Budgets, alerts and throttles", key: "org_budgets", use: { screen: "spend" } },
@@ -101,6 +103,7 @@ export const TIERS: Tier[] = [
     audience: "Defense, finance, healthcare and government teams.",
     lead: "Everything in Team, plus",
     features: [
+      { what: "Org analysis library and controls", key: "analysis_docs_enterprise" },
       { what: "Air-gap mode", key: "airgap", use: { url: `${ENTERPRISE_URL}#adds` } },
       { what: "Signed audit trail", key: "audit", use: { url: `${ENTERPRISE_URL}#adds` } },
       { what: "Remote shutdown and throttle", key: "managed_rollout", use: { url: `${ENTERPRISE_URL}#rollout` } },

@@ -26,17 +26,18 @@ function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client(), props
   const store = createAppStore();
   const sync = startSync({ client, store, connect: daemon.connect });
   const onOpen = vi.fn();
+  const onNavigate = vi.fn();
   const onOpenRule = vi.fn();
   render(
     <DaemonContext.Provider value={client}>
       <StoreContext.Provider value={store}>
         <SessionsProvider client={client}>
-          <InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} onOpenRule={onOpenRule} {...props} />
+          <InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} onNavigate={onNavigate} onOpenRule={onOpenRule} {...props} />
         </SessionsProvider>
       </StoreContext.Provider>
     </DaemonContext.Provider>,
   );
-  return { store, sync, onOpen, onOpenRule };
+  return { store, sync, onOpen, onNavigate, onOpenRule };
 }
 
 /* Held requests as GET /permissions/asks groups them: two pushes into main (w1's is the `permission` fixture's
@@ -58,6 +59,22 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
+  it.each([42, "d1"])("opens requested document %s at its section, replies in the session and dismisses the request", async (reference) => {
+    const doc: InboxItemDTO = { kind: "doc", reason: "Check the storage design.", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", request_id: "dr1", doc: reference, section: "Storage" };
+    // A paused session remains in the sessions feed after all its agents leave the snapshot.
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, status: typeof reference === "string" ? "paused" : "idle" }], workspaces: typeof reference === "string" ? [] : [root, worker], inbox: [doc] });
+    const { sync, onOpen, onNavigate } = mount(daemon);
+    await screen.findByRole("region", { name: "Ship ls --json" });
+    fireEvent.click(within(card("doc")).getByRole("button", { name: "Open" }));
+    expect(onNavigate).toHaveBeenLastCalledWith({ screen: "knowledge", view: "docs", doc: reference, section: "Storage" });
+    fireEvent.click(within(card("doc")).getByRole("button", { name: "Reply" }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "w1");
+    fireEvent.click(within(card("doc")).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/dr1/dismiss", query: {}, body: {} }]));
+    await waitFor(() => expect(card("doc")).toBeNull());
+    sync.stop();
+  });
+
   it("groups the queue by session as banner cards, each going to its session and agent; an org notice is a card to read", async () => {
     const daemon = new FakeDaemon({
       repos: [{ repo_root: REPO, name: "proj" }],

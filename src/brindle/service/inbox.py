@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -193,8 +194,9 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 (r for r in [awaiting_review(a, ws)] if r and r.startswith("merge failed")), None)
             # A request the hook holds is pending whatever the screen shows meanwhile.
             drop_orphan_requests(db, row)   # whatever the agent's status: a cancelled call's row
-            asking = (pending_permissions(db, row)
-                      if a["status"] == "waiting" or HOLDS.of_agent(row.id) else [])
+            asking = [p for p in (pending_permissions(db, row)
+                                  if a["status"] == "waiting" or HOLDS.of_agent(row.id) else [])
+                      if _answerable(row, p)]
             out += [InboxItemDTO(kind="permission", reason="asks permission",
                                  detail=p.request.summary() if p.request else None, permission=p.dto, **link)
                     for p in asking]
@@ -202,7 +204,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 kind = _kind(a, ws, reason)
                 out.append(InboxItemDTO(kind=kind, reason=reason, **link,
                                         action=_sign_in(row.provider) if kind == "credentials" else None))
-            if row.plan_state == "proposed":
+            # Only a plan agents.approve_plan would take: a plan-first worker with a supervisor.
+            if row.plan_state == "proposed" and row.plan_first and row.parent_id is not None:
                 out.append(InboxItemDTO(kind="plan", reason="plan awaiting approval", **link,
                                         detail=row.plan_text))
             if row.parent_id is not None:
@@ -222,7 +225,69 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
-    return out + _setup_items() + _org_blocks(db, repo_root) + _org_notices()
+    return out + _doc_items(db, repo_root) + _setup_items() + _org_blocks(db, repo_root) + _org_notices()
+
+
+def _doc_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
+    """Unread requests survive a session leaving the sidebar, until dismissed."""
+    out = []
+    for ws in view.session_workspaces(db, repo_root):
+        for r in db.conn.execute(
+                "SELECT r.* FROM doc_requests r JOIN agents a ON a.id = r.agent_id"
+                " WHERE a.workspace_id = ? ORDER BY r.created_at, r.rowid", (ws.id,)):
+            if identity_lock.locked_by(r["agent_id"]):
+                continue
+            out.append(InboxItemDTO(kind="doc", reason=r["why"], detail=r["title"],
+                                    request_id=r["id"], doc=r["doc_id"], section=r["section"],
+                                    agent_id=r["agent_id"], workspace_id=ws.id,
+                                    root_id=autopilot.root_of(db, r["agent_id"])))
+    return out
+
+
+def request_doc_read(db: DB, agent: Agent, doc: int | str, why: str, section: str | None = None) -> str:
+    """Keep a session's explicit reading request until the person dismisses it."""
+    from brindle import knowledge
+
+    identity_lock.ensure(agent)
+    why = why.strip()
+    if not why or len(why.splitlines()) != 1:
+        raise ServiceError("invalid", "why must be one nonempty line")
+    ws = db.get_workspace(agent.workspace_id)
+    if isinstance(doc, str):
+        from urllib.parse import quote
+
+        from brindle.pro import analysis_docs, auth
+
+        load_repo_config(ws.repo_root)   # apply the repo's air-gap setting before any request
+        try:
+            title = analysis_docs.api("GET", f"/analysis-docs/{quote(doc, safe='')}").get("title")
+        except (auth.AuthError, RuntimeError) as e:
+            raise ServiceError("invalid", str(e)) from e
+    else:
+        found = db.conn.execute(
+            "SELECT d.title FROM kb_docs d JOIN kb_sources s ON s.id = d.source_id"
+            " WHERE d.id = ? AND NOT d.tombstoned AND s.repo_key = ?",
+            (doc, knowledge.repo_key(ws.repo_root))).fetchone()
+        if found is None:
+            raise ServiceError("not_found", f"no document {doc} in this session's repo", 404)
+        title = found["title"]
+    request = uuid.uuid4().hex
+    with db.tx() as c:
+        c.execute("INSERT INTO doc_requests (id, agent_id, doc_id, title, section, why, created_at)"
+                  " VALUES (?, ?, ?, ?, ?, ?, ?)", (request, agent.id, doc, title, section, why, time.time()))
+    bus.publish_agent(db, "doc.requested", agent.id, request_id=request)
+    return request
+
+
+def dismiss_doc_read(db: DB, request: str) -> dict:
+    row = db.conn.execute("SELECT agent_id FROM doc_requests WHERE id = ?", (request,)).fetchone()
+    if row is None:
+        raise ServiceError("conflict", "document request is no longer waiting", 409)
+    identity_lock.ensure(db.get_agent(row["agent_id"]))
+    with db.tx() as c:
+        c.execute("DELETE FROM doc_requests WHERE id = ?", (request,))
+    bus.publish_agent(db, "doc.dismissed", row["agent_id"], request_id=request)
+    return {"dismissed": request}
 
 
 # -- permission requests ---------------------------------------------------------------------
@@ -236,6 +301,17 @@ class Pending:
     request: permissions.Request | None
     suggestions: list | None                 # Claude Code's own "always allow" updates
     dto: PermissionDTO
+
+
+def _answerable(agent: Agent, p: Pending) -> bool:
+    """Whether answer_permission would take ``p`` (HOLDS.claim's conditions): a
+    hook-held request whose answer is already claimed, or whose digest differs
+    from the one its hook registered, is refused, so it isn't listed. A
+    request at the CLI's own prompt stays, as a terminal-only card."""
+    if p.via != "hook":
+        return True
+    hold = HOLDS.held(agent.id, p.dto.request_id)
+    return hold is not None and hold.answer is None and hold.digest == p.dto.digest
 
 
 def _always_rule(req: permissions.Request | None, suggestions: list | None, repo_root: str | None) -> str | None:

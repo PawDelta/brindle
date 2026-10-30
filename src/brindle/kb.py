@@ -265,9 +265,21 @@ def add_source(db: DB, repo_key: str, kind: str, scope: str, *, mode: str = "ind
 def remove_source(db: DB, source_id: str, *, actor: str | None = None,
                   session: str | None = None) -> None:
     """Delete a source with its documents, chunks, index rows, links and
-    embeddings in one transaction, and log the removal."""
+    embeddings in one transaction, and log the removal. A folder added to the
+    library is removed from it first; a removal the server does not confirm is
+    kept and retried later."""
+    from brindle.pro import analysis_imports
+
+    if analysis_imports.in_library(db, source_id):
+        try:
+            analysis_imports.remove_from_library(db, source_id)
+        except Exception:  # noqa: BLE001 - removing locally never waits on the network
+            pass
     with db.tx() as c:
         src = c.execute("SELECT * FROM kb_sources WHERE id = ?", (source_id,)).fetchone()
+        c.execute("INSERT OR IGNORE INTO kb_import_removals (source_id, identity)"
+                  " SELECT source_id, identity FROM kb_import_library WHERE source_id = ?",
+                  (source_id,))   # whatever remove_from_library could not finish
         if src is None:
             raise KeyError(source_id)
         c.execute("DELETE FROM kb_fts WHERE rowid IN (SELECT kb_chunks.rowid FROM kb_chunks"
@@ -381,14 +393,29 @@ def _index(c, source_id: str, doc: _Doc, chunks, names: dict[str, list[str]]) ->
                           (cid, symbol, node_id))
 
 
-def sources(db: DB, repo_key: str) -> list[dict]:
+def sources(db: DB, repo_key: str, library_identity: str | None = None) -> list[dict]:
     """``repo_key``'s sources, oldest first, each with its live document count
-    and the number of its live documents' quarantined chunks."""
-    return [dict(r) for r in db.conn.execute(
+    and the number of its live documents' quarantined chunks. The library
+    fields are what ``library_identity`` (brindle.pro.analysis_imports.
+    current_identity) sees: ``library_state`` is local, adding, in_library or
+    removing, with ``library_pending`` (files not uploaded) and
+    ``library_removing`` (docs still in the library while removing); no identity sees every folder local."""
+    rows = [dict(r) for r in db.conn.execute(
         "SELECT s.*, (SELECT count(*) FROM kb_docs d WHERE d.source_id = s.id AND NOT d.tombstoned) AS docs,"
         " (SELECT count(*) FROM kb_chunks c JOIN kb_docs d ON d.id = c.doc_id WHERE d.source_id = s.id"
-        " AND NOT d.tombstoned AND c.quarantined IS NOT NULL) AS quarantined"
-        " FROM kb_sources s WHERE s.repo_key = ? ORDER BY s.added_at", (repo_key,))]
+        " AND NOT d.tombstoned AND c.quarantined IS NOT NULL) AS quarantined,"
+        " COALESCE((SELECT l.state FROM kb_import_library l WHERE l.source_id = s.id AND l.identity = ?),"
+        " 'local') AS library_state,"
+        " COALESCE((SELECT l.pending FROM kb_import_library l WHERE l.source_id = s.id AND l.identity = ?), 0)"
+        " AS library_pending,"
+        " (SELECT count(*) FROM kb_import_uploads x WHERE x.source_id = s.id AND x.identity = ?)"
+        " AS library_removing"
+        " FROM kb_sources s WHERE s.repo_key = ? ORDER BY s.added_at",
+        (library_identity, library_identity, library_identity, repo_key))]
+    for r in rows:
+        r["in_library"] = r["library_state"] == "in_library"
+        r["library_removing"] = max(1, r["library_removing"]) if r["library_state"] == "removing" else 0
+    return rows
 
 
 def find_source(db: DB, repo_key: str, ref: str) -> str:
@@ -505,12 +532,14 @@ def hop(db: DB, repo_key: str, chunk_ids: list[str], graph: Path | None = None) 
     return [h for h in found if h["chunk_id"] not in set(chunk_ids)]
 
 
-def sync(db: DB, source_id: str, graph: Path | None = None) -> dict[str, int]:
+def sync(db: DB, source_id: str, graph: Path | None = None, repo_root: str | None = None) -> dict:
     """Bring an indexed source's documents up to date: (re)index the new and
     changed ones and tombstone the ones it no longer has, committing per BATCH
     documents. Code-formatted identifiers that name a node of the repo's
     ``graph`` (codemap.graph_path) become ``kb_links``; without one, none do.
-    Returns how many were indexed, unchanged and tombstoned."""
+    Returns how many were indexed, unchanged and tombstoned. With ``repo_root``,
+    a folder the person added to the library (brindle.pro.analysis_imports) is
+    uploaded again where it changed, under ``library``."""
     src = db.conn.execute("SELECT * FROM kb_sources WHERE id = ?", (source_id,)).fetchone()
     if src is None:
         raise KeyError(source_id)
@@ -554,4 +583,10 @@ def sync(db: DB, source_id: str, graph: Path | None = None) -> dict[str, int]:
     counts["tombstoned"] = len(gone)
     with db.tx() as c:
         c.execute("UPDATE kb_sources SET sync_cursor = ? WHERE id = ?", (str(time.time()), source_id))
+    if repo_root is not None:   # a folder added to the library re-uploads what changed
+        from brindle.pro import analysis_imports
+
+        sent = analysis_imports.sync_upload(db, source_id, repo_root)
+        if sent["sent"] or sent["failed"]:
+            counts["uploaded"], counts["upload_failed"] = sent["uploaded"], len(sent["failed"])
     return counts

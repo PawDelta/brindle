@@ -337,6 +337,7 @@ def create(
     run_setup: bool = True,
     apply_prefix: bool = True,
     reuse_registered: bool = False,
+    session_root: str | None = None,
 ) -> Created:
     """``reuse_registered`` (assign/handoff): a branch that already has a
     registered workspace reuses it, or is refused while a worker is live in
@@ -419,6 +420,7 @@ def create(
         ),
         tmux_session=_session_name(repo_root, name, slug),
         created_at=time.time(),
+        session_root=session_root,
     )
     db.add_workspace(ws)
     if run_setup:

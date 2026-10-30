@@ -12,6 +12,7 @@ import type { InboxItemDTO } from "../../api/schema";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { button, quiet } from "../../components/ui";
 import { useAppState } from "../../store/useStore";
+import type { Route } from "../../routes";
 import { CloudLoginStatus, useCloudLogin } from "./CloudSignIn";
 import { itemKey, loginProvider } from "./items";
 import type { InboxActions } from "./useInboxActions";
@@ -21,6 +22,7 @@ export interface ItemActionsProps {
   actions: Pick<InboxActions, "now" | "busy" | "notes">;
   /* Open the item's agent in its session. */
   onGo?(): void;
+  onNavigate?(route: Route): void;
   /* The repo the item's session is in: a sign-in checks the provider there. */
   repo?: string | null;
   /* A sign-in ended (either way): the inbox is read again. */
@@ -36,7 +38,7 @@ export function useLoginProvider(item: InboxItemDTO) {
   return loginProvider(item, provider);
 }
 
-export function ItemActions({ item, actions, onGo, repo, onDone, compact = false }: ItemActionsProps) {
+export function ItemActions({ item, actions, onGo, onNavigate, repo, onDone, compact = false }: ItemActionsProps) {
   const client = useDaemon();
   const provider = useLoginProvider(item);
   const cloud = useCloudLogin();
@@ -46,6 +48,13 @@ export function ItemActions({ item, actions, onGo, repo, onDone, compact = false
   return (
     <div className="flex flex-col gap-1" data-testid="item-actions">
       <div className="flex flex-wrap items-center gap-1">
+        {item.kind === "doc" && (
+          <>
+            <button type="button" className={`${button} ${size}`} disabled={item.doc == null || !onNavigate} onClick={() => onNavigate?.({ screen: "knowledge", view: "docs", doc: item.doc!, section: item.section ?? undefined })}>Open</button>
+            {onGo && <button type="button" className={`${quiet} ${size}`} onClick={onGo}>Reply</button>}
+            <button type="button" className={`${quiet} ${size}`} disabled={actions.busy.has(key)} onClick={() => actions.now(item, "dismiss")}>Dismiss</button>
+          </>
+        )}
         {item.kind === "credentials" && (
           <ProviderSignIn
             provider={provider}
@@ -62,7 +71,7 @@ export function ItemActions({ item, actions, onGo, repo, onDone, compact = false
             Sign in to brindle
           </button>
         )}
-        {onGo && (
+        {onGo && item.kind !== "doc" && (
           <button type="button" className={`${quiet} ${size} ml-auto`} onClick={onGo} title="Open the agent in its session">
             Go to it ↗
           </button>

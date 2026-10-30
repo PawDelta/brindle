@@ -338,9 +338,11 @@ plan is approved; if it comes back with feedback, revise it and call
 
 def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: str | None,
                            provider, headless: bool, plan_first: bool = False,
-                           decisions: str = "", chunks: str = "", report_only: bool = False) -> str:
+                           decisions: str = "", chunks: str = "", report_only: bool = False,
+                           analysis: str = "") -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
-    ``task``, the ``decisions`` block that covers its files, its finish line,
+    ``task``, the ``decisions`` block that covers its files, the ``analysis``
+    doc rule and brief (large work only), its finish line,
     the WORKER_FOOTER reminder to report, and (for an interactive Claude
     worker with a finish line) the ``/goal`` wrapper. Used at spawn time, and
     again by ``resume`` to rebuild it (decisions from the brief's receipt)
@@ -348,7 +350,7 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
     from brindle import autopilot as pilot
 
     prompt = assemble([Block(TASK_AND_RULES, task), Block(DECISIONS, decisions),
-                       Block(DOCUMENT_CHUNKS, chunks)])
+                       Block(DOCUMENT_CHUNKS, chunks), Block(DOCUMENT_CHUNKS, analysis)])
     if done_when:
         prompt += f"\n\nFinish line: {done_when.strip()}"
     if plan_first:
@@ -383,18 +385,23 @@ def spawn(
     claim_goals: bool = True,
     files: list[str] | None = None,
     weight: str | None = None,
+    analysis_doc: bool = False,
 ) -> Agent:
     """Start an agent in ``ws``. ``weight`` is the weight its task was routed
     as, kept on the agent so the owner's per-kind effort and instructions apply
     from the first launch. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``; their brief carries the
-    accepted decisions covering ``files``. An interactive root always
-    drives toward a goal (see brindle.autopilot);
+    accepted decisions covering ``files``, and for large work (heavy/advanced,
+    or ``analysis_doc`` asked for) the analysis-doc rule and brief. An
+    interactive root always drives toward a goal (see brindle.autopilot);
     with ``claim_goals`` it claims a hand-written ``.brindle/goals.md``."""
     from brindle import autopilot as pilot
     from brindle import identity_lock
 
     identity_lock.ensure_workspace(db, ws)   # no new agent in another identity's worktree
+    session_root = pilot.root_of(db, parent_id) if parent_id else None
+    if session_root:
+        db.set_workspace_session_root(ws.id, session_root)
     profile = load_profile(profile_name, ws.repo_root)
     if (profile.name == "coordinator") != (mode == "coordinator"):
         # Only the sweep starts a coordinator (brindle.coordinator.wake).
@@ -414,6 +421,14 @@ def spawn(
     # wrapper), but the fully decorated prompt for a subagent (that text IS
     # what's handed to the supervisor's own Agent tool) or a reviewer.
     raw_task = prompt
+    analysis = ""
+    if mode in ("handoff", "assign"):
+        from brindle.pro import analysis_brief
+
+        analysis = analysis_brief.brief_context(
+            db, ws.repo_root, ws.branch, agent_id, prompt or "", files,
+            large=analysis_brief.large_work(weight, requested=analysis_doc),
+            **({"session_id": session_root} if session_root else {}))
     if not provider.launches_process:
         if mode not in ("handoff", "assign"):
             raise AgentError(
@@ -429,7 +444,7 @@ def spawn(
                                         guardrails.scope_prompt(guardrails.effective(profile))) if p)
         tuned = _with_overrides(profile, _weight_kind(weight), ws.repo_root)
         full = f"{tuned.prompt.strip()}\n\n{rules}".strip() if rules else tuned.prompt
-        prompt = raw_task = subagent_prompt(full, prompt or "", ws, done_when)
+        prompt = raw_task = subagent_prompt(full, prompt or "", ws, done_when, analysis)
     elif prompt and mode in ("handoff", "assign"):
         from brindle import codemap
         prompt = decorate_worker_prompt(prompt, agent_id, ws, done_when, provider, headless,
@@ -437,7 +452,8 @@ def spawn(
                                         report_only=is_review_profile(profile.name, ws.repo_root),
                                         decisions=knowledge.brief_decisions(db, ws.repo_root, agent_id, files),
                                         chunks=knowledge.brief_chunks(db, ws.repo_root, agent_id, prompt, files,
-                                                                      codemap.graph_path(ws)))
+                                                                      codemap.graph_path(ws)),
+                                        analysis=analysis)
     elif prompt and mode == "review":
         prompt = raw_task = prompt + REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
 
@@ -1589,12 +1605,17 @@ def _fresh_start_prompt(db: DB, a: Agent, ws: Workspace, provider, note: str) ->
         # start needs the same decoration it got the first time. A row
         # from before this change stored the already-decorated text, so
         # it gets decorated a second time here; harmless, if redundant.
+        from brindle.pro import analysis_brief
+
         return decorate_worker_prompt(
             a.task, a.id, ws, a.done_when, provider, bool(a.headless),
             plan_first=bool(a.plan_first) and a.plan_state != "approved",
             report_only=is_review_profile(a.profile, ws.repo_root),
             decisions=knowledge.replay_decisions(db, a.id),
-            chunks=knowledge.replay_chunks(db, a.id)) + note
+            chunks=knowledge.replay_chunks(db, a.id),
+            analysis=analysis_brief.brief_context(
+                db, ws.repo_root, ws.branch, a.id, a.task, None,
+                large=analysis_brief.got_context(db, a.id))) + note
     return (a.task + note) if a.task else None
 
 
@@ -2203,9 +2224,10 @@ def _paste_blocked(agent: Agent) -> bool:
 # -- subagent provider -------------------------------------------------------------
 
 
-def subagent_prompt(profile_prompt: str, task: str, ws: Workspace, done_when: str | None) -> str:
+def subagent_prompt(profile_prompt: str, task: str, ws: Workspace, done_when: str | None,
+                    analysis: str = "") -> str:
     """What the supervisor passes to its Agent tool for a subagent worker."""
-    parts = [profile_prompt.strip(), "Task:\n" + task.strip()]
+    parts = [profile_prompt.strip(), "Task:\n" + task.strip(), analysis]
     if done_when:
         parts.append(f"Finish line: {done_when.strip()}")
     body = "\n\n".join(p for p in parts if p)
@@ -2262,12 +2284,14 @@ def condense(head: str, *body: str) -> str:
 
 
 def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
-                  removed: tuple[Agent, Workspace] | None = None) -> str:
+                  removed: tuple[Agent, Workspace] | None = None, docs_checked: bool = False) -> str:
     """Record a worker's or reviewer's result. A piped worker's report goes
     to the pipeline (which reviews and merges the branch); otherwise, and
     with ``forward``, it's sent to the parent as a message. ``removed`` is a
     reviewer and workspace the pipeline has just removed, loaded before that:
-    the result is then only recorded in the history."""
+    the result is then only recorded in the history. A first result waits
+    while an analysis doc the agent read has a newer version it hasn't read
+    (unless the caller already checked: ``docs_checked``)."""
     from brindle import history, pipeline, pricing, usage as usage_mod
 
     if removed and db.get_agent(agent_id) is None:
@@ -2276,6 +2300,10 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
         agent = get(db, agent_id)
         ws = db.get_workspace(agent.workspace_id)
     first = agent.result is None
+    if first and not removed and not docs_checked:
+        stale = stale_analysis_docs(db, agent.id)
+        if stale:
+            return stale
     db.set_result(agent.id, result)
     if ws:
         bus.publish_agent(db, "agent.reported", agent.id, workspace_id=ws.id,
@@ -2420,7 +2448,7 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
         return "Only a reviewer started with request_review can submit a review."
     if is_auditor:   # the completion audit, not a branch review
         text = autopilot.record_audit(db, root_id, approved, summary)
-        report_result(db, caller.id, text, forward=False)
+        report_result(db, caller.id, text, forward=False, docs_checked=True)   # the audit is recorded
         try:
             send_message(db, root_id, text, sender_id=caller.id)
         except (AgentError, tmux.TmuxError):
@@ -2431,6 +2459,9 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
     # whatever the verdict set off is done.
     if caller.result is not None:
         return "Your review was already recorded. You're done."
+    stale = stale_analysis_docs(db, caller.id)
+    if stale:
+        return stale
     # Recorded without the branch's merge lock: a merge holds it while the
     # repo's checks run, for minutes, and a verdict waiting on it left the
     # reviewer's call hanging until its CLI gave up on it, never recorded.
@@ -2657,8 +2688,10 @@ def delegate(
     start: str | None = None,
     files: list[str] | None = None,
     weight: str | None = None,
+    analysis_doc: bool = False,
 ) -> tuple[Agent, Workspace]:
-    """Start a worker. ``weight`` is the weight its task was routed as.
+    """Start a worker. ``weight`` is the weight its task was routed as;
+    ``analysis_doc`` asks for an analysis doc whatever the weight.
     ``plan_first`` (None: the repo's ``plan_first`` config)
     makes it get a plan approved before it may edit; ``files`` picks the
     decisions its brief carries. With ``isolate``, the worker gets a new worktree whose
@@ -2692,7 +2725,7 @@ def delegate(
         return spawn(
             db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
             done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
-            weight=weight,
+            weight=weight, analysis_doc=analysis_doc,
         )
 
     if isolate:
@@ -2717,6 +2750,7 @@ def delegate(
             created = workspaces.create(
                 db, caller_ws.path, branch, base, fetch=False, start=start,
                 apply_prefix=False, reuse_registered=True,
+                session_root=pilot.root_of(db, caller.id) if caller else None,
             )
             if created.setup and not created.setup.ok:
                 raise AgentError(f"workspace setup failed:\n{created.setup.log}")
@@ -3259,6 +3293,17 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         task += f"\n\nIts finish line: {worker_done_when.strip()}"
     task += _review_context(db, ws, worker, worker_files)
 
+    from brindle.pro import analysis_brief
+
+    try:
+        changed = git.paths(["diff", "--name-only", f"{ws.base_branch}...HEAD"], ws.path) if ws.base_branch else []
+    except git.GitError:
+        changed = []
+    covering, cited = analysis_brief.review_context(db, ws.repo_root, (worker.task or "") if worker else "",
+                                                    list(dict.fromkeys([*worker_files, *changed])))
+    if covering:
+        task += f"\n\n{covering}"
+
     if check_summary:
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
                  "Take these results into account; don't run the whole suite yourself.")
@@ -3307,6 +3352,9 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     # replace that verdict in the same role (gates.standing_reviews).
     if reviewer is not None:
         db.update_agent(reviewer.id, review_slot=profile if second else "")
+        if cited:   # the docs its brief cites, pinned at the versions it got
+            knowledge.record_receipt(db, reviewer.id, cited)
+            analysis_brief.record_session_citations(db, reviewer.id, cited)
         bus.publish_agent(db, "review.started", reviewer.id, workspace_id=ws.id,
                           repo_root=ws.repo_root, sha=sha)   # the stage_timings rollup
     return reviewer
@@ -4152,6 +4200,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # The turn is over: a worker's worktree is snapshotted (brindle.rewind)
         # before anything below could start its next turn.
         snapshot_turn(db, agent)
+        analysis_docs_turn(db, agent)
 
         # Claude Code shows any blocked stop as "Stop hook error" in the chat.
         # Where a person watches (an interactive agent), brindle lets the stop
@@ -4187,6 +4236,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         if payload.get("type") == "agent-turn-complete":
             db.set_status(agent_id, "idle")
             snapshot_turn(db, agent)
+            analysis_docs_turn(db, agent)
             if agent.mode == "interactive" and not db.pending_count(agent_id):
                 # What the Stop hook does for Claude Code: an autopilot
                 # supervisor that stops short is told to keep going (capped
@@ -4327,6 +4377,31 @@ def snapshot_turn(db: DB, agent: Agent) -> int | None:
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't snapshot %s's turn", agent.id)
         return None
+
+
+def stale_analysis_docs(db: DB, agent_id: str) -> str | None:
+    """Why ``agent_id``'s result can't be accepted yet: analysis docs it read
+    have newer versions it hasn't read (brindle.pro.analysis_docs). None to
+    go ahead. Never raises."""
+    try:
+        from brindle.pro import analysis_docs
+
+        return analysis_docs.stale_before_result(db, agent_id)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't check %s's analysis docs", agent_id)
+        return None
+
+
+def analysis_docs_turn(db: DB, agent: Agent) -> None:
+    """At the end of a turn: tell the agent about analysis docs it read that
+    have changed since, and settle drafts its session still owes the server
+    (brindle.pro.analysis_docs). Never raises."""
+    try:
+        from brindle.pro import analysis_docs
+
+        analysis_docs.on_turn(db, agent)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't check %s's analysis docs", agent.id)
 
 
 def agent_for_session(db: DB, session_id: object) -> str | None:

@@ -127,9 +127,21 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
 }) {
   const openSession = (root: string, repo: string, agent?: string, sheet?: SheetRef) => navigate({ screen: "session", root, repo, agent, sheet });
   const closeSession = useCloseSession(navigate);
+  const docsFrom = route.screen === "knowledge" ? route.from : undefined;
   switch (route.screen) {
     case "knowledge":
-      return <KnowledgeScreen client={client} pickFolder={pickFolder} />;
+      return (
+        <KnowledgeScreen
+          key={`${route.view ?? ""}|${route.doc ?? ""}|${route.session ?? ""}`}
+          client={client}
+          pickFolder={pickFolder}
+          view={route.view}
+          doc={route.doc}
+          session={route.session}
+          fromRepo={docsFrom?.repo}
+          onBackToSession={docsFrom && (() => navigate({ screen: "session", root: docsFrom.root, repo: docsFrom.repo, agent: docsFrom.root }))}
+        />
+      );
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     case "settings":
@@ -141,7 +153,7 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
     case "new":
       return <NewSession key={route.repo} client={client} onOpen={openSession} initialRepo={route.repo} pickFolder={pickFolder} refresh={refresh} />;
     case "inbox":
-      return <InboxScreen client={client} refresh={refresh} onOpen={openSession} session={route.session ?? null} onShowAll={() => navigate({ screen: "inbox" })} onOpenRule={(rule) => navigate({ screen: "settings", section: "permissions", rule, ask: ++providerAsks })} appUpdates={appUpdates} openUrl={openUrl} />;
+      return <InboxScreen client={client} refresh={refresh} onOpen={openSession} onNavigate={navigate} session={route.session ?? null} onShowAll={() => navigate({ screen: "inbox" })} onOpenRule={(rule) => navigate({ screen: "settings", section: "permissions", rule, ask: ++providerAsks })} appUpdates={appUpdates} openUrl={openUrl} />;
     case "session":
       return (
         <SessionScreen

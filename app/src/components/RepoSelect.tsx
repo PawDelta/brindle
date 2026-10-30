@@ -6,9 +6,10 @@ import { useState } from "react";
 import { useSessions } from "../store/sessions";
 import { field } from "./ui";
 
-export function useRepo(): { repo: string | null; setRepo(repo: string): void; repos: ReturnType<typeof useSessions>["repos"] } {
+/* `initial`: the repo to start on (a route's own), when it is one the app knows; else the first. */
+export function useRepo(initial?: string | null): { repo: string | null; setRepo(repo: string): void; repos: ReturnType<typeof useSessions>["repos"] } {
   const { repos } = useSessions();
-  const [picked, setPicked] = useState<string | null>(null);
+  const [picked, setPicked] = useState<string | null>(initial ?? null);
   const repo = picked && repos?.some((r) => r.repo_root === picked) ? picked : (repos?.[0]?.repo_root ?? null);
   return { repo, setRepo: setPicked, repos };
 }
