@@ -298,6 +298,8 @@ def api(method: str, path: str, body: dict | None = None, *, client=None, store=
     status, resp = auth.authed(client, store, method, path, auth.JSONBody(body) if body is not None else None)
     if status != 200:
         raise RuntimeError(resp.get("error") if isinstance(resp, dict) and resp.get("error") else f"HTTP {status}")
+    if isinstance(resp, dict) and auth.BINARY_KEY in resp:
+        return resp
     return resp if isinstance(resp, dict) else {}
 
 
