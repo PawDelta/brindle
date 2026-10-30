@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import re
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -148,6 +149,11 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             if row is None:
                 continue
             link = {"agent_id": a["id"], "workspace_id": ws["id"], "root_id": autopilot.root_of(db, a["id"])}
+            out += [InboxItemDTO(kind="doc", reason=r["why"], detail=r["title"],
+                                 request_id=r["id"], doc=r["doc_id"], section=r["section"], **link)
+                    for r in db.conn.execute(
+                        "SELECT r.*, d.title FROM doc_requests r JOIN kb_docs d ON d.id = r.doc_id"
+                        " WHERE r.agent_id = ? AND NOT d.tombstoned ORDER BY r.created_at, r.rowid", (row.id,))]
             # A failed merge waits on the person even when autopilot reviews the rest.
             reason = needs_you(a, ws) or next(
                 (r for r in [awaiting_review(a, ws)] if r and r.startswith("merge failed")), None)
@@ -184,6 +190,40 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
     return out + _setup_items() + _org_notices()
+
+
+def request_doc_read(db: DB, agent: Agent, doc: int, why: str, section: str | None = None) -> str:
+    """Keep a person's explicit reading request until they dismiss it."""
+    from brindle import knowledge
+
+    identity_lock.ensure(agent)
+    why = why.strip()
+    if not why or len(why.splitlines()) != 1:
+        raise ServiceError("invalid", "why must be one nonempty line")
+    ws = db.get_workspace(agent.workspace_id)
+    found = db.conn.execute(
+        "SELECT d.id FROM kb_docs d JOIN kb_sources s ON s.id = d.source_id"
+        " WHERE d.id = ? AND NOT d.tombstoned AND s.repo_key = ?",
+        (doc, knowledge.repo_key(ws.repo_root))).fetchone()
+    if found is None:
+        raise ServiceError("not_found", f"no document {doc} in this session's repo", 404)
+    request = uuid.uuid4().hex
+    with db.tx() as c:
+        c.execute("INSERT INTO doc_requests (id, agent_id, doc_id, section, why, created_at)"
+                  " VALUES (?, ?, ?, ?, ?, ?)", (request, agent.id, doc, section, why, time.time()))
+    bus.publish_agent(db, "doc.requested", agent.id, request_id=request)
+    return request
+
+
+def dismiss_doc_read(db: DB, request: str) -> dict:
+    row = db.conn.execute("SELECT agent_id FROM doc_requests WHERE id = ?", (request,)).fetchone()
+    if row is None:
+        raise ServiceError("conflict", "document request is no longer waiting", 409)
+    identity_lock.ensure(db.get_agent(row["agent_id"]))
+    with db.tx() as c:
+        c.execute("DELETE FROM doc_requests WHERE id = ?", (request,))
+    bus.publish_agent(db, "doc.dismissed", row["agent_id"], request_id=request)
+    return {"dismissed": request}
 
 
 # -- permission requests ---------------------------------------------------------------------

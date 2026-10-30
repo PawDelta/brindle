@@ -20,16 +20,17 @@ function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client()) {
   const store = createAppStore();
   const sync = startSync({ client, store, connect: daemon.connect });
   const onOpen = vi.fn();
+  const onNavigate = vi.fn();
   render(
     <DaemonContext.Provider value={client}>
       <StoreContext.Provider value={store}>
         <SessionsProvider client={client}>
-          <InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} />
+          <InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} onNavigate={onNavigate} />
         </SessionsProvider>
       </StoreContext.Provider>
     </DaemonContext.Provider>,
   );
-  return { store, sync, onOpen };
+  return { store, sync, onOpen, onNavigate };
 }
 
 const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "POST");
@@ -37,6 +38,21 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
+  it("opens a requested document at its section, replies in the session and dismisses the request", async () => {
+    const doc: InboxItemDTO = { kind: "doc", reason: "Check the storage design.", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", request_id: "dr1", doc: 42, section: "Storage" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [doc] });
+    const { sync, onOpen, onNavigate } = mount(daemon);
+    await screen.findByRole("region", { name: "Ship ls --json" });
+    fireEvent.click(within(card("doc")).getByRole("button", { name: "Open" }));
+    expect(onNavigate).toHaveBeenLastCalledWith({ screen: "knowledge", view: "docs", doc: 42, section: "Storage" });
+    fireEvent.click(within(card("doc")).getByRole("button", { name: "Reply" }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "w1");
+    fireEvent.click(within(card("doc")).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/dr1/dismiss", query: {}, body: {} }]));
+    await waitFor(() => expect(card("doc")).toBeNull());
+    sync.stop();
+  });
+
   it("groups the queue by session as banner cards, each going to its session and agent; an org notice is a card to read", async () => {
     const daemon = new FakeDaemon({
       repos: [{ repo_root: REPO, name: "proj" }],

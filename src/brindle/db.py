@@ -565,6 +565,15 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
     text TEXT NOT NULL,
     quarantined TEXT
 );
+-- Only an explicit session request creates a document inbox item.
+CREATE TABLE IF NOT EXISTS doc_requests (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    doc_id INTEGER NOT NULL REFERENCES kb_docs(id) ON DELETE CASCADE,
+    section TEXT,
+    why TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS kb_chunks_doc ON kb_chunks(doc_id);
 CREATE TABLE IF NOT EXISTS kb_links (
     chunk_id TEXT NOT NULL REFERENCES kb_chunks(id) ON DELETE CASCADE,

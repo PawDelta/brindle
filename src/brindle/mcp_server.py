@@ -93,6 +93,26 @@ def _root_id(db: DB, caller: Agent | None) -> str | None:
     return autopilot.root_of(db, caller.id) if caller else None
 
 
+@mcp.tool()
+def request_doc_read(doc: int, why: str, section: str | None = None) -> str:
+    """Ask the person to read a knowledge document (id), optionally at a section.
+    Give a one-line why. Creates a Doc to read item in their Inbox; editing
+    or indexing a document alone never asks them to read it.
+    """
+    from brindle.service import inbox
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    if caller is None:
+        raise ToolError("A session is required to request a document read.")
+    try:
+        request = inbox.request_doc_read(db, caller, doc, why, section)
+    except ServiceError as e:
+        raise ToolError(str(e)) from e
+    return f"Document read requested: {request}."
+
+
 def _remind_goal(db: DB, caller: Agent | None, text: str) -> str:
     """A delegation reply, plus the set_goal reminder when the caller's
     autopilot session has no goal yet: the work starts either way."""
