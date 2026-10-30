@@ -352,6 +352,83 @@ export interface KbHit {
   updated: string | null;
 }
 
+/* brindle Pro's analysis-doc library, proxied by the daemon (routes_read.analysis_docs):
+   the server's own shapes, passed through, so every derived field may be missing. A scope
+   is `user` (the person's own), `team:<id>` or `org:<id>`. */
+export interface DocScope {
+  kind: string;
+  id?: string;
+  name?: string;
+}
+
+export interface AnalysisDoc {
+  id: string;
+  title?: string;
+  kind?: string | null;
+  scope?: DocScope;
+  summary?: string | null;
+  topics?: string[];
+  version?: number;
+  created_at?: number | string;
+  updated_at?: number | string;
+  used_in_briefs?: number;
+  findings?: string[];
+  open_questions?: string[];
+}
+
+export interface DocLink {
+  id?: string;
+  doc_id?: string;
+  title?: string;
+  relation?: string;
+}
+
+/* GET /analysis-docs/{id}: the files as written and what the server read from them. */
+export interface AnalysisDocDetail extends AnalysisDoc {
+  files?: { name: string; md: string }[];
+  body_md?: string;
+  appendices?: { name: string; md: string }[];
+  related?: DocLink[];
+  supersedes?: DocLink[];
+  mentions?: (string | { kind?: string; name?: string })[];
+  shared_with?: DocScope[];
+}
+
+export interface DocTopic {
+  name: string;
+  count?: number;
+}
+
+/* GET /analysis-docs/results (analysis_brief.results): review rounds of finished tasks
+   whose brief got a doc block, against similar ones (same repo, kind and size) without;
+   the averages are null until each side has `minimum` tasks. */
+export interface DocResults {
+  days: number;
+  minimum: number;
+  enough: boolean;
+  briefed: number;
+  large: number;
+  compared: number;
+  similar: number;
+  with_brief: number | null;
+  without_brief: number | null;
+}
+
+/* POST /analysis-docs/{id}/export: the path written in a picked folder, or the file itself. */
+export interface DocExport {
+  filename: string;
+  path?: string;
+  content_b64?: string;
+}
+
+export interface DocsQuery {
+  repo?: string;
+  scope?: string;
+  topic?: string;
+  kind?: string;
+  session?: string;
+}
+
 /* GET /profiles/{name} (routes_read.get_profile): a profile as `brindle
    profile show` resolves it, with `brindle profile lint`'s findings. */
 export interface RulePackInfo {
@@ -931,6 +1008,42 @@ export class DaemonClient {
   /* Indexes a source again (POST /kb/sources/{id}/sync?repo=): a job, done when the index is current. */
   syncKbSource(repo: string, id: string) {
     return this.post<Job>(`/kb/sources/${encodeURIComponent(id)}/sync?repo=${encodeURIComponent(repo)}`, {});
+  }
+
+  /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.
+     A plan without it throws DaemonError "not_entitled". */
+  docs(query: DocsQuery = {}) {
+    return this.get<{ docs?: AnalysisDoc[] }>("/analysis-docs", { ...query });
+  }
+
+  docTopics(query: { repo?: string; scope?: string } = {}) {
+    return this.get<{ topics?: DocTopic[] }>("/analysis-docs/topics", { ...query });
+  }
+
+  doc(id: string, repo?: string) {
+    return this.get<AnalysisDocDetail>(`/analysis-docs/${encodeURIComponent(id)}`, { repo });
+  }
+
+  /* Computed on this machine from its own records; needs no plan. */
+  docResults(repo?: string) {
+    return this.get<DocResults>("/analysis-docs/results", { repo });
+  }
+
+  shareDoc(id: string, scope: string) {
+    return this.post<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
+  }
+
+  unshareDoc(id: string, scope: string) {
+    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
+  }
+
+  deleteDoc(id: string) {
+    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, {});
+  }
+
+  /* With `dir` the daemon writes the file there; without, it comes back as base64. */
+  exportDoc(id: string, format: "md" | "docx" | "zip", dir?: string) {
+    return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, dir ? { format, dir } : { format });
   }
 
   profile(name: string, repo?: string) {

@@ -25,12 +25,17 @@ export interface SessionRef {
    cards or in the agent's own terminal. */
 export type SheetRef = { kind: "review" };
 
+/* Knowledge's tabs. */
+export type KnowledgeView = "map" | "docs" | "imported" | "decisions";
+
 export type Route =
   /* `repo`: the project to start in (one just picked, as the first launch ends). */
   | { screen: "new"; repo?: string }
   /* `session`: only what waits in that session (its root), from its bar's count. */
   | { screen: "inbox"; session?: string }
-  | { screen: "knowledge"; view?: "docs"; doc?: number | string; section?: string }
+  /* `doc`: a library doc's id (opened in the Docs reader) or an imported doc's number;
+     `session`: Docs only of that session (its root), from the session's goal panel. */
+  | { screen: "knowledge"; view?: KnowledgeView; doc?: number | string; section?: string; session?: string }
   | { screen: "agents" }
   /* `section`: scrolled to on opening (the sidebar's usage reading opens Account › Usage,
      a provider's problem Settings › Providers); `ask` counts the requests, so asking

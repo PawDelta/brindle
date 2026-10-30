@@ -123,7 +123,7 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
   const closeSession = useCloseSession(navigate);
   switch (route.screen) {
     case "knowledge":
-      return <KnowledgeScreen client={client} pickFolder={pickFolder} />;
+      return <KnowledgeScreen key={`${route.view ?? ""}|${route.doc ?? ""}|${route.session ?? ""}`} client={client} pickFolder={pickFolder} view={route.view} doc={route.doc} session={route.session} />;
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     case "settings":

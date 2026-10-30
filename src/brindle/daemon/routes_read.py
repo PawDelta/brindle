@@ -33,7 +33,7 @@ from brindle import (
     workspaces,
 )
 from brindle.daemon import session_review
-from brindle.daemon.routes_actions import read_edit_target
+from brindle.daemon.routes_actions import docs_api, read_edit_target
 from brindle.db import DB
 from brindle.service import inbox
 from brindle.service.dto import (
@@ -492,6 +492,41 @@ def get_cost(db: DB, request: Request) -> Any:
             "by_model": {m: bucket(b) for m, b in s.by_model.items()}}
 
 
+@_json
+def analysis_docs(db: DB, request: Request) -> Any:
+    """The library's docs (``{"docs": [...]}``, as the server lists them),
+    filtered by ``scope`` (user, team:<id> or org:<id>; none: all), ``topic``,
+    ``kind`` and ``session``."""
+    q = request.query_params
+    return docs_api("GET", "/analysis-docs", repo=_repo(request), scope=q.get("scope"),
+                    query={k: q[k] for k in ("topic", "kind", "session") if q.get(k)})
+
+
+@_json
+def analysis_doc_topics(db: DB, request: Request) -> Any:
+    return docs_api("GET", "/analysis-docs/topics", repo=_repo(request),
+                    scope=request.query_params.get("scope"))
+
+
+@_json
+def analysis_doc_results(db: DB, request: Request) -> Any:
+    """How tasks with a doc brief went against similar ones without, from
+    this machine's records (analysis_brief.results); nothing is sent."""
+    from brindle.pro import analysis_brief
+
+    days = int(request.query_params.get("days") or analysis_brief.RESULTS_DAYS)
+    return analysis_brief.results(db, _repo(request), days)
+
+
+@_json
+def analysis_doc(db: DB, request: Request) -> Any:
+    """One doc: its files, what the server read from it and how often briefs used it."""
+    from urllib.parse import quote
+
+    return docs_api("GET", f"/analysis-docs/{quote(request.path_params['id'], safe='')}",
+                    repo=_repo(request))
+
+
 USAGE_NEAR_PERCENT = 80.0
 USAGE_NEAR_RESET_SECONDS = 3600
 
@@ -552,6 +587,11 @@ ROUTES = [
     Route("/v1/decisions", decisions),
     Route("/v1/kb/sources", kb_sources),
     Route("/v1/kb/search", kb_search),
+    Route("/v1/analysis-docs", analysis_docs),
+    # Before /analysis-docs/{id}.
+    Route("/v1/analysis-docs/topics", analysis_doc_topics),
+    Route("/v1/analysis-docs/results", analysis_doc_results),
+    Route("/v1/analysis-docs/{id}", analysis_doc),
     Route("/v1/profiles", list_profiles),
     Route("/v1/profiles/{name}", get_profile),
     Route("/v1/rules", list_rules),

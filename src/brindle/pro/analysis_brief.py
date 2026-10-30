@@ -12,15 +12,18 @@ data. Without it (or in air-gap mode) nothing is sent, and the repo's docs
 folder is added as a Knowledge folder source so the local search finds the
 docs. A task's context receipt records what its brief got: the rule
 (RULE_ITEM, so a fresh restart gives it again), the server's brief and the
-docs it cites.
+docs it cites. :func:`results` reads those receipts back to compare how
+tasks with the server's brief went against similar tasks without one.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import secrets
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -116,6 +119,58 @@ def server_brief(db, task_id: str, task_text: str, paths: list[str] | None,
     except Exception as e:  # noqa: BLE001 - the brief is extra context, never a reason to fail
         log.info("analysis brief skipped (%s)", type(e).__name__)
         return ""
+
+
+RESULTS_DAYS = 30
+MIN_RESULTS = 5      # finished tasks on each side of the comparison before it is shown
+
+
+def task_kind(files: str | None) -> str:
+    """What a task works on, from the paths it declared: ``docs``, ``tests``
+    or ``code``; ``unknown`` when it declared none."""
+    try:
+        paths = [p for p in json.loads(files or "[]") if isinstance(p, str)]
+    except ValueError:
+        paths = []
+    if not paths:
+        return "unknown"
+    if all(Path(p).suffix.lower() in (".md", ".mdx", ".rst", ".txt") for p in paths):
+        return "docs"
+    if all(p.startswith("tests/") or "test" in Path(p).name.lower() for p in paths):
+        return "tests"
+    return "code"
+
+
+def results(db, repo_root: str | None = None, days: int = RESULTS_DAYS, now: float | None = None) -> dict:
+    """Review rounds of the finished tasks whose brief got the server's block,
+    against similar finished tasks that didn't: the same repo, kind
+    (:func:`task_kind`) and weight. Each briefed task is compared with the
+    average of its own group, so a mix of sizes can't skew it. Below
+    MIN_RESULTS tasks on either side it says there isn't enough data yet."""
+    from brindle.config import normalize_weight
+
+    since = (time.time() if now is None else now) - days * 86400
+    where, args = ("AND d.repo_root = ?", (repo_root,)) if repo_root else ("", ())
+    rows = db.conn.execute(
+        "SELECT d.repo_root, d.weight, d.review_rounds, t.files,"
+        " EXISTS(SELECT 1 FROM context_receipts r WHERE r.task_id = d.agent_id AND r.item_kind = ?) AS briefed,"
+        " EXISTS(SELECT 1 FROM context_receipts r WHERE r.task_id = d.agent_id AND r.item_kind = ?) AS large"
+        " FROM routing_decisions d LEFT JOIN tasks t ON t.id = d.task_id"
+        f" WHERE d.outcome IS NOT NULL AND d.agent_id IS NOT NULL AND d.ts >= ? {where}",
+        (BRIEF_ITEM, RULE_ITEM, since, *args)).fetchall()
+    groups: dict[tuple, tuple[list[int], list[int]]] = {}
+    for r in rows:
+        key = (r["repo_root"], task_kind(r["files"]), normalize_weight(r["weight"]))
+        groups.setdefault(key, ([], []))[0 if r["briefed"] else 1].append(r["review_rounds"])
+    matched = [(b, o) for b, o in groups.values() if b and o]
+    briefed = sum(len(b) for b, _ in matched)
+    similar = sum(len(o) for _, o in matched)
+    enough = briefed >= MIN_RESULTS and similar >= MIN_RESULTS
+    with_brief = sum(sum(b) for b, _ in matched) / briefed if enough else None
+    without = sum(len(b) * sum(o) / len(o) for b, o in matched) / briefed if enough else None
+    return {"days": days, "minimum": MIN_RESULTS, "enough": enough,
+            "briefed": sum(1 for r in rows if r["briefed"]), "large": sum(1 for r in rows if r["large"]),
+            "compared": briefed, "similar": similar, "with_brief": with_brief, "without_brief": without}
 
 
 def got_context(db, task_id: str) -> bool:

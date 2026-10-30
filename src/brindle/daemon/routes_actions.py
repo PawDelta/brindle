@@ -1322,6 +1322,103 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
     return {"messages": _said(account)}
 
 
+# -- analysis docs: brindle Pro's library, proxied (the reads are in routes_read) ----
+# Answers pass through as the server gave them, held in memory only; a file
+# reaches disk only on an export to a folder the person picked.
+
+DOC_SCOPES = {"user": "user", "team": "group", "group": "group", "enterprise": "org", "org": "org"}
+EXPORT_FORMATS = ("md", "docx", "zip")
+
+
+def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | None = None,
+             query: dict[str, str] | None = None, scope: str | None = None) -> dict:
+    """One call to the library: ``scope`` is ``user`` or ``team:<id>`` /
+    ``org:<id>`` (none: every scope the person reads). Not entitled (or in
+    the repo's air-gap mode) is 402 before anything is sent; the server's
+    refusal is 502 with its reason; signed out is 401."""
+    from urllib.parse import urlencode
+
+    from brindle import config
+    from brindle.pro import analysis_docs
+
+    if repo:
+        config.load_repo_config(repo)        # its air-gap setting applies first
+    try:
+        ent = analysis_docs.require_entitlement()
+    except RuntimeError as e:
+        raise ServiceError("not_entitled", str(e), 402) from e
+    query = dict(query or {})
+    if scope:
+        query.update(zip(("scope_kind", "scope_id"), doc_scope(scope, ent.sub)))
+    try:
+        return analysis_docs.api(method, path + (f"?{urlencode(query)}" if query else ""), body)
+    except RuntimeError as e:
+        raise ServiceError("upstream", str(e), 502) from e
+
+
+def doc_scope(spec: str, sub: str) -> tuple[str, str]:
+    """``user`` (the person's own), ``team:<id>`` or ``org:<id>`` as the server's (kind, id)."""
+    kind, _, scope_id = spec.partition(":")
+    kind = DOC_SCOPES.get(kind, "")
+    scope_id = sub if kind == "user" else scope_id
+    if not kind or not scope_id:
+        raise ServiceError("invalid", "scope is user, team:<id> or org:<id>")
+    return kind, scope_id
+
+
+def _doc_path(params: dict, *rest: str) -> str:
+    from urllib.parse import quote
+
+    return "/".join(["/analysis-docs", *(quote(p, safe="") for p in (params["id"], *rest))])
+
+
+def share_doc(db: DB, params: dict, body: Body) -> Any:
+    """Share a doc with ``scope`` (team:<id> or org:<id>; never ``user``)."""
+    kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
+    return docs_api("POST", _doc_path(params, "share"), {"scope": {"kind": kind, "id": scope_id}},
+                    repo=params.get("repo"))
+
+
+def unshare_doc(db: DB, params: dict, body: Body) -> Any:
+    """Stop sharing a doc with ``scope`` (team:<id> or org:<id>)."""
+    kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
+    return docs_api("DELETE", _doc_path(params, "share", kind, scope_id), repo=params.get("repo"))
+
+
+def delete_doc(db: DB, params: dict, body: Body) -> Any:
+    return docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
+
+
+def export_doc(db: DB, params: dict, body: Body) -> Any:
+    """The doc as ``format`` (md, docx or zip; the server checks scope and the
+    org's export policy). With ``dir`` (a folder the person picked) the file
+    is written there and its path answered; without, its ``filename`` and
+    ``content_b64`` go back to the app and nothing is written."""
+    import base64
+    import binascii
+
+    fmt = _get(body, "format", default="md")
+    if fmt not in EXPORT_FORMATS:
+        raise ServiceError("invalid", "format is md, docx or zip")
+    got = docs_api("GET", _doc_path(params, "export"), repo=params.get("repo"),
+                   query={"format": fmt, "destination": "download"})
+    name = Path(str(got.get("filename") or f"{params['id']}.{fmt}")).name
+    try:
+        data = base64.b64decode(got.get("content_b64") or "", validate=True)
+    except (binascii.Error, ValueError):
+        data = b""
+    if not data:
+        raise ServiceError("upstream", "the export came back empty", 502)
+    folder = _get(body, "dir")
+    if folder is None:
+        return {"filename": name, "content_b64": base64.b64encode(data).decode()}
+    folder = Path(folder).expanduser()
+    if not folder.is_dir():
+        raise ServiceError("invalid", f"not a folder: {folder}")
+    (folder / name).write_bytes(data)
+    return {"filename": name, "path": str(folder / name)}
+
+
 # -- terminals: the real command in a terminal the app shows -------------------------
 # Each answers an ActionTerminalDTO: the pane and tmux server the app's own tmux
 # client attaches to, and the id for POST /terminals/{id}/input. While the same
@@ -1704,6 +1801,11 @@ ROUTES = [
     _post("/account/login", account_login),
     _post("/account/logout", account_logout),
     _post("/account/switch-org", account_switch_org),
+    # GET on these paths reads (routes_read).
+    _post("/analysis-docs/{id}/share", share_doc),
+    Route("/v1/analysis-docs/{id}/share", _endpoint(unshare_doc), methods=["DELETE"]),
+    _post("/analysis-docs/{id}/export", export_doc),
+    Route("/v1/analysis-docs/{id}", _endpoint(delete_doc), methods=["DELETE"]),
     # Like every route, refused to agent callers by the guard.
     _post("/providers/{provider}/login", provider_login),
     _post("/providers/{provider}/trust", provider_trust),
