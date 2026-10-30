@@ -155,9 +155,16 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
             c.execute("UPDATE kb_import_library SET state = 'adding', op = 'add', op_token = 'dead', op_until = 1"
                       " WHERE source_id = ?", (source,))
 
+    def tracked():
+        return [r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM kb_import_uploads")]
+
     crashed()
+    kb.sync(db, source, None, "/repo")      # an index must not finish a removal of an adding folder
+    assert imports.state(db, source) == "adding" and tracked() == ["d5"]
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)
     assert imports.state(db, source) == "in_library"
     crashed()
+    kb.sync(db, source, None, "/repo")
+    assert imports.state(db, source) == "adding" and tracked() == ["d5"] and "d5" not in remote.deleted
     assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
     assert imports.state(db, source) is None and remote.deleted[-1] == "d5"

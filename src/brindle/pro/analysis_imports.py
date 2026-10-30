@@ -154,9 +154,7 @@ def _claim(db: DB, source_id: str, op: str, allowed: tuple[str | None, ...], *, 
         row = c.execute("SELECT state, op, op_until FROM kb_import_library WHERE source_id = ?",
                         (source_id,)).fetchone()
         current = row["state"] if row else None
-        # A crashed add leaves `adding` behind; once its lease ran out a new add or a removal takes it over.
-        takeover = current == ADDING and op in ("add", "remove")
-        if (current not in allowed and not takeover) or (row and row["op"] and (row["op_until"] or 0) >= now):
+        if current not in allowed or (row and row["op"] and (row["op_until"] or 0) >= now):
             return None
         if row is None:
             c.execute("INSERT INTO kb_import_library (source_id, added_at, state, op, op_token, op_until)"
@@ -395,7 +393,8 @@ def add_to_library(db: DB, source_id: str, repo_root: str, token: str | None = N
     sendable, _ = _plan(src)
     if token != _token(sendable):
         raise ManifestChanged(dry_run(db, source_id))
-    claim = _claim(db, source_id, "add", (None, IN_LIBRARY), new_state=ADDING)
+    # ADDING is listed for the add that crashed: its lease must have lapsed, as for any claim.
+    claim = _claim(db, source_id, "add", (None, IN_LIBRARY, ADDING), new_state=ADDING)
     if claim is None:
         raise Busy(source_id)
     failed: list[str] | str = []
@@ -431,7 +430,8 @@ def remove_from_library(db: DB, source_id: str, *, client=None, store=None) -> d
 
     claim = None
     if state(db, source_id) is not None:
-        claim = _claim(db, source_id, "remove", (IN_LIBRARY, REMOVING), new_state=REMOVING, local=queue_all)
+        claim = _claim(db, source_id, "remove", (IN_LIBRARY, REMOVING, ADDING), new_state=REMOVING,
+                       local=queue_all)
         if claim is None:
             raise Busy(source_id)
     try:
