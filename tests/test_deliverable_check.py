@@ -50,7 +50,8 @@ def test_gate_checks_committed_main_only_when_active(monkeypatch):
     monkeypatch.setattr(workspaces, "require_base", lambda ws: "main")
     files = [MAIN, ".brindle/deliverables/deleted/main.md", "unrelated.md"]
     monkeypatch.setattr(rule_checks, "branch_files", lambda path, base: files)
-    committed = {MAIN: VALID.replace("20%", "substantially"), APPENDIX: "data"}
+    malformed_link = "\n[Other](http://[broken)\n"
+    committed = {MAIN: VALID.replace("20%", "substantially") + malformed_link, APPENDIX: "data"}
 
     def read_tree(args, cwd):
         if args[0] == "ls-tree":
@@ -62,11 +63,25 @@ def test_gate_checks_committed_main_only_when_active(monkeypatch):
     result = rule_checks.run(None, ws)
     assert not result.ok and [v.rule for v in result.violations] == ["metric"]
     assert rule_checks.gate_problem(result, ws.branch)
-    committed[MAIN] = VALID
+    committed[MAIN] = VALID + malformed_link
     assert rule_checks.run(None, ws).ok
+    committed[MAIN] = committed[MAIN].replace("[Data](appendices/data.md)", "")
+    assert [v.rule for v in rule_checks.run(None, ws).violations] == ["appendix_links"]
     committed[MAIN] = "bad"
     packs.clear()
     assert rule_checks.run(None, ws) is None
+
+
+def test_wrapped_tags_belong_to_individual_list_items():
+    text = VALID.replace("1. [verified] Throughput rose 20%.\n  - [not checked] Latency.",
+                         "- Throughput rose 20%.\n  [verified]\n"
+                         "- Untagged sibling.\n  - Nested item.\n    [inference]")
+    failures = checker.check_main("analysis", MAIN, text, [APPENDIX])
+    assert len(failures) == 1 and failures[0].rule == "tags"
+    text = text.replace("- Untagged sibling.", "- Tagged sibling.\n  [not checked]")
+    assert checker.check_main("analysis", MAIN, text, [APPENDIX]) == []
+    text = text.replace("\n    [inference]", "")
+    assert [v.rule for v in checker.check_main("analysis", MAIN, text, [APPENDIX])] == ["tags"]
 
 
 @pytest.mark.variant("fenced examples and comments cannot stand in for real deliverable sections")

@@ -35,6 +35,37 @@ def prose(text: str) -> str:
     return "\n".join(lines)
 
 
+def list_items(lines: list[str]) -> list[str]:
+    """Collect wrapped item text without sharing evidence with child items."""
+    items: list[list[str]] = []
+    stack: list[tuple[int, list[str]]] = []
+    blank = True
+    for raw in lines:
+        line = raw.expandtabs(4)
+        indent = len(line) - len(line.lstrip())
+        bullet = BULLET.match(line)
+        if bullet:
+            while stack and indent <= stack[-1][0]:
+                stack.pop()
+            item = [bullet[1]]
+            items.append(item)
+            stack.append((indent, item))
+        elif not line.strip():
+            blank = True
+            continue
+        elif re.match(r"^ {0,3}#{1,6}\s", line):
+            stack.clear()
+        else:
+            # An outdent leaves a nested item; a blank line also ends an
+            # unindented paragraph. Other lines can be lazy continuations.
+            while stack and indent <= stack[-1][0] and (blank or len(stack) > 1):
+                stack.pop()
+            if stack:
+                stack[-1][1].append(line.strip())
+        blank = False
+    return ["\n".join(item) for item in items]
+
+
 def check_main(pack: str, path: str, text: str, appendices: list[str]) -> list[Violation]:
     found = []
 
@@ -68,10 +99,9 @@ def check_main(pack: str, path: str, text: str, appendices: list[str]) -> list[V
     for name in ("Results", "Conclusion"):
         if name not in sections:
             fail(name.lower(), f"## {name} section is required")
-        for line in sections.get(name, []):
-            bullet = BULLET.match(line)
-            if bullet and not TAG.search(bullet[1]):
-                fail("tags", f"{name} bullet needs an evidence tag: {line.strip()}")
+        for item in list_items(sections.get(name, [])):
+            if not TAG.search(item):
+                fail("tags", f"{name} bullet needs an evidence tag: {item}")
     metrics = "\n".join(BULLET.sub(r"\1", line) for line in sections.get("Results", []))
     if "Results" in sections and not re.search(r"\d", metrics):
         fail("metric", "Results needs a quantified metric")
@@ -90,7 +120,10 @@ def check_main(pack: str, path: str, text: str, appendices: list[str]) -> list[V
             targets.append(target)
     linked = set()
     for target in targets:
-        url = urlsplit(target)
+        try:
+            url = urlsplit(target)
+        except ValueError:  # malformed destinations cannot link an appendix
+            continue
         if not url.scheme and not url.netloc and url.path:
             linked.add(posixpath.normpath(posixpath.join(posixpath.dirname(path), unquote(url.path))))
     for appendix in appendices:
