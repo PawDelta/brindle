@@ -2005,6 +2005,108 @@ def learning_seed() -> None:
         raise typer.Exit(1)
 
 
+docs_app = typer.Typer(no_args_is_help=True,
+                       help="Your personal library of analysis deliverables (brindle Pro).")
+app.add_typer(docs_app, name="docs")
+
+
+def _docs_call(method: str, path: str, body: dict | None = None) -> dict:
+    from brindle.pro import analysis_docs, auth
+
+    try:
+        return analysis_docs.api(method, path, body)
+    except (auth.AuthError, RuntimeError) as e:
+        _fail(f"analysis docs: {e}")
+        raise
+
+
+def _docs_scope(spec: str) -> tuple[str, str]:
+    kind, _, scope_id = spec.partition(":")
+    kind = {"team": "group", "group": "group", "enterprise": "org", "org": "org"}.get(kind)
+    if not kind or not scope_id:
+        _fail("scope is team:<group id> or org:<org id>")
+    return kind, scope_id
+
+
+@docs_app.command("list")
+def docs_list() -> None:
+    """List the documents in your library."""
+    from brindle.pro import license
+
+    resp = _docs_call("GET", f"/analysis-docs?scope_kind=user&scope_id={license.current(refresh=False).sub}")
+    for d in resp.get("docs") or []:
+        typer.echo(f"{d.get('id')}  v{d.get('version', 1)}  {d.get('title', '')}")
+
+
+@docs_app.command("show")
+def docs_show(doc_id: str = typer.Argument(..., help="Document id.")) -> None:
+    """Print a document."""
+    d = _docs_call("GET", f"/analysis-docs/{doc_id}")
+    typer.echo(d.get("body_md", ""))
+    for a in d.get("appendices") or []:
+        typer.echo(f"\n--- {a.get('name')} ---\n{a.get('md', '')}")
+
+
+@docs_app.command("delete")
+def docs_delete(doc_id: str = typer.Argument(..., help="Document id.")) -> None:
+    """Delete a document from your library."""
+    _docs_call("DELETE", f"/analysis-docs/{doc_id}")
+    typer.echo(f"deleted {doc_id}")
+
+
+@docs_app.command("share")
+def docs_share(doc_id: str = typer.Argument(..., help="Document id."),
+               scope: str = typer.Argument(..., help="team:<group id> or org:<org id>.")) -> None:
+    """Share a document with a team or your org."""
+    kind, scope_id = _docs_scope(scope)
+    _docs_call("POST", f"/analysis-docs/{doc_id}/share", {"scope": {"kind": kind, "id": scope_id}})
+    typer.echo(f"shared {doc_id} with {scope}")
+
+
+@docs_app.command("unshare")
+def docs_unshare(doc_id: str = typer.Argument(..., help="Document id."),
+                 scope: str = typer.Argument(..., help="team:<group id> or org:<org id>.")) -> None:
+    """Stop sharing a document with a team or your org."""
+    kind, scope_id = _docs_scope(scope)
+    _docs_call("DELETE", f"/analysis-docs/{doc_id}/share/{kind}/{scope_id}")
+    typer.echo(f"unshared {doc_id} from {scope}")
+
+
+@docs_app.command("export")
+def docs_export(doc_id: str = typer.Argument(..., help="Document id."),
+                out: str = typer.Option(".", "--out", "-o", help="Directory to write main.md and appendices/ into.")) -> None:
+    """Write a document (main.md and its appendices) to a directory."""
+    d = _docs_call("GET", f"/analysis-docs/{doc_id}")
+    root = Path(out)
+    (root / "appendices").mkdir(parents=True, exist_ok=True)
+    (root / "main.md").write_text(d.get("body_md", ""), encoding="utf-8")
+    for a in d.get("appendices") or []:
+        (root / "appendices" / Path(str(a.get("name"))).name).write_text(a.get("md", ""), encoding="utf-8")
+    typer.echo(f"exported {doc_id} to {root}")
+
+
+def _docs_switch(on: bool) -> None:
+    from brindle.pro import analysis_docs, auth
+
+    try:
+        analysis_docs.set_switch(on)
+    except (auth.AuthError, RuntimeError) as e:
+        _fail(f"analysis docs: {e}")
+    typer.echo("storing analysis deliverables is " + ("on" if on else "off"))
+
+
+@docs_app.command("on")
+def docs_on() -> None:
+    """Store your analysis deliverables in your library after they merge (the default for Pro)."""
+    _docs_switch(True)
+
+
+@docs_app.command("off")
+def docs_off() -> None:
+    """Stop storing your analysis deliverables."""
+    _docs_switch(False)
+
+
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True,
                                "help_option_names": []})   # --help is the plugin's: it lists every subcommand
 def account(ctx: typer.Context) -> None:
