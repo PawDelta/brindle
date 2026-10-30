@@ -2051,16 +2051,16 @@ def docs_list() -> None:
         _fail(f"analysis docs: {e}")
     resp = _docs_call("GET", f"/analysis-docs?scope_kind=user&scope_id={sub}")
     for d in resp.get("docs") or []:
-        typer.echo(f"{d.get('id')}  v{d.get('version', 1)}  {d.get('title', '')}")
+        typer.echo(f"{d.get('doc_id')}  v{d.get('version', 1)}  {d.get('title', '')}")
 
 
 @docs_app.command("show")
 def docs_show(doc_id: str = typer.Argument(..., help="Document id.")) -> None:
-    """Print a document."""
+    """Print a document: its main file, then each other file under its name."""
     d = _docs_call("GET", f"/analysis-docs/{doc_id}")
-    typer.echo(d.get("body_md", ""))
-    for a in d.get("appendices") or []:
-        typer.echo(f"\n--- {a.get('name')} ---\n{a.get('md', '')}")
+    files = [f for f in d.get("files") or [] if isinstance(f, dict)]
+    for i, f in enumerate(files):
+        typer.echo(f.get("md", "") if i == 0 else f"\n--- {f.get('name')} ---\n{f.get('md', '')}")
 
 
 @docs_app.command("delete")

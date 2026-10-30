@@ -564,7 +564,8 @@ def test_doc_map_proxies_only_a_neighbourhood_without_caching(brindle_home, monk
     for version in ("1", "2"):
         code, body = _get("/v1/analysis-docs/map", AUTH, urlencode(query | {"local_decisions": "private"}))
         assert code == 200 and body["nodes"][0]["id"] == version
-    assert calls == [("GET", "/analysis-docs/map", {k: [v] for k, v in query.items()}, None)] * 2
+    upstream = query | {"paths": "src/cache,src/db"}       # the server splits its list on commas
+    assert calls == [("GET", "/analysis-docs/map", {k: [v] for k, v in upstream.items()}, None)] * 2
     monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: (_ for _ in ()).throw(RuntimeError("no plan")))
     assert _get("/v1/analysis-docs/map", AUTH, urlencode(query))[0] == 402
     assert len(calls) == 2
@@ -615,7 +616,8 @@ def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, m
         assert path == "/analysis-docs/brief"
         return {"block": "A brief", "cited": [{"doc_id": "worker-cited", "version": 4}]}
 
-    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(features=()))
+    monkeypatch.setattr(analysis_docs, "require_entitlement",
+                        lambda store=None: SimpleNamespace(sub="u1", features=()))
     monkeypatch.setattr(analysis_docs, "api", docs_api)
     analysis_docs.read_doc(db, "r1", "manual-only")
     knowledge.record_receipt(db, "r1", [(analysis_docs.UPDATED_ITEM, "overlap-doc", "published")])

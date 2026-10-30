@@ -443,8 +443,8 @@ def save_draft(db, agent, branch: str, doc_id: str, files: list[dict], *, clashe
                            "to reconcile (clashed_branch)")
     target = clashed_branch or (clashed[0] if clashed else None)
     body = {"session": session, "branch": target or branch, "base_version": base, "files": files}
-    status, resp = _call("PUT", _doc_path(doc_id, "/drafts"), body, client=client, store=store)
-    if status == 409 and resp.get("error") == "snapshot":
+    status, resp = _call("PUT", _doc_path(doc_id, "/draft"), body, client=client, store=store)
+    if status == 409 and resp.get("error") == "snapshot_doc":
         raise RuntimeError(SNAPSHOT.format(doc=doc_id))
     if status != 200:
         raise RuntimeError(resp.get("error") or f"HTTP {status}")
@@ -471,12 +471,17 @@ def _settle(db, session: str, branch: str, doc_id: str, op: str, by: str, client
     "clash" (the session's supervisor is told to reconcile it, never the
     person; with no session left, the draft is dropped instead) or the op
     still owed. Never raises."""
+    from urllib.parse import urlencode
+
     from brindle import gates, knowledge
 
     _set_draft(db, session, branch, doc_id, op, by)
+    ref = {"session": session, "branch": branch}
     try:
-        status, resp = _call("POST", _doc_path(doc_id, f"/drafts/{op}"), {"session": session, "branch": branch},
-                             client=client, store=store)
+        if op == "publish":
+            status, resp = _call("POST", _doc_path(doc_id, "/draft/publish"), ref, client=client, store=store)
+        else:
+            status, resp = _call("DELETE", _doc_path(doc_id, f"/draft?{urlencode(ref)}"), client=client, store=store)
     except Exception as e:  # noqa: BLE001 - owed: settled at a later turn
         log.info("analysis doc draft not settled (%s)", type(e).__name__)
         return op
@@ -491,12 +496,12 @@ def _settle(db, session: str, branch: str, doc_id: str, op: str, by: str, client
             knowledge.record_receipt(db, by, [(TOLD_ITEM, doc_id, str(version))])
             tell_readers(db, doc_id, version)
         return "done"
-    if op == "publish" and status == 409 and resp.get("error") == "clash":
+    if op == "publish" and status == 409 and resp.get("error") == "section_clash":
         if db.get_agent(session) is None:   # the session is gone: nobody is left to reconcile it
             return _settle(db, session, branch, doc_id, "drop", by, client, store)
-        clashes = [c for c in resp.get("clashes") or [] if isinstance(c, dict)]
-        where = ", ".join(json.dumps(str(c.get("section", ""))) for c in clashes) or "a section"
-        newest = max((_version(c.get("version")) or 0 for c in clashes), default=0)
+        clashes = [str(c) for c in resp.get("clashes") or [] if isinstance(c, (str, int))]   # the sections' keys
+        where = ", ".join(json.dumps(c) for c in clashes) or "a section"
+        newest = _version(resp.get("head_version"))
         _set_draft(db, session, branch, doc_id, "clash", by)
         gates.tell(db, session,
                    f"[brindle] Your session's edit of analysis doc {doc_id} on branch {branch} clashes "
@@ -574,7 +579,7 @@ def _newer(db, agent_id: str, client=None, store=None) -> list[tuple[str, int, i
     read = {d: v for d, v in ((d, _version(v)) for d, v in _pins(db, agent_id, DOC_ITEM).items()) if v is not None}
     if not read:
         return []
-    versions = api("POST", "/analysis-docs/versions", {"ids": sorted(read)}, client=client, store=store)
+    versions = api("POST", "/analysis-docs/versions", {"doc_ids": sorted(read)}, client=client, store=store)
     return [(d, read[d], _version(v)) for d, v in sorted((versions.get("versions") or {}).items())
             if d in read and _version(v) is not None and _version(v) > read[d]]
 

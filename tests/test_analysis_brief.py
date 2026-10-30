@@ -52,6 +52,8 @@ def test_brief_only_for_large_work(weight, plan, db, backend, tmp_path):
         assert (out, sent, sources, receipt) == ("", [], [], [])
     elif plan == "pro":
         assert f"\n{block}\n" in out and FOLDER in out
+        assert [f["scopes"] for k, f, _ in backend.calls if k == "POST /analysis-docs/brief"] == [
+            [{"kind": "user", "id": "user_1"}]]                     # scopes as the server takes them
         assert receipt == [(ab.RULE_ITEM, "a1"), (ab.BRIEF_ITEM, "a1"), (ab.DOC_ITEM, "d1"),
                            (ab.SESSION_DOC_ITEM, "d1")]
         assert sources == []

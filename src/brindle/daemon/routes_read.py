@@ -547,7 +547,7 @@ def analysis_doc_map(db: DB, request: Request) -> Any:
         raise ServiceError("bad_request", "choose a scope and code paths at depth 1", 400)
     return docs_api("GET", "/analysis-docs/map", repo=_repo(request),
                     query={"scope_kind": q["scope_kind"], "scope_id": q["scope_id"],
-                           "paths": json.dumps(paths), "depth": "1"})
+                           "paths": ",".join(paths), "depth": "1"})    # the server's list is comma-separated
 
 
 @_json
