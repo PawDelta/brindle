@@ -1,12 +1,14 @@
 """Adding an imported Knowledge folder to the library: secret-looking files are
 never sent, nothing is sent when the switch is off or the folder changed after
 the preview, a changed file re-uploads, and failures are surfaced and retried."""
+import time
+
 import pytest
 
 from brindle import airgap, kb
 from brindle.pro import analysis_imports as imports
 from brindle.pro import auth, credentials, license
-from pro_fixtures import backend, claims, fixed_identity, pro_env, sign, signing_key  # noqa: F401 - fixtures
+from pro_fixtures import BASE, backend, claims, fixed_identity, pro_env, sign, signing_key  # noqa: F401 - fixtures
 from test_pro_remote_learning import login_as
 
 
@@ -198,9 +200,10 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     remote.fail_delete = False
     sent, gone = len(remote.docs), len(remote.deleted)
 
-    def sign_in_as(sub, access_token=None):
+    def sign_in_as(sub, access_token=None, base=None):
         creds = deps["store"].load()
-        creds["entitlement"] = sign(remote.key, claims(features=["analysis_docs"], sub=sub))
+        creds["base_url"] = base = base or creds["base_url"]
+        creds["entitlement"] = sign(remote.key, claims(features=["analysis_docs"], sub=sub, iss=base))
         creds["access_token"] = access_token or creds["access_token"]
         deps["store"].save(creds)
         license.clear_cache()
@@ -267,3 +270,46 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     with pytest.raises(imports.AccountChanged):
         imports._call(snap, "GET", "/me/analysis-docs/settings")
     assert len(remote.calls) == calls
+    # (e) An expiring token across a backend switch (same user and org, another host): the refresh
+    # token is sent to neither host, because the store no longer holds the record it was read from.
+    other = "https://other.pawdelta.test/api/brindle/v1"
+    sign_in_as("user_1", "token-1", BASE)
+    creds = deps["store"].load()
+    creds["access_expires_at"] = 1
+    deps["store"].save(creds)
+    armed.clear()
+
+    def load_then_other_backend():
+        record = real_load()
+        if not armed:
+            armed.append(True)
+            sign_in_as("user_1", "token-3", other)
+        return record
+
+    deps["store"].load = load_then_other_backend
+    with pytest.raises(imports.AccountChanged):
+        imports._snapshot(deps["client"], deps["store"])
+    del deps["store"].load
+    assert len(remote.calls) == calls
+    creds = deps["store"].load()
+    creds["access_expires_at"] = time.time() + 900
+    deps["store"].save(creds)
+    sign_in_as("user_1", "token-1", BASE)
+    # (f) A backend-only switch in the middle of a batch of deletes: nothing more is sent, rows stay queued.
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # two docs
+    remote.fail_delete = True
+    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 2}
+    remote.fail_delete, at_switch, gone = False, [], len(remote.deleted)
+
+    def switch_backend():
+        at_switch.append(len(remote.calls))
+        sign_in_as("user_1", None, other)
+
+    remote.after_delete = switch_backend
+    kb.sync(db, source, None, "/repo")
+    remote.after_delete = None
+    assert len(remote.deleted) == gone + 1 and len(remote.calls) == at_switch[0]
+    assert shown(first)["library_state"] == "removing" and shown(first)["library_removing"] == 1
+    sign_in_as("user_1", None, BASE)
+    kb.sync(db, source, None, "/repo")
+    assert shown()["library_state"] == "local" and len(remote.deleted) == gone + 2

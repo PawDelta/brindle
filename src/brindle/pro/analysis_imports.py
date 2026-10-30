@@ -142,16 +142,46 @@ def dry_run(db: DB, source_id: str, *, client=None, store=None) -> dict:
 # -- identity and state ---------------------------------------------------------------------------
 
 
-def _identity_of(client, ent) -> str:
-    return "\n".join((client.base, ent.sub, ent.org_id, "user"))
+def _identity(base: str, sub: str, org_id: str) -> str:
+    return "\n".join((base, sub, org_id, "user"))
+
+
+def _pin_identity(rec: dict) -> str | None:
+    """The identity (backend, user, org, scope) one credential record names, from
+    the record's own ``base_url`` and its entitlement's signed claims (expiry is
+    not looked at: it does not change who the record is). None when it names none."""
+    from brindle.pro import auth, license
+
+    try:
+        base = auth.base_url(rec.get("base_url"))
+        claims = license.verify_signed(rec.get("entitlement") or "", typ=license.TYP, token_use=license.TOKEN_USE)
+        if claims.get("iss") != base:
+            return None
+        return _identity(base, claims["sub"], claims["org_id"])
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _who(client=None, store=None):
-    """(client, store, entitlement, identity) of the verified sign-in; raises
+    """(client, store, entitlement, identity) of the verified sign-in, all from
+    one read of the credential store and its own ``base_url``; raises
     (``RuntimeError``) in air-gap mode, signed out, or without the library."""
-    client, store = analysis_docs._session(client, store)
-    ent = analysis_docs.require_entitlement(store)
-    return client, store, ent, _identity_of(client, ent)
+    from brindle import airgap
+    from brindle.pro import auth, credentials, license
+
+    if airgap.enabled():
+        raise RuntimeError("air-gap mode is on: nothing is sent")
+    store = store or credentials.default_store()
+    rec = store.load() or {}
+    base = auth.base_url(rec.get("base_url"))
+    try:
+        ent = license.verify(rec.get("entitlement") or "", issuer=base)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError("not logged in to brindle Pro (`brindle account login`)") from e
+    if analysis_docs.FEATURE not in ent.features or ent.in_grace:
+        raise RuntimeError("your plan has no analysis doc library (the `analysis_docs` entitlement)")
+    client = client or auth.Client(base, auth.UrllibTransport(timeout=analysis_docs.SEND_WAIT))
+    return client, store, ent, _identity(base, ent.sub, ent.org_id)
 
 
 def current_identity(client=None, store=None) -> str | None:
@@ -187,22 +217,51 @@ def _snapshot(client=None, store=None) -> Snapshot:
     the verified entitlement, the identity and the backend from that one record.
     Raises (``RuntimeError``) like :func:`_who`."""
     from brindle import airgap
-    from brindle.pro import auth, license
+    from brindle.pro import auth, credentials, license
 
-    client, store = analysis_docs._session(client, store)
     if airgap.enabled():
         raise RuntimeError("air-gap mode is on: nothing is sent")
-    cur = store.load() or {}
-    if float(cur.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK and cur.get("refresh_token"):
-        auth.refresh(client, store, cur)
-        cur = store.load() or {}
-    ent = license.verify(cur.get("entitlement") or "", issuer=client.base)
+    store = store or credentials.default_store()
+    rec = store.load() or {}
+    base = auth.base_url(rec.get("base_url"))
+    client = client or auth.Client(base, auth.UrllibTransport(timeout=analysis_docs.SEND_WAIT))
+    pinned = _pin_identity(rec)
+    if pinned is None or client.base != base:
+        raise AccountChanged("the stored sign-in does not match the backend in use")
+    if float(rec.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK and rec.get("refresh_token"):
+        # The refresh token goes only to this record's backend, and only while the store still holds this record.
+        auth.refresh(_Pinned(client, store, pinned), store, rec)
+        rec = store.load() or {}
+        if _pin_identity(rec) != pinned:
+            raise AccountChanged("the sign-in changed while it was refreshed")
+    ent = license.verify(rec.get("entitlement") or "", issuer=base)
     if analysis_docs.FEATURE not in ent.features or ent.in_grace:
         raise RuntimeError("your plan has no analysis doc library (the `analysis_docs` entitlement)")
-    if not cur.get("access_token"):
+    if not rec.get("access_token"):
         raise AccountChanged("not signed in")
-    return Snapshot(client, store, ent, _identity_of(client, ent), cur["access_token"],
-                    float(cur.get("access_expires_at") or 0))
+    return Snapshot(client, store, ent, _identity(base, ent.sub, ent.org_id), rec["access_token"],
+                    float(rec.get("access_expires_at") or 0))
+
+
+class _Pinned:
+    """A client whose every request first checks that the store still holds the
+    record (backend, user, org) it was pinned to, so a refresh token is never sent
+    after the sign-in changed."""
+
+    def __init__(self, client, store, who: str) -> None:
+        self.client, self.store, self.who = client, store, who
+        self.base = client.base
+
+    def call(self, method, path, form=None, token=None, headers=None):
+        if _pin_identity(self.store.load() or {}) != self.who:
+            raise AccountChanged("the sign-in changed")
+        return self.client.call(method, path, form, token, headers)
+
+    def post(self, path, form, token=None):
+        return self.call("POST", path, form, token)
+
+    def get(self, path, token=None):
+        return self.call("GET", path, None, token)
 
 
 def _call(snap: Snapshot, method: str, path: str, body: dict | None = None) -> tuple[int, dict]:
@@ -214,13 +273,14 @@ def _call(snap: Snapshot, method: str, path: str, body: dict | None = None) -> t
     but ``snap.stopped`` is set so the run ends and a 404 is not believed."""
     from brindle.pro import auth
 
-    if snap.stopped or current_identity(snap.client, snap.store) != snap.who \
+    # The identity is read from the store's current record, backend included, never from snap.client.
+    if snap.stopped or _pin_identity(snap.store.load() or {}) != snap.who \
             or snap.expires <= time.time() + auth.ACCESS_SLACK:
         raise AccountChanged("the signed-in account changed")
     status, got = snap.client.call(method, path, body, token=snap.token)
     if status == 401:
         raise AccountChanged("the sign-in needs refreshing")
-    if current_identity(snap.client, snap.store) != snap.who:
+    if _pin_identity(snap.store.load() or {}) != snap.who:
         snap.stopped = True
     return status, got
 
