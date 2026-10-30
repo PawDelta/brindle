@@ -359,6 +359,9 @@ export interface KbHit {
 export interface DocScope {
   kind: string;
   id: string;
+  /* From GET /analysis-docs/scopes only: the team's or org's name, and whether the person may share into it. */
+  name?: string;
+  can_share?: boolean;
 }
 
 interface WireMentions {
@@ -456,11 +459,11 @@ export interface DocResults {
   without_brief: number | null;
 }
 
-/* POST /analysis-docs/{id}/export: the Markdown file's path in a picked folder, or its text. */
+/* POST /analysis-docs/{id}/export: the file's path in a picked folder, or the file itself. */
 export interface DocExport {
   filename: string;
   path?: string;
-  content?: string;
+  content_b64?: string;
 }
 
 export interface DocsQuery {
@@ -1064,7 +1067,7 @@ export class DaemonClient {
     return { topics: (got.topics ?? []).map((t) => ({ name: t.topic, count: t.count })) };
   }
 
-  /* The scopes the person can read for certain: their own, their org's (no team: the server says none). */
+  /* Every scope the person reads (their own, their teams', their org's), with or without docs. */
   docScopes(repo?: string) {
     return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
   }
@@ -1090,9 +1093,9 @@ export class DaemonClient {
     return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, {});
   }
 
-  /* As Markdown: with `dir` the daemon writes the file there; without, its text comes back. */
-  exportDoc(id: string, dir?: string) {
-    return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, dir ? { dir } : {});
+  /* With `dir` the daemon writes the file there; without, it comes back as base64. */
+  exportDoc(id: string, format: "md" | "docx" | "zip", dir?: string) {
+    return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, dir ? { format, dir } : { format });
   }
 
   profile(name: string, repo?: string) {

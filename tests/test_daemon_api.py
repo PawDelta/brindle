@@ -548,21 +548,28 @@ def test_docs_with_no_scope_lists_each_readable_scope_once_per_doc(brindle_home,
 
     from brindle.pro import analysis_docs
 
-    held = {"user:u1": [("d1", 3, ["checkout"]), ("shared", 2, ["checkout", "refunds"])],
+    held = {"user:u1": [("d1", 4, ["checkout"]), ("shared", 2, ["checkout", "refunds"])],
+            "group:t-empty": [],                                    # a team of theirs with no docs yet
+            "group:t-pay": [("team-only", 3, ["refunds"])],
             "org:o1": [("shared", 2, ["checkout", "refunds"]), ("d2", 1, ["refunds"])]}
 
     def api(method, path, body=None, **kw):     # the server refuses a list without a scope
-        q = {k: v[0] for k, v in parse_qs(urlsplit(path).query).items()}
+        url = urlsplit(path)
+        if url.path == "/analysis-docs/scopes":
+            return {"scopes": [{"kind": k, "id": i, "name": i, "can_share": k != "user"}
+                               for k, _, i in (s.partition(":") for s in held)]}
+        q = {k: v[0] for k, v in parse_qs(url.query).items()}
         docs = held[f"{q['scope_kind']}:{q['scope_id']}"]
         return {"docs": [{"doc_id": d, "created_at": at, "topics": t} for d, at, t in docs]}
 
-    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(
-        sub="u1", org_id="o1", features={"analysis_docs", "analysis_docs_enterprise"}))
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(sub="u1"))
     monkeypatch.setattr(analysis_docs, "api", api)
+    _, scopes = _get("/v1/analysis-docs/scopes", AUTH)
+    assert [s["id"] for s in scopes["scopes"]] == ["u1", "t-empty", "t-pay", "o1"]
     _, listed = _get("/v1/analysis-docs", AUTH)
-    assert [d["doc_id"] for d in listed["docs"]] == ["d1", "shared", "d2"]
+    assert [d["doc_id"] for d in listed["docs"]] == ["d1", "team-only", "shared", "d2"]
     _, topics = _get("/v1/analysis-docs/topics", AUTH)
-    assert topics["topics"] == [{"topic": "checkout", "count": 2}, {"topic": "refunds", "count": 2}]
+    assert topics["topics"] == [{"topic": "refunds", "count": 3}, {"topic": "checkout", "count": 2}]
 
 
 @pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])

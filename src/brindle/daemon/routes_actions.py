@@ -1327,7 +1327,7 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
 # reaches disk only on an export to a folder the person picked.
 
 DOC_SCOPES = {"user": "user", "team": "group", "group": "group", "enterprise": "org", "org": "org"}
-DOCS_ENTERPRISE = "analysis_docs_enterprise"
+EXPORT_FORMATS = ("md", "docx", "zip")
 
 
 def _docs_entitlement(repo: str | None):
@@ -1350,7 +1350,7 @@ def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | No
     out is 401."""
     from urllib.parse import urlencode
 
-    from brindle.pro import analysis_docs
+    from brindle.pro import analysis_docs, auth
 
     ent = _docs_entitlement(repo)
     query = dict(query or {})
@@ -1358,19 +1358,21 @@ def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | No
         query.update(zip(("scope_kind", "scope_id"), doc_scope(scope, ent.sub)))
     try:
         return analysis_docs.api(method, path + (f"?{urlencode(query)}" if query else ""), body)
-    except RuntimeError as e:
+    except (RuntimeError, auth.TransportError) as e:    # unreachable, or an answer it can't read: not signed out
         raise ServiceError("upstream", str(e), 502) from e
 
 
 def docs_scopes(repo: str | None = None) -> list[dict]:
-    """The scopes the person can read for certain: their own, and their
-    org's when its plan has the enterprise library. The server says no
-    one's team, so a team scope is known only from a doc listed in it."""
-    ent = _docs_entitlement(repo)
-    scopes = [{"kind": "user", "id": ent.sub}]
-    if DOCS_ENTERPRISE in ent.features and ent.org_id:
-        scopes.append({"kind": "org", "id": ent.org_id})
-    return scopes
+    """Every scope the person reads, as the server lists them
+    (``{kind, id, name, can_share}``; their teams too, docs or not)."""
+    scopes = docs_api("GET", "/analysis-docs/scopes", repo=repo).get("scopes")
+    return [s for s in scopes or [] if isinstance(s, dict) and s.get("kind") in DOC_SCOPES.values()
+            and isinstance(s.get("id"), str)]
+
+
+def scope_spec(scope: dict) -> str:
+    """A server scope as docs_api's ``scope``: user, team:<id> or org:<id>."""
+    return "user" if scope["kind"] == "user" else f"{'team' if scope['kind'] == 'group' else 'org'}:{scope['id']}"
 
 
 def docs_everywhere(path: str, repo: str | None, query: dict[str, str]) -> list[dict]:
@@ -1378,7 +1380,7 @@ def docs_everywhere(path: str, repo: str | None, query: dict[str, str]) -> list[
     :func:`docs_scopes`: the answers that came back. A scope that refuses
     is skipped unless every one does."""
     got, refused = [], None
-    for spec in (f"{s['kind']}:{s['id']}" if s["kind"] != "user" else "user" for s in docs_scopes(repo)):
+    for spec in dict.fromkeys(scope_spec(s) for s in docs_scopes(repo)):
         try:
             got.append(docs_api("GET", path, repo=repo, query=query, scope=spec))
         except ServiceError as e:
@@ -1422,28 +1424,36 @@ def delete_doc(db: DB, params: dict, body: Body) -> Any:
 
 
 def export_doc(db: DB, params: dict, body: Body) -> Any:
-    """The doc as one Markdown file (the server's md export, which checks
-    scope and the org's export policy; its docx and zip are bytes the Pro
-    client can't carry yet). With ``dir`` (a folder the person picked) the
-    file is written there and its path answered; without, its ``filename``
-    and ``content`` go back to the app and nothing is written."""
+    """The doc as ``format`` (md, docx or zip; the server renders it and
+    checks scope and the org's export policy). Markdown arrives as text; a
+    Word or zip file as bytes once the Pro transport carries them (until
+    then, a 502 saying it can't read the answer). With ``dir`` (a folder the
+    person picked) the file is written there and its path answered;
+    without, its ``filename`` and ``content_b64`` go back to the app and
+    nothing is written."""
+    import base64
     import re
 
     from brindle.pro import auth
 
+    fmt = _get(body, "format", default="md")
+    if fmt not in EXPORT_FORMATS:
+        raise ServiceError("invalid", "format is md, docx or zip")
     got = docs_api("GET", _doc_path(params, "export"), repo=params.get("repo"),
-                   query={"format": "md", "destination": "download"})
+                   query={"format": fmt, "destination": "download"})
     text = got.get(auth.TEXT_KEY)
-    if not isinstance(text, str) or not text:
+    data = text.encode() if isinstance(text, str) else next(
+        (v for v in got.values() if isinstance(v, (bytes, bytearray))), b"")
+    if not data:
         raise ServiceError("upstream", "the export came back empty", 502)
-    name = f"{re.sub(r'[^A-Za-z0-9_-]+', '-', params['id']).strip('-') or 'doc'}.md"
+    name = f"{re.sub(r'[^A-Za-z0-9_-]+', '-', params['id']).strip('-') or 'doc'}.{fmt}"
     folder = _get(body, "dir")
     if folder is None:
-        return {"filename": name, "content": text}
+        return {"filename": name, "content_b64": base64.b64encode(data).decode()}
     folder = Path(folder).expanduser()
     if not folder.is_dir():
         raise ServiceError("invalid", f"not a folder: {folder}")
-    (folder / name).write_text(text)
+    (folder / name).write_bytes(data)
     return {"filename": name, "path": str(folder / name)}
 
 

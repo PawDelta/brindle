@@ -17,6 +17,14 @@ const DOCS = [
   listed("d1", "Checkout drop after pricing change", "Investigation", "root1", { version: 3, used_in_briefs: 6, findings: ["a", "b"], open_questions: ["c"], related: ["d2"] }),
   listed("d2", "Stripe vs Adyen fees", "Comparison", "root1"),
   listed("d3", "Refund latency", "Investigation", "root2"),
+  listed("d4", "Payments runbook", "Runbook", "root1", { scope: { kind: "group", id: "team-pay" } }),
+];
+
+/* GET /analysis-docs/scopes: every scope the person reads, a team with no docs among them. */
+const SCOPES = [
+  { kind: "user", id: "u1", name: "Me", can_share: false },
+  { kind: "group", id: "team-pay", name: "Payments team", can_share: true },
+  { kind: "group", id: "team-new", name: "Platform", can_share: true },
 ];
 
 const RESULTS: DocResults = { days: 30, minimum: 5, enough: true, briefed: 6, large: 9, compared: 6, similar: 7, with_brief: 1.2, without_brief: 2.0 };
@@ -32,7 +40,7 @@ function client(detail: (id: string) => object, results: DocResults = RESULTS) {
         : path === "/analysis-docs/topics"
           ? { topics: [{ topic: "checkout", count: 3, stale: 0, latest: "d1" }] }
           : path === "/analysis-docs/scopes"
-            ? { scopes: [{ kind: "user", id: "u1" }] }
+            ? { scopes: SCOPES }
             : path === "/analysis-docs/results"
               ? results
               : detail(decodeURIComponent(path.split("/").pop()!));
@@ -51,9 +59,12 @@ const view = (d: (typeof DOCS)[number], extra: object = {}) => {
 describe("docs view", () => {
   it("lists one session's docs as cards, narrows them by kind and search, and opens one in the reader", async () => {
     render(<DocsView client={client((id) => view(DOCS.find((d) => d.doc_id === id)!))} repo="/r" session="root1" />);
-    await waitFor(() => expect(shown()).toEqual(["d1", "d2"]));
+    await waitFor(() => expect(shown()).toEqual(["d1", "d2", "d4"]));
     const first = screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!;
     for (const text of ["Checkout drop after pricing change", "Investigation", "Mine", "v3", "2 findings · 1 open question", "used in 6 briefs"]) expect(first.textContent).toContain(text);
+    // A team's doc carries the team's name; a team with no docs still gets its chip.
+    await waitFor(() => expect(screen.getByTestId("docs").querySelector('li[data-doc="d4"]')!.textContent).toContain("Payments team"));
+    await waitFor(() => expect(within(screen.getByRole("group", { name: "Scope" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["All", "Mine", "Payments team", "Platform"]));
     const rail = screen.getByRole("navigation", { name: "Topics and kinds" });
     expect(within(rail).getByRole("button", { name: /checkout/ }).textContent).toBe("checkout3");
     fireEvent.click(within(rail).getByRole("button", { name: /Comparison/ }));
@@ -69,8 +80,8 @@ describe("docs view", () => {
     await waitFor(() => expect(screen.getByTestId("doc-body").textContent).toContain("Stripe vs Adyen fees"));
   });
 
-  it("reads a real doc: raw HTML and images stay text, mentions are listed, and a team it is shared with can be unshared", async () => {
-    const team = { kind: "group", id: "team-payments" };
+  it("reads a real doc: raw HTML and images stay text, mentions are listed, and Share offers every team of the person's", async () => {
+    const team = { kind: "group", id: "team-pay" };
     const md = '# Findings\n\n<script>window.pwned = 1</script>\n<img src="https://evil.example/x.png" onerror="alert(1)">\n\n![chart](https://evil.example/chart.png) and **bold**';
     const detail = view(DOCS[0], { files: [{ name: "main.md", md }], mentions: { files: ["src/pay.py"], symbols: ["charge()"], services: ["stripe"] }, scopes: [DOCS[0].scope, team] });
     const { container } = render(<DocsView client={client(() => detail)} doc="d1" />);
@@ -81,7 +92,10 @@ describe("docs view", () => {
     expect(body.querySelector("strong")?.textContent).toBe("bold");
     expect(screen.getByRole("complementary").textContent).toContain("Mentions: src/pay.py · charge() · stripe");
     fireEvent.click(screen.getByRole("button", { name: "Share" }));
-    expect(within(screen.getByRole("group", { name: "Share with" })).getByRole("button").textContent).toBe("Stop sharing with Team team-pay");
+    // Shared with one team already, never shared with the other, which has no docs at all.
+    await waitFor(() =>
+      expect(within(screen.getByRole("group", { name: "Share with" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["Stop sharing with Payments team", "Share with Platform"]),
+    );
   });
 
   it("says there isn't enough data yet below the minimum instead of showing numbers", async () => {
