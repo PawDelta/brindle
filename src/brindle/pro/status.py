@@ -11,8 +11,9 @@
   activity (or a worker is running), every 5 minutes after 15 minutes without
   any, never in air-gap mode and never again after a 404 (an old server). When
   ``policy_version`` moves past the cached policy's, the policy is refetched.
-* The last answer is kept in ``$BRINDLE_HOME/pro/status.json`` (0600) so other
-  processes (the MCP server's spawn gate, the cull pass) see it. A failed poll
+* Enforced accounts keep verified answers in ``pro/signed/status.json``;
+  ``pro/status.json`` holds delivery and ack bookkeeping, and legacy accounts'
+  status. Signed reads always verify the cache for the current member. A failed poll
   changes nothing: notices fail open (none arrive), a pause keeps its last
   known value (fails closed).
 * ``block_reason`` is the spawn gate for a pause or a remote shutdown,
@@ -35,7 +36,7 @@ import socket
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from brindle import airgap
 from brindle.pro._files import private_dir, read_private, write_private
@@ -84,6 +85,7 @@ class Saved:
     delivered: list = field(default_factory=list)      # notice ids already put into a chat
     acked: list = field(default_factory=list)          # control ids already acknowledged
     pending: dict = field(default_factory=dict)        # control id -> workers stopped, not yet acked
+    read: list = field(default_factory=list)           # notice ids marked read at the account
 
 
 def _num(v) -> float | None:
@@ -174,6 +176,21 @@ def _org_id() -> str | None:
 
 
 def load(org_id: str | None = None) -> Saved:
+    """Verified status for enforced accounts; local delivery and ack bookkeeping."""
+    from brindle.pro import managed, policy_cache
+
+    saved = _load_saved(org_id)
+    ctx = _context()
+    ent = ctx.entitlement
+    if ent is not None and (policy_cache.enforced(ent) or isinstance(ctx.managed, managed.Managed)):
+        if saved.org_id != ent.org_id:
+            return Saved(org_id=saved.org_id)
+        saved.status = ctx.status.status
+        saved.status.notices = [n for n in saved.status.notices if n["id"] not in saved.read]
+    return saved
+
+
+def _load_saved(org_id: str | None = None) -> Saved:
     """The saved status for ``org_id`` (default: the signed-in org), else an
     empty one: nothing is paused or sent."""
     org_id = org_id or _org_id()
@@ -188,6 +205,7 @@ def load(org_id: str | None = None) -> Saved:
     return Saved(org_id=org_id, status=st,
                  delivered=[x for x in d.get("delivered") or [] if isinstance(x, str)][-KEEP_IDS:],
                  acked=[x for x in d.get("acked") or [] if isinstance(x, str)][-KEEP_IDS:],
+                 read=[x for x in d.get("read") or [] if isinstance(x, str)][-KEEP_IDS:],
                  pending={k: v for k, v in (d.get("pending") or {}).items()
                           if isinstance(k, str) and isinstance(v, int)})
 
@@ -195,7 +213,7 @@ def load(org_id: str | None = None) -> Saved:
 def save(s: Saved) -> None:
     write_private(_path(), json.dumps({
         "org_id": s.org_id, "status": s.status.to_json(), "delivered": s.delivered[-KEEP_IDS:],
-        "acked": s.acked[-KEEP_IDS:], "pending": s.pending}).encode())
+        "acked": s.acked[-KEEP_IDS:], "pending": s.pending, "read": s.read[-KEEP_IDS:]}).encode())
 
 
 # -- what is in force ---------------------------------------------------------------------------
@@ -210,34 +228,48 @@ def control_in_force(st: Status, now: float | None = None) -> dict | None:
     return c
 
 
-def _rollout_entitled() -> bool:
-    from brindle.pro import rollout
+def _tighter(a, b):
+    return b if a is None else a if b is None else min(a, b)
 
-    return rollout.entitled()
+
+def stricter(a: Status, b: Status, now: float | None = None) -> Status:
+    """One status from two orgs' (a signed-in member's ``a`` and the managed
+    device's ``b``) where each takes the stricter side: paused if either is,
+    a shutdown in force over a throttle, two throttles combined (the models
+    both allow, the lower worker limit and budget). ``a``'s policy version,
+    seat and bookkeeping stand; notices of both are shown."""
+    ca, cb = control_in_force(a, now), control_in_force(b, now)
+    control = next((c for c in (ca, cb) if c and c["action"] == "shutdown"), None) or ca or cb
+    if control is not None and control["action"] == "throttle" and ca and cb:
+        ta, tb = ca.get("throttle") or {}, cb.get("throttle") or {}
+        ma, mb = ta.get("allowed_models"), tb.get("allowed_models")
+        control = {**ca, "throttle": {
+            "allowed_models": mb if ma is None else ma if mb is None else [m for m in ma if m in mb],
+            "max_parallel_workers": _tighter(ta.get("max_parallel_workers"), tb.get("max_parallel_workers")),
+            "seat_month_usd": _tighter(ta.get("seat_month_usd"), tb.get("seat_month_usd"))}}
+    pauser = b if b.paused and not a.paused else a
+    seen = {n["id"] for n in a.notices}
+    return Status(policy_version=a.policy_version, paused=pauser.paused, paused_reason=pauser.paused_reason,
+                  seat=a.seat, notices=[*a.notices, *(n for n in b.notices if n["id"] not in seen)],
+                  org_alert=a.org_alert, control=control, at=a.at or b.at)
+
+
+def _context(now: float | None = None, saved: Saved | None = None):
+    """An org context at ``now`` whose status is ``saved`` (default: :func:`load`)."""
+    from brindle.pro.org_context import OrgContext, Providers
+
+    return OrgContext.resolve(now=now, providers=Providers(status=(lambda: saved) if saved else None))
 
 
 def shutdown_control(now: float | None = None, saved: Saved | None = None) -> dict | None:
-    """A shutdown in force, for an org with ``managed_rollout``."""
-    saved = saved or load()
-    c = control_in_force(saved.status, now)
-    return c if c and c["action"] == "shutdown" and _rollout_entitled() else None
+    """A shutdown in force, for an org with ``managed_rollout``
+    (brindle.pro.org_context.OrgContext.shutdown_control)."""
+    return _context(now, saved).shutdown_control()
 
 
 def pause_reason(saved: Saved | None = None) -> str | None:
-    saved = saved or load()
-    why = saved.status.paused_reason
-    if not saved.status.paused:
-        # The cached effective policy says so too (it follows policy_version).
-        try:
-            from brindle.pro import team_policy
-
-            cached = team_policy.load_cached(saved.org_id) if saved.org_id else None
-        except Exception:  # noqa: BLE001
-            cached = None
-        if cached is None or not cached.enforced.paused:
-            return None
-        why = cached.enforced.paused_reason
-    return f"paused by your org{': ' + why if why else ''} (ask an org admin to resume you)"
+    """Why the member is paused (brindle.pro.org_context.OrgContext.pause_reason)."""
+    return _context(saved=saved).pause_reason()
 
 
 def shutdown_reason(c: dict) -> str:
@@ -247,46 +279,16 @@ def shutdown_reason(c: dict) -> str:
 def block_reason(p=None, now: float | None = None) -> str | None:
     """Why no new worker or reviewer may start: the member is paused or their
     org shut brindle down remotely. ``p`` is the policy being enforced (its
-    ``paused`` counts too). None when nothing blocks."""
-    try:
-        saved = load()
-        if p is not None and getattr(p, "paused", False):
-            why = getattr(p, "paused_reason", None)
-            return f"paused by your org{': ' + why if why else ''} (ask an org admin to resume you)"
-        c = shutdown_control(now, saved)
-        if c:
-            return shutdown_reason(c)
-        return pause_reason(saved)
-    except Exception:  # noqa: BLE001 - a broken status file must not stop all work
-        log.warning("brindle: couldn't read the org status", exc_info=True)
-        return None
-
-
-def _tighter(a, b):
-    return b if a is None else a if b is None else min(a, b)
+    ``paused`` counts too). None when nothing blocks
+    (brindle.pro.org_context.OrgContext.blocked_reason)."""
+    ctx = _context(now)
+    return ctx.blocked_reason(p) if p is not None else ctx.blocked_reason()
 
 
 def narrow(p, now: float | None = None):
     """``p`` (an enforced :class:`OrgPolicy`) narrowed by a throttle control in
-    force: cheaper models only (the intersection with the policy's), fewer
-    parallel workers, a lower budget. Never widens anything."""
-    try:
-        saved = load()
-        c = control_in_force(saved.status, now)
-        t = c.get("throttle") if c and c["action"] == "throttle" else None
-        if not t or not _rollout_entitled():
-            return p
-        models = p.allowed_models
-        if t.get("allowed_models") is not None:
-            models = (tuple(t["allowed_models"]) if models is None
-                      else tuple(m for m in models if m in t["allowed_models"]))
-        return replace(
-            p, allowed_models=models,
-            max_parallel_workers=_tighter(p.max_parallel_workers, t.get("max_parallel_workers")),
-            budget_seat_month_usd=_tighter(p.budget_seat_month_usd, t.get("seat_month_usd")))
-    except Exception:  # noqa: BLE001
-        log.warning("brindle: couldn't apply the org throttle", exc_info=True)
-        return p
+    force (brindle.pro.org_context.OrgContext.narrow). Never widens anything."""
+    return _context(now).narrow(p)
 
 
 def ack(control: dict, stopped: int, client=None, store=None) -> bool:
@@ -395,21 +397,28 @@ class Poller:
         return client, store
 
     def _refetch_policy(self, ent) -> None:
-        from brindle.pro import team_policy
+        from brindle.pro import managed, org_context, policy_cache, team_policy
 
         client, store = self._make_client()
+        ctx = org_context.OrgContext.resolve(now=self._clock())
+        if policy_cache.enforced(ent) or isinstance(ctx.managed, managed.Managed):
+            ctx._client, ctx._store = client, store
+            policy_cache.get_verified("policy", binding=policy_cache.Binding(
+                ent.sub, ent.org_id, ent.role, ent.policy_role),
+                fetch=lambda kind: ctx._fetch(kind, ent.org_id), now=ctx.now, home=ctx.home, refresh=True)
+            return
         team_policy.fetch_policy(ent.org_id, client, store,
                                  cached_for=(ent.role, getattr(ent, "policy_role", None)))
 
     def poll_once(self) -> Status | None:
         """One poll. None when there is nothing to do or it failed (nothing is changed then)."""
-        from brindle.pro import auth, team_policy
+        from brindle.pro import auth, managed, policy_cache, team_policy
 
         if self.disabled or airgap.enabled():
             return None
         try:
             ent = self._ent()
-            if team_policy.FEATURE not in ent.features:
+            if team_policy.FEATURE not in ent.features and not policy_cache.enforced(ent):
                 return None
             client, store = self._make_client()
             code, body = auth.authed(client, store, "GET", f"/orgs/{ent.org_id}/status")
@@ -419,11 +428,21 @@ class Poller:
         if code == 404:
             self.disabled = True
             return None
-        st = parse(body, self._clock()) if code == 200 else None
+        now = self._clock()
+        signed_required = policy_cache.enforced(ent) or isinstance(managed.load(now=now), managed.Managed)
+        if code == 200 and signed_required:
+            binding = policy_cache.Binding(ent.sub, ent.org_id, ent.role, ent.policy_role)
+            copy = policy_cache.get_verified("status", binding=binding,
+                                             fetch=lambda kind: body, now=now, refresh=True)
+            if isinstance(copy, policy_cache.Unavailable):
+                return None
+            body = copy.body
+        st = parse(body, now) if code == 200 else None
         if st is None:
             return None
         with _lock:
-            saved = load(ent.org_id)
+            saved = _load_saved(ent.org_id)
+            st.notices = [n for n in st.notices if n["id"] not in saved.read]
             saved.org_id, saved.status = ent.org_id, st
             try:
                 save(saved)
@@ -431,8 +450,13 @@ class Poller:
                 log.warning("brindle: couldn't save the org status", exc_info=True)
         self.saved = saved
         try:
-            cached = team_policy.load_cached(ent.org_id)
-            if st.policy_version is not None and (cached is None or st.policy_version > cached.version):
+            if signed_required:
+                cached = policy_cache.get_verified("policy", binding=binding, fetch=lambda kind: None, now=now)
+                version = cached.claims["policy_version"] if isinstance(cached, policy_cache.VerifiedCopy) else None
+            else:
+                cached = team_policy.load_cached(ent.org_id)
+                version = cached.version if cached else None
+            if st.policy_version is not None and (version is None or st.policy_version > version):
                 self._refetch(ent)
         except Exception:  # noqa: BLE001 - the old policy stays; the next poll tries again
             log.debug("brindle: policy refetch failed", exc_info=True)
@@ -550,6 +574,7 @@ def mark_read(ids: list[str], client=None, store=None) -> list[str]:
     if done:
         with _lock:
             saved = load(saved.org_id)
+            saved.read = list(dict.fromkeys([*saved.read, *done]))[-KEEP_IDS:]
             saved.status.notices = [n for n in saved.status.notices if n["id"] not in done]
             save(saved)
     return done
@@ -586,7 +611,7 @@ def bar_text(saved: Saved | None, now: float | None = None) -> tuple[str, str] |
 
     st = saved.status
     c = control_in_force(st, now)
-    if c and c["action"] == "shutdown" and _rollout_entitled():
+    if shutdown_control(now, saved):
         return shutdown_reason(c), BAR_ALERT
     if st.paused:
         return f"paused: {st.paused_reason or 'by your org'}", BAR_ALERT

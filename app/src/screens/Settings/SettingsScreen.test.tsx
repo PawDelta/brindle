@@ -7,6 +7,7 @@ import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
 import { StoreContext } from "../../store/useStore";
 import { DaemonClient } from "../../api/client";
+import type { GovernanceStatusDTO } from "../../api/schema";
 import { BASE_URL, FAKE_PRESETS, FakeDaemon, TOKEN, flush, freshProviders, type DaemonData } from "../../test/fakeDaemon";
 import { PtyViewsProvider } from "../../api/ptyView";
 import { REPO, root } from "../../test/fixtures";
@@ -42,7 +43,7 @@ function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps[
   const daemon = new FakeDaemon({
     repos: [{ repo_root: REPO, name: "proj" }],
     config: {
-      user: { supervisor: "claude" },
+      user: { supervisor: "claude", autopilot: false },
       repo: { checks: ["npm test"], max_agents: 5, default_agent: "developer", sidebar: "left", overlap: null },
       local: {},
       keys: [
@@ -108,18 +109,17 @@ describe("settings screen", () => {
     expect(within(mine).queryByRole("textbox", { name: "Checks" })).toBeNull();
     expect(within(mine).queryByRole("combobox", { name: "Overlapping tasks" })).toBeNull();
     expect(screen.queryByTestId("user-save")).toBeNull();
-    fireEvent.click(within(mine).getByRole("switch", { name: "Plan first" }));
     // A number can't be left empty: the engine would store the null and choke on it later.
     const workers = within(mine).getByRole("spinbutton", { name: "Workers at once" });
     fireEvent.change(workers, { target: { value: "" } });
     expect(screen.getByTestId("settings-invalid").textContent).toContain("Workers at once needs a number");
     expect(screen.getByRole("button", { name: "Save your settings" })).toHaveProperty("disabled", true);
     fireEvent.change(workers, { target: { value: "2" } });
-    expect(mine.querySelector('[data-setting="plan_first"]')!.textContent).toContain("edited");
+    expect(mine.querySelector('[data-setting="max_agents"]')!.textContent).toContain("edited");
     fireEvent.click(screen.getByRole("button", { name: "Save your settings" }));
-    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Saved max_agents, plan_first for every project to /home/u/.brindle/config.json"));
-    expect(patches(daemon)[0].body).toEqual({ scope: "user", values: { max_agents: 2, plan_first: true } });
-    expect(daemon.data.config.user).toMatchObject({ max_agents: 2, plan_first: true });
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Saved max_agents for every project to /home/u/.brindle/config.json"));
+    expect(patches(daemon)[0].body).toEqual({ scope: "user", values: { max_agents: 2 } });
+    expect(daemon.data.config.user).toMatchObject({ max_agents: 2 });
     expect(daemon.data.config.local).toEqual({});
     // More: the other settings; what the person has set beyond the rows is listed to read.
     fireEvent.click(within(mine).getByRole("button", { name: /^More/ }));
@@ -127,6 +127,71 @@ describe("settings screen", () => {
     expect(screen.getByRole("switch", { name: "Coordinator" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: /Other settings you have/ }));
     expect(screen.getByTestId("user-rest").textContent).toContain("supervisor");
+    // The goal-driving key stays in the person's file but has no control or line anywhere here.
+    expect(mine.textContent).not.toMatch(/autopilot/i);
+    stop();
+  });
+
+  it("organization: the policy's exact problem and what to do, an offline policy export of at most 90 days, a device file for an Enterprise admin, and the plan approvals default", async () => {
+    const { daemon, stop } = setup({
+      governance: { status: "problem", org_id: "org_1", org_name: "Acme", source: "snapshot", verified: false, enterprise_admin: true,
+        problem: "The saved policy expired 3 days ago.", action: "Connect to the internet so brindle can fetch a fresh signed policy." },
+      plan: { user: "auto", projects: {} },
+    });
+    const status = await screen.findByTestId("org-status");
+    expect([status.dataset.status, status.dataset.verified, status.dataset.source]).toEqual(["problem", "false", "snapshot"]);
+    expect(status.textContent).toContain("Acme");
+    const problem = within(status).getByRole("alert").textContent;
+    expect(problem).toContain("The saved policy expired 3 days ago.");
+    expect(problem).toContain("Connect to the internet so brindle can fetch a fresh signed policy.");
+    // The export lasts 1 to 90 days.
+    const days = screen.getByRole("spinbutton", { name: "Days the export lasts" });
+    fireEvent.change(days, { target: { value: "91" } });
+    expect(screen.getByRole("button", { name: "Offline policy export" })).toHaveProperty("disabled", true);
+    fireEvent.change(days, { target: { value: "14" } });
+    fireEvent.click(screen.getByRole("button", { name: "Offline policy export" }));
+    expect((await within(screen.getByTestId("org-approvals")).findByRole("status")).textContent).toContain("/home/u/proj/.brindle/policy.json");
+    expect(posts(daemon).find((r) => r.path === "/governance/offline-policy")?.body).toEqual({ days: 14, repo: "/home/u/proj" });
+    // The device file comes back to save as managed.json.
+    fireEvent.change(screen.getByRole("textbox", { name: "Device name" }), { target: { value: "build-01" } });
+    fireEvent.click(screen.getByRole("checkbox", { name: "Allow air-gapped use" }));
+    fireEvent.click(screen.getByRole("button", { name: "Download device file" }));
+    const file = await screen.findByTestId("device-file");
+    expect(file.getAttribute("download")).toBe("managed.json");
+    expect(screen.getByTestId("install-location").getAttribute("data-path")).toBe("/Library/Application Support/brindle");
+    expect(JSON.parse(decodeURIComponent(file.getAttribute("href")!.split(",")[1]))).toEqual({ org_id: "org_1", name: "build-01", allow_airgap: true });
+    // Plan approvals: the default for every project, saved when picked.
+    const plan = await screen.findByRole("combobox", { name: "Plan approvals" });
+    expect(plan).toHaveProperty("value", "auto");
+    fireEvent.change(plan, { target: { value: "always" } });
+    await waitFor(() => expect(daemon.data.plan.user).toBe("always"));
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/governance/plan")?.body).toEqual({ scope: "user", plan: "always" });
+    stop();
+  });
+
+  it.each<[string, GovernanceStatusDTO, { alert: boolean; deviceFile: boolean }]>([
+    ["managed from this device", { status: "managed", org_name: "Acme", verified: true, source: "device" }, { alert: false, deviceFile: false }],
+    ["not managed", { status: "unmanaged" }, { alert: false, deviceFile: false }],
+    // An unusable device file names no organization: the problem says it, and an admin can make a new one.
+    ["an unusable device file", { status: "problem", problem: "This device's managed device file can't be used: bad signature", action: "Ask your admin.", enterprise_admin: true }, { alert: true, deviceFile: true }],
+  ])("organization: %s shows that state and only the actions it allows", async (_, governance, want) => {
+    // With no project, the export stays off and sends nothing.
+    const none = setup({ governance, repos: [] });
+    const exportButton = await screen.findByRole("button", { name: "Offline policy export" });
+    expect(exportButton).toHaveProperty("disabled", true);
+    fireEvent.click(exportButton);
+    expect(posts(none.daemon).some((r) => r.path === "/governance/offline-policy")).toBe(false);
+    none.stop();
+    cleanup();
+    const { stop } = setup({ governance });
+    const status = await screen.findByTestId("org-status");
+    expect(status.dataset.status).toBe(governance.status);
+    expect(status.dataset.verified).toBe(String(!!governance.verified));
+    expect(!!within(status).queryByRole("alert")).toBe(want.alert);
+    if (governance.org_name) expect(status.textContent).toContain(governance.org_name);
+    // No sign-in gate: the export is always offered; the device file only to an Enterprise admin.
+    expect(screen.getByRole("button", { name: "Offline policy export" })).toBeTruthy();
+    expect(!!screen.queryByRole("button", { name: "Download device file" })).toBe(want.deviceFile);
     stop();
   });
 

@@ -12,8 +12,11 @@ import type {
   AskGroupDTO,
   CloudOptionsDTO,
   DecisionDTO,
+  DeviceFileDTO,
   GoalDTO,
+  GovernanceStatusDTO,
   InboxItemDTO,
+  OfflinePolicyExportDTO,
   OrgApprovalPolicyDTO,
   OrgAssignmentDTO,
   OrgAssignmentRequestDTO,
@@ -22,6 +25,7 @@ import type {
   PermissionLimitsDTO,
   PermissionPolicyDTO,
   PermissionRuleDTO,
+  PlanSettingDTO,
   PreflightItemDTO,
   ProfileDTO,
   ProviderConnectionDTO,
@@ -37,6 +41,9 @@ import type {
    ~/.brindle/config.json, "local" the repo's gitignored
    .brindle/config.local.json, "repo" its committed .brindle/config.json. */
 export type RoutingScope = "user" | "local" | "repo";
+
+/* Plan approvals (config `plan`): plan first for heavy, cross-repo and risky changes, or always, or never. */
+export type Plan = PlanSettingDTO["user"];
 
 export interface RoutingPut {
   repo: string;
@@ -1248,6 +1255,31 @@ export class DaemonClient {
 
   saveOrgApprovalPolicy(body: OrgPolicyRequestDTO) {
     return this.put<OrgApprovalPolicyDTO>("/org-permissions/policy", body);
+  }
+
+  /* Organization governance (routes_governance): who manages this device and
+     whether its signed policy verifies; an offline policy export (written to
+     the repo's .brindle/policy.json); a managed device file to save; plan approvals. */
+  governance() {
+    return this.get<GovernanceStatusDTO>("/governance");
+  }
+
+  exportOfflinePolicy(days: number, repo?: string) {
+    return this.post<OfflinePolicyExportDTO>("/governance/offline-policy", { days, ...(repo ? { repo } : {}) });
+  }
+
+  deviceFile(body: { name: string; allow_airgap: boolean; audit_sink?: string }) {
+    return this.post<DeviceFileDTO>("/governance/device-file", body);
+  }
+
+  /* With `repo`, the project's override and what applies there too. */
+  planSetting(repo?: string) {
+    return this.get<PlanSettingDTO>("/governance/plan", { repo });
+  }
+
+  /* `plan` null (scope "repo"): clear the project's override. */
+  setPlan(body: { scope: "user" | "repo"; repo?: string; plan: Plan | null }) {
+    return this.put<PlanSettingDTO>("/governance/plan", body);
   }
 
   /* Starts a sign-in as a job: a job.progress event carries the URL to open

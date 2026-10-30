@@ -226,12 +226,15 @@ def launch_flags(cwd: str | None, review: bool = False) -> list[str]:
     """The flags a Codex agent in ``cwd`` launches with: brindle's hook when the
     repo's policy is on and the person trusted the hook; else none. A reviewer
     gets it with the policy off too (nobody watches its prompts; the hook only
-    allows what its allowed_tools cover, #241), but only a hook trusted
-    already: with the policy off brindle never trusts a NEW one itself, and a
-    REMOVED trust stays removed."""
+    allows what its allowed_tools cover, #241), and so does any agent in a
+    checkout an org or managed device governs (its controls bind either way,
+    permissions.org_only), but only a hook trusted already: with the policy
+    off brindle never trusts a NEW one itself, and a REMOVED trust stays removed."""
     try:
         if not policy_on(cwd):
-            if not review:
+            from brindle.permission_grants import org_governs
+
+            if not review and not (cwd and org_governs(cwd)):
                 return []
             command = hook_command()
             if status(command) not in (TRUSTED, MOVED):

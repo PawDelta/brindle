@@ -40,7 +40,6 @@ export const SETTINGS: Setting[] = [
   { key: "base_branch", label: "PR branch", kind: "text", fallback: null, repoOnly: true, blurb: "The branch pull requests target. Empty: the repo's default branch." },
   { key: "rules", label: "Project rules", kind: "list", fallback: [], repoOnly: true, blurb: "Rules every worker in this repo follows, one per line." },
   { key: "max_agents", label: "Workers at once", kind: "number", fallback: 5, common: true, blurb: "How many workers a session runs at the same time. 0 means no cap." },
-  { key: "plan_first", label: "Plan first", kind: "boolean", fallback: false, common: true, blurb: "Workers propose a plan and wait for your approval before they edit anything." },
   {
     key: "overlap",
     label: "Overlapping tasks",
@@ -68,6 +67,10 @@ export const SETTINGS: Setting[] = [
     ],
   },
 ];
+
+/* The keys the "everything else" lists leave out: those with a row above, and
+   the supervisor's goal driving, always on now (the engine keeps its key). */
+export const HANDLED = [...SETTINGS.map((s) => s.key), "autopilot"];
 
 export type Draft = Record<string, unknown>;
 

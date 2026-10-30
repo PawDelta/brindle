@@ -264,27 +264,34 @@ def permission_decision(db: DB, agent_id: str, ws: Workspace, tool: str, args: d
     """With permission_policy on, the shared rules' word on a native tool call
     before the profile's own permissions: a deny, an ask a rule makes, or an
     allow by the person's own rules or saved actions. None leaves it to the
-    profile (an allow a preset makes, or an ask no rule made)."""
+    profile (an allow a preset makes, or an ask no rule made). With the
+    policy off, only the org's and the managed device's deny or ask
+    (permissions.org_only)."""
     from brindle import permissions
     from brindle.antigravity import tool_names
     from brindle.config import load_repo_config
+    from brindle.permission_grants import org_check
     from brindle.profiles import profile_rules_for
 
     cfg = load_repo_config(ws.repo_root)
-    if cfg.permission_policy != "on":
-        return None
+    policy = cfg.permission_policy == "on"
     agent = db.get_agent(agent_id)
     if agent is None:
-        return "deny"
+        return "deny" if policy else None
     name = f"mcp__brindle__{tool}" if tool in tool_names() else tool
     req = permissions.from_claude({"tool_name": name, "tool_input": args, "cwd": ws.path},
                                   ws.path, ws.repo_root, agent_id)
     if req is None:
-        return "deny"
+        return "deny" if policy else None
     req = dataclasses.replace(req, provider="native")
-    rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
-    decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=agents._session_of(db, agent),
-                                  spend=True)
+    if not policy:
+        # Off drops the person's own rules, never the org's or the managed device's.
+        found = permissions.org_only([req], checks=cfg.checks)
+        return found.decision if found is not None else None
+    with org_check(ws.repo_root):    # the rules' org denies and decide's controls: one policy
+        rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+        decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=agents._session_of(db, agent),
+                                      spend=True)
     rule = decision.rule
     if decision.decision == "deny" or rule is not None and (
             decision.decision == "ask" or rule.decision == "ask" or rule.source in ("user", "learned")):

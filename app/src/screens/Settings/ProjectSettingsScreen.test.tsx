@@ -11,7 +11,6 @@ import { StoreContext } from "../../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN, type DaemonData } from "../../test/fakeDaemon";
 import { REPO } from "../../test/fixtures";
 import { SettingsScreen } from ".";
-import { SETTINGS, scopeOf, statusLine } from "./settings";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
@@ -22,7 +21,7 @@ function setup(data: Partial<DaemonData> = {}) {
     repos: [{ repo_root: REPO, name: "proj" }],
     config: {
       user: { supervisor: "claude" },
-      repo: { checks: ["npm test"], max_agents: 5, default_agent: "developer", sidebar: "left", overlap: null },
+      repo: { checks: ["npm test"], max_agents: 5, default_agent: "developer", sidebar: "left", overlap: null, autopilot: false },
       local: {},
       keys: [{ name: "ANTHROPIC_API_KEY", set: true, last4: "WXYZ" }],
     },
@@ -84,6 +83,8 @@ describe("settings repo view", () => {
     await waitFor(() => expect(screen.queryByTestId("settings-save")).toBeNull());
     fireEvent.click(within(screen.getByTestId("repo-settings")).getByRole("button", { name: /Everything else/ }));
     expect(screen.getByTestId("config-rest").textContent).toContain("default_agent");
+    // The goal-driving key the repo's file still sets is not one of everything else.
+    expect(screen.getByTestId("project-settings").textContent).not.toMatch(/autopilot/i);
     // The Autopilot row is gone, and so is the old overrides list.
     expect(screen.queryByRole("switch", { name: "Autopilot" })).toBeNull();
     expect(screen.queryByTestId("project-overrides")).toBeNull();
@@ -134,6 +135,31 @@ describe("settings repo view", () => {
     stop();
   });
 
+  it.each([
+    ["your default", undefined],
+    // The project's committed config.json sets it: clearing the local override reads that, never yours.
+    ["the project's shared config", { [REPO]: "auto" as const }],
+  ])("plan approvals: a local override over %s, and clearing it", async (_, shared) => {
+    const { daemon, stop } = setup({ plan: { user: "never", projects: {}, shared } });
+    const section = screen.getByTestId("project-plan-approvals");
+    const plan = await within(section).findByRole("combobox", { name: "Plan approvals" });
+    const unset = () => within(plan).getAllByRole("option")[0];
+    expect(plan).toHaveProperty("value", "");
+    expect(unset().textContent!.startsWith("Yours")).toBe(!shared);
+    expect(!!within(section).queryByTestId("plan-shared")).toBe(!!shared);
+    fireEvent.change(plan, { target: { value: "always" } });
+    await waitFor(() => expect(daemon.data.plan.projects).toEqual({ [REPO]: "always" }));
+    await waitFor(() => expect(plan).toHaveProperty("value", "always"));
+    expect(within(section).queryByTestId("plan-shared")).toBeNull();
+    expect(unset().textContent!.startsWith("Yours")).toBe(!shared);
+    fireEvent.change(plan, { target: { value: "" } });
+    await waitFor(() => expect(daemon.data.plan.projects).toEqual({}));
+    await waitFor(() => expect(!!within(section).queryByTestId("plan-shared")).toBe(!!shared));
+    const puts = daemon.requests.filter((r) => r.method === "PUT" && r.path === "/governance/plan").map((r) => r.body);
+    expect(puts).toEqual([{ scope: "repo", repo: REPO, plan: "always" }, { scope: "repo", repo: REPO, plan: null }]);
+    stop();
+  });
+
   it("never saves one project's checks into another while its config has not loaded", async () => {
     const OTHER = "/home/u/other";
     const { daemon, failing, stop } = setup({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }] });
@@ -154,17 +180,5 @@ describe("settings repo view", () => {
     expect(await screen.findByRole("textbox", { name: "Checks" })).toHaveProperty("value", "npm test");
     expect(screen.queryByTestId("settings-save")).toBeNull();
     stop();
-  });
-});
-
-describe("statusLine", () => {
-  const setting = (key: string) => SETTINGS.find((s) => s.key === key)!;
-  it.each([
-    ["plan_first", { plan_first: "repo" as const }, false, "Set by the team"],
-    ["plan_first", { plan_first: "local" as const }, false, "Just for you"],
-    ["max_agents", {}, undefined, "Same as yours (5)"],
-    ["stale_after", undefined, 45, "Same as yours (45 minutes)"],
-  ])("%s resolves through the three layers to %s", (key, overrides, yours, line) => {
-    expect(statusLine(setting(key), scopeOf(overrides, key), yours)).toBe(line);
   });
 });

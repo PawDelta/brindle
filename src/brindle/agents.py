@@ -156,20 +156,27 @@ PERMISSION_GUIDANCE = (
 )
 
 
-def is_review_profile(profile_name: str, repo_root: str) -> bool:
-    """Whether ``profile_name`` is a reviewer (or extends one): it reads a
-    branch and reports, so it has nothing to commit, test or merge."""
+def review_role(profile_name: str, repo_root: str) -> bool:
+    """Whether ``profile_name`` is a reviewer (or extends one). Raises when a
+    profile in the chain can't be loaded, so a caller can refuse instead of
+    guessing that an unresolved reviewer is a builder."""
     name: str | None = profile_name
     seen: set[str] = set()
     while name and name not in seen:
         if name.startswith("reviewer"):
             return True
         seen.add(name)
-        try:
-            name = load_profile(name, repo_root).extends   # one step up the chain
-        except Exception:  # noqa: BLE001 - an unknown profile is a builder as before
-            return False
+        name = load_profile(name, repo_root).extends   # one step up the chain
     return False
+
+
+def is_review_profile(profile_name: str, repo_root: str) -> bool:
+    """Whether ``profile_name`` is a reviewer (or extends one): it reads a
+    branch and reports, so it has nothing to commit, test or merge."""
+    try:
+        return review_role(profile_name, repo_root)
+    except Exception:  # noqa: BLE001 - an unknown profile is a builder as before
+        return False
 
 
 def worker_guidance(ws: Workspace, report_only: bool = False) -> str:
@@ -461,6 +468,10 @@ def spawn(
     if why:
         raise AgentError(why)
     db.add_agent(agent)
+    # The verified team member this session ran for, so a plan approval is bound to it.
+    from brindle import plan_policy
+
+    db.update_agent(agent_id, member=plan_policy.current_member(ws.repo_root))
     if agent.weight:
         db.update_agent(agent_id, weight=agent.weight)
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):
@@ -2657,8 +2668,11 @@ def delegate(
     start: str | None = None,
     files: list[str] | None = None,
     weight: str | None = None,
+    depends_on: list[str] | None = None,
+    dependent_task_id: str | None = None,
 ) -> tuple[Agent, Workspace]:
-    """Start a worker. ``weight`` is the weight its task was routed as.
+    """Start a worker. ``weight`` is the weight its task was routed as;
+    ``depends_on`` only feeds the plan policy (a dependency in another repo).
     ``plan_first`` (None: the repo's ``plan_first`` config)
     makes it get a plan approved before it may edit; ``files`` picks the
     decisions its brief carries. With ``isolate``, the worker gets a new worktree whose
@@ -2677,8 +2691,27 @@ def delegate(
         pilot.check_capacity(db, caller.id if caller else None, load_repo_config(cap_root))
     except pilot.AutopilotError as e:
         raise AgentError(str(e)) from e
+    from brindle import plan_policy
+    from brindle import tasks as task_mod
+    from brindle.plan_policy import PlanTask
+    from brindle.pro.org_context import OrgContext, Providers
+
+    ctx = OrgContext.resolve(repo_root=caller_ws.repo_root, providers=Providers(
+        plan_rules=lambda: plan_policy.load_org_rules(caller_ws.repo_root)))
+    try:
+        org_rules = ctx.plan_rules
+    except plan_policy.OrgRulesUnavailable as e:
+        raise AgentError(str(e)) from e
+    own = repos.own_root(db, pilot.root_of(db, caller.id)) if caller else None
+    dep_repos = task_mod.dependency_repos(db, caller_ws, depends_on, caller.id if caller else None,
+                                          dependent_task_id=dependent_task_id)
+    plan_task = PlanTask(weight=weight, files=files,
+                         cross_repo=(bool(own) and own != caller_ws.repo_root)
+                         or any(r != caller_ws.repo_root for r in dep_repos))
     if plan_first is None:
-        plan_first = load_repo_config(caller_ws.repo_root).plan_first
+        plan_first = ctx.needs_plan(plan_task, config=load_repo_config(caller_ws.repo_root))
+    elif not plan_first:
+        plan_first = plan_policy.org_requires_plan(plan_task, org_rules)  # an explicit False can't waive the org's
     from brindle import identity_lock
 
     identity_lock.ensure_workspace(db, caller_ws)
@@ -3355,26 +3388,135 @@ def submit_plan(db: DB, agent_id: str, plan: str) -> str:
         return "Give the plan."
     if not agent.parent_id:
         raise AgentError("no supervisor to send the plan to")
-    db.update_agent(agent.id, plan_state="proposed", plan_text=plan.strip())
+    db.update_agent(agent.id, plan_state="proposed", plan_text=plan.strip(), plan_approvals=None)
+    _emit_plan(db, "plan.submitted", agent, agent)
     send_message(db, agent.parent_id,
                  f"Worker {agent.id} proposes this plan and is waiting for your decision "
                  f"(approve_plan agent_id={agent.id}):\n\n{plan.strip()}", sender_id=agent.id)
     return "Plan sent. Stop now and wait for your supervisor's decision; don't edit files until it's approved."
 
 
+def _emit_plan(db: DB, kind: str, agent: Agent, actor: Agent | str | None) -> None:
+    """Record a plan event in the audit log (through the events plugins)."""
+    from brindle import events
+    from brindle.config import load_repo_config
+
+    ws = db.get_workspace(agent.workspace_id)
+    if ws is not None:
+        events.emit(load_repo_config(ws.repo_root), kind, ws, agent, actor=actor)
+
+
+def _org_rules_for(db: DB, agent: Agent):
+    """The org's plan rules for ``agent``'s repo (None: no team org); a team
+    org whose policy can't be read refuses."""
+    from brindle import plan_policy
+
+    ws = db.get_workspace(agent.workspace_id)
+    try:
+        return plan_policy.load_org_rules(ws.repo_root) if ws else None
+    except plan_policy.OrgRulesUnavailable as e:
+        raise AgentError(str(e)) from e
+
+
+def _org_eligibility(db: DB, caller_id: str | None, agent: Agent, rules, human_member: str | None = None):
+    """Judge the verified Inbox member or the member bound to an agent at spawn.
+    Return (approver, plan, refusal); refusal is None when the caller may approve."""
+    from brindle import autopilot, plan_approvals, plan_policy, repos, tasks
+
+    ws = db.get_workspace(agent.workspace_id)
+    caller = db.get_agent(caller_id) if caller_id is not None else None
+    # the caller's profile is judged in the caller's own repo: a custom profile may exist only there
+    caller_ws = db.get_workspace(caller.workspace_id) if caller else None
+    if caller and caller_ws is None:
+        return None, None, "can't tell whether the caller is a reviewer agent; refusing"
+    try:
+        reviewer = bool(caller) and review_role(caller.profile, caller_ws.repo_root)
+    except Exception:  # noqa: BLE001 - an unresolvable profile can't be shown to be a builder
+        return None, None, "can't verify the caller's profile is not a reviewer agent; refusing"
+    member = human_member if human_member is not None else caller.member if caller else None
+    task = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == agent.id), None)
+    # Rebuild delegation's risk in the delegating session, not the approver's.
+    # Use the original workspace for dependency resolution: the worker may have
+    # its own worktree, and a queued task must not shadow its own dependency.
+    delegator_id = task.caller_id if task else agent.parent_id
+    target_ws = db.get_workspace(task.caller_ws_id) if task else ws
+    own = repos.own_root(db, autopilot.root_of(db, delegator_id)) if delegator_id else None
+    dep_repos = tasks.dependency_repos(
+        db, target_ws or ws,
+        json.loads(task.depends_on) if task and task.depends_on else None,
+        delegator_id, dependent_task_id=task.id if task else None,
+    )
+    plan = plan_policy.PlanTask(
+        weight=agent.weight,
+        files=json.loads(task.files) if task and task.files else None,
+        cross_repo=(bool(own) and own != ws.repo_root)
+        or any(r != ws.repo_root for r in dep_repos),
+    )
+    if member is None:
+        return None, plan, ("your org's plan rules need an approver started while signed in to the org "
+                            "(this agent has no team member bound)")
+    who = plan_approvals.Approver(member, reviewer)
+    decision = plan_approvals.eligible(rules, who, plan)
+    return who, plan, None if decision.allowed else decision.reason
+
+
+def _org_plan_refusal(db: DB, caller_id: str | None, agent: Agent, rules, so_far: list[str],
+                      human_member: str | None = None) -> str | None:
+    """Why the org's plan rules refuse this approval, or None. An eligible
+    first approval a two-person rule still waits on is recorded and refused;
+    an ineligible one changes nothing."""
+    from brindle import plan_approvals
+
+    who, plan, denied = _org_eligibility(db, caller_id, agent, rules, human_member)
+    if denied:
+        return denied
+    member = who.id
+    d = plan_approvals.may_approve(rules, who, plan, so_far)
+    if d.allowed:
+        return None
+    if member not in so_far:
+        db.update_agent(agent.id, plan_approvals=json.dumps([*so_far, member]))
+        _emit_plan(db, "plan.approved", agent, human_member or caller_id)
+    return d.reason
+
+
 def approve_plan(db: DB, caller_id: str | None, agent_id: str, feedback: str = "",
-                 approved: bool = True) -> str:
-    """The worker's parent decides on its proposed plan; the worker is told."""
+                 approved: bool = True, *, human: bool = False, human_member: str | None = None) -> str:
+    """The worker's parent decides on its proposed plan; the worker is told.
+    The Inbox supplies human decisions, with a verified member for identity-based org rules."""
     agent = get(db, agent_id)
     if not agent.plan_first:
         raise AgentError(f"{agent.id} isn't a plan-first worker")
-    if caller_id is None or agent.parent_id != caller_id:
+    if caller_id is None and not human:
+        raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
+    rules = _org_rules_for(db, agent)
+    if human:
+        if rules and rules.requires_member:
+            if not human_member:
+                raise AgentError("Sign in to approve or revise a plan under your org's approval rules")
+        else:
+            # A local human decision needs no member vote when the policy has no identity requirement.
+            rules = None
+    if not human and agent.parent_id != caller_id and not (
+            rules and caller_id != agent.id and db.get_agent(caller_id)):
+        # Org rules open approval to any other agent (another member's supervisor, a
+        # reviewer); the member behind it is verified and judged by the rules.
         raise AgentError(f"only {agent.id}'s supervisor can decide on its plan")
     if agent.plan_state != "proposed":
         raise AgentError(f"{agent.id} has no plan awaiting a decision")
+    if not approved and rules and (human or agent.parent_id != caller_id):
+        # A revision is a decision too: a non-parent needs an eligible bound member.
+        denied = _org_eligibility(db, caller_id, agent, rules, human_member)[2]
+        if denied:
+            raise AgentError(denied)
     feedback = feedback.strip()
     if approved:
-        db.update_agent(agent.id, plan_state="approved", plan_text=None)
+        so_far = json.loads(agent.plan_approvals or "[]")
+        denied = _org_plan_refusal(db, caller_id, agent, rules, so_far, human_member) if rules else None
+        if denied:
+            raise AgentError(denied)
+        db.update_agent(agent.id, plan_state="approved", plan_text=None, plan_approvals=None)
+        _emit_plan(db, "plan.approved", agent, human_member or caller_id)
         text = "Your plan is approved: go ahead and implement it."
     else:
         db.update_agent(agent.id, plan_state="revise")
@@ -3458,8 +3600,9 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
 
 
 def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, load) -> dict | None:
-    """With ``permission_policy`` on, the policy's word on a PreToolUse call
-    before any approval of brindle's own: a deny denies it, and an ask a rule
+    """The policy's word on a PreToolUse call (with ``permission_policy`` off,
+    only the org's and the managed device's: permissions.org_only) before
+    any approval of brindle's own: a deny denies it, and an ask a rule
     makes explicitly forces Claude Code's prompt (``permissionDecision``
     "ask"), so the PermissionRequest hook then holds it for the person,
     whatever the profile's allowed_tools or Claude Code's own mode would have
@@ -3473,17 +3616,24 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, 
         from brindle.config import load_repo_config
 
         cfg = load_repo_config(ws.repo_root)
-        if cfg.permission_policy != "on":
-            return None
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
         if req is None:
             return None
-        try:
-            profile_rules = permissions.profile_rules(load())
-        except KeyError:  # a deleted profile: no override (profiles.profile_rules_for)
-            profile_rules = []
-        rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-        decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
+        if cfg.permission_policy != "on":
+            # Off drops the person's own rules, never the org's or the managed device's.
+            decision = permissions.org_only([req], checks=cfg.checks)
+            if decision is None:
+                return None
+        else:
+            try:
+                profile_rules = permissions.profile_rules(load())
+            except KeyError:  # a deleted profile: no override (profiles.profile_rules_for)
+                profile_rules = []
+            from brindle.permission_grants import org_check
+
+            with org_check(ws.repo_root):        # the rules' org denies and decide's controls: one policy
+                rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+                decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
         if decision.decision == "deny" or (decision.decision == "ask" and decision.rule is not None):
             if decision.decision == "deny":   # an ask is counted when the PermissionRequest hook holds it
                 _note_decision(db, agent, ws, req.kind, req.summary(), decision)
@@ -3550,9 +3700,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         # Policy off: of the other CLIs only a Codex reviewer has the hook
         # (codex_hook.launch_flags). Nobody watches it, so it gets what its
         # allowed_tools cover and nothing else of brindle's: every other
-        # answer is Codex's own.
+        # answer is Codex's own. With the policy off, any Codex or OpenCode
+        # agent that has the hook still gets the org's and the managed
+        # device's word (org_only).
         review_only = not policy and provider == "codex"
-        if not policy and provider != "claude" and not (review_only and agent.mode == "review"):
+        if not policy and provider not in ("claude", "codex", "opencode"):
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         session = _session_of(db, agent)   # for saved actions that last this session
@@ -3562,55 +3714,65 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             reqs = permissions.from_codex(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
             if not reqs:
                 return None
-            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
             from dataclasses import replace
 
             from brindle.native.permissions import Permissions, split_commands, uncovered_part
+            from brindle.permission_grants import org_check
             from brindle.profiles import load_profile
 
             try:
                 profile = load_profile(agent.profile, ws.repo_root)
             except KeyError:
                 profile = None  # deleted profile: no extra allowances
-            if profile is not None:
-                rules += permissions.profile_bash_allows(profile)
-            decision = permissions.Decision("ask", "not in the profile's allowed_tools") if review_only \
-                else permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session, spend=True)
-            if decision.decision == "ask" and len(reqs) == 1:
-                # A deny on one part of a compound command (cd x && <denied>)
-                # wins before any part-by-part allow below.
-                decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
-            # A rule that asks explicitly is the person's to decide, whatever the
-            # profile's allowed_tools cover: only an ask no rule made falls to them.
-            explicit = decision.decision == "ask" and decision.rule is not None
-            if decision.decision == "ask" and profile is not None and not explicit:
-                perms = Permissions(profile.permission_mode, profile.allowed_tools)
-                command = reqs[0].command or ""
-                specs = [spec for name, spec in perms.rules
-                         if name == "Bash" and spec not in (None, "", "*")]
-                cwd = os.path.realpath(reqs[0].cwd or ws.path)
-                root = os.path.realpath(ws.path)
-                # Like pre_tool_decision: a compound command whose every part
-                # allowed_tools covers (a cd within the worktree counts).
-                if (len(reqs) == 1 and reqs[0].kind == "bash" and specs
-                        and (cwd == root or cwd.startswith(root + os.sep))
-                        and uncovered_part(specs, command, cd_root=ws.path) is None):
-                    decision = permissions.Decision(
-                        "allow", "every part of the command matches the profile's allowed_tools")
-                    # Deny each part as the allow just read it (quotes and a
-                    # harmless redirection gone), which deny_in_parts doesn't.
-                    for part in split_commands(command):
-                        denied = permissions.decide(replace(reqs[0], command=part), checks=cfg.checks, rules=rules)
-                        if denied.decision == "deny" or (denied.decision == "ask" and denied.rule is not None):
-                            decision = denied
-                            break
-                elif perms.mode == "dontAsk":
-                    # Nobody watches this pane: a prompt would stall the agent.
-                    decision = permissions.Decision(
-                        "deny", f"{decision.reason.removesuffix('; asking the user')}, and this profile "
-                        "never asks (permission_mode dontAsk). Don't retry it: do without it, or ask "
-                        "your supervisor with the send_message tool (brindle MCP server)")
-            if review_only and decision.decision != "allow":
+            with org_check(ws.repo_root):    # the rules' org denies and every decide's controls: one policy
+                rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+                if profile is not None:
+                    rules += permissions.profile_bash_allows(profile)
+                # The org's and the managed device's word still binds every agent.
+                bound = permissions.org_only(reqs, checks=cfg.checks) if review_only else None
+                if review_only and agent.mode != "review" and (bound is None or bound.decision != "deny"):
+                    return None    # only a reviewer gets its allowed_tools; the rest is Codex's own
+                if review_only:
+                    decision = bound or permissions.Decision("ask", "not in the profile's allowed_tools")
+                else:
+                    decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session,
+                                                      spend=True)
+                if decision.decision == "ask" and len(reqs) == 1:
+                    # A deny on one part of a compound command (cd x && <denied>)
+                    # wins before any part-by-part allow below.
+                    decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+                # A rule that asks explicitly is the person's to decide, whatever the
+                # profile's allowed_tools cover: only an ask no rule made falls to them.
+                explicit = decision.decision == "ask" and decision.rule is not None
+                if decision.decision == "ask" and profile is not None and not explicit:
+                    perms = Permissions(profile.permission_mode, profile.allowed_tools)
+                    command = reqs[0].command or ""
+                    specs = [spec for name, spec in perms.rules
+                             if name == "Bash" and spec not in (None, "", "*")]
+                    cwd = os.path.realpath(reqs[0].cwd or ws.path)
+                    root = os.path.realpath(ws.path)
+                    # Like pre_tool_decision: a compound command whose every part
+                    # allowed_tools covers (a cd within the worktree counts).
+                    if (len(reqs) == 1 and reqs[0].kind == "bash" and specs
+                            and (cwd == root or cwd.startswith(root + os.sep))
+                            and uncovered_part(specs, command, cd_root=ws.path) is None):
+                        decision = permissions.Decision(
+                            "allow", "every part of the command matches the profile's allowed_tools")
+                        # Deny each part as the allow just read it (quotes and a
+                        # harmless redirection gone), which deny_in_parts doesn't.
+                        for part in split_commands(command):
+                            denied = permissions.decide(replace(reqs[0], command=part), checks=cfg.checks,
+                                                        rules=rules)
+                            if denied.decision == "deny" or (denied.decision == "ask" and denied.rule is not None):
+                                decision = denied
+                                break
+                    elif perms.mode == "dontAsk":
+                        # Nobody watches this pane: a prompt would stall the agent.
+                        decision = permissions.Decision(
+                            "deny", f"{decision.reason.removesuffix('; asking the user')}, and this profile "
+                            "never asks (permission_mode dontAsk). Don't attempt it again: do without it, or ask "
+                            "your supervisor with the send_message tool (brindle MCP server)")
+            if review_only and decision.decision != "allow" and (decision is not bound or bound.decision != "deny"):
                 return None  # as Codex would without brindle: its own prompt or refusal
             summary = reqs[0].summary() if len(reqs) == 1 else (
                 f"{reqs[0].tool}: " + ", ".join(r.path or "?" for r in reqs))[:200]
@@ -3645,9 +3807,15 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
             if not reqs:
                 return None
-            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
-            if decision.decision == "ask" and len(reqs) == 1:
+            from brindle.permission_grants import org_check
+
+            if not policy:
+                decision = permissions.org_only(reqs, checks=cfg.checks) or permissions.Decision("ask", "")
+            else:
+                with org_check(ws.repo_root):    # the rules' org denies and decide's controls: one policy
+                    rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+                    decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
+            if policy and decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
             if decision.decision == "ask" and decision.rule is not None:
@@ -3667,8 +3835,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         if req is None:
             return None
         if policy:
-            rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=session, spend=True)
+            from brindle.permission_grants import org_check
+
+            with org_check(ws.repo_root):    # the rules' org denies and decide's controls: one policy
+                rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
+                decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=session, spend=True)
             _record_permission(db, agent, ws, req.summary(), f"{decision.decision}: {decision.reason}")
             if decision.decision != "ask":
                 _note_decision(db, agent, ws, req.kind, req.summary(), decision)

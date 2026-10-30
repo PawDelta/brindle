@@ -345,8 +345,10 @@ def _read_head(path: Path) -> dict | None:
 
 
 def append(repo_root: str, event: dict, *, home: Path | None = None,
-           key: Ed25519PrivateKey | None = None, ts: str | None = None) -> dict:
-    """Append ``event`` to the repo's chain and return the record written."""
+           key: Ed25519PrivateKey | None = None, ts: str | None = None, after=None) -> dict:
+    """Append ``event`` to the repo's chain and return the record written.
+    ``after(record)``, if given, runs once the record is on disk and while the
+    chain lock is still held (local file work only; it must not raise)."""
     path = log_path(repo_root, home)
     key = key or signing_key(home)
     with _locked(path):
@@ -365,6 +367,8 @@ def append(repo_root: str, event: dict, *, home: Path | None = None,
         finally:
             os.close(fd)
         _write_atomic(_head_path(path), (canonical({"seq": seq, "hash": record_hash(rec)}) + "\n").encode())
+        if after is not None:
+            after(rec)
     return rec
 
 
@@ -555,12 +559,18 @@ def export(repo_root: str | None = None, *, since: datetime | None = None, fmt: 
 
 
 class AuditChain(EventsPlugin):
-    """Append every event to the repo's chain, when entitled."""
+    """Append every event to the repo's chain, when entitled.
 
-    def __init__(self, repo_root: str, *, home: Path | None = None, entitled=None) -> None:
+    ``stream_targets`` is this repo's target list or cache-only provider;
+    an unconfigured chain never inherits another repo's streaming targets.
+    """
+
+    def __init__(self, repo_root: str, *, home: Path | None = None, entitled=None,
+                 stream_targets=()) -> None:
         self.repo_root = repo_root
         self.home = home
         self._entitled = entitled
+        self._stream_targets = stream_targets if stream_targets is not None else ()
         self.dropped = 0
 
     def entitled(self) -> bool:
@@ -569,10 +579,10 @@ class AuditChain(EventsPlugin):
         event never waits on the network. Fails closed."""
         if self._entitled is not None:
             return bool(self._entitled())
-        from brindle.pro import license
+        from brindle.pro import license, managed
 
         try:
-            return FEATURE in license.current(refresh=False).features
+            return isinstance(managed.load(), managed.Managed) or FEATURE in license.current(refresh=False).features
         except Exception:  # noqa: BLE001 - not logged in, expired, unreadable: no audit
             return False
 
@@ -584,14 +594,22 @@ class AuditChain(EventsPlugin):
         try:
             if not self.entitled():
                 return
-            append(event.repo_root or self.repo_root, event_record(event), home=self.home)
+            from brindle.pro import audit_stream
+
+            # audit streaming: queue under the chain lock (same order as the chain), send in the background
+            append(event.repo_root or self.repo_root, event_record(event), home=self.home,
+                   after=lambda rec: audit_stream.enqueue(rec, self.home, targets=self._stream_targets))
+            audit_stream.kick(self.home, targets=self._stream_targets)
         except Exception:  # noqa: BLE001 - never fail the operation being reported
             self.dropped += 1
             log.warning("brindle: couldn't append to the audit chain", exc_info=True)
 
 
 def make(repo_root: str) -> AuditChain:
-    return AuditChain(repo_root)
+    from brindle.pro import org_context
+
+    return AuditChain(repo_root, stream_targets=lambda: org_context.OrgContext.resolve(
+        repo_root=repo_root, cached_only=True).audit_sinks())
 
 
 __all__ = ["CHECKPOINT_KIND", "CSV_COLUMNS", "EVENT_KEYS", "FEATURE", "RECORD_KEYS", "ZERO_HASH",

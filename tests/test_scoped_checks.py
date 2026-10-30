@@ -37,6 +37,11 @@ DYNAMIC_IMPORTS = {
     "relative-level": "__import__('new', globals(), locals(), [], 1)\n",
     "dynamic-level": "__import__('new', level=level)\n",
 }
+INTERMEDIARIES = {   # a source module between the changed one and a test
+    "namespace": {"src/pkg/ns/api.py": "import pkg.pro.status\n", "tests/test_ns.py": "import pkg.ns.api\n"},
+    "relative-dynamic": {"src/pkg/dyn.py": "from importlib import import_module\nimport_module(f'.{name}', package='pkg')\n",
+                         "tests/test_dyn.py": "import pkg.dyn\n"},
+}
 
 
 @pytest.mark.parametrize("where,cmd,changes,ran", [
@@ -52,7 +57,12 @@ DYNAMIC_IMPORTS = {
      [PYTEST]),   # an unmapped module with an unresolved dynamic test import
     ("infer", PYTEST, {"src/pkg/pro/status.py": "X = 1\n",
                        "tests/test_other.py": "import pkg.pro.status\ndef test_new(): pass\n"},
-     [f"{PYTEST} tests/test_direct.py tests/test_from.py tests/test_member.py tests/test_other.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/sub/test_sub.py tests/test_api.py tests/test_direct.py tests/test_from.py tests/test_member.py "
+      "tests/test_other.py || [ $? -eq 5 ]"]),   # test_api and tests/sub reach it only through pkg.api
+    ("namespace", PYTEST, {"src/pkg/pro/status.py": "X = 1\n"}, [PYTEST]),   # pkg.ns.api has no module path to follow
+    ("relative-dynamic", PYTEST, {"src/pkg/pro/status.py": "X = 1\n"},
+     [f"{PYTEST} tests/sub/test_sub.py tests/test_api.py tests/test_direct.py tests/test_dyn.py tests/test_from.py "
+      "tests/test_member.py || [ $? -eq 5 ]"]),   # pkg.dyn may load any module
     ("fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST]),
     pytest.param("dynamic-fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST],
                  marks=pytest.mark.variant("review requested a nonliteral fromlist bypass")),
@@ -86,7 +96,7 @@ DYNAMIC_IMPORTS = {
     ("cap-empty", PYTEST, BOTH, [f"printf '%s\\n' {shlex.quote(EMPTY_NOTE)}"]),   # no own or namesake test: note only
     ("cap-pr", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER}, [PYTEST]),
 ], ids=["python-affected", "deleted-function", "test-helper", "lookup-failed", "fallback-unmapped", "unmapped-importers",
-        "import-fromlist", "import-dynamic-fromlist", "import-relative-level", "import-dynamic-level", "unmapped-test-helper", "quoted-name",
+        "unmapped-namespace-intermediary", "unmapped-relative-dynamic-intermediary", "import-fromlist", "import-dynamic-fromlist", "import-relative-level", "import-dynamic-level", "unmapped-test-helper", "quoted-name",
         "fallback-conftest", "fallback-pyproject", "infer", "infer-options", "infer-selects", "other-command-changed_files_env", "empty-diff",
         "non-python-only", "non-python-plus-python", "lockfile", "unset-mode", "off", "supervisor", "cap", "cap-none", "cap-empty", "cap-pr"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran):
@@ -104,9 +114,12 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
                  "tests/test_from.py": "from pkg.pro import status\n",
                  "tests/test_member.py": "from pkg.pro.status import X\n",
                  "tests/test_unrelated.py": "from pkg.other import status\n",
+                 "src/pkg/api.py": "from .pro import status\n", "tests/test_api.py": "import pkg.api\n",
+                 "tests/sub/conftest.py": "from pkg import api\n", "tests/sub/test_sub.py": "def test_s(): pass\n",
                  "tests/test_f.py": TEST_F, "tests/test_g.py": "from test_f import helper\n"})
     if where in DYNAMIC_IMPORTS:
         write(repo, {"tests/test_dynamic.py": DYNAMIC_IMPORTS[where]})
+    write(repo, INTERMEDIARIES.get(where, {}))
     sh("git add -A && git commit -qm base", repo)
     graph = tmp_path / "graph.json"
     graph.write_text(json.dumps({"nodes": [

@@ -136,7 +136,8 @@ class RepoConfig:
     auto_merge_default_branch: bool = False  # let the pipeline merge into the repo's default branch on its own
     delegation: str = "balanced"      # how readily a supervisor hands work to workers: "conservative" (save tokens), "balanced" or "fast" (save time)
     max_weight: str | None = None      # ceiling for weight routing: "light", "medium", "heavy", "advanced", or None (unlimited)
-    plan_first: bool = False           # workers propose a plan and wait for approval before editing
+    plan_first: bool = False           # legacy: "plan" below wins; load_repo_config maps it to "always"/"never"
+    plan: str = "auto"                 # plan approval before editing: "auto" (brindle.plan_policy), "always" or "never"
     # "on": brindle answers workers' permission requests by its rules (see
     # brindle.permissions). Unset, it's "on" for Pro and up and "off" on Free.
     permission_policy: str = "off"
@@ -365,6 +366,23 @@ def kind_overrides(found: object) -> dict[str, dict[str, str]]:
     return out
 
 
+def _layer_plan(layer: dict) -> str | None:
+    """One config file's ``plan``, or an old file's plan_first ("always" / "never"), or None."""
+    if layer.get("plan") in ("auto", "always", "never"):
+        return layer["plan"]
+    if "plan_first" in layer:
+        return "always" if layer["plan_first"] else "never"
+    return None
+
+
+def plan_layers(repo_root: str | Path) -> dict[str, str | None]:
+    """The plan each of ``repo_root``'s files sets, as load_repo_config reads
+    it ("local" over "repo", the shared file), plan_first included."""
+    base = config_root(repo_root) / CONFIG_DIR
+    return {"local": _layer_plan(_read_json(base / LOCAL_CONFIG_FILE)),
+            "repo": _layer_plan(_read_shared(base.parent, None))}
+
+
 def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: str | None = None) -> RepoConfig:
     """The settings for ``repo_root``: its local file over its shared one over
     the person's ~/.brindle/config.json. ``user_only``: the person's file
@@ -394,6 +412,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             if key in source:
                 setattr(cfg, key, source[key])
                 break
+    cfg.plan = next((p for p in map(_layer_plan, (local, shared, user)) if p), cfg.plan)
     rules: list[str] = []
     for source in (user, shared, local):
         found = source.get("rules")

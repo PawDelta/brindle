@@ -196,6 +196,29 @@ describe("inbox", () => {
     sync.stop();
   });
 
+  it("plan approvals: a plan waiting on the viewer as the second person says so and can be approved; one waiting on named approvers can't", async () => {
+    const plan: InboxItemDTO = { kind: "plan", reason: "plan awaiting approval", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", detail: "1. Migrate." };
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker],
+      inbox: [{ ...plan, approval: { second_person: true, requested_by: "ana@example.test", you: true } }],
+    });
+    const { sync } = mount(daemon);
+    const prompt = await screen.findByTestId("approver-prompt");
+    expect(prompt.textContent).toContain("ana@example.test");
+    const approve = await within(card("plan")).findByRole("button", { name: "Approve" });
+    expect(approve).toBeTruthy();
+    fireEvent.click(approve);
+    await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/w1/approve", query: {}, body: { feedback: "" } }]));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Approve" })).toBeNull());
+    daemon.data.inbox = [{ ...plan, approval: { approvers: ["lee@example.test", "kim@example.test"], you: false } }];
+    daemon.publish("message.queued", { agent_id: "w1" });
+    await waitFor(() => expect(within(card("plan")).queryByRole("button", { name: "Approve" })).toBeNull());
+    const approvers = screen.getByTestId("approver-prompt").textContent;
+    expect(approvers).toContain("lee@example.test");
+    expect(approvers).toContain("kim@example.test");
+    sync.stop();
+  });
+
   it("self-repair: a setup problem the engine can fix is a card with one Fix, a job on the engine; the card clears when it is done, or shows the job's error", async () => {
     // As the engine's M10 inbox lists it (service/inbox._setup_items): no agent, a fix the app has a button for.
     const setupItem: InboxItemDTO = { kind: "setup", fix: "codex_hook_trust", reason: "Codex's trust of brindle's permission hook was removed from Codex's config", action: { method: "POST", path: "/v1/setup/codex-hook" } };

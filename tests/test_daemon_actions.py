@@ -80,8 +80,6 @@ def _flat(args):
 
 @pytest.mark.parametrize("method,path,body,fake,returns,status,target", [
     ("POST", "/v1/sessions/sup/pause", {}, (agents, "pause"), [], 200, "sup"),
-    # The person decides a plan as the worker's supervisor would.
-    ("POST", "/v1/inbox/wk/approve", {}, (agents, "approve_plan"), "approved", 200, "sup"),
     ("POST", "/v1/agents/wk/kill", {}, (agents, "kill"), None, 200, "wk"),
     ("POST", "/v1/workspaces/w-1/review", {}, (agents, "start_review"), None, 200, "w-1"),
     # Real workspace ids contain a slash, which arrives in the path as %2F decoded.

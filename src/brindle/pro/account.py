@@ -82,7 +82,11 @@ USAGE = """usage: brindle account [<command>] [--base-url URL]
   org join <code>   accept an invite code and join that org
   org use <org_id>  work as a member of <org_id> (`personal` for your own)
   org policy        show the current org's policy, its per-role overrides and the
-                    policy that applies to you (and refresh the cached copy)
+                    policy that applies to you (and refresh the cached copy), with the
+                    source of the verified policy (device, account, snapshot or offline)
+  org policy --export [--days N] [--org ORG]
+                    write the signed policy as an offline policy export to
+                    .brindle/policy.json, valid N days (1-90; default 30); Enterprise admins
   org profiles [list] [--org ORG]
             list the org's shared profiles and rule packs (and refresh the cached copy)
   org profiles push <file> [--pack] [--pinned] [--name NAME] [--org ORG]
@@ -382,36 +386,32 @@ class _OrgCommands:
         self._company_login(client)
         return 0
 
-    def cmd_org_policy(self, base: str | None) -> int:
-        from brindle.pro import team_policy
-
-        client = self._client(base)
-        ent = license.current(store=self.store, client=client)
-        if "team" not in ent.features:
-            self._say(f"Org {ent.org_id} has no team policy (plan {ent.plan}); nothing is enforced.")
-            return 0
+    def cmd_org_policy(self, base: str | None, org: str | None = None, export: bool = False,
+                       days: int | None = None) -> int:
         from brindle import airgap
+        from brindle.policy import Decision
+        from brindle.pro import org_cli
 
-        try:
-            if airgap.enabled():     # nothing is fetched: the policy is the offline file's
-                p = team_policy.with_role_overrides(
-                    team_policy.load_offline(self.repo_root, ent.org_id), ent.role, ent.policy_role)
-                note = f" (offline: {airgap.policy_path(self.repo_root)})"
-            else:
-                p = team_policy.fetch_policy(ent.org_id, client, self.store,
-                                             cached_for=(ent.role, ent.policy_role))
-                note = ""
-        except team_policy.PolicyUnavailable as e:
-            if airgap.enabled():
-                self._say(f"brindle account: no usable offline policy for {ent.org_id} ({e}); "
-                          f"delegations and merges are refused until it is at .brindle/{airgap.POLICY_FILE}.")
+        if export:
+            return org_cli.run_export(self.repo_root, org=org, days=days, base=base,
+                                      transport=self.transport, echo=self._say)
+        ctx = org_cli.context(self.repo_root, store=self.store, client=self._client(base))
+        p = ctx.policy
+        if p is None:
+            self._say("brindle account: the org policy can't be read; delegations and merges are refused "
+                      "until it can.")
+            return 1
+        if isinstance(p, Decision):
+            if not p.allowed:
+                self._say(f"brindle account: {p.reason}")
                 return 1
-            p = team_policy.load_cached(ent.org_id)
-            if p is None:
-                self._say(f"brindle account: couldn't fetch the policy for {ent.org_id} ({e}), "
-                          "and none is cached; delegations and merges are refused until it is.")
-                return 1
-            note = f" (cached; couldn't refresh: {e})"
+            ent = ctx.entitlement
+            self._say(f"Org {ent.org_id} has no team policy (plan {ent.plan}); nothing is enforced." if ent
+                      else "No team policy applies; nothing is enforced.")
+            return 0
+        source = ctx.source() or ("offline" if airgap.enabled() else "account")
+        self._say(f"Verified policy source: {source}")
+        full = ctx.cached_policy(p.org_id) if source == "account" else None   # its role overrides
         fmt = lambda v: "any" if v is None else (", ".join(v) or "none")  # noqa: E731
         show = {"allowed_providers": ("providers", fmt), "allowed_models": ("models", fmt),
                 "allowed_profiles": ("profiles", fmt),
@@ -422,29 +422,33 @@ class _OrgCommands:
             for key, (label, f) in show.items():
                 self._say(f"  {label:<22} {f(getattr(q, key))}")
 
-        self._say(f"Policy for org {p.org_id}, version {p.version}{note}")
-        rules(p)
-        c = p.agent_setup.claude if p.agent_setup else None
+        org_p = full or p
+        note = f" (offline: {airgap.policy_path(self.repo_root)})" if source == "offline" else ""
+        self._say(f"Policy for org {org_p.org_id}, version {org_p.version}{note}")
+        rules(org_p)
+        c = org_p.agent_setup.claude if org_p.agent_setup else None
         if c is not None:
             from brindle.pro import managed_models
 
             route = managed_models._describe_claude(c) if c.route in managed_models.CLAUDE_ROUTE_NAMES else c.route
             self._say(f"  {'agent setup':<22} Claude: {route}")
-        if p.roles:
+        if org_p.roles:
             self._say("Role overrides (what a role's members get instead):")
-            for role, over in sorted(p.roles.items()):
-                self._say(f"  {role}")
+            for name, over in sorted(org_p.roles.items()):
+                self._say(f"  {name}")
                 for key, v in over.items():
                     self._say(f"    {show[key][0]:<22} {show[key][1](v)}")
         else:
             self._say("Role overrides: none")
-        role, policy_role = p.role or ent.role, p.policy_role or ent.policy_role
+        ent = ctx.entitlement
+        role = org_p.role or (ent and ent.role)
+        policy_role = org_p.policy_role or (ent and ent.policy_role)
         who = f"role {role or 'member'}" + (f", policy role {policy_role}" if policy_role else "")
-        if p.effective is None:
+        if p is org_p:
             self._say(f"Your policy ({who}): the org policy above.")
         else:
             self._say(f"Your effective policy ({who}):")
-            rules(p.effective)
+            rules(p)
         return 0
 
 
@@ -493,8 +497,10 @@ class ProAccount(_OrgCommands):
                     "device": _take(args, "--device", value=False),
                     "pack": _take(args, "--pack", value=False),
                     "pinned": _take(args, "--pinned", value=False), "name": _take(args, "--name"),
-                    "reset": _take(args, "--reset", value=False)}
+                    "reset": _take(args, "--reset", value=False),
+                    "export": _take(args, "--export", value=False), "days": _take(args, "--days")}
             seats = int(opts["seats"]) if opts["seats"] is not None else None
+            days = int(opts["days"]) if opts["days"] is not None else None
         except ValueError:
             print(USAGE, file=self.err)
             return 2
@@ -534,7 +540,10 @@ class ProAccount(_OrgCommands):
                     else ("org", "pack", "pinned", "name") if sub == "profiles" and rest[1:2] == ["push"]
                     else ("org", "pack") if sub == "profiles" and rest[1:2] == ["rm"]
                     else ("org",) if sub == "profiles"
+                    else ("org", "export", "days") if sub == "policy"
                     else ()}.get(cmd, ())
+        if opts["days"] is not None and not opts["export"]:
+            ok = False
         if not ok or any(v is not None and k not in flags_ok for k, v in opts.items()):
             print(USAGE, file=self.err)
             return 2
@@ -552,6 +561,8 @@ class ProAccount(_OrgCommands):
                     return self.cmd_org_profiles(base, *rest[1:], org=opts["org"],
                                                  pack=bool(opts["pack"]), pinned=bool(opts["pinned"]),
                                                  name=opts["name"])
+                if sub == "policy":
+                    return self.cmd_org_policy(base, org=opts["org"], export=bool(opts["export"]), days=days)
                 if sub in ("company", "member"):
                     return getattr(self, "cmd_org_" + sub)(base, *rest[1:], org=opts["org"])
                 return getattr(self, "cmd_org_" + sub)(base, *rest[1:])

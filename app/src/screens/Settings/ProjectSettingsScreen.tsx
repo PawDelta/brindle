@@ -6,16 +6,18 @@
    the same as yours. A team-set row also offers "Change just for me", which
    writes the value to the local file. The repo-only sections (checks, the
    rules only a repo's files carry) save to the local file too
-   (PATCH /v1/config, scope repo). The page asks GET /v1/config without the
-   stored keys (keys=0): they are the slow part of that route and nothing
-   here shows them. Each section renders at once and fills in when the
-   config arrives, so the page never waits on it. */
+   (PATCH /v1/config, scope repo). Plan approvals has its own override here
+   (Governance.tsx, PUT /v1/governance/plan). The page asks GET /v1/config
+   without the stored keys (keys=0): they are the slow part of that route
+   and nothing here shows them. Each section renders at once and fills in
+   when the config arrives, so the page never waits on it. */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Config, DaemonClient } from "../../api/client";
 import { alert, button, notice, panel, quiet } from "../../components/ui";
-import { More, message, RestOfConfig, Section, SettingRow } from "./SettingsScreen";
-import { PROJECT_RULES, SETTINGS, YOURS, carryEdits, changed, draftOf, invalid, scopeOf, statusLine, values, type Draft, type Setting } from "./settings";
+import { PLAN_HELP, PlanChoice } from "./Governance";
+import { More, message, RestOfConfig, Row, Section, SettingRow } from "./SettingsScreen";
+import { HANDLED, PROJECT_RULES, SETTINGS, YOURS, carryEdits, changed, draftOf, invalid, scopeOf, statusLine, values, type Draft, type Setting } from "./settings";
 
 const only = (...keys: string[]) => PROJECT_RULES.filter((s) => keys.includes(s.key));
 const CHECKS = only("checks");
@@ -104,9 +106,8 @@ export function RepoSettings({ client, repo }: { client: DaemonClient; repo: str
       cleared.current = [key];
     });
 
-  const shown = SETTINGS.map((s) => s.key);
   const restLines: [string, string][] = Object.entries(config?.repo ?? {})
-    .filter(([k]) => !shown.includes(k))
+    .filter(([k]) => !HANDLED.includes(k))
     .map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)]);
   const checkRow = (s: Setting) => <SettingRow key={s.key} s={s} value={draft[s.key]} dirty={dirty.includes(s.key)} disabled={saving} onChange={(v) => edit(s.key, v)} />;
   const row = (s: Setting) => {
@@ -144,6 +145,12 @@ export function RepoSettings({ client, repo }: { client: DaemonClient; repo: str
 
       <Section id="repo-settings-list" title="Settings" blurb="Each one says whether the team, you alone, or your own settings decide it." testId="repo-setting-rows">
         {config ? YOURS.map(row) : loading("settings-loading", "settings")}
+      </Section>
+
+      <Section id="project-plans" title="Plan approvals" blurb="This repo's own choice, saved to .brindle/config.local.json." testId="project-plan-approvals">
+        <Row label="Plan approvals" help={PLAN_HELP} htmlFor="plan-project">
+          <PlanChoice client={client} repo={repo} id="plan-project" />
+        </Row>
       </Section>
 
       <Section id="checks" title="Checks" blurb="Run before a branch merges." testId="project-checks">

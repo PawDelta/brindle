@@ -2,11 +2,14 @@
 
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
+from test_daemon_actions import _send
 
-from brindle import identity_lock, workspaces
+from brindle import agents, identity_lock, plan_policy, workspaces
 from brindle.db import Agent
+from brindle.pro import license
 from brindle.pro import status as org_status
 from brindle.service import inbox
 
@@ -52,6 +55,15 @@ def _notice(db, root, worker, mp):
                   "at": None, "scope": "org"}])))
 
 
+def _plan_approval(db, root, worker, mp):
+    db.update_agent(worker, plan_first=1, plan_state="proposed", plan_approvals=json.dumps(["alice"]))
+    db.update_agent(root, member="alice")
+    rules = plan_policy.OrgPlanRules.from_policy({"plan_approvers": ["alice", "bob"], "plan_two_person": True})
+    mp.setattr(plan_policy, "load_org_rules", lambda repo: rules)
+    mp.setattr(license, "current", lambda **kw: SimpleNamespace(
+        sub="bob", org_id="org1", features={"team"}, role="member", policy_role=None))
+
+
 @pytest.mark.parametrize("kind, setup, expected", [
     ("waiting", _worker(status="waiting"), [("w1", None)]),
     ("credentials", _worker(status="failed", failed_why="auth"), [("w1", None)]),
@@ -59,7 +71,8 @@ def _notice(db, root, worker, mp):
     ("failed", _worker(provider="codex", status="failed", failed_why="delivery"), [("w1", None)]),
     ("question", _two_asking, [("r1", None), ("r2", None)]),
     ("merge_failed", _worker(result="done", merge_failed="conflict in app.py"), [("w1", None)]),
-    ("plan", _worker(plan_state="proposed", plan_text="1. add the column"), [("w1", "1. add the column")]),
+    ("plan", _worker(plan_first=1, plan_state="proposed", plan_text="1. add the column"), [("w1", "1. add the column")]),
+    ("plan", _plan_approval, [("w1", None)]),
     ("proposed_checks", _checks, [("r1", "pytest -q")]),
     ("proposed_checks", _locked_checks, []),
     ("login", _login, [("r1", "aws sso login")]),
@@ -77,6 +90,48 @@ def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, se
     got = [i for i in inbox.items(db, str(repo), panes={"@1": True, "@2": True, "@3": True})
            if i.kind == kind]
     assert sorted((i.agent_id, i.detail) for i in got) == expected
+    if setup is _plan_approval:
+        from brindle.tmux import PaneSnapshot
+
+        monkeypatch.setattr("brindle.tmux.list_panes", PaneSnapshot)
+        code, rows = _send("GET", f"/v1/inbox?repo={repo}")
+        assert code == 200
+        assert next(i["approval"] for i in rows if i["kind"] == "plan") == {
+            "approvers": ["alice", "bob"], "second_person": True, "requested_by": "alice", "you": True}
+        ent = license.current()
+        monkeypatch.setattr(license, "current", lambda **kw: ent)
+        monkeypatch.setattr(agents, "send_message", lambda *a, **kw: None)
+        db.update_agent("w1", plan_approvals=None)
+        for member, expected_code in [("alice", 409), ("alice", 409), ("bob", 200)]:
+            ent.sub = member
+            assert _send("POST", "/v1/inbox/w1/approve")[0] == expected_code
+            worker = db.get_agent("w1")
+            assert worker.plan_state == ("approved" if member == "bob" else "proposed")
+            assert json.loads(worker.plan_approvals or "[]") == ([] if member == "bob" else ["alice"])
+        db.update_agent("w1", plan_state="proposed")
+        ent = None
+        assert _send("POST", "/v1/inbox/w1/approve")[0] == 409
+        assert db.get_agent("w1").plan_approvals is None
+    elif kind == "plan":
+        monkeypatch.setattr(license, "current", lambda **kw: None)
+        monkeypatch.setattr(agents, "send_message", lambda *a, **kw: None)
+        for action, state in [("approve", "approved"), ("reject", "revise")]:
+            db.update_agent("w1", plan_state="proposed")
+            assert _send("POST", f"/v1/inbox/w1/{action}")[0] == 200
+            assert db.get_agent("w1").plan_state == state
+        for policy, allowed in [({"plan": "always"}, True), ({"plan_two_person": True}, False),
+                                ({"plan_approvers": ["alice"]}, False), (None, False)]:
+            def rules(repo):
+                if policy is None:
+                    raise plan_policy.OrgRulesUnavailable("policy unavailable")
+                return plan_policy.OrgPlanRules.from_policy(policy)
+
+            monkeypatch.setattr(plan_policy, "load_org_rules", rules)
+            for action, state in [("approve", "approved"), ("reject", "revise")]:
+                db.update_agent("w1", plan_state="proposed")
+                assert inbox._plan_approval(db, db.get_agent("w1")).you is allowed
+                assert _send("POST", f"/v1/inbox/w1/{action}")[0] == (200 if allowed else 409)
+                assert db.get_agent("w1").plan_state == (state if allowed else "proposed")
     # Each agent's item links into its session; a sign-in carries the login the app can start.
     assert all(i.root_id == {"r2": "r2"}.get(i.agent_id, "r1") for i in got if i.agent_id)
     assert all(i.action.path == "/v1/providers/claude/login" for i in got if kind == "credentials")

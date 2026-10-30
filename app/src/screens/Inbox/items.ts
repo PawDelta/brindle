@@ -73,6 +73,20 @@ export const KIND_SHORT: Record<string, string> = {
   setup: "setup",
 };
 
+/* Who a plan waits on (the item's `approval`: named approvers, or a second
+   person other than who asked), in a line; null for a plan anyone may approve. */
+export function approverPrompt(item: InboxItemDTO): string | null {
+  const a = item.approval;
+  if (item.kind !== "plan" || !a) return null;
+  const who = a.approvers ?? [];
+  if (a.you) {
+    if (who.length > 0) return `You're a named approver${who.length > 1 ? ` (with ${who.length - 1} other${who.length > 2 ? "s" : ""})` : ""}: it waits on your approval.`;
+    if (a.second_person) return `Needs a second person: ${a.requested_by ?? "someone else"} asked for it, so it waits on your approval.`;
+    return null;
+  }
+  return who.length > 0 ? `Waiting on ${who.join(", ")} to approve.` : "Waiting on a second person to approve.";
+}
+
 /* What is being asked, in a line the person can decide on. */
 export function describeItem(item: InboxItemDTO): string {
   switch (item.kind) {
@@ -87,7 +101,7 @@ export function describeItem(item: InboxItemDTO): string {
     case "question":
       return "Has a question for you";
     case "plan":
-      return "Plan ready for your approval";
+      return item.approval && !item.approval.you ? "Plan waiting on another approver" : "Plan ready for your approval";
     case "review":
       return item.reason === "to review" ? "Branch ready to review" : `Branch ${item.reason}`;
     case "merge_failed":

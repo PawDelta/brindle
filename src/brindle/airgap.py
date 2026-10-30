@@ -7,7 +7,9 @@ the environment. Every path that would leave the machine asks here first:
 * ``brindle.pro`` refuses every backend request (login, refresh, entitlement,
   JWKS, learning, team policy, audit events); see :func:`guard`. Learning
   makes no suggestions, the team policy comes from an offline
-  file (``.brindle/policy.json``, same schema as the org policy), events are
+  file (``.brindle/policy.json``: the signed offline policy export that
+  ``brindle account org policy --export`` writes, verified before use, or
+  an unsigned policy in the org policy's schema, with a warning), events are
   not recorded, and the entitlement is the offline license installed with
   ``brindle account license install`` (never refreshed).
 * Delegation only reaches profiles whose model is on this machine or the
@@ -91,10 +93,11 @@ def source(cfg=None) -> str:
 
 def licensed() -> bool:
     """Whether the entitlement (the offline license, in air-gap mode) includes
-    the ``airgap`` feature. Offline check; fails closed."""
-    from brindle.pro import license
+    the ``airgap`` feature (brindle.pro.org_context.OrgContext.entitled).
+    Offline check; fails closed."""
+    from brindle.pro.org_context import OrgContext
 
-    return license.has(FEATURE)
+    return OrgContext.resolve().entitled(FEATURE)
 
 
 def warning() -> str | None:
@@ -228,6 +231,25 @@ def policy_path(repo_root: str | None):
 
     root = config_root(repo_root) if repo_root else Path.cwd()
     return Path(root) / CONFIG_DIR / POLICY_FILE
+
+
+def check_local_policy(*, signed: bool, org_id: str) -> None:
+    """Require a signed offline export belonging to the managed device's org.
+
+    The caller's account cannot change which organization governs the device.
+    Validate that binding before the export is interpreted as policy.
+    """
+    from brindle.pro import managed, org_context, team_policy
+
+    ctx = org_context.active()
+    device = ctx.managed if ctx is not None else managed.load()
+    if isinstance(device, managed.Invalid):
+        raise team_policy.PolicyUnavailable(device.reason)
+    if not managed.local_policy_allowed(device, signed):
+        raise team_policy.PolicyUnavailable("This managed device requires a signed offline policy export.")
+    if isinstance(device, managed.Managed) and org_id != device.org_id:
+        raise team_policy.PolicyUnavailable(
+            f"This managed device requires an offline policy export for org {device.org_id}.")
 
 
 __all__ = ["ENV", "FEATURE", "POLICY_FILE", "AirGapError", "arm", "check_profile", "enabled",

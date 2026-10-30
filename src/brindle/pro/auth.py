@@ -7,7 +7,9 @@ Backend contract (``/api/brindle/v1``): OAuth calls are form-encoded POSTs that
 all carry ``client_id=brindle-cli``; ``/cli/token``, ``/device/token`` and
 ``/token/refresh`` return a 15-minute access token (opaque here, sent as
 Bearer) and a refresh token that is rotated on every use. ``GET /entitlement`` (Bearer) returns
-the signed entitlement that :mod:`brindle.pro.license` verifies. Presenting a
+the signed entitlement that :mod:`brindle.pro.license` verifies, once the public
+revocation list (``GET /keys/revocations``, :mod:`brindle.pro.signed`) has been
+refreshed. Presenting a
 refresh token twice is treated by the backend as theft and revokes the
 whole session, so rotation is serialized across processes with a file lock
 and the rotated tokens are saved before anything else is attempted.
@@ -47,7 +49,7 @@ from pathlib import Path
 from typing import Callable, Protocol
 
 from brindle import airgap
-from brindle.pro import license, loopback
+from brindle.pro import license, loopback, signed
 
 log = logging.getLogger(__name__)
 
@@ -382,7 +384,13 @@ def _fetch_entitlement(client: Client, access: str, now: float, org_id: str | No
     tok = body.get("entitlement")
     if not isinstance(tok, str):
         raise AuthError("backend returned no entitlement", code="bad_response")
-    ent = license.verify(tok, issuer=client.base, now=now, grace=0)
+    if signed.refresh_revocations(client):    # best effort: a failure leaves the list as it was
+        license.clear_cache()                  # what was cached may be signed by a newly revoked key
+    try:
+        ent = license.verify(tok, issuer=client.base, now=now, grace=0)
+    except signed.Revoked:
+        license.clear_cache()                  # the cached entitlement may be from the same key
+        raise
     if org_id is not None and ent.org_id != org_id:
         raise AuthError("backend returned an entitlement for another org", code="bad_response")
     return tok, ent
@@ -483,9 +491,9 @@ def login(client: Client, store, *, show: Callable[[str], None] = print,
 
 
 def lock_path() -> Path:
-    from brindle.config import brindle_home
+    from brindle.pro._files import pro_home
 
-    return brindle_home() / "pro" / "refresh.lock"
+    return pro_home() / "pro" / "refresh.lock"
 
 
 @contextmanager

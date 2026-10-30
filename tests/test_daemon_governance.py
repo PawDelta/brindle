@@ -1,0 +1,128 @@
+"""The daemon's governance routes: the status line's facts by where the signed
+policy came from, the offline policy export, the managed device file and plan
+approvals, against faked org context modules and a fake account API."""
+import json
+import sys
+from types import SimpleNamespace
+
+import pytest
+
+from brindle import airgap, config
+from brindle.pro import auth, managed
+from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401
+from test_daemon_actions import _send
+from test_pro_team import ORG, login, team, team_claims  # noqa: F401
+
+PREFIX = "/v1/governance"
+
+
+class Invalid:
+    def __init__(self, reason):
+        self.reason = reason
+
+
+def fake_org(monkeypatch, *, source, blocked=None, managed=None, verified=True):
+    """brindle.pro.org_context, .managed and .policy_cache as they will answer."""
+    ctx = SimpleNamespace(source=lambda: source, blocked_reason=lambda: blocked, org_name="Acme", org_id=ORG,
+                          verified=verified)
+    modules = {"org_context": SimpleNamespace(OrgContext=SimpleNamespace(resolve=lambda: ctx)),
+               "managed": SimpleNamespace(load=lambda: managed, Invalid=Invalid),
+               "policy_cache": SimpleNamespace(get_verified=lambda org_id: {"org_id": org_id} if verified else None)}
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, f"brindle.pro.{name}", module)
+
+
+@pytest.mark.parametrize("org,expected", [
+    ({"source": "device", "managed": SimpleNamespace(org_id=ORG)},
+     {"status": "managed", "verified": True, "source": "device", "org_name": "Acme", "problem": None}),
+    ({"source": "snapshot", "blocked": "The saved policy expired 3 days ago."},
+     {"status": "problem", "verified": False, "problem": "The saved policy expired 3 days ago.",
+      "action": "Connect to the internet so brindle can fetch a fresh signed policy, "
+                "or ask your organization's admin for an offline policy export."}),
+    ({"source": "account", "verified": False}, {"status": "problem", "verified": False, "source": "account"}),
+    ({"source": None, "managed": Invalid("signature does not verify")},
+     {"status": "problem", "problem": "This device's managed device file can't be used: signature does not verify"}),
+    ({"source": None}, {"status": "unmanaged", "org_name": None}),
+    (None, {"status": "unavailable", "verified": False}),
+])
+def test_status(monkeypatch, org, expected):
+    if org is None:     # an engine without the org context modules yet
+        monkeypatch.setitem(sys.modules, "brindle.pro.org_context", None)
+    else:
+        fake_org(monkeypatch, **org)
+    code, got = _send("GET", PREFIX)
+    assert code == 200
+    assert got | expected == got
+
+
+@pytest.fixture
+def admin(team, pro_env, monkeypatch):
+    monkeypatch.setattr(auth, "UrllibTransport", lambda: team)
+    login(team, team_claims(plan="enterprise", role="admin"))
+    return team
+
+
+@pytest.mark.parametrize("bad_signature", [False, True])
+def test_offline_export_and_device_file(admin, monkeypatch, signing_key, bad_signature, tmp_path):
+    from test_managed_device import NOW, ORG as DEVICE_ORG, answer, managed_file
+
+    sent = []
+    repo = str(tmp_path)
+    # No repo: nothing is asked of the account or written.
+    assert _send("POST", PREFIX + "/offline-policy", {"days": 30})[0] == 400
+    # A signed policy naming another org is refused, and nothing is written.
+    admin.routes[f"POST /orgs/{ORG}/policy/offline"] = lambda f, h: (200, {"token": "t", "body": {"org_id": "org_other"}})
+    assert _send("POST", PREFIX + "/offline-policy", {"days": 30, "repo": repo})[0] == 502
+    assert not airgap.policy_path(repo).exists()
+    admin.routes[f"POST /orgs/{ORG}/policy/offline"] = lambda f, h: (
+        sent.append(dict(f)) or (200, {"token": "signed.token", "body": {"org_id": ORG, "exp": 99}}))
+    assert _send("POST", PREFIX + "/offline-policy", {"days": 91})[0] == 400
+    code, got = _send("POST", PREFIX + "/offline-policy", {"days": 30, "repo": repo})
+    assert code == 200 and sent == [{"days": 30}]
+    written = json.loads(airgap.policy_path(repo).read_text())
+    assert got["path"] == str(airgap.policy_path(repo))
+    assert written == {"token": "signed.token", "body": {"org_id": ORG, "exp": 99}}
+
+    monkeypatch.setattr("time.time", lambda: NOW)
+    login(admin, team_claims(plan="enterprise", role="admin", org_id=DEVICE_ORG))
+    doc = json.loads(managed_file(signing_key, answer()))
+    if bad_signature:
+        parts = doc["managed"].split(".")
+        parts[2] = ("A" if parts[2][0] != "A" else "B") + parts[2][1:]
+        doc["managed"] = ".".join(parts)
+    admin.routes[f"POST /orgs/{DEVICE_ORG}/managed-devices"] = lambda f, h: (
+        sent.append(dict(f)) or (200, doc))
+    code, got = _send("POST", PREFIX + "/device-file", {"name": "build-01", "allow_airgap": True,
+                                                       "audit_sink": "https://siem.example.test"})
+    assert code == (502 if bad_signature else 200)
+    if bad_signature:
+        return
+    assert got == {"filename": "managed.json", "device_id": doc["device_id"], "managed": doc,
+                   "system_dir": str(managed.system_dir())}
+    # The signed-in Enterprise admin may hand out device files.
+    fake_org(monkeypatch, source="account")
+    assert _send("GET", PREFIX)[1]["enterprise_admin"] is True
+
+
+def test_plan_default_and_project_override(tmp_path):
+    repo = str(tmp_path)
+    plan = f"{PREFIX}/plan?repo={repo}"
+    assert _send("PUT", PREFIX + "/plan", {"scope": "user", "plan": "sometimes"})[0] == 400
+    assert _send("PUT", PREFIX + "/plan", {"scope": "user", "plan": "always"})[1]["user"] == "always"
+    # An old local plan_first is the project's override, whatever the person's own plan is.
+    config.set_local(repo, "plan_first", False)
+    assert _send("GET", plan)[1] == {"user": "always", "project": "never", "project_source": "local",
+                                     "shared": None, "effective": "never"}
+    # The shared config.json's plan, under that local override, then read through once it's cleared.
+    config.set_repo(repo, "plan", "auto")
+    got = _send("GET", plan)[1]
+    assert got | {"project": "never", "project_source": "local", "shared": "auto"} == got
+    code, got = _send("PUT", PREFIX + "/plan", {"scope": "repo", "repo": repo, "plan": None})
+    assert code == 200 and got == {"user": "always", "project": "auto", "project_source": "shared",
+                                   "shared": "auto", "effective": "auto"}
+    got = _send("PUT", PREFIX + "/plan", {"scope": "repo", "repo": repo, "plan": "always"})[1]
+    assert got | {"project": "always", "project_source": "local", "effective": "always"} == got
+    config.unset_repo(repo, "plan")
+    config.unset_local(repo, "plan")
+    assert _send("GET", plan)[1] == {"user": "always", "project": None, "project_source": None,
+                                     "shared": None, "effective": "always"}

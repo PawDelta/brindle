@@ -6,6 +6,10 @@ cloud with no stored secret. Each one trusts only GitHub's OIDC token
 environment `brindle-ci` of one repository, i.e. the subject
 `repo:OWNER/REPO:environment:brindle-ci`.
 
+To enroll machines with brindle Enterprise through your MDM (managed device
+files, device tokens and offline policy exports), see
+[`managed-devices.md`](managed-devices.md).
+
 ## Tightening trust
 
 The run job in the `brindle-ci` environment can mint cloud credentials for
@@ -102,3 +106,24 @@ brindle ci init --from-deployment main -g RG
 | `clientId` | the Azure client id |
 | `tenantId` | the Azure tenant id |
 | `subscriptionId` | not used |
+
+## Standby signing key
+
+brindle signs its entitlement, policy and revocation documents with the active
+Ed25519 key. A second, standby key is pinned ahead of need, so that a
+compromised active key can be revoked. The pinning procedure is described in
+the docstring of [`src/brindle/pro/keys.py`](../src/brindle/pro/keys.py).
+In short, an operator:
+
+1. creates a second Ed25519 key in KMS;
+2. sets `BRINDLE_KMS_STANDBY_KEY_ID` on the server;
+3. takes the key's raw 32-byte public key, base64url-encoded, and computes its
+   RFC 7638 thumbprint from that value. It then sets:
+   - `STANDBY_KID` to the thumbprint;
+   - `STANDBY_KEY` to the same 32 public-key bytes, hex-encoded (the form
+     `keys.py` and the verifier read);
+4. ships that in a release before the key is ever needed.
+
+A revocation is issued by the standby key: a `brindle-revocation+jwt` token
+signed by it, naming the active `kid` in `revoked_kid`. Clients read revocations
+from `GET /keys/revocations` on their next refresh.

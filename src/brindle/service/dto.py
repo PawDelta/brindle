@@ -108,6 +108,49 @@ class OrgPolicyRequestDTO(_DTO):
     permission_grants: OrgGrantPolicyDTO | None
 
 
+class GovernanceStatusDTO(_DTO):
+    """Who manages this device and whether its signed policy verifies (daemon/routes_governance)."""
+    status: Literal["managed", "unmanaged", "problem", "unavailable"]
+    org_id: str | None = None
+    org_name: str | None = None
+    verified: bool = False
+    # Where the policy came from: the managed device token, the account, the
+    # last saved copy, an offline policy export, or nowhere.
+    source: Literal["device", "account", "snapshot", "offline"] | None = None
+    problem: str | None = None
+    action: str | None = None       # what to do about the problem
+    enterprise_admin: bool = False  # may download a managed device file
+
+
+class PlanSettingDTO(_DTO):
+    """Plan approvals: Auto / Always / Never, the person's default and a project's override."""
+    user: Literal["auto", "always", "never"]
+    project: Literal["auto", "always", "never"] | None = None
+    project_source: Literal["local", "shared"] | None = None       # the file that sets project: config.local.json or config.json
+    shared: Literal["auto", "always", "never"] | None = None       # the shared config.json's, under a local override
+    effective: Literal["auto", "always", "never"] | None = None   # the project's, with a repo
+
+
+class OfflinePolicyExportDTO(_DTO):
+    path: str
+    days: int
+
+
+class DeviceFileDTO(_DTO):
+    filename: str
+    device_id: str
+    managed: dict[str, Any]
+    system_dir: str                 # where an MDM installs managed.json on this OS
+
+
+class PlanApprovalDTO(_DTO):
+    """Who may approve a plan, from the org rules and votes already recorded."""
+    approvers: list[str] = []
+    second_person: bool = False
+    requested_by: str | None = None
+    you: bool = False               # the viewer is one who can approve it
+
+
 class NativeSubagentDTO(_DTO):
     id: str
     agent_type: str
@@ -218,6 +261,7 @@ class InboxItemDTO(_DTO):
     fix: str | None = None         # a setup item's: what the app's fix button repairs (codex_hook_trust)
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None
+    approval: PlanApprovalDTO | None = None   # a plan's: who may approve it
 
 
 class MilestoneDTO(_DTO):
