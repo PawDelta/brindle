@@ -1,18 +1,29 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import App from "../../App";
 import { DaemonClient, type AnalysisDoc } from "../../api/client";
-import type { GoalDTO, MilestoneDTO } from "../../api/schema";
+import { PtyViewsProvider } from "../../api/ptyView";
+import type { GoalDTO, MilestoneDTO, SessionDTO } from "../../api/schema";
 import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
 import { BASE_URL, FakeDaemon, TOKEN, flush } from "../../test/fakeDaemon";
-import { REPO } from "../../test/fixtures";
+import { REPO, root } from "../../test/fixtures";
+import { standInViews } from "../../test/panes";
 import { GoalPanel, completion, goalPhase, outputTail } from "./GoalPanel";
 import { UNKNOWN, type Readiness } from "./review";
+
+vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
 afterEach(cleanup);
 
 const ROOT = "proj";
-const doc = (id: string): AnalysisDoc => ({ id });
+/* The App-level test's session: the App routes to it by its root agent id. */
+const APP_ROOT = "sup1";
+const appSession: SessionDTO = { id: APP_ROOT, workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: Date.now() / 1000 - 600, goal: "Ship the Goal screen" };
+const libDoc = (id: string): AnalysisDoc => ({ id, title: `Doc ${id}`, kind: "investigation", topics: [], findings: [], open_questions: [], related: [], supersedes: [] });
+/* The app as the shell shows it: its panes through pty views (stand-ins here). */
+const renderApp = (app: ReactElement) => render(<PtyViewsProvider value={standInViews}>{app}</PtyViewsProvider>);
 
 /* progress is the engine's activity counter, not the completion: 7 must not
    show as 7 of anything. */
@@ -114,25 +125,35 @@ describe("GoalPanel", () => {
     expect(screen.queryByRole("switch")).toBeNull();
   });
 
-  it("links the session's docs line to its filtered docs, and hides it with no docs", async () => {
-    const daemon = new FakeDaemon({ goal: structuredClone(goal) });
-    const store = createAppStore();
+  it("opens the session's docs from its goal line, filtered; Back to session returns, clearing the chip shows all; no docs hides the line", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [appSession], workspaces: [root], goal: { ...structuredClone(goal), root_id: APP_ROOT } });
     const client = daemon.client();
-    const docs = vi.spyOn(client, "docs").mockResolvedValue({ docs: [doc("d1"), doc("d2")] });
-    const onOpenDocs = vi.fn();
-    const { unmount } = render(<GoalPanel client={client} repo={REPO} root={ROOT} store={store} onOpenDocs={onOpenDocs} />);
-    const line = await screen.findByTestId("goal-docs");
-    expect(docs).toHaveBeenCalledWith({ repo: REPO, session: ROOT });
-    expect(line.textContent).toContain("2 docs");
-    fireEvent.click(line);
-    expect(onOpenDocs).toHaveBeenCalledOnce();
-    unmount();
+    const docs = vi.spyOn(client, "docs").mockImplementation(async (query = {}) => ({ docs: query.session ? [libDoc("d1"), libDoc("d2")] : [libDoc("d1"), libDoc("d2"), libDoc("d3")] }));
+    const cards = () => screen.getByTestId("docs").querySelectorAll("li[data-doc]").length;
+    const sync = startSync({ client, store: createAppStore(), connect: daemon.connect });
+    renderApp(<App store={createAppStore()} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: REPO }} />);
+    fireEvent.click(await screen.findByTestId("goal-docs"));
+    await waitFor(() => expect(cards()).toBe(2));
+    expect(screen.getByTestId("session-filter").textContent).toContain(APP_ROOT);
 
+    fireEvent.click(screen.getByRole("button", { name: "Clear session filter" }));
+    await waitFor(() => expect(cards()).toBe(3));
+    expect(screen.queryByText(`Session ${APP_ROOT}`)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Back to session" }));
+    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
+    expect(screen.queryByTestId("docs")).toBeNull();
+    sync.stop();
+    cleanup();
+
+    // With no docs for the session, the goal line is hidden.
     docs.mockResolvedValue({ docs: [] });
-    render(<GoalPanel client={client} repo={REPO} root={ROOT} store={store} onOpenDocs={onOpenDocs} />);
-    await waitFor(() => expect(screen.getByText("Ship the Goal screen")).toBeTruthy());
+    const again = startSync({ client, store: createAppStore(), connect: daemon.connect });
+    renderApp(<App store={createAppStore()} client={client} refresh={again.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: REPO }} />);
+    await waitFor(() => expect(daemon.requests.some((r) => r.path === "/goal")).toBe(true));
     await flush();
     expect(screen.queryByTestId("goal-docs")).toBeNull();
+    again.stop();
   });
 
   it("shows an initial load error with a retry that loads the goal", async () => {

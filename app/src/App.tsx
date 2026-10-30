@@ -121,9 +121,20 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
 }) {
   const openSession = (root: string, repo: string, agent?: string, sheet?: SheetRef) => navigate({ screen: "session", root, repo, agent, sheet });
   const closeSession = useCloseSession(navigate);
+  const docsFrom = route.screen === "knowledge" ? route.from : undefined;
   switch (route.screen) {
     case "knowledge":
-      return <KnowledgeScreen key={`${route.view ?? ""}|${route.doc ?? ""}|${route.session ?? ""}`} client={client} pickFolder={pickFolder} view={route.view} doc={route.doc} session={route.session} />;
+      return (
+        <KnowledgeScreen
+          key={`${route.view ?? ""}|${route.doc ?? ""}|${route.session ?? ""}`}
+          client={client}
+          pickFolder={pickFolder}
+          view={route.view}
+          doc={route.doc}
+          session={route.session}
+          onBackToSession={docsFrom && (() => navigate({ screen: "session", root: docsFrom.root, repo: docsFrom.repo, agent: docsFrom.root }))}
+        />
+      );
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     case "settings":
