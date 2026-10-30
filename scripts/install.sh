@@ -4,7 +4,7 @@
 # Installs uv (if missing) and tmux (with Homebrew on macOS; prints the
 # command elsewhere), then brindle itself with `uv tool install`, then runs
 # `brindle doctor`. Safe to run again: it upgrades brindle in place.
-# BRINDLE_VERSION=0.14.3 pins a version.
+# BRINDLE_VERSION=0.5.4 pins a version.
 set -eu
 
 say() { printf '%s\n' "$*"; }
@@ -53,7 +53,7 @@ case ":$PATH:" in
 esac
 
 if ! have claude; then
-  warn "Claude Code isn't installed; the supervisor runs on it: npm install -g @anthropic-ai/claude-code"
+  warn "Claude Code isn't installed; the supervisor runs on it by default (or pass --supervisor codex / agy): npm install -g @anthropic-ai/claude-code"
 fi
 
 say ""
