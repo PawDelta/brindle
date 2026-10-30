@@ -462,6 +462,7 @@ const INBOX_ACTIONS: Record<string, unknown> = {
   review: { reviewer: "rev1", checks_running: false },
   merge: { job: "job1", kind: "merge" },
   read: { read: 1 },
+  dismiss: { dismissed: true },
 };
 
 /* The workspace actions that run as jobs (routes_actions.py start_job). */
@@ -1886,7 +1887,7 @@ export class FakeDaemon {
         const [id, action] = [m[1], m[2]];
         const answer = INBOX_ACTIONS[action];
         if (!answer) return error("invalid", `unknown inbox action '${action}'`, 400);
-        const item = d.inbox.find((i) => (action === "read" ? i.notice_id : i.agent_id) === id);
+        const item = d.inbox.find((i) => (action === "dismiss" ? i.request_id : action === "read" ? i.notice_id : i.agent_id) === id);
         if (!item) return error("not_found", `no agent ${id}`, 404);
         // The action settles the item, and the bus row it writes sends clients for a fresh inbox.
         d.inbox = d.inbox.filter((i) => i !== item);

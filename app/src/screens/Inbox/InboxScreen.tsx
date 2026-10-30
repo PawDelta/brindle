@@ -34,6 +34,7 @@ import { alert, button, card, quiet } from "../../components/ui";
 import { agentName, formatAge, rootOf } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
 import { useAppState } from "../../store/useStore";
+import type { Route } from "../../routes";
 import { useJob } from "../Branch/useJob";
 import { ItemActions } from "./ItemActions";
 import { FIXES, KIND_SHORT, answerable, describeItem, fixable, forgetGone, itemKey, kindLabel, permissionAnswer, permissionLine, seenAt } from "./items";
@@ -45,6 +46,7 @@ export interface InboxScreenProps {
   refresh: () => Promise<void>;
   /* Open an item's agent in its session: its provider screen, nothing over it. */
   onOpen?(root: string, repo: string, agent?: string): void;
+  onNavigate?(route: Route): void;
   /* Only what waits in this session (its root agent id), from its bar's count; null for everything. */
   session?: string | null;
   /* Back to everything. */
@@ -79,7 +81,7 @@ const PLAIN = "border-line-strong bg-surface text-ink hover:bg-surface-2";
 const GHOST = "border-transparent text-ink-3 hover:text-ink";
 const LINK = "text-[11.5px] text-branch hover:underline";
 
-export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll }: InboxScreenProps) {
+export function InboxScreen({ client, refresh, onOpen, onNavigate, session = null, onShowAll }: InboxScreenProps) {
   const inbox = useAppState((s) => s.inbox);
   const workspaces = useAppState((s) => s.workspaces);
   const synced = useAppState((s) => s.synced);
@@ -92,7 +94,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
   const agents = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []), [workspaces]);
 
   // On one session: the items of any of its agents (the whole tree), none from elsewhere.
-  const inSession = (i: InboxItemDTO) => session === null || (!!i.agent_id && rootOf(agents, i.agent_id, hidden) === session);
+  const inSession = (i: InboxItemDTO) => session === null || (i.root_id ?? (i.agent_id ? rootOf(agents, i.agent_id, hidden) : null)) === session;
   const here = useMemo(() => (session === null ? inbox : inbox.filter(inSession)).filter((i) => !actions.hidden.has(itemKey(i))), [inbox, session, agents, hidden, actions.hidden]); // eslint-disable-line react-hooks/exhaustive-deps
   const sessionTitle = session === null ? null : (find(session)?.goal ?? session);
 
@@ -102,7 +104,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
   const groups = useMemo<Group[]>(() => {
     const bySession = new Map<string, Group>();
     for (const item of here) {
-      const root = item.agent_id ? rootOf(agents, item.agent_id, hidden) : null;
+      const root = item.root_id ?? (item.agent_id ? rootOf(agents, item.agent_id, hidden) : null);
       const key = root ?? (item.agent_id ? `ws:${item.workspace_id ?? item.agent_id}` : item.kind === "setup" ? "setup" : "org");
       let group = bySession.get(key);
       if (!group) {
@@ -125,7 +127,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
   }, [here, agents, hidden, find, repoOf, repos]);
 
   const sessionOf = (item: InboxItemDTO) => {
-    const root = item.agent_id ? rootOf(agents, item.agent_id, hidden) : null;
+    const root = item.root_id ?? (item.agent_id ? rootOf(agents, item.agent_id, hidden) : null);
     const repo = root ? repoOf(root) : null;
     return root && repo ? { root, repo } : null;
   };
@@ -185,7 +187,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
               )}
             </header>
             {group.items.map((item) => (
-              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
+              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onNavigate={onNavigate} />
             ))}
           </section>
         ))}
@@ -195,7 +197,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
 }
 
 /* One banner card. */
-function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }: {
+function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo, onNavigate }: {
   item: InboxItemDTO;
   actions: ReturnType<typeof useInboxActions>;
   who: string | null;
@@ -205,6 +207,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
   onDone(): void;
   /* The agent in its session, nothing over it. */
   onGo?(): void;
+  onNavigate?(route: Route): void;
 }) {
   const key = itemKey(item);
   const busy = actions.busy.has(key);
@@ -234,6 +237,8 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
     body = <pre className="whitespace-pre-wrap font-mono text-xs" data-testid="card-detail">{item.detail}</pre>;
   } else if (item.kind === "org_notice") {
     body = item.detail ? <span>from your org's {item.detail}</span> : null;
+  } else if (item.kind === "doc") {
+    body = <span>{item.detail ?? `Document ${item.doc}`}{item.section && ` · ${item.section}`}</span>;
   } else if (item.kind === "setup") {
     // What the button does, in a line; a fix this app doesn't know: the engine's detail, if any.
     const fix = item.fix ? FIXES[item.fix] : undefined;
@@ -281,8 +286,8 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
     acts = <SetupFix item={item} actions={actions} onDone={onDone} />;
   } else if (item.kind === "setup") {
     acts = <span className="text-[11px] text-ink-3">fixed from a terminal: brindle doctor says how</span>;
-  } else if (item.kind === "credentials" || item.kind === "login") {
-    acts = <ItemActions item={item} actions={actions} repo={repo} onDone={onDone} compact />;
+  } else if (item.kind === "credentials" || item.kind === "login" || item.kind === "doc") {
+    acts = <ItemActions item={item} actions={actions} repo={repo} onDone={onDone} onGo={item.kind === "doc" ? onGo : undefined} onNavigate={onNavigate} compact />;
   } else if (item.kind === "permission") {
     acts = (
       <span className="text-[11px] text-ink-3" data-testid="permission-terminal" title={item.permission?.terminal ?? undefined}>
@@ -319,7 +324,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, onDone, onGo }
       <div className="col-span-2 mt-1 flex flex-wrap items-center gap-1.5">
         {acts}
         <span className="flex-1" />
-        {onGo && (
+        {onGo && item.kind !== "doc" && (
           <button type="button" className={`${LINK} whitespace-nowrap`} onClick={onGo}>
             Go to session ›
           </button>
