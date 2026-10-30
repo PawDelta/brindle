@@ -1377,7 +1377,9 @@ def docs_org_api(method: str, tail: str, body: dict | None = None, *, repo: str 
 
 def put_doc_destination(db: DB, params: dict, body: Body) -> Any:
     """Connect the team's export destination (``kind``, ``target``, ``credential``; admin only)."""
-    payload = {k: _get(body, k, required=True) for k in ("kind", "target", "credential")}
+    payload = {"kind": _get(body, "kind", required=True),
+               "target": _get(body, "target", (str, dict), required=True),    # a SharePoint site and folder, or {drive_id, folder_id?}
+               "credential": _get(body, "credential", required=True)}
     return docs_org_api("PUT", "destination", payload, repo=_get(body, "repo"), admin=True)
 
 

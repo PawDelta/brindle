@@ -1,10 +1,11 @@
 /* Settings › Team destination: where the organisation's docs are exported to
    (SharePoint or Google Drive), shown to owners and admins only (GET /account's
    `role`; the daemon refuses anyone else on PUT and DELETE too). It shows what
-   is connected (GET /analysis-docs/destination), connects one (the admin signs
-   in with the provider in the system browser, as in Knowledge's Export, and the
-   credential goes to the daemon in the PUT, then is forgotten here) and revokes
-   it (DELETE). Anyone else, or an engine without the routes, sees nothing. */
+   is connected (GET /analysis-docs/destination), connects one and revokes it
+   (DELETE). SharePoint: the admin signs in in the system browser, as in
+   Knowledge's Export. Google Drive: a service account, never a person's
+   sign-in: the admin gives its JSON key and the shared drive's id (and a folder)
+   and the key goes to the server once, in the PUT, then is dropped here. Anyone else, or an engine without the routes, sees nothing. */
 
 import { useEffect, useRef, useState } from "react";
 import type { DaemonClient, DocExportConfig, TeamDestination as Destination, TeamDestinationKind } from "../../api/client";
@@ -18,7 +19,7 @@ const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e)
 
 const KINDS: { kind: TeamDestinationKind; name: string; provider: ExportProvider; target: string }[] = [
   { kind: "sharepoint", name: "SharePoint", provider: "microsoft", target: "Site id, then the folder: site-id/Docs/Analysis" },
-  { kind: "google_drive", name: "Google Drive", provider: "google", target: "Drive folder id" },
+  { kind: "google_drive", name: "Google Drive", provider: "google", target: "" },
 ];
 
 const when = (v: number | string | null) => {
@@ -33,6 +34,10 @@ export function TeamDestination({ client, session }: { client: TeamDestinationCl
   const [config, setConfig] = useState<DocExportConfig | null>(null);
   const [kind, setKind] = useState<TeamDestinationKind>("sharepoint");
   const [target, setTarget] = useState("");
+  /* Google Drive: the service account's key (held only until the PUT), the shared drive and an optional folder. */
+  const [key, setKey] = useState("");
+  const [driveId, setDriveId] = useState("");
+  const [folderId, setFolderId] = useState("");
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -71,6 +76,24 @@ export function TeamDestination({ client, session }: { client: TeamDestinationCl
       setBusy(false);
     }
   };
+
+  const connectGoogle = () =>
+    run(async () => {
+      let parsed: { type?: unknown; client_email?: unknown; private_key?: unknown } = {};
+      try {
+        parsed = JSON.parse(key);
+      } catch {
+        /* checked below */
+      }
+      if (parsed.type !== "service_account" || !parsed.client_email || !parsed.private_key) throw new Error("Paste or choose the service account's JSON key.");
+      if (!driveId.trim()) throw new Error("Enter the shared drive's id.");
+      try {
+        setDest(await client.setDocDestination({ kind: "google_drive", target: { drive_id: driveId.trim(), ...(folderId.trim() ? { folder_id: folderId.trim() } : {}) }, credential: key }));
+      } finally {
+        setKey("");
+      }
+      return "Connected to Google Drive.";
+    });
 
   const connect = () =>
     run(async () => {
@@ -125,15 +148,50 @@ export function TeamDestination({ client, session }: { client: TeamDestinationCl
               ))}
             </select>
           </label>
-          <label className="flex min-w-56 flex-1 flex-col gap-0.5">
-            <span className={label}>Target</span>
-            <input type="text" className={field} placeholder={choice.target} value={target} onChange={(e) => setTarget(e.target.value)} />
-          </label>
-          <button type="button" className={button} disabled={busy || !clientId || !target.trim()} onClick={() => void connect()}>
-            Sign in and connect
-          </button>
+          {kind === "sharepoint" ? (
+            <>
+              <label className="flex min-w-56 flex-1 flex-col gap-0.5">
+                <span className={label}>Target</span>
+                <input type="text" className={field} placeholder={choice.target} value={target} onChange={(e) => setTarget(e.target.value)} />
+              </label>
+              <button type="button" className={button} disabled={busy || !clientId || !target.trim()} onClick={() => void connect()}>
+                Sign in and connect
+              </button>
+            </>
+          ) : (
+            <div className="flex w-full flex-col gap-s1">
+              <p className="text-xs text-ink-3">Add the service account's email as a Content manager on the shared drive first. The key is sent once and isn't kept on this machine.</p>
+              <label className="flex flex-col gap-0.5">
+                <span className={label}>Service account JSON key</span>
+                <textarea className={`${field} font-mono text-xs`} rows={3} value={key} onChange={(e) => setKey(e.target.value)} />
+              </label>
+              <input
+                type="file"
+                accept="application/json,.json"
+                aria-label="Choose the key file"
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = "";
+                  if (f) void f.text().then(setKey);
+                }}
+              />
+              <label className="flex flex-col gap-0.5">
+                <span className={label}>Shared drive id</span>
+                <input type="text" className={field} value={driveId} onChange={(e) => setDriveId(e.target.value)} />
+              </label>
+              <label className="flex flex-col gap-0.5">
+                <span className={label}>Folder id (optional)</span>
+                <input type="text" className={field} value={folderId} onChange={(e) => setFolderId(e.target.value)} />
+              </label>
+              <div>
+                <button type="button" className={button} disabled={busy} onClick={() => void connectGoogle()}>
+                  Connect
+                </button>
+              </div>
+            </div>
+          )}
         </div>
-        {config && !clientId && <p className="text-xs text-ink-3">{choice.name} sign-in isn't set up for this build.</p>}
+        {kind === "sharepoint" && config && !clientId && <p className="text-xs text-ink-3">{choice.name} sign-in isn't set up for this build.</p>}
       </div>
       {said && (
         <p role="status" className={notice}>

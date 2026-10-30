@@ -1160,7 +1160,7 @@ export class DaemonClient {
     return this.get<TeamDestination>("/analysis-docs/destination", { repo });
   }
 
-  setDocDestination(body: { kind: TeamDestinationKind; target: string; credential: string }) {
+  setDocDestination(body: { kind: TeamDestinationKind; target: string | { drive_id: string; folder_id?: string }; credential: string }) {
     return this.put<TeamDestination>("/analysis-docs/destination", body);
   }
 
