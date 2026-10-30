@@ -72,7 +72,14 @@ def test_gate_checks_committed_main_only_when_active(monkeypatch):
     assert rule_checks.run(None, ws) is None
 
 
-def test_wrapped_tags_belong_to_individual_list_items():
+@pytest.mark.parametrize("parent,child,expected", [
+    ("Parent [verified]", "Child 20%.", []),
+    ("Parent untagged", "Child 20% [verified]", ["tags"]),
+])
+def test_wrapped_tags_belong_to_individual_list_items(parent, child, expected):
+    nested = VALID.replace("1. [verified] Throughput rose 20%.\n  - [not checked] Latency.",
+                           f"- {parent}\n  - {child}\n  [inference]")
+    assert [v.rule for v in checker.check_main("analysis", MAIN, nested, [APPENDIX])] == expected
     text = VALID.replace("1. [verified] Throughput rose 20%.\n  - [not checked] Latency.",
                          "- Throughput rose 20%.\n  [verified]\n"
                          "- Untagged sibling.\n  - Nested item.\n    [inference]")

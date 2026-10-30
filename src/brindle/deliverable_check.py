@@ -56,9 +56,10 @@ def list_items(lines: list[str]) -> list[str]:
         elif re.match(r"^ {0,3}#{1,6}\s", line):
             stack.clear()
         else:
-            # An outdent leaves a nested item; a blank line also ends an
-            # unindented paragraph. Other lines can be lazy continuations.
-            while stack and indent <= stack[-1][0] and (blank or len(stack) > 1):
+            # Outdented paragraph text is a lazy continuation of the current
+            # item, even when nested. A blank line ends that paragraph, so
+            # only then can indentation move ownership back to a parent.
+            while stack and indent <= stack[-1][0] and blank:
                 stack.pop()
             if stack:
                 stack[-1][1].append(line.strip())
