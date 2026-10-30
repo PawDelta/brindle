@@ -147,6 +147,24 @@ def private_tmux_server():
         os.environ["BRINDLE_TMUX_SOCKET"] = old
 
 
+# Every test in these files is a brindle CI test; tests elsewhere carry @pytest.mark.brindle_ci.
+_BRINDLE_CI_FILES = re.compile(r"(^|/)(test_ci_[^/]*|e2e/test_ci|test_deploy_templates|test_pro_features)\.py$")
+
+
+def pytest_collection_modifyitems(config, items):
+    """brindle CI's tests run only with BRINDLE_CI_TESTS=1; otherwise they are
+    deselected, whatever -m the run passes."""
+    for item in items:
+        if _BRINDLE_CI_FILES.search(item.nodeid.split("::", 1)[0]):
+            item.add_marker(pytest.mark.brindle_ci)
+    if os.environ.get("BRINDLE_CI_TESTS") == "1":
+        return
+    skipped = [item for item in items if item.get_closest_marker("brindle_ci")]
+    if skipped:
+        config.hook.pytest_deselected(items=skipped)
+        items[:] = [item for item in items if not item.get_closest_marker("brindle_ci")]
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_teardown(item, nextitem):
     """Each test's sessions end with it, so none outlive the test that made
