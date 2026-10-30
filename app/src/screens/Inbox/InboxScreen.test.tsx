@@ -1,37 +1,58 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../../api/client";
 import { DaemonContext } from "../../api/context";
-import type { InboxItemDTO, SessionDTO } from "../../api/schema";
+import { scopesFor } from "../../api/permissions";
+import type { AskDTO, AskDecisionDTO, AskGroupDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
 import { SessionsProvider } from "../../store/sessions";
 import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
 import { StoreContext } from "../../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
-import { InboxScreen } from "./InboxScreen";
+import { releaseNotesUrl, type AppUpdateStatus, type AppUpdates } from "../../api/tauri";
+import { watchAppUpdates } from "../../store/appUpdates";
+import { Permissions } from "../Settings/Permissions";
+import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
+import { watchInbox } from "./notify";
 
 afterEach(cleanup);
 
 const notice: InboxItemDTO = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };
+const prReady: InboxItemDTO = { kind: "pr_ready", reason: "PR ready for your approval", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "Ship ls --json" };
 const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship ls --json" };
 
-function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client()) {
+function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client(), props: Partial<InboxScreenProps> = {}) {
   const store = createAppStore();
   const sync = startSync({ client, store, connect: daemon.connect });
   const onOpen = vi.fn();
   const onNavigate = vi.fn();
+  const onOpenRule = vi.fn();
   render(
     <DaemonContext.Provider value={client}>
       <StoreContext.Provider value={store}>
         <SessionsProvider client={client}>
-          <InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} onNavigate={onNavigate} />
+          <InboxScreen client={client} refresh={sync.refresh} onOpen={onOpen} onNavigate={onNavigate} onOpenRule={onOpenRule} {...props} />
         </SessionsProvider>
       </StoreContext.Provider>
     </DaemonContext.Provider>,
   );
-  return { store, sync, onOpen, onNavigate };
+  return { store, sync, onOpen, onNavigate, onOpenRule };
 }
+
+/* Held requests as GET /permissions/asks groups them: two pushes into main (w1's is the `permission` fixture's
+   hold) under the push rule's 30-minute limit, and a read the credential deny blocks. */
+const now = Date.now() / 1000;
+const limits = { max_scope: "destination", life: "time", minutes: 30 };
+const ask = (agent_id: string, request_id: string, kind: string, exact: string, since: number, rule: string, blocked = false): AskDTO => ({
+  agent_id, root_id: "sup1", request_id, digest: `d-${request_id}`, repo: REPO, kind, tool: kind === "read" ? "Read" : "Bash", exact,
+  summary: exact, waiting_since: now - since, worker: agent_id === "w1" ? "developer" : "supervisor", rule, blocked, limits: blocked ? null : limits,
+});
+const pushes: AskGroupDTO = {
+  key: `${REPO}|push|* → main @ origin`, repo: REPO, kind: "push", title: "Allow pushes into main?", general: scopesFor("push", "fix/login → main @ origin")[1],
+  scopes: scopesFor("push", "fix/login → main @ origin"), blocked: false, rule: "d-push-default", limits, modes: ["once", "deny", "always-deny", "timed"],
+  items: [ask("w1", "req-1", "push", "fix/login → main @ origin", 600, "d-push-default"), ask("sup1", "req-2", "push", "chore/ci → main @ origin", 120, "d-push-default")],
+};
 
 const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "POST");
 /* The one card an item gets, whatever its kind. */
@@ -59,11 +80,15 @@ describe("inbox", () => {
       repos: [{ repo_root: REPO, name: "proj" }],
       sessions: [session],
       workspaces: [root, worker],
-      inbox: [question, waiting, notice],
+      inbox: [question, waiting, notice, prReady],
     });
     const { sync, onOpen } = mount(daemon);
     const group = await screen.findByRole("region", { name: "Ship ls --json" });
-    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(2);
+    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(3);
+    // The PR brindle prepared (its checks passed, nothing pushed): Review & open PR opens the session's sheet.
+    expect(card("pr_ready").textContent).toContain("PR ready for your approval");
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Review & open PR" }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "review" });
     expect(group.textContent).toContain("sup1 · proj");
     fireEvent.click(within(group).getByRole("button", { name: "Open the session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO);
@@ -93,40 +118,48 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it("answers a permission brindle holds in its card with the provider's choices, links one only its prompt can take, and starts a sign-in from its card", async () => {
+  it("marks an item new until the page has been left; one shown before is not marked again", async () => {
+    const mine = { ...prReady, workspace_id: "proj-new" };
+    const elsewhere = { ...notice, notice_id: "n-new" };
+    const askA = { ...permission, permission: { ...permission.permission!, request_id: "req-a" } };
+    const askB = { ...permission, permission: { ...permission.permission!, request_id: "req-b" } };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [mine, elsewhere, askA] });
+    // A visit filtered to one session shows (and marks) only that session's item.
+    const first = mount(daemon, daemon.client(), { session: "sup1" });
+    await waitFor(() => expect(card("pr_ready")).toBeTruthy());
+    expect(card("pr_ready").getAttribute("data-new")).toBe("true");
+    cleanup();
+    first.sync.stop();
+    // The full Inbox: the item already shown is not new, the one the filter hid is.
+    const second = mount(daemon);
+    await waitFor(() => expect(card("org_notice")).toBeTruthy());
+    expect(card("org_notice").getAttribute("data-new")).toBe("true");
+    expect(card("pr_ready").getAttribute("data-new")).toBeNull();
+    // It leaves and comes back: new again.
+    daemon.data.inbox = [elsewhere, askA];
+    daemon.publish("message.queued", { agent_id: "sup1" });
+    await waitFor(() => expect(card("pr_ready")).toBeFalsy());
+    daemon.data.inbox = [mine, elsewhere, askA];
+    daemon.publish("message.queued", { agent_id: "sup1" });
+    await waitFor(() => expect(card("pr_ready")?.getAttribute("data-new")).toBe("true"));
+    // A request already shown is not new; another from the same agent replacing it (no empty snapshot between) is.
+    const ask = () => document.querySelector<HTMLElement>('[data-testid="permission-card"]')!;
+    expect(ask().getAttribute("data-new")).toBeNull();
+    daemon.data.inbox = [mine, elsewhere, askB];
+    daemon.publish("message.queued", { agent_id: "w1" });
+    await waitFor(() => expect(ask().getAttribute("data-new")).toBe("true"));
+    second.sync.stop();
+  });
+
+  it("starts a sign-in from its card", async () => {
     // As the engine's permission-items branch emits a lapsed sign-in: no detail, the sign-in route named on the
     // item; the worker is on Codex (its record), so the sign-in must be Codex's, never Claude's.
     const codexWorker = { ...worker, agents: [{ ...worker.agents![0], provider: "codex", profile: "developer-codex" }] };
     const credentials: InboxItemDTO = { kind: "credentials", reason: "credentials need attention", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", detail: null, action: { method: "POST", path: "/v1/providers/codex/login" } };
     const login: InboxItemDTO = { kind: "login", reason: "cloud login expired", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "brindle account login" };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, codexWorker], inbox: [permission, permissionInTerminal, credentials, login, notice] });
-    const { sync, onOpen } = mount(daemon);
-    const group = await screen.findByRole("region", { name: "Ship ls --json" });
-    const cards = () => within(group).getAllByTestId("inbox-card").filter((c) => c.dataset.kind === "permission");
-    expect(cards()).toHaveLength(2);
-
-    // Held by brindle's hook: the choices as small buttons, one readable line with the command in mono (the whole
-    // on click), nothing else; a choice answers at once and the card goes.
-    const held = cards().find((c) => within(c).queryByRole("group", { name: "Permission choices" }))!;
-    expect(held.textContent).toContain("held by brindle");
-    expect(within(held).getByTestId("permission-line").querySelector("code")!.textContent).toBe("npx playwright install chromium");
-    fireEvent.click(within(held).getByTestId("permission-line"));
-    expect(within(held).getByTestId("permission-line").getAttribute("aria-expanded")).toBe("true");
-    expect(within(held).getAllByRole("button", { name: /Allow|Deny/ }).map((b) => b.textContent)).toEqual(["Allow once", "Allow always", "Deny"]);
-    expect(within(held).getByRole("button", { name: "Allow always" }).title).toContain("brindle's permission rule");
-    expect(within(held).queryByText(/terminal instead/)).toBeNull();
-    fireEvent.click(within(held).getByRole("button", { name: "Deny" }));
-    await waitFor(() => expect(daemon.permissionAnswers).toEqual([{ agent: "w1", request: "req-1", choice: "deny" }]));
-    expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/w1/permission", query: {}, body: { request: "req-1", digest: "d1", choice: "deny" } }]);
-    await waitFor(() => expect(cards()).toHaveLength(1));
-
-    // One only the CLI's own prompt can take: no choices, a quiet line, and the card only goes to the session.
-    const atPrompt = cards()[0];
-    expect(within(atPrompt).queryByRole("group", { name: "Permission choices" })).toBeNull();
-    expect(within(atPrompt).getByTestId("permission-terminal").textContent).toContain("answered at its own prompt");
-    expect(within(atPrompt).getByTestId("permission-terminal").title).toContain("its prompt doesn't show which option is selected");
-    fireEvent.click(within(atPrompt).getByRole("button", { name: "Go to session ›" }));
-    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, codexWorker], inbox: [credentials, login, notice] });
+    const { sync } = mount(daemon);
+    await screen.findByRole("region", { name: "Ship ls --json" });
 
     // A lapsed sign-in: Sign in starts that provider CLI's own login on the engine (Codex, as the engine's route
     // and the worker's record say).
@@ -149,9 +182,10 @@ describe("inbox", () => {
     const plan: InboxItemDTO = { kind: "plan", reason: "plan awaiting approval", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", detail: "1. Keep the plan.\n2. Ship it." };
     const checks: InboxItemDTO = { kind: "proposed_checks", reason: "checks proposed", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "npm test\nnpm run build" };
     const review: InboxItemDTO = { kind: "review", reason: "to review", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1" };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [plan, checks, review] });
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...session, name: "Login fix" }], workspaces: [root, worker], inbox: [plan, checks, review] });
     const { sync, onOpen } = mount(daemon);
-    const group = await screen.findByRole("region", { name: "Ship ls --json" });
+    // A named session is headed by its name, not its goal.
+    const group = await screen.findByRole("region", { name: "Login fix" });
     // A plan: Approve alone (changes are asked for in its session), no reply field, no undo; the plan whole on the
     // card, never cut short.
     expect(within(card("plan")).queryByRole("textbox")).toBeNull();
@@ -216,6 +250,141 @@ describe("inbox", () => {
     sync.stop();
   });
 
+  it("one permission card per source: a held request (Deny, Allow once, Allow ▾, details collapsed) and an agent-window prompt (a way to the window), under a one-line stall banner", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, permissionInTerminal], asks: [pushes] });
+    const { sync, onOpen } = mount(daemon);
+    const held = await screen.findByRole("article", { name: "Allow pushes into main?" });
+    const cards = screen.getAllByTestId("permission-card");
+    expect(cards.map((c) => c.dataset.source)).toEqual(["hook", "window"]);
+
+    // The banner is one line with no actions of its own but the way to the first card.
+    const stall = screen.getByTestId("stall-notice");
+    expect(within(stall).getAllByRole("button").map((b) => b.textContent)).toEqual(["Review all"]);
+    // The held card: why it reached the person, the three actions, and the requests under collapsed details.
+    expect(within(held).getAllByRole("button").filter((b) => ["Deny", "Allow once", "Allow"].includes(b.textContent ?? "")).map((b) => b.textContent)).toEqual(["Deny", "Allow once", "Allow"]);
+    expect(held.querySelector("details")!.open).toBe(false);
+
+    // The prompt only the agent's window can take: no decision, the way to that window instead.
+    const prompt = cards[1];
+    expect(within(prompt).queryByRole("group", { name: "Decision" })).toBeNull();
+    fireEvent.click(within(prompt).getByRole("button", { name: /^Open / }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
+
+    fireEvent.click(within(held).getByRole("button", { name: "Allow once" }));
+    await waitFor(() => expect(posts(daemon).find((r) => r.path === "/permissions/asks/decide")?.body).toEqual({ key: pushes.key, scope: "general", mode: "once" }));
+    sync.stop();
+  });
+
+  it.each([
+    ["the groups entry's reason", null, "the shell/unchecked baseline is ask"],
+    ["the engine's d-shell-syntax rule", "d-shell-syntax", "shell syntax cannot be checked safely"],
+  ])("unchecked commands opt-in: the ask (%s) offers only Deny and Allow once, and a link to the Settings row", async (_, rule, reason) => {
+    const unchecked: AskGroupDTO = { ...pushes, key: "k-unchecked", title: "Allow this unchecked command?", modes: ["once", "deny"], rule, items: pushes.items.map((a) => ({ ...a, rule, reason })) };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [unchecked] });
+    const { sync, onOpenRule } = mount(daemon);
+    const held = await screen.findByRole("article", { name: "Allow this unchecked command?" });
+    expect(within(held).getAllByRole("button").filter((b) => ["Deny", "Allow once", "Allow"].includes(b.textContent ?? "")).map((b) => b.textContent)).toEqual(["Deny", "Allow once"]);
+    fireEvent.click(within(held).getByRole("button", { name: "Stop asking for these…" }));
+    expect(within(held).queryByRole("button", { name: /rule/ })).toBeNull();
+    expect(onOpenRule).toHaveBeenCalledWith("unchecked-commands");
+    sync.stop();
+  });
+
+  it("a hold with no group: the request is in the headline, Allow never saves a grant by itself, and a refusal shows on the card", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, permissionInTerminal] });
+    const { sync } = mount(daemon);
+    const cards = await screen.findAllByTestId("permission-card");
+    expect(cards.map((c) => c.dataset.source)).toEqual(["hook", "window"]);
+    // Both requests are named with Details closed.
+    expect(cards[0].querySelector("h3")!.textContent).toContain("npx playwright install chromium");
+    expect(cards[1].querySelector("h3")!.textContent).toContain("uv run alembic upgrade head");
+    // Allow only opens the menu: no choice is sent, least of all Allow always.
+    fireEvent.click(within(cards[0]).getByRole("button", { name: "Allow" }));
+    expect(within(cards[0]).getByRole("menuitem", { name: /Allow always/ })).toBeTruthy();
+    expect(posts(daemon)).toEqual([]);
+    // The engine refuses (the request is gone): its reason is on the card.
+    daemon.data.inbox = [];
+    fireEvent.click(within(cards[0]).getByRole("button", { name: "Deny" }));
+    await waitFor(() => expect(within(cards[0]).getByRole("alert")).toBeTruthy());
+    sync.stop();
+  });
+
+  it("a decision out blocks a second one from the menu's duration button", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [pushes] });
+    const client = daemon.client();
+    let settle!: (got: AskDecisionDTO) => void;
+    const decide = vi.spyOn(client, "decidePermissionAsks").mockImplementation(() => new Promise<AskDecisionDTO>((resolve) => (settle = resolve)));
+    const { sync } = mount(daemon, client);
+    const item = await screen.findByRole("article", { name: "Allow pushes into main?" });
+    fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
+    fireEvent.click(within(item).getByRole("menuitem", { name: /^For 30 minutes/ }));
+    const submit = within(item).getByRole("button", { name: /^Allow for 30 minutes/ });
+    // Both clicks land before React commits anything: only the guard can stop the second.
+    act(() => {
+      fireEvent.click(submit);
+      fireEvent.click(submit);
+    });
+    expect(decide).toHaveBeenCalledTimes(1);
+    // Once the first is answered, the next decision goes out.
+    await act(async () => settle({ mode: "timed", scope: pushes.general, resumed: [] }));
+    await waitFor(() => expect(within(item).getByRole("button", { name: "Allow once" })).toHaveProperty("disabled", false));
+    fireEvent.click(within(item).getByRole("button", { name: "Allow once" }));
+    expect(decide).toHaveBeenCalledTimes(2);
+    sync.stop();
+  });
+
+  it("Always for <group item> sets that subcategory's override through the group baselines, then resumes the request", async () => {
+    const install: AskGroupDTO = {
+      key: `${REPO}|bash|npm install`, repo: REPO, kind: "bash", title: "Allow npm install?", general: scopesFor("bash", "npm install left-pad")[0],
+      scopes: scopesFor("bash", "npm install left-pad"), blocked: false, rule: null, limits: null, modes: ["once", "deny", "session"],
+      items: [{ ...ask("w1", "req-1", "bash", "npm install left-pad", 60, "d-none"), rule: null, limits: null, reason: "the shell/install baseline is ask" }],
+    };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [install] });
+    const { sync } = mount(daemon);
+    const item = await screen.findByRole("article", { name: "Allow npm install?" });
+    expect(within(item).getByTestId("permission-chip")).toBeTruthy();
+    fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
+    fireEvent.click(within(item).getByRole("menuitem", { name: /^Always for / }));
+    await waitFor(() => expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/groups")?.body).toEqual({ groups: { shell: { subcategories: { install: "allow" } } } }));
+    await waitFor(() => expect(daemon.data.asks).toEqual([]));
+    // An override, not a saved action.
+    expect(daemon.data.policy.saved).toEqual([]);
+    expect(daemon.data.policy.groups?.shell.subcategories).toEqual({ install: "allow" });
+    sync.stop();
+  });
+
+  it("org policy shown to member: an org Ask is labelled with the org and its reason, saves only what the org allows; a Block is one calm notice; Settings shows locked rows", async () => {
+    const org = { name: "Acme", what: "local git changes", decision: "ask", reason: "commits are audited" };
+    const commits: AskGroupDTO = {
+      key: `${REPO}|bash|family: git/local`, repo: REPO, kind: "bash", title: "Allow local git changes?", general: scopesFor("bash", "git add -A")[0],
+      scopes: scopesFor("bash", "git add -A"), blocked: false, rule: "org-git-local", limits: { life: "time", minutes: 15 }, modes: ["once", "deny", "always-deny", "timed"], org,
+      items: [{ ...ask("w1", "req-1", "bash", "git add -A", 60, "org-git-local"), limits: { life: "time", minutes: 15 } }],
+    };
+    const blocked: InboxItemDTO = { kind: "org_blocked", reason: "Blocked by Acme policy: installs go through platform review", detail: "3 requests stopped today. Agents were told to work around it." };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [permission, blocked], asks: [commits] });
+    daemon.data.policy.org_controls = [org, { name: "Acme", what: "package installs", decision: "deny", reason: "installs go through platform review" }];
+    const { sync } = mount(daemon);
+    const item = await screen.findByRole("article", { name: "Allow local git changes?" });
+    const why = within(item).getByTestId("org-why");
+    expect([why.dataset.org, why.dataset.reason, why.dataset.setting]).toEqual(["Acme", "commits are audited", "ask"]);
+    // Offered: what the org allows (no lasting save), and no way into the member's own rules.
+    expect(within(item).queryByRole("button", { name: /rule/ })).toBeNull();
+    fireEvent.click(within(item).getByRole("button", { name: "More ways to allow" }));
+    expect(within(item).getAllByRole("menuitem")).toHaveLength(1);   // a timed approval, its only save
+    expect(within(item).getByRole("button", { name: "Allow once" })).toBeTruthy();
+    // A Block: one quiet notice in the org's group, however many requests it stopped.
+    expect(document.querySelectorAll('[data-kind="org_blocked"]')).toHaveLength(1);
+    expect(screen.getByRole("region", { name: "Your org" }).contains(card("org_blocked"))).toBe(true);
+    sync.stop();
+    cleanup();
+
+    render(<Permissions client={daemon.client()} />);
+    const rows = [...(await screen.findByTestId("org-controls")).querySelectorAll<HTMLElement>("[data-locked]")];
+    expect(rows.map((r) => [r.dataset.org, r.dataset.what, r.dataset.setting, r.dataset.reason])).toEqual([
+      ["Acme", "local git changes", "ask", "commits are audited"], ["Acme", "package installs", "deny", "installs go through platform review"]]);
+    expect(rows.flatMap((r) => [...r.querySelectorAll("button, input, select")])).toEqual([]);   // locked: nothing to change
+  });
+
   it("groups a closed worker's running child under its session, as the sidebar does", async () => {
     // The snapshot leaves w1 out (closed) but keeps c1, which w1 started; w1's record says where c1 belongs.
     const child = { ...worker.agents![0], id: "c1", parent_id: "w1" };
@@ -250,6 +419,57 @@ describe("inbox", () => {
     daemon.data.inbox = [];
     daemon.publish("message.queued", { agent_id: "sup1" });
     await waitFor(() => expect(screen.getByTestId("all-clear")).toBeTruthy());
+    sync.stop();
+  });
+
+  it("shows the app's own update until restarted, then once until dismissed, counted on the badge too; a late first status never hides it; nothing for an rc or staff build", async () => {
+    const idle: AppUpdateStatus = { version: "0.6.0", automatic: true, pending: null, updated: null, last_checked: null, checking: false };
+    let announce: (s: AppUpdateStatus) => void = () => {};
+    let answer: ((s: AppUpdateStatus) => void) | null = null;
+    const updates: AppUpdates = {
+      // The status now, answered only when the test says: after an announcement it predates.
+      status: () => new Promise((resolve) => (answer = resolve)),
+      check: () => Promise.resolve(idle),
+      restart: vi.fn(() => Promise.resolve()),
+      dismiss: vi.fn(() => Promise.resolve(announce({ ...idle, version: "0.7.0" }))),
+      watch: (on) => {
+        announce = (s) => act(() => on(s));
+        return Promise.resolve(() => {});
+      },
+    };
+    const openUrl = vi.fn(() => Promise.resolve());
+    const { store, sync } = mount(new FakeDaemon({ inbox: [] }), undefined, { appUpdates: updates, openUrl });
+    const counts: number[] = [];
+    watchInbox(store, { notify: () => {}, count: (n) => counts.push(n) });
+    watchAppUpdates(store, updates);
+    await waitFor(() => expect(screen.getByTestId("all-clear")).toBeTruthy());
+    await waitFor(() => expect(answer).not.toBeNull());
+    const kind = () => screen.queryByTestId("app-update-card")?.dataset.kind ?? null;
+
+    // Installed in the background, then the older first status arrives: the update still waits for
+    // the person's restart (never the app's own), on the Inbox and its badge alike.
+    announce({ ...idle, pending: "0.7.0" });
+    await act(async () => answer!(idle));
+    expect(kind()).toBe("pending");
+    expect(screen.queryByTestId("all-clear")).toBeNull();
+    expect(counts.at(-1)).toBe(1);
+    const pending = screen.getByTestId("app-update-card");
+    fireEvent.click(within(pending).getByRole("button", { name: "What's new" }));
+    expect(openUrl).toHaveBeenCalledWith(releaseNotesUrl("0.7.0"));
+    fireEvent.click(within(pending).getByRole("button", { name: "Restart to update" }));
+    expect(updates.restart).toHaveBeenCalled();
+
+    // Restarted on it: once, until dismissed.
+    announce({ ...idle, version: "0.7.0", updated: "0.7.0" });
+    expect(kind()).toBe("updated");
+    fireEvent.click(within(screen.getByTestId("app-update-card")).getByRole("button", { name: "Dismiss" }));
+    await waitFor(() => expect(kind()).toBeNull());
+    expect(counts.at(-1)).toBe(0);
+
+    // An rc or a staff build installs nothing by itself, and nothing waits for it.
+    announce({ ...idle, automatic: false, pending: "0.7.1-rc.1" });
+    expect(kind()).toBeNull();
+    expect(counts.at(-1)).toBe(0);
     sync.stop();
   });
 });

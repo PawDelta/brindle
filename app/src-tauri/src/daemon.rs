@@ -69,9 +69,17 @@ pub(crate) const ENGINE_TOO_OLD: &str = "engine too old";
 /// How a start's failure begins when an app that carries its engine finds
 /// another install's `brindle daemon`, one a person started, using brindle's home.
 pub(crate) const ENGINE_CONFLICT: &str = "engine conflict";
-/// How long a daemon being replaced has to shut down after SIGTERM.
+/// How long a daemon being replaced has to shut down after SIGTERM before it
+/// is killed, as `brindle daemon stop` kills one (lifecycle.STOP_GRACE). What
+/// it still runs was asked by an app that has gone (one that quit for its
+/// update); the daemon gives that work lifecycle.SHUTDOWN_GRACE, but an
+/// older one waited it out, a provider's sign-in probe 10s at a time, and an
+/// app that waited on it showed its first-run screen after 15s.
 #[cfg(not(windows))]
-const STOP_TIMEOUT: Duration = Duration::from_secs(15);
+const STOP_GRACE: Duration = Duration::from_secs(2);
+/// How long a killed daemon has to be gone.
+#[cfg(not(windows))]
+const KILL_GRACE: Duration = Duration::from_secs(2);
 
 /// `~/.brindle/daemon.json`, as `brindle daemon` writes it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -176,19 +184,24 @@ fn reuse_running(engine: &Path, info: &DaemonInfo) -> Reuse {
 }
 
 /// SIGTERM the daemon `pid` (it shuts down and removes its files) and wait
-/// until it's gone.
+/// until it's gone; still there after `grace`, SIGKILL it (the next daemon
+/// takes over the files it left).
 #[cfg(not(windows))]
-fn stop_daemon(pid: u32) -> Result<(), String> {
+fn stop_daemon(pid: u32, grace: Duration) -> Result<(), String> {
     let pid_t = libc::pid_t::try_from(pid).map_err(|_| format!("bad daemon pid {pid}"))?;
     // SAFETY: kill(2) only sends a signal; is_daemon has just said pid is a daemon's.
     unsafe { libc::kill(pid_t, libc::SIGTERM) };
-    let deadline = Instant::now() + STOP_TIMEOUT;
+    let mut deadline = Instant::now() + grace;
+    let mut killed = false;
     while is_daemon(pid) {
-        if Instant::now() > deadline {
-            return Err(format!(
-                "the previous brindle daemon (pid {pid}) didn't stop within {}s",
-                STOP_TIMEOUT.as_secs()
-            ));
+        if Instant::now() >= deadline {
+            if killed {
+                return Err(format!("the previous brindle daemon (pid {pid}) didn't stop, even killed"));
+            }
+            // SAFETY: as above; is_daemon has just said it's still the daemon.
+            unsafe { libc::kill(pid_t, libc::SIGKILL) };
+            killed = true;
+            deadline = Instant::now() + KILL_GRACE;
         }
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -331,6 +344,41 @@ fn starting_in(home: &Path) -> bool {
     STARTING.lock().is_ok_and(|s| s.as_ref().is_some_and(|s| s.contains_key(home)))
 }
 
+/// What a start is doing, for the webview's "Starting brindle…" to say
+/// (`daemon_start_step`) while it waits.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "step", rename_all = "lowercase")]
+pub enum StartStep {
+    /// Stopping daemon `pid`: another build's (from before an update), or another install's.
+    Stopping { pid: u32 },
+    /// The engine's daemon `pid` runs and doesn't answer yet.
+    Starting { pid: u32 },
+}
+
+/// Each brindle home's start under way: its step, and since when.
+#[cfg(not(windows))]
+static STEPS: Mutex<Option<HashMap<PathBuf, (StartStep, Instant)>>> = Mutex::new(None);
+
+/// Record `home`'s start as at `step` since `since`; None: no start is under way.
+#[cfg(not(windows))]
+fn set_step(home: &Path, step: Option<(StartStep, Instant)>) {
+    if let Ok(mut steps) = STEPS.lock() {
+        let steps = steps.get_or_insert_with(HashMap::new);
+        match step {
+            Some(step) => steps.insert(home.to_path_buf(), step),
+            None => steps.remove(home),
+        };
+    }
+}
+
+/// `home`'s start under way: its step, and how long it has been at it.
+#[cfg(not(windows))]
+fn step_in(home: &Path) -> Option<(StartStep, Duration)> {
+    let steps = STEPS.lock().ok()?;
+    let (step, since) = steps.as_ref()?.get(home)?;
+    Some((step.clone(), since.elapsed()))
+}
+
 /// Start `bin daemon --idle-exit` with brindle's home `home` (or go on waiting
 /// for the one started there before) and wait until it listens, for up to
 /// `patience`: past it, a daemon still starting answers `ENGINE_STARTING`.
@@ -359,6 +407,7 @@ fn start_in(
             Starting { child, since: Instant::now() }
         }
     };
+    set_step(home, Some((StartStep::Starting { pid: child.id() }, since)));
     let waiting = Instant::now();
     loop {
         // daemon.json is written once the sockets are bound, a moment before they listen.
@@ -404,9 +453,15 @@ fn start_in(
 #[cfg(not(windows))]
 fn ensure() -> Result<DaemonInfo, String> {
     let engine = crate::engine::bundled_engine();
-    ensure_in(&brindle_home(), engine.as_deref(), crate::engine::PATH_FALLBACK, reuse_running, || {
+    let home = brindle_home();
+    let got = ensure_in(&home, engine.as_deref(), crate::engine::PATH_FALLBACK, reuse_running, || {
         start(engine.as_deref())
-    })
+    });
+    // A daemon still starting is waited on again (ENGINE_STARTING): its step stands till then.
+    if !matches!(&got, Err(why) if why.starts_with(ENGINE_STARTING)) {
+        set_step(&home, None);
+    }
+    got
 }
 
 /// `ensure` with brindle's home `home`: the daemon running there, judged by
@@ -440,7 +495,8 @@ fn ensure_in(
     match judge(engine, &info) {
         Reuse::Use => Ok(info),
         Reuse::Replace => {
-            stop_daemon(info.pid)?;
+            set_step(home, Some((StartStep::Stopping { pid: info.pid }, Instant::now())));
+            stop_daemon(info.pid, STOP_GRACE)?;
             start()
         }
         Reuse::Conflict(why) => Err(why),
@@ -1097,6 +1153,24 @@ pub async fn daemon_connect(engine: State<'_, Engine>) -> Result<EngineInfo, Str
     })
 }
 
+/// A start's step as the webview sees it: what, and for how many seconds now.
+#[derive(Serialize)]
+pub struct StartNow {
+    #[serde(flatten)]
+    step: StartStep,
+    secs: u64,
+}
+
+/// What the engine start under way (a `daemon_connect` still waiting) is
+/// doing, for "Starting brindle…" to say; none when none is.
+#[tauri::command]
+pub fn daemon_start_step() -> Option<StartNow> {
+    #[cfg(not(windows))]
+    return step_in(&brindle_home()).map(|(step, took)| StartNow { step, secs: took.as_secs() });
+    #[cfg(windows)]
+    None
+}
+
 /// One HTTP request to the daemon, the token added here. Rejects only when no
 /// answer came back; an error status is a normal reply.
 #[tauri::command]
@@ -1439,10 +1513,37 @@ mod tests {
         std::fs::rename(&app, dir.join("old.app")).unwrap();
         std::fs::rename(staged.parent().unwrap().parent().unwrap().parent().unwrap(), &app).unwrap();
         assert_eq!(crate::engine::require_build(&installed).as_deref(), Ok("00b2"));
-        let got = ensure_in(&home, Some(&installed), false, reuse_running, || Ok(engines_own(7))).unwrap();
+        let old_pid = old.id();
+        let start = || {
+            // Meanwhile "Starting brindle…" says the old daemon was being stopped.
+            assert!(matches!(step_in(&home), Some((StartStep::Stopping { pid }, _)) if pid == old_pid));
+            Ok(engines_own(7))
+        };
+        let got = ensure_in(&home, Some(&installed), false, reuse_running, start).unwrap();
         assert_eq!(got, engines_own(7));
         assert!(old.wait().unwrap().success(), "stopped by SIGTERM");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_daemon_still_busy_past_its_grace_is_killed_not_waited_on() {
+        use std::io::BufRead;
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        // An older daemon finishing what an app that quit for its update asked of it
+        // (a provider's sign-in probe) stays past SIGTERM: this one ignores it outright.
+        let mut busy = Command::new("/bin/bash")
+            .arg0("/opt/uv/tools/brindle/bin/python")
+            .args(["-c", "trap '' TERM; echo ready; read", "daemon", "-m", "brindle", "daemon", "--idle-exit"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        io::BufReader::new(busy.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+        assert!(is_daemon(busy.id()), "ps doesn't show it as a daemon");
+        stop_daemon(busy.id(), Duration::ZERO).unwrap();
+        assert_eq!(busy.wait().unwrap().signal(), Some(libc::SIGKILL));
     }
 
     #[cfg(unix)]

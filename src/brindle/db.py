@@ -28,6 +28,10 @@ NATIVE_SUBAGENT_STALE = 2 * 3600
 # Ended rows are dropped from the table entirely after this long.
 NATIVE_SUBAGENT_PRUNE_AFTER = 3600
 
+# SQLite user_version: 0 identifies databases written before version tracking.
+# Bump this when changing SCHEMA or _migrate so older engines refuse the result.
+SCHEMA_VERSION = 1
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workspaces (
     id TEXT PRIMARY KEY,
@@ -78,7 +82,8 @@ CREATE TABLE IF NOT EXISTS agents (
     merge_failed TEXT,             -- why the pipeline couldn't merge its approved branch (pipeline.review_state)
     config_home TEXT,              -- the CLI config home it runs with, decided once at spawn (provider_homes): '' the person's own
     review_slot TEXT,              -- the review claim slot a reviewer was started in (gates.standing_reviews)
-    failed_why TEXT                -- why its status is 'failed': auth | model | delivery (service.inbox)
+    failed_why TEXT,               -- why its status is 'failed': auth | model | delivery (service.inbox)
+    name TEXT                      -- a session root's name, given by the person (POST /sessions/{root}/rename)
 );
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,7 +93,8 @@ CREATE TABLE IF NOT EXISTS inbox (
     created_at REAL NOT NULL,
     delivered_at REAL,
     held INTEGER,                  -- 1: a pull-mode message, read with read_messages instead of being delivered
-    noticed_at REAL                -- when a "new messages" notice covering it went out
+    noticed_at REAL,               -- when a "new messages" notice covering it went out
+    supervisor_context INTEGER    -- authenticated before a handover changed the recipient's ancestry
 );
 -- Autopilot: one row per session (keyed by its supervisor) that has it on.
 CREATE TABLE IF NOT EXISTS autopilot (
@@ -169,6 +175,18 @@ CREATE TABLE IF NOT EXISTS merges (
     workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE,
     sha TEXT NOT NULL,
     merged_at REAL NOT NULL
+);
+-- A check command's PASSING result for one git tree in one repo, whichever
+-- workspace (or the supervisor's checkout after a merge) it ran in: the same
+-- tree is the same code. Written next to check_cache (see gates.run_checked).
+CREATE TABLE IF NOT EXISTS check_tree_cache (
+    repo_root TEXT NOT NULL,
+    tree TEXT NOT NULL,
+    command TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    output TEXT,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, tree, command)
 );
 -- A check command's PASSING result at one commit, so gates.run and
 -- request_review don't re-run the same command against the same tree. Only
@@ -369,6 +387,7 @@ CREATE TABLE IF NOT EXISTS pool_failures (
 -- pending, and so the tool's PostToolUse (the same tool and input) can count
 -- as the person approving it. Cleared when the turn ends. While the daemon
 -- holds it for the person's answer (channel 'hook': for the inbox to show;
+-- 'supervisor' while the worker's supervisor answers it first, see brindle.permission_routing;
 -- the answer itself goes through the daemon, brindle.daemon.holds), then the
 -- CLI's own prompt has it ('prompt') or the hook took an answer ('answered').
 -- ``tool_use_id`` is the request's id: brindle's own, not the CLI's.
@@ -379,11 +398,35 @@ CREATE TABLE IF NOT EXISTS permission_requests (
     reason TEXT NOT NULL,           -- the policy's; '' when the policy is off
     created_at REAL NOT NULL,
     suggestions TEXT,               -- JSON: the CLI's own "always allow" updates
-    channel TEXT,                   -- hook | prompt | answered
-    answer TEXT,                    -- what the person answered (a record only: answers go through the daemon)
+    channel TEXT,                   -- supervisor | hook | prompt | answered
+    -- what the person (or, supervisor_allow | supervisor_deny, the supervisor) answered:
+    -- a record only, answers go through the daemon
+    answer TEXT,
     hold_until REAL,                -- when the hook stops holding it for the app
     PRIMARY KEY (agent_id, tool_use_id)
 );
+-- The history permission_requests lacks (see brindle.permission_asks): one row
+-- per permission hook decision, kept after it is answered. ``asked`` is 1 for
+-- a request that was left to the person (or settled by a saved action), 0 for
+-- one the policy decided itself. Like history it has no foreign keys, so it
+-- survives session pruning.
+CREATE TABLE IF NOT EXISTS permission_asks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    repo_root TEXT NOT NULL DEFAULT '',
+    agent_id TEXT NOT NULL,
+    request_id TEXT,                -- the permission_requests row's tool_use_id (asks only)
+    kind TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    asked INTEGER NOT NULL,
+    -- policy | person | supervisor | saved_action, or how the hold ended unanswered (timeout,
+    -- terminal, agent_exit, daemon_lost, unheld); NULL while the ask is pending
+    resolved_by TEXT,
+    outcome TEXT NOT NULL,          -- allow | deny | prompt (left to the CLI's own prompt) | none | pending
+    wait_seconds REAL               -- NULL when the end of the person's wait wasn't seen
+);
+CREATE INDEX IF NOT EXISTS permission_asks_ts ON permission_asks(ts);
 -- One row per delegation: which profile brindle would have used without
 -- learning, which it used, and how the task went (see brindle.savings). Local
 -- only, and like history it has no foreign keys, so it survives session
@@ -436,8 +479,8 @@ CREATE TABLE IF NOT EXISTS review_edits (
     sha TEXT NOT NULL,
     PRIMARY KEY (workspace_id, sha)
 );
--- The PR of a session's branch (POST /v1/sessions/{root}/pr, or brindle's own
--- with auto_pr): one per session and branch, so none is ever opened twice.
+-- The PR of a session's branch (POST /v1/sessions/{root}/pr: only the person
+-- opens one): one per session and branch, so none is ever opened twice.
 -- url is NULL while it is being opened; pushed_sha: the commit last pushed to it.
 CREATE TABLE IF NOT EXISTS session_prs (
     root_id TEXT NOT NULL,
@@ -447,6 +490,22 @@ CREATE TABLE IF NOT EXISTS session_prs (
     auto INTEGER NOT NULL DEFAULT 0,
     opened_at REAL NOT NULL,
     merged_at REAL,                 -- when gh first reported the PR merged (session_review.poll_merged)
+    PRIMARY KEY (root_id, branch)
+);
+-- A ready session's PR as brindle prepared it for the person's approval
+-- (routes_actions.prepare_pr): the pre-PR checks run on sha, nothing pushed.
+-- state: checking | passed | failed (check_cmd and output: the failing check);
+-- checks: the JSON list of commands that passed on sha (only those are reused).
+CREATE TABLE IF NOT EXISTS session_pr_prep (
+    root_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    sha TEXT NOT NULL,
+    state TEXT NOT NULL,
+    title TEXT,
+    checks TEXT,
+    check_cmd TEXT,
+    output TEXT,
+    prepared_at REAL NOT NULL,
     PRIMARY KEY (root_id, branch)
 );
 -- The one reviewer of a workspace's commit (agents.request_review): only the
@@ -501,6 +560,27 @@ CREATE TABLE IF NOT EXISTS events (
     payload TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS events_ts ON events(ts);
+-- Per-stage pipeline timings rolled up from events as they are pruned
+-- (brindle.bus.rollup_stage_timings): one row per UTC day, repo and stage.
+-- ``samples`` (JSON seconds) lets a later prune of the same day merge exactly.
+CREATE TABLE IF NOT EXISTS stage_timings (
+    day TEXT NOT NULL,
+    repo_root TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    n INTEGER NOT NULL,
+    median_s REAL NOT NULL,
+    p90_s REAL NOT NULL,
+    samples TEXT NOT NULL,
+    PRIMARY KEY (day, repo_root, stage)
+);
+-- Stages begun in events already pruned, waiting for their end event.
+CREATE TABLE IF NOT EXISTS stage_open (
+    workspace_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    who TEXT NOT NULL,
+    ts REAL NOT NULL,
+    PRIMARY KEY (workspace_id, stage, who)
+);
 CREATE TABLE IF NOT EXISTS intents (
     session_root TEXT NOT NULL,
     repo_key TEXT NOT NULL,
@@ -693,6 +773,7 @@ class Agent:
     weight: str | None = None              # the weight its task was routed as, known from launch (agents.spawn)
     review_slot: str | None = None         # the review claim slot it was started in (gates.standing_reviews)
     failed_why: str | None = None          # why it is 'failed': auth | model | delivery; None from an older brindle
+    name: str | None = None                # a session root's name from the person; None: listed by its goal
 
 
 @dataclass
@@ -933,11 +1014,23 @@ class DB:
         self.path = p
         self.conn = sqlite3.connect(p, timeout=30, isolation_level=None)
         self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
-        self.conn.execute("PRAGMA foreign_keys=ON")
-        self.conn.executescript(SCHEMA)
-        self._enforce_permissions()
-        self._migrate()
+        try:
+            version = self.conn.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise RuntimeError(
+                    "This database was written by a newer brindle. Update brindle."
+                )
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA foreign_keys=ON")
+            self.conn.executescript(SCHEMA)
+            self._enforce_permissions()
+            self._migrate()
+            # Mark the upgrade only after all required migrations succeed.
+            if version < SCHEMA_VERSION:
+                self.conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+        except BaseException:
+            self.conn.close()
+            raise
 
     def _enforce_permissions(self) -> None:
         if self.path == ":memory:":
@@ -987,7 +1080,8 @@ class DB:
                           ("reopened_at", "REAL"), ("hooks_off", "TEXT"),
                           ("reviewing_since", "REAL"), ("review_restarted", "REAL"),
                           ("merge_failed", "TEXT"), ("plan_text", "TEXT"), ("config_home", "TEXT"),
-                          ("weight", "TEXT"), ("review_slot", "TEXT"), ("failed_why", "TEXT")):
+                          ("weight", "TEXT"), ("review_slot", "TEXT"), ("failed_why", "TEXT"),
+                          ("name", "TEXT")):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE agents ADD COLUMN {col} {kind}")
         if "failed_why" not in cols:
@@ -1044,7 +1138,8 @@ class DB:
         if "transcript_path" not in mark_cols:
             self.conn.execute("ALTER TABLE history_usage_mark ADD COLUMN transcript_path TEXT")
         inbox_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(inbox)")}
-        for col, kind in (("held", "INTEGER"), ("noticed_at", "REAL")):
+        for col, kind in (("held", "INTEGER"), ("noticed_at", "REAL"),
+                          ("supervisor_context", "INTEGER")):
             if col not in inbox_cols:
                 self.conn.execute(f"ALTER TABLE inbox ADD COLUMN {col} {kind}")
         tables = {r["name"] for r in self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -1440,8 +1535,9 @@ class DB:
                                  (agent_id,)).fetchall()
 
     def hook_permission_request(self, agent_id: str) -> sqlite3.Row | None:
-        """The request the agent's hook holds for the app's answer, if any."""
-        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? AND channel='hook' "
+        """The request the agent's hook holds for the app's (or its supervisor's) answer, if any."""
+        return self.conn.execute("SELECT * FROM permission_requests WHERE agent_id=? "
+                                 "AND channel IN ('hook', 'supervisor') "
                                  "ORDER BY created_at DESC LIMIT 1", (agent_id,)).fetchone()
 
     def update_permission_request(self, agent_id: str, tool_use_id: str, **fields) -> None:
@@ -1485,6 +1581,12 @@ class DB:
                 return None
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), row["id"]))
             return _load(Message, row)
+
+    def release_pending(self, message_id: int, agent_id: str) -> None:
+        """Put a message pop_pending claimed back in the queue, as it was."""
+        with self.tx() as c:
+            c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
+                      (message_id, agent_id))
 
     def retry_pending(self, message_id: int, agent_id: str, idle_since: float) -> None:
         """Release the caller's failed delivery claim without creating a second message.
@@ -1564,6 +1666,24 @@ class DB:
             "SELECT * FROM inbox WHERE id=? AND agent_id=?", (message_id, agent_id)
         ).fetchone()
         return _load(Message, row) if row else None
+
+    def review_messages(self, agent_id: str, supervisor_ids: list[str]) -> list[Message]:
+        """This worker's current and authenticated former supervisor updates.
+
+        Include delivered and queued updates; delivery notices carry no spec.
+        Handover marks only existing messages from the departing supervisor
+        to its descendants, retaining their original sender and recipient.
+        An empty current ancestry still admits those marked rows, never an
+        unrelated sender's messages or later messages from a former supervisor.
+        """
+        placeholders = ",".join("?" for _ in supervisor_ids) or "NULL"
+        rows = self.conn.execute(
+            "SELECT * FROM inbox WHERE agent_id=? "
+            f"AND (supervisor_context=1 OR sender_id IN ({placeholders})) "
+            "AND (held=1 OR noticed_at IS NULL) ORDER BY id",
+            (agent_id, *supervisor_ids),
+        )
+        return [_load(Message, row) for row in rows]
 
     def unread(self, agent_id: str) -> list[Message]:
         rows = self.conn.execute(
@@ -1667,7 +1787,23 @@ class DB:
 
     def get_autopilot(self, root_id: str) -> Autopilot | None:
         row = self.conn.execute("SELECT * FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
-        return _load(Autopilot, row) if row else None
+        if row is None:
+            # Live sessions created before goal driving became unconditional
+            # may have no row. Backfill at lookup so hooks and continuation agree.
+            root = self.get_agent(root_id)
+            if root and root.parent_id is None and root.mode == "interactive" \
+                    and root.status not in ("paused", "done"):
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO autopilot (root_id, enabled, created_at) "
+                    "SELECT id, 1, ? FROM agents WHERE id=? AND parent_id IS NULL "
+                    "AND mode='interactive' AND status NOT IN ('paused', 'done')",
+                    (time.time(), root_id),
+                )
+                row = self.conn.execute("SELECT * FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
+        ap = _load(Autopilot, row) if row else None
+        if ap:
+            ap.enabled = 1  # Legacy off values no longer disable the goal driver.
+        return ap
 
     def legacy_goal_owners(self) -> list[str]:
         """Sessions whose goal was loaded from a shared goals.md before each
@@ -1888,6 +2024,21 @@ class DB:
                 "VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id, sha, command) DO UPDATE SET "
                 "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
                 (workspace_id, sha, command, int(ok), output, time.time()),
+            )
+
+    def get_tree_check(self, repo_root: str, tree: str, command: str):
+        return self.conn.execute(
+            "SELECT ok, output FROM check_tree_cache WHERE repo_root=? AND tree=? AND command=?",
+            (repo_root, tree, command),
+        ).fetchone()
+
+    def set_tree_check(self, repo_root: str, tree: str, command: str, ok: bool, output: str) -> None:
+        with self.tx() as c:
+            c.execute(
+                "INSERT INTO check_tree_cache (repo_root, tree, command, ok, output, created_at) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(repo_root, tree, command) DO UPDATE SET "
+                "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
+                (repo_root, tree, command, int(ok), output, time.time()),
             )
 
     def check_duration(self, repo_root: str, command: str) -> float | None:

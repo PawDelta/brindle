@@ -46,7 +46,9 @@ jobs:
 
   # The deployment templates under deploy/, checked with their own linters
   # (the pytest checks need none of these). Runs only when deploy/ changes.
+  # Off until brindle CI launches; to restore, remove `if: false`.
   deploy-templates:
+    if: false
     needs: changes
     runs-on: ubuntu-latest
     steps:

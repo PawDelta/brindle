@@ -228,6 +228,64 @@ def credential_checks() -> list[Check]:
     return out
 
 
+def cloud_checks(repo_root: str | None = None) -> list[Check]:
+    """Cloud login diagnostics for the identities the configured profiles launch with."""
+    from brindle import agents, cloud_login, company_login, providers
+    from brindle.db import Agent, Workspace
+    from brindle.profiles import ProfileError, list_profiles
+
+    claude_managed = providers.claude_org_managed()
+    grouped: dict[tuple[str, bool], tuple[dict, list[str]]] = {}
+
+    def identity_key(env):
+        # A bearer-backed profile and an SSO profile can name the same AWS
+        # config. Grouping them together would hide the SSO profile's lapse.
+        bearer = bool({**os.environ, **env}.get("AWS_BEARER_TOKEN_BEDROCK"))
+        return cloud_login.action_key(env), bearer
+
+    ambient = {**os.environ, **company_login.stored_env()}
+    if not claude_managed and cloud_login.provider_from_env(ambient):
+        grouped[identity_key(ambient)] = (ambient, ["default"])
+    root = repo_root or os.getcwd()
+    ws = Workspace("doctor", root, "doctor", "main", "HEAD", None, root, None, "", 0.0)
+    managed = agents.managed(root)
+    out = []
+    for profile in list_profiles(repo_root):
+        if profile.provider not in ("claude", "opencode") or (profile.provider == "claude" and claude_managed):
+            continue
+        agent = Agent("", ws.id, profile.name, profile.provider, None, "assign", "starting", "", None, 0.0)
+        try:
+            resolved = agents.launch_identity(agent, ws, profile, managed)[0]
+        except ProfileError as e:
+            out.append(Check(FAIL, f"cloud login ({profile.name})", str(e)))
+            continue
+        # Diagnostics use cloud selectors, never a repo's PATH or interpreter options.
+        env = {k: v for k, v in resolved.items() if k in cloud_login.IDENTITY_ENV
+               or k in ("AWS_ACCESS_KEY_ID", "AWS_BEARER_TOKEN_BEDROCK")}
+        if not cloud_login.provider_from_env({**os.environ, **env}):
+            continue
+        key = identity_key(env)
+        grouped.setdefault(key, (env, []))[1].append(profile.name)
+    for env, names in grouped.values():
+        status = cloud_login.configured_status(env)
+        if status is None:
+            continue
+        detail = status.note
+        if status.expires_at is not None:
+            from datetime import datetime, timezone
+
+            detail += f"; expires {datetime.fromtimestamp(status.expires_at, timezone.utc).isoformat()}"
+        command = cloud_login.login_command(env)
+        if command:
+            import shlex
+
+            detail += f"; refresh with `{shlex.join(command)}`"
+        elif not status.ok:
+            detail += "; refresh the configured credential file"
+        out.append(Check(OK if status.ok else WARN, f"cloud login ({', '.join(names)})", detail))
+    return out
+
+
 def _codex_key_source(name: str) -> str | None:
     from brindle import keystore
 
@@ -306,6 +364,7 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
                      install=CLI_INSTALL["opencode"][1]))
     out.extend(signin_checks(repo_root))
     out.extend(credential_checks())
+    out.extend(cloud_checks(repo_root))
     from brindle import company_identity, self_serve
 
     out.extend(company_identity.checks())

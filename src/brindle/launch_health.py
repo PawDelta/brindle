@@ -170,7 +170,10 @@ def verify_delivery(db, agent, text: str | None = None, baseline: str | None = N
 
 def _turn_running(provider, screen: str, baseline: str, prompt: str) -> bool:
     """Recognize acceptance without requiring Codex's turn-complete notify."""
-    if provider.screen_state(screen) == "busy" and provider.paste_blocked(screen, True) != "typing":
+    # Keep styling for composer/draft detection, but not for the busy marker:
+    # Codex can style individual words inside "esc to interrupt".
+    state_screen = provider.ANSI_SGR.sub("", screen) if provider.name == "codex" else screen
+    if provider.screen_state(state_screen) == "busy" and provider.paste_blocked(screen, True) != "typing":
         return True
     if provider.name != "codex":
         return False
@@ -184,7 +187,9 @@ def _turn_running(provider, screen: str, baseline: str, prompt: str) -> bool:
     prompt_text = " ".join(prompt.split())
     matching = [i for i in prompts
                 if (heading := " ".join(provider.INPUT_LINE.match(lines[i]).group(1).split()))
-                and prompt_text.startswith(heading)]
+                and (prompt_text.startswith(heading)
+                     or heading.endswith("…") and len(heading) >= 32
+                     and prompt_text.startswith(heading[:-1].rstrip()))]
     if not matching:
         return False
     # A resume may replay old tool output with no baseline at all. Only
@@ -212,7 +217,7 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
     State 1 is scheduled, 2 is running. A duplicate helper cannot take over
     an existing observation, clear its input or submit another copy.
     """
-    from brindle import agents
+    from brindle import agents, prompt_answer
     from brindle.providers import get_provider
 
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent_id,)).fetchone()
@@ -243,12 +248,19 @@ def verify_pending(db, agent_id: str, token: str | None) -> None:
             if fresh is None:
                 return
             screen = capture(fresh)
+            if prompt_answer.blocking_prompt(screen, agent.provider, text):
+                if _turn_running(provider, screen, baseline, text):
+                    delivered(db, agent, baseline)
+                else:
+                    db.conn.execute("UPDATE launch_health SET outcome='awaiting-approval' "
+                                    "WHERE agent_id=? AND token=? AND outcome IS NULL",
+                                    (agent.id, token))
+                prompt_answer.tell(db, fresh, "\n".join(prompt_answer._tail(screen)))
+                return
             if (_turn_running(provider, screen, baseline, text)
                     or failure(screen, baseline=baseline, task=agent.task or "",
                                submitted_prompt=text, provider=agent.provider)):
                 delivered(db, agent, baseline)
-                if provider.tool_permission(screen):
-                    _tell(db, agent, _approval_body(agent, screen))
                 return
             if time.time() >= deadline:
                 break
@@ -528,7 +540,7 @@ def _cause(line: str):
 
 def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -> str | None:
     """Run in a detached helper, five seconds after actual delivery."""
-    from brindle import agents
+    from brindle import agents, prompt_answer
 
     row = db.conn.execute("SELECT * FROM launch_health WHERE agent_id=?", (agent_id,)).fetchone()
     agent = db.get_agent(agent_id)
@@ -549,7 +561,11 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
     if row["delivered_at"] is not None and not wait and time.time() < row["delivered_at"] + FOLLOWUP_SECONDS:
         return None
     alive = agents.is_alive(agent)
-    cause, error_block = _failure(capture(agent), baseline=row["baseline"], task=agent.task or "",
+    screen = capture(agent)
+    if alive and prompt_answer.blocking_prompt(screen, agent.provider, row["submitted_prompt"] or agent.task or ""):
+        prompt_answer.tell(db, agent, "\n".join(prompt_answer._tail(screen)))
+        return "waiting"
+    cause, error_block = _failure(screen, baseline=row["baseline"], task=agent.task or "",
                                   submitted_prompt=row["submitted_prompt"], provider=agent.provider)
     if alive and row["delivered_at"] is None and not cause:
         return None

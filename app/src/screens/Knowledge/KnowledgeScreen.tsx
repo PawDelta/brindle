@@ -28,7 +28,7 @@ import type { DecisionDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
 import { PageHeader } from "../../components/PageHeader";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
-import { alert, button, card, field, h2, mono, notice, pill, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, h2, main, mono, notice, pill, quiet } from "../../components/ui";
 import type { KnowledgeView } from "../../routes";
 import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
@@ -97,7 +97,7 @@ export function DecisionCard({ d }: { d: DecisionDTO }) {
     <li className={`${card} flex flex-col gap-s1 px-s2 py-s2`} data-decision={d.id} data-topic={d.topic}>
       <div className="flex flex-wrap items-baseline gap-x-s1 gap-y-0.5">
         <span className="font-semibold">{d.topic}</span>
-        <span className={`${pill} ${d.status === "accepted" ? "bg-pass-soft text-pass" : "bg-surface-2 text-ink-3"}`}>{d.status === "accepted" ? "In force" : d.status}</span>
+        <span className={`${pill} ${d.status === "accepted" ? "text-ink-2" : "text-ink-3"}`}>{d.status === "accepted" ? "In force" : d.status}</span>
         <span className="flex-1" />
         <span className="text-xs text-ink-3" title={d.id}>
           {ago(d.created_at)}
@@ -113,10 +113,10 @@ export function DecisionCard({ d }: { d: DecisionDTO }) {
       <div className="flex flex-wrap items-center gap-1 text-xs text-ink-3">
         <span>Applies to</span>
         {d.scope.length === 0 ? (
-          <span className={`${pill} bg-surface-2 text-ink-2`}>the whole repo</span>
+          <span className={`${pill} text-ink-2`}>the whole repo</span>
         ) : (
           d.scope.map((p) => (
-            <span key={p} className={`${pill} ${mono} bg-surface-2 text-ink-2`}>
+            <span key={p} className={`${pill} ${mono} text-ink-2`}>
               {p}
             </span>
           ))
@@ -171,7 +171,7 @@ function RecordForm({ client, repo, onRecorded, onCancel }: { client: DaemonClie
 
   const row = "grid gap-x-s2 gap-y-0.5 md:grid-cols-[9rem_minmax(0,1fr)] md:items-start";
   return (
-    <form aria-label="Record a decision" onSubmit={submit} className={`${card} flex flex-col gap-s1 border-branch px-s2 py-s2`} data-testid="record-form">
+    <form aria-label="Record a decision" onSubmit={submit} className={`${card} flex flex-col gap-s1 border-pass/55 px-s2 py-s2`} data-testid="record-form">
       <div className="flex items-baseline gap-s1">
         <span className="font-semibold">Record a decision</span>
         <span className="text-xs text-ink-3">A rule for every agent in this repo, from now on. Every session is told; new tasks on these paths carry it in their brief.</span>
@@ -225,7 +225,7 @@ function RecordForm({ client, repo, onRecorded, onCancel }: { client: DaemonClie
         <button type="button" className={quiet} disabled={busy} onClick={onCancel}>
           Cancel
         </button>
-        <button type="submit" className={primary} disabled={busy || !topic.trim() || !decision.trim()}>
+        <button type="submit" className={main} disabled={busy || !topic.trim() || !decision.trim()}>
           {busy ? "Recording…" : "Record"}
         </button>
       </div>
@@ -252,7 +252,7 @@ function AddFolderForm({ pickFolder, busy, onAdd, onCancel }: { pickFolder?: Pic
   return (
     <form
       aria-label="Add a folder"
-      className={`${card} flex flex-col gap-s1 border-branch px-s2 py-s2`}
+      className={`${card} flex flex-col gap-s1 border-pass/55 px-s2 py-s2`}
       onSubmit={(e) => {
         e.preventDefault();
         if (path.trim()) onAdd(path.trim(), isPrivate);
@@ -276,7 +276,7 @@ function AddFolderForm({ pickFolder, busy, onAdd, onCancel }: { pickFolder?: Pic
         <button type="button" className={quiet} disabled={busy} onClick={onCancel}>
           Cancel
         </button>
-        <button type="submit" className={primary} disabled={busy || !path.trim()}>
+        <button type="submit" className={button} disabled={busy || !path.trim()}>
           Add
         </button>
       </div>
@@ -295,7 +295,7 @@ function Hit({ h }: { h: KbHit }) {
         <span className="font-medium">{h.title || h.external_id}</span>
         {h.heading_path && <span className="text-ink-3">› {h.heading_path}</span>}
         {h.updated && <span className="text-xs text-ink-3">· updated {h.updated}</span>}
-        {stale && <span className={`${pill} bg-fawn-soft text-fawn`}>not updated in {STALE_DAYS} days</span>}
+        {stale && <span className={`${pill} text-sap`}>not updated in {STALE_DAYS} days</span>}
       </div>
       <p className="line-clamp-4 whitespace-pre-wrap text-sm text-ink-2">{h.text}</p>
       {h.url && (
@@ -324,9 +324,9 @@ function Source({ s, busy, indexing, library, onSync, onRemove }: { s: KbSource;
         <div className="flex flex-wrap items-baseline gap-x-s1">
           <span className="font-medium">{sourceName(s)}</span>
           <span className="text-xs text-ink-3">{s.kind === "folder" ? "Folder" : s.kind}</span>
-          {s.visibility && <span className={`${pill} bg-surface-2 text-ink-2`}>{s.visibility === "private" ? "just for me" : s.visibility}</span>}
+          {s.visibility && <span className={`${pill} text-ink-2`}>{s.visibility === "private" ? "just for me" : s.visibility}</span>}
           {s.quarantined && (
-            <span className={`${pill} bg-fawn-soft text-fawn`} title="Some of its text looked like instructions to an agent, or a secret. Agents never see those parts.">
+            <span className={`${pill} text-sap`} title="Some of its text looked like instructions to an agent, or a secret. Agents never see those parts.">
               some text held back
             </span>
           )}
@@ -366,26 +366,26 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
       </div>
       <ol className="flex flex-col gap-s1 text-sm">
         <li className="flex gap-s2">
-          <span className="w-5 shrink-0 font-semibold text-branch">1</span>
+          <span className="w-5 shrink-0 font-semibold text-pass">1</span>
           <span>
             <span className="font-medium">You record a decision.</span> A rule every agent follows from now on, with why. Workers get the ones that cover their files in their brief.
           </span>
         </li>
         <li className="flex gap-s2">
-          <span className="w-5 shrink-0 font-semibold text-branch">2</span>
+          <span className="w-5 shrink-0 font-semibold text-pass">2</span>
           <span>
             <span className="font-medium">A session records one.</span> A supervisor that settles something durable keeps it here for every later session.
           </span>
         </li>
         <li className="flex gap-s2">
-          <span className="w-5 shrink-0 font-semibold text-branch">3</span>
+          <span className="w-5 shrink-0 font-semibold text-pass">3</span>
           <span>
             <span className="font-medium">You add a folder of documents.</span> Markdown or text (design notes, runbooks) that agents can look up and get the relevant parts of.
           </span>
         </li>
       </ol>
       <div className="flex flex-wrap gap-s1">
-        <button type="button" className={primary} onClick={onRecord}>
+        <button type="button" className={main} onClick={onRecord}>
           Record a decision
         </button>
         <button type="button" className={button} onClick={onAddFolder}>
@@ -617,7 +617,7 @@ export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBack
             </span>
             <span className="flex-1" />
             {!recording && (
-              <button type="button" className={primary} onClick={startRecording}>
+              <button type="button" className={main} onClick={startRecording}>
                 Record a decision
               </button>
             )}
@@ -667,7 +667,7 @@ export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBack
           {adding && <AddFolderForm pickFolder={pickFolder} busy={busy} onAdd={(path, isPrivate) => void addFolder(path, isPrivate)} onCancel={() => setAdding(false)} />}
           {pending.map((p) => (
             <p key={p.job} role="status" className={`${notice} flex items-center gap-s1`} data-testid="source-pending">
-              <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />
+              <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-pass/55 border-t-transparent" aria-hidden />
               {p.label}…
             </p>
           ))}

@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from brindle import agents, cull, watch
+from brindle import agents, cull, prompt_answer, watch
 from brindle.config import set_local
 from brindle.db import Agent
 from brindle.providers import get_provider
@@ -37,6 +37,7 @@ def test_codex_busy_and_plain_screens():
     assert codex.screen_state("›  \n  100% context left\n") is None
     # Codex quoting the words in a transcript line far above isn't a prompt.
     assert codex.screen_state("Would you like to run the following command?\n" + "line\n" * 30) is None
+    assert not prompt_answer.blocking_prompt("Would you like to run the following command?\n" + "line\n" * 30, "codex")
 
 
 @pytest.mark.parametrize("provider,screen", PROMPTS)

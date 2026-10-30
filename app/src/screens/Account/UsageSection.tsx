@@ -18,7 +18,7 @@ const EDGE: Record<UsageState, string> = { none: "", ok: "", warn: "before:bg-sa
 const BAR: Record<ReturnType<typeof level>, string> = { ok: "bg-ink-3", warn: "bg-sap", stop: "bg-fail" };
 const PCT: Record<ReturnType<typeof level>, string> = { ok: "text-ink", warn: "text-sap", stop: "text-fail" };
 /* The provider's mark, in the palette's own colours. */
-const DOT: Record<string, string> = { claude: "bg-fawn", codex: "bg-ink-2", antigravity: "bg-branch", native: "bg-pass" };
+const DOT: Record<string, string> = { claude: "bg-sap", codex: "bg-ink-2", antigravity: "bg-branch", native: "bg-pass" };
 
 function Meter({ w, now }: { w: UsageWindow; now: number }) {
   const l = level(w.used);
@@ -46,7 +46,7 @@ function ProviderCard({ q, now }: { q: ProviderUsage; now: number }) {
   const note = q.known && !q.limited ? hint(q) : null;
   return (
     <article
-      className={`relative flex min-h-24 flex-col gap-s1 rounded-md border border-line bg-surface py-2.5 pr-3 pl-[15px] before:absolute before:top-2.5 before:bottom-2.5 before:-left-px before:w-[3px] before:rounded-[2px] before:content-[''] ${EDGE[state]}`}
+      className={`relative flex min-h-24 flex-col gap-s1 border-t border-line py-2.5 pr-3 pl-[15px] before:absolute before:top-2.5 before:bottom-2.5 before:left-0 before:w-[2px] before:rounded-[2px] before:content-[''] ${EDGE[state]}`}
       aria-label={providerName(q.provider)}
       data-provider={q.provider}
       data-state={state}
@@ -65,7 +65,7 @@ function ProviderCard({ q, now }: { q: ProviderUsage; now: number }) {
           <b className="font-semibold text-fail">Limit reached</b>
           {q.limited_until != null && ` · available again ${resets(q.limited_until, now)}${soon(q.limited_until, now) ? ` (${clock(q.limited_until)})` : ""}`}
           <small className="mt-[3px] block text-[11.5px] leading-[1.4] text-ink-3">
-            Workers on {providerName(q.provider)} wait for it; autopilot routes new work to the other providers until then.
+            Workers on {providerName(q.provider)} wait for it; brindle routes new work to the other providers until then.
           </small>
         </div>
       ) : (

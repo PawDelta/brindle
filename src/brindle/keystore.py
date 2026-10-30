@@ -20,6 +20,8 @@ This module is shared: brindle Pro keeps its sign-in here (service
 from __future__ import annotations
 
 import base64
+import contextlib
+import contextvars
 import json
 import os
 import re
@@ -27,8 +29,14 @@ import shutil
 import stat
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:     # Windows: threads are still serialized
+    fcntl = None
 
 ACCOUNT = "default"
 MAX_BLOB = 64 * 1024
@@ -272,18 +280,74 @@ def check_name(name: str, repo_root: str | None = None) -> None:
         raise KeyNameError(f"{name} is not a variable any provider or profile reads")
 
 
-def set_key(name: str, value: str, repo_root: str | None = None) -> None:
+_key_lock = threading.RLock()
+
+
+@contextlib.contextmanager
+def _locked():
+    """Serializes every change to a stored key across daemon threads and, through
+    a lock file, across the CLI and hook processes."""
+    with _key_lock:
+        fd = None
+        if fcntl is not None:
+            from brindle.config import brindle_home
+
+            home = brindle_home()
+            try:
+                home.mkdir(mode=0o700, parents=True, exist_ok=True)
+                fd = os.open(home / "keys.lock", os.O_RDWR | os.O_CREAT, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError as e:
+                # Without it another process could delete the key mid-update and have it recreated.
+                if fd is not None:
+                    os.close(fd)
+                raise CredentialError(f"couldn't lock the key store ({type(e).__name__})") from None
+        try:
+            yield
+        finally:
+            if fd is not None:
+                os.close(fd)     # closing drops the flock
+
+
+def set_key(name: str, value: str, repo_root: str | None = None, status: str | None = None) -> None:
+    """Keep ``value``; with ``status``, its check result is saved in the same write."""
     check_name(name, repo_root)
     value = value.strip()
     if not value:
         raise KeyNameError("empty key")
-    _key_store(name).save({"value": value, "updated_at": time.time()})
+    now = time.time()
+    rec = {"value": value, "updated_at": now}
+    if status:
+        rec.update(status=status, checked_at=now)
+    with _locked():
+        _key_store(name).save(rec)
+
+
+_reads: contextvars.ContextVar[dict[str, str | None] | None] = contextvars.ContextVar("keystore_reads", default=None)
+
+
+@contextlib.contextmanager
+def reading():
+    """Within this block each stored key is read from the store once (on
+    macOS every read runs ``security``): for a read-only pass that checks
+    many candidates, each asking for the same keys. Nothing outlives it."""
+    token = _reads.set({})
+    try:
+        yield
+    finally:
+        _reads.reset(token)
 
 
 def get_key(name: str) -> str | None:
+    memo = _reads.get()
+    if memo is not None and name in memo:
+        return memo[name]
     rec = _key_store(name).load()
     value = rec.get("value") if rec else None
-    return value if isinstance(value, str) and value else None
+    value = value if isinstance(value, str) and value else None
+    if memo is not None:
+        memo[name] = value
+    return value
 
 
 def get_key_info(name: str) -> tuple[str | None, float]:
@@ -296,8 +360,46 @@ def get_key_info(name: str) -> tuple[str | None, float]:
 
 
 
+def get_record(name: str) -> dict:
+    """The stored key's record: ``value`` plus ``status``/``checked_at`` once it has been checked."""
+    return _key_store(name).load() or {}
+
+
+def set_check(name: str, status: str, value: str) -> bool:
+    """Remember how the check of ``value`` came out (verified, rejected or unchecked) and
+    when. Only if ``value`` is still the stored key: a key replaced or removed while the
+    check ran keeps its own result (and a removed one stays removed). True when saved."""
+    store = _key_store(name)
+    with _locked():
+        rec = store.load()
+        if not rec or rec.get("value") != value:
+            return False
+        store.save({**rec, "status": status, "checked_at": time.time()})
+        return True
+
+
+def provider_of(name: str) -> str | None:
+    """The provider whose credentials include ``name``, if any."""
+    from brindle import providers, secrets
+
+    for table in (providers._ENV_AUTH, secrets._CREDENTIALS):
+        for provider, names in table.items():
+            if name in names:
+                return provider
+    return None
+
+
+def provider_key_names(provider: str) -> list[str]:
+    """Names of the provider's credentials that could be a stored key."""
+    from brindle import providers, secrets
+
+    names = {*providers._ENV_AUTH.get(provider, ()), *secrets._CREDENTIALS.get(provider, ())}
+    return sorted(n for n in names if n not in REFUSED and not secrets.is_job_secret(n))
+
+
 def unset_key(name: str) -> None:
-    _key_store(name).delete()
+    with _locked():
+        _key_store(name).delete()
 
 
 def list_keys(repo_root: str | None = None) -> dict[str, str]:

@@ -16,7 +16,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { DaemonError, type Diff } from "../../api/client";
 import { useDaemon } from "../../api/context";
-import { button, card, label, mono, primary, quiet } from "../../components/ui";
+import { button, card, label, mono, quiet } from "../../components/ui";
 import { hunksOf, newSide, parseDiff, splice, type FileDiff, type Hunk, type Untracked } from "./parseDiff";
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -36,7 +36,7 @@ export interface EditAccess {
 export function EditPill({ access }: { access: EditAccess }) {
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-full border px-2 py-px text-xs ${access.editable ? "border-line bg-surface-2 text-ink-2" : "border-dashed border-line-strong text-ink-3"}`}
+      className={`inline-flex items-center gap-1 rounded-sm border px-2 py-px text-xs ${access.editable ? "border-line bg-surface-2 text-ink-2" : "border-dashed border-line-strong text-ink-3"}`}
       title={access.editable ? "Click a hunk, or press e, to edit its new side. ⌘S saves it as your commit on the worker's branch." : `Editing is off: ${access.why ?? "the worker is busy"}.`}
       data-testid="edit-pill"
     >
@@ -173,7 +173,7 @@ function HunkEditor({ file, hunk, access, onSaved, onDone }: { file: FileDiff; h
           </span>
         )}
         <span className="flex-1" />
-        <button type="button" className={`${primary} px-s1 py-0.5 text-xs`} disabled={busy} onClick={() => void save()}>
+        <button type="button" className={`${button} px-s1 py-0.5 text-xs`} disabled={busy} onClick={() => void save()}>
           Save <kbd className="ml-1 font-mono text-[10px] opacity-80">⌘S</kbd>
         </button>
         <button type="button" className={`${quiet} text-xs`} disabled={busy} onClick={onDone}>

@@ -11,6 +11,28 @@ from brindle.db import Agent
 from conftest import sh
 
 
+@pytest.mark.parametrize("command", [[], ["start", "--no-attach"], ["supervisor", "--no-attach"]])
+@pytest.mark.parametrize("flag", ["--no-autopilot", pytest.param("--autopilot", marks=pytest.mark.variant("deprecated positive spelling"))])
+def test_deprecated_driver_flags_still_start_a_goal_session(db, repo, monkeypatch, command, flag):
+    from brindle import agents, cli, config
+
+    monkeypatch.chdir(repo)
+    config.set_local(str(repo), "autopilot", False)
+    monkeypatch.setattr(cli, "_resolve_supervisor", lambda *a, **k: "claude")
+    for name in ("_preflight", "_trust_codex_hook", "_pause_transferred", "_check_updates",
+                 "_cull_detached", "_local_models_detached", "_settings_sync_detached", "_attach"):
+        monkeypatch.setattr(cli, name, lambda *a, **k: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "_launch", lambda *a, **k: None)
+    result = CliRunner().invoke(app, [*command, flag, "--yes"])
+    assert result.exit_code == 0, result.output
+    roots = db.conn.execute("SELECT root_id FROM autopilot").fetchall()
+    assert len(roots) == 1
+    assert db.get_agent(roots[0][0]).profile == "supervisor"
+    assert db.get_autopilot(roots[0][0]).enabled
+    assert config.load_repo_config(str(repo)).autopilot
+
+
 @pytest.mark.variant("guards the suite against launching the real agent CLI")
 @pytest.mark.parametrize("argv, override", [
     (["claude", "--version"], None),
@@ -77,6 +99,34 @@ def test_rm_survives_a_missing_base_branch(db, repo, monkeypatch):
     assert res.exit_code == 0, res.output
     assert "removed" in res.output
     assert db.get_workspace(ws.id) is None
+
+
+@pytest.mark.parametrize("check,pushed,said", [
+    ("echo boom; false", False, "checks failed: echo boom; false"),
+    ("git -c user.name=a -c user.email=a@a commit --allow-empty -qm moved", False, "changed while its checks ran"),
+    ("grep -q fixed app.py; r=$?; git checkout -q app.py; exit $r", False, "uncommitted changes"),   # passes only dirty
+    ("true", True, ""),
+], ids=["fails", "head-moves", "dirty-start", "passes"])
+def test_pr_runs_the_checks_before_pushing(db, repo, monkeypatch, check, pushed, said):
+    from brindle import config
+
+    ws = workspaces.create(db, str(repo), "feat/x").workspace
+    config.set_local(str(repo), "checks", [check])
+    if "dirty" in said or "fixed" in check:
+        sh("echo fixed >> app.py", ws.path)
+    verified = sh("git rev-parse HEAD", ws.path)
+    opened = []
+
+    def fake_pull_request(ws, title, draft, **kw):
+        opened.append(kw["sha"])    # a commit landing now must not be what is pushed
+        sh("git -c user.name=a -c user.email=a@a commit --allow-empty -qm late", ws.path)
+        return "https://gh.test/pr/1"
+
+    monkeypatch.setattr(workspaces, "pull_request", fake_pull_request)
+    monkeypatch.setattr(workspaces, "keeps_merged_branches", lambda root: False)
+    monkeypatch.chdir(ws.path)
+    res = CliRunner().invoke(app, ["pr"])
+    assert (opened == [verified], res.exit_code == 0) == (pushed, pushed) and said in res.output
 
 
 def test_version_flag_prints_the_installed_version():

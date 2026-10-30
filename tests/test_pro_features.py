@@ -80,6 +80,7 @@ def ci_repo(repo, monkeypatch):
     return repo
 
 
+@pytest.mark.brindle_ci
 def test_init_with_ci_fix_fetches_only_the_fix_workflow(tmp_path, ci_repo, backend, token, monkeypatch):
     from brindle import git as git_mod
 

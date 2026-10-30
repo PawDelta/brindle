@@ -108,6 +108,7 @@ def test_unknown_answers_never_block(monkeypatch):
     assert providers.signed_out("codex") is None
     assert providers.signed_out("antigravity") is None
     assert providers.signed_out("native") is None
+    assert not any(providers.seen_signed_in(p) for p in ("claude", "codex", "antigravity"))
 
 
 def test_routing_skips_a_signed_out_cli(repo, monkeypatch, tmp_path):

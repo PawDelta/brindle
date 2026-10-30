@@ -1,11 +1,15 @@
+import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 import brindle
-from brindle import bus, git, mcp_server, providers, workspaces
+from brindle import cli
+from brindle import agents, bus, gates, git, mcp_server, providers, services, workspaces
 from brindle.config import load_repo_config
 
 from conftest import sh
@@ -35,6 +39,51 @@ def test_new_worktrees_go_under_the_repo_and_stay_out_of_git_status(db, repo, co
     assert "feat" not in sh("git status --porcelain --untracked-files=all", repo)
     # Still one of brindle's own worktrees (trusted), unlike the main checkout.
     assert providers._in_worktree(ws.path) and not providers._in_worktree(str(repo / "app.py"))
+
+
+def test_session_config_setup_comes_from_base_branch(db, repo, monkeypatch):
+    # The main checkout sits on another branch whose committed config differs
+    # from the base the workspace is cut from: the base's config wins, for
+    # setup and its services' env, check scoping and the review's checks.
+    monkeypatch.setattr(services, "entitled", lambda: True)
+    monkeypatch.setattr(services, "docker_path", lambda: None)
+    write_config(repo, setup=["echo main:$DB_URL > marker"], checks=["pytest -q"], scoped_checks="off",
+                 services=[{"name": "db", "image": "img", "port": 5432, "env": {"DB_URL": "db:{port}"}}])
+    sh("git add -A && git commit -qm config && git checkout -qb import/app", repo)
+    write_config(repo, setup=["echo app > marker"], checks=[], scoped_checks="infer")
+    sh("git add -A && git commit -qm app-config", repo)
+    ws = workspaces.create(db, str(repo), "w", base="main").workspace
+    assert open(os.path.join(ws.path, "marker")).read().strip() == f"main:db:{ws.port_base + 1}"
+    assert gates._scoped(ws, "pytest -q", ("main", [])) == "pytest -q"
+    reviewed = []
+    monkeypatch.setattr(agents, "start_review", lambda db_, caller, ws_, profile, focus, cfg: reviewed.append(cfg.checks))
+    monkeypatch.chdir(repo)
+    asyncio.run(mcp_server.request_review(ws.id))
+    assert reviewed == [["pytest -q"]]
+    # A session's own workspace reads its own branch; its worker reads the session branch as its base.
+    sess = workspaces.create(db, str(repo), "brindle/session-2", base="main", apply_prefix=False).workspace
+    write_config(Path(sess.path), setup=["echo $SESS_URL > marker"], checks=["echo $SESS_URL > seen"],
+                 scoped_checks="off", services=[{"name": "db", "image": "img", "port": 5432, "env": {"SESS_URL": "s:{port}"}}])
+    sh("git add -A && git commit -qm sess-config", sess.path)
+    add(db, sess, "boss", "interactive", profile="supervisor")
+    worker = workspaces.create(db, str(repo), "w2", base=sess.branch).workspace
+    assert workspaces.config_for(db, sess).checks == ["echo $SESS_URL > seen"]   # not main's ["pytest -q"]
+    assert workspaces.config_for(db, worker).checks == ["echo $SESS_URL > seen"]   # its base is the session branch
+    cfg = workspaces.config_for(db, sess)
+    want = f"s:{sess.port_base + 1}"
+    reviewed.clear()
+    asyncio.run(mcp_server.request_review(sess.id))
+    assert reviewed == [["echo $SESS_URL > seen"]]
+    # Check execution, `brindle setup` and `brindle services` all see the session branch's service env.
+    gates.check_summary(db, sess, cfg)
+    assert open(os.path.join(sess.path, "seen")).read().strip() == want
+    assert CliRunner().invoke(cli.app, ["setup", sess.id]).exit_code == 0
+    assert open(os.path.join(sess.path, "marker")).read().strip() == want
+    assert CliRunner().invoke(cli.app, ["services", "ls", sess.id]).exit_code == 0
+    # A base without the file committed falls back to the working tree.
+    sh("git checkout -q --orphan bare && git rm -rqf --cached .brindle", repo)
+    sh("git commit -qm bare --allow-empty", repo)
+    assert load_repo_config(repo, branch="bare").scoped_checks == "infer"
 
 
 def test_local_config_wraps_shared(repo):

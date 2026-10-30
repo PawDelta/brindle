@@ -71,18 +71,16 @@ describe("Account › Usage", () => {
     stop();
   });
 
-  it("near a limit: the window turns warm or red, a limited provider says when it is back, and what autopilot does", async () => {
+  it("near a limit: the window turns warm or red, a limited provider says when it is back, and what brindle does", async () => {
     const { stop } = setup("reset");
     await waitFor(() => expect(card("Claude").getAttribute("data-state")).toBe("stop"));
     const claude = windows(card("Claude"));
     expect(claude[0]).toEqual({ window: "5h", level: "stop", bar: "94%", text: "5-hour window94% usedResets in 12 min (3:10pm)" });
-    expect(card("Claude").textContent).toContain("Past 90%: autopilot has stopped starting new Claude work and paused the Claude workers that were running");
     expect(within(card("Claude")).getAllByTestId("usage-percent")[0].className).toContain("text-fail");
     // A reset within the hour reads green.
     expect(within(card("Claude")).getAllByTestId("usage-reset")[0].className).toContain("text-pass");
     expect(card("Codex").getAttribute("data-state")).toBe("warn");
     expect(windows(card("Codex"))[1]).toMatchObject({ level: "warn", bar: "83%" });
-    expect(card("Codex").textContent).toContain("Past 80%. Autopilot stops starting new Codex work at 90%.");
     const ag = card("Antigravity");
     expect(ag.getAttribute("data-state")).toBe("limit");
     expect(within(ag).getByTestId("usage-limited").textContent).toContain("Limit reached · available again in 6 min (3:04pm)");

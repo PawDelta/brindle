@@ -37,6 +37,9 @@ export interface SessionsFeed {
   close(root: string): Promise<void>;
   /* The last close the engine refused, in words; null once another goes. */
   closeError: string | null;
+  /* Names a session (POST /sessions/{root}/rename; empty clears the name) and
+     reloads the lists, so every place the session is listed shows it. */
+  rename(root: string, name: string): Promise<void>;
   /* Where the view goes once `root` is closed: the next live session in
      the sidebar's order (else the one before it), else the Inbox. */
   after(root: string): Route;
@@ -193,6 +196,15 @@ export function SessionsProvider({ client, children }: { client: DaemonClient | 
     [client, reload],
   );
 
+  const rename = useCallback(
+    async (root: string, name: string) => {
+      if (!client) return;
+      await client.renameSession(root, name);
+      await reload();
+    },
+    [client, reload],
+  );
+
   const feed = useMemo<SessionsFeed>(
     () => ({
       repos,
@@ -204,6 +216,7 @@ export function SessionsProvider({ client, children }: { client: DaemonClient | 
       hidden,
       close,
       closeError,
+      rename,
       after: (root) => {
         // The sidebar's order: repo by repo, each repo's live sessions.
         const live = (repos ?? []).flatMap((r) => (shown[r.repo_root] ?? []).filter((s) => !isPaused(s)).map((s) => ({ root: s.id, repo: r.repo_root })));
@@ -213,7 +226,7 @@ export function SessionsProvider({ client, children }: { client: DaemonClient | 
         return next ? { screen: "session", root: next.root, repo: next.repo, agent: next.root } : { screen: "inbox" };
       },
     }),
-    [repos, shown, error, reload, hidden, close, closeError],
+    [repos, shown, error, reload, hidden, close, closeError, rename],
   );
   return <SessionsContext.Provider value={feed}>{children}</SessionsContext.Provider>;
 }

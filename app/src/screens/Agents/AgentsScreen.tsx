@@ -23,16 +23,18 @@
 
    Nothing opens over the page: lists, panels and the builder are all inline
    under the row they change. No <select>. Every change goes straight to the
-   engine (PUT /v1/routing `kinds`, into this repo's personal config) and the
-   page reads GET /v1/routing again. */
+   engine (PUT /v1/routing `kinds`, into the person's ~/.brindle/config.json:
+   agents are theirs, one list whatever the repos) and the page reads GET
+   /v1/routing again: the rows at once, what learning runs instead after. */
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient, KindPut, RulePackInfo } from "../../api/client";
 import type { RoutingDTO, RoutingProfileDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
 import { PageHeader } from "../../components/PageHeader";
-import { NO_REPO, useRepo } from "../../components/RepoSelect";
-import { alert, button, card, field, h2, label, mono, pill, primary, quiet } from "../../components/ui";
+import { NO_REPO } from "../../components/RepoSelect";
+import { alert, button, card, chip, field, h2, label, main, mono, pill, quiet } from "../../components/ui";
+import { useSessions } from "../../store/sessions";
 import {
   COST_MARK,
   COST_WORDS,
@@ -76,7 +78,7 @@ const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e)
 /* What is open under a row: its list, its fallbacks, its More, or the builder. */
 type Panel = "pick" | "fb" | "more" | "make";
 
-const MARK: Record<string, string> = { claude: "bg-fawn text-on-fawn", codex: "bg-ink text-surface", opencode: "bg-ink-3 text-surface", antigravity: "bg-branch text-on-branch", native: "bg-pass text-surface" };
+const MARK: Record<string, string> = { claude: "bg-sap text-on-sap", codex: "bg-ink text-surface", opencode: "bg-ink-3 text-surface", antigravity: "bg-branch text-on-branch", native: "bg-pass text-surface" };
 
 /* A provider's small letter mark. */
 function Mark({ provider }: { provider: string }) {
@@ -110,14 +112,14 @@ function ChoiceName({ c }: { c: Choice }) {
 /* A one-of-several choice as a row of buttons (never a <select>). */
 function Seg<T extends string>({ name, options, value, onPick, disabled, labelOf }: { name: string; options: readonly T[]; value: T | null; onPick(v: T): void; disabled?: boolean; labelOf?(v: T): string }) {
   return (
-    <span role="group" aria-label={name} className="inline-flex flex-wrap overflow-hidden rounded-md border border-line">
+    <span role="group" aria-label={name} className="inline-flex flex-wrap gap-0.5">
       {options.map((o) => (
         <button
           key={o}
           type="button"
           aria-pressed={value === o}
           disabled={disabled}
-          className={`border-r border-line px-s1 py-0.5 text-sm last:border-r-0 ${value === o ? "bg-branch text-on-branch" : "text-ink-2 hover:bg-surface-2"}`}
+          className={`rounded-md px-s1 py-0.5 text-sm ${value === o ? "bg-surface-2 font-medium text-ink" : "text-ink-2 hover:text-ink"}`}
           onClick={() => onPick(o)}
         >
           {labelOf ? labelOf(o) : o}
@@ -130,7 +132,7 @@ function Seg<T extends string>({ name, options, value, onPick, disabled, labelOf
 /* The link every "isn't connected" carries: Settings › Providers. */
 function ConnectLink({ provider, onNavigate, children }: { provider: string; onNavigate?: AgentsScreenProps["onNavigate"]; children?: ReactNode }) {
   return (
-    <button type="button" className="text-sm text-branch underline" data-connect={provider} onClick={() => onNavigate?.("providers")}>
+    <button type="button" className="text-sm text-pass underline" data-connect={provider} onClick={() => onNavigate?.("providers")}>
       {children ?? `Connect ${productName(provider)}`}
     </button>
   );
@@ -172,14 +174,14 @@ function Choices({ name, choices, current, skip = [], fresh, onPick, onMake, mis
       ) : (
       <button
         type="button"
-        className={`grid w-full grid-cols-[minmax(0,14rem)_5rem_minmax(0,1fr)] items-baseline gap-x-s2 rounded-md px-s1 py-0.5 text-left text-sm hover:bg-surface-2 ${c.id === current ? "bg-branch-soft" : ""}`}
+        className={`grid w-full grid-cols-[minmax(0,14rem)_5rem_minmax(0,1fr)] items-baseline gap-x-s2 rounded-md px-s1 py-0.5 text-left text-sm hover:bg-surface-2 ${c.id === current ? "bg-pass-soft" : ""}`}
         aria-current={c.id === current ? "true" : undefined}
         data-choice={c.id}
         onClick={() => onPick(c.id)}
       >
         <span className="flex min-w-0 items-center gap-1">
           <ChoiceName c={c} />
-          {fresh === c.id && <span className={`${pill} bg-pass-soft text-pass`}>new</span>}
+          {fresh === c.id && <span className={`${pill} text-pass`}>new</span>}
         </span>
         <span className="flex items-baseline gap-1 text-xs text-ink-3">
           <CostTag cost={c.cost} />
@@ -198,12 +200,12 @@ function Choices({ name, choices, current, skip = [], fresh, onPick, onMake, mis
       </div>
     );
   return (
-    <div className="flex flex-col gap-s1 rounded-md border border-line bg-surface px-s1 py-s1" role="group" aria-label={`Choices for ${name}`} data-testid="choices">
+    <div className="flex flex-col gap-s1 px-s1 py-s1" role="group" aria-label={`Choices for ${name}`} data-testid="choices">
       {group("Your custom agents", own, "own")}
       {byProvider.map((p) => group(<><Mark provider={p} />{productName(p)}</>, shown.filter((c) => !c.custom && c.provider === p), p))}
       {onMake && (
         <button type="button" className="flex items-baseline gap-s2 rounded-md px-s1 py-0.5 text-left text-sm hover:bg-surface-2" onClick={onMake}>
-          <span className="font-medium text-branch">+ Make a custom agent…</span>
+          <span className="font-medium text-pass">+ Make a custom agent…</span>
           <span className="text-xs text-ink-3">A model plus your effort, instructions and rules</span>
         </button>
       )}
@@ -241,7 +243,7 @@ function Problems({ c }: { c: Choice }) {
 
 const ProblemsButton = ({ c, open, onToggle }: { c: Choice; open: boolean; onToggle(): void }) =>
   c.problems.length > 0 ? (
-    <button type="button" className={`${pill} bg-sap-soft text-sap`} aria-expanded={open} data-testid="problems" onClick={onToggle}>
+    <button type="button" className={`${pill} text-sap`} aria-expanded={open} data-testid="problems" onClick={onToggle}>
       {problemCount(c.problems.length)} {open ? "▴" : "▾"}
     </button>
   ) : null;
@@ -285,10 +287,10 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
   let note: ReactNode = null;
   if (learned) {
     note = (
-      <div className="flex flex-col gap-0.5 rounded-md bg-fawn-soft px-s1 py-0.5 text-sm" data-testid="learned">
+      <div className="flex flex-col gap-0.5 rounded-md bg-pass-soft px-s1 py-0.5 text-sm" data-testid="learned">
         <span>
           brindle learned <b>{learned.label}</b> does better here ·{" "}
-          <button type="button" className="text-fawn underline" disabled={busy} onClick={() => put({ locked: true })}>
+          <button type="button" className="text-pass underline" disabled={busy} onClick={() => put({ locked: true })}>
             use mine instead
           </button>
         </span>
@@ -297,7 +299,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
     );
   } else if (first && !first.ok && now) {
     note = (
-      <p className="flex flex-wrap items-baseline gap-x-1 rounded-md bg-fawn-soft px-s1 py-0.5 text-sm" data-testid="cant-run">
+      <p className="flex flex-wrap items-baseline gap-x-1 rounded-md bg-sap-soft px-s1 py-0.5 text-sm" data-testid="cant-run">
         {first.label} can't run: {first.why}. <b>{now.label}</b> runs it until then.
         {connectable(first) && <ConnectLink provider={first.provider} onNavigate={onNavigate} />}
       </p>
@@ -313,7 +315,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
   }
 
   const fallbacks = (
-    <div className="flex flex-col gap-s1 rounded-md border border-line px-s2 py-s1" data-testid="fallback-list">
+    <div className="flex flex-col gap-s1 px-s2 py-s1" data-testid="fallback-list">
       <p className="text-xs text-ink-2">Tried in order when the one before it is at its limit or can't run. None left: the task waits and you're told.</p>
       <ol className="flex flex-col rounded-md bg-canvas-2 px-s1 py-0.5" aria-label={`${name} fallbacks`}>
         {rest.map((c, k) => {
@@ -330,7 +332,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
               {problems(c)}
               <span className="flex-1" />
               {mine ? (
-                <span className={`${pill} bg-surface-2 text-ink-3`}>your pick</span>
+                <span className={`${pill} text-ink-3`}>your pick</span>
               ) : (
                 <span className="flex items-center">
                   <button type="button" className={quiet} aria-label={`Move ${c.label} earlier`} disabled={busy || i <= 1} onClick={() => put({ fallbacks: move(own, i, i - 1).slice(1) })}>
@@ -359,7 +361,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
   );
 
   const more = (
-    <div className="flex flex-col gap-s1 rounded-md border border-line px-s2 py-s1" data-testid="more">
+    <div className="flex flex-col gap-s1 px-s2 py-s1" data-testid="more">
       <div className="flex flex-wrap items-center gap-s2 text-sm">
         <span className="w-24 text-ink-3">Effort</span>
         <Seg name={`${name} effort`} options={EFFORT} value={(state.effort as (typeof EFFORT)[number]) ?? null} disabled={busy} onPick={(effort) => put({ effort })} />
@@ -422,7 +424,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
             <ChoiceName c={first} />
             <CostTag cost={first.cost} />
             {first.speed && <span className="text-ink-3">{first.speed}</span>}
-            {learned && <span className={`${pill} bg-fawn-soft text-fawn`}>learned</span>}
+            {learned && <span className={`${pill} text-pass`}>learned</span>}
             <span className="text-ink-3" aria-hidden>
               ▾
             </span>
@@ -448,7 +450,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
                     </span>
                   ))}
             </span>{" "}
-            <span className="text-branch">
+            <span className="text-pass">
               fallbacks ({rest.length}) {panel === "fb" ? "▴" : "▾"}
             </span>
         </button>
@@ -456,7 +458,7 @@ function Row({ kind, state, choiceOf: info, choices, missing, panel, adding, pro
       <div className="flex items-start gap-s1">
         <button
           type="button"
-          className={`${pill} border ${state.locked ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2"}`}
+          className={`${chip} border ${state.locked ? "border-pass/55 bg-pass-soft text-pass" : "border-line text-ink-2"}`}
           aria-pressed={state.locked}
           data-testid="lock"
           title={state.locked ? "Locked: learning won't change this row. Click to let it." : "Learning may run a better model here. Click to lock your choice."}
@@ -510,14 +512,14 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
   const step = (i: number, body: ReactNode) => (
     <div key={STEPS[i][0]} className={`grid gap-x-s3 gap-y-1 border-t border-line py-s1 md:grid-cols-[11rem_minmax(0,1fr)] ${i > reach ? "opacity-60" : ""}`} data-step={STEPS[i][0]}>
       <span className="flex items-baseline gap-1 text-sm font-semibold">
-        <span className="inline-flex size-4 items-center justify-center rounded-full bg-branch-soft text-[10px] text-branch">{i + 1}</span>
+        <span className="inline-flex size-4 items-center justify-center rounded-full bg-pass-soft text-[10px] text-pass">{i + 1}</span>
         {STEPS[i][1]}
       </span>
       <div className="flex min-w-0 flex-col gap-s1">{body}</div>
     </div>
   );
   return (
-    <section className={`${card} flex flex-col gap-s1 border-branch px-s2 py-s2`} aria-label="New custom agent" data-testid="builder">
+    <section className={`${card} flex flex-col gap-s1 border-pass/55 px-s2 py-s2`} aria-label="New custom agent" data-testid="builder">
       <header className="flex flex-col">
         <h3 className="text-sm font-semibold">New custom agent</h3>
         <p className="text-xs text-ink-2">A model plus how it should work. When it's made, it's in every model list, and {KIND_INFO[kind].name} can use it.</p>
@@ -541,13 +543,13 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
           <div className="flex flex-wrap gap-1" role="group" aria-label="Provider">
             {providers.map((p) =>
               connected.has(p) ? (
-                <button key={p} type="button" aria-pressed={draft.provider === p} className={`${pill} gap-1 border py-0.5 ${draft.provider === p ? "border-branch bg-branch-soft text-branch" : "border-line text-ink"}`} onClick={() => set({ provider: p, model: null })}>
+                <button key={p} type="button" aria-pressed={draft.provider === p} className={`${chip} gap-1 border py-0.5 ${draft.provider === p ? "border-pass/55 bg-pass-soft text-pass" : "border-line text-ink"}`} onClick={() => set({ provider: p, model: null })}>
                   <Mark provider={p} />
                   {productName(p)}
                   <span className="text-ink-3">{modelsOf(p, profiles).length} models</span>
                 </button>
               ) : (
-                <span key={p} className={`${pill} gap-1 border border-line py-0.5 text-ink-3`} data-provider-off={p}>
+                <span key={p} className={`${chip} gap-1 border border-line py-0.5 text-ink-3`} data-provider-off={p}>
                   <Mark provider={p} />
                   {productName(p)} <span>not connected</span>
                 </span>
@@ -562,7 +564,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
           {draft.provider ? (
             <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3" role="group" aria-label="Model">
               {models.map((m) => (
-                <button key={m.name} type="button" aria-pressed={draft.model === m.model} className={`flex flex-col items-start rounded-md border px-s1 py-0.5 text-left ${draft.model === m.model ? "border-branch bg-branch-soft" : "border-line hover:bg-surface-2"}`} onClick={() => set({ model: m.model ?? null })}>
+                <button key={m.name} type="button" aria-pressed={draft.model === m.model} className={`flex flex-col items-start rounded-md border px-s1 py-0.5 text-left ${draft.model === m.model ? "border-pass/55 bg-pass-soft" : "border-line hover:bg-surface-2"}`} onClick={() => set({ model: m.model ?? null })}>
                   <span className="text-sm font-semibold">{prettyModel(m.model)}</span>
                   <span className="text-xs text-ink-3">
                     {COST_MARK[m.cost_tier]} {COST_WORDS[m.cost_tier]} · {speedOf(m)}
@@ -591,7 +593,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
           <div className="flex flex-col gap-0.5 text-sm" role="group" aria-label="Rules">
             <p className="text-xs text-ink-3">
               Rules are short instructions brindle adds to this agent's brief.{" "}
-              <button type="button" className="text-branch underline" onClick={() => onNavigate?.("knowledge")}>
+              <button type="button" className="text-pass underline" onClick={() => onNavigate?.("knowledge")}>
                 See all rules
               </button>
             </p>
@@ -658,7 +660,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
             <button type="button" className={quiet} onClick={onCancel}>
               Cancel
             </button>
-            <button type="button" className={primary} disabled={!!problem || busy} onClick={onCreate}>
+            <button type="button" className={main} disabled={!!problem || busy} onClick={onCreate}>
               {busy ? "Creating…" : "Create agent"}
             </button>
           </div>
@@ -668,8 +670,25 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
   );
 }
 
+/* Until the learned picks are read again, a kind keeps the one it had,
+   unless it's locked now (never overridden) or that is now its own pick. */
+function keepLearned(next: RoutingDTO, prev: RoutingDTO | null): RoutingDTO {
+  if (!next.kinds || !prev?.kinds) return next;
+  const kinds = Object.fromEntries(
+    Object.entries(next.kinds).map(([k, v]) => {
+      const was = prev.kinds?.[k]?.learned;
+      return [k, !v.learned && was && !v.locked && was !== v.model ? { ...v, learned: was } : v];
+    }),
+  );
+  return { ...next, kinds };
+}
+
 export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
-  const { repo, setRepo, repos } = useRepo();
+  const { repos } = useSessions();
+  /* Agents are the person's, the same in every repo (their settings and
+     library, PUT at scope "user"): one list, whatever the repos. A repo only
+     gives the engine its org policy and what learning knows. */
+  const repo = repos?.[0]?.repo_root ?? null;
   const [routing, setRouting] = useState<RoutingDTO | null>(null);
   const [describe, setDescribe] = useState<Record<string, string>>({});
   const [rules, setRules] = useState<RulePackInfo[]>([]);
@@ -684,22 +703,23 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const [createError, setCreateError] = useState<string | null>(null);
   const [fresh, setFresh] = useState<string | null>(null);
   const seq = useRef(0);
-  /* The repo on screen. A save or a load that ends after the picker moved to
-     another repo is about that one: it must not read or show anything here
-     (nor bump `seq`, which would drop this repo's own load). */
-  const shown = useRef<string | null>(repo);
-  shown.current = repo;
 
   const load = useCallback(() => {
-    if (!repo || shown.current !== repo) return Promise.resolve();
+    if (!repo) return Promise.resolve();
     const mine = ++seq.current;
-    return Promise.all([client.routing(repo), client.profiles(repo).catch(() => []), client.rulePacks(repo).catch(() => [])]).then(
+    // The rows first: what learning runs instead resolves the dispatch for
+    // every candidate (seconds), so it fills in after, and only the newest load's.
+    return Promise.all([client.routing(repo, { scope: "user", learned: false }), client.profiles().catch(() => []), client.rulePacks(repo).catch(() => [])]).then(
       ([r, ps, rs]) => {
-        if (mine !== seq.current || shown.current !== repo) return;
-        setRouting(r);
+        if (mine !== seq.current) return;
+        setRouting((prev) => keepLearned(r, prev));
         setDescribe(Object.fromEntries(ps.map((p) => [p.name, p.description])));
         setRules(rs);
         setLoadError(null);
+        client.routing(repo, { scope: "user" }).then(
+          (full) => mine === seq.current && setRouting(full),
+          () => {}, // the rows stand without what learning runs instead
+        );
       },
       (e: unknown) => {
         if (mine === seq.current) setLoadError(message(e));
@@ -734,15 +754,13 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
 
   const put = (kind: Kind, change: KindPut) => {
     if (!repo || frozen) return Promise.resolve();
-    const target = repo;
-    const here = () => shown.current === target;
     setBusy(true);
     setSaveError(null);
     return client
-      .putRouting({ repo: target, scope: "local", kinds: { [kind]: change } })
-      .then(() => (here() ? load() : undefined))
-      .catch((e: unknown) => here() && setSaveError(message(e)))
-      .finally(() => here() && setBusy(false));
+      .putRouting({ repo, scope: "user", kinds: { [kind]: change } })
+      .then(load)
+      .catch((e: unknown) => setSaveError(message(e)))
+      .finally(() => setBusy(false));
   };
 
   const panelFor = (k: Kind): Panel | null => (open?.kind === k ? open.panel : null);
@@ -758,8 +776,6 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
   const create = async (k: Kind) => {
     if (!repo || !draft || !kinds || !draft.provider || !draft.model) return;
     const name = cleanName(draft.name);
-    const target = repo;
-    const here = () => shown.current === target;
     setBusy(true);
     setCreateError(null);
     try {
@@ -768,19 +784,17 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
       if (draft.useFor) {
         const was = kinds[draft.useFor];
         const own = [was.model, ...was.fallbacks].filter((x): x is string => !!x);
-        await client.putRouting({ repo, scope: "local", kinds: { [draft.useFor]: { model: name, fallbacks: own } } });
+        await client.putRouting({ repo, scope: "user", kinds: { [draft.useFor]: { model: name, fallbacks: own } } });
       }
-      // The picker moved to another repo meanwhile: nothing here to show.
-      if (!here()) return;
       setFresh(name);
       setDraft(null);
       await load();
       // The builder closes; the row it went to shows its list, the new agent in it.
-      if (here()) setOpen({ kind: draft.useFor ?? k, panel: "pick" });
+      setOpen({ kind: draft.useFor ?? k, panel: "pick" });
     } catch (e) {
-      if (here()) setCreateError(message(e));
+      setCreateError(message(e));
     } finally {
-      if (here()) setBusy(false);
+      setBusy(false);
     }
   };
 
@@ -830,17 +844,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
 
   return (
     <section className="flex flex-col gap-s2" aria-label="Agents">
-      <PageHeader title="Agents" lede="Which model runs each kind of work, and what takes over at a limit.">
-        {repos && repos.length > 1 && (
-          <span role="group" aria-label="Repo" className="flex flex-wrap gap-1">
-            {repos.map((r) => (
-              <button key={r.repo_root} type="button" aria-pressed={r.repo_root === repo} className={`${pill} border py-0.5 ${mono} ${r.repo_root === repo ? "border-branch bg-branch-soft text-branch" : "border-line text-ink-2"}`} onClick={() => setRepo(r.repo_root)}>
-                {r.name}
-              </button>
-            ))}
-          </span>
-        )}
-      </PageHeader>
+      <PageHeader title="Agents" lede="Which model runs each kind of work, and what takes over at a limit." />
 
       {repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {loadError && (
@@ -863,7 +867,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
         <ol className="grid gap-s1 md:grid-cols-2 xl:grid-cols-4" aria-label="How a task is run">
           {FLOW.map(([t, b], i) => (
             <li key={t} className="flex gap-s1 rounded-md bg-canvas-2 px-s1 py-s1">
-              <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-branch-soft text-xs text-branch">{i + 1}</span>
+              <span className="inline-flex size-5 shrink-0 items-center justify-center rounded-full bg-pass-soft text-xs text-pass">{i + 1}</span>
               <span className="flex flex-col">
                 <b className="text-sm">{t}</b>
                 <span className="text-xs text-ink-2">{b}</span>
@@ -884,7 +888,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
             </span>
           </header>
           {policy?.applies && (
-            <p className="px-s2 pb-s1 text-sm text-fawn" data-testid="policy">
+            <p className="px-s2 pb-s1 text-sm text-ink-2" data-testid="policy">
               🔒 Your org's policy applies: models it doesn't allow aren't offered.
               {frozen && ` Nothing here can change now: ${policy.reason ?? "the policy couldn't be read"}.`}
             </p>

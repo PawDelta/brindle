@@ -7,7 +7,7 @@
 import Logo from "../../components/Logo";
 import { alert, button } from "../../components/ui";
 
-export function Starting({ error, onRetry }: { error?: string | null; onRetry?(): void }) {
+export function Starting({ error, onRetry, line = "Starting brindle…" }: { error?: string | null; onRetry?(): void; /* What the start is doing (Launch's, from the shell). */ line?: string }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-s2 bg-canvas px-s3 text-ink" data-testid="starting">
       <Logo className="text-2xl" />
@@ -26,7 +26,7 @@ export function Starting({ error, onRetry }: { error?: string | null; onRetry?()
             <i />
           </div>
           <p className="text-sm text-ink-2" role="status">
-            Starting brindle…
+            {line}
           </p>
         </>
       )}

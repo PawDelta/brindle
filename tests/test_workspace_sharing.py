@@ -118,6 +118,7 @@ def test_concurrent_sessions_merge_their_workers_into_the_checkout(db, repo, liv
         spaces[sup] = ws
     assert spaces["supA"].branch != spaces["supB"].branch
     for sup, ws in spaces.items():
+        db.add_review(ws.id, sh("git rev-parse HEAD", ws.path), None, True, "approved")
         assert pipeline.merge(db, db.get_agent(sup), ws).startswith("Merged"), sup
     assert {"supA.py", "supB.py"} <= set(sh("git ls-tree --name-only HEAD", repo).split())
 

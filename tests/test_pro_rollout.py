@@ -21,7 +21,7 @@ def item(kind, name, text, pinned=True):
 
 @pytest.fixture
 def entitled(monkeypatch):
-    monkeypatch.setattr(license, "has", lambda feature: feature == rollout.FEATURE)
+    monkeypatch.setattr(license, "has", lambda feature: feature in (rollout.FEATURE, org_profiles.FEATURE))
 
 
 @pytest.fixture

@@ -2,7 +2,7 @@
    (design/options-v2/M3b-multi .ctx, as design/options-v3/C2b-inbox-only
    keeps it): the goal's title with the session's id, repo and mode under
    it; the goal with its milestones, progress and checks (GoalPanel
-   compact: the check button, autopilot on / off, none of that for a paused
+   compact: the check button, none of that for a paused
    session), whose one lifecycle carries the PR step: at Ready for PR its
    Review & open PR opens the session's sheet, at PR open it links to the
    PR, and at Done its Close session closes the session and moves on. There
@@ -16,13 +16,15 @@ import type { DaemonClient } from "../api/client";
 import { DaemonContext } from "../api/context";
 import type { OpenUrl } from "../api/open";
 import type { Route, SessionRef } from "../routes";
+import type { AppStore } from "../store/store";
 import { useGoal } from "../screens/Session/GoalPanel";
+import { useSessionDiff } from "../screens/Session/review";
 import { GoalPanel } from "../screens/Session/GoalPanel";
 import { agentIds, sessionTree } from "../screens/Session/tree";
 import { isPaused, liveWorkers, sessionAge } from "../store/overview";
 import { useCloseSession, useSessions } from "../store/sessions";
 import { useAppState, useStore } from "../store/useStore";
-import { useMemo } from "react";
+import { useMemo, useRef, useState } from "react";
 
 export interface SessionContextProps {
   /* The session whose context shows; null when none is selected. */
@@ -63,16 +65,69 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
   const paused = row ? isPaused(row) : false;
   const repoName = feed.repos?.find((r) => r.repo_root === repo)?.name ?? repo;
   const closeSession = useCloseSession(navigate);
+  const [renaming, setRenaming] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
+  const saving = useRef(false);
+  // A refused rename keeps the editor and what was typed, and says why.
+  const commit = (name: string) => {
+    if (saving.current) return;
+    if (name.trim() === (row?.name ?? "")) {
+      setRenaming(false);
+      return;
+    }
+    saving.current = true;
+    feed
+      .rename(root, name)
+      .then(
+        () => {
+          setRenaming(false);
+          setRenameError(null);
+        },
+        (err: unknown) => setRenameError(`Couldn't rename: ${err instanceof Error ? err.message : String(err)}`),
+      )
+      .finally(() => {
+        saving.current = false;
+      });
+  };
 
   const here = route.screen === "session" && route.root === root;
   return (
     <section className="flex min-h-0 flex-col gap-[10px] overflow-auto" aria-label="Session context" data-testid="session-context" style={style}>
       <div className="px-s1">
-        <button type="button" className={`block w-full text-left text-[12.5px] font-semibold leading-[1.35] ${here ? "text-ink" : "text-ink/90 hover:text-ink"}`} title={here ? undefined : "Open the session"} onClick={() => navigate({ screen: "session", root, repo, agent: root })}>
-          {row?.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}
-        </button>
+        {renaming ? (
+          <input
+            autoFocus
+            aria-label="Session name"
+            className="w-full rounded border border-line bg-surface px-1 text-[12.5px] font-semibold text-ink"
+            defaultValue={row?.name ?? ""}
+            placeholder={row?.goal || goal?.goal || "Name this session"}
+            onFocus={(e) => e.currentTarget.select()}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") commit(e.currentTarget.value);
+              if (e.key === "Escape") {
+                setRenaming(false);
+                setRenameError(null);
+              }
+            }}
+            onBlur={(e) => commit(e.currentTarget.value)}
+          />
+        ) : (
+          <div className="flex items-start gap-1">
+            <button type="button" className={`block min-w-0 flex-1 text-left text-[12.5px] font-semibold leading-[1.35] ${here ? "text-ink" : "text-ink/90 hover:text-ink"}`} title={here ? undefined : "Open the session"} onClick={() => navigate({ screen: "session", root, repo, agent: root })}>
+              {row?.name || row?.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}
+            </button>
+            <button type="button" className="text-[11px] text-ink-3 hover:text-ink" aria-label="Rename session" title="Rename session" onClick={() => setRenaming(true)}>
+              ✎
+            </button>
+          </div>
+        )}
+        {renameError && (
+          <p role="alert" className="text-[11px] text-sap">
+            {renameError}
+          </p>
+        )}
         <div className="truncate text-[11px] text-ink-3">
-          <span className="font-mono text-[11px]">{root}</span> · {repoName} · {row ? (paused ? sessionAge(row) : `${row.mode}${goal?.enabled ? " · autopilot" : ""} · ${liveWorkers(agents, alive)} working`) : "…"}
+          <span className="font-mono text-[11px]">{root}</span> · {repoName} · {row ? (paused ? sessionAge(row) : `${row.mode} · ${liveWorkers(agents, alive)} working`) : "…"}
         </div>
       </div>
       <GoalPanel
@@ -87,6 +142,57 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
         onCloseSession={closeSession && (() => closeSession(root))}
         onOpenDocs={() => navigate({ screen: "knowledge", view: "docs", session: root, from: { root, repo } })}
       />
+      {sidebarChanges.shown && (
+        <ChangesRow
+          client={client}
+          root={root}
+          store={store}
+          open={here && route.screen === "session" && route.sheet?.kind === "changes"}
+          onOpen={(open) => navigate({ screen: "session", root, repo, agent: here && route.screen === "session" ? route.agent : undefined, sheet: open ? { kind: "changes" } : undefined })}
+        />
+      )}
     </section>
+  );
+}
+
+/* Hidden for now: the row, its sheet and its tests stay, below the milestones;
+   set `shown` to bring it back. */
+export const sidebarChanges = { shown: false };
+
+/* The session's changes against its PR base, in one line: the files and lines,
+   coloured. Clicking it puts the diff in the chat's place, and again (or ← Chat)
+   takes it away. */
+function ChangesRow({ client, root, store, open, onOpen }: { client: DaemonClient; root: string; store: AppStore; open: boolean; onOpen(open: boolean): void }) {
+  const { diff, files } = useSessionDiff(client, root, store);
+  const added = files.reduce((n, f) => n + f.added, 0);
+  const removed = files.reduce((n, f) => n + f.removed, 0);
+  return (
+    <div className="mx-s1 flex items-center gap-1">
+      <button
+        type="button"
+        aria-pressed={open}
+        className="flex min-w-0 flex-1 items-baseline gap-s1 rounded-md px-s1 py-1 text-left text-[13px] hover:bg-surface-2 aria-pressed:bg-surface-2"
+        onClick={() => onOpen(!open)}
+        data-testid="changes-row"
+      >
+        <span className="font-medium text-ink">Changes</span>
+        {!diff ? (
+          <span className="text-xs text-ink-3">…</span>
+        ) : files.length === 0 ? (
+          <span className="text-xs text-ink-3">none yet</span>
+        ) : (
+          <span className="truncate font-mono text-xs" data-testid="changes-count">
+            <span className="text-ink-3">
+              {files.length} {files.length === 1 ? "file" : "files"}
+            </span>{" "}
+            <span className="text-pass">+{added}</span> <span className="text-sap">−{removed}</span>
+          </span>
+        )}
+        <span className="flex-1" />
+        <span className="text-ink-3" aria-hidden>
+          {open ? "‹" : "›"}
+        </span>
+      </button>
+    </div>
   );
 }

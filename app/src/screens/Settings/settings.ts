@@ -13,19 +13,6 @@
 
 import { LOGIN_PROVIDERS, type DoctorCheck, type LoginProvider } from "../../api/client";
 
-export type Scope = "repo" | "user";
-
-export interface ScopeChoice {
-  scope: Scope;
-  label: string;
-  detail: string;
-}
-
-export const SCOPES: ScopeChoice[] = [
-  { scope: "repo", label: "This repo", detail: "Just this repo, for you: .brindle/config.local.json, not committed." },
-  { scope: "user", label: "Every repo", detail: "Your default for every repo: ~/.brindle/config.json." },
-];
-
 /* The settings with a UI, in the order shown, each with what it means. */
 export interface Setting {
   key: string;
@@ -33,7 +20,7 @@ export interface Setting {
   blurb: string;
   /* A number needs a value; a boolean is on or off; a choice may be the
      engine's own null when it lists it; a list is one entry per line. */
-  kind: "number" | "boolean" | "choice" | "list";
+  kind: "number" | "boolean" | "choice" | "list" | "text";
   choices?: { value: string | null; label: string }[];
   /* The engine's default, for a field the config leaves unset. */
   fallback: unknown;
@@ -49,8 +36,10 @@ export interface Setting {
 
 export const SETTINGS: Setting[] = [
   { key: "checks", label: "Checks", kind: "list", fallback: [], repoOnly: true, common: true, blurb: "Commands a branch must pass before it merges, one per line, run from the repo root." },
+  { key: "setup", label: "Setup", kind: "list", fallback: [], repoOnly: true, blurb: "Commands run in a new worktree before a worker starts, one per line." },
+  { key: "base_branch", label: "PR branch", kind: "text", fallback: null, repoOnly: true, blurb: "The branch pull requests target. Empty: the repo's default branch." },
+  { key: "rules", label: "Project rules", kind: "list", fallback: [], repoOnly: true, blurb: "Rules every worker in this repo follows, one per line." },
   { key: "max_agents", label: "Workers at once", kind: "number", fallback: 5, common: true, blurb: "How many workers a session runs at the same time. 0 means no cap." },
-  { key: "autopilot", label: "Autopilot", kind: "boolean", fallback: true, common: true, blurb: "A new session's supervisor keeps driving toward the goal on its own." },
   { key: "plan_first", label: "Plan first", kind: "boolean", fallback: false, common: true, blurb: "Workers propose a plan and wait for your approval before they edit anything." },
   {
     key: "overlap",
@@ -97,9 +86,29 @@ export const changed = (loaded: Draft, draft: Draft): string[] => SETTINGS.map((
 export const invalid = (draft: Draft): string[] =>
   SETTINGS.filter((s) => s.kind === "number" && (typeof draft[s.key] !== "number" || Number.isNaN(draft[s.key]))).map((s) => s.key);
 
-/* Whether the changes include a setting only the repo's own files carry. */
-export const repoOnlyChanged = (loaded: Draft, draft: Draft): string[] =>
-  changed(loaded, draft).filter((k) => SETTINGS.find((s) => s.key === k)?.repoOnly);
+/* A draft over a freshly loaded one: what was loaded, but every field with an unsaved edit keeps it. */
+export const carryEdits = (oldLoaded: Draft, oldDraft: Draft, next: Draft): Draft =>
+  ({ ...next, ...Object.fromEntries(changed(oldLoaded, oldDraft).map((k) => [k, oldDraft[k]])) });
+
+/* The settings the person's own file can carry (everything but the repo-only ones), and the ones only a repo's files do. */
+export const YOURS = SETTINGS.filter((s) => !s.repoOnly);
+export const PROJECT_RULES = SETTINGS.filter((s) => s.repoOnly);
+
+/* A value as the status line reads it ("Off", "5 minutes"). */
+export function overrideText(s: Setting, value: unknown): string {
+  if (s.kind === "boolean") return value === true ? "On" : "Off";
+  if (s.kind === "choice") return s.choices?.find((c) => c.value === (value ?? null))?.label ?? String(value);
+  return value === undefined || value === null ? "Default" : `${String(value)}${s.unit ? ` ${s.unit}` : ""}`;
+}
+
+/* Which layer decides a setting in a repo (GET /config's `overrides`: key -> the file that sets it). */
+export type Scope = "team" | "local" | "yours";
+export const scopeOf = (overrides: Record<string, "local" | "repo"> | undefined, key: string): Scope =>
+  overrides?.[key] === "repo" ? "team" : overrides?.[key] === "local" ? "local" : "yours";
+
+/* The one plain line under a repo-view row; yours falls back to the engine's default. */
+export const statusLine = (s: Setting, scope: Scope, yourValue: unknown): string =>
+  scope === "team" ? "Set by the team" : scope === "local" ? "Just for you" : s.repoOnly ? "Not set" : `Same as yours (${overrideText(s, yourValue ?? s.fallback)})`;
 
 /* PATCH /config's `values`: only what changed, as the engine takes it (a
    list setting's lines, a number, a bool, a choice; null only where the
@@ -115,10 +124,6 @@ export const listOf = (text: string): string[] =>
     .split("\n")
     .map((l) => l.trim())
     .filter(Boolean);
-
-/* permissions.KINDS and MATCH_TYPES: what a rule can be about, and how its match reads. */
-export const PERMISSION_KINDS = ["read", "write", "edit", "bash", "fetch", "mcp", "other"];
-export const MATCH_TYPES = ["exact", "prefix", "glob"];
 
 /* doctor's levels, as marks. */
 export const MARK: Record<string, string> = { ok: "✓", warn: "!", fail: "✗" };

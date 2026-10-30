@@ -96,6 +96,40 @@ def test_use_mine_picks_an_install_and_delete_only_turns_it_off(machine):
     assert standard.exists()            # never uninstalled
 
 
+@pytest.mark.parametrize("provider,argv", [("claude", ["auth", "logout"]), ("codex", ["logout"])])
+def test_provider_logout_runs_the_cli_with_brindles_config_home(machine, tmp_path, monkeypatch, provider, argv):
+    _, bin_dir = machine
+    exe = _exe(bin_dir / pi.CLI[provider])
+    variable = provider_homes.VARIABLE[provider]
+    personal, brindles = tmp_path / "personal", tmp_path / "brindles"
+    personal.mkdir()
+    (personal / "auth.json").write_text("{}")
+    monkeypatch.setenv(variable, str(personal))
+    monkeypatch.setenv(f"BRINDLE_{provider.upper()}_CONFIG_HOME", str(brindles))
+    monkeypatch.setenv(*(("ANTHROPIC_API_KEY", "k") if provider == "claude" else ("OPENAI_API_KEY", "k")))
+    runs = []
+    monkeypatch.setattr(company_login, "run_cmd", lambda a, *_, env=None, **__: runs.append((a, env)) or (0, ""))
+    code, row = _send("POST", f"/v1/providers/{provider}/logout")
+    assert (code, row["signed_in"]) == (200, False)
+    [(cmd, env)] = runs
+    assert cmd == [str(exe), *argv]
+    assert env[variable] == str(brindles)
+    # A later read says signed out, brindle keeps launching with its own home, the person's login stays.
+    assert _row(provider)["signed_in"] is False
+    assert provider_homes.launch_env(provider) == {variable: str(brindles)}
+    assert (personal / "auth.json").exists()
+    # A re-login that fails or is cancelled leaves brindle on its own home, signed out; a good one signs in.
+    provider_homes.login_env(provider)
+    monkeypatch.setattr(providers, "_auth_probe", lambda *a, **k: None)
+    provider_homes._confirmed_at.clear()
+    assert _row(provider)["signed_in"] is False
+    assert provider_homes.launch_env(provider) == {variable: str(brindles)}
+    monkeypatch.setattr(providers, "_auth_probe", lambda *a, **k: (0, '{"loggedIn": true}'))
+    provider_homes._confirmed_at.clear()
+    assert _row(provider)["signed_in"] is True
+    assert provider_homes.launch_env(provider) == {variable: str(brindles)}
+
+
 @pytest.mark.parametrize("script,ends", [
     ("echo fetching; mkdir -p {bin}; printf '#!/bin/sh\\necho 1.2.3\\n' > {bin}/opencode; "
      "chmod +x {bin}/opencode; echo installed", "job.done"),
@@ -194,6 +228,50 @@ def test_the_persons_home_runs_until_a_sign_in_inside_brindle_then_brindles_does
     # Signed in inside brindle: from now on its home, and the identity check asks that one.
     assert provider_homes.launch_env("claude") == {"CLAUDE_CONFIG_DIR": str(brindle_home)}
     assert "brindle-org" in company_identity.claude_identity("org", None).line
+
+
+@pytest.mark.parametrize("provider,completion", [("claude", "installed"), ("antigravity", "installed"),
+                                                 ("claude", "preflight")])
+def test_desktop_login_confirms_credentials_and_unblocks_launch(db, repo, tmp_path, monkeypatch, provider, completion):
+    from brindle import preflight, tmux
+    opened, signed = [], False
+    monkeypatch.setenv("BRINDLE_CLAUDE_CONFIG_HOME", str(tmp_path / "desktop-claude"))
+    monkeypatch.setattr(pi, "detect", lambda p: [p] if p == provider else [])
+    monkeypatch.setattr(pi, "probe_version", lambda p: "test")
+    monkeypatch.setattr(providers, "which_cli", lambda p: p)
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
+    monkeypatch.setattr(tmux, "tagged_panes", lambda *a: [])
+    monkeypatch.setattr(tmux, "new_window", lambda *a, **kw: opened.append(a) or "%1")
+
+    def probe(argv, env):
+        if provider == "claude":
+            ok = signed and env.get("CLAUDE_CONFIG_DIR") == str(provider_homes.home(provider))
+            return 0, json.dumps({"loggedIn": ok})
+        return (0, "models") if signed else (1, "Please sign in to view available models")
+
+    monkeypatch.setattr(providers, "_auth_probe", probe)
+    assert any(i.kind == "signin" for i in preflight.check(provider, str(repo)))
+    assert _send("POST", f"/v1/providers/{provider}/login")[0] == 200
+    # A status read while the browser is open must not strand Claude on its old home.
+    assert _row(provider)["signed_in"] is not True
+    signed = True
+    if completion == "preflight":
+        code, items = _send("GET", f"/v1/providers/{provider}/preflight")
+        assert code == 200 and not any(i["kind"] == "signin" for i in items)
+    assert _row(provider)["signed_in"] is True
+    ws = workspaces.adopt_root(db, str(repo))
+    agent = Agent("login-launch", ws.id, "developer", provider, None, "interactive", "paused", "", None,
+                  time.time())
+    db.add_agent(agent)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    monkeypatch.setattr(company_identity, "launch_check", lambda *a, **kw: (None, None, None))
+
+    def launch(*a, **kw):
+        assert provider_homes.launch_env(provider) == opened[0][4]
+        raise StopIteration
+    monkeypatch.setattr(agents, "_open_window", launch)
+    with pytest.raises(StopIteration):
+        agents._launch(db, agent, ws, prompt=None, resume=None, watch_pane=False)
 
 
 @pytest.mark.variant("a sign-in finishing after spawn must not move a running agent to another config home")

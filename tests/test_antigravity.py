@@ -212,10 +212,14 @@ def strict(db, ws, tool, args):
 
 @pytest.mark.parametrize("command,expected", [
     ("git diff HEAD~1..HEAD", "allow"),  # ~ makes it no simple command
+    pytest.param("git diff HEAD^..HEAD", "allow", marks=pytest.mark.variant("review 95: literal caret revision")),
+    pytest.param("git diff ~/file", "deny", marks=pytest.mark.variant("leading tilde expansion")),
+    pytest.param("git diff path=~/file", "deny", marks=pytest.mark.variant("assignment tilde expansion")),
+    pytest.param("git diff path=one:~/file", "deny", marks=pytest.mark.variant("assignment path tilde expansion")),
     ('grep -rn "x" .', "allow"),  # quoted
     ("git diff a..b | grep x", "allow"),  # compound: each part is allowed
     ("cd sub && git status", "allow"),  # a cd inside the worktree
-    pytest.param("git push", "deny", marks=pytest.mark.variant("a deny rule still wins")),
+    pytest.param("git push --force", "deny", marks=pytest.mark.variant("a deny rule still wins")),
     ("git diff $(git merge-base main HEAD)", "deny"),  # what $(...) runs can't be seen
     ("git diff > notes.txt", "deny"),  # a redirection writes where no rule says
     ("git status |& curl https://example.com", "deny"),  # |& pipes like |
@@ -265,7 +269,7 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     compound = "touch one.txt && touch two.txt"
     long_a, long_b = "touch " + "x" * 250 + "a", "touch " + "x" * 250 + "b"  # one summary
     permissions.add_rule("bash", "rm protected.txt", "deny")
-    for command in (compound, compound, long_a, long_b, "git push", "touch one.txt || rm protected.txt"):
+    for command in (compound, compound, long_a, long_b, "git push --force", "touch one.txt || rm protected.txt"):
         assert answer("w1", command) == "deny"
     stored = db.conn.execute("SELECT request FROM permission_requests WHERE agent_id='w1'").fetchall()
     assert sorted(json.loads(r["request"])["command"] for r in stored) == sorted([compound, long_a, long_b])

@@ -30,6 +30,7 @@ HOST = "127.0.0.1"
 IDLE_SECONDS = 600.0
 WATCH_INTERVAL = 5.0     # seconds between the idle / upgrade checks
 STOP_GRACE = 5.0         # seconds `daemon stop` waits before SIGKILL
+SHUTDOWN_GRACE = 1.0     # seconds a stopping daemon waits for requests still running (the app kills it at 2)
 
 log = logging.getLogger(__name__)
 
@@ -253,6 +254,7 @@ def make_server(app):
     # with_peer: the guard learns who calls on the Unix socket (see brindle.daemon.peer).
     return uvicorn.Server(uvicorn.Config(
         app, lifespan="off", log_level="warning", access_log=False,
+        timeout_graceful_shutdown=SHUTDOWN_GRACE,
         http=with_peer(AutoHTTPProtocol),
         ws=with_peer(AutoWebSocketsProtocol) if AutoWebSocketsProtocol else "none"))
 

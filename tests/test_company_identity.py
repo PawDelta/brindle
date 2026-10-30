@@ -360,9 +360,10 @@ def test_a_login_without_an_org_id_has_no_org(monkeypatch):
 
 def _env_of(db, repo, monkeypatch, profile_env):
     from types import SimpleNamespace
+    from brindle.profiles import Profile
 
     monkeypatch.setattr(agents, "load_profile",
-                        lambda name, root=None: SimpleNamespace(env=profile_env, tool_search=None))
+                        lambda name, root=None: Profile(name, "", "claude", "", env=profile_env))
     ws = workspaces.create(db, str(repo), "enf").workspace
     a = Agent("e1", ws.id, "developer", "claude", None, "assign", "starting", "", None, 0.0)
     db.add_agent(a)

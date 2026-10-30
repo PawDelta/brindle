@@ -73,7 +73,7 @@ Run `brindle` with no arguments to open (or reopen) a supervisor chat here, with
 the live dashboard underneath. Outside a git repo it starts a scratch session;
 `brindle transfer <repo>` moves that work into a real repository later.
 
-Paid features (hosted learning, per-worktree services, team policies, CI):
+Paid features (hosted learning, per-worktree services, team policies):
 `brindle account` shows what you have and how to get the rest.""")
 agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
 app.add_typer(agent_app, name="agent")
@@ -220,8 +220,8 @@ def demo(
     """Watch brindle work on a tiny practice repo: two workers in parallel, reviews, gated merges, verified milestones.
 
     Creates a small Python repo under ~/.brindle/demo/ with two failing test
-    files and a two-milestone goal, then starts the supervisor there with
-    autopilot on. Takes a few minutes; nothing is created where you run it."""
+    files and a two-milestone goal, then starts the supervisor there to
+    verify the goal. Takes a few minutes; nothing is created where you run it."""
     from brindle import demo as demo_mod
 
     root = demo_mod.create(local=local)
@@ -289,17 +289,13 @@ def new(
             typer.secho(f"  setup   FAILED\n{created.setup.log}", fg="yellow")
             typer.echo(f"  (workspace kept; fix and re-run with `brindle setup {ws.name}`)")
 
-    from brindle.config import load_repo_config
-
     window = None
     if not no_agent:
-        autopilot = load_repo_config(ws.repo_root).autopilot
         a = _run(agents.spawn, db, ws, agents.SUPERVISOR, prompt=prompt, provider_name=provider,
-                 autopilot=autopilot)
+                 autopilot=True)
         window = a.tmux_window
         typer.echo(f"  agent   {a.id} ({a.profile}/{a.provider})")
-        if autopilot:
-            _say_autopilot(db, a.id)
+        _say_autopilot(db, a.id)
     typer.echo(f"\n  brindle attach {ws.name}")
     if attach:
         _attach(ws, window)
@@ -313,7 +309,7 @@ def start(
     ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
-    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .brindle/config.json)."),
+    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", hidden=True),
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't open the supervisor picker: use your last pick, else the default.")] = False,
@@ -330,6 +326,9 @@ def start(
     from brindle import picker
     from brindle.providers import NOT_SUPERVISOR, SUPERVISOR_PROVIDERS, get_provider
     from brindle.service import sessions as svc
+
+    if isinstance(autopilot, bool):
+        typer.echo("brindle's goal driver is always on; --autopilot/--no-autopilot is deprecated and ignored.")
 
     provider = provider or provider_alias or _group_supervisor
     if provider and provider != picker.PICK:
@@ -547,10 +546,9 @@ def _say_autopilot(db: DB, root_id: str) -> None:
     ap = db.get_autopilot(root_id)
     if ap and ap.goal:
         done, total = pilot.counts(db, root_id)
-        typer.echo(f"  autopilot: {ap.goal} ({done} of {total} milestones verified)")
+        typer.echo(f"  goal: {ap.goal} ({done} of {total} milestones verified)")
     else:
-        typer.echo("  autopilot: on. Tell the supervisor what we're building.")
-    typer.echo("  `brindle autopilot off` hands the wheel back to you.")
+        typer.echo("  Tell the supervisor what we're building; brindle drives toward a verified goal.")
 
 
 def _ask_about_running(live: list, wanted: Optional[str] = None, here: Optional[str] = None):
@@ -782,7 +780,7 @@ def handover(
 def default(
     ctx: typer.Context,
     cont: bool = typer.Option(False, "--continue", "-c", help="Pick up the most recent paused session instead of starting fresh."),
-    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="Start with autopilot on or off (default: on, or `autopilot` in .brindle/config.json)."),
+    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", hidden=True),
     provider: Optional[str] = typer.Option(
         None, "--supervisor", "-s", help="Run the supervisor on this CLI instead of Claude Code (codex, antigravity, opencode). Workers keep their own profiles' providers.",
     ),
@@ -794,6 +792,8 @@ def default(
     provider = provider or provider_alias
     global _group_supervisor
     _group_supervisor = provider if ctx.invoked_subcommand else None   # `-s codex start`
+    if isinstance(autopilot, bool):
+        typer.echo("brindle's goal driver is always on; --autopilot/--no-autopilot is deprecated and ignored.")
     if show_version:
         from brindle import __version__
 
@@ -814,7 +814,7 @@ def default(
             continue_cmd(session_id=None, attach=True)
         else:
             start(prompt=None, provider=provider, attach=True, watch=True,
-                  autopilot=autopilot, branch=None, worktree=None, yes=yes)
+                  autopilot=None, branch=None, worktree=None, yes=yes)
 
 
 @app.command()
@@ -825,7 +825,7 @@ def supervisor(
     ),
     attach: bool = typer.Option(True, "--attach/--no-attach"),
     watch: bool = typer.Option(True, "--watch/--no-watch", help="Show the brindle watch dashboard in a pane under the agent."),
-    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", help="The supervisor drives toward a goal until it's verified (default: on, or `autopilot` in .brindle/config.json)."),
+    autopilot: Optional[bool] = typer.Option(None, "--autopilot/--no-autopilot", hidden=True),
     branch: Optional[str] = typer.Option(None, "--branch", "-b", help="Run in the worktree for this branch, creating the branch and worktree if needed."),
     worktree: Optional[str] = typer.Option(None, "--worktree", "-w", help="Run in the worktree at this path (created with --branch if it doesn't exist)."),
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Don't open the supervisor picker: use your last pick, else the default.")] = False,
@@ -898,41 +898,28 @@ def _tell_supervisors_about_delegation(db: DB) -> None:
                 pass
 
 
-@app.command("autopilot")
+@app.command("goal")
+@app.command("autopilot", hidden=True)
 def autopilot_cmd(
-    action: Optional[str] = typer.Argument(None, help="on, off, or check (run the milestone checks now). Omit to show progress."),
+    action: Optional[str] = typer.Argument(None, help="check runs the milestone checks now. Omit to show progress."),
 ) -> None:
-    """Show the goal's progress, or turn autopilot on or off.
-
-    With autopilot on, the supervisor keeps working until every milestone's
-    check passes or it needs you."""
+    """Show the goal's progress or run its milestone checks."""
     from brindle import autopilot as pilot
 
     db = DB()
     root_id = _session_root(db)
     root = db.get_agent(root_id)
     if action in ("on", "off"):
-        on = action == "on"
-        pilot.set_enabled(db, root_id, on)
-        if root and agents.is_alive(root):
-            note = ("Autopilot is on again: keep driving toward the goal (get_progress shows where it stands)."
-                    if on else "Autopilot is now off: stop driving and wait for the user's instructions.")
-            try:
-                agents.send_message(db, root_id, f"[brindle autopilot] {note}")
-            except agents.AgentError:
-                pass
-        typer.echo(f"autopilot {action} for session {root_id}")
-        if on and not (root and agents.is_alive(root)):
-            typer.echo("It takes effect when the session runs: `brindle continue`.")
+        typer.echo("brindle's goal driver is always on; on/off is deprecated and ignored. Pause the session to stop it.")
         return
     if action == "check":
         ws = db.get_workspace(root.workspace_id) if root else None
         if ws is None or db.get_autopilot(root_id) is None:
-            _fail("autopilot isn't set up for this session")
+            _fail("no goal is set up for this session")
         typer.echo(_run(pilot.check_milestones, db, root_id, ws))
         return
     if action:
-        _fail(f"unknown action {action!r}: use on, off or check")
+        _fail(f"unknown action {action!r}: use check")
     typer.echo(pilot.progress(db, root_id))
     u = pilot.usage()
     if u:
@@ -1441,7 +1428,7 @@ def coordinator_stop() -> None:
 
 @permissions_app.command("list")
 def permissions_list() -> None:
-    """Every rule in force (built-in, this repo's denies, yours and learned), with its source."""
+    """Every rule in force (this repo's denies, the preset's, yours and learned), with its source."""
     from brindle import permissions as perms
 
     repo = _here_repo()
@@ -1449,9 +1436,19 @@ def permissions_list() -> None:
         from brindle.config import load_repo_config
 
         state = load_repo_config(repo).permission_policy
-        typer.echo(f"permission_policy: {state if state == 'on' else 'off'}\n")
+        typer.echo(f"permission_policy: {state if state == 'on' else 'off'}")
+    store = perms.load_store()
+    typer.echo(f"preset: {store.preset or 'none'}; unmatched actions: {store.unmatched}\n")
     for r in perms.all_rules(repo):
         typer.echo(f"{r.id:<12} {r.decision:<5} {r.kind:<5} {r.source:<7} {r.describe()}")
+
+
+@permissions_app.command("report")
+def permissions_report(days: int = typer.Option(7, "--days", min=1, help="How many days back to look.")) -> None:
+    """How often permission requests were left to the person (vs. decided by the policy), and why."""
+    from brindle import permission_asks
+
+    typer.echo(permission_asks.format_report(permission_asks.report(DB(), days, _here_repo())))
 
 
 @permissions_app.command("check")
@@ -1497,6 +1494,8 @@ def permissions_check(profile: str | None = typer.Option(None, "--profile", help
             where = "settings + hook" if mirrored else "hook; settings mirror off"
             if entry:
                 typer.echo(f"  {rule.decision:5} {rule.kind:5} {entry} ({rule.source}; {where})")
+            elif rule.decision == "ask":
+                typer.echo(f"  ask   {rule.kind:5} {rule.describe()} ({rule.source}; brindle hook asks)")
             elif rule.decision == "deny":
                 typer.echo(f"  deny  {rule.kind:5} {rule.describe()} (brindle hook only)")
             else:
@@ -1589,27 +1588,47 @@ def permissions_deny(
 
 @permissions_app.command("forget")
 def permissions_forget(rule_id: str = typer.Argument(..., metavar="ID")) -> None:
-    """Remove one of your or learned rules (or a suggestion's approval count). Built-in rules stay."""
+    """Remove a rule, whatever seeded it (or a suggestion's approval count). A repo's own denies stay."""
     from brindle import permissions as perms
 
     gone = perms.forget(rule_id)
     if gone is None:
-        typer.echo(f"no rule or suggestion {rule_id} of yours (built-in and repo rules can't be forgotten)")
+        typer.echo(f"no rule or suggestion {rule_id} in your store (a repo's own rules can't be forgotten)")
         raise typer.Exit(1)
     typer.echo(f"forgot {gone}")
     _resync_agy()
 
 
+@permissions_app.command("preset")
+def permissions_preset(name: Optional[str] = typer.Argument(None, help="autonomous, permissive, standard or secure.")) -> None:
+    """Show the presets, or start over from one (your own and learned rules stay)."""
+    from brindle import permissions as perms
+
+    if name is None:
+        current = perms.load_store().preset
+        for preset, (_, unmatched, description) in perms.PRESETS.items():
+            mark = "*" if preset == current else " "
+            typer.echo(f"{mark} {preset:<11} unmatched: {unmatched:<5} {description}")
+        return
+    try:
+        store = perms.apply_preset(name)
+    except ValueError as e:
+        typer.echo(str(e))
+        raise typer.Exit(2)
+    typer.echo(f"preset {name}: {len(store.rules)} rules; unmatched actions {store.unmatched}")
+    _resync_agy()
+
+
 @permissions_app.command("reset")
 def permissions_reset(yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")) -> None:
-    """Back to the built-in rules: drop your rules, learned rules and approval counts."""
+    """Back to the preset's rules: drop your rules, learned rules, saved actions and approval counts."""
     from brindle import permissions as perms
 
     if not yes:
-        typer.confirm("Remove all your and learned permission rules and approval counts?",
+        typer.confirm("Remove all your and learned permission rules, saved actions and approval counts?",
                       default=False, abort=True)
     perms.reset()
-    typer.echo("permission rules reset to the defaults")
+    typer.echo("permission rules reset to the preset's")
     _resync_agy()
 
 
@@ -2433,11 +2452,10 @@ def open_cmd(
 @app.command()
 def setup(workspace: Optional[str] = typer.Argument(None)) -> None:
     """Re-run setup commands in a workspace."""
-    from brindle.config import load_repo_config
-
-    ws = _ws(DB(), workspace)
-    cmds = load_repo_config(ws.repo_root).setup
-    res = workspaces.run_commands(cmds, ws.path, workspaces.workspace_env(ws))
+    db = DB()
+    ws = _ws(db, workspace)
+    cfg = workspaces.config_for(db, ws)
+    res = workspaces.run_commands(cfg.setup, ws.path, workspaces.workspace_env(ws, cfg))
     typer.echo(res.log or "(no setup commands)")
     raise typer.Exit(0 if res.ok else 1)
 
@@ -2507,8 +2525,15 @@ def pr(
     draft: bool = typer.Option(False, "--draft"),
 ) -> None:
     """Push and open a pull request against the base branch."""
-    ws = _ws(DB(), workspace)
-    url = _run(workspaces.pull_request, ws, title, draft)
+    from brindle import gates
+
+    db = DB()
+    ws = _ws(db, workspace)
+    def open_checked() -> str:
+        with gates.pr_checked(db, ws, lambda text: typer.echo(text, err=True)) as sha:
+            return workspaces.pull_request(ws, title, draft, sha=sha)
+
+    url = _run(open_checked)
     typer.echo(url)
     _offer_delete_on_merge(ws.repo_root)
 
@@ -2553,12 +2578,12 @@ def services_cmd(
 ) -> None:
     """Per-worktree Docker services (brindle Pro): list, start or stop a workspace's."""
     from brindle import services as services_mod
-    from brindle.config import load_repo_config
 
     if action not in ("ls", "up", "down"):
         _fail("action must be ls, up or down")
-    ws = _ws(DB(), workspace)
-    cfg = load_repo_config(ws.repo_root)
+    db = DB()
+    ws = _ws(db, workspace)
+    cfg = workspaces.config_for(db, ws)
     if not cfg.services:
         _fail('no services configured; add a "services" list to .brindle/config.json')
     if action == "up":
@@ -2710,7 +2735,7 @@ def mcp() -> None:
 ci_app = typer.Typer(no_args_is_help=True,
                      help="brindle CI (brindle Team): the client the CI workflows run. "
                           "`brindle ci init` sets a repository up.")
-app.add_typer(ci_app, name="ci")
+app.add_typer(ci_app, name="ci", hidden=True)
 
 
 def _ci_call(fn, *args, **kwargs):
@@ -3187,7 +3212,8 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
                             profile: Optional[str] = typer.Option(None, "--profile"),
                             focus: Optional[str] = typer.Option(None, "--focus"),
                             request_id: Annotated[Optional[str], typer.Option("--request-id")] = None,
-                            second: Annotated[bool, typer.Option("--second-review")] = False) -> None:
+                            second: Annotated[bool, typer.Option("--second-review")] = False,
+                            slot: Annotated[Optional[str], typer.Option("--review-slot")] = None) -> None:
     """Run a repo's checks, then start the reviewer with their results in its
     prompt. Started detached from start_review, so the review still starts
     even if the MCP server that asked for it has exited."""
@@ -3199,8 +3225,8 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
     if ws is None:
         return
     try:
-        agents.review_after_checks(db, caller, ws, profile, focus, load_repo_config(ws.repo_root),
-                                   request_id=request_id, second=second)
+        agents.review_after_checks(db, caller, ws, profile, focus, workspaces.config_for(db, ws),
+                                   request_id=request_id, second=second, slot=slot)
     except (agents.AgentError, ValueError) as e:
         from brindle import pipeline
 
@@ -3269,7 +3295,7 @@ def warm_checks_cmd(workspace_id: str) -> None:
     try:
         # A new commit makes this run's result useless (the review and the
         # gate want the new head), so give up and free the check slot.
-        gates.check_summary(db, ws, load_repo_config(ws.repo_root),
+        gates.check_summary(db, ws, workspaces.config_for(db, ws),
                             cancel=lambda: gates.head(ws) != sha)
     except gates.Abandoned:
         pass

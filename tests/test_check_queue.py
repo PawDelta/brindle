@@ -153,6 +153,21 @@ def test_an_unset_check_concurrency_follows_the_host_size(repo, brindle_home, mo
     assert host(16, 64) > host(2, 4)
 
 
+def test_check_timeout_kills_group(monkeypatch):
+    killed, kw = [], {}
+
+    class Hung:
+        def communicate(self, timeout=None):
+            if not killed:
+                raise autopilot.subprocess.TimeoutExpired("suite", timeout)
+            return "", ""
+
+    monkeypatch.setattr(autopilot.subprocess, "Popen", lambda cmd, **k: (kw.update(k), Hung())[1])
+    monkeypatch.setattr(autopilot, "_kill_group", killed.append)
+    assert not autopilot.run_check("suite", ".", {}, 5)[0]
+    assert kw["start_new_session"] and len(killed) == 1
+
+
 def test_check_summary_and_the_merge_gate_share_the_queue(db, repo, monkeypatch):
     configure(repo, check_concurrency=1, pre_commit=False)
     monkeypatch.setattr(gates, "SLOT_POLL", 0.01)
@@ -240,14 +255,18 @@ def test_warm_checks_gives_up_when_the_head_moves(db, repo, monkeypatch):
 def test_a_waiter_reuses_the_holders_failure_instead_of_rerunning(db, repo, monkeypatch):
     configure(repo, check_concurrency=0)
     ws = branch(db, repo, "one")
-    calls = []
+    calls, envs = [], []
 
     def failing(cmd, cwd, env, timeout, **kw):
         calls.append(cmd)
+        envs.append(env)
         time.sleep(0.3)
-        return False, "boom (timed out)"
+        return passing, "ok" if passing else "boom (timed out)"
 
+    passing = False
     monkeypatch.setattr(autopilot, "run_check", failing)
+    monkeypatch.setattr(gates, "_concurrency", lambda ws: 4)
+    monkeypatch.setattr(gates.os, "cpu_count", lambda: 10)
     results = []
 
     def run(i):
@@ -257,3 +276,13 @@ def test_a_waiter_reuses_the_holders_failure_instead_of_rerunning(db, repo, monk
     in_threads(3, run)
     assert calls == ["suite"]
     assert results == [(False, "boom (timed out)")] * 3
+    assert envs[0]["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "2"   # 10 CPUs shared by 4 slots
+    # a pass is cached by tree: another branch with the same tree (different head) doesn't rerun
+    passing = True
+    two = branch(db, repo, "one2")
+    (Path(two.path) / "one.py").write_text("x = 1\n")
+    (Path(two.path) / "one2.py").unlink()
+    sh("git add -A && git commit -qm same-tree", Path(two.path))
+    assert gates.run_checked(db, ws, "suite", {}, 30) == (True, "ok")
+    assert gates.run_checked(db, two, "suite", {}, 30) == (True, "ok")
+    assert gates.head(ws) != gates.head(two) and calls == ["suite", "suite"]

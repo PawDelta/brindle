@@ -2,10 +2,12 @@
    provider model): its own full-window screens, no sidebar, from a clean
    Mac to a first project. Starting brindle (Starting.tsx, while the app
    asks the engine) → Sign in to brindle (one button; the browser does it:
-   POST /account/login) → Connect your providers (a card each: a CLI found
-   on this Mac is used as-is and says where it was found; Connect on a
-   missing one runs its maker's official installer, as-is, into its normal
-   place) → the installs, one calm progress card each with the installer's
+   POST /account/login) → Connect your providers (a section each: a CLI
+   found on this Mac is used as-is and says where it was found; each offers
+   Sign in, API key or Your cloud up front (components/ProviderConnect: a
+   key or a cloud is set up right there), and choosing one on a missing CLI
+   runs its maker's official installer, as-is, into its normal place) →
+   the installs, one calm progress card each with the installer's
    own lines (POST /providers/{p}/install, a job; a failure is a strip on
    its card with Retry and Skip for now) → each provider's own sign-in in
    the browser (components/ProviderSignIn's workings; brindle never sees the
@@ -19,14 +21,15 @@
    itself up to date: nothing here offers an update. Every step is a
    button: nothing to type but a URL to clone, no popup. */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { DaemonClient, ProviderInstalled } from "../../api/client";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import type { DaemonClient, KeyInfo, PermissionPreset, ProviderConnection, ProviderInstalled } from "../../api/client";
 import type { OpenUrl, PickFolder } from "../../api/open";
 import { plain } from "../../api/wording";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ProjectPicker } from "../../components/ProjectPicker";
+import { ApiKeyPaste, CLOUD_NAME, CloudSetup, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, ReadyNote, type Lock, type Method } from "../../components/ProviderConnect";
 import { useProviderSignIn } from "../../components/ProviderSignIn";
-import { alert, button, card, field, mono, primary, quiet } from "../../components/ui";
+import { alert, button, card, field, mainTone, mono, quiet } from "../../components/ui";
 import type { Route } from "../../routes";
 import { useSessions } from "../../store/sessions";
 import { useJob } from "../Branch/useJob";
@@ -47,14 +50,14 @@ export interface OnboardingProps {
   onDone(route?: Route): void;
 }
 
-type Step = "loading" | "signin" | "connect" | "install" | "provider-signin" | "ready" | "project";
+type Step = "loading" | "signin" | "connect" | "install" | "provider-signin" | "ready" | "permissions" | "project";
 
-const big = `${primary} px-s2 py-s1 text-[15px]`;
+const big = `inline-flex items-center gap-1 rounded-md border px-s2 py-s1 ${mainTone}`;
 const link = "text-branch underline-offset-2 hover:underline";
 const fine = "text-xs text-ink-3";
 
 /* The provider's mark: its initial on its own colour (tokens only). */
-const MARKS: Record<string, string> = { claude: "bg-sap text-on-sap", codex: "bg-ink text-canvas", opencode: "bg-ink-3 text-canvas", antigravity: "bg-fawn text-on-fawn" };
+const MARKS: Record<string, string> = { claude: "bg-sap text-on-sap", codex: "bg-ink text-canvas", opencode: "bg-ink-3 text-canvas", antigravity: "bg-branch text-on-branch" };
 function Mark({ provider, name, small = false }: { provider: string; name: string; small?: boolean }) {
   return (
     <span aria-hidden className={`inline-grid shrink-0 place-items-center rounded-md font-semibold ${small ? "size-4 text-[9px]" : "size-7 text-xs"} ${MARKS[provider] ?? "bg-branch text-on-branch"}`}>
@@ -152,23 +155,56 @@ function BrindleSignIn({ client, openUrl, onSignedIn, onSkip }: { client: Daemon
 
 /* ---- Step 2: connect your providers. ---- */
 
-function ProviderCard({ row, picked, installed, onPick, onUndo }: { row: ProviderInstalled; picked: boolean; installed: boolean; onPick(): void; onUndo(): void }) {
+/* A provider, as a section: where its CLI is (or that its maker's installer
+   will run), then how it connects (components/ProviderConnect): Sign in
+   (its own browser sign-in, the step after the installs), an API key pasted
+   here, or the person's cloud signed in here. Choosing one on a missing CLI
+   picks it for its installer. One is open at a time (the first not yet
+   connected, or the one Choose opened); the others are a line with Choose. */
+function ProviderCard({ client, row, picked, installed, method, connection, open, error, keys, openUrl, lock, onOpen, onMethod, onUndo, onConnected }: {
+  /* The provider's write lock: while a key, a cloud route or a Sign in is being saved, nothing here can change. */
+  lock: Lock;
+  client: DaemonClient;
+  row: ProviderInstalled;
+  picked: boolean;
+  installed: boolean;
+  method: Method | null;
+  /* How it connects as the engine reads it (its clouds, its readiness); null until read. */
+  connection: ProviderConnection | null;
+  open: boolean;
+  /* Saving the method failed: why. */
+  error: string | null;
+  /* GET /config's keys: a stored key's state, and the ones the shell has. */
+  keys: KeyInfo[] | null;
+  openUrl: OpenUrl;
+  onOpen(): void;
+  onMethod(method: Method): void;
+  onUndo(): void;
+  /* Set up here, by a key or a cloud, for `method`: how, in a few words, and the connection after. */
+  onConnected(method: Method, via: string, connection: ProviderConnection | null): void;
+}) {
   const f = factsOf(row);
   const found = connected(row);
+  const opencode = row.provider === "opencode";
+  const [model, setModel] = useState(MODEL_PROVIDERS[0]);
+  const cloud = (connection?.clouds ?? []).length > 0;
+  const busy = lock.busy;
   return (
-    <section className={`${card} flex flex-col gap-s1 p-s2 ${picked ? "border-branch ring-1 ring-branch" : found ? "border-pass" : ""}`} aria-label={f.name} data-testid={`onb-card-${row.provider}`} data-picked={picked} data-found={found}>
-      <div className="flex items-center gap-s1">
-        <Mark provider={row.provider} name={f.name} />
-        <div className="leading-tight">
-          <p className="font-semibold">{f.name}</p>
-          <p className={fine}>by {f.maker}</p>
-        </div>
-      </div>
-      {f.blurb && <p className="text-sm text-ink-2">{f.blurb}</p>}
-      {f.license.label && <p className={fine}>{f.license.label}</p>}
-      <div className="mt-auto pt-s1">
+    <section
+      className={`${card} flex flex-col gap-s2 p-s2 ${picked ? "border-branch" : found ? "border-pass" : ""}`}
+      aria-label={f.name}
+      data-testid={`onb-card-${row.provider}`}
+      data-picked={picked}
+      data-found={found}
+      data-open={open}
+    >
+      <div className="flex flex-wrap items-center gap-x-s1 gap-y-1">
+        <Mark provider={row.provider} name={f.name} small />
+        <span className="text-[15px] font-semibold">{f.name}</span>
+        <span className="text-sm text-ink-3">{f.maker}</span>
+        <span className="flex-1" />
         {found ? (
-          <div className="flex items-start gap-s1 text-sm" data-testid={`onb-found-${row.provider}`}>
+          <span className="flex min-w-0 items-center gap-s1 text-sm" data-testid={`onb-found-${row.provider}`}>
             <Tick />
             <span className="min-w-0">
               {installed ? (
@@ -180,22 +216,68 @@ function ProviderCard({ row, picked, installed, onPick, onUndo }: { row: Provide
               )}
               {row.version && <span className="text-ink-3"> · {row.version}</span>}
             </span>
-          </div>
+          </span>
         ) : picked ? (
-          <div className="flex items-center gap-s1 text-sm" data-testid={`onb-chosen-${row.provider}`}>
+          <span className="flex items-center gap-s1 text-sm" data-testid={`onb-chosen-${row.provider}`}>
             <Tick />
             <span>Runs {f.maker}'s installer</span>
-            <span className="flex-1" />
-            <button type="button" className={`${quiet} ${link}`} onClick={onUndo}>
+            <button type="button" className={`${quiet} ${link}`} disabled={busy} onClick={onUndo}>
               Undo
             </button>
-          </div>
+          </span>
         ) : (
-          <button type="button" className={primary} onClick={onPick}>
-            Connect
+          f.license.label && <span className={fine}>{f.license.label}</span>
+        )}
+        {!open && (
+          <button type="button" className={button} aria-label={`Choose how ${f.name} connects`} onClick={onOpen}>
+            Choose
           </button>
         )}
       </div>
+      {!open ? (
+        <p className={fine}>{["Sign in", "API key", ...(cloud ? ["Your cloud"] : [])].join(" · ")}</p>
+      ) : (
+        <>
+          {opencode && (
+            <ModelProviderPicker
+              value={model.id}
+              disabled={busy}
+              onChange={(id) => {
+                const next = MODEL_PROVIDERS.find((m) => m.id === id) ?? MODEL_PROVIDERS[0];
+                setModel(next);
+                if (next.cloud && cloud) onMethod("cloud");
+              }}
+            />
+          )}
+          <MethodChoice provider={row.provider} name={f.name} value={method} cloud={cloud} disabled={busy} onChange={onMethod} />
+          {error && (
+            <p className={alert} role="alert">
+              Couldn't save how {f.name} connects: {error}
+            </p>
+          )}
+          {method === "sign_in" && (
+            <p className={fine}>
+              {signedIn(row) ? `Signed in already: brindle uses ${f.name}'s own sign-in.` : `${f.maker}'s own sign-in opens in your browser ${found ? "next" : "once it's installed"}, using ${f.account}.`}
+            </p>
+          )}
+          {method === "api_key" &&
+            (opencode && !model.key ? (
+              <p className={fine}>{model.name} connects through your cloud, not a key.</p>
+            ) : (
+              <ApiKeyPaste
+                key={opencode ? model.id : row.provider}
+                client={client}
+                provider={row.provider}
+                expect={(opencode ? model.key : undefined) ?? PROVIDER_KEYS[row.provider]?.[0] ?? "ANTHROPIC_API_KEY"}
+                keys={keys}
+                openUrl={openUrl}
+                onSaved={(_, last4, c) => onConnected("api_key", `API key ending ${last4}`, c)}
+                lock={lock}
+              />
+            ))}
+          {method === "cloud" && cloud && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} openUrl={openUrl} onSignedIn={(route, c) => onConnected("cloud", `through ${CLOUD_NAME[route] ?? route}`, c)} lock={lock} />}
+        </>
+      )}
     </section>
   );
 }
@@ -329,7 +411,7 @@ function ProviderSignInStep({ row, index, of, rest, already, check, openUrl, onL
             }}
           >
             <input className={`${field} w-full font-mono`} aria-label="Code from the browser" placeholder={phase.prompt} value={code} autoFocus onChange={(e) => setCode(e.target.value)} />
-            <button type="submit" className={primary} disabled={!code.trim()}>
+            <button type="submit" className={button} disabled={!code.trim()}>
               Continue
             </button>
           </form>
@@ -373,7 +455,23 @@ function ProviderSignInStep({ row, index, of, rest, already, check, openUrl, onL
 
 /* ---- You're ready. ---- */
 
-function Ready({ rows, installed, onSignIn, onNext }: { rows: ProviderInstalled[]; installed: string[]; onSignIn(provider: string): void; onNext(): void }) {
+/* Each provider found, connected only when it is (installed, its method set up and the engine
+   reading it ready); one set up with a key or a cloud but not ready says why, with the fix. */
+function Ready({ client, rows, installed, via, connections, done, methodOf, onConnection, onSetup, onSignIn, onNext }: {
+  client: DaemonClient;
+  rows: ProviderInstalled[];
+  installed: string[];
+  via: Record<string, { method: Method; how: string }>;
+  connections: Record<string, ProviderConnection>;
+  done(row: ProviderInstalled): boolean;
+  /* How it connects: chosen in this flow, else as saved (a resumed first launch has only the saved). */
+  methodOf(row: ProviderInstalled): Method | null;
+  onConnection(provider: string, connection: ProviderConnection): void;
+  /* Back to its section on the cards, to set its key or cloud up again. */
+  onSetup(provider: string): void;
+  onSignIn(provider: string): void;
+  onNext(): void;
+}) {
   const have = rows.filter(connected);
   const others = rows.length - have.length;
   const count = ["", "one", "two", "three"][others] ?? String(others);
@@ -383,15 +481,32 @@ function Ready({ rows, installed, onSignIn, onNext }: { rows: ProviderInstalled[
         {have.map((r) => {
           const f = factsOf(r);
           const signed = signedIn(r);
+          const ok = done(r);
+          const conn = connections[r.provider];
+          const m = methodOf(r);
+          // A key or a cloud, from the saved connection; this flow's own words for it when it has them.
+          const keyed = m === "api_key" || m === "cloud";
+          const how = keyed ? (via[r.provider]?.method === m ? via[r.provider].how : m === "cloud" ? `through ${CLOUD_NAME[conn?.cloud ?? ""] ?? "your cloud"}` : "API key") : undefined;
           return (
-            <div key={r.provider} className="flex flex-wrap items-center gap-s1 px-s2 py-s1" data-testid={`onb-ready-${r.provider}`}>
-              <Tick on={signed} />
+            <div key={r.provider} className="flex flex-wrap items-center gap-s1 px-s2 py-s1" data-testid={`onb-ready-${r.provider}`} data-connected={ok}>
+              <Tick on={ok} />
               <Mark provider={r.provider} name={f.name} small />
               <span className="font-semibold">{f.name}</span>
               {r.version && <span className={`${mono} text-ink-3`}>{r.version}</span>}
               <span className="flex-1" />
               <span className={fine}>
-                {signed ? (
+                {how && ok ? (
+                  `connected ${how.startsWith("through") ? how : `by ${how}`} · ${installed.includes(r.provider) ? `installed by ${f.maker}'s installer` : "your own copy"}`
+                ) : keyed ? (
+                  // Not ready: the engine's fix (Renew login, Sign out of ChatGPT, Set key back on the cards), never a subscription sign-in over it.
+                  conn?.ready && !conn.ready.ok ? (
+                    <ReadyNote client={client} connection={conn} onSetKey={() => onSetup(r.provider)} onChanged={(c) => onConnection(r.provider, c)} />
+                  ) : (
+                    <button type="button" className={link} onClick={() => onSetup(r.provider)}>
+                      Finish setting it up
+                    </button>
+                  )
+                ) : signed ? (
                   `signed in · ${installed.includes(r.provider) ? `installed by ${f.maker}'s installer` : "your own copy"}, it keeps itself updated`
                 ) : (
                   <>
@@ -408,13 +523,190 @@ function Ready({ rows, installed, onSignIn, onNext }: { rows: ProviderInstalled[
       </div>
       <div>
         <button type="button" className={big} onClick={onNext}>
-          Pick a project
+          Continue
         </button>
       </div>
       <p className={fine}>
         From now on your providers live in Settings › Providers: where each one is and its sign-in
         {others > 0 ? `, and the other ${count} whenever you want ${others === 1 ? "it" : "them"}` : ""}.
       </p>
+    </Frame>
+  );
+}
+
+/* ---- Permissions: how much the agents do on their own (design/setup-presets.html). ---- */
+
+interface PresetCopy {
+  preset: PermissionPreset;
+  name: string;
+  who: string;
+  runs: string;
+  asks: string;
+  blocked: string;
+  /* Of 4: how many bars of the interruptions meter are lit. */
+  bars: number;
+  often: string;
+  note: string;
+}
+
+const PRESETS: PresetCopy[] = [
+  {
+    preset: "autonomous",
+    name: "Autonomous",
+    who: "Agents work start to finish without stopping. Best for most people: you review the result, not every step.",
+    runs: "Anything no rule covers: reading, writing and editing files, running commands, fetching, pushing to work branches",
+    asks: "Pushing into your default branch (remembered answers can last), pushing into release/* (every time)",
+    blocked: "Force pushes, deleting the root or home folder, reading credential files (~/.ssh, ~/.aws, .env)",
+    bars: 1,
+    often: "rarely",
+    note: "With Autonomous, brindle also groups similar requests (for example every push into your default branch) so one answer covers them all.",
+  },
+  {
+    preset: "permissive",
+    name: "Permissive",
+    who: "Files in the worktree and everyday tools run freely; other requests ask, and you can remember the answer.",
+    runs: "Reading tracked files, reading, writing and editing files in the worktree, everyday dev tools (npm, uv, pytest, docker, gh...), checks, read-only commands",
+    asks: "Other commands, files outside the worktree, pushes, web and connected tools; pushing into release/* every time",
+    blocked: "Force pushes, deleting the root or home folder, reading credential files",
+    bars: 2,
+    often: "sometimes",
+    note: "Permissive asks for other commands, files outside the worktree and pushes. Remembered answers stop repeat questions.",
+  },
+  {
+    preset: "standard",
+    name: "Standard",
+    who: "Agents read and run everyday tools freely but ask before writing or editing files directly. Good while you're getting to know brindle.",
+    runs: "Reading tracked files, everyday dev tools (npm, uv, pytest, docker, gh...; these can change files), checks",
+    asks: "Direct file writes and edits, other commands, pushes, web and tool access; pushing into release/* every time",
+    blocked: "Force pushes, deleting the root or home folder, reading credential files",
+    bars: 3,
+    often: "often",
+    note: "Standard pauses agents often. If they stall, switch to Autonomous in Settings → Permissions, or allow the noisiest rules there.",
+  },
+  {
+    preset: "secure",
+    name: "Secure",
+    who: "For sensitive code: almost everything asks, approvals last at most 15 minutes, and anything no rule covers is denied.",
+    runs: "Reading tracked files",
+    asks: "Every write, edit, command, fetch and push (remembered for at most 15 minutes); pushing into release/* every time",
+    blocked: "Force pushes, deleting the root or home folder, credential files, anything no rule covers",
+    bars: 4,
+    often: "constantly",
+    note: "Secure pauses agents on almost every step and denies anything no rule covers. Expect to approve requests often.",
+  },
+];
+
+function PresetCard({ copy, on, disabled, buttonRef, onPick, onKey }: { copy: PresetCopy; on: boolean; disabled: boolean; buttonRef(el: HTMLButtonElement | null): void; onPick(): void; onKey(e: KeyboardEvent<HTMLButtonElement>): void }) {
+  return (
+    <button
+      ref={buttonRef}
+      type="button"
+      role="radio"
+      aria-checked={on}
+      disabled={disabled}
+      tabIndex={on ? 0 : -1}
+      data-testid={`onb-preset-${copy.preset}`}
+      className={`${card} flex flex-col items-stretch gap-s1 p-s2 text-left aria-checked:border-branch aria-checked:bg-branch-soft`}
+      onClick={onPick}
+      onKeyDown={onKey}
+    >
+      <span className="flex items-center gap-s1">
+        <span aria-hidden className={`size-[18px] shrink-0 rounded-full border-2 ${on ? "border-branch bg-branch shadow-[inset_0_0_0_4px_var(--surface)]" : "border-line-strong"}`} />
+        <span className="text-base font-semibold">{copy.name}</span>
+        {copy.preset === "autonomous" && <span className="ml-auto rounded-sm bg-branch-soft px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-branch">RECOMMENDED</span>}
+      </span>
+      <span className="text-[13px] text-ink-2">{copy.who}</span>
+      <span className="grid gap-1 border-t border-line pt-s1 text-[13px]">
+        {(
+          [
+            ["Runs on its own", copy.runs, "text-pass"],
+            ["Asks you", copy.asks, "text-branch"],
+            ["Blocked", copy.blocked, "text-sap"],
+          ] as const
+        ).map(([k, v, tone]) => (
+          <span key={k} className="grid grid-cols-[96px_1fr] gap-s1">
+            <span className={`pt-0.5 text-[11px] font-semibold uppercase tracking-wide ${tone}`}>{k}</span>
+            <span className="text-ink-2">{v}</span>
+          </span>
+        ))}
+      </span>
+      <span className="flex items-center gap-s1 text-xs text-ink-3">
+        Interruptions
+        <span aria-hidden className="flex gap-[3px]">
+          {[1, 2, 3, 4].map((n) => (
+            <i key={n} className={`h-1.5 w-3.5 rounded-sm ${n <= copy.bars ? "bg-sap" : "bg-line-strong"}`} />
+          ))}
+        </span>
+        {copy.often}
+      </span>
+    </button>
+  );
+}
+
+/* Continue applies the choice (PUT /permissions/preset); Skip for now leaves the engine's
+   own default, Autonomous. */
+function Permissions({ client, onNext }: { client: DaemonClient; onNext(): void }) {
+  const [choice, setChoice] = useState<PermissionPreset>("autonomous");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const refs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const copy = PRESETS.find((p) => p.preset === choice) ?? PRESETS[0];
+
+  const move = (from: number, step: number) => {
+    const next = PRESETS[(from + step + PRESETS.length) % PRESETS.length];
+    setChoice(next.preset);
+    refs.current[next.preset]?.focus();
+  };
+  const apply = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await client.setPermissionPreset(choice);
+      onNext();
+    } catch (e) {
+      setError(plain(e instanceof Error ? e.message : String(e)));
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Frame step="permissions" kicker="Permissions" title="How much should your agents do on their own?" lede="Agents stop and wait whenever they need your permission. Pick how often that happens. You can change this, and edit or remove any rule it adds, in Settings → Permissions.">
+      <div className="mt-s1 grid gap-s2 sm:grid-cols-2" role="radiogroup" aria-label="Permission preset">
+        {PRESETS.map((p, i) => (
+          <PresetCard
+            key={p.preset}
+            copy={p}
+            on={p.preset === choice}
+            disabled={busy}
+            buttonRef={(el) => void (refs.current[p.preset] = el)}
+            onPick={() => setChoice(p.preset)}
+            onKey={(e) => {
+              const d = ({ ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 } as Record<string, number>)[e.key];
+              if (!d) return;
+              e.preventDefault();
+              move(i, d);
+            }}
+          />
+        ))}
+      </div>
+      <p className="flex items-start gap-s1 rounded-md bg-canvas-2 px-s2 py-s1 text-[13px] text-ink-2" data-testid="onb-preset-note">
+        <span aria-hidden className="text-branch">◇</span>
+        {copy.note}
+      </p>
+      {error && (
+        <p className={alert} role="alert">
+          Couldn't apply {copy.name}: {error}
+        </p>
+      )}
+      <div className="flex flex-wrap items-center gap-s2">
+        <span className={`${fine} min-w-0 flex-1`}>Nothing is locked in. Every rule a preset adds can be edited or removed later.</span>
+        <button type="button" className={quiet} disabled={busy} onClick={onNext}>
+          Skip for now
+        </button>
+        <button type="button" className={big} disabled={busy} onClick={() => void apply()}>
+          Continue with {copy.name}
+        </button>
+      </div>
     </Frame>
   );
 }
@@ -428,6 +720,53 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
   const [picks, setPicks] = useState<string[]>([]);
   /* Sign-ins put off with "Do this later" in this flow. */
   const [later, setLater] = useState<string[]>([]);
+  /* How each provider connects, as chosen on its card. */
+  const [methods, setMethods] = useState<Record<string, Method>>({});
+  /* Each provider's connection as the engine reads it (its method, clouds and readiness), read with the rows. */
+  const [connections, setConnections] = useState<Record<string, ProviderConnection>>({});
+  /* Per provider, bumped by each write: a read that started before one doesn't overwrite what it answered. */
+  const writes = useRef<Record<string, number>>({});
+  const putConnection = (provider: string, c: ProviderConnection) => {
+    writes.current[provider] = (writes.current[provider] ?? 0) + 1;
+    setConnections((all) => ({ ...all, [provider]: c }));
+  };
+  const loadConnections = useCallback(
+    (list: ProviderInstalled[]) => {
+      for (const r of list) {
+        const at = writes.current[r.provider] ?? 0;
+        client.providerConnection(r.provider).then(
+          (c) => (writes.current[r.provider] ?? 0) === at && setConnections((all) => ({ ...all, [r.provider]: c })),
+          () => undefined,
+        );
+      }
+    },
+    [client],
+  );
+  /* Set up on its card by a key or a cloud ("API key ending k7Qa"), for the method chosen then: a different method undoes it. */
+  const [via, setVia] = useState<Record<string, { method: Method; how: string }>>({});
+  const forgetVia = (provider: string) => setVia(({ [provider]: _, ...rest }) => rest);
+  /* Saving a choice failed, per provider: why. */
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  /* The keys as GET /config reads them, for the API key fields. */
+  const [keys, setKeys] = useState<KeyInfo[] | null>(null);
+  const keyStored = (provider: string) => !!keys?.some((k) => k.set && (PROVIDER_KEYS[provider] ?? []).includes(k.name));
+  /* The method shown: the one chosen here, else the saved one. Left to auto, a found CLI
+     signs in with its own login unless a key it reads is stored: then nothing is claimed. */
+  const methodOf = (row: ProviderInstalled): Method | null => {
+    const saved = connections[row.provider]?.method;
+    if (methods[row.provider]) return methods[row.provider];
+    if (saved === "sign_in" || saved === "api_key" || saved === "cloud") return saved;
+    return connected(row) && !keyStored(row.provider) ? "sign_in" : null;
+  };
+  /* Connected for good: installed, the current method set up (its own sign-in, or a key or a
+     cloud done here or saved before), and the engine reading it ready to launch. */
+  const done = (row: ProviderInstalled): boolean => {
+    const m = methodOf(row);
+    const c = connections[row.provider];
+    if (!connected(row) || !m) return false;
+    const set = m === "sign_in" ? signedIn(row) : via[row.provider]?.method === m || (c?.method === m && !!c.ready?.ok);
+    return set && (c?.ready ? c.ready.ok : true);
+  };
 
   /* The providers read again failed: the step stays where it is and says so, with Retry. */
   const [refreshError, setRefreshError] = useState<string | null>(null);
@@ -436,12 +775,14 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
       const got = await client.providersInstalled();
       setRows(got);
       setRefreshError(null);
+      // An install or a sign-in changes whether each is ready: their connections are read again too.
+      loadConnections(got);
       return got;
     } catch (e) {
       setRefreshError(plain(e instanceof Error ? e.message : String(e)));
       throw e;
     }
-  }, [client]);
+  }, [client, loadConnections]);
   const refreshProblem = refreshError && (
     <div className={`${alert} flex flex-wrap items-center gap-s2`} role="alert" data-testid="onb-refresh-failed">
       <span className="min-w-0 flex-1">Couldn't read your providers again: {refreshError}</span>
@@ -467,10 +808,57 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
 
-  // The cards read what's on this Mac afresh.
+  // The cards read what's on this Mac afresh, and the keys stored or in the shell.
   useEffect(() => {
-    if (step === "connect") void reload().catch(() => undefined);
-  }, [step, reload]);
+    if (step !== "connect") return;
+    void reload().catch(() => undefined);
+    client.config().then(
+      (c) => setKeys(c.keys),
+      () => setKeys([]),
+    );
+  }, [step, reload, client]);
+
+  /* Each provider's connection writes in flight (components/ProviderConnect Lock): a key save,
+     a cloud route, an explicit Sign in. Kept here, not in the forms, so a form leaving never frees one. */
+  const [writing, setWriting] = useState<Record<string, number>>({});
+  const lockOf = (p: string): Lock => ({
+    busy: (writing[p] ?? 0) > 0,
+    run: async <T,>(work: () => Promise<T>): Promise<T> => {
+      setWriting((w) => ({ ...w, [p]: (w[p] ?? 0) + 1 }));
+      try {
+        return await work();
+      } finally {
+        setWriting((w) => ({ ...w, [p]: (w[p] ?? 1) - 1 }));
+      }
+    },
+  });
+  const choose = async (row: ProviderInstalled, method: Method) => {
+    const p = row.provider;
+    const lock = lockOf(p);
+    if (lock.busy) return false;
+    // The section worked in stays open, whatever becomes connected.
+    setOpen(p);
+    setErrors(({ [p]: _, ...rest }) => rest);
+    // An explicit Sign in is saved, even over auto: a key stored or exported would bill otherwise.
+    // It holds the provider's lock until it answers, so no other choice can land before it.
+    if (method === "sign_in" && connections[p]?.method !== "sign_in") {
+      const got = await lock.run(() => client.setProviderConnection(p, { method: "sign_in" }).then((c) => ({ c }), (e: unknown) => ({ e })));
+      if ("e" in got) {
+        setErrors((all) => ({ ...all, [p]: plain(got.e instanceof Error ? got.e.message : String(got.e)) }));
+        return false;
+      }
+      putConnection(p, got.c);
+    }
+    setMethods((m) => ({ ...m, [p]: method }));
+    if (via[p]?.method !== method) forgetVia(p);
+    if (!connected(row)) setPicks((all) => (all.includes(p) ? all : [...all, p]));
+    return true;
+  };
+  /* A provider with a write in flight: its section stays open and the flow can't move on until it answers. */
+  const writingTo = rows.find((r) => (writing[r.provider] ?? 0) > 0)?.provider ?? null;
+  /* The open section: one writing, else the one Choose opened, else the first not yet connected. */
+  const [open, setOpen] = useState<string | null>(null);
+  const opened = writingTo ?? open ?? rows.find((r) => !done(r))?.provider ?? null;
 
   const order = rows.map((r) => r.provider);
   const queue = order.filter((p) => picks.includes(p));
@@ -494,13 +882,19 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
     if (rest.length === 0 && !rows.some(connected)) setStep("connect");
   };
 
-  // A provider confirmed connected and signed in: the first launch is done for good, whatever happens after.
-  const finished = onboarded(rows);
+  // A provider confirmed connected and signed in, or installed and ready on a key or a cloud: the first launch is done for good, whatever happens after.
+  const finished = onboarded(rows) || rows.some(done);
   useEffect(() => {
     if (finished) markOnboarded();
   }, [finished]);
 
-  const pending = useMemo(() => rows.filter((r) => unsigned(r) && !later.includes(r.provider)), [rows, later]);
+  // The browser sign-ins still to do: a provider set up with a key or a cloud has none.
+  const signInFirst = (r: ProviderInstalled) => {
+    const m = methodOf(r);
+    return m === "sign_in" || (m === null && !connections[r.provider]?.ready?.ok);
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const pending = useMemo(() => rows.filter((r) => unsigned(r) && !later.includes(r.provider) && signInFirst(r)), [rows, later, methods, connections, keys]);
   /* The sign-ins this round began with ("1 of 2"), kept as each one finishes. */
   const [round, setRound] = useState<string[]>([]);
   useEffect(() => {
@@ -538,24 +932,41 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
         <Frame
           step="connect"
           kicker="Step 2 of 3"
-          title="Connect your providers"
-          lede="Pick the coding agents you'll run, one or more. brindle runs each maker's own installer, as it is, and uses the CLI where the installer puts it; each keeps itself up to date. One you already have, brindle simply uses."
+          title="Connect your AI providers"
+          lede="Pick how brindle reaches each model. You can use more than one, and change it later in Settings."
         >
-          <div className="mt-s1 grid gap-s2 sm:grid-cols-2">
+          <div className="mt-s1 flex flex-col">
             {rows.map((r) => (
               <ProviderCard
                 key={r.provider}
+                client={client}
                 row={r}
                 picked={picks.includes(r.provider)}
                 installed={installed.includes(r.provider)}
-                onPick={() => setPicks((all) => [...all, r.provider])}
-                onUndo={() => setPicks((all) => all.filter((p) => p !== r.provider))}
+                method={methodOf(r)}
+                connection={connections[r.provider] ?? null}
+                open={opened === r.provider}
+                error={errors[r.provider] ?? null}
+                keys={keys}
+                openUrl={openUrl}
+                lock={lockOf(r.provider)}
+                onOpen={() => setOpen(r.provider)}
+                onMethod={(m) => void choose(r, m)}
+                onUndo={() => {
+                  setPicks((all) => all.filter((p) => p !== r.provider));
+                  setMethods(({ [r.provider]: _, ...rest }) => rest);
+                  forgetVia(r.provider);
+                }}
+                onConnected={(method, how, c) => {
+                  setVia((v) => ({ ...v, [r.provider]: { method, how } }));
+                  if (c) putConnection(r.provider, c);
+                }}
               />
             ))}
           </div>
           {refreshProblem}
           <div className="mt-s1 flex flex-wrap items-center gap-s2">
-            <button type="button" className={big} disabled={(queue.length === 0 && found.length === 0) || !!refreshError} onClick={() => setStep("install")}>
+            <button type="button" className={big} disabled={(queue.length === 0 && found.length === 0) || !!refreshError || !!writingTo} onClick={() => setStep("install")}>
               {queue.length ? `Connect ${names(queue.map(label))}` : found.length ? `Continue with ${names(found.map((r) => factsOf(r).name))}` : "Connect"}
             </button>
             <p className={`${fine} min-w-0 flex-1`}>
@@ -644,15 +1055,33 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
     case "ready":
       return (
         <Ready
+          client={client}
           rows={rows}
           installed={installed}
-          onSignIn={(p) => {
-            setLater((l) => l.filter((x) => x !== p));
-            setStep("provider-signin");
+          via={via}
+          connections={connections}
+          done={done}
+          methodOf={methodOf}
+          onConnection={putConnection}
+          onSetup={(p) => {
+            setOpen(p);
+            setStep("connect");
           }}
-          onNext={() => setStep("project")}
+          onSignIn={(p) => {
+            const row = rows.find((r) => r.provider === p);
+            if (!row) return;
+            // Signing in is choosing Sign in: saved first, then its browser sign-in.
+            void choose(row, "sign_in").then((saved) => {
+              if (!saved) return;
+              setLater((l) => l.filter((x) => x !== p));
+              setStep("provider-signin");
+            });
+          }}
+          onNext={() => setStep("permissions")}
         />
       );
+    case "permissions":
+      return <Permissions client={client} onNext={() => setStep("project")} />;
     case "project":
       return (
         <Frame step="project" kicker="Ready" title="Pick a project" lede="The folder brindle works in: one on this Mac, or a repository to clone. Your first session starts there.">

@@ -117,7 +117,7 @@ describe("App", () => {
     expect(treeAgent("sup1").getAttribute("aria-current")).toBe("page");
     expect(screen.queryByRole("complementary", { name: "Session panel" })).toBeNull();
     const context = within(nav()).getByTestId("session-context");
-    await waitFor(() => expect(within(context).getByTestId("goal-line").textContent).toContain("1 of 1 passed"));
+    await waitFor(() => expect(within(context).getByTestId("goal-line").textContent).toContain("1 of 1 milestones complete"));
     expect(within(context).getByRole("list", { name: "Milestones" }).textContent).toContain("Client wired");
     expect(within(nav()).getByTestId("split-handle")).toBeTruthy();
     expect(daemon.requests.find((r) => r.path === "/goal")?.query).toEqual({ repo: REPO, root: "sup1" });
@@ -152,11 +152,14 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
 
     // The pages behind the sidebar's foot, each for the repo in view.
-    for (const name of ["Knowledge", "Agents", "Settings", "Account"]) {
+    for (const name of ["Knowledge", "Agents", "Settings"]) {
       fireEvent.click(link(name));
       expect(await screen.findByRole("region", { name })).toBeTruthy();
       expect(link(name).getAttribute("aria-current")).toBe("page");
     }
+    fireEvent.click(link("Open Account"));
+    expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
+    expect(link("Open Account").getAttribute("aria-current")).toBe("page");
 
     // ⌘1 is the first live session, back from any page; ⌘N the composer.
     fireEvent.keyDown(window, { key: "1", metaKey: true });
@@ -186,6 +189,35 @@ describe("App", () => {
     expect(screen.queryByRole("status")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Can't reach the brindle engine: missing or wrong token"));
+    sync.stop();
+  });
+
+  it("project settings: opens from a repo's sidebar heading and from Settings' link, and a shell opened there starts in that repo", async () => {
+    const OTHER = "/home/u/other";
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }],
+      sessions: [session, { ...session, id: "sup2", workspace_id: "other" }],
+      workspaces: [root],
+    });
+    const store = createAppStore();
+    const client = daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "new" }} />);
+    // The second repo's heading: its Project settings, and a shell from the status line starts at that repo.
+    await screen.findByRole("complementary", { name: "Sidebar" });
+    fireEvent.click(await within(nav()).findByRole("button", { name: "Project settings for other" }));
+    await screen.findByRole("region", { name: "Project settings" });
+    expect(screen.getByRole("radio", { name: /^other/ }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.click(screen.getByTestId("terminal-toggle"));
+    await waitFor(() => expect(daemon.shells.map((s) => s.cwd)).toEqual([OTHER]));
+    // Settings opens on You; the switch's repo side is the current session's repo (here the second), with a menu for the others.
+    localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ root: "sup2", repo: OTHER }));
+    fireEvent.click(link("Settings"));
+    fireEvent.click(await screen.findByRole("radio", { name: /^other/ }));
+    await screen.findByRole("region", { name: "Project settings" });
+    fireEvent.click(screen.getByRole("radio", { name: /^other/ }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "proj" }));
+    expect((await screen.findByRole("radio", { name: /^proj/ })).getAttribute("aria-checked")).toBe("true");
     sync.stop();
   });
 
@@ -376,6 +408,7 @@ describe("App", () => {
     const sync = startSync({ client, store, connect: daemon.connect });
     const installCli = vi.fn(() => Promise.resolve({ path: "/home/sam/.local/bin/brindle", target: "/Applications/brindle.app/Contents/Resources/engine/bin/brindle" }));
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "settings" }} installCli={installCli} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Details/ }));
     const cli = await screen.findByTestId("install-cli");
     const btn = within(cli).getByRole("button", { name: "Install command-line tool" });
     expect(btn).toHaveProperty("disabled", false);
@@ -412,10 +445,21 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
     expect(screen.queryByTestId("engine-banner")).toBeNull();
 
+    fireEvent.click(link("Settings"));
+    await screen.findByRole("region", { name: "Settings" });
+    const engineSection = screen.getByTestId("engine");
+    fireEvent.click(within(engineSection).getByRole("button", { name: /Details/ }));
+    expect(within(engineSection).getByTestId("connection").textContent).toBe("daemon · connected");
+    expect(screen.queryByTestId("engine-health")).toBeNull();
+    expect(within(nav()).queryByTestId("connection")).toBeNull();
+    fireEvent.click(within(nav()).getByTestId("inbox-link"));
+    await screen.findByRole("region", { name: "Inbox" });
+
     // The engine dies: the stream drops and nothing answers. The banner says so; the app asks for nothing.
     const before = daemon.requests.length;
     daemon.die();
     await waitFor(() => expect(screen.getByTestId("engine-banner").textContent).toContain("Can't reach the brindle engine"));
+    expect(within(screen.getByTestId("engine-health")).getByTestId("connection").textContent).toBe("daemon · reconnecting…");
     // It keeps trying on its own (the shell starts the daemon again on the next attempt).
     await waitFor(() => expect(daemon.sockets.filter((s) => s.closed).length).toBeGreaterThan(2));
     expect(store.getState().connection).not.toBe("open");
@@ -429,11 +473,16 @@ describe("App", () => {
     await waitFor(() => expect(store.getState().connection).toBe("open"));
     await waitFor(() => expect(screen.queryByTestId("engine-banner")).toBeNull());
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
+    fireEvent.click(link("Settings"));
+    await screen.findByRole("region", { name: "Settings" });
+    fireEvent.click(within(screen.getByTestId("engine")).getByRole("button", { name: /Details/ }));
+    expect(within(screen.getByTestId("engine")).getByTestId("connection").textContent).toBe("daemon · connected");
     const after = daemon.requests.slice(before).filter((r) => r.method === "GET").map((r) => r.path);
     expect(after).toContain("/snapshot");
     expect(after).toContain("/inbox");
     expect(after).toContain("/meta");
-    expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    fireEvent.click(link("Knowledge"));
+    expect(await screen.findByRole("region", { name: "Knowledge" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
     sync.stop();
   });
@@ -493,8 +542,7 @@ describe("providers in the sidebar", () => {
     expect(nav().textContent).not.toContain("Claude Code");
     expect(within(nav()).queryByRole("button", { name: /Connect|Sign in/ })).toBeNull();
     expect(within(nav()).queryByTestId("provider-problem")).toBeNull();
-    // The footer's links stay the four pages, on one line.
-    expect(within(screen.getByRole("navigation", { name: "Pages" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["Knowledge", "Agents", "Settings", "Account"]);
+    expect(within(nav()).getByRole("button", { name: "Open Account" })).toBeTruthy();
     stop();
   });
 
@@ -507,6 +555,8 @@ describe("providers in the sidebar", () => {
     );
     await waitFor(() => expect(treeAgent("sup1")).toBeTruthy());
     const problem = await within(nav()).findByTestId("provider-problem");
+    expect(statusLine().lastElementChild).toBe(problem);
+    expect(within(statusLine()).getByTestId("usage-reading")).toBeTruthy();
     expect(problem.textContent).toBe("Codex signed out");
     expect(problem.getAttribute("data-kind")).toBe("signed_out");
     expect(problem.className).toContain("text-sap");
@@ -521,7 +571,7 @@ describe("providers in the sidebar", () => {
 
     // An install that fails reaches the status line too, after the sign-out: "+1", still there on another page.
     daemon.installFails.opencode = 1;
-    fireEvent.click(within(screen.getByTestId("provider-opencode")).getByRole("button", { name: "Connect OpenCode" }));
+    fireEvent.click(within(screen.getByTestId("provider-opencode")).getByRole("button", { name: "Install OpenCode" }));
     await screen.findByTestId("provider-install-opencode-failed");
     await waitFor(() => expect(within(statusLine()).getByTestId("provider-problem-more").textContent).toBe("+1"));
     expect(within(statusLine()).getByTestId("provider-problem").textContent).toContain("Codex signed out");
@@ -532,10 +582,11 @@ describe("providers in the sidebar", () => {
     fireEvent.click(within(await screen.findByTestId("provider-install-opencode-failed")).getByRole("button", { name: "Dismiss" }));
     await waitFor(() => expect(within(statusLine()).queryByTestId("provider-problem-more")).toBeNull());
     // An install failure alone says so in its own words.
+    fireEvent.click(within(screen.getByTestId("provider-codex")).getByRole("button", { name: "Connection details" }));
     fireEvent.click(within(screen.getByTestId("provider-codex")).getByRole("button", { name: "Remove Codex from brindle" }));
     await waitFor(() => expect(within(nav()).queryByTestId("provider-problem")).toBeNull());
     daemon.installFails.antigravity = 1;
-    fireEvent.click(within(screen.getByTestId("provider-antigravity")).getByRole("button", { name: "Connect Antigravity" }));
+    fireEvent.click(within(screen.getByTestId("provider-antigravity")).getByRole("button", { name: "Install Antigravity" }));
     await waitFor(() => expect(within(nav()).getByTestId("provider-problem").textContent).toBe("Antigravity install failed"));
     expect(screen.queryByRole("dialog")).toBeNull();
     Element.prototype.scrollIntoView = before;
@@ -559,10 +610,11 @@ describe("closing a session", () => {
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
     const context = within(nav()).getByTestId("session-context");
-    // Beside the Done status: a primary Close session.
+    // Finished: the count line is green, with no phase label; Close session sits under the milestone list.
     const close = await within(context).findByRole("button", { name: "Close session" });
-    expect(within(context).getByTestId("goal-phase").textContent).toBe("Done");
-    expect(close.parentElement).toBe(within(context).getByTestId("goal-line").parentElement);
+    expect(within(context).getByTestId("goal-line").className).toContain("text-pass");
+    expect(within(context).queryByTestId("goal-phase")).toBeNull();
+    expect(within(context).getByRole("list", { name: "Milestones" }).compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(sessionRow("sup1")).toBeTruthy();
 
     fireEvent.click(close);

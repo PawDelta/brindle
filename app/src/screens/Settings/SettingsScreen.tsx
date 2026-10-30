@@ -1,8 +1,11 @@
-/* Settings: this machine's brindle, in five sections (About last) with a small nav at
-   the top: This repo (the handful of settings people change most, the rest
-   behind More), You (how Claude's permission requests are handled, your
-   permission rules, your defaults for every repo), Providers (one row per
-   provider CLI and per key, each with its state and its buttons) and
+/* Settings: this machine's brindle, in sections (About last) with a switch at
+   the top: "You" and the repo's name (the session's, or one picked from the
+   switch's menu when there are several). The repo side is RepoSettings
+   (ProjectSettingsScreen.tsx): the same rows with where each value comes
+   from. The You side has a small nav: Your settings (editable, saved to
+   ~/.brindle/config.json for every project), Permissions (how Claude's permission
+   requests are handled, your permission rules), Providers (one row per
+   provider CLI, with how it connects, its state and its buttons) and
    Engine & health (the engine's version and update, the command-line tool,
    and the doctor as a short health list with a fix where the app has one).
 
@@ -19,13 +22,22 @@
    Connect on a provider that is off turns it back on with the copy still
    found (POST /v1/providers/{p}/use-mine), no installer run. The rows and installs are the app's (store/providers), so a problem
    also reaches the sidebar's status line, which opens this section.
+   Each row also says how the provider connects (GET
+   /v1/providers/{p}/connection; components/ProviderConnect): its own
+   sign-in (Sign in, Sign out), an API key (••••last4, verified or rejected
+   and when, rejected in the fail colour naming the agents it stopped; Test
+   POST /v1/keys/{name}/test, Replace, Remove DELETE /v1/keys/{name}) or a
+   cloud (the route and its settings, the login's time left; Renew login
+   POST .../cloud-sign-in), and Change method offers the three choices
+   again. A key the shell exports but brindle doesn't keep is offered for
+   Import (POST /v1/keys/{name}/import).
 
-   The repo's settings (GET /v1/config) are edited as a draft and saved with
-   PATCH /v1/config to this repo's own config.local.json or to the person's
-   config for every repo, from a save bar at the foot. The Claude
+   Your settings (GET /v1/config's `user`, with `overrides` saying which keys
+   a project's files set) are edited as a draft and saved with PATCH /v1/config
+   (scope user). The Claude
    permission mode is the person's own (GET and PATCH /v1/user-settings) and
-   saves as soon as it is picked. Keys show as names and last four characters
-   only; setting one is typed into a password field and stored write-only
+   saves as soon as it is picked. Keys show as their last four characters
+   only; setting one is pasted into a password field and stored write-only
    (PUT /v1/keys/{name}, routes_actions.put_key): the value never comes back.
    A provider's sign-in is the browser-first card (components/ProviderSignIn,
    POST /v1/providers/{p}/login) and the engine's update the background
@@ -35,43 +47,51 @@
    pane. The doctor (GET /v1/doctor) is read once per repo and on demand;
    its update line feeds the engine row (its sign-in lines stay out of the
    health list: the provider rows say that).
-   Permission rules (POST /v1/permissions) are added or reset here; the list
-   itself is the terminal's until the daemon serves it. The command-line
+   Organization (OrgApprovals.tsx, read only when opened): the organization's
+   members, roles and approval limits (/v1/org-permissions). The command-line
    tool's install is the shell's (install_cli, api/tauri.ts): App passes it
    in the app, where the row then says where the link went; in a browser
    tab there is none and the button stays disabled. Staff alone (GET
-   /v1/debug's `staff`) get a fifth section at the foot, Debug logging: one
-   switch (PUT /v1/debug) for uploading debug logs to brindle (api/debug.ts).
-   In the app staff also get App update: one Update button that checks this
-   build's feed (a release candidate's rc channel) and installs what it
-   finds, then offers a restart. It is how a release candidate updates at
-   all: an rc build never checks by itself (src-tauri/src/updates.rs).
+   /v1/debug's `staff`) get one section before About, Staff only, marked as
+   not public: Debug logging, one switch (PUT /v1/debug) for uploading debug
+   logs to brindle (api/debug.ts). In the app staff also get App update: one
+   Update button that checks this build's feed (a release candidate's rc
+   channel) and installs what it finds, then offers a restart. It is how a
+   release candidate updates at all: an rc build never checks by itself
+   (src-tauri/src/updates.rs). Beside it, staff can install the release
+   branch's latest build, before it ships, and restart into it
+   (ReleaseBuildUpdate), and go back to stable (Return to stable).
    Last, About: the app's version and its license files (About.tsx). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, Meta, PermissionChange, ProviderInstalled, UserSettings } from "../../api/client";
+import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, KeyInfo, Meta, ProviderConnection, ProviderInstalled, UserSettings } from "../../api/client";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
 import type { Install } from "../../api/providersInstall";
-import type { About as AboutInfo, AppUpdater, CliLink } from "../../api/tauri";
+import type { About as AboutInfo, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from "../../api/tauri";
 import { plain } from "../../api/wording";
 import { UpgradeCard, useEngineUpgrade } from "../../components/EngineUpgrade";
 import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
+import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, ReadyNote, RenewLogin, useLock, type Lock, type Method } from "../../components/ProviderConnect";
 import { ProviderSignIn } from "../../components/ProviderSignIn";
+import { ThemeToggle } from "../../components/ThemeToggle";
 import { About } from "./About";
 import { DocSwitches } from "./DocSwitches";
 import { TeamDestination } from "./TeamDestination";
-import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
-import { alert, button, card, danger, field, h2, label, mono, notice, pill, primary, quiet } from "../../components/ui";
+import { OrgApprovals } from "./OrgApprovals";
+import { Permissions } from "./Permissions";
+import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
+import { NO_REPO, useRepo } from "../../components/RepoSelect";
+import { RepoSettings } from "./ProjectSettingsScreen";
+import { alert, button, card, field, h2, main, mono, notice, pill, quiet } from "../../components/ui";
 import { useProviders } from "../../store/providers";
-import { StoreContext } from "../../store/useStore";
+import { StoreContext, useAppState } from "../../store/useStore";
 import {
   MARK,
-  MATCH_TYPES,
-  PERMISSION_KINDS,
-  SCOPES,
   SETTINGS,
+  YOURS,
+  carryEdits,
   changed,
   draftOf,
   fixFor,
@@ -80,13 +100,11 @@ import {
   isOptional,
   listOf,
   listText,
-  repoOnlyChanged,
   updateNotice,
   userLines,
   values,
   type Draft,
   type Fix,
-  type Scope,
   type Setting,
 } from "./settings";
 
@@ -100,34 +118,50 @@ export interface SettingsScreenProps {
      api/tauri.ts), shown to staff only. Without one (a browser tab) there is
      no such row. */
   appUpdater?: AppUpdater;
+  /* Staff's install of the release branch's latest build (the shell's
+     app_release_build_install, api/tauri.ts): a row under App update. */
+  releaseBuildUpdater?: ReleaseBuildUpdater;
   /* About's license files (the shell's about_read, api/tauri.ts). Without
      one (a browser tab) About only names them. */
   readAbout?: () => Promise<AboutInfo>;
-  /* The section to scroll to on opening: "providers" from the sidebar's problem line. */
-  section?: "providers";
+  /* About's updates for a build that updates by itself: last checked, Check
+     now, Restart to update (the shell's, api/tauri.ts AppUpdates). */
+  appUpdates?: AppUpdates;
+  /* The section to scroll to on opening: "providers" from the sidebar's problem line, "permissions" from the Inbox. */
+  section?: "providers" | "permissions";
   /* A new value asks to scroll to `section` again, the page already open. */
   ask?: number;
+  /* A permission rule to open in its editor (the Inbox's "Open the deny rule"). */
+  rule?: string;
+  /* The repo to open the switch on (the sidebar's repo header, the old project-settings route): its view, not You's. */
+  repo?: string;
+  /* The current session's repo: the one the switch starts on when no route names one. */
+  current?: string;
 }
 
-const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
+export const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
 const SECTIONS = [
-  { id: "this-repo", label: "This repo" },
-  { id: "you", label: "You" },
+  { id: "your-settings", label: "Your settings" },
+  { id: "permissions", label: "Permissions" },
   { id: "providers", label: "Providers" },
   { id: "engine", label: "Engine & health" },
   { id: "about", label: "About" },
 ];
 
+/* The staff section sits before About, and is in the nav only for staff. */
+const STAFF = { id: "staff", label: "Staff only" };
+
 /* The small in-page nav: one button per section, scrolling to it. */
-function SectionNav() {
+function SectionNav({ staff }: { staff: boolean }) {
+  const shown = staff ? [...SECTIONS.slice(0, -1), STAFF, ...SECTIONS.slice(-1)] : SECTIONS;
   return (
     <nav aria-label="Settings sections" className="flex flex-wrap gap-1">
-      {SECTIONS.map((s) => (
+      {shown.map((s) => (
         <button
           key={s.id}
           type="button"
-          className={`${quiet} rounded-full border border-line px-s2 text-xs`}
+          className={`${quiet} rounded-sm border border-line px-s2 text-xs`}
           onClick={() => document.getElementById(s.id)?.scrollIntoView?.({ behavior: "smooth", block: "start" })}
         >
           {s.label}
@@ -138,13 +172,14 @@ function SectionNav() {
 }
 
 /* A section: its heading and one-line blurb, actions on the right, and a card of rows. */
-function Section({ id, title, blurb, actions, children, testId }: { id: string; title: string; blurb?: ReactNode; actions?: ReactNode; children: ReactNode; testId: string }) {
+export function Section({ id, title, blurb, actions, children, testId, staff = false }: { id: string; title: string; blurb?: ReactNode; actions?: ReactNode; children: ReactNode; testId: string; staff?: boolean }) {
   return (
     <section id={id} aria-labelledby={`${id}-title`} className="flex scroll-mt-s2 flex-col gap-s1" data-testid={testId}>
       <header className="flex flex-wrap items-baseline gap-x-s2 gap-y-0.5">
         <h2 id={`${id}-title`} className={h2}>
           {title}
         </h2>
+        {staff && <span className={`${pill} text-sap`}>STAFF</span>}
         {blurb && <span className="text-xs text-ink-3">{blurb}</span>}
         <span className="flex-1" />
         {actions}
@@ -182,7 +217,7 @@ function Row({ label: text, help, htmlFor, badges, wide = false, children, testI
   );
 }
 
-const Edited = () => <span className={`${pill} bg-branch-soft text-branch`}>edited</span>;
+const Edited = () => <span className={`${pill} text-ink-2`}>edited</span>;
 
 /* On or off, as a switch. */
 function Toggle({ id, label: name, checked, disabled, onChange }: { id: string; label: string; checked: boolean; disabled: boolean; onChange(on: boolean): void }) {
@@ -194,10 +229,10 @@ function Toggle({ id, label: name, checked, disabled, onChange }: { id: string; 
       aria-checked={checked}
       aria-label={name}
       disabled={disabled}
-      className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${checked ? "border-branch bg-branch" : "border-line-strong bg-surface-2"}`}
+      className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${checked ? "border-pass bg-pass" : "border-line-strong bg-surface-2"}`}
       onClick={() => onChange(!checked)}
     >
-      <span aria-hidden className={`absolute top-0.5 size-3.5 rounded-full transition-[left] ${checked ? "left-[18px] bg-on-branch" : "left-0.5 bg-ink-3"}`} />
+      <span aria-hidden className={`absolute top-0.5 size-3.5 rounded-full transition-[left] ${checked ? "left-[18px] bg-canvas" : "left-0.5 bg-ink-3"}`} />
     </button>
   );
 }
@@ -250,6 +285,8 @@ function Field({ s, value, disabled, onChange }: { s: Setting; value: unknown; d
           {s.unit && <span className="text-xs text-ink-3">{s.unit}</span>}
         </>
       );
+    case "text":
+      return <input id={id} type="text" className={`${field} w-56`} aria-label={s.label} value={typeof value === "string" ? value : ""} disabled={disabled} onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)} />;
     case "boolean":
       return <Toggle id={id} label={s.label} checked={value === true} disabled={disabled} onChange={onChange} />;
     case "choice":
@@ -265,16 +302,25 @@ function Field({ s, value, disabled, onChange }: { s: Setting; value: unknown; d
   }
 }
 
-function SettingRow({ s, value, dirty, disabled, onChange }: { s: Setting; value: unknown; dirty: boolean; disabled: boolean; onChange(value: unknown): void }) {
+export function SettingRow({ s, value, dirty, disabled, onChange, override }: { s: Setting; value: unknown; dirty: boolean; disabled: boolean; onChange(value: unknown): void; override?: ReactNode }) {
   return (
     <Row
       label={s.label}
-      help={s.blurb}
+      help={
+        override ? (
+          <>
+            {s.blurb}
+            {override}
+          </>
+        ) : (
+          s.blurb
+        )
+      }
       htmlFor={`setting-${s.key}`}
       wide={s.kind === "list"}
       badges={
         <>
-          {s.pro && <span className={`${pill} bg-fawn-soft text-fawn`}>Pro</span>}
+          {s.pro && <span className={`${pill} text-ink-2`}>Pro</span>}
           {dirty && <Edited />}
         </>
       }
@@ -286,7 +332,7 @@ function SettingRow({ s, value, dirty, disabled, onChange }: { s: Setting; value
 }
 
 /* A disclosure under a card's rows: More / Less. */
-function More({ open, onToggle, label: text = "More", count }: { open: boolean; onToggle(): void; label?: string; count?: number }) {
+export function More({ open, onToggle, label: text = "More", count }: { open: boolean; onToggle(): void; label?: string; count?: number }) {
   return (
     <button type="button" className={`${quiet} self-start text-xs`} aria-expanded={open} onClick={onToggle}>
       {open ? "Less" : text}
@@ -296,7 +342,7 @@ function More({ open, onToggle, label: text = "More", count }: { open: boolean; 
 }
 
 /* The settings from the config the screen doesn't edit, as key: value lines. */
-function RestOfConfig({ lines, testId, note }: { lines: [string, string][]; testId: string; note: string }) {
+export function RestOfConfig({ lines, testId, note }: { lines: [string, string][]; testId: string; note: string }) {
   return (
     <div className="flex flex-col gap-1">
       <dl className="grid grid-cols-[auto_1fr] gap-x-s2 gap-y-0.5 text-xs" data-testid={testId}>
@@ -355,7 +401,7 @@ function PermissionMode({ client }: { client: DaemonClient }) {
       data={{ mode: current }}
     >
       {!unavailable && (
-        <div role="radiogroup" aria-label="Claude permission mode" className="inline-flex rounded-md border border-line-strong bg-surface p-0.5">
+        <div role="radiogroup" aria-label="Claude permission mode" className="inline-flex rounded-md border border-line p-0.5">
           {MODES.map((m) => (
             <button
               key={m.value}
@@ -364,7 +410,7 @@ function PermissionMode({ client }: { client: DaemonClient }) {
               aria-checked={current === m.value}
               disabled={saving || !settings}
               title={m.blurb}
-              className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${current === m.value ? "bg-branch text-on-branch" : "text-ink-2 hover:bg-surface-2"}`}
+              className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${current === m.value ? "bg-pass-soft font-medium text-pass" : "text-ink-2 hover:bg-surface-2"}`}
               onClick={() => void pick(m.value)}
             >
               {m.label}
@@ -417,7 +463,7 @@ function DebugLogging({ client }: { client: DaemonClient }) {
     }
   };
   return (
-    <Section id="debug" title="Debug logging" testId="debug-logging">
+    <div className="contents" data-testid="debug-logging">
       <Row label="Upload debug logs" htmlFor="debug-logging" help="While this is on, brindle's and this app's debug logs upload to brindle." testId="debug-row">
         <Toggle id="debug-logging" label="Debug logging" checked={state.enabled} disabled={saving} onChange={(on) => void turn(on)} />
       </Row>
@@ -426,16 +472,32 @@ function DebugLogging({ client }: { client: DaemonClient }) {
           Could not save: {error}
         </p>
       )}
-    </Section>
+    </div>
   );
 }
 
 /* Staff-only app update (owner decision): a release candidate never updates
-   by itself, so staff update it here. Shown only when GET /debug says this
+   by itself, so staff update it here, and can install the release branch's
+   latest build (ReleaseBuildUpdate). Shown only when GET /debug says this
    account is staff and the shell gives an updater; anyone else sees nothing.
    The shell checks staff again before installing. */
-function AppUpdate({ client, updater }: { client: DaemonClient; updater?: AppUpdater }) {
+function AppUpdate({ client, updater, release, readAbout }: { client: DaemonClient; updater?: AppUpdater; release?: ReleaseBuildUpdater; readAbout?: () => Promise<AboutInfo> }) {
   const [staff, setStaff] = useState(false);
+  /* This build's version, for Return to stable (shown on a release-branch build only). */
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    if (release && readAbout)
+      readAbout().then(
+        (a) => {
+          if (live) setVersion(a.version);
+        },
+        () => {},
+      );
+    return () => {
+      live = false;
+    };
+  }, [release, readAbout]);
   const [state, setState] = useState<"idle" | "checking" | "latest" | "installed" | "restarting">("idle");
   const [installed, setInstalled] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -451,8 +513,8 @@ function AppUpdate({ client, updater }: { client: DaemonClient; updater?: AppUpd
       live = false;
     };
   }, [client]);
-  if (!staff || !updater) return null;
-  const update = async () => {
+  if (!staff || (!updater && !release)) return null;
+  const update = async (updater: AppUpdater) => {
     setState("checking");
     setError(null);
     try {
@@ -464,7 +526,7 @@ function AppUpdate({ client, updater }: { client: DaemonClient; updater?: AppUpd
       setState("idle");
     }
   };
-  const restart = async () => {
+  const restart = async (updater: AppUpdater) => {
     setState("restarting");
     try {
       await updater.restart();
@@ -480,177 +542,171 @@ function AppUpdate({ client, updater }: { client: DaemonClient; updater?: AppUpd
         ? "This is the latest build."
         : "Checks for a newer build of this app (a beta checks the beta channel) and installs it.";
   return (
-    <Section id="app-update" title="App update" testId="app-update">
-      <Row label="Update the app" help={help} testId="app-update-row">
-        {state === "installed" || state === "restarting" ? (
-          <button type="button" className={primary} disabled={state === "restarting"} onClick={() => void restart()}>
-            Restart
-          </button>
-        ) : (
-          <button type="button" className={button} disabled={state === "checking"} onClick={() => void update()}>
-            {state === "checking" ? "Updating…" : "Update"}
-          </button>
-        )}
-      </Row>
+    <div className="contents" data-testid="app-update">
+      {updater && (
+        <Row label="Update the app" help={help} testId="app-update-row">
+          {state === "installed" || state === "restarting" ? (
+            <button type="button" className={button} disabled={state === "restarting"} onClick={() => void restart(updater)}>
+              Restart
+            </button>
+          ) : (
+            <button type="button" className={button} disabled={state === "checking"} onClick={() => void update(updater)}>
+              {state === "checking" ? "Updating…" : "Update"}
+            </button>
+          )}
+        </Row>
+      )}
+      {release && <ReleaseBuildUpdate updater={release} version={version} />}
       {error && (
         <p role="alert" className={`${alert} m-s2`}>
           Could not update: {error}
         </p>
       )}
-    </Section>
+    </div>
   );
 }
 
-/* A rule for brindle's permission policy: allow or deny a kind of request. */
-function PermissionRules({ client }: { client: DaemonClient }) {
-  const [decision, setDecision] = useState<"allow" | "deny">("allow");
-  const [kind, setKind] = useState("bash");
-  const [matchType, setMatchType] = useState("exact");
-  const [match, setMatch] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [said, setSaid] = useState<string | null>(null);
+/* The key a provider runs on: OpenCode's model provider's own (`model`),
+   any other provider's first stored one. */
+const keyOf = (provider: string, keys: KeyInfo[] | null, model?: string): KeyInfo | undefined =>
+  (model ? [model] : (PROVIDER_KEYS[provider] ?? [])).map((n) => keys?.find((k) => k.name === n && k.set)).find(Boolean);
+
+/* OpenCode's model providers that take a key: the one shown first is the first with a key stored. */
+const KEY_MODELS = MODEL_PROVIDERS.filter((m) => m.key);
+const firstModel = (keys: KeyInfo[] | null) => KEY_MODELS.find((m) => keys?.some((k) => k.name === m.key && k.set)) ?? KEY_MODELS[0];
+
+/* Keys no provider reads (a profile's api_key_env): kept, in a row of their own. */
+const PROVIDER_KEY_NAMES = new Set(Object.values(PROVIDER_KEYS).flat());
+const otherKey = (k: KeyInfo) => !k.provider && !PROVIDER_KEY_NAMES.has(k.name);
+
+/* "40 min", "3h", "2d" until `ts` (seconds). */
+function until(ts: number, now = Date.now() / 1000): string {
+  const m = Math.max(0, Math.round((ts - now) / 60));
+  return m < 60 ? `${m} min` : m < 1440 ? `${Math.floor(m / 60)}h` : `${Math.floor(m / 1440)}d`;
+}
+
+/* The agents that stopped on this provider's credentials (the engine's stopped_agents), by name. */
+const stoppedOn = (agents: { name: string }[]) => (agents.length ? ` Stopped ${agents.length === 1 ? "1 agent" : `${agents.length} agents`}: ${agents.map((a) => a.name).join(", ")}.` : "");
+
+/* How a key or a cloud connection is doing, in one line: verified with when,
+   the cloud login's time left, or what's wrong in the fail colour, naming
+   the agents it stopped. `keyLine`: the key's line on a row left to auto. */
+function Health({ connection, keyInfo, keyLine = false }: { connection: ProviderConnection; keyInfo: KeyInfo | undefined; keyLine?: boolean }) {
+  const stopped = connection.stopped_agents ?? [];
+  const line = (tone: "pass" | "sap" | "fail" | "ink-3", text: string) => (
+    <span className={`flex items-center gap-1 ${tone === "fail" ? "text-fail" : ""}`} data-testid="provider-health" data-tone={tone} data-stopped={stopped.length}>
+      <span className={`size-2 shrink-0 rounded-full ${tone === "pass" ? "bg-pass" : tone === "sap" ? "bg-sap" : tone === "fail" ? "bg-fail" : "bg-ink-3"}`} aria-hidden />
+      {text}
+    </span>
+  );
+  if (connection.method === "api_key" || keyLine) {
+    if (!keyInfo) return line("sap", "No key stored: Replace adds one.");
+    const billing = KEYS[keyInfo.name]?.billing.replace(/^B/, "b");
+    if (keyInfo.status === "rejected") return line("fail", `Rejected ${ago(keyInfo.checked_at)}: ${KEYS[keyInfo.name]?.maker ?? "the provider"} refused this key.${stoppedOn(stopped)}`);
+    if (keyInfo.status === "verified") return line("pass", `Verified ${ago(keyInfo.checked_at)}${billing ? ` · ${billing}` : ""}`);
+    return line("ink-3", "Saved, not checked yet");
+  }
+  const login = connection.login;
+  if (login?.valid) {
+    if (login.expires_at == null) return line("pass", "Cloud login valid");
+    return line(login.expires_at - Date.now() / 1000 < 3600 ? "sap" : "pass", `Cloud login expires in ${until(login.expires_at)}`);
+  }
+  if (login?.expired) return line("fail", `Cloud login expired.${stoppedOn(stopped)}`);
+  return line("ink-3", `Not signed in to ${CLOUD_NAME[connection.cloud ?? ""] ?? "the cloud"} yet`);
+}
+
+/* Change method: the three choices (Your cloud only where the engine has a
+   route), and the chosen one's setup, in the row. Sign in is saved as soon
+   as it is picked, over auto too, so a stored or exported key stops billing. */
+function ChangeMethod({ client, row, connection, keys, repo, model: rowModel, onModel, lock, onChanged, onClose }: {
+  client: DaemonClient;
+  row: ProviderInstalled;
+  connection: ProviderConnection;
+  keys: KeyInfo[] | null;
+  repo: string | null;
+  /* OpenCode: the row's model provider, where this starts, and where a key saved here moves it. */
+  model: (typeof MODEL_PROVIDERS)[number];
+  onModel(model: (typeof MODEL_PROVIDERS)[number]): void;
+  /* The row's write lock: a Sign in, a key or a cloud route saved here holds it until it settles. */
+  lock: Lock;
+  onChanged(): void;
+  onClose(): void;
+}) {
+  const f = factsOf(row);
+  const saved = connection.method;
+  const [choice, setChoice] = useState<Method | null>(saved === "api_key" || saved === "cloud" || saved === "sign_in" ? saved : null);
   const [error, setError] = useState<string | null>(null);
-  const [confirmReset, setConfirmReset] = useState(false);
-
-  const run = async (body: PermissionChange, what: string) => {
-    setBusy(true);
-    setError(null);
-    setSaid(null);
-    try {
-      const got = await client.changePermissions(body);
-      setSaid("reset" in got ? "Your rules and learned rules are gone; the defaults stay." : `Added: ${got.describe} (${got.rule})`);
-      if (what === "add") setMatch("");
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setBusy(false);
-      setConfirmReset(false);
-    }
+  const opencode = row.provider === "opencode";
+  const [model, setModel] = useState(rowModel);
+  const cloud = (connection.clouds ?? []).length > 0;
+  const busy = lock.busy;
+  const done = () => {
+    onChanged();
+    onClose();
   };
-
+  const pick = async (m: Method) => {
+    if (busy) return;
+    setChoice(m);
+    setError(null);
+    if (m !== "sign_in" || saved === "sign_in") return;
+    const got = await lock.run(() => client.setProviderConnection(row.provider, { method: "sign_in", ...(repo ? { repo } : {}) }).then(() => null, (e: unknown) => message(e)));
+    if (got) setError(got);
+    else done();
+  };
   return (
-    <Row label="Permission rules" help="With the permission policy on, brindle answers workers' requests by these rules instead of asking you. Rules learned from your approvals count too." wide testId="permissions">
-      <form
-        className="flex w-full flex-wrap items-center gap-s1"
-        aria-label="Add a rule"
-        onSubmit={(e) => {
-          e.preventDefault();
-          if (match.trim()) void run({ op: decision, kind, match: match.trim(), match_type: matchType }, "add");
-        }}
-      >
-        <select className={field} aria-label="Decision" value={decision} disabled={busy} onChange={(e) => setDecision(e.target.value as "allow" | "deny")}>
-          <option value="allow">Allow</option>
-          <option value="deny">Deny</option>
-        </select>
-        <select className={field} aria-label="Kind" value={kind} disabled={busy} onChange={(e) => setKind(e.target.value)}>
-          {PERMISSION_KINDS.map((k) => (
-            <option key={k} value={k}>
-              {k}
-            </option>
-          ))}
-        </select>
-        <select className={field} aria-label="Match type" value={matchType} disabled={busy} onChange={(e) => setMatchType(e.target.value)}>
-          {MATCH_TYPES.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-        <input className={`${field} min-w-48 flex-1 font-mono`} aria-label="Match" placeholder={kind === "bash" ? "npm test" : "src/**"} value={match} disabled={busy} onChange={(e) => setMatch(e.target.value)} />
-        <button type="submit" className={button} disabled={busy || !match.trim()}>
-          Add rule
-        </button>
-        <span className="flex-1" />
-        {confirmReset ? (
-          <>
-            <span className="text-sm text-sap">Forget every rule you added and every learned one?</span>
-            <button type="button" className={danger} disabled={busy} onClick={() => void run({ op: "reset" }, "reset")}>
-              Reset rules
-            </button>
-            <button type="button" className={quiet} disabled={busy} onClick={() => setConfirmReset(false)}>
-              Keep them
-            </button>
-          </>
+    <div className="flex w-full flex-col gap-s2 pt-s1" data-testid={`change-method-${row.provider}`}>
+      {opencode && (
+        <ModelProviderPicker
+          value={model.id}
+          disabled={busy}
+          onChange={(id) => {
+            const next = MODEL_PROVIDERS.find((x) => x.id === id) ?? MODEL_PROVIDERS[0];
+            setModel(next);
+            if (next.cloud && cloud) setChoice("cloud");
+          }}
+        />
+      )}
+      <MethodChoice provider={row.provider} name={f.name} value={choice} cloud={cloud} disabled={busy} onChange={(m) => void pick(m)} />
+      {choice === "api_key" &&
+        (opencode && !model.key ? (
+          <p className="text-xs text-ink-3">{model.name} connects through your cloud, not a key.</p>
         ) : (
-          <button type="button" className={quiet} disabled={busy} onClick={() => setConfirmReset(true)}>
-            Reset your rules…
-          </button>
-        )}
-      </form>
-      {said && (
-        <p role="status" className={`${notice} w-full`}>
-          {said}
-        </p>
-      )}
+          <ApiKeyPaste
+            key={model.id}
+            client={client}
+            provider={row.provider}
+            expect={(opencode ? model.key : undefined) ?? PROVIDER_KEYS[row.provider]?.[0] ?? "ANTHROPIC_API_KEY"}
+            keys={keys}
+            repo={repo}
+            lock={lock}
+            onSaved={() => {
+              // The row's key controls follow the model provider whose key was just saved.
+              if (opencode && model.key) onModel(model);
+              done();
+            }}
+            onCancel={onClose}
+          />
+        ))}
+      {choice === "cloud" && cloud && <CloudSetup client={client} provider={row.provider} name={f.name} route={opencode ? model.cloud : undefined} repo={repo} lock={lock} onSignedIn={done} />}
       {error && (
-        <p role="alert" className={`${alert} w-full`}>
-          {error}
+        <p className={alert} role="alert">
+          Couldn't change how {f.name} connects: {error}
         </p>
       )}
-    </Row>
-  );
-}
-
-/* One key's value, typed into a password field and sent to PUT /keys/{name}
-   (write-only: the engine stores it as `brindle keys set` does and answers
-   the last four). The value lives in this field until Save and nowhere
-   after: not in the app's state, not in its logs. */
-function KeyField({ client, name, repo, onStored, onCancel }: { client: DaemonClient; name: string; repo: string | null; onStored(): void; onCancel(): void }) {
-  const [value, setValue] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const save = async () => {
-    if (!value.trim() || busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await client.putKey(name, value, repo ?? undefined);
-      setValue("");
-      onStored();
-    } catch (e) {
-      setError(message(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <form
-      className="flex w-full flex-wrap items-center gap-s1"
-      aria-label={`Value for ${name}`}
-      onSubmit={(e) => {
-        e.preventDefault();
-        void save();
-      }}
-    >
-      <input
-        className={`${field} min-w-64 flex-1 font-mono`}
-        type="password"
-        autoComplete="off"
-        aria-label={`${name} value`}
-        placeholder={`Paste the ${name} value`}
-        value={value}
-        disabled={busy}
-        autoFocus
-        onChange={(e) => setValue(e.target.value)}
-      />
-      <button type="submit" className={primary} disabled={busy || !value.trim()}>
-        {busy ? "Saving…" : "Save"}
-      </button>
-      <button type="button" className={quiet} disabled={busy} onClick={onCancel}>
-        Cancel
-      </button>
-      {error && (
-        <p role="alert" className={`${alert} w-full`}>
-          Could not store {name}: {error}
-        </p>
-      )}
-    </form>
+    </div>
   );
 }
 
 type RowState = "signed_in" | "signed_out" | "unknown" | "not_installed" | "off";
-const DOT: Record<RowState, string> = { signed_in: "bg-pass", signed_out: "bg-fawn", unknown: "bg-ink-3", not_installed: "bg-ink-3", off: "bg-ink-3" };
-const STATE_TEXT: Record<RowState, string> = { signed_in: "Signed in", signed_out: "Not signed in", unknown: "Sign-in unknown", not_installed: "Not installed", off: "Removed from brindle" };
+const DOT: Record<RowState, string> = { signed_in: "bg-pass", signed_out: "bg-sap", unknown: "bg-ink-3", not_installed: "bg-ink-3", off: "bg-ink-3" };
+const STATE_TEXT: Record<RowState, string> = { signed_in: "Signed in", signed_out: "Not signed in", unknown: "Sign-in not checked", not_installed: "Not installed", off: "Removed from brindle" };
+const SIGN_IN_HELP: Record<RowState, string> = {
+  signed_in: "Your account is connected.",
+  signed_out: "Sign in with your account to use this provider. Continue in your browser.",
+  unknown: "We couldn't confirm your sign-in. Sign in to connect your account.",
+  not_installed: "Install this provider, then sign in with your account.",
+  off: "Connect to use this provider in brindle again.",
+};
 
 function rowState(row: ProviderInstalled): RowState {
   if (connected(row)) return row.signed_in === true ? "signed_in" : row.signed_in === false ? "signed_out" : "unknown";
@@ -665,7 +721,15 @@ function rowState(row: ProviderInstalled): RowState {
    own browser login (the browser-first card); Remove from brindle stops
    brindle using it and leaves it installed. No update controls: each CLI
    keeps itself up to date. */
-function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn, onDismiss, onRemove, onLookAgain }: {
+function ProviderRowView({ client, repo, connection, keys, onChanged, row, install, detectError, check, onInstall, onTurnOn, onDismiss, onRemove, onSignOut, onLookAgain }: {
+  client: DaemonClient;
+  repo: string | null;
+  /* How it connects (GET /providers/{p}/connection: its readiness and the agents stopped on it); null until read, or from an engine without the route. */
+  connection: ProviderConnection | null;
+  /* GET /config's keys. */
+  keys: KeyInfo[] | null;
+  /* The connection or a key changed here: read both again. */
+  onChanged(): void;
   row: ProviderInstalled;
   install: Install | undefined;
   /* Why the rows couldn't be read again (after a finished install, its row is stale until they are). */
@@ -675,16 +739,38 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
   onTurnOn(path: string): Promise<void>;
   onDismiss(): void;
   onRemove(): Promise<void>;
+  onSignOut(): Promise<void>;
   onLookAgain(): void;
 }) {
   const f = factsOf(row);
   const state = rowState(row);
   const on = connected(row);
   const [signing, setSigning] = useState(false);
-  const [busy, setBusy] = useState<"removing" | "connecting" | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [busy, setBusy] = useState<"removing" | "connecting" | "signing-out" | "testing" | "removing-key" | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  // One editor at a time: Change method or Replace, never both.
+  const [editor, setEditor] = useState<"change" | "replace" | null>(null);
+  const changing = editor === "change";
+  const replacing = editor === "replace";
+  const setReplacing = (on: boolean) => setEditor(on ? "replace" : null);
+  /* The row's connection writes (a key saved, a method chosen, a key removed): while one is in
+     flight nothing else in the row can write, open, close or switch, whichever form started it. */
+  const lock = useLock();
+  const locked = lock.busy;
   const installing = install?.status === "starting" || install?.status === "running";
-  const act = async (kind: "removing" | "connecting", run: () => Promise<void>, what: string) => {
+  // A key or a cloud, as saved; its own sign-in (sign_in); auto, a key when one is set, else
+  // its sign-in; or the org's say.
+  const method = connection?.method;
+  const viaKey = method === "api_key";
+  const viaCloud = method === "cloud" && !!connection?.cloud;
+  const auto = !!connection && method === "auto";
+  const opencode = row.provider === "opencode";
+  const [model, setModel] = useState(firstModel(keys));
+  const keyInfo = keyOf(row.provider, keys, opencode ? model.key : undefined);
+  // A stored key stays manageable whether it was chosen here, imported, or set before (auto).
+  const keyed = viaKey || (auto && (!!keyInfo || (opencode && KEY_MODELS.some((m) => keyOf(row.provider, keys, m.key)))));
+  const act = async (kind: "removing" | "connecting" | "signing-out" | "testing" | "removing-key", run: () => Promise<void>, what: string) => {
     setBusy(kind);
     setActionError(null);
     try {
@@ -696,21 +782,67 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
     }
   };
   const remove = () => act("removing", onRemove, "remove");
+  // Brindle's own copy only; offered where the engine can sign it out.
+  const canSignOut = row.provider === "claude" || row.provider === "codex";
   // An off provider still found comes back as it is; one missing runs the maker's installer.
   const connectNow = () => (turnedOff(row) && row.path ? void act("connecting", () => onTurnOn(row.path!), "connect") : onInstall());
+  const installAction = turnedOff(row) && row.path ? "Connect" : "Install";
+  const keyName = (opencode ? model.key : undefined) ?? keyInfo?.name ?? PROVIDER_KEYS[row.provider]?.[0];
+  const testKey = () => act("testing", async () => void (await client.testKey(keyInfo!.name), onChanged()), "test the key of");
+  // The key goes; chosen as the method, the method goes too and the provider is back on auto.
+  const removeKey = () =>
+    act(
+      "removing-key",
+      async () => {
+        await lock.run(async () => {
+          if (keyInfo) await client.deleteKey(keyInfo.name);
+          if (viaKey) await client.setProviderConnection(row.provider, { method: "auto", ...(repo ? { repo } : {}) });
+        });
+        onChanged();
+      },
+      "remove the key of",
+    );
+  const ready = connection?.ready;
   const help = (
     <>
-      {on ? (
+      {(viaKey || viaCloud) && connection ? (
+        <Health connection={connection} keyInfo={keyInfo} />
+      ) : method === "org" && connection?.managed ? (
+        <span className="block">{plain(connection.managed)}</span>
+      ) : auto ? (
         <>
-          Found at <span className={mono}>{row.path}</span>
-          {row.version && <> · {row.version}</>}. {settingsNote(row)}
-        </>
-      ) : turnedOff(row) && row.path ? (
-        <>
-          Still installed at <span className={mono}>{row.path}</span>; brindle doesn't use it. Connect brings it back.
+          <span className="block" data-testid="provider-auto">
+            Uses your key if set, else {f.name}'s own sign-in.
+          </span>
+          {keyed && <Health connection={connection!} keyInfo={keyInfo} keyLine />}
         </>
       ) : (
-        <>Connect runs {f.maker}'s official installer{f.installer.label && <> ({f.installer.label})</>}, as-is.</>
+        <span className="block">{SIGN_IN_HELP[state]}</span>
+      )}
+      {on && connection && ready && !ready.ok && !(viaCloud && ready.action === "renew") && <ReadyNote client={client} connection={connection} onSetKey={() => setReplacing(true)} onChanged={onChanged} />}
+      <button type="button" className="mt-1 underline underline-offset-2 hover:text-ink" aria-expanded={expanded} aria-controls={`provider-details-${row.provider}`} onClick={() => setExpanded((value) => !value)}>
+        Connection details
+      </button>
+      {expanded && (
+        <span id={`provider-details-${row.provider}`} className="mt-s1 block break-words">
+          {on ? (
+            <>
+              Found at <span className={mono}>{row.path}</span>
+              {row.version && <> · {row.version}</>}. {settingsNote(row)}
+            </>
+          ) : turnedOff(row) && row.path ? (
+            <>
+              Still installed at <span className={mono}>{row.path}</span>; brindle doesn't use it. Connect brings it back.
+            </>
+          ) : (
+            <>Connect runs {f.maker}'s official installer{f.installer.label && <> ({f.installer.label})</>}, as-is.</>
+          )}
+          {on && !signing && (
+            <button type="button" className={`${quiet} block`} aria-label={`Remove ${f.name} from brindle`} disabled={busy !== null} onClick={() => void remove()}>
+              {busy === "removing" ? "Removing…" : "Remove from brindle"}
+            </button>
+          )}
+        </span>
       )}
       {actionError && (
         <span className="block text-sap" role="alert">
@@ -720,23 +852,102 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
     </>
   );
   return (
-    <Row label={f.name} help={help} wide={signing || !!install} testId={`provider-${row.provider}`} data={{ provider: row.provider, state, install: install?.status }}>
-      {!signing && (
-        <span className="flex items-center gap-1 text-xs text-ink-2" data-testid="provider-state">
-          <span className={`size-2 rounded-full ${DOT[state]}`} aria-hidden />
-          {STATE_TEXT[state]}
-        </span>
-      )}
+    <Row
+      label={f.name}
+      help={help}
+      wide={signing || !!install || changing || replacing}
+      testId={`provider-${row.provider}`}
+      data={{ provider: row.provider, state, install: install?.status, method: method ?? "auto" }}
+      badges={
+        viaKey ? (
+          <span className="inline-flex items-center gap-1 text-xs font-normal text-ink-2" data-testid="provider-method">
+            API key {keyInfo ? <span className={mono}>••••{keyInfo.last4}</span> : "· none stored"}
+          </span>
+        ) : viaCloud ? (
+          <span className="inline-flex flex-wrap items-center gap-1 text-xs font-normal text-ink-2" data-testid="provider-method">
+            {CLOUD_NAME[connection!.cloud!] ?? connection!.cloud}
+            {Object.values(connection!.settings ?? {}).filter(Boolean).length > 0 && <span className={mono}>· {Object.values(connection!.settings ?? {}).filter(Boolean).join(" · ")}</span>}
+          </span>
+        ) : (
+          <span className={`inline-flex items-center gap-1 text-xs font-normal ${state === "signed_in" ? "text-pass" : "text-ink-2"}`} data-testid="provider-state">
+            <span className={`size-2 rounded-full ${DOT[state]}`} aria-hidden />
+            {STATE_TEXT[state]}
+            {auto && keyInfo && <span className={`${mono} text-ink-2`}>· key ••••{keyInfo.last4}</span>}
+          </span>
+        )
+      }
+    >
       {!on && !install && (
-        <button type="button" className={`${primary} px-s1 py-0.5 text-xs`} aria-label={`Connect ${f.name}`} disabled={busy !== null} onClick={connectNow}>
-          {busy === "connecting" ? "Connecting…" : "Connect"}
+        <button type="button" className={button} aria-label={`${installAction} ${f.name}`} disabled={busy !== null} onClick={connectNow}>
+          {busy === "connecting" ? "Connecting…" : installAction}
         </button>
       )}
-      {on && (row.signed_in !== true || signing) && <ProviderSignIn provider={row.provider} check={check} small onActive={setSigning} details={false} />}
-      {on && !signing && (
-        <button type="button" className={quiet} aria-label={`Remove ${f.name} from brindle`} disabled={busy !== null} onClick={() => void remove()}>
-          {busy === "removing" ? "Removing…" : "Remove from brindle"}
+      {on && keyed && opencode && !changing && (
+        <label className="flex items-center gap-s1 text-xs text-ink-2">
+          Model provider
+          <select
+            className={field}
+            value={model.id}
+            onChange={(e) => {
+              setModel(KEY_MODELS.find((m) => m.id === e.target.value) ?? KEY_MODELS[0]);
+              setReplacing(false);
+            }}
+          >
+            {KEY_MODELS.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {on && keyed && !replacing && (
+        <>
+          {keyInfo && (
+            <button type="button" className={button} disabled={busy !== null || locked} onClick={() => void testKey()}>
+              {busy === "testing" ? "Testing…" : "Test"}
+            </button>
+          )}
+          <button type="button" className={button} disabled={busy !== null || locked} onClick={() => setReplacing(true)}>
+            {keyInfo ? "Replace" : "Add a key"}
+          </button>
+          {(keyInfo || viaKey) && (
+            <button type="button" className={button} disabled={busy !== null || locked} onClick={() => void removeKey()}>
+              {busy === "removing-key" ? "Removing…" : "Remove"}
+            </button>
+          )}
+        </>
+      )}
+      {on && replacing && keyName && (
+        <div className="w-full">
+          <ApiKeyPaste key={keyName} client={client} provider={row.provider} expect={keyName} keys={keys} repo={repo} lock={lock} onSaved={() => (setReplacing(false), onChanged())} onCancel={() => setReplacing(false)} />
+        </div>
+      )}
+      {on && viaCloud && <RenewLogin client={client} provider={row.provider} route={connection!.cloud!} onSignedIn={onChanged} />}
+      {on && !viaKey && !viaCloud && canSignOut && state === "signed_in" && !signing && (
+        <button type="button" className={quiet} aria-label={`Sign out of ${f.name}`} disabled={busy !== null || locked} onClick={() => void act("signing-out", onSignOut, "sign out of")}>
+          {busy === "signing-out" ? "Signing out…" : "Sign out"}
         </button>
+      )}
+      {on && !viaKey && !viaCloud && (row.signed_in !== true || signing) && <ProviderSignIn provider={row.provider} check={check} onActive={setSigning} details={false} />}
+      {on && connection && method !== "org" && !signing && (
+        <button type="button" className={quiet} aria-expanded={changing} disabled={locked} onClick={() => setEditor(changing ? null : "change")}>
+          Change method {changing ? "▴" : "▾"}
+        </button>
+      )}
+      {changing && connection && (
+        <ChangeMethod
+          client={client}
+          row={row}
+          connection={connection}
+          keys={keys}
+          repo={repo}
+          model={model}
+          onModel={(m) => setModel(KEY_MODELS.find((k) => k.id === m.id) ?? model)}
+          lock={lock}
+          onChanged={onChanged}
+          onClose={() => setEditor(null)}
+        />
       )}
       {install && (
         <div className="w-full">
@@ -779,7 +990,7 @@ function ProviderRowView({ row, install, detectError, check, onInstall, onTurnOn
   );
 }
 
-const TONE: Record<string, string> = { ok: "text-pass", warn: "text-fawn", fail: "text-sap" };
+const TONE: Record<string, string> = { ok: "text-pass", warn: "text-sap", fail: "text-fail" };
 
 /* A doctor line as a health row: its mark, name and words, and a fix where the app has one. */
 function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fix: Fix): void }) {
@@ -803,11 +1014,75 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
   );
 }
 
-export function SettingsScreen({ client, installCli, appUpdater, readAbout, section, ask }: SettingsScreenProps) {
+/* The switch at the top: You, or the repo (a menu to pick another when there are several). */
+function ScopeSwitch({ view, onView, repo, repos, onRepo, disabled }: { view: "you" | "repo"; onView(v: "you" | "repo"): void; repo: string | null; repos: ReturnType<typeof useRepo>["repos"]; onRepo(repo: string): void; disabled: boolean }) {
+  const name = repos?.find((r) => r.repo_root === repo)?.name ?? repo?.split("/").filter(Boolean).pop();
+  const choices: { id: "you" | "repo"; label: string }[] = [{ id: "you", label: "You" }, ...(repo ? [{ id: "repo" as const, label: name ?? repo }] : [])];
+  const [open, setOpen] = useState(false);
+  const several = !!repos && repos.length > 1;
+  return (
+    <div className="relative flex flex-wrap items-center gap-s1">
+      <div role="radiogroup" aria-label="Settings for" className="inline-flex rounded-md border border-line p-0.5">
+        {choices.map((c) => (
+          <button
+            key={c.id}
+            type="button"
+            role="radio"
+            aria-checked={view === c.id}
+            aria-haspopup={c.id === "repo" && several ? "menu" : undefined}
+            aria-expanded={c.id === "repo" && several ? open : undefined}
+            disabled={disabled}
+            className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${view === c.id ? "bg-pass-soft font-medium text-pass" : "text-ink-2 hover:bg-surface-2"}`}
+            // The repo segment, already chosen, opens the menu of repos.
+            onClick={() => (c.id === "repo" && several && view === "repo" ? setOpen((o) => !o) : (setOpen(false), onView(c.id)))}
+          >
+            {c.label}
+            {c.id === "repo" && several ? " ▾" : ""}
+          </button>
+        ))}
+      </div>
+      {open && several && (
+        <div role="menu" aria-label="Repo" className={`${card} absolute left-0 top-full z-10 mt-1 flex min-w-40 flex-col p-0.5`}>
+          {repos!.map((r) => (
+            <button
+              key={r.repo_root}
+              type="button"
+              role="menuitem"
+              className={`rounded-sm px-s2 py-0.5 text-left text-sm hover:bg-surface-2 ${r.repo_root === repo ? "font-medium" : ""}`}
+              onClick={() => {
+                setOpen(false);
+                onRepo(r.repo_root);
+              }}
+            >
+              {r.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, section, ask, rule, repo: routed, current }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
+  const connection = useAppState((state) => state.connection);
+  const updateStatus = useAppState((state) => state.appUpdate);
   const pick = useRepo();
-  const { repo, repos } = pick;
+  const { repos, setRepo } = pick;
+  /* The repo a route names is the one on screen from the first paint, before the repos are known. */
+  const repo = pick.repo ?? routed ?? current ?? null;
+  const [view, setView] = useState<"you" | "repo">(routed ? "repo" : "you");
+  /* Start on the repo the route names, else the current session's; only a route opens its view. */
+  useEffect(() => {
+    const first = routed ?? current;
+    if (first) setRepo(first);
+    if (routed) setView("repo");
+  }, [routed, current, setRepo]);
+  /* A section asked for (the sidebar's problem line, the Inbox) lives on You's side. */
+  useEffect(() => {
+    if (section) setView("you");
+  }, [section, ask]);
   const [config, setConfig] = useState<Config | null>(null);
   const [checks, setChecks] = useState<DoctorCheck[] | null>(null);
   const [doctorError, setDoctorError] = useState<string | null>(null);
@@ -815,6 +1090,20 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
   const [loadError, setLoadError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
   const seq = useRef(0);
+  /* Staff alone get the Staff only section and its nav button (GET /debug's `staff`). */
+  const [staff, setStaff] = useState(false);
+  useEffect(() => {
+    let live = true;
+    client.debug().then(
+      (s) => {
+        if (live) setStaff(s.staff);
+      },
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+  }, [client]);
 
   const loadConfig = useCallback(() => {
     const mine = ++seq.current;
@@ -864,65 +1153,48 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
     void loadMeta();
   }, [loadMeta]);
 
-  /* The repo's settings as a draft, saved where the person says. */
-  const loaded = useMemo(() => draftOf(config?.repo ?? {}), [config]);
-  const [base, setBase] = useState<Draft>(loaded);
-  const [draft, setDraft] = useState<Draft>(loaded);
-  // A config read anew (a reload, another repo) replaces the draft in the same render.
-  if (base !== loaded) {
-    setBase(loaded);
-    setDraft(loaded);
+  /* The person's own settings (~/.brindle/config.json) as a second draft, for every project. */
+  const userLoaded = useMemo(() => draftOf(config?.user ?? {}), [config]);
+  const [userBase, setUserBase] = useState<Draft>(userLoaded);
+  const [userDraft, setUserDraft] = useState<Draft>(userLoaded);
+  if (config && userBase !== userLoaded) {
+    setUserBase(userLoaded);
+    setUserDraft(carryEdits(userBase, userDraft, userLoaded));
   }
-  const [scope, setScope] = useState<Scope>("repo");
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState<string | null>(null);
-  const [saveError, setSaveError] = useState<string | null>(null);
+  const [userSaved, setUserSaved] = useState<string | null>(null);
+  const [userError, setUserError] = useState<string | null>(null);
   const [more, setMore] = useState(false);
-  const [rest, setRest] = useState(false);
   const [yours, setYours] = useState(false);
   const [optional, setOptional] = useState(false);
-  useEffect(() => {
-    setSaved(null);
-    setSaveError(null);
-  }, [repo]);
-  const dirty = changed(loaded, draft);
-  const missing = invalid(draft);
-  // A setting the person's own file can't carry (checks) pins the save to the repo.
-  const repoOnly = repoOnlyChanged(loaded, draft);
-  const pinned = repoOnly.length > 0;
-  const target: Scope = pinned ? "repo" : scope;
-  const edit = (key: string, v: unknown) => {
-    setSaved(null);
-    setDraft((d) => ({ ...d, [key]: v }));
+  /* Engine & health's Details: null follows the health (open when bad), a click decides. */
+  const [details, setDetails] = useState<boolean | null>(null);
+  const userDirty = changed(userLoaded, userDraft);
+  const userMissing = invalid(userDraft);
+  const editUser = (key: string, v: unknown) => {
+    setUserSaved(null);
+    setUserDraft((d) => ({ ...d, [key]: v }));
   };
-  const save = async () => {
-    if (!repo || dirty.length === 0 || saving || missing.length > 0) return;
+  /* Your settings: saved to the person's own file, so they apply to every project. */
+  const saveUser = async () => {
+    if (userDirty.length === 0 || saving || userMissing.length > 0) return;
     setSaving(true);
-    setSaveError(null);
+    setUserError(null);
     try {
-      const ack = await client.patchConfig({ scope: target, repo: target === "repo" ? repo : undefined, values: values(loaded, draft) });
-      setSaved(`Saved ${ack.updated.join(", ")} to ${ack.path}`);
+      const ack = await client.patchConfig({ scope: "user", values: values(userLoaded, userDraft) });
+      setUserSaved(`Saved ${ack.updated.join(", ")} for every project to ${ack.path}`);
       await loadConfig();
     } catch (e) {
-      setSaveError(message(e));
+      setUserError(message(e));
     } finally {
       setSaving(false);
     }
   };
 
-  /* A key being set (its name), by name from the list or typed; stored, the config is read again. */
-  const [editing, setEditing] = useState<string | null>(null);
-  const [stored, setStored] = useState<string | null>(null);
-  const [keyName, setKeyName] = useState("");
   const [cliState, setCliState] = useState<"idle" | "installing" | "installed" | "failed">("idle");
   const [cliError, setCliError] = useState<string | null>(null);
   /* The link the shell made, to say where: the row's own line, never a popup. */
   const [cliLink, setCliLink] = useState<string | null>(null);
-  const keyStored = (name: string) => {
-    setEditing(null);
-    setStored(name);
-    void loadConfig();
-  };
   /* The engine's update: its job followed on the bus; done, the engine and the doctor are read again. */
   const upgrade = useEngineUpgrade(client, store);
   const upgraded = upgrade.state.kind === "done";
@@ -944,11 +1216,55 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
   useEffect(() => {
     void reloadProviders();
   }, [reloadProviders]);
+  /* How each provider connects (GET /providers/{p}/connection), read with the rows and after a change. */
+  const [connections, setConnections] = useState<Record<string, ProviderConnection>>({});
+  /* Per provider, the newest read asked for: an older one answering late is dropped. */
+  const asked = useRef<Record<string, number>>({});
+  const loadConnection = useCallback(
+    (provider: string) => {
+      const mine = (asked.current[provider] = (asked.current[provider] ?? 0) + 1);
+      return client.providerConnection(provider, repo ?? undefined).then(
+        (c) => asked.current[provider] === mine && setConnections((all) => ({ ...all, [provider]: c })),
+        () => undefined,
+      );
+    },
+    [client, repo],
+  );
+  // Read again with every look at the providers: a sign-in, sign-out, install or turn-on changes whether each is ready.
+  const rows = providers.rows;
+  useEffect(() => {
+    for (const r of rows ?? []) void loadConnection(r.provider);
+  }, [rows, loadConnection]);
+  /* A key no provider reads being set or replaced (its name). */
+  const [otherEditing, setOtherEditing] = useState<string | null>(null);
+  const [otherError, setOtherError] = useState<string | null>(null);
+  const removeOther = async (name: string) => {
+    setOtherError(null);
+    try {
+      await client.deleteKey(name);
+      await loadConfig();
+    } catch (e) {
+      setOtherError(`Couldn't remove ${name}: ${message(e)}`);
+    }
+  };
+  /* A key the shell has and brindle doesn't, imported on request (POST /keys/{name}/import). */
+  const [importError, setImportError] = useState<string | null>(null);
+  const importShellKey = async (name: string) => {
+    setImportError(null);
+    try {
+      await client.importKey(name, repo ?? undefined);
+      await loadConfig();
+      // The key may make its provider ready to launch.
+      for (const r of rows ?? []) void loadConnection(r.provider);
+    } catch (e) {
+      setImportError(`Couldn't import ${name}: ${message(e)}`);
+    }
+  };
   // Opened from the sidebar's problem line: scrolled to Providers, again once the sections above it have loaded.
   const placed = config !== null;
   useEffect(() => {
-    if (section === "providers") document.getElementById("providers")?.scrollIntoView?.({ behavior: "smooth", block: "start" });
-  }, [section, ask, placed]);
+    if (section) document.getElementById(section)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [section, ask, placed, view]);
   const install = async () => {
     if (!installCli) return;
     setCliState("installing");
@@ -963,28 +1279,42 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
     }
   };
 
-  const validKey = /^[A-Z][A-Z0-9_]{2,}$/.test(keyName.trim());
   const health = checks?.filter((c) => !isOptional(c) && !inSignInRows(c)) ?? [];
   const optionals = checks?.filter((c) => isOptional(c) && !inSignInRows(c)) ?? [];
   // What needs attention here: the sign-in rows show their own state in their own section.
   const wrong = health.filter((c) => c.level !== "ok" || c.name === "brindle update").length;
   const upgradeNotice = checks ? updateNotice(checks) : undefined;
-  const common = SETTINGS.filter((s) => s.common);
-  const others = SETTINGS.filter((s) => !s.common);
+  // Details: closed unless health is bad (a failed check or a doctor that didn't answer), until the user chooses.
+  const healthBad = !!doctorError || health.some((c) => c.level === "fail");
+  const detailsOpen = details ?? healthBad;
+  const common = YOURS.filter((s) => s.common);
+  const others = YOURS.filter((s) => !s.common);
   const shown = SETTINGS.map((s) => s.key);
-  const restLines: [string, string][] = Object.entries(config?.repo ?? {})
-    .filter(([k]) => !shown.includes(k))
-    .map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)]);
-  const yourLines = userLines(config?.user ?? {});
+  // What the person set for every repo that has no row here.
+  const yourLines = userLines(config?.user ?? {}).filter(([k]) => !shown.includes(k));
+  const yourRow = (s: Setting) => <SettingRow key={s.key} s={s} value={userDraft[s.key]} dirty={userDirty.includes(s.key)} disabled={saving} onChange={(v) => editUser(s.key, v)} />;
+  const repoView = view === "repo" && !!repo;
 
   return (
-    // Room at the foot for the save bar, which sticks there while there are changes.
-    <section className={`flex min-h-0 flex-col gap-s3 ${dirty.length > 0 ? "pb-s12" : ""}`} aria-label="Settings">
-      <PageHeader title="Settings" lede="This repo's settings, your own, the providers and keys agents use, and whether everything brindle needs is here.">
-        <RepoSelect {...pick} disabled={saving} />
+    <section className="flex min-h-0 flex-col gap-s3" aria-label="Settings">
+      <PageHeader title="Settings" lede={repoView ? "This repo's settings: what the team sets, what is just for you, and what follows your own." : "Your settings apply to every project; a project can override them. Below: permissions, sign-ins and engine health."}>
+        <ScopeSwitch view={repoView ? "repo" : "you"} onView={setView} repo={repo} repos={repos} onRepo={setRepo} disabled={saving} />
       </PageHeader>
-      <SectionNav />
-      {repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
+      {repoView && (
+        <section className="flex min-h-0 flex-col gap-s3" aria-label="Project settings" data-testid="project-settings">
+          <RepoSettings key={repo} client={client} repo={repo} />
+        </section>
+      )}
+      {!repoView && <SectionNav staff={staff} />}
+      {!repoView && (
+      <div className="border-t border-line">
+        <Row label="Appearance">
+          <ThemeToggle choices />
+        </Row>
+      </div>
+      )}
+      {!repoView && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
+      {!repoView && <>
       {loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
           <span>Could not load settings: {loadError}</span>
@@ -993,39 +1323,69 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
           </button>
         </div>
       )}
-      {config && repo && (
-        <Section id="this-repo" title="This repo" blurb="As brindle reads it: this repo's own files over your defaults." testId="repo-settings">
-          {common.map((s) => (
-            <SettingRow key={s.key} s={s} value={draft[s.key]} dirty={dirty.includes(s.key)} disabled={saving} onChange={(v) => edit(s.key, v)} />
-          ))}
-          {more && others.map((s) => <SettingRow key={s.key} s={s} value={draft[s.key]} dirty={dirty.includes(s.key)} disabled={saving} onChange={(v) => edit(s.key, v)} />)}
+      {config && (
+        <Section id="your-settings" title="Your settings" blurb="Saved to ~/.brindle/config.json and applied to every project, unless a repo sets one itself." testId="your-settings">
+          {common.map(yourRow)}
+          {more && others.map(yourRow)}
           <div className="flex flex-col gap-1 px-s2 py-1">
             <div className="flex flex-wrap items-center gap-s2">
               <More open={more} onToggle={() => setMore((m) => !m)} count={others.length} />
-              {restLines.length > 0 && <More open={rest} onToggle={() => setRest((r) => !r)} label="Everything else" count={restLines.length} />}
+              {yourLines.length > 0 && <More open={yours} onToggle={() => setYours((y) => !y)} label="Other settings you have" count={yourLines.length} />}
             </div>
-            {rest && <RestOfConfig lines={restLines} testId="config-rest" note="Edit these in .brindle/config.json (the repo's, committed) or .brindle/config.local.json (yours)." />}
+            {yours && <RestOfConfig lines={yourLines} testId="user-rest" note="~/.brindle/config.json: what you have set for every repo, which a repo's own files override." />}
           </div>
-        </Section>
-      )}
-
-      {config && (
-        <Section id="you" title="You" blurb="How Claude's requests reach you, your permission rules, and your defaults for every repo." testId="user-settings">
-          <PermissionMode client={client} />
-          <PermissionRules client={client} />
-          {yourLines.length > 0 && (
-            <div className="flex flex-col gap-1 px-s2 py-1">
-              <More open={yours} onToggle={() => setYours((y) => !y)} label="Your defaults for every repo" count={yourLines.length} />
-              {yours && <RestOfConfig lines={yourLines} testId="user-rest" note="~/.brindle/config.json: what you have set for every repo, which a repo's own files override." />}
+          {(userDirty.length > 0 || userSaved || userError) && (
+            <div className="flex flex-col gap-s1 px-s2 py-s1" data-testid="user-save">
+              {userDirty.length > 0 && (
+                <div className="flex flex-wrap items-center gap-s2">
+                  <span className="text-sm font-medium">{userDirty.length === 1 ? "1 change" : `${userDirty.length} changes`}, for every project</span>
+                  <span className="flex-1" />
+                  <button type="button" className={quiet} disabled={saving} onClick={() => setUserDraft(userLoaded)}>
+                    Discard
+                  </button>
+                  <button type="button" className={button} disabled={saving || userMissing.length > 0} onClick={() => void saveUser()}>
+                    {saving ? "Saving…" : "Save your settings"}
+                  </button>
+                </div>
+              )}
+              {userMissing.length > 0 && userDirty.length > 0 && (
+                <p className={alert} data-testid="settings-invalid">
+                  {userMissing.map((k) => SETTINGS.find((s) => s.key === k)?.label ?? k).join(", ")} needs a number: the engine keeps what is saved as it is, and an empty value would break it.
+                </p>
+              )}
+              {userSaved && userDirty.length === 0 && (
+                <p role="status" className={notice}>
+                  {userSaved}
+                </p>
+              )}
+              {userError && (
+                <p role="alert" className={alert}>
+                  Could not save: {userError}
+                </p>
+              )}
             </div>
           )}
         </Section>
       )}
 
+      {config && (
+        <Section id="you" title="How Claude asks you" blurb="Whether Claude's held requests wait for you in the Inbox or Claude decides most itself." testId="user-settings">
+          <PermissionMode client={client} />
+        </Section>
+      )}
+
+      <Permissions client={client} rule={rule} ask={ask} />
+
+      <Section id="organization" title="Organization" blurb="Your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
+        <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
+          <OrgApprovals client={client} />
+        </Row>
+      </Section>
+
       <Section
         id="providers"
         title="Providers"
-        blurb="The agent CLIs brindle runs, each as brindle finds it on this Mac and kept up to date by itself, and the keys agents start with. A key is kept in your keychain and shows as its last four characters only."
+        blurb="How brindle reaches each model. Each one can sign in, use an API key, or go through your cloud."
         testId="providers"
       >
         {providers.rows === null ? (
@@ -1055,6 +1415,14 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
             {providers.rows.map((r) => (
               <ProviderRowView
                 key={r.provider}
+                client={client}
+                repo={repo}
+                connection={connections[r.provider] ?? null}
+                keys={config?.keys ?? null}
+                onChanged={() => {
+                  void loadConnection(r.provider);
+                  void loadConfig();
+                }}
                 row={r}
                 install={providers.installs[r.provider]}
                 detectError={providers.error}
@@ -1063,74 +1431,72 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
                 onTurnOn={(path) => providers.turnOn(r.provider, path)}
                 onDismiss={() => providers.dismiss(r.provider)}
                 onRemove={() => providers.remove(r.provider)}
+                onSignOut={() => providers.signOut(r.provider)}
                 onLookAgain={() => void providers.reload()}
               />
             ))}
           </>
         )}
-        {config &&
-          config.keys.map((k) => (
-            <Row
-              key={k.name}
-              label={<span className={mono}>{k.name}</span>}
-              help={stored === k.name && editing !== k.name ? <span role="status">{k.name} stored.</span> : undefined}
-              wide={editing === k.name}
-              testId={`key-${k.name}`}
-              data={{ key: k.name, set: String(k.set) }}
-            >
-              {editing === k.name ? (
-                <KeyField client={client} name={k.name} repo={repo} onStored={() => keyStored(k.name)} onCancel={() => setEditing(null)} />
-              ) : (
-                <>
-                  {k.set ? (
-                    <span className="flex items-center gap-1 text-xs text-ink-2">
-                      <span className="size-2 rounded-full bg-pass" aria-hidden />
-                      Set <span className={mono}>••••{k.last4}</span>
-                    </span>
-                  ) : (
-                    <span className="flex items-center gap-1 text-xs text-ink-2">
-                      <span className="size-2 rounded-full bg-fawn" aria-hidden />
-                      Not set
-                    </span>
-                  )}
-                  <button
-                    type="button"
-                    className={button}
-                    aria-label={`${k.set ? "Change" : "Set"} ${k.name}`}
-                    onClick={() => {
-                      setStored(null);
-                      setEditing(k.name);
-                    }}
-                  >
-                    {k.set ? "Change…" : "Set…"}
-                  </button>
-                </>
-              )}
-            </Row>
+        {/* A key the shell exports and brindle doesn't keep yet: imported on request, never on its own. */}
+        {config?.keys
+          .filter((k) => k.importable)
+          .map((k) => (
+            <div key={k.name} className="flex flex-wrap items-center gap-s2 px-s2 py-s1 text-sm text-ink-2" data-testid={`key-import-${k.name}`}>
+              <span>
+                Found <span className={mono}>{k.name}</span> in your shell, not saved in brindle.
+              </span>
+              <button type="button" className={button} onClick={() => void importShellKey(k.name)}>
+                Import
+              </button>
+            </div>
           ))}
-        {config && editing !== null && !config.keys.some((k) => k.name === editing) && (
-            // Keyed by the name: a field for another new key starts empty, never with the last one's value.
-            <Row key={editing} label={<span className={mono}>{editing}</span>} wide testId={`key-${editing}`} data={{ key: editing, set: "false" }}>
-              <KeyField key={editing} client={client} name={editing} repo={repo} onStored={() => keyStored(editing)} onCancel={() => setEditing(null)} />
-            </Row>
-          )}
-        {config && (
-          <form
-            className="flex flex-wrap items-center gap-s1 px-s2 py-s1"
-            aria-label="Add a key"
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!validKey) return;
-              setStored(null);
-              setEditing(keyName.trim());
-              setKeyName("");
-            }}
-          >
-            <input className={`${field} w-56 font-mono`} aria-label="Key name" placeholder="ANOTHER_API_KEY" value={keyName} onChange={(e) => setKeyName(e.target.value.toUpperCase())} />
-            <button type="submit" className={quiet} disabled={!validKey}>
-              Add a key…
-            </button>
-          </form>
+        {importError && (
+          <p className={`${alert} mx-s2 my-s1`} role="alert">
+            {importError}
+          </p>
+        )}
+        {/* Keys a profile names (api_key_env) that no provider reads: stored, replaced and removed here. */}
+        {config && config.keys.some(otherKey) && (
+          <Row label="Other keys" help="Keys your profiles name that no provider reads. Stored in your keychain." wide testId="other-keys">
+            <ul className="flex w-full flex-col divide-y divide-line">
+              {config.keys.filter(otherKey).map((k) => (
+                <li key={k.name} className="flex flex-col gap-s1 py-1" data-testid={`other-key-${k.name}`} data-set={k.set}>
+                  <span className="flex flex-wrap items-center gap-s1 text-sm">
+                    <span className={mono}>{k.name}</span>
+                    <span className="text-xs text-ink-3">{k.set ? <span className={mono}>••••{k.last4}</span> : "not set"}</span>
+                    <span className="flex-1" />
+                    <button type="button" className={quiet} onClick={() => setOtherEditing(otherEditing === k.name ? null : k.name)}>
+                      {k.set ? "Replace" : "Set"}
+                    </button>
+                    {k.set && (
+                      <button type="button" className={quiet} onClick={() => void removeOther(k.name)}>
+                        Remove
+                      </button>
+                    )}
+                  </span>
+                  {otherEditing === k.name && (
+                    <ApiKeyPaste
+                      client={client}
+                      provider={null}
+                      expect={k.name}
+                      keys={config.keys}
+                      repo={repo}
+                      onSaved={() => {
+                        setOtherEditing(null);
+                        void loadConfig();
+                      }}
+                      onCancel={() => setOtherEditing(null)}
+                    />
+                  )}
+                </li>
+              ))}
+            </ul>
+            {otherError && (
+              <p className={alert} role="alert">
+                {otherError}
+              </p>
+            )}
+          </Row>
         )}
       </Section>
 
@@ -1145,12 +1511,42 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
         }
         testId="engine"
       >
+        <div className="flex flex-col gap-s1 px-s2 py-s1" data-testid="engine-health-summary">
+          <div className="flex flex-wrap items-center gap-x-s2 gap-y-1 text-xs text-ink-2">
+            {meta ? <span className={mono}>brindle {meta.engine_version}</span> : <span>No engine</span>}
+            <span data-testid="health-status" data-bad={healthBad ? "true" : "false"} className={healthBad ? "text-sap" : undefined}>
+              {doctorError ? "Checks didn't run" : checks === null ? "Checking…" : wrong === 0 ? "Healthy" : wrong === 1 ? "1 needs attention" : `${wrong} need attention`}
+            </span>
+            {cliState !== "idle" && (
+              <span data-testid="cli-status">{cliState === "installing" ? "Installing CLI…" : cliState === "installed" ? "CLI installed" : "CLI install failed"}</span>
+            )}
+            <span className="flex-1" />
+            {upgradeNotice && upgrade.state.kind === "idle" && (
+              <button type="button" className={main} onClick={update}>
+                Update brindle
+              </button>
+            )}
+            {upgrade.state.kind !== "idle" && (
+              <span data-testid="update-status">{upgrade.state.kind === "done" ? "Updated" : upgrade.state.kind === "failed" ? "Update failed: see Details" : "Updating…"}</span>
+            )}
+            <More open={detailsOpen} onToggle={() => setDetails(!detailsOpen)} label="Details" />
+          </div>
+        </div>
+        {detailsOpen && (
+          <div data-testid="engine-details">
+            {upgrade.state.kind !== "idle" && (
+              <div className="px-s2 py-1">
+                <UpgradeCard state={upgrade.state} onDismiss={upgrade.dismiss} />
+              </div>
+            )}
+        <Row label="Daemon connection" help="The live connection between the app and brindle." testId="daemon-connection">
+          <span className="text-xs text-ink-2" data-testid="connection">daemon · {connection === "open" ? "connected" : connection === "closed" ? "reconnecting…" : connection === "unauthorized" ? "token refused" : connection === "connecting" ? "connecting…" : "no engine"}</span>
+        </Row>
         <Row
           label="Engine"
-          wide={upgrade.state.kind !== "idle"}
           help={
             upgradeNotice ? (
-              <span className="text-fawn" data-testid="update-notice">
+              <span className="text-sap" data-testid="update-notice">
                 {plain(upgradeNotice)}
               </span>
             ) : upgradeNotice === undefined ? (
@@ -1166,16 +1562,6 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
               brindle {meta.engine_version} · API {meta.api_version}
               {meta.airgap ? " · air-gapped" : ""}
             </span>
-          )}
-          {upgradeNotice && upgrade.state.kind === "idle" && (
-            <button type="button" className={primary} onClick={update}>
-              Update brindle
-            </button>
-          )}
-          {upgrade.state.kind !== "idle" && (
-            <div className="w-full">
-              <UpgradeCard state={upgrade.state} onDismiss={upgrade.dismiss} />
-            </div>
           )}
         </Row>
         <Row
@@ -1211,67 +1597,23 @@ export function SettingsScreen({ client, installCli, appUpdater, readAbout, sect
             )}
           </div>
         )}
+          </div>
+        )}
       </Section>
 
       <DocSwitches client={client} />
 
       <TeamDestination client={client} />
 
-      <DebugLogging client={client} />
-
-      <AppUpdate client={client} updater={appUpdater} />
-
-      <About read={readAbout} />
-
-      {saved && dirty.length === 0 && (
-        <p role="status" className={notice}>
-          {saved}
-        </p>
-      )}
-      {repo && dirty.length > 0 && (
-        <div className={`${card} sticky bottom-0 flex flex-col gap-s1 border-branch px-s2 py-s2 shadow-lg`} data-testid="settings-save">
-          <div className="flex flex-wrap items-center gap-s2">
-            <span className="text-sm font-medium">{dirty.length === 1 ? "1 change" : `${dirty.length} changes`}</span>
-            <fieldset className="flex flex-wrap items-center gap-1">
-              <legend className={`${label} sr-only`}>Save for</legend>
-              {SCOPES.map((s) => (
-                <label
-                  key={s.scope}
-                  className={`flex cursor-pointer items-center gap-1 rounded-md border px-s1 py-1 text-sm ${target === s.scope ? "border-branch bg-branch-soft" : "border-line text-ink-2 hover:bg-surface-2"} ${pinned && s.scope !== "repo" ? "opacity-50" : ""}`}
-                  title={s.detail}
-                >
-                  <input type="radio" name="settings-scope" value={s.scope} checked={target === s.scope} disabled={saving || (pinned && s.scope !== "repo")} onChange={() => setScope(s.scope)} className="accent-current" />
-                  {s.label}
-                </label>
-              ))}
-            </fieldset>
-            <span className="flex-1" />
-            <button type="button" className={quiet} disabled={saving} onClick={() => setDraft(loaded)}>
-              Discard
-            </button>
-            <button type="button" className={primary} disabled={saving || missing.length > 0} onClick={() => void save()}>
-              {saving ? "Saving…" : "Save"}
-            </button>
-          </div>
-          <p className="text-xs text-ink-3">{SCOPES.find((s) => s.scope === target)?.detail}</p>
-          {pinned && (
-            <p className="text-xs text-ink-3" data-testid="repo-only">
-              {repoOnly.map((k) => SETTINGS.find((s) => s.key === k)?.label ?? k).join(", ")} only count from a repo's own files, so this save goes to this repo.
-            </p>
-          )}
-          {missing.length > 0 && (
-            <p className={alert} data-testid="settings-invalid">
-              {missing.map((k) => SETTINGS.find((s) => s.key === k)?.label ?? k).join(", ")} needs a number: the engine keeps what is saved as it is, and an empty value would break it.
-            </p>
-          )}
-          {saveError && (
-            <p role="alert" className={alert}>
-              Could not save: {saveError}
-            </p>
-          )}
-        </div>
+      {staff && (
+        <Section id="staff" title="Staff only" blurb="Internal tools for Brindle staff. Not shown to customers." staff testId="staff-only">
+          <DebugLogging client={client} />
+          <AppUpdate client={client} updater={appUpdater} release={releaseBuildUpdater} readAbout={readAbout} />
+        </Section>
       )}
 
+      <About read={readAbout} updates={appUpdates} status={updateStatus} />
+      </>}
     </section>
   );
 }

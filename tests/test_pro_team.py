@@ -425,6 +425,7 @@ def test_invite_and_join(team):
 # -- org CI tokens ---------------------------------------------------------------------------------
 
 
+@pytest.mark.brindle_ci
 def test_ci_token_create_list_revoke(team):
     secret = "cpc_" + "c" * 43
     token_id = "ct_" + "a" * 32

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { DESIGN_NOW, usageScenario } from "../../test/usage";
-import { caps, fullest, hint, nearReading, planWindows, resetLine, resets, stateOf, windowLabel } from "./usage";
+import { caps, fullest, nearReading, planWindows, resetLine, resets, stateOf, windowLabel } from "./usage";
 
 const now = DESIGN_NOW.getTime() / 1000;
 const at = (h: number, m: number, days = 0) => new Date(2026, 9, 21 + days, h, m).getTime() / 1000;
@@ -20,7 +20,6 @@ describe("usage words", () => {
     expect(planWindows(claude).map(windowLabel)).toEqual(["5-hour window", "weekly window"]);
     expect(caps(claude).map(windowLabel)).toEqual(["Fable cap, this week"]);
     expect(fullest(claude)!.used).toBe(88);
-    expect(hint(claude)).toBe("Past 80%. Autopilot stops starting new Claude work at 90% and pauses running Claude workers until the window resets.");
   });
 
   it("puts each provider in a state for its card", () => {

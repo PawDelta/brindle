@@ -96,14 +96,19 @@ def test_tmux_server(monkeypatch):
     one shared by every test on the worker. A detached helper an earlier test
     started (``_launch-health``, ``_warm-checks``, ...) keeps that test's
     BRINDLE_TMUX_SOCKET, so it can only reach that test's dead server, never
-    the one a later test is using. A shared server is the suspected route for
-    a leftover helper's tmux commands, or the previous test's teardown, to
-    take the server out from under a later test between its new-session and
-    new-window (#199); the failure was not reproduced."""
+    the one a later test is using. A keeper session also prevents closing the
+    last test-owned session from taking down the server before new-window
+    (#199). The teardown hook reaps the server after all fixtures finish."""
+    from brindle import tmux
+
     _TEST_COUNT[0] += 1
     name = f"brindle-test-{os.getpid()}-{_TEST_COUNT[0]}"
     _TEST_SERVER[:] = [name]
     monkeypatch.setenv("BRINDLE_TMUX_SOCKET", name)
+    if shutil.which(tmux._bin()):
+        # Use a plain shell and no user config so the keeper stays alive
+        # independently of the agent panes and the user's tmux settings.
+        tmux._tmux("-f", os.devnull, "new-session", "-d", "-s", "brindle-test-keeper", "/bin/sh")
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -140,6 +145,27 @@ def private_tmux_server():
         os.environ.pop("BRINDLE_TMUX_SOCKET", None)
     else:
         os.environ["BRINDLE_TMUX_SOCKET"] = old
+
+
+# Every test in these files is a brindle CI test, except the refusal, fail-closed and
+# secret-hygiene ones (@pytest.mark.brindle_ci_guard); tests elsewhere carry @pytest.mark.brindle_ci.
+_BRINDLE_CI_FILES = re.compile(r"(^|/)(test_ci_[^/]*|e2e/test_ci|test_deploy_templates)\.py$")
+
+
+def pytest_collection_modifyitems(config, items):
+    """brindle CI's tests run only with BRINDLE_CI_TESTS=1; otherwise they are
+    deselected, whatever -m the run passes. The guards always run: the
+    commands stay callable, so their refusals must hold."""
+    for item in items:
+        if (_BRINDLE_CI_FILES.search(item.nodeid.split("::", 1)[0])
+                and not item.get_closest_marker("brindle_ci_guard")):
+            item.add_marker(pytest.mark.brindle_ci)
+    if os.environ.get("BRINDLE_CI_TESTS") == "1":
+        return
+    skipped = [item for item in items if item.get_closest_marker("brindle_ci")]
+    if skipped:
+        config.hook.pytest_deselected(items=skipped)
+        items[:] = [item for item in items if not item.get_closest_marker("brindle_ci")]
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -318,6 +344,10 @@ def provider_http(monkeypatch):
 def brindle_home(tmp_path, monkeypatch):
     home = tmp_path / "brindle-home"
     monkeypatch.setenv("BRINDLE_HOME", str(home))
+    # A fresh store is a new person's: the Autonomous preset, which runs what no
+    # rule covers. The tests' policy is Standard (asks), so a test that wants the
+    # default behaviour says so (tests/test_permission_presets.py).
+    monkeypatch.setattr("brindle.permissions.DEFAULT_PRESET", "standard")
     # Never touch the real ~/.claude.json (providers.trust_folder writes there).
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))

@@ -15,6 +15,6 @@ if len(sys.argv) >= 3 and sys.argv[1] == "_sidebar-follow":
         pass
     raise SystemExit(0)
 
-from brindle.cli import app
+from brindle.entry import main
 
-app()
+main()

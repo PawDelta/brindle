@@ -10,7 +10,8 @@ import logging
 import os
 import time
 from collections.abc import Callable
-from functools import wraps
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache, wraps
 from typing import Any
 
 from starlette.requests import Request
@@ -24,6 +25,8 @@ from brindle import (
     doctor,
     git,
     kb,
+    key_check,
+    keys_cmds,
     keystore,
     knowledge,
     profiles,
@@ -38,14 +41,17 @@ from brindle.daemon.routes_actions import (
     doc_switches, docs_api, docs_everywhere, docs_org_api, docs_scopes, read_edit_target,
 )
 from brindle.db import DB
+from brindle.pro import license
 from brindle.service import inbox
 from brindle.service.dto import (
     AccountDTO,
     AgentDTO,
+    CloudOptionsDTO,
     DecisionDTO,
     GoalDTO,
     PreflightItemDTO,
     ProfileDTO,
+    ProviderConnectionDTO,
     RoutingDTO,
     RoutingKindDTO,
     RoutingProfileDTO,
@@ -174,21 +180,29 @@ def workspace_file(db: DB, request: Request) -> Any:
 @_json
 def session_readiness(db: DB, request: Request) -> Any:
     """Whether brindle judges the session ready for a PR; ``reasons``: what
-    is missing, in plain words (none when it is ready); ``auto_pr``: whether
-    brindle opens its PR on its own once it is."""
+    is missing, in plain words (none when it is ready); ``pr``: the PR the
+    person opened, with how many session commits aren't pushed to it yet
+    (session_review.open_pr), or None."""
     root, ws = session_review.session(db, request.path_params["root"])
     why = session_review.reasons(db, root, ws)
-    return {"root_id": root.id, "ready": not why, "reasons": why, "auto_pr": session_review.auto_pr(ws.repo_root)}
+    return {"root_id": root.id, "ready": not why, "reasons": why, "pr": session_review.open_pr(db, root, ws)}
 
 
 @_json
 def session_diff(db: DB, request: Request) -> Any:
     """The session branch against its PR base, each file and hunk with its
     authors (worker ids, "supervisor", "you") and the authors for filtering.
-    409 with ``reasons`` unless the session is ready."""
+    Readable at any time: readiness only gates opening the PR."""
     root, ws = session_review.session(db, request.path_params["root"])
-    session_review.require_ready(db, root, ws)
     return session_review.diff(db, root, ws)
+
+
+@_json
+def session_tree(db: DB, request: Request) -> Any:
+    """The session checkout's tracked files (paths only) and its branch."""
+    root, ws = session_review.session(db, request.path_params["root"])
+    return {"root_id": root.id, "branch": ws.branch,
+            "files": [p for p in git.run(["ls-files", "-z"], ws.path).stdout.split("\0") if p]}
 
 
 @_json
@@ -300,17 +314,51 @@ def get_profile(db: DB, request: Request) -> Any:
 
 @_json
 def get_config(db: DB, request: Request) -> Any:
+    from brindle import providers
+
     repo = _repo(request)
     settings = {"user": config.user_settings()}
     if repo:
-        settings["repo"] = dataclasses.asdict(config.load_repo_config(repo))
-        # The org's policy may force auto_pr off whatever the files say: why, or None.
-        settings["auto_pr_forbidden"] = session_review.auto_pr_forbidden(repo)
-    keys = []
-    for name in keystore.known_names(repo):
-        value = keystore.get_key(name)
-        keys.append({"name": name, "set": value is not None, "last4": _last4(value or "")})
-    return {**settings, "keys": keys}
+        # Saved model choices are checked for readiness while the config loads (worker_models.apply):
+        # no sign-in probe or keychain read for that here, as for GET /routing?learned=0.
+        with providers.no_sign_in_probes():
+            settings["repo"] = dataclasses.asdict(config.load_repo_config(repo))
+        # Settings this project's own files set (over the person's): key -> "local" or "repo".
+        settings["overrides"] = {k: s for k in settings["repo"] if (s := config.setting_source(repo, k)) in ("local", "repo")}
+        # The local file's own rules: the effective list unions every scope's, so the app edits this one.
+        settings["local"] = config.local_values(repo, ("rules",))
+    # `keys=0`: the page doesn't show the stored keys, and reading them is the slow part
+    # (one keychain read per name), so it skips them.
+    if request.query_params.get("keys") in ("0", "false"):
+        return {**settings, "keys": []}
+    return {**settings, "keys": _key_rows(repo)}
+
+
+def _key_rows(repo: str | None) -> list[dict]:
+    try:
+        denied = key_check.personal_keys_denied(repo)
+    except Exception:  # noqa: BLE001 - policy unreadable: fail closed, as storing does
+        denied = True
+
+    def row(name: str) -> dict:
+        rec = keystore.get_record(name)    # the one read of this key (on macOS a `security` call)
+        raw = rec.get("value")
+        value = raw if isinstance(raw, str) and raw else None
+        return {
+            "name": name, "set": value is not None, "last4": _last4(value or ""),
+            "provider": keystore.provider_of(name),
+            "status": (rec.get("status") or "unchecked") if value else None,
+            "checked_at": rec.get("checked_at") if value else None,
+            "key_page": key_check.key_page(name),
+            "bills": keys_cmds.bills_instead_of_subscription(name),
+            "personal_keys_denied": denied,
+            # Set in the daemon's environment but not stored; the value is never returned.
+            "importable": value is None and bool(os.environ.get(name, "").strip()),
+        }
+
+    names = keystore.known_names(repo)
+    with ThreadPoolExecutor(max_workers=8) as pool:    # the reads wait on subprocesses, not the CPU
+        return list(pool.map(row, names))
 
 
 @_json
@@ -319,25 +367,86 @@ def get_user_settings(db: DB, request: Request) -> Any:
 
 
 @_json
+def get_permissions(db: DB, request: Request) -> Any:
+    """The permission policy: preset, unmatched setting, rules, saved actions, prompt counts."""
+    from brindle.service import permissions as svc_permissions
+
+    return svc_permissions.policy_dto(repo_root=_repo(request)).to_json()
+
+
+@_json
+def get_permission_asks(db: DB, request: Request) -> Any:
+    """The requests waiting on the person, grouped by kind and general form (``repo`` narrows)."""
+    from brindle.service import permissions as svc_permissions
+
+    return [g.to_json() for g in svc_permissions.asks(db, _repo(request))]
+
+
+@_json
+def get_permission_report(db: DB, request: Request) -> Any:
+    """The ask rate and top causes of permission asks (``days``, default 7; ``repo`` narrows)."""
+    from brindle import permission_asks
+
+    try:
+        days = max(1, int(request.query_params.get("days", permission_asks.DEFAULT_DAYS)))
+    except ValueError:
+        days = permission_asks.DEFAULT_DAYS
+    return permission_asks.report(db, days, _repo(request))
+
+
+@_json
+def get_permission_plan(db: DB, request: Request) -> Any:
+    """What allowing everything waiting would grant (``forever=1`` for lasting grants)."""
+    from brindle.service import permissions as svc_permissions
+
+    forever = request.query_params.get("forever") in ("1", "true", "yes")
+    return svc_permissions.plan(db, _repo(request), forever).to_json()
+
+
+@_json
 def get_debug(db: DB, request: Request) -> Any:
-    """``{enabled, staff}`` for debug logs (only a brindle staff account may turn them on)."""
+    """``{enabled, staff}`` for debug logs (only a brindle staff account may turn them on).
+    ``?fresh=1`` asks the backend now instead of the cached answer (the app does,
+    right before a staff-only update), and says not staff when it can't be asked."""
     from brindle import debuglog
 
-    return debuglog.checked()
+    return debuglog.checked(fresh=request.query_params.get("fresh") == "1")
 
 
 @_json
 def get_routing(db: DB, request: Request) -> Any:
     """Each tier's profiles (and the model and agent each runs), the reviewer
     and the excluded providers, with the scope each comes from, every profile
-    with what routing knows of it, and the org policy all of it answers to."""
+    with what routing knows of it, and the org policy all of it answers to.
+    ``scope=user``: the person's own view, as every repo starts from it (their
+    ~/.brindle/config.json and their library, never this repo's files); the
+    repo still gives the org policy and what learning knows. ``learned=0``
+    answers at once, for the app to read the rest after the page is up: no
+    learned picks (each kind's ``learned`` is null; working them out
+    resolves the dispatch for every candidate) and no sign-in probe (each
+    ``signed_in`` as an earlier probe found it, else as can't-be-told,
+    true)."""
+    from brindle import providers
+    from brindle.pro import license
+
+    if request.query_params.get("learned") != "0":
+        return _routing(db, request, learn=True)
+    with providers.no_sign_in_probes(), license.reading():
+        return _routing(db, request, learn=False)
+
+
+def _routing(db: DB, request: Request, learn: bool) -> Any:
+    from concurrent.futures import ThreadPoolExecutor
+
     from brindle import autopilot, providers
     from brindle.service.routing import RoutingPolicy, provider_name
 
     repo = _need_repo(request)
-    cfg = config.load_repo_config(repo)
-    policy = RoutingPolicy.load(repo)
-    every = profiles.list_profiles(repo)
+    user = request.query_params.get("scope") == "user"
+    lib = None if user else repo        # where profiles are looked up: the repo's own first, or only the person's
+    cfg = config.load_repo_config(repo, user_only=user)
+    policy = RoutingPolicy.load(repo, user_library=user)
+    every = profiles.list_profiles(lib)
     refusals = {p.name: policy.refusal(p) for p in every}
     scope_of = {str(path): scope for scope, path in config.scope_paths(repo).items()}
 
@@ -350,34 +459,57 @@ def get_routing(db: DB, request: Request) -> Any:
                                models=[as_model(n) for n in cfg.routing[t]])
              for t in config.WEIGHTS}
     installed = doctor.signin_providers()
+    # A provider with no CLI of its own (native) is always there.
+    here = {p.name: p.provider not in doctor.CLI_INSTALL or p.provider in installed for p in every}
+    # Each sign-in once per environment its profiles give it, all at once: a
+    # probe runs the provider's CLI, and a signed-out answer isn't cached.
+    # (Without probes each answer is at hand, and a pool thread wouldn't see that mode.)
+    probes = list({(p.provider, tuple(sorted(p.env.items()))) for p in every if here[p.name]})
+
+    def probe(k: tuple) -> bool:
+        return providers.signed_out(k[0], dict(k[1])) is None
+
+    if not providers.probing():
+        signed = {k: probe(k) for k in probes}
+    else:
+        with ThreadPoolExecutor(max_workers=max(1, len(probes))) as pool:
+            signed = dict(zip(probes, pool.map(probe, probes)))
     rows = []
     for p in every:
-        # A provider with no CLI of its own (native) is always there.
-        here = p.provider not in doctor.CLI_INSTALL or p.provider in installed
-        errors, warnings = profiles.lint_profile(p.name, repo)
+        errors, warnings = profiles.lint_profile(p.name, lib)
         rows.append(RoutingProfileDTO(
             lint_errors=errors, lint_warnings=warnings,
             name=p.name, provider=p.provider, provider_name=provider_name(p.provider),
-            model=autopilot.effective_profile_model(p, repo) or None,
-            installed=here, signed_in=here and providers.signed_out(p.provider, p.env) is None,
-            excluded=p.provider in cfg.exclude_providers, cost_tier=autopilot.cost_tier(p.name, cfg, repo),
+            model=autopilot.effective_profile_model(p, lib) or None,
+            installed=here[p.name],
+            signed_in=here[p.name] and signed[(p.provider, tuple(sorted(p.env.items())))],
+            excluded=p.provider in cfg.exclude_providers, cost_tier=autopilot.cost_tier(p.name, cfg, lib),
             allowed=refusals[p.name] is None, refusal=refusals[p.name]))
+
+    def source(key: str) -> str:
+        if user:
+            return "user" if key in config.user_settings() else "default"
+        return config.setting_source(repo, key)
+
+    # Every candidate's check reads the same stored keys: each from the store once.
+    with keystore.reading():
+        kinds = _routing_kinds(db, cfg, repo, learn=learn)
     return RoutingDTO(
         tiers=tiers,
-        reviewer=RoutingSettingDTO(values=[cfg.reviewer], source=config.setting_source(repo, "reviewer")),
-        exclude_providers=RoutingSettingDTO(values=cfg.exclude_providers,
-                                            source=config.setting_source(repo, "exclude_providers")),
-        profiles=rows, policy=policy.to_dto(every), kinds=_routing_kinds(db, cfg, repo)).to_json()
+        reviewer=RoutingSettingDTO(values=[cfg.reviewer], source=source("reviewer")),
+        exclude_providers=RoutingSettingDTO(values=cfg.exclude_providers, source=source("exclude_providers")),
+        profiles=rows, policy=policy.to_dto(every), kinds=kinds).to_json()
 
 
-def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str) -> dict[str, RoutingKindDTO]:
+def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True) -> dict[str, RoutingKindDTO]:
     """Per kind of work: the owner's pick, its ordered fallbacks, whether it
-    is locked, and the different profile hosted learning runs for it now.
-    A locked kind is never overridden, so it never reports one."""
+    is locked, and the different profile hosted learning runs for it now
+    (``learn=False``: none asked for, each null). A locked kind is never
+    overridden, so it never reports one."""
     from brindle import agents, autopilot
 
     def learned(kind: str, run) -> str | None:
-        if cfg.routing_locked.get(kind):
+        if not learn or cfg.routing_locked.get(kind):
             return None
         try:
             return run()
@@ -426,10 +558,11 @@ def provider_preflight(db: DB, request: Request) -> Any:
     turn: the items POST /v1/sessions answers 409 with, for the identity its
     chat would run as (see brindle.preflight). Native, which runs no chat,
     and a request without ``repo`` get the provider's checks as brindle sees it."""
-    from brindle import preflight
+    from brindle import preflight, provider_homes
     from brindle.daemon.routes_actions import session_blockers
 
     provider, repo = request.path_params["provider"], _repo(request)
+    provider_homes.confirm_login(provider)
     if repo is None or provider == "native":
         items = preflight.check(provider, repo)
     else:
@@ -445,7 +578,7 @@ def providers_installed(db: DB, request: Request) -> Any:
     """Each provider CLI as a terminal would find it (PATH, then the makers'
     standard places): ``state`` "installed", "missing" or "off" (turned off
     in brindle), the path brindle runs and its version, whether it is signed
-    in where that is cheap to know (else null), every install found, and
+    in according to its CLI (null if unknown), every install found, and
     brindle's config home for it (null for Antigravity, which shares ~/.gemini)."""
     from brindle import providers_install
 
@@ -453,20 +586,62 @@ def providers_installed(db: DB, request: Request) -> Any:
 
 
 @_json
-def account(db: DB, request: Request) -> Any:
-    from brindle.pro import license
+def provider_connection(db: DB, request: Request) -> Any:
+    """How the provider connects (brindle.connections): sign-in, API key or a
+    cloud, and for a cloud its settings and login (valid, expiry, the command
+    that renews it). ``managed`` says why the org decides it instead."""
+    from brindle import connections
+
+    try:
+        got = connections.view(request.path_params["provider"], _repo(request), db)
+    except connections.Invalid as e:
+        raise ServiceError("invalid", str(e)) from None
+    return ProviderConnectionDTO(**got).to_json()
+
+
+@_json
+def cloud_options(db: DB, request: Request) -> Any:
+    """The cloud choices this machine is set up for, from the cloud CLIs' own
+    files: AWS profiles (SSO or not), gcloud's application-default login and
+    default project, the Azure CLI's tenant, and the usual regions. No secrets."""
+    from brindle import connections
+
+    return CloudOptionsDTO(**connections.options()).to_json()
+
+
+@lru_cache(maxsize=1)
+def _account_details(ent: license.Entitlement, generation: int | None, period: int) -> AccountDTO:
+    """Identity and orgs share a read, including offline misses. Entitlement,
+    credential generation and a bounded period keep it scoped to this login.
+    Repo-specific learning state is resolved separately on every request."""
+    from brindle.pro import auth
     from brindle.pro.account import ProAccount
 
+    account = ProAccount()
+    who = {}
+    try:
+        who = auth.me(account._client(None), account.store)
+    except Exception:  # noqa: BLE001 - identity is optional while offline
+        log.debug("brindle: daemon couldn't read the account's identity", exc_info=True)
+    try:
+        # For the app's org picker; the plan still shows when the org list can't be had.
+        orgs = account.orgs(None)
+    except Exception:  # noqa: BLE001 - offline, or the backend refused
+        log.debug("brindle: daemon couldn't list the account's orgs", exc_info=True)
+        orgs = []
+    return AccountDTO(signed_in=True, name=who.get("name"), email=who.get("email"), plan=ent.plan, orgs=orgs)
+
+
+license._clear_hooks.append(_account_details.cache_clear)
+
+
+@_json
+def account(db: DB, request: Request) -> Any:
     try:
         ent = license.current(refresh=False)
     except license.LicenseError:
         return AccountDTO(signed_in=False).to_json()
-    try:
-        # For the app's org picker; the plan still shows when the org list can't be had.
-        orgs = ProAccount().orgs(None)
-    except Exception:  # noqa: BLE001 - offline, or the backend refused
-        log.debug("brindle: daemon couldn't list the account's orgs", exc_info=True)
-        orgs = []
+    details = _account_details(ent, license._disk_cache_generation(), int(time.monotonic() // license.CACHE_SECONDS))
     # Signed in, the DTO carries more: the org, status, features, seats, role,
     # expiry and grace; whether hosted learning is entitled, whether it is
     # effectively on for `repo` (its setting resolved as the engine does), and
@@ -478,7 +653,7 @@ def account(db: DB, request: Request) -> Any:
     cfg = config.load_repo_config(repo) if repo else config.RepoConfig()
     on = available and plugins.learning_name(cfg) == plugins.CLOUD
     note = learning.kept_note(cfg, repo) if on and repo else None
-    return {**AccountDTO(signed_in=True, plan=ent.plan, orgs=orgs).to_json(),
+    return {**details.to_json(),
             "org_id": ent.org_id, "status": ent.status, "features": sorted(ent.features),
             "seats": ent.seats, "role": ent.role, "expires_at": ent.exp,
             "in_grace": ent.in_grace, "grace_until": ent.grace_until,
@@ -674,6 +849,7 @@ ROUTES = [
     Route("/v1/sessions/{root:path}/diff", session_diff),
     # PUT and DELETE on the same path edit (routes_actions).
     Route("/v1/sessions/{root:path}/file", session_file),
+    Route("/v1/sessions/{root:path}/tree", session_tree),
     Route("/v1/decisions", decisions),
     Route("/v1/kb/sources", kb_sources),
     Route("/v1/kb/search", kb_search),
@@ -694,12 +870,18 @@ ROUTES = [
     Route("/v1/rules", list_rules),
     Route("/v1/config", get_config),
     Route("/v1/user-settings", get_user_settings),
+    Route("/v1/permissions", get_permissions),
+    Route("/v1/permissions/asks", get_permission_asks),
+    Route("/v1/permissions/asks/plan", get_permission_plan),
+    Route("/v1/permissions/report", get_permission_report),
     Route("/v1/routing", get_routing),
     Route("/v1/debug", get_debug),
     Route("/v1/doctor", get_doctor),
     # Before the action routes' DELETE /v1/providers/{provider}.
     Route("/v1/providers/installed", providers_installed),
     Route("/v1/providers/{provider}/preflight", provider_preflight),
+    Route("/v1/providers/{provider}/connection", provider_connection),
+    Route("/v1/cloud/options", cloud_options),
     Route("/v1/account", account),
     Route("/v1/cost", get_cost),
     Route("/v1/usage", get_usage),

@@ -199,6 +199,7 @@ def test_github_start_run_report_through_the_cli(job, mkplan, wire, tmp_path):
     assert [s[1]["conclusion"] for s in server.job_status] == ["success", "failure"]
 
 
+@pytest.mark.brindle_ci_guard
 def test_start_needs_exactly_one_trigger_and_a_valid_validate(job, tmp_path):
     out = str(tmp_path / "o")
     assert cli("start", "--out", out).exit_code != 0
@@ -207,6 +208,7 @@ def test_start_needs_exactly_one_trigger_and_a_valid_validate(job, tmp_path):
     assert cli("start", "--out", out, "--dispatch", "nope").exit_code != 0
 
 
+@pytest.mark.brindle_ci_guard
 def test_validate_checks_never_see_secrets_or_model_keys(job, mkplan, wire, tmp_path, monkeypatch):
     sha = sh("git rev-parse HEAD", job)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
@@ -283,6 +285,7 @@ def run_it(job, token, server, adapter, tmp_path, *, sleep=lambda s: None, clock
                          say=lambda s: None)
 
 
+@pytest.mark.brindle_ci_guard
 def test_the_dollar_limit_holds_while_the_server_is_unreachable(job, mkplan, tmp_path):
     token = run_plan_of(mkplan, job, budget_usd=5)
     server = Server(run_plan=token)
@@ -314,6 +317,7 @@ def test_escalation_does_not_reset_the_dollar_spend(job, mkplan, tmp_path, monke
 # -- adapters and doctor ---------------------------------------------------------------------------
 
 
+@pytest.mark.brindle_ci_guard
 def test_doctor_names_credentials_not_values_and_applies_the_org_rule(job, monkeypatch, tmp_path):
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(tmp_path / "event.json"))
     (tmp_path / "event.json").write_text(json.dumps({"repository": {"owner": {"type": "Organization"}}}))

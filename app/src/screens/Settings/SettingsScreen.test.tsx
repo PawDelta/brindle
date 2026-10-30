@@ -7,17 +7,38 @@ import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
 import { StoreContext } from "../../store/useStore";
 import { DaemonClient } from "../../api/client";
-import { BASE_URL, FakeDaemon, TOKEN, flush, freshProviders, type DaemonData } from "../../test/fakeDaemon";
+import { BASE_URL, FAKE_PRESETS, FakeDaemon, TOKEN, flush, freshProviders, type DaemonData } from "../../test/fakeDaemon";
 import { PtyViewsProvider } from "../../api/ptyView";
-import { REPO } from "../../test/fixtures";
+import { REPO, root } from "../../test/fixtures";
+import { releaseBuildUpdater } from "../../api/tauri";
 import { SettingsScreen } from ".";
 import type { SettingsScreenProps } from "./SettingsScreen";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
-afterEach(cleanup);
+/* The shell's IPC, for the real release-build updater (api/tauri.ts): each
+   invoke recorded, the install's answer held until the test gives it. */
+const ipc = vi.hoisted(() => {
+  const calls: Array<{ cmd: string; args: Record<string, unknown> }> = [];
+  const answers: Array<(value: unknown) => void> = [];
+  class Channel<T> {
+    onmessage: ((message: T) => void) | null = null;
+  }
+  const invoke = vi.fn((cmd: string, args: Record<string, unknown> = {}) => {
+    calls.push({ cmd, args });
+    return new Promise((resolve) => answers.push(resolve));
+  });
+  return { calls, answers, Channel, invoke };
+});
+vi.mock("@tauri-apps/api/core", () => ({ Channel: ipc.Channel, invoke: ipc.invoke, isTauri: () => true }));
 
-function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps["installCli"], appUpdater?: SettingsScreenProps["appUpdater"]) {
+afterEach(() => {
+  cleanup();
+  ipc.calls.length = 0;
+  ipc.answers.length = 0;
+});
+
+function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps["installCli"], appUpdater?: SettingsScreenProps["appUpdater"], releaseUpdater?: SettingsScreenProps["releaseBuildUpdater"], rule?: string, readAbout?: SettingsScreenProps["readAbout"]) {
   const daemon = new FakeDaemon({
     repos: [{ repo_root: REPO, name: "proj" }],
     config: {
@@ -57,7 +78,7 @@ function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps[
           <ProvidersProvider client={client}>
             {/* A sign-in's CLI read through the fake daemon's pty views, as the shell's show it. */}
             <PtyViewsProvider value={daemon.ptyViews()}>
-              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} />
+              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} readAbout={readAbout} rule={rule} />
             </PtyViewsProvider>
           </ProvidersProvider>
         </SessionsProvider>
@@ -72,58 +93,39 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const doctorCalls = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.path === "/doctor");
 
 describe("settings screen", () => {
-  it("shows the repo's common settings as rows with the rest behind More, and saves what changed where the person says", async () => {
+  it("edits your settings and saves them to the user scope, and leaves the repo's checks and rules to Project settings", async () => {
     const { daemon, stop } = setup();
-    const repoSettings = await screen.findByTestId("repo-settings");
+    const mine = await screen.findByTestId("your-settings");
     expect(daemon.requests.find((r) => r.path === "/config")?.query).toEqual({ repo: REPO });
-    // The handful people change most, read as the engine merges the files; the rest behind More.
-    const checks = screen.getByRole("textbox", { name: "Checks" });
-    expect(checks).toHaveProperty("value", "npm test");
-    expect(screen.getByRole("spinbutton", { name: "Workers at once" })).toHaveProperty("value", "5");
-    expect(screen.getByRole("switch", { name: "Plan first" }).getAttribute("aria-checked")).toBe("false");
-    expect(screen.queryByRole("combobox", { name: "Overlapping tasks" })).toBeNull();
-    expect(screen.queryByTestId("settings-save")).toBeNull();
-    // Typed a keystroke at a time: the space and the Enter stay on screen while the draft reads the lines.
-    for (const typed of ["npm test ", "npm test \n", "npm test \nn", "npm test \nnpm run build"]) fireEvent.change(checks, { target: { value: typed } });
-    expect(checks).toHaveProperty("value", "npm test \nnpm run build");
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Workers at once" }), { target: { value: "3" } });
-    fireEvent.click(screen.getByRole("switch", { name: "Plan first" }));
-    expect(screen.getByRole("switch", { name: "Plan first" }).getAttribute("aria-checked")).toBe("true");
-    expect(repoSettings.querySelector('[data-setting="plan_first"]')!.textContent).toContain("edited");
-    const bar = screen.getByTestId("settings-save");
-    expect(bar.textContent).toContain("3 changes");
-    // Checks live in the repo's files only: the save is pinned to this repo, whatever was picked before.
-    expect(within(bar).getByRole("radio", { name: "This repo" })).toHaveProperty("checked", true);
-    expect(within(bar).getByRole("radio", { name: "Every repo" })).toHaveProperty("disabled", true);
-    expect(screen.getByTestId("repo-only").textContent).toContain("Checks only count from a repo's own files");
-    fireEvent.click(within(bar).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Saved checks, max_agents, plan_first to /home/u/proj/.brindle/config.local.json"));
-    expect(patches(daemon)[0].body).toEqual({ scope: "repo", repo: REPO, values: { checks: ["npm test", "npm run build"], max_agents: 3, plan_first: true } });
-    // The local file took them; read back as the engine merges the files (a local list replaces the shared one): the
-    // same lines, so the text stays as typed, and nothing is left to save.
-    expect(daemon.data.config.local).toEqual({ checks: ["npm test", "npm run build"], max_agents: 3, plan_first: true });
-    await waitFor(() => expect(screen.getByRole("textbox", { name: "Checks" })).toHaveProperty("value", "npm test \nnpm run build"));
-    expect(screen.queryByTestId("settings-save")).toBeNull();
+    // Your settings lead; the handful people change most show, the rest behind More. Checks is not among them.
+    expect(screen.getAllByRole("region").map((s) => s.id).filter(Boolean).slice(0, 2)).toEqual(["your-settings", "you"]);
+    // The repo's own checks and rules are on the switch's repo side, not here; no Autopilot row anywhere.
+    expect(screen.queryByTestId("repo-settings")).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Checks" })).toBeNull();
+    expect(screen.getByRole("radio", { name: "You" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: "proj" })).toBeTruthy();
+    expect(screen.queryByRole("switch", { name: "Autopilot" })).toBeNull();
+    expect(within(mine).queryByRole("textbox", { name: "Checks" })).toBeNull();
+    expect(within(mine).queryByRole("combobox", { name: "Overlapping tasks" })).toBeNull();
+    expect(screen.queryByTestId("user-save")).toBeNull();
+    fireEvent.click(within(mine).getByRole("switch", { name: "Plan first" }));
     // A number can't be left empty: the engine would store the null and choke on it later.
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Workers at once" }), { target: { value: "" } });
+    const workers = within(mine).getByRole("spinbutton", { name: "Workers at once" });
+    fireEvent.change(workers, { target: { value: "" } });
     expect(screen.getByTestId("settings-invalid").textContent).toContain("Workers at once needs a number");
-    expect(screen.getByRole("button", { name: "Save" })).toHaveProperty("disabled", true);
-    // A change the person's file can carry goes there, without the repo.
-    fireEvent.change(screen.getByRole("spinbutton", { name: "Workers at once" }), { target: { value: "2" } });
-    fireEvent.click(screen.getByRole("radio", { name: "Every repo" }));
-    fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(patches(daemon)).toHaveLength(2));
-    expect(patches(daemon)[1].body).toEqual({ scope: "user", values: { max_agents: 2 } });
-    expect(daemon.data.config.user.max_agents).toBe(2);
-    // The local file still wins for this repo: the screen reads 3 again, as the engine would.
-    await waitFor(() => expect(screen.getByRole("spinbutton", { name: "Workers at once" })).toHaveProperty("value", "3"));
-    // More: the other settings; Everything else: the rest of the config to read; the person's own defaults likewise.
-    fireEvent.click(within(repoSettings).getByRole("button", { name: /^More/ }));
+    expect(screen.getByRole("button", { name: "Save your settings" })).toHaveProperty("disabled", true);
+    fireEvent.change(workers, { target: { value: "2" } });
+    expect(mine.querySelector('[data-setting="plan_first"]')!.textContent).toContain("edited");
+    fireEvent.click(screen.getByRole("button", { name: "Save your settings" }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toContain("Saved max_agents, plan_first for every project to /home/u/.brindle/config.json"));
+    expect(patches(daemon)[0].body).toEqual({ scope: "user", values: { max_agents: 2, plan_first: true } });
+    expect(daemon.data.config.user).toMatchObject({ max_agents: 2, plan_first: true });
+    expect(daemon.data.config.local).toEqual({});
+    // More: the other settings; what the person has set beyond the rows is listed to read.
+    fireEvent.click(within(mine).getByRole("button", { name: /^More/ }));
     expect(screen.getByRole("combobox", { name: "Overlapping tasks" })).toBeTruthy();
     expect(screen.getByRole("switch", { name: "Coordinator" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: /Everything else/ }));
-    expect(screen.getByTestId("config-rest").textContent).toContain("default_agent");
-    fireEvent.click(screen.getByRole("button", { name: /Your defaults for every repo/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Other settings you have/ }));
     expect(screen.getByTestId("user-rest").textContent).toContain("supervisor");
     stop();
   });
@@ -150,67 +152,285 @@ describe("settings screen", () => {
     stop();
   });
 
-  it("adds permission rules as the engine describes them back, and resets them only after asking", async () => {
-    const { daemon, stop } = setup();
-    const form = await screen.findByRole("form", { name: "Add a rule" });
-    fireEvent.change(within(form).getByLabelText("Match"), { target: { value: "npm test" } });
-    fireEvent.click(within(form).getByRole("button", { name: "Add rule" }));
-    await waitFor(() => expect(screen.getByTestId("permissions").textContent).toContain("Added: allow bash exact 'npm test'"));
-    expect(daemon.requests.filter((r) => r.path === "/permissions").at(-1)?.body).toEqual({ op: "allow", kind: "bash", match: "npm test", match_type: "exact" });
-    expect(daemon.permissionRules).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Reset your rules…" }));
-    fireEvent.click(screen.getByRole("button", { name: "Reset rules" }));
-    await waitFor(() => expect(daemon.permissionRules).toHaveLength(0));
+  it("permissions: groups are the default view with the preset and ask rate; a group baseline and a subcategory override save through the groups API and show their marker", async () => {
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: { "d-push-default": 7 } } });
+    const perms = await screen.findByTestId("permissions-settings");
+    await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Autonomous"));
+    expect(within(perms).getByTestId("presets").querySelector('[data-preset="autonomous"]')!.textContent).toContain("RECOMMENDED");
+    await waitFor(() => expect(within(perms).getByTestId("ask-rate").textContent).toMatch(/\b7\b.*\b26%/));
+    // A group's baseline: one click, sent as the group's baseline only.
+    fireEvent.click(within(within(perms).getByTestId("groups").querySelector<HTMLElement>('[data-group="shell"]')!).getByRole("button", { name: "Deny" }));
+    await waitFor(() => expect(daemon.data.policy.groups?.shell.baseline).toBe("deny"));
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/groups")?.body).toEqual({ groups: { shell: { baseline: "deny" } } });
+    // Open it: a subcategory overrides the group, marked while it does.
+    fireEvent.click(within(perms).getByRole("button", { name: "Show Shell items" }));
+    const installs = () => within(perms).getByTestId("group-shell").querySelector<HTMLElement>('[data-sub="install"]')!;
+    expect(within(installs()).getByRole("button", { name: "Inherit" }).getAttribute("aria-pressed")).toBe("true");
+    expect(within(installs()).queryByTestId("override-marker")).toBeNull();
+    fireEvent.click(within(installs()).getByRole("button", { name: "Ask" }));
+    await waitFor(() => expect(within(installs()).getByTestId("override-marker")).toBeTruthy());
+    expect(within(installs()).getByRole("button", { name: "Ask" }).getAttribute("aria-pressed")).toBe("true");
+    expect(daemon.data.policy.groups?.shell.subcategories.install).toBe("ask");
+    expect(daemon.requests.filter((r) => r.path === "/permissions/groups").at(-1)?.body).toEqual({ groups: { shell: { subcategories: { install: "ask" } } } });
     stop();
   });
 
-  it("keeps the keys in Providers: a key stored write-only from a password field, no terminal anywhere", async () => {
-    const { daemon, stop } = setup();
-    const keys = await screen.findByTestId("providers");
-    await within(keys).findByTestId("key-ANTHROPIC_API_KEY");
-    expect(keys.textContent).not.toContain("in a terminal");
-    expect(within(keys).getByTestId("key-ANTHROPIC_API_KEY").textContent).toContain("••••WXYZ");
-    expect(within(keys).getByTestId("key-OPENAI_API_KEY").textContent).toContain("Not set");
+  it("permissions: unchecked commands opt-in is off, turns on only after an in-page confirmation, turns off in one click, and is locked when an org forces it", async () => {
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} } });
+    const row = await screen.findByTestId("dangerous");
+    const toggle = () => within(row).getByRole("switch", { name: "Run unchecked commands without asking" });
+    expect(toggle().getAttribute("aria-checked")).toBe("false");
+    // On needs the confirmation; Cancel sends nothing.
+    fireEvent.click(toggle());
+    fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+    expect(daemon.requests.some((r) => r.method === "PUT" && r.path === "/permissions/groups")).toBe(false);
+    fireEvent.click(toggle());
+    fireEvent.click(within(row).getByRole("button", { name: "Run unchecked commands" }));
+    await waitFor(() => expect(toggle().getAttribute("aria-checked")).toBe("true"));
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/groups")?.body).toEqual({ groups: { shell: { subcategories: { unchecked: "allow" } } } });
+    fireEvent.click(toggle());
+    await waitFor(() => expect(toggle().getAttribute("aria-checked")).toBe("false"));
+    expect(daemon.data.policy.groups?.shell.subcategories.unchecked).toBe("ask");
+    stop();
+  });
 
-    // Set a key: a password field; Save sends the value to PUT /keys/{name} and keeps nothing of it.
-    fireEvent.click(within(keys).getByRole("button", { name: "Set OPENAI_API_KEY" }));
-    const form = within(keys).getByRole("form", { name: "Value for OPENAI_API_KEY" });
-    const value = within(form).getByLabelText("OPENAI_API_KEY value") as HTMLInputElement;
-    expect(value.type).toBe("password");
-    fireEvent.change(value, { target: { value: "sk-test-0000-9xTz" } });
-    fireEvent.click(within(form).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(screen.getByTestId("key-OPENAI_API_KEY").textContent).toContain("••••9xTz"));
-    expect(daemon.requests.filter((r) => r.method === "PUT")).toEqual([{ method: "PUT", path: "/keys/OPENAI_API_KEY", query: {}, body: { value: "sk-test-0000-9xTz", repo: REPO } }]);
-    expect(daemon.keysStored).toEqual(["OPENAI_API_KEY"]);
-    expect(screen.queryByDisplayValue("sk-test-0000-9xTz")).toBeNull();
-    expect(screen.queryByRole("form", { name: "Value for OPENAI_API_KEY" })).toBeNull();
-    expect(screen.getByTestId("key-OPENAI_API_KEY").textContent).toContain("OPENAI_API_KEY stored.");
-    // A key brindle doesn't know yet, by name. A value typed for one new key never carries over to the field
-    // for another: the second starts empty, with nothing to save.
-    const add = screen.getByRole("form", { name: "Add a key" });
-    fireEvent.change(within(add).getByLabelText("Key name"), { target: { value: "review_first" } });
-    expect(within(add).getByLabelText("Key name")).toHaveProperty("value", "REVIEW_FIRST");
-    fireEvent.click(within(add).getByRole("button", { name: "Add a key…" }));
-    fireEvent.change(screen.getByLabelText("REVIEW_FIRST value"), { target: { value: "first-value-0001" } });
-    fireEvent.change(within(add).getByLabelText("Key name"), { target: { value: "REVIEW_SECOND" } });
-    fireEvent.click(within(add).getByRole("button", { name: "Add a key…" }));
-    expect(screen.queryByRole("form", { name: "Value for REVIEW_FIRST" })).toBeNull();
-    const second = screen.getByRole("form", { name: "Value for REVIEW_SECOND" });
-    expect(within(second).getByLabelText("REVIEW_SECOND value")).toHaveProperty("value", "");
-    expect(within(second).getByRole("button", { name: "Save" })).toHaveProperty("disabled", true);
-    fireEvent.click(within(second).getByRole("button", { name: "Cancel" }));
-    // Brindle's own token is refused by the engine, in its words, in the field.
-    fireEvent.change(within(add).getByLabelText("Key name"), { target: { value: "brindle_token" } });
-    expect(within(add).getByLabelText("Key name")).toHaveProperty("value", "BRINDLE_TOKEN");
-    fireEvent.click(within(add).getByRole("button", { name: "Add a key…" }));
-    const token = screen.getByRole("form", { name: "Value for BRINDLE_TOKEN" });
-    fireEvent.change(within(token).getByLabelText("BRINDLE_TOKEN value"), { target: { value: "nope" } });
-    fireEvent.click(within(token).getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(within(token).getByRole("alert").textContent).toContain("Could not store BRINDLE_TOKEN: BRINDLE_TOKEN isn't a key agents can be given"));
-    expect(daemon.keysStored).toEqual(["OPENAI_API_KEY"]);
-    fireEvent.click(within(token).getByRole("button", { name: "Cancel" }));
-    expect(screen.queryByRole("form", { name: "Value for BRINDLE_TOKEN" })).toBeNull();
+  it("permissions: unchecked commands opt-in is locked when org policy denies it", async () => {
+    const { stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", groups: { shell: { baseline: "ask", subcategories: { unchecked: "deny" } } }, rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} } });
+    const row = await screen.findByTestId("dangerous");
+    expect(within(row).getByText("Set by your organization")).toBeTruthy();
+    expect((within(row).getByRole("switch") as HTMLButtonElement).disabled).toBe(true);
+    stop();
+  });
+
+  it("permissions: changes the preset, searches and filters the Advanced rules, removes a former default with undo, and sets unmatched actions", async () => {
+    const gitCommit = { id: "u-git-commit", kind: "bash", match: "git commit", match_type: "prefix", decision: "allow", source: "user", created: 1, describe: "bash prefix 'git commit'", exclusions: [] };
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), gitCommit], saved: [], prompts: {} } });
+    const perms = await screen.findByTestId("permissions-settings");
+    await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Autonomous"));
+    fireEvent.click(within(perms).getByRole("button", { name: "Use Standard" }));
+    await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Standard"));
+    expect(daemon.requests.find((r) => r.method === "PUT" && r.path === "/permissions/preset")?.body).toEqual({ preset: "standard" });
+    // The flat list lives in Advanced: searchable, and filterable by decision.
+    fireEvent.click(within(perms).getByRole("button", { name: "Open advanced view" }));
+    expect(within(perms).getByRole("combobox", { name: "Unmatched actions" })).toHaveProperty("value", "ask");
+    const total = within(perms).getByTestId("rules").querySelectorAll("[data-rule]").length;
+    fireEvent.change(within(perms).getByRole("searchbox", { name: "Search rules" }), { target: { value: "ssh" } });
+    const found = within(perms).getByTestId("rules").querySelectorAll("[data-rule]");
+    expect(found.length).toBeGreaterThan(0);
+    expect(found.length).toBeLessThan(total);
+    fireEvent.change(within(perms).getByRole("combobox", { name: "Decision filter" }), { target: { value: "allow" } });
+    expect(within(perms).getByTestId("rules").querySelectorAll("[data-rule]").length).toBe(0);
+    fireEvent.click(within(perms).getByRole("button", { name: "Clear" }));
+    expect(within(perms).getByTestId("rules").querySelectorAll("[data-rule]").length).toBe(total);
+    // Git & push holds the push rules and the force-flag matcher, not the file rules.
+    fireEvent.change(within(perms).getByRole("combobox", { name: "Capability" }), { target: { value: "git" } });
+    const ids = [...within(perms).getByTestId("rules").querySelectorAll("[data-rule]")].map((e) => e.getAttribute("data-rule"));
+    expect(ids).toContain("d-git-force");
+    expect(ids).toContain("d-push-default");
+    expect(ids).toContain("u-git-commit");
+    expect(ids).not.toContain("d-ssh");
+    fireEvent.change(within(perms).getByRole("combobox", { name: "Capability" }), { target: { value: "shell" } });
+    const shellIds = [...within(perms).getByTestId("rules").querySelectorAll("[data-rule]")].map((e) => e.getAttribute("data-rule"));
+    expect(shellIds).not.toContain("u-git-commit");
+    expect(shellIds).not.toContain("d-git-force");
+    fireEvent.click(within(perms).getByRole("button", { name: "Clear" }));
+    // A preset's deny is removable like any rule, and Undo adds it back.
+    const row = () => within(perms).getByTestId("rules").querySelector<HTMLElement>('[data-rule="d-ssh"]');
+    fireEvent.click(within(row()!).getByRole("button", { name: "Remove Read files rule" }));
+    await waitFor(() => expect(row()).toBeNull());
+    fireEvent.click(within(perms).getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(daemon.data.policy.rules.some((r) => r.match === "~/.ssh*" && r.decision === "deny")).toBe(true));
+    expect(posts(daemon).find((r) => r.path === "/permissions/rules")?.body).toEqual({ kind: "read", match: "~/.ssh*", match_type: "glob", decision: "deny" });
+    fireEvent.change(within(perms).getByRole("combobox", { name: "Unmatched actions" }), { target: { value: "deny" } });
+    await waitFor(() => expect(daemon.data.policy.unmatched).toBe("deny"));
+    stop();
+  });
+
+  it("permissions: a rule opens in a three-step editor, saves its limits, and a new rule that disagrees with one is checked and auto-resolved", async () => {
+    const npm = { id: "u-npm", kind: "bash", match: "npm ", match_type: "prefix", decision: "allow", source: "user", created: 1, describe: "bash prefix 'npm '", exclusions: [] };
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), npm], saved: [], prompts: {} } }, undefined, undefined, undefined, "d-push-default");
+    // Opened for a rule (the Inbox's "Open the deny rule"): its editor, over the Advanced list.
+    const editor = await screen.findByTestId("rule-editor");
+    expect(within(editor).getByRole("combobox", { name: "Action" })).toHaveProperty("value", "push");
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Remember approvals for" }), { target: { value: "time" } });
+    fireEvent.change(within(editor).getByRole("spinbutton", { name: "Longest approval" }), { target: { value: "15" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save rule" }));
+    await waitFor(() => expect(daemon.data.policy.rules.find((r) => r.id === "d-push-default")?.limits).toEqual({ life: "time", minutes: 15, max_scope: "all" }));
+    expect(screen.queryByTestId("rule-editor")).toBeNull();
+    // A new deny on a command an allow rule covers: the save stops at the conflict; auto-resolve keeps the deny and
+    // excepts the command from the allow.
+    fireEvent.click(screen.getByRole("button", { name: "+ Add rule" }));
+    const add = screen.getByTestId("rule-editor");
+    fireEvent.change(within(add).getByRole("textbox", { name: "Target" }), { target: { value: "npm publish" } });
+    fireEvent.change(within(add).getByRole("combobox", { name: "Decision" }), { target: { value: "deny" } });
+    fireEvent.click(within(add).getByRole("button", { name: "Save rule" }));
+    const review = within(add).getByTestId("conflict-review");
+    expect(review.textContent).toContain("Until resolved: Deny wins on the shared requests.");
+    expect(daemon.data.policy.rules.some((r) => r.match === "npm publish")).toBe(false);
+    fireEvent.click(within(review).getByRole("button", { name: "Auto-resolve" }));
+    await waitFor(() => expect(daemon.data.policy.rules.find((r) => r.id === "u-npm")?.exclusions).toEqual([{ kind: "bash", match: "npm publish", match_type: "exact", describe: "bash exact 'npm publish'" }]));
+    expect(daemon.data.policy.rules.find((r) => r.match === "npm publish")?.decision).toBe("deny");
+    stop();
+  });
+
+  it("permissions: a saved action moves along its scope ladder with a duration, is deleted with undo, and shows in Activity", async () => {
+    const saved = { id: "s9", kind: "write", pattern: "src/auth/login.ts", decision: "allow", scope: "exact", life: "forever", created: 1_700_000_000, note: "This file only · src/auth/login.ts" };
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [saved], prompts: {} } });
+    fireEvent.click(await screen.findByRole("button", { name: "Manage saved actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit Write files saved action" }));
+    const editor = screen.getByTestId("saved-editor");
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Scope" }), { target: { value: "general" } });
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Lasts" }), { target: { value: "time" } });
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Saved action duration unit" }), { target: { value: "hours" } });
+    fireEvent.change(within(editor).getByRole("spinbutton", { name: "Saved action duration" }), { target: { value: "2" } });
+    expect(within(editor).getByTestId("saved-summary").textContent).toBe("Allow without asking · Write files · Everything under src/** · 2 hours");
+    fireEvent.click(within(editor).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(daemon.data.policy.saved[0]).toMatchObject({ pattern: "src/**", scope: "general", life: "time", minutes: 120 }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete Write files saved action" }));
+    await waitFor(() => expect(daemon.data.policy.saved).toHaveLength(0));
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(daemon.data.policy.saved).toMatchObject([{ kind: "write", pattern: "src/**", life: "time", minutes: 120 }]));
+    fireEvent.click(screen.getByRole("button", { name: "← Back to permissions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Activity" }));
+    expect(screen.getByTestId("activity").textContent).toContain("Saved action deleted");
+    stop();
+  });
+
+  it("providers: each row says how it connects, an API key with its health (Test, Replace, Remove, rejected naming only the agents its credentials stopped), a cloud with its login (Renew login), Change method saving Sign in over auto, and an Import for a key in the shell", async () => {
+    const now = Date.now() / 1000;
+    const failed = (id: string) => ({ ...root.agents![0], id, provider: "claude", status: "failed" });
+    const { daemon, stop } = setup({
+      providers: freshProviders({ claude: { path: "/opt/homebrew/bin/claude", version: "2.1.0" }, opencode: { path: "/home/u/.opencode/bin/opencode", version: "1.2.8" } }),
+      connections: {
+        // Two Claude agents failed, one of them on its credentials: only that one is the key's.
+        claude: { method: "api_key", stopped_agents: [{ id: "a1", name: "fix-login", profile: "developer" }] },
+        opencode: { method: "cloud", cloud: "vertex", settings: { GOOGLE_CLOUD_PROJECT: "my-project", VERTEX_LOCATION: "us-central1" }, login: { valid: true, expired: false, expires_at: now + 40 * 60 + 30 } },
+      },
+      config: { user: {}, repo: {}, local: {}, keys: [{ name: "ANTHROPIC_API_KEY", set: true, last4: "WXYZ", status: "verified", checked_at: now - 2 * 3600 - 60 }] },
+      workspaces: [{ ...root, agents: [failed("a1"), failed("a2")] }],
+    });
+    daemon.shellKeys.add("GEMINI_API_KEY");
+    const health = (p: string) => within(screen.getByTestId(`provider-${p}`)).getByTestId("provider-health");
+    const claude = await screen.findByTestId("provider-claude");
+    expect(screen.queryByRole("button", { name: "API keys (optional, for advanced setups)" })).toBeNull();
+
+    const puts = () => daemon.requests.filter((r) => r.method === "PUT" && r.path === "/providers/claude/connection").map((r) => (r.body as { method: string }).method);
+
+    // API key: its last four, verified.
+    await waitFor(() => expect(within(claude).getByTestId("provider-method").textContent).toContain("WXYZ"));
+    await waitFor(() => expect(health("claude").getAttribute("data-tone")).toBe("pass"));
+    // Test: Anthropic refuses it now: the fail tone, naming the one agent its credentials stopped.
+    daemon.rejectedKeys.add("ANTHROPIC_API_KEY");
+    fireEvent.click(within(claude).getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(health("claude").getAttribute("data-tone")).toBe("fail"));
+    expect(health("claude").getAttribute("data-stopped")).toBe("1");
+    expect(health("claude").textContent).toContain("fix-login");
+    // Replace: one editor at a time, so opening it closes Change method.
+    daemon.rejectedKeys.clear();
+    fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
+    fireEvent.click(within(claude).getByRole("button", { name: "Replace" }));
+    expect(within(claude).queryByTestId("connect-method")).toBeNull();
+    // A fresh key pasted in place; while its check is pending Change method can't open (a Sign in there would be
+    // overwritten by this save's method write).
+    const key = within(claude).getByLabelText("Paste your key") as HTMLInputElement;
+    expect(key.type).toBe("password");
+    fireEvent.change(key, { target: { value: "sk-ant-api03-new-k7Qa" } });
+    daemon.holdKeys = true;
+    fireEvent.click(within(claude).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(claude).getByRole("button", { name: "Change method ▾" })).toHaveProperty("disabled", true));
+    fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
+    expect(within(claude).queryByTestId("connect-method")).toBeNull();
+    daemon.holdKeys = false;
+    daemon.releaseKeys();
+    await waitFor(() => expect(within(screen.getByTestId("provider-claude")).getByTestId("provider-method").textContent).toContain("k7Qa"));
+    expect(health("claude").getAttribute("data-tone")).toBe("pass");
+    expect(screen.queryByDisplayValue("sk-ant-api03-new-k7Qa")).toBeNull();
+    // Remove: the key and the method go; the row is on auto.
+    fireEvent.click(within(claude).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(screen.getByTestId("provider-claude").getAttribute("data-method")).toBe("auto"));
+    expect(daemon.requests.filter((r) => r.method === "DELETE").map((r) => r.path)).toEqual(["/keys/ANTHROPIC_API_KEY"]);
+    expect(puts()).toEqual(["api_key", "auto"]);
+    // Change method on auto: nothing is claimed; Sign in is saved at once.
+    fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
+    expect(within(claude).getByTestId("connect-method").getAttribute("data-method")).toBe("");
+    fireEvent.click(within(claude).getByRole("radio", { name: "Sign in" }));
+    await waitFor(() => expect(screen.getByTestId("provider-claude").getAttribute("data-method")).toBe("sign_in"));
+    expect(puts()).toEqual(["api_key", "auto", "sign_in"]);
+    // And back to an API key, chosen and pasted in the row; while its check is pending, nothing else can be chosen or closed.
+    fireEvent.click(within(claude).getByRole("button", { name: "Change method ▾" }));
+    fireEvent.click(within(claude).getByRole("radio", { name: "API key" }));
+    fireEvent.change(within(claude).getByLabelText("Paste your key"), { target: { value: "sk-ant-api03-again-Zz99" } });
+    daemon.holdKeys = true;
+    fireEvent.click(within(claude).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(claude).getByRole("radio", { name: "Sign in" })).toHaveProperty("disabled", true));
+    expect(within(claude).getByRole("button", { name: "Change method ▴" })).toHaveProperty("disabled", true);
+    daemon.holdKeys = false;
+    daemon.releaseKeys();
+    await waitFor(() => expect(screen.getByTestId("provider-claude").getAttribute("data-method")).toBe("api_key"));
+    expect(within(screen.getByTestId("provider-claude")).getByTestId("provider-method").textContent).toContain("Zz99");
+    expect(within(claude).queryByTestId("connect-method")).toBeNull();
+
+    // Your cloud: the route and its settings, the login near its end, and Renew login runs it again.
+    const opencode = screen.getByTestId("provider-opencode");
+    expect(within(opencode).getByTestId("provider-method").textContent).toContain("my-project");
+    expect(health("opencode").getAttribute("data-tone")).toBe("sap");
+    fireEvent.click(within(opencode).getByRole("button", { name: "Renew login" }));
+    await waitFor(() => expect(daemon.cloudSignIns).toEqual(["opencode"]));
+    daemon.completeCloudSignIn();
+    await waitFor(() => expect(health("opencode").getAttribute("data-tone")).toBe("pass"));
+
+    // A key the shell has and brindle doesn't: offered, and imported on request.
+    fireEvent.click(within(await screen.findByTestId("key-import-GEMINI_API_KEY")).getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(screen.queryByTestId("key-import-GEMINI_API_KEY")).toBeNull());
+    expect(posts(daemon).map((r) => r.path)).toContain("/keys/GEMINI_API_KEY/import");
     expect(screen.queryByTestId("terminal")).toBeNull();
+    stop();
+  });
+
+  it("providers: a key on an auto row stays manageable, an imported one too, OpenCode's controls follow its model provider's own key, and keys no provider reads keep a row", async () => {
+    const stored = (name: string, last4: string) => ({ name, set: true, last4, status: "verified" as const, checked_at: Date.now() / 1000 });
+    const { daemon, stop } = setup({
+      providers: freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" }, opencode: { path: "/home/u/.opencode/bin/opencode", version: "1.2.8" }, antigravity: { path: "/home/u/.local/bin/agy", version: "1.3.0" } }),
+      connections: { opencode: { method: "api_key" } },
+      config: { user: {}, repo: {}, local: {}, keys: [stored("OPENAI_API_KEY", "1111"), stored("OPENROUTER_API_KEY", "2222"), stored("ANTHROPIC_API_KEY", "3333"), stored("REVIEW_KEY", "4444")] },
+    });
+    daemon.shellKeys.add("GEMINI_API_KEY");
+    const deletes = () => daemon.requests.filter((r) => r.method === "DELETE").map((r) => r.path);
+
+    // Codex left on auto with a key stored: the row says auto, and the key keeps Test and Remove; removing it leaves the method alone.
+    const codex = await screen.findByTestId("provider-codex");
+    await waitFor(() => expect(within(codex).getByTestId("provider-auto")).toBeTruthy());
+    await waitFor(() => expect(within(codex).getByTestId("provider-state").textContent).toContain("1111"));
+    fireEvent.click(within(codex).getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(posts(daemon).map((r) => r.path)).toContain("/keys/OPENAI_API_KEY/test"));
+    fireEvent.click(within(codex).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(deletes()).toEqual(["/keys/OPENAI_API_KEY"]));
+    expect(daemon.requests.some((r) => r.method === "PUT" && r.path === "/providers/codex/connection")).toBe(false);
+
+    // OpenCode runs two model providers' keys: an Anthropic key saved through Change method moves the row's
+    // controls onto it, so Test and Remove reach that key, never OpenRouter's.
+    const opencode = screen.getByTestId("provider-opencode");
+    await waitFor(() => expect(within(opencode).getByTestId("provider-method").textContent).toContain("2222"));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Change method ▾" }));
+    fireEvent.change(within(opencode).getByLabelText("Model provider"), { target: { value: "anthropic" } });
+    fireEvent.change(within(opencode).getByLabelText("Paste your key"), { target: { value: "sk-ant-api03-new-5555" } });
+    fireEvent.click(within(opencode).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(within(opencode).getByTestId("provider-method").textContent).toContain("5555"));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Test" }));
+    await waitFor(() => expect(posts(daemon).map((r) => r.path)).toContain("/keys/ANTHROPIC_API_KEY/test"));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(deletes()).toEqual(["/keys/OPENAI_API_KEY", "/keys/ANTHROPIC_API_KEY"]));
+
+    // A key imported from the shell lands on its provider's auto row, with its controls.
+    fireEvent.click(within(await screen.findByTestId("key-import-GEMINI_API_KEY")).getByRole("button", { name: "Import" }));
+    const agy = screen.getByTestId("provider-antigravity");
+    await waitFor(() => expect(within(agy).getByRole("button", { name: "Test" })).toBeTruthy());
+
+    // A profile's own key, read by no provider: listed, and removable.
+    const other = within(screen.getByTestId("other-keys")).getByTestId("other-key-REVIEW_KEY");
+    expect(other.getAttribute("data-set")).toBe("true");
+    fireEvent.click(within(other).getByRole("button", { name: "Remove" }));
+    await waitFor(() => expect(deletes()).toContain("/keys/REVIEW_KEY"));
     stop();
   });
 
@@ -219,24 +439,33 @@ describe("settings screen", () => {
     const section = await screen.findByTestId("providers");
     expect(within(section).getByRole("heading", { name: "Providers" })).toBeTruthy();
     const claude = await within(section).findByTestId("provider-claude");
+    const details = within(claude).getByRole("button", { name: "Connection details" });
+    expect(details.getAttribute("aria-expanded")).toBe("false");
+    expect(within(claude).queryByRole("button", { name: "Remove Claude Code from brindle" })).toBeNull();
+    fireEvent.click(details);
+    expect(details.getAttribute("aria-expanded")).toBe("true");
     expect([...section.querySelectorAll("[data-provider]")].map((r) => r.getAttribute("data-provider"))).toEqual(["claude", "codex", "opencode", "antigravity"]);
     expect(claude.getAttribute("data-state")).toBe("signed_in");
     expect(claude.textContent).toContain("Found at /opt/homebrew/bin/claude · 2.1.0");
     expect(claude.textContent).toContain("brindle keeps its own copy of Claude Code's settings.");
-    expect(within(claude).getByTestId("provider-state").textContent).toBe("Signed in");
     expect(within(claude).queryByRole("button", { name: /Sign in/ })).toBeNull();
     const codex = screen.getByTestId("provider-codex");
     expect(codex.getAttribute("data-state")).toBe("signed_out");
     expect(within(codex).getByTestId("provider-state").textContent).toBe("Not signed in");
     expect(within(codex).getByRole("button", { name: "Sign in to Codex" })).toBeTruthy();
+    fireEvent.click(within(codex).getByRole("button", { name: "Connection details" }));
     const opencode = screen.getByTestId("provider-opencode");
     expect(opencode.getAttribute("data-state")).toBe("not_installed");
+    fireEvent.click(within(opencode).getByRole("button", { name: "Connection details" }));
     expect(opencode.textContent).toContain("Connect runs Anomaly's official installer (opencode.ai/install), as-is.");
-    expect(within(opencode).getByRole("button", { name: "Connect OpenCode" })).toBeTruthy();
+    expect(within(opencode).getByRole("button", { name: "Install OpenCode" })).toBeTruthy();
     expect(within(opencode).queryByRole("button", { name: /Remove/ })).toBeNull();
     // Each found CLI can be taken out of brindle; one not installed can't.
     expect(within(claude).getByRole("button", { name: "Remove Claude Code from brindle" })).toBeTruthy();
     expect(within(codex).getByRole("button", { name: "Remove Codex from brindle" })).toBeTruthy();
+    fireEvent.click(details);
+    expect(details.getAttribute("aria-expanded")).toBe("false");
+    expect(within(claude).queryByRole("button", { name: "Remove Claude Code from brindle" })).toBeNull();
     // The CLI keeps itself up to date: nothing here offers or reports an update.
     expect(within(section).queryByRole("button", { name: /update/i })).toBeNull();
     expect(section.textContent).not.toMatch(/updated|update now|is ready/i);
@@ -249,6 +478,7 @@ describe("settings screen", () => {
     const { stop } = setup({ providers: freshProviders({ antigravity: { path: "/home/u/.local/bin/agy", version: "1.3.0" } }) });
     const agy = await screen.findByTestId("provider-antigravity");
     await waitFor(() => expect(agy.getAttribute("data-state")).toBe("signed_in"));
+    fireEvent.click(within(agy).getByRole("button", { name: "Connection details" }));
     expect(agy.textContent).toContain("Antigravity shares its settings with yours, in ~/.gemini.");
     expect(agy.textContent).not.toContain("own copy");
     stop();
@@ -259,17 +489,18 @@ describe("settings screen", () => {
     const opencode = await screen.findByTestId("provider-opencode");
     await waitFor(() => expect(opencode.getAttribute("data-state")).toBe("not_installed"));
     daemon.deferInstall = true;
-    fireEvent.click(within(opencode).getByRole("button", { name: "Connect OpenCode" }));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Install OpenCode" }));
     await waitFor(() => expect(posts(daemon).at(-1)).toEqual({ method: "POST", path: "/providers/opencode/install", query: {}, body: {} }));
     const card = await within(opencode).findByTestId("provider-install-opencode");
     await waitFor(() => expect(within(card).getByTestId("provider-install-opencode-lines").textContent).toContain("Downloading opencode-darwin-arm64.zip"));
     expect(card.getAttribute("data-state")).toBe("running");
-    expect(within(opencode).queryByRole("button", { name: "Connect OpenCode" })).toBeNull();
+    expect(within(opencode).queryByRole("button", { name: "Install OpenCode" })).toBeNull();
     const asked = daemon.requests.filter((r) => r.path === "/providers/installed").length;
     daemon.completeInstall();
     // Done: the rows are read again, and the row says where the installer put it.
     await waitFor(() => expect(screen.getByTestId("provider-opencode").getAttribute("data-state")).toBe("signed_out"));
     expect(daemon.requests.filter((r) => r.path === "/providers/installed").length).toBeGreaterThan(asked);
+    fireEvent.click(within(opencode).getByRole("button", { name: "Connection details" }));
     expect(screen.getByTestId("provider-opencode").textContent).toContain("Found at /home/u/.opencode/bin/opencode · 1.2.8");
     expect(screen.queryByTestId("provider-install-opencode")).toBeNull();
     expect(within(screen.getByTestId("provider-opencode")).getByRole("button", { name: "Sign in to OpenCode" })).toBeTruthy();
@@ -278,7 +509,7 @@ describe("settings screen", () => {
     daemon.deferInstall = false;
     daemon.installFails.antigravity = 1;
     const agy = screen.getByTestId("provider-antigravity");
-    fireEvent.click(within(agy).getByRole("button", { name: "Connect Antigravity" }));
+    fireEvent.click(within(agy).getByRole("button", { name: "Install Antigravity" }));
     const failed = await within(agy).findByTestId("provider-install-antigravity-failed");
     expect(failed.textContent).toContain("Install failed.");
     expect(failed.textContent).toContain("Connection reset by peer");
@@ -294,6 +525,8 @@ describe("settings screen", () => {
     const { daemon, stop } = setup();
     const codex = await screen.findByTestId("provider-codex");
     await waitFor(() => expect(codex.getAttribute("data-state")).toBe("signed_out"));
+    // The engine reads it not ready, wanting a sign-in.
+    expect((await within(codex).findByTestId("provider-ready")).getAttribute("data-action")).toBe("sign_in");
     fireEvent.click(within(codex).getByRole("button", { name: "Sign in to Codex" }));
     const flow = await within(codex).findByTestId("sign-in-flow");
     expect(posts(daemon).at(-1)).toEqual({ method: "POST", path: "/providers/codex/login", query: {}, body: {} });
@@ -307,12 +540,33 @@ describe("settings screen", () => {
     await waitFor(() => expect(flow.getAttribute("data-phase")).toBe("done"));
     expect(flow.textContent).toContain("Signed in to Codex ✓");
     expect(screen.getByTestId("provider-codex").getAttribute("data-state")).toBe("signed_in");
+    // Its readiness is read again with the rows, without reopening the page: nothing left to fix.
+    await waitFor(() => expect(within(screen.getByTestId("provider-codex")).queryByTestId("provider-ready")).toBeNull());
+    stop();
+  });
+
+  it("providers: Sign out on a signed-in row signs brindle's copy out and the row reads Not signed in", async () => {
+    const { daemon, stop } = setup();
+    const codex = await screen.findByTestId("provider-codex");
+    await waitFor(() => expect(codex.getAttribute("data-state")).toBe("signed_out"));
+    expect(within(codex).queryByRole("button", { name: "Sign out of Codex" })).toBeNull();
+    fireEvent.click(within(codex).getByRole("button", { name: "Sign in to Codex" }));
+    const flow = await within(codex).findByTestId("sign-in-flow");
+    await waitFor(() => expect(flow.getAttribute("data-phase")).toBe("waiting"));
+    daemon.signInProvider("codex");
+    await waitFor(() => expect(screen.getByTestId("provider-codex").getAttribute("data-state")).toBe("signed_in"));
+    fireEvent.click(within(flow).getByRole("button", { name: "Close" }));
+    fireEvent.click(await within(screen.getByTestId("provider-codex")).findByRole("button", { name: "Sign out of Codex" }));
+    await waitFor(() => expect(screen.getByTestId("provider-codex").getAttribute("data-state")).toBe("signed_out"));
+    expect(posts(daemon).at(-1)).toEqual({ method: "POST", path: "/providers/codex/logout", query: {}, body: {} });
+    expect(within(screen.getByTestId("provider-codex")).getByTestId("provider-state").textContent).toBe("Not signed in");
     stop();
   });
 
   it("providers: Remove from brindle turns the CLI off without uninstalling it, and Connect turns the copy still found back on, no installer run", async () => {
     const { daemon, failing, stop } = setup();
     const codex = await screen.findByTestId("provider-codex");
+    fireEvent.click(within(codex).getByRole("button", { name: "Connection details" }));
     await waitFor(() => expect(codex.getAttribute("data-state")).toBe("signed_out"));
     fireEvent.click(within(codex).getByRole("button", { name: "Remove Codex from brindle" }));
     await waitFor(() => expect(screen.getByTestId("provider-codex").getAttribute("data-state")).toBe("off"));
@@ -347,12 +601,12 @@ describe("settings screen", () => {
     const opencode = await screen.findByTestId("provider-opencode");
     await waitFor(() => expect(opencode.getAttribute("data-state")).toBe("not_installed"));
     daemon.installDetectFails = 2;
-    fireEvent.click(within(opencode).getByRole("button", { name: "Connect OpenCode" }));
+    fireEvent.click(within(opencode).getByRole("button", { name: "Install OpenCode" }));
     // The installer finished; the look after it failed. The stale row offers no second install.
     const detect = await screen.findByTestId("provider-install-opencode-detect");
     await waitFor(() => expect(detect.textContent).toContain("OpenCode is installed, but brindle couldn't look for it again"));
     expect(screen.getByTestId("provider-install-opencode").getAttribute("data-state")).toBe("done");
-    expect(within(screen.getByTestId("provider-opencode")).queryByRole("button", { name: "Connect OpenCode" })).toBeNull();
+    expect(within(screen.getByTestId("provider-opencode")).queryByRole("button", { name: "Install OpenCode" })).toBeNull();
     expect(screen.getByTestId("providers-refresh-error").textContent).toContain("Couldn't look for the providers again");
     // Looking again fails once more, then finds it: the row reads it, the card goes, one install all along.
     const looks = () => daemon.requests.filter((r) => r.path === "/providers/installed").length;
@@ -366,6 +620,7 @@ describe("settings screen", () => {
     await waitFor(() => expect(screen.getByTestId("provider-opencode").getAttribute("data-state")).toBe("signed_out"));
     expect(screen.queryByTestId("provider-install-opencode")).toBeNull();
     expect(screen.queryByTestId("providers-refresh-error")).toBeNull();
+    fireEvent.click(within(opencode).getByRole("button", { name: "Connection details" }));
     expect(screen.getByTestId("provider-opencode").textContent).toContain("Found at /home/u/.opencode/bin/opencode · 1.2.8");
     expect(posts(daemon).filter((r) => r.path === "/providers/opencode/install")).toHaveLength(1);
     expect(daemon.installs).toEqual(["opencode"]);
@@ -400,17 +655,29 @@ describe("settings screen", () => {
     daemon.deferUpgrade = true;
     daemon.upgradeFails = true;
     fireEvent.click(screen.getByRole("button", { name: "Update brindle" }));
-    const card = await screen.findByTestId("upgrade-card");
+    const toggleDetails = () => fireEvent.click(within(screen.getByTestId("engine-health-summary")).getByRole("button", { name: /Details|Less/ }));
+    let card = await screen.findByTestId("upgrade-card");
     expect(posts(daemon).at(-1)).toEqual({ method: "POST", path: "/engine/upgrade", query: {}, body: {} });
     await waitFor(() => expect(card.getAttribute("data-state")).toBe("running"));
     expect(screen.queryByRole("button", { name: "Update brindle" })).toBeNull();
+    // Details closed mid-update: the summary alone carries the progress and then the failure.
+    toggleDetails();
+    expect(screen.queryByTestId("upgrade-card")).toBeNull();
+    expect(screen.getByTestId("update-status").textContent).toBe("Updating…");
     daemon.completeUpgrade();
-    await waitFor(() => expect(card.getAttribute("data-state")).toBe("failed"));
+    await waitFor(() => expect(screen.getByTestId("update-status").textContent).toContain("Update failed"));
+    expect(screen.queryByTestId("upgrade-card")).toBeNull();
+    expect(screen.queryByTestId("upgrade-log")).toBeNull();
+    // Reopened, the card still holds the failure and the log.
+    toggleDetails();
+    card = screen.getByTestId("upgrade-card");
+    expect(card.getAttribute("data-state")).toBe("failed");
     expect(card.textContent).toContain("The update didn't finish: uv tool upgrade brindle exited 1");
     expect(screen.getByTestId("upgrade-log").textContent).toContain("network unreachable");
     expect(screen.queryByTestId("terminal")).toBeNull();
     fireEvent.click(within(card).getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByTestId("upgrade-card")).toBeNull();
+    expect(screen.queryByTestId("update-status")).toBeNull();
     // Done, the engine and the doctor are read again: the new version, nothing left to update.
     daemon.upgradeFails = false;
     fireEvent.click(screen.getByRole("button", { name: "Update brindle" }));
@@ -427,6 +694,23 @@ describe("settings screen", () => {
     expect(within(cli).getByRole("button", { name: "Install command-line tool" })).toHaveProperty("disabled", true);
     expect(cli.textContent).toContain("Not in this build yet");
     stop();
+  });
+
+  it("keeps Engine & health to one summary line with Details closed when healthy, and opens them when a check fails", async () => {
+    const healthy = setup({ doctor: [{ name: "git", level: "ok", detail: "git 2.45" }] });
+    const summary = await screen.findByTestId("engine-health-summary");
+    await waitFor(() => expect(summary.textContent).toContain("Healthy"));
+    expect(summary.textContent).toContain("brindle 0.5.0");
+    expect(summary.textContent).not.toContain("CLI");
+    expect(screen.queryByTestId("engine-details")).toBeNull();
+    fireEvent.click(within(summary).getByRole("button", { name: /Details/ }));
+    expect(screen.getByTestId("engine-details")).toBeTruthy();
+    healthy.stop();
+    cleanup();
+    const bad = setup();
+    await screen.findByTestId("engine-details");
+    expect(screen.getByTestId("health-status").getAttribute("data-bad")).toBe("true");
+    bad.stop();
   });
 
   it("installs the command-line tool through the shell when it offers to, and says where the link went on the row", async () => {
@@ -467,15 +751,25 @@ describe("settings screen", () => {
     await flush();
     expect(screen.queryByTestId("debug-logging")).toBeNull();
     expect(screen.queryByRole("switch", { name: "Debug logging" })).toBeNull();
+    expect(screen.queryByTestId("staff-only")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Staff only" })).toBeNull();
     stop();
   });
 
-  it("gives staff one debug logging switch, which turns it on with PUT /debug", async () => {
-    const { daemon, stop } = setup({ debug: { staff: true, enabled: false } });
-    const section = await screen.findByTestId("debug-logging");
+  it("gives staff one Staff only section holding debug logging, app update and the release-branch rows, which turns debug logging on with PUT /debug", async () => {
+    const updater = { install: vi.fn(async () => "0.1.0-rc.8"), restart: vi.fn(async () => {}) };
+    const { daemon, stop } = setup({ debug: { staff: true, enabled: false } }, undefined, updater, releaseBuildUpdater, undefined, async () => ({ version: "0.2.4+release.42.0123456789ab", files: [] }));
+    // The staff section holds the staff controls, last before About, and is in the nav.
+    const staffOnly = await screen.findByTestId("staff-only");
+    await within(staffOnly).findByTestId("return-to-stable-row");
+    expect(within(staffOnly).getByTestId("app-update-row")).toBeTruthy();
+    expect(within(staffOnly).getByTestId("release-build-row")).toBeTruthy();
+    expect(staffOnly.nextElementSibling?.id).toBe("about");
+    expect(screen.getByRole("button", { name: "Staff only" })).toBeTruthy();
+    const section = within(staffOnly).getByTestId("debug-logging");
     expect(section.textContent).toContain("upload to brindle");
     const toggle = within(section).getByRole("switch", { name: "Debug logging" });
-    expect(within(section).getAllByRole("switch")).toHaveLength(1);
+    expect(within(staffOnly).getAllByRole("switch")).toHaveLength(1);
     expect(toggle.getAttribute("aria-checked")).toBe("false");
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
@@ -486,14 +780,76 @@ describe("settings screen", () => {
 
   it("staff update: hides the app's Update from anyone the daemon doesn't call staff", async () => {
     const updater = { install: vi.fn(async () => "0.1.0-rc.8"), restart: vi.fn(async () => {}) };
-    const { daemon, stop } = setup({ debug: { staff: false, enabled: false } }, undefined, updater);
+    // Even on a release-branch build (which makes Return to stable eligible by version), a non-staff account sees nothing.
+    const { daemon, stop } = setup({ debug: { staff: false, enabled: false } }, undefined, updater, releaseBuildUpdater, undefined, async () => ({ version: "0.2.4+release.42.0123456789ab", files: [] }));
     await screen.findByTestId("engine");
     await waitFor(() => expect(daemon.requests.some((r) => r.method === "GET" && r.path === "/debug")).toBe(true));
     await flush();
     expect(screen.queryByTestId("app-update")).toBeNull();
     expect(screen.queryByTestId("app-update-row")).toBeNull();
+    expect(screen.queryByTestId("release-build-row")).toBeNull();
+    expect(screen.queryByTestId("return-to-stable-row")).toBeNull();
     expect(screen.queryByText("Update the app")).toBeNull();
     expect(updater.install).not.toHaveBeenCalled();
+    expect(ipc.calls).toEqual([]);
+    stop();
+  });
+
+  it("staff update: installs the release branch's latest build through the shell, following its download, then restarts into it", async () => {
+    const build = "0.1.0-rc.9+release.42.fedcba987654";
+    const { stop } = setup({ debug: { staff: true, enabled: false } }, undefined, undefined, releaseBuildUpdater);
+    const row = await within(await screen.findByTestId("app-update")).findByTestId("release-build-row");
+    fireEvent.click(within(row).getByRole("button", { name: "Install" }));
+    // The shell's command, given only the channel it reports on: no feed, no version.
+    const [{ cmd, args }] = ipc.calls;
+    expect(cmd).toBe("app_release_build_install");
+    expect(Object.keys(args)).toEqual(["onProgress"]);
+    const progress = (args.onProgress as InstanceType<typeof ipc.Channel>).onmessage!;
+    progress({ kind: "found", version: build });
+    progress({ kind: "downloading", downloaded: 3_000_000, total: 12_000_000 });
+    const bar = await within(row).findByRole("progressbar");
+    expect([bar.getAttribute("value"), bar.getAttribute("max")]).toEqual(["3000000", "12000000"]);
+    progress({ kind: "installing" });
+    await waitFor(() => expect(within(row).queryByRole("progressbar")).toBeNull());
+    ipc.answers[0](build);
+    const restart = await within(row).findByRole("button", { name: "Restart" });
+    expect(row.textContent).toContain(build);
+    fireEvent.click(restart);
+    await waitFor(() => expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_release_build_install", "app_restart"]));
+    stop();
+  });
+
+  it("staff update: Return to stable shows only on a release-branch build, and installs the stable feed after a confirmation", async () => {
+    const about = (version: string) => async () => ({ version, files: [] });
+    const plain = setup({ debug: { staff: true, enabled: false } }, undefined, undefined, releaseBuildUpdater, undefined, about("0.2.4"));
+    await within(await screen.findByTestId("app-update")).findByTestId("release-build-row");
+    await flush();
+    expect(screen.queryByTestId("return-to-stable-row")).toBeNull();
+    plain.stop();
+    cleanup();
+
+    const { stop } = setup({ debug: { staff: true, enabled: false } }, undefined, undefined, releaseBuildUpdater, undefined, about("0.2.4+release.42.0123456789ab"));
+    const row = await screen.findByTestId("return-to-stable-row");
+    fireEvent.click(within(row).getByRole("button", { name: "Return to stable" }));
+    // The shell is asked which version first; nothing installs until it is confirmed, and Cancel installs nothing.
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check"]);
+    // Nothing to return to at first (the stable is older); a later check finds one, and that version is what is shown to confirm.
+    ipc.answers[0](null);
+    fireEvent.click(await within(row).findByRole("button", { name: "Return to stable" }));
+    ipc.answers[1]("0.2.4");
+    await within(row).findByRole("button", { name: "Confirm" });
+    expect(row.textContent).toContain("0.2.4");
+    fireEvent.click(within(row).getByRole("button", { name: "Cancel" }));
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check", "app_stable_check"]);
+    fireEvent.click(within(row).getByRole("button", { name: "Return to stable" }));
+    ipc.answers[2]("0.2.4");
+    fireEvent.click(await within(row).findByRole("button", { name: "Confirm" }));
+    // The install is pinned to the version the person confirmed.
+    expect(ipc.calls.map((c) => c.cmd)).toEqual(["app_stable_check", "app_stable_check", "app_stable_check", "app_return_to_stable"]);
+    expect(ipc.calls[3].args.version).toBe("0.2.4");
+    ipc.answers[3]("0.2.4");
+    fireEvent.click(await within(row).findByRole("button", { name: "Restart" }));
+    await waitFor(() => expect(ipc.calls.at(-1)?.cmd).toBe("app_restart"));
     stop();
   });
 

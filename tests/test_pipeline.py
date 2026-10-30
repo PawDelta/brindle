@@ -25,7 +25,8 @@ def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, rep
     ws = workspaces.create(db, str(repo), "feat").workspace
     add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
     add(db, ws, "rev0", "review", "reviewer-gemini", parent="boss")
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)  # supervisor stays busy
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     started = []
@@ -282,25 +283,85 @@ def test_issue190_the_check_run_before_a_review_outlives_the_reporting_worker(db
             os.kill(helper, signal.SIGKILL)
 
 
-@pytest.mark.parametrize("check_run", ["gone", "at work"])
-def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, repo, monkeypatch, check_run):
+@pytest.mark.parametrize("check_run, delay", [("gone", 90), ("at work", 90), ("launching", 15)])
+def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, repo, monkeypatch, check_run, delay):
     """#186: a reported branch sat with no check run, no reviewer and no
     verdict until the 30-minute reminder asked the supervisor to call
     request_review, which then always worked. The sweep starts it again
     itself, once per report, and never while its check run is still at work
     (queued for a slot, say)."""
-    ws = _reported(db, repo, reviewing_since=time.time() - pipeline.RESTART_REVIEW_AFTER - 60)
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now)
+    ws = _reported(db, repo)
+    (repo / ".brindle" / "config.local.json").write_text(json.dumps({"review_start_delay": delay}))
     launched, told = [], []
     monkeypatch.setattr(agents, "_detach", launched.append)
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: told.append(body))
+    monkeypatch.setattr(agents, "warm_checks", lambda ws_: None)
+    agents.report_result(db, "w1", "done")
+    claim = agents._review_request_file(ws.id, "reviewer")
+    original = claim.read_text()
+    assert len(launched) == 1
+    now += delay - 1
+    cull.note_reported_stuck(db, now, {})
+    assert claim.read_text() == original
+    now += 1
     with contextlib.ExitStack() as stack:
         if check_run == "at work":   # in a process of its own, in production
             stack.enter_context(pipeline.review_run(ws.id))
-        cull.note_reported_stuck(db, time.time(), {})
-        cull.note_reported_stuck(db, time.time(), {})
-    runs = [argv for argv in launched if "_review-after-checks" in argv]
-    assert len(runs) == (1 if check_run == "gone" else 0) and told == []
+            stack.enter_context(gates.marker("review-request", original.splitlines()[0]))
+        cull.note_reported_stuck(db, now, {})
+        if check_run == "launching":
+            assert db.get_agent("w1").review_restarted is None
+            now += agents.LAUNCH_GRACE
+        cull.note_reported_stuck(db, now, {})
+        cull.note_reported_stuck(db, now, {})
+        assert len(launched) == (1 if check_run == "at work" else 2) and told == []
+        active = claim.read_text()
+        agents.report_result(db, "w1", "done again")
+        assert claim.read_text() == active
     assert db.get_agent("w1").pipeline == "reviewing"
+
+
+@pytest.mark.parametrize("session, exits_mid_delivery", [
+    ("sess-w1", False), (None, False),
+    # Alive when the verdict lands, gone by the time send_message delivers.
+    ("sess-w1", True),
+])
+def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_mid_delivery):
+    """Live incident (session-17): a worker that had exited after
+    report_result got a blocker review, and the pipeline handed its branch to
+    the supervisor "after 0 fix round(s)" instead of starting a fix round.
+    The worker is reopened (its own session, else a fresh start on its task)
+    with the findings, and only a branch out of rounds goes to the supervisor."""
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    add(db, ws, "w1", "assign", parent="boss", status="done", result="done", task="Add the None check")
+    db.update_agent("w1", session_ref=session)
+    add(db, ws, "rev", "review", "reviewer", parent="boss")
+    live = []   # w1 answers alive once per entry, then is gone
+    monkeypatch.setattr(agents, "is_alive",
+                        lambda a, panes=None: a.id == "boss" or (a.id == "w1" and bool(live) and live.pop()))
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
+    monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: ref == "sess-w1"))
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, *, prompt, resume, **kw:
+                        launched.append((a.id, resume, prompt)))
+    summary = "- blocker: missing check for None.\nNeeds supervisor action: None."
+    for rounds in (1, 2):
+        db.update_agent("w1", pipeline="reviewing")
+        live[:] = [True] if exits_mid_delivery else []
+        assert pipeline.on_review(db, db.get_agent("rev"), ws, False, summary)
+        worker, resume, prompt = launched[-1]
+        assert (worker, resume) == ("w1", session) and "missing check for None" in prompt
+        assert session or "Add the None check" in prompt
+        assert (db.get_agent("w1").pipeline, db.get_agent("w1").pipeline_rounds) == ("fixing", rounds)
+        assert drain(db) == []
+    db.update_agent("w1", pipeline="reviewing")
+    assert pipeline.on_review(db, db.get_agent("rev"), ws, False, summary)
+    assert len(launched) == 2 and db.get_agent("w1").pipeline is None
+    assert [e["agent_id"] for e in bus.tail(db, kinds=("pipeline.escalated",))] == ["w1"]
 
 
 def test_no_duplicate_reviewer_while_the_first_is_still_starting(db, repo, monkeypatch):
@@ -327,9 +388,35 @@ def test_supervisor_action_negations(summary):
     assert pipeline.has_supervisor_action(summary) is False
 
 
-def test_issue186_review_state_tells_silence_apart(db, repo, monkeypatch):
-    """Where a reported branch is in review shows in list_agents and the sidebar."""
-    from brindle import mcp_server, view, watch
+@pytest.mark.parametrize("case", [None, "old merge", "old verdict", "paused reviewer", "old reviewer", "recorded", "standing"])
+def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypatch, case):
+    """Both list tools and the sidebar expose the branch's actual review stage."""
+    from dataclasses import replace
+
+    from brindle import mcp_server, tasks, view, watch
+    from brindle.db import Workspace
+
+    if case is not None:
+        ws = Workspace("repo/feat", str(tmp_path), "feat", "worktree", "feat", "main",
+                       str(tmp_path), None, "session", time.time())
+        db.add_workspace(ws)
+        monkeypatch.setattr(gates, "head", lambda ws_: "current")
+        add(db, ws, "w1", "assign", result="done", pipeline="reviewing")
+        expected = "waiting for review: nothing is checking or reviewing it"
+        if case == "old merge":
+            db.set_merged(ws.id, "old")
+        elif case in ("paused reviewer", "old reviewer"):
+            add(db, ws, "r1", "review", status="paused" if case == "paused reviewer" else "processing")
+            db.update_agent("r1", review_sha="old" if case == "old reviewer" else "current")
+        else:
+            db.add_review(ws.id, "old" if case == "old verdict" else "current", "r1", False, "fix")
+            if case != "recorded":
+                db.update_agent("w1", pipeline=None)
+            if case == "standing":
+                db.add_review(ws.id, "current", "r2", True, "ok")
+            expected = None if case == "old verdict" else "changes requested at current"
+        assert pipeline.review_state(db, ws) == expected
+        return
 
     (repo / ".brindle").mkdir()
     (repo / ".brindle" / "config.json").write_text(json.dumps({"review": True}))
@@ -339,35 +426,51 @@ def test_issue186_review_state_tells_silence_apart(db, repo, monkeypatch):
     (Path(ws.path) / "new.py").write_text("x = 1\n")
     sh("git add new.py && git commit -qm work", Path(ws.path))
     add(db, ws, "w1", "assign", parent="boss", status="done", result="added new.py")
+    task = tasks.record_started(db, root, db.get_agent("w1"), "developer", "work", "assign",
+                                isolate=True, branch=None, done_when=None, files=None, depends_on=None)
+    other = replace(ws, id=ws.id + "-other", name="other", branch="other")
+    db.add_workspace(other)
+    add(db, other, "w2", "assign", parent="boss", status="done", result="done")
+    other_task = replace(task, id=task.id + "-other", agent_id="w2")
+    db.add_task(other_task)
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     sha = gates.head(ws)[:8]
     assert pipeline.review_state(db, ws) is None
 
+    def state_is(expected):
+        assert pipeline.review_state(db, ws) == expected
+        for render, identifier in ((mcp_server.list_agents, "w1"), (mcp_server.list_tasks, task.id)):
+            [line] = [line for line in render().splitlines() if line.startswith(identifier + " ")]
+            assert f"branch={ws.branch}" in line and line.endswith(" review=" + expected)
+        assert other_task.id not in mcp_server.list_tasks()
+        [other_line] = [line for line in mcp_server.list_agents().splitlines() if line.startswith("w2 ")]
+        assert " review=" not in other_line
+
     db.update_agent("w1", pipeline="reviewing")
     assert "nothing" in pipeline.review_state(db, ws)
     with pipeline.review_run(ws.id):
-        assert pipeline.review_state(db, ws) == "waiting for checks"   # queued for a check slot
+        state_is("waiting for checks")
         with gates.marker("checks-running", ws.id):
-            assert pipeline.review_state(db, ws) == "checks running"
+            state_is("checks running")
     add(db, ws, "rev0", "review", "reviewer", parent="boss", status="processing")
-    assert pipeline.review_state(db, ws) == "reviewer running (rev0)"
-    [line] = [x for x in mcp_server.list_agents().splitlines() if x.startswith("w1 ")]
-    assert "review=reviewer running (rev0)" in line
+    db.update_agent("rev0", review_sha=gates.head(ws))
+    state_is("reviewer running (rev0)")
 
     db.set_status("rev0", "done")
     db.add_review(ws.id, gates.head(ws), "rev0", False, "no")
     db.update_agent("w1", pipeline=None)
-    assert pipeline.review_state(db, ws) == f"changes requested at {sha}"
+    state_is(f"changes requested at {sha}")
     db.add_review(ws.id, gates.head(ws), "rev0", True, "lgtm")
-    assert pipeline.review_state(db, ws) == f"approved at {sha}"
+    state_is(f"approved at {sha}")
     db.update_agent("w1", pipeline="ready")
     with gates.marker("merge-run", ws.id), gates.marker("checks-running", ws.id):
-        assert pipeline.review_state(db, ws) == "approved, merging, checks running"
+        state_is("approved, merging, checks running")
     db.update_agent("w1", pipeline=None)
 
     db.update_agent("w1", merge_failed="check `pytest` failed:\nboom\n" + "x" * 300)
     state = pipeline.review_state(db, ws)
     assert state.startswith("merge failed: check `pytest` failed: boom x") and len(state) < 230
+    state_is(state)
     [entry] = [e for e in view.snapshot(db, ws.repo_root, panes={}) if e["id"] == ws.id]
     assert entry["review_state"] == state
     [w1] = [a for a in entry["agents"] if a["id"] == "w1"]

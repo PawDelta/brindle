@@ -193,8 +193,9 @@ def seeded(db, repo, monkeypatch):
 
     def no_license(**kw):
         raise license.LicenseError("not logged in")
+    current_license = license.current
     monkeypatch.setattr(license, "current", no_license)
-    return {"repo": str(repo), "ws": ws.id}
+    return {"repo": str(repo), "ws": ws.id, "current_license": current_license}
 
 
 @pytest.mark.parametrize("path,check", [
@@ -212,7 +213,7 @@ def seeded(db, repo, monkeypatch):
     ("/v1/profiles", lambda b, s: "developer" in [p["name"] for p in b] and "env" not in b[0]),
     ("/v1/config", lambda b, s: "repo" in b and b["repo"]["default_agent"] == "developer"),
     ("/v1/doctor", lambda b, s: b == [{"level": "ok", "name": "python", "detail": "3.12"}]),
-    ("/v1/account", lambda b, s: b == {"signed_in": False, "name": None, "plan": None, "orgs": []}),
+    ("/v1/account", lambda b, s: b == {"signed_in": False, "name": None, "email": None, "plan": None, "orgs": []}),
     ("/v1/cost", lambda b, s: b["days"] == 30 and b["total"]["dollars"] == 0),
 ], ids=["repos", "sessions", "snapshot", "inbox", "goal", "agent", "agent-locked", "agent-missing", "diff",
         "knowledge-decisions", "knowledge-sources", "profiles", "config", "doctor", "account", "cost"])
@@ -220,6 +221,37 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     code, body = _get(path.format(ws=seeded["ws"]), AUTH, f"repo={seeded['repo']}")
     assert code in (200, 404)
     assert check(body, seeded)
+
+
+def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_home, monkeypatch):
+    from brindle.pro import auth
+    from brindle.pro.account import ProAccount
+
+    ent = license.Entitlement("user", "org", "pro", "active", frozenset(), 1, 0, 9999999999, "key")
+    monkeypatch.setattr(license, "current", lambda **kw: ent)
+    reads = []
+
+    def me(*args):
+        reads.append("me")
+        if len(reads) > 1:
+            raise auth.AuthError("offline", code="transport")
+        return {"name": "Sam Rivera", "email": "sam@example.com"}
+
+    def orgs(*args):
+        reads.append("orgs")
+        raise auth.AuthError("offline", code="transport")
+
+    monkeypatch.setattr(auth, "me", me)
+    monkeypatch.setattr(ProAccount, "orgs", orgs)
+    for _ in range(2):
+        code, body = _get("/v1/account", AUTH)
+        assert code == 200 and (body["name"], body["email"]) == ("Sam Rivera", "sam@example.com")
+    assert reads == ["me", "orgs"]
+    license.clear_cache()
+    for _ in range(2):
+        code, body = _get("/v1/account", AUTH)
+        assert code == 200 and body["signed_in"] and body["name"] is None and body["email"] is None
+    assert reads == ["me", "orgs", "me", "orgs"]
 
 
 def test_usage_lists_every_provider_and_flags_the_near_ones_worst_first(brindle_home, monkeypatch):
@@ -282,12 +314,13 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
         monkeypatch.setattr(tmux, "tagged_pane_ids", lambda keys, server=None: [])
         assert terminal.reset_window_sizes() == 0
     elif kind == "preflight":
-        from brindle import git, preflight
+        from brindle import git, preflight, provider_homes
 
         repo = str(brindle_home.parent)
         monkeypatch.setattr(git, "toplevel", lambda path: repo)
         monkeypatch.setattr(git, "main_repo_root", lambda path: repo)
         monkeypatch.setattr(preflight, "check", lambda *a, **k: [])
+        monkeypatch.setattr(provider_homes, "confirm_login", lambda provider: None)
         for _ in range(10):
             assert _get("/v1/providers/claude/preflight", AUTH, f"repo={repo}") == (200, [])
     elif kind == "spend-events":
@@ -311,7 +344,7 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
 
         # Keep the actual database probes; fake unrelated CLI/network diagnostics.
         monkeypatch.setattr(doctor, "_tool", lambda *a, **k: doctor.Check("ok", a[0], ""))
-        for name in ("signin_checks", "credential_checks", "daemon_checks", "native_checks",
+        for name in ("signin_checks", "credential_checks", "cloud_checks", "daemon_checks", "native_checks",
                      "override_checks", "quota_checks", "airgap_checks", "pro_checks", "managed_checks"):
             monkeypatch.setattr(doctor, name, lambda *a, **k: [])
         monkeypatch.setattr(company_identity, "checks", lambda: [])
@@ -508,6 +541,45 @@ def test_routing_policy_marks_what_the_org_refuses_and_locks(seeded, monkeypatch
                          for m in heavy)
 
 
+@pytest.mark.parametrize("keychain_status", [44, 1])
+def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypatch, keychain_status):
+    # The Agents tab opens on this read: it must not run the dispatch's learned
+    # resolution (a keychain read per credential per candidate) nor any
+    # provider's sign-in CLI (up to its timeout each, a signed-out answer never
+    # cached), the picker's own readiness check in the config load included.
+    from brindle import autopilot, config, providers, worker_models
+    from brindle.pro import credentials
+
+    repo = Path(seeded["repo"])
+    (repo / ".brindle" / "agents").mkdir(parents=True)
+    (repo / ".brindle" / "agents" / "repo-only.md").write_text("---\nname: repo-only\nextends: developer\n---\n")
+    config.set_user("routing", {"medium": ["developer-codex"]})
+    config.set_user("routing_light", "claude-haiku")
+    config.set_user("routing_heavy", "or-glm-4.6")      # a hosted pick: its key is in the keychain
+    config.set_local(str(repo), "routing", {"medium": ["developer"]})
+    routed, probed, pro_reads = [], [], []
+    monkeypatch.setattr(license, "current", seeded["current_license"])
+    monkeypatch.setattr(keystore, "backend_name", lambda: "keychain")
+    monkeypatch.setattr(credentials.KeychainStore, "_run",
+                        lambda self, args: pro_reads.append(args) or SimpleNamespace(returncode=keychain_status))
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(autopilot, "_route_by_weight", lambda *a, **k: routed.append(a) or (None, False, ""))
+    monkeypatch.setattr(doctor, "signin_providers", lambda: list(doctor.CLI_INSTALL))
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: probed.append(argv[0]))
+    monkeypatch.setattr(keystore, "get_key", lambda name: probed.append(name))
+    monkeypatch.setattr(worker_models, "_signed_in", None)
+    code, body = _get("/v1/routing", AUTH, f"repo={repo}&scope=user&learned=0")
+    assert code == 200 and routed == [] and probed == []
+    assert len(pro_reads) <= 1
+    # The person's own view: their settings and library, not this repo's.
+    assert (body["tiers"]["medium"]["values"], body["tiers"]["medium"]["source"]) == (["developer-codex"], "user")
+    assert "repo-only" not in {p["name"] for p in body["profiles"]}
+    assert all(k["learned"] is None for k in body["kinds"].values())
+    pro_reads.clear()
+    assert _get("/v1/routing", AUTH, f"repo={repo}&scope=user&learned=0")[0] == 200
+    assert len(pro_reads) <= 1       # at most one read; main's cross-process entitlement cache may serve it
+
+
 def test_knowledge_search_returns_hits_for_an_indexed_doc(seeded, db):
     (Path(seeded["repo"]) / "NOTES.md").write_text("# Storage\n\nWe keep state in sqlite, never postgres.\n")
     src = kb_mod.sources(db, knowledge.repo_key(seeded["repo"]))[0]["id"]
@@ -536,11 +608,33 @@ def test_profiles_detail_lints_a_broken_profile(seeded):
 @pytest.mark.variant("a secret is shown only as its name and last four characters, never whole")
 def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     monkeypatch.setattr(keystore, "known_names", lambda repo=None: ["OPENAI_API_KEY", "UNSET_KEY"])
-    monkeypatch.setattr(keystore, "get_key", lambda n: "sk-live-1234567890WXYZ" if n == "OPENAI_API_KEY" else None)
+    reads: list[str] = []
+
+    def record(name):
+        reads.append(name)
+        return {"value": "sk-live-1234567890WXYZ"} if name == "OPENAI_API_KEY" else {}
+
+    monkeypatch.setattr(keystore, "get_record", record)
     _, body = _get("/v1/config", AUTH, f"repo={seeded['repo']}")
-    assert body["keys"] == [{"name": "OPENAI_API_KEY", "set": True, "last4": "WXYZ"},
-                            {"name": "UNSET_KEY", "set": False, "last4": ""}]
+    assert [(k["name"], k["set"], k["last4"]) for k in body["keys"]] == [("OPENAI_API_KEY", True, "WXYZ"),
+                                                                         ("UNSET_KEY", False, "")]
     assert "1234567890" not in json.dumps(body)
+    # One read per key, and none at all when the page asks without the keys (the project page).
+    assert sorted(reads) == ["OPENAI_API_KEY", "UNSET_KEY"]
+    reads.clear()
+    # A saved model choice is judged while the config loads: that must run no sign-in CLI
+    # and read no key (a `security` call on macOS), or the quick read waits on them.
+    from brindle import config, doctor, providers, worker_models
+
+    config.set_user("routing_heavy", "or-glm-4.6")      # a hosted pick: its key is in the keychain
+    probed: list = []
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setattr(doctor, "signin_providers", lambda: list(doctor.CLI_INSTALL))
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: probed.append(argv[0]))
+    monkeypatch.setattr(keystore, "get_key", lambda name: probed.append(name))
+    monkeypatch.setattr(worker_models, "_signed_in", None)
+    _, bare = _get("/v1/config", AUTH, f"repo={seeded['repo']}&keys=0")
+    assert bare["keys"] == [] and "repo" in bare and reads == [] and probed == []
 
 
 def test_doc_map_proxies_only_a_neighbourhood_without_caching(brindle_home, monkeypatch):

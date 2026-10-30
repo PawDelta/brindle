@@ -394,28 +394,61 @@ path) and `VITE_BRINDLE_ROOT` (a session's root agent) open it on that session.
 ## Updates
 
 The shell registers Tauri's updater plugin (`src-tauri/src/updates.rs`) and
-checks once a launch against
+checks once a launch, in the background, against
 `https://pawdelta.com/brindle/downloads/desktop/latest.json` (a release
-candidate makes no launch check; staff update it from Settings against
-`rc/latest.json`: see "The rc channel" under Releases); an update found
+candidate or a staff release-branch build makes no launch check; staff update
+those from Settings: see "The rc channel" under Releases); an update found
 is downloaded, its minisign signature checked against the public key built into
-the app, installed, and a notification says it starts with the next launch.
+the app, and installed. It starts with the next launch: the app never restarts
+by itself. The Inbox shows "brindle X is installed" with Restart to update and
+What's new until then (a notification too, only when the window isn't showing),
+and "Updated to brindle X" once after the restart. Settings › About shows when
+this machine last checked, Check now, and Restart to update once one is
+installed (`app-update.json` in the app's data directory keeps the version last
+run and the last check).
 No check is made when brindle is air-gapped or updates are off:
 `"app_updates": false` or `"airgap": true` in `~/.brindle/config.json`,
 `BRINDLE_AIRGAP=1` in the environment, or the engine: a repo's own
 `.brindle/config.json` can turn air-gap on, and a freshly started daemon hasn't
 read it yet, so the app first has the daemon load every known repo's config
-(`GET /v1/repos`, then `GET /v1/config?repo=` for each) and checks only if each
-says `"airgap": false` and `GET /v1/meta` then does too. Any failed or
-unexpected answer means no check. The public key is committed
+(`GET /v1/repos`, then `GET /v1/config?repo=` for each) and checks unless one
+says `"airgap": true` or `GET /v1/meta` then does. A repo whose config can't be
+read is logged and passed over. At launch the app waits (up to five minutes)
+for the daemon it starts alongside to answer `GET /v1/meta`; one that never
+answers means no check. The public key is committed
 (`plugins.updater.pubkey` in `tauri.conf.json`), so every build checks, a local
-`tauri build` too. Since `bundle.createUpdaterArtifacts` is on as well, a local
+`tauri build` too. Staff installs of a staff build check against a
+separate staff key instead (`src-tauri/staff-updater.pub`; see "Staff builds"). Since `bundle.createUpdaterArtifacts` is on as well, a local
 `tauri build` needs the minisign private key in `TAURI_SIGNING_PRIVATE_KEY`
 (the key file's contents, as the release secret holds it; tauri-cli 2.12 ignores
 `TAURI_SIGNING_PRIVATE_KEY_PATH` and fails with "A public key has been found,
 but no private key") and its `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, or `--config
 '{"bundle":{"createUpdaterArtifacts":false}}'` to skip the updater bundle
 (`scripts/smoke_bundle.sh` does that).
+
+## Testing local changes
+
+`app/scripts/dev.sh` runs your checkout's brindle, uncommitted edits included,
+under the app, with no in-app buttons needed. Run it from any brindle checkout
+or worktree. Quit the installed brindle app first: it refuses a daemon started
+by hand (an engine conflict).
+
+**Default (dev app against your engine).** Run `bash app/scripts/dev.sh`. It
+stops the running daemon, starts this checkout's engine
+(`.venv/bin/brindle daemon`, in the background, logging to
+`~/.brindle/dev-daemon.log`), installs the npm packages if `app/node_modules`
+is missing, and runs `npm --prefix app run tauri dev` with `BRINDLE_BIN` set to
+that engine. If `.venv` is missing, it says to run `uv sync` first. Ctrl-C
+stops the app and leaves the local daemon running. To go back, run
+`brindle daemon stop`, then open the installed app.
+
+**`--bundle` (a built app with its engine).** Run `bash app/scripts/dev.sh
+--bundle`. It runs `scripts/smoke_bundle.sh --engine` and, if that passes,
+opens the built `brindle.app` from `src-tauri/target/release/bundle/macos/`.
+It builds only committed code, so uncommitted edits are not in it. The app is
+not copied into `/Applications`.
+
+`bash app/scripts/dev.sh --help` lists both modes.
 
 ## Releases
 
@@ -493,6 +526,87 @@ launch check against the stable feed only, so a release never offers an rc.
 An rc tester moves to a final release by installing its DMG: the rc channel
 names release candidates only.
 
+### Staff builds
+
+A signed build of a commit on `main` gives brindle staff an installable,
+updating app without a tag or version bump. Each push to `main` that touches
+the app runs `app-release.yml`:
+
+1. `release-gate` (`scripts/release_publish.mjs ci-gate`) refuses unless the
+   commit is on `origin/main` and the newest `App` (`app.yml`) run for exactly
+   that commit, pushed or dispatched on `main`, completed with success. The
+   `CI` (`ci.yml`) run must also pass when one exists; CI skips app-only
+   pushes. A pull request's
+   runs, other branches' and other commits' don't count; a newer failed
+   attempt outweighs an older pass. Workflows and runs come from the Actions
+   API by path, all pages.
+2. The `macos` jobs build both architectures with the app's version set to
+   `<package.json version>+release.<run number>.<12-hex commit>` (e.g.
+   `0.1.0-rc.9+release.42.0123456789ab`): Info.plist's
+   `CFBundleShortVersionString` and `CFBundleVersion`, and the version the
+   updater compares, all carry it. No Linux or Windows build.
+3. `release-publish` (`release_publish.mjs verify`) refuses unless both
+   builds are signed, notarized, have their updater bundle, and their signed
+   Info.plist and binary (`--version`) both say that version. It writes
+   `release/<run>.<attempt>-<12-hex>/` with
+   `brindle_<package version>-release.<run>.<12-hex>_<arch>.dmg`, `.app.tar.gz`
+   and `.sig` (no `+` in published names), `latest.json` (Tauri's format,
+   signed with the staff updater key, notes naming the full commit) and `build.json` (commit,
+   run, attempt, versions). Then `release_publish.mjs promote` decides whether
+   `release/latest.json`, the channel's feed, moves to it: only to a strictly
+   later run, of a version no lower (semver precedence), at a descendant of
+   the commit the feed names. It is written with an S3 conditional put
+   (`--if-match` the ETag read, or `--if-none-match '*'` for the first), so a
+   stale run finishing late, a re-run or two runs at once can never move it
+   back. It never writes `latest.json`, `rc/` or the stable names.
+
+The feed's files are public at an unlisted path, like every download. Only
+staff apps can install from it through Settings; normal users' apps never
+read the feed.
+
+**A separate updater key.** Staff builds are signed with their own
+minisign updater key, not the production one. Its private key and password
+are held only in `desktop-staff-release` (`TAURI_SIGNING_PRIVATE_KEY` and
+`TAURI_SIGNING_PRIVATE_KEY_PASSWORD` there); its public key is committed at
+`src-tauri/staff-updater.pub`. The `macos` job of a staff build
+checks its updater key against that file and fails if it is the production
+key (or if `TAURI_UPDATER_PUBKEY` names another key); a tag build still
+checks against `tauri.conf.json`. In the app, only Settings' "Install latest
+staff build" verifies with the staff key (`STAFF_UPDATER_KEY` in
+`src-tauri/src/updates.rs`); every other update, a staff build's own
+included, keeps the production key from `tauri.conf.json`. Installed
+production apps never trust the staff key: a bundle signed with it fails
+their update check, and their updater never reads the release feed. An app
+built before this key existed verifies staff builds with the production key,
+so it refuses them: install one staff build by hand first.
+
+**When the gate refuses.** Once the missing or failed checks have passed,
+rerun the refused `app-release.yml` run; the gate checks the same commit
+again. The gate waits for the App and CI workflow runs started by the main
+push, through `release_publish.mjs ci-gate`.
+
+The staff role can write only `brindle/downloads/desktop/release/*`.
+Tag publishing uses a different role and environment. There is no fallback
+to the production role when the staff role is missing: publishing is skipped.
+The gate is code from the pushed commit, so it is a correctness check;
+GitHub deployment restrictions and IAM enforce the publishing boundary.
+
+Re-running `release-publish` alone publishes into that attempt's own
+directory (`verify` refuses an earlier attempt's). Its GitHub artifact also
+includes the attempt number, preserving the earlier attempt's artifact after
+an OIDC or S3 failure. Re-running all jobs after a completed Mac build can
+still collide with that build's artifact name; use the publish job alone for
+a publishing failure. Fix build failures with a new promotion/run.
+
+Configure `desktop-release` to admit only `app-v*` tags and require owner
+approval. The `stable-gate` job verifies each pushed tag's commit is on
+`main` before any tag build runs. Configure `desktop-staff-release` to admit
+`main` pushes. Provision the same Apple signing and notarization credentials
+there as in `desktop-release`, plus the separate staff updater key matching
+`src-tauri/staff-updater.pub`. Set
+`AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN` in that environment to `StaffRoleArn`
+from `deploy/aws/desktop-release.json`.
+
 ### Linux
 
 The same tag also runs the workflow's `linux` job on ubuntu-22.04 (x86_64):
@@ -524,10 +638,16 @@ What a Linux machine needs to run the app:
 
 ### Windows (WSL)
 
-The same tag runs the workflow's `windows` job: it builds an unsigned NSIS
-installer (`brindle_<version>_x64-setup.exe`) and keeps it as a workflow
-artifact only. Windows code signing is an owner purchase; until then nothing
-for Windows is published, and an unsigned build shows a SmartScreen warning.
+The same tag runs the workflow's `windows` job, which builds the NSIS installer
+(`brindle_<version>_x64-setup.exe`). With the Azure Artifact Signing secrets
+set (table below; `azure/login` through GitHub's OIDC, no client secret)
+Tauri's `signCommand` (signtool with the Azure dlib) signs the app exe and the installer, and `signtool verify
+/pa` must accept both or the job fails. Under the same gate as the other
+platforms (a pushed tag, the bucket set) the signed installer is published as
+`<version>/brindle_<version>_x64-setup.exe` and `brindle_x64-setup.exe`
+(a release candidate only under `rc/<version>/`). Without the secrets the
+installer is unsigned and kept as a workflow artifact only, nothing is
+published, and it shows a SmartScreen warning.
 
 The Windows app is a thin client of an engine running inside WSL
 (`src-tauri/src/wsl.rs`): it uses `$BRINDLE_WSL_DISTRO`, else WSL's default
@@ -539,13 +659,16 @@ and installs inside the distribution (no pty there: the install's output comes
 over pipes). A daemon already started in WSL without `--tcp` can't be reached:
 stop it (`brindle daemon stop`) and the app starts one that can.
 
-What the owner sets up, once. The Apple and Tauri secrets and the
+What the owner sets up, once. The Apple, Tauri and Azure secrets and the
 `TAURI_UPDATER_PUBKEY` variable live in the `desktop-release` GitHub
-environment (repository settings → Environments), whose deployment rule admits
-only `app-v*` tags and which needs the owner's approval for each run; every job
-that reads the Apple, Tauri or AWS secrets
-(`macos`, `macos-publish`, `linux`) declares it on a pushed tag. The rest are
-repository secrets and variables (Secrets and variables → Actions):
+environment (repository settings → Environments). The stable-gate job uses
+this environment and requires reviewer approval for pushed tags. Staff builds
+use the `desktop-staff-release` environment for staff updater signing and
+publishing; configure its secrets and AWS role for the staff feed. `macos`
+selects the environment by ref; `macos-publish`, `linux` and `windows` use
+production, and `release-publish` uses staff.
+Downloads bucket and region variables may be repository variables (Secrets
+and variables → Actions):
 
 | Name | Kind | What |
 | --- | --- | --- |
@@ -556,16 +679,25 @@ repository secrets and variables (Secrets and variables → Actions):
 | `APPLE_API_ISSUER` | secret (`desktop-release` env) | That key's issuer ID. |
 | `APPLE_API_PRIVATE_KEY` | secret (`desktop-release` env) | The key's `.p8` contents; the workflow writes it to a file and sets `APPLE_API_KEY_PATH`. |
 | `APPLE_ID`, `APPLE_PASSWORD`, `APPLE_TEAM_ID` | secrets (`desktop-release` env) | Instead of the API key: an Apple ID, an app-specific password and the team ID. |
-| `TAURI_SIGNING_PRIVATE_KEY` | secret (`desktop-release` env) | The updater's minisign private key (`npm run tauri signer generate -- -w ~/.tauri/brindle.key`). |
+| `TAURI_SIGNING_PRIVATE_KEY` | secret (`desktop-release` env) | The production updater minisign private key matching the committed public key. `desktop-staff-release` holds the staff key instead (matching `src-tauri/staff-updater.pub`). |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | secret (`desktop-release` env) | Its password, if it has one. |
-| `TAURI_UPDATER_PUBKEY` | variable (`desktop-release` env) | Optional. The matching public key is committed in `tauri.conf.json` (`plugins.updater.pubkey`); when this is set, the build fails unless it is that same key. |
-| `AWS_DESKTOP_RELEASE_ROLE_ARN` | secret | The release role's ARN, from the site's infrastructure setup. |
+| `TAURI_UPDATER_PUBKEY` | variable (`desktop-release` env) | Optional. The matching public key is committed in `tauri.conf.json` (`plugins.updater.pubkey`); when this is set, the build fails unless it is that same key. In `desktop-staff-release` it must be `src-tauri/staff-updater.pub`'s key, never the production one. |
+| `AZURE_CLIENT_ID` | secret (`desktop-release` env) | Windows signing: the application (client) ID of a Microsoft Entra app registration that has the **Artifact Signing Certificate Profile Signer** role on the signing account (Entra admin center → App registrations). |
+| `AZURE_TENANT_ID` | secret (`desktop-release` env) | The Entra tenant (directory) ID, from the same app registration's overview. |
+| `AZURE_SUBSCRIPTION_ID` | secret (`desktop-release` env) | The subscription holding the signing account (`azure/login` needs one). There is no client secret: add a federated credential to the app registration (Certificates & secrets → Federated credentials; issuer `https://token.actions.githubusercontent.com`, subject `repo:OWNER/REPO:environment:desktop-release`, audience `api://AzureADTokenExchange`). |
+| `AZURE_SIGNING_ENDPOINT` | secret (`desktop-release` env) | The signing account's regional endpoint, e.g. `https://eus.codesigning.azure.net/` (the account's overview page in the Azure portal). |
+| `AZURE_SIGNING_ACCOUNT` | secret (`desktop-release` env) | The Artifact Signing account's name (Azure portal → Artifact Signing accounts; formerly Trusted Signing). |
+| `AZURE_SIGNING_PROFILE` | secret (`desktop-release` env) | The certificate profile's name, under that account (needs identity validation done first). Signing is on when this and `AZURE_CLIENT_ID` are set. |
+| `AWS_DESKTOP_RELEASE_ROLE_ARN` | secret (`desktop-release` env) | ProductionRoleArn from the publishing stack; tags only. |
+| `AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN` | secret (`desktop-staff-release` env) | StaffRoleArn from `deploy/aws/desktop-release.json`; main pushes only. |
 | `DESKTOP_DOWNLOADS_BUCKET` | variable | The downloads bucket's name, from the same setup. |
 | `AWS_REGION` | variable | Optional; `us-east-1` when unset. |
 
 Before the first release: join the Apple Developer Program, and have the site's
 infrastructure create the downloads bucket, GitHub's OIDC provider and the
-release role, which only this repo's `desktop-release` environment (so only
-`app-v*` tags) can assume. Keep the
+release roles and restrict their GitHub environments as described above.
+Only `app-v*` tags may enter production; staff builds come from pushes to
+`main` after the commit's App run and any matching CI run pass.
+Keep the
 minisign private key safe: losing it means no installed app can take another
 update.
