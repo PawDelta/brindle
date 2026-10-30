@@ -352,6 +352,128 @@ export interface KbHit {
   updated: string | null;
 }
 
+/* brindle Pro's analysis-doc library, proxied by the daemon (routes_read.analysis_docs).
+   The Wire* types are the server's own shapes (pawdelta-web pro_api.analysis_docs: _listed,
+   _view, topics); the client methods turn them into the AnalysisDoc* below. A scope is
+   {kind: user | group | org, id}; the daemon's filter spells it `user`, `team:<id>` or `org:<id>`. */
+export interface DocScope {
+  kind: string;
+  id: string;
+  /* From GET /analysis-docs/scopes only: the team's or org's name, and whether the person may share into it. */
+  name?: string;
+  can_share?: boolean;
+}
+
+interface WireMentions {
+  files?: string[];
+  symbols?: string[];
+  services?: string[];
+}
+
+interface WireListedDoc {
+  doc_id: string;
+  version?: number;
+  title?: string;
+  summary?: string;
+  kind?: string;
+  findings?: string[];
+  open_questions?: string[];
+  topics?: string[];
+  mentions?: WireMentions;
+  related?: string[];
+  supersedes?: string[];
+  superseded_by?: string | null;
+  stale?: boolean;
+  used_in_briefs?: number;
+  created_at?: number;
+  scope?: DocScope;
+}
+
+interface WireDoc extends Omit<WireListedDoc, "doc_id"> {
+  id: string;
+  files?: { name: string; md: string }[];
+  /* Every scope it is shared into, its owner's (`scope`) among them. */
+  scopes?: DocScope[];
+}
+
+export interface AnalysisDoc {
+  id: string;
+  title?: string;
+  kind?: string;
+  scope?: DocScope;
+  summary?: string;
+  topics?: string[];
+  version?: number;
+  created_at?: number;
+  used_in_briefs?: number;
+  findings?: string[];
+  open_questions?: string[];
+  stale?: boolean;
+  /* Other docs' ids. */
+  related?: string[];
+  supersedes?: string[];
+  superseded_by?: string | null;
+}
+
+/* GET /analysis-docs/{id}: the files as written and what the server read from them. */
+export interface AnalysisDocDetail extends AnalysisDoc {
+  files: { name: string; md: string }[];
+  /* The files, symbols and services it names, in that order. */
+  mentions: string[];
+  /* The scopes it is shared into besides its owner's. */
+  shared_with: DocScope[];
+}
+
+export interface DocTopic {
+  name: string;
+  count?: number;
+}
+
+const sameScope = (a: DocScope, b: DocScope) => a.kind === b.kind && a.id === b.id;
+
+export function listedDoc({ doc_id, mentions: _, ...rest }: WireListedDoc): AnalysisDoc {
+  return { ...rest, id: doc_id };
+}
+
+export function docDetail({ mentions, scopes, files, ...rest }: WireDoc): AnalysisDocDetail {
+  return {
+    ...rest,
+    files: files ?? [],
+    mentions: [...(mentions?.files ?? []), ...(mentions?.symbols ?? []), ...(mentions?.services ?? [])],
+    shared_with: (scopes ?? []).filter((s) => !rest.scope || !sameScope(s, rest.scope)),
+  };
+}
+
+/* GET /analysis-docs/results (analysis_brief.results): review rounds of finished tasks
+   whose brief got a doc block, against similar ones (same repo, kind and size) without;
+   the averages are null until each side has `minimum` tasks. */
+export interface DocResults {
+  days: number;
+  minimum: number;
+  enough: boolean;
+  briefed: number;
+  large: number;
+  compared: number;
+  similar: number;
+  with_brief: number | null;
+  without_brief: number | null;
+}
+
+/* POST /analysis-docs/{id}/export: the file's path in a picked folder, or the file itself. */
+export interface DocExport {
+  filename: string;
+  path?: string;
+  content_b64?: string;
+}
+
+export interface DocsQuery {
+  repo?: string;
+  scope?: string;
+  topic?: string;
+  kind?: string;
+  session?: string;
+}
+
 /* GET /profiles/{name} (routes_read.get_profile): a profile as `brindle
    profile show` resolves it, with `brindle profile lint`'s findings. */
 export interface RulePackInfo {
@@ -931,6 +1053,49 @@ export class DaemonClient {
   /* Indexes a source again (POST /kb/sources/{id}/sync?repo=): a job, done when the index is current. */
   syncKbSource(repo: string, id: string) {
     return this.post<Job>(`/kb/sources/${encodeURIComponent(id)}/sync?repo=${encodeURIComponent(repo)}`, {});
+  }
+
+  /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.
+     A plan without it throws DaemonError "not_entitled". */
+  async docs(query: DocsQuery = {}): Promise<{ docs: AnalysisDoc[] }> {
+    const got = await this.get<{ docs?: WireListedDoc[] }>("/analysis-docs", { ...query });
+    return { docs: (got.docs ?? []).map(listedDoc) };
+  }
+
+  async docTopics(query: { repo?: string; scope?: string } = {}): Promise<{ topics: DocTopic[] }> {
+    const got = await this.get<{ topics?: { topic: string; count?: number }[] }>("/analysis-docs/topics", { ...query });
+    return { topics: (got.topics ?? []).map((t) => ({ name: t.topic, count: t.count })) };
+  }
+
+  /* Every scope the person reads (their own, their teams', their org's), with or without docs. */
+  docScopes(repo?: string) {
+    return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
+  }
+
+  async doc(id: string, repo?: string): Promise<AnalysisDocDetail> {
+    return docDetail(await this.get<WireDoc>(`/analysis-docs/${encodeURIComponent(id)}`, { repo }));
+  }
+
+  /* Computed on this machine from its own records; needs no plan. */
+  docResults(repo?: string) {
+    return this.get<DocResults>("/analysis-docs/results", { repo });
+  }
+
+  shareDoc(id: string, scope: string) {
+    return this.post<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
+  }
+
+  unshareDoc(id: string, scope: string) {
+    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}/share`, { scope });
+  }
+
+  deleteDoc(id: string) {
+    return this.delete<unknown>(`/analysis-docs/${encodeURIComponent(id)}`, {});
+  }
+
+  /* With `dir` the daemon writes the file there; without, it comes back as base64. */
+  exportDoc(id: string, format: "md" | "docx" | "zip", dir?: string) {
+    return this.post<DocExport>(`/analysis-docs/${encodeURIComponent(id)}/export`, dir ? { format, dir } : { format });
   }
 
   profile(name: string, repo?: string) {
