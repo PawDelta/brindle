@@ -338,25 +338,44 @@ class Locked(RuntimeError):
     """The person's org enforces the switch: their own choice wouldn't apply."""
 
 
+ENFORCED = ("enforced_on", "enforced_off")
+
+
+def _own_group(policy: dict, client, store) -> str | None:
+    """The person's group in the org whose ``policy`` this is: the one group
+    scope they read that the policy names. None when there isn't exactly one
+    (never a guess)."""
+    listed = api("GET", "/analysis-docs/scopes", client=client, store=store).get("scopes") or []
+    mine = {s["id"] for s in listed if isinstance(s, dict) and s.get("kind") == "group" and isinstance(s.get("id"), str)}
+    found = sorted(mine & set(policy.get("groups") or {}))
+    return found[0] if len(found) == 1 else None
+
+
 def switch_states(client=None, store=None) -> list[dict]:
     """The person's own switches (:data:`analysis_policy.SWITCHES`), each as
     ``{name, on, choice, locked, org}``: ``choice`` is their own "on" or "off"
-    (None while unset), ``on`` what applies, and ``locked`` whether their
-    Enterprise org enforces it, with the org's value in ``org``."""
+    (None while unset), ``on`` what applies, and ``locked`` whether their org
+    enforces it (an Enterprise org's own switches, or their group's in a Team
+    or Enterprise org), with the enforced value in ``org``."""
     client, store = _session(client, store)
     ent = require_entitlement(store)
     choices = fetch_switches(client, store)
-    policy = {"switches": {}, "groups": {}}
-    if "analysis_docs_enterprise" in ent.features:
-        policy = analysis_policy.fetch(ent.org_id, client, store)
+    policy, group = {"switches": {}, "groups": {}}, None
+    if "analysis_docs_team" in ent.features:
+        got = analysis_policy.fetch(ent.org_id, client, store)
+        # the server weighs the org's own switches only on Enterprise; groups from Team up
+        policy = {"switches": got["switches"] if "analysis_docs_enterprise" in ent.features else {},
+                  "groups": got["groups"]}
+        group = _own_group(policy, client, store)
     states = []
     for name in analysis_policy.SWITCHES:
-        org = policy["switches"].get(name)
-        locked = org in ("enforced_on", "enforced_off")
+        enforced = next((v for v in (policy["switches"].get(name),
+                                     ((policy["groups"].get(group) or {}).get("switches") or {}).get(name)
+                                     if group else None) if v in ENFORCED), None)
         states.append({"name": name, "choice": choices.get(name) if choices.get(name) in ("on", "off") else None,
-                       "on": analysis_policy.resolve_switch(name, choices, policy=policy, org=ent.org_id,
-                                                            plan=ent.plan),
-                       "locked": locked, "org": org if locked else None})
+                       "on": analysis_policy.resolve_switch(name, choices, group=group, policy=policy,
+                                                            org=ent.org_id, plan=ent.plan),
+                       "locked": enforced is not None, "org": enforced})
     return states
 
 

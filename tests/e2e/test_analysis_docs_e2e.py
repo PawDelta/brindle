@@ -321,8 +321,9 @@ def test_brief_and_map_neighbourhood(sign_in, db, tmp_path):
 
 
 @pytest.mark.variant("end to end against a live backend; skipped in CI")
-def test_share_and_unshare_with_the_team(sign_in, db, tmp_path):
+def test_share_and_unshare_with_the_team(sign_in, server, db, tmp_path):
     from brindle.daemon import routes_actions, routes_read
+    from brindle.pro import analysis_policy, auth, credentials
     from brindle.service.errors import ServiceError
 
     sign_in("team-member")
@@ -356,6 +357,22 @@ def test_share_and_unshare_with_the_team(sign_in, db, tmp_path):
     assert status == 200 and listed["docs"] == [], listed
     status, _ = daemon_get(routes_read.analysis_doc, {"id": doc_id})
     assert status != 200
+
+    client, store, org = auth.Client(server["base"]), credentials.default_store(), server["team_org"]
+    analysis_policy.update(org, client, store, {"groups": {GROUP: {"switches": {"share": "enforced_off"}}}})
+    try:                                                                       # the admin locks the group's sharing
+        sign_in("team-member")
+        status, got = daemon_get(routes_read.analysis_doc_switches)
+        assert status == 200 and {"name": "share", "on": False, "choice": "on", "locked": True,
+                                  "org": "enforced_off"} in got["switches"], got
+        with pytest.raises(ServiceError) as locked:                            # the toggle refuses it
+            routes_actions.put_doc_switch(db, {}, {"name": "share", "on": True})
+        assert locked.value.http_status == 403
+        with pytest.raises(ServiceError, match="switch_off"):                  # as the server does the share
+            routes_actions.share_doc(db, {"id": doc_id}, {"scope": f"team:{GROUP}"})
+    finally:
+        sign_in("team-admin")
+        analysis_policy.update(org, client, store, {})
 
 
 @pytest.mark.variant("end to end against a live backend; skipped in CI")

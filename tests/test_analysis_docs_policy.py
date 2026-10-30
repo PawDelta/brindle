@@ -79,11 +79,15 @@ def test_org_docs_shows_caches_and_updates_policy(team, monkeypatch):
     team.routes["PUT /me/analysis-docs/settings"] = lambda f, h: put.append(f) or (200, f)
     monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, m, url, form, headers:
                         team.request(m, url, form, headers))
-    login(team, team_claims(features=["analysis_docs", "analysis_docs_enterprise"]))
-    done = CliRunner().invoke(app, ["docs", "off", "--switch", "share"])
-    assert done.exit_code == 0 and put == [{"switches": {"store": "on", "share": "off"}}], done.output
-    refused = CliRunner().invoke(app, ["docs", "on"])                    # the org enforces store off
-    assert refused.exit_code == 1 and "organisation has store off" in refused.output and len(put) == 1
+    team.routes["GET /analysis-docs/scopes"] = lambda f, h: (200, {"scopes": [
+        {"kind": "user", "id": "user_1"}, {"kind": "group", "id": "g"}, {"kind": "group", "id": "elsewhere"}]})
+    login(team, team_claims(features=["analysis_docs", "analysis_docs_team", "analysis_docs_enterprise"]))
+    done = CliRunner().invoke(app, ["docs", "off", "--switch", "assist"])
+    assert done.exit_code == 0 and put == [{"switches": {"store": "on", "assist": "off"}}], done.output
+    for args, why in ((["docs", "on"], "store off"),                    # the org enforces store off
+                      (["docs", "off", "--switch", "share"], "share on")):   # and the person's group share on
+        refused = CliRunner().invoke(app, args)
+        assert refused.exit_code == 1 and f"organisation has {why}" in refused.output and len(put) == 1
     login(team, claims(org_id="org_personal", plan="free", features=[]))
     policy["switches"].pop("store")
     team.routes["GET /me/analysis-docs/settings"] = lambda f, h: (200, {"switches": {}})
