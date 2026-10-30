@@ -164,15 +164,27 @@ def test_a_lost_claim_queues_every_doc_of_the_batch_that_was_stored(folder, remo
     assert db.conn.execute("SELECT count(*) FROM kb_import_uploads").fetchone()[0] == 0
 
 
-def test_a_restored_file_is_not_adopted_while_its_old_doc_waits_for_deletion(folder, remote, deps):
+def test_a_restored_file_is_not_adopted_while_its_old_doc_waits_for_deletion(folder, remote, deps, monkeypatch):
     db, source, docs = folder
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)
     (docs / "notes.md").unlink()
     remote.fail_delete = True
     imports.sync_upload(db, source, "/repo", **deps)                          # d1 queued, its delete fails
     (docs / "notes.md").write_text("# Notes\nthe TTL is too short")
+    exchange = imports._exchange
+
+    def exchange_then_drain(*args):     # the deletes recover and another sync drains right after the answer
+        got = exchange(*args)
+        remote.fail_delete = False
+        imports.drain_pending(db, client=deps["client"], store=deps["store"])
+        live.extend(v["id"] for v in remote.items.values())
+        return got
+
+    live = []
+    monkeypatch.setattr(imports, "_exchange", exchange_then_drain)
     assert imports.sync_upload(db, source, "/repo", **deps)["failed"] == ["notes.md"]     # d1 comes back: not adopted
-    remote.fail_delete = False
+    assert live == ["d1"]       # the other drain left it alone while this sync held the folder
+    monkeypatch.setattr(imports, "_exchange", exchange)
     imports.sync_upload(db, source, "/repo", **deps)                          # d1 deleted, the file sent again
     assert [v["id"] for v in remote.items.values()] == ["d2"]
     assert [r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM kb_import_uploads")] == ["d2"]
@@ -260,8 +272,8 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     assert shown()["library_state"] == "adding" and tracked() == ["d2"] and "d2" not in remote.deleted
     assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
     assert shown()["library_state"] == "local" and remote.deleted[-1] == "d2"
-    # Another source's sync drains this folder's queue; the folder, held at that moment, stays
-    # "removing" with nothing queued, so Finish removing is still there and completes it.
+    # Another source's sync leaves a folder another operation holds alone (its queued delete could
+    # overlap that operation's upload); once the hold ends, a sync drains it and the folder is done.
     other = kb.add_source(db, KEY, kb.FOLDER, str(docs.parent / "other"))
     (docs.parent / "other").mkdir()
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # d3
@@ -271,14 +283,20 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     with db.tx() as c:
         c.execute("UPDATE kb_import_library SET op = 'sync', op_token = 'held', op_until = 9e12")
     kb.sync(db, other, None, "/repo")
-    assert remote.deleted[-1] == "d3" and (shown()["library_state"], shown()["library_removing"]) == ("removing", 0)
+    assert remote.deleted[-1] == "d2" and (shown()["library_state"], shown()["library_removing"]) == ("removing", 1)
     with db.tx() as c:
         c.execute("UPDATE kb_import_library SET op = NULL, op_token = NULL, op_until = NULL")
+    kb.sync(db, other, None, "/repo")
+    assert remote.deleted[-1] == "d3" and shown()["library_state"] == "local"
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # d4
+    remote.fail_delete = True
+    imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
+    remote.fail_delete = False
     assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
     assert shown()["library_state"] == "local"
     # An account switch: the folder is local for the new identity, which uploads nothing; the first
     # identity's queued deletion stays untouched until it is signed in again.
-    imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # d4
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # d5
     first = imports.current_identity(deps["client"], deps["store"])
     remote.fail_delete = True
     imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
@@ -299,7 +317,7 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     assert shown()["library_state"] == "local" and shown(first)["library_state"] == "removing"
     sign_in_as("user_1")
     kb.sync(db, source, None, "/repo")
-    assert remote.deleted[-1] == "d4" and shown()["library_state"] == "local"
+    assert remote.deleted[-1] == "d5" and shown()["library_state"] == "local"
     # (a) An account switch while the folder's DELETE is out: it was sent under the first account, so its
     # 200 is believed and the first account's queue is cleared; nothing more is sent under the new one.
     (docs / "more.md").write_text("# More\nsecond file")

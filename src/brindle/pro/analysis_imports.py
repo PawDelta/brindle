@@ -437,12 +437,26 @@ def _delete_folder(db: DB, snap: Snapshot, source_id: str) -> bool:
     return False
 
 
-def _drain(db: DB, snap: Snapshot) -> None:
+def _drain(db: DB, snap: Snapshot, held: str | None = None) -> None:
     """Delete the snapshot identity's queued docs; each stays queued until the
-    server confirms. Another identity's queue is left as it is, and the drain
-    stops (leaving the rest queued) if the account changes or needs refreshing."""
-    for r in db.conn.execute("SELECT doc_id FROM kb_import_deletions WHERE identity = ?", (snap.who,)).fetchall():
+    server confirms. A doc of a folder in the library is deleted only under that
+    folder's claim (``held`` names the folder the caller already holds), so a
+    delete never overlaps an upload that may be adopting the same doc; a folder
+    another operation holds is left for later. Another identity's queue is left as
+    it is, and the drain stops (leaving the rest queued) if the account changes or
+    needs refreshing."""
+    for r in db.conn.execute("SELECT doc_id, source_id FROM kb_import_deletions WHERE identity = ?",
+                             (snap.who,)).fetchall():
+        token = None
         try:
+            sid = r["source_id"]
+            if sid is not None and sid != held and state(db, sid, snap.who) is not None:
+                token = _claim(db, sid, "sync", (ADDING, IN_LIBRARY, REMOVING), snap.who)
+                if token is None:
+                    continue
+                if not db.conn.execute("SELECT 1 FROM kb_import_deletions WHERE doc_id = ? AND identity = ?",
+                                       (r["doc_id"], snap.who)).fetchone():
+                    continue        # settled while the claim was taken
             if _delete(snap, r["doc_id"]):
                 with db.tx() as c:
                     c.execute("DELETE FROM kb_import_deletions WHERE doc_id = ? AND identity = ?",
@@ -452,6 +466,9 @@ def _drain(db: DB, snap: Snapshot) -> None:
             return
         except Exception:  # noqa: BLE001 - tried again on the next sync or removal
             log.info("library doc not deleted yet")
+        finally:
+            if token:
+                _release(db, r["source_id"], token)
 
 
 def drain_pending(db: DB, *, client=None, store=None) -> None:
@@ -472,6 +489,13 @@ def drain_pending(db: DB, *, client=None, store=None) -> None:
                 finally:
                     _release(db, r["source_id"], token, drop_if_no_queue=True)
         _drain(db, snap)
+        for r in db.conn.execute(
+                "SELECT source_id FROM kb_import_library l WHERE identity = ? AND state = ? AND NOT EXISTS"
+                " (SELECT 1 FROM kb_import_deletions x WHERE x.source_id = l.source_id AND x.identity = l.identity)",
+                (who, REMOVING)).fetchall():
+            token = _claim(db, r["source_id"], "remove", (REMOVING,), who)
+            if token:
+                _release(db, r["source_id"], token, drop_if_no_queue=True)
     except Exception:  # noqa: BLE001
         log.info("library deletions not drained")
 
@@ -574,7 +598,7 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: 
                     _queue_deletion(c, source_id, who, name)
     count = "SELECT count(*) FROM kb_import_deletions WHERE identity = ?"
     before = db.conn.execute(count, (who,)).fetchone()[0]
-    _drain(db, snap)
+    _drain(db, snap, source_id)
     result["deleted"] = before - db.conn.execute(count, (who,)).fetchone()[0]
     with db.tx() as c:
         c.execute("UPDATE kb_import_library SET pending = ? WHERE source_id = ? AND op_token = ?",
@@ -680,7 +704,7 @@ def remove_from_library(db: DB, source_id: str, *, client=None, store=None) -> d
     try:
         if claim:
             _delete_folder(db, snap, source_id)
-        _drain(db, snap)
+        _drain(db, snap, source_id if claim else None)
     finally:
         if claim:
             _release(db, source_id, claim, drop_if_no_queue=True)
