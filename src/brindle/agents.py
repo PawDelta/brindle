@@ -328,9 +328,11 @@ plan is approved; if it comes back with feedback, revise it and call
 
 def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: str | None,
                            provider, headless: bool, plan_first: bool = False,
-                           decisions: str = "", chunks: str = "", report_only: bool = False) -> str:
+                           decisions: str = "", chunks: str = "", report_only: bool = False,
+                           analysis: str = "") -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
-    ``task``, the ``decisions`` block that covers its files, its finish line,
+    ``task``, the ``decisions`` block that covers its files, the ``analysis``
+    doc rule and brief (large work only), its finish line,
     the WORKER_FOOTER reminder to report, and (for an interactive Claude
     worker with a finish line) the ``/goal`` wrapper. Used at spawn time, and
     again by ``resume`` to rebuild it (decisions from the brief's receipt)
@@ -338,7 +340,7 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
     from brindle import autopilot as pilot
 
     prompt = assemble([Block(TASK_AND_RULES, task), Block(DECISIONS, decisions),
-                       Block(DOCUMENT_CHUNKS, chunks)])
+                       Block(DOCUMENT_CHUNKS, chunks), Block(DOCUMENT_CHUNKS, analysis)])
     if done_when:
         prompt += f"\n\nFinish line: {done_when.strip()}"
     if plan_first:
@@ -373,12 +375,14 @@ def spawn(
     claim_goals: bool = True,
     files: list[str] | None = None,
     weight: str | None = None,
+    analysis_doc: bool = False,
 ) -> Agent:
     """Start an agent in ``ws``. ``weight`` is the weight its task was routed
     as, kept on the agent so the owner's per-kind effort and instructions apply
     from the first launch. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``; their brief carries the
-    accepted decisions covering ``files``. With ``autopilot``, the
+    accepted decisions covering ``files``, and for large work (heavy/advanced,
+    or ``analysis_doc`` asked for) the analysis-doc rule and brief. With ``autopilot``, the
     agent is a session root that drives toward a goal (see brindle.autopilot);
     with ``claim_goals`` it claims a hand-written ``.brindle/goals.md``."""
     from brindle import autopilot as pilot
@@ -404,6 +408,13 @@ def spawn(
     # wrapper), but the fully decorated prompt for a subagent (that text IS
     # what's handed to the supervisor's own Agent tool) or a reviewer.
     raw_task = prompt
+    analysis = ""
+    if mode in ("handoff", "assign"):
+        from brindle.pro import analysis_brief
+
+        analysis = analysis_brief.brief_context(
+            db, ws.repo_root, ws.branch, agent_id, prompt or "", files,
+            large=analysis_brief.large_work(weight, requested=analysis_doc))
     if not provider.launches_process:
         if mode not in ("handoff", "assign"):
             raise AgentError(
@@ -419,7 +430,7 @@ def spawn(
                                         guardrails.scope_prompt(guardrails.effective(profile))) if p)
         tuned = _with_overrides(profile, _weight_kind(weight), ws.repo_root)
         full = f"{tuned.prompt.strip()}\n\n{rules}".strip() if rules else tuned.prompt
-        prompt = raw_task = subagent_prompt(full, prompt or "", ws, done_when)
+        prompt = raw_task = subagent_prompt(full, prompt or "", ws, done_when, analysis)
     elif prompt and mode in ("handoff", "assign"):
         from brindle import codemap
         prompt = decorate_worker_prompt(prompt, agent_id, ws, done_when, provider, headless,
@@ -427,7 +438,8 @@ def spawn(
                                         report_only=is_review_profile(profile.name, ws.repo_root),
                                         decisions=knowledge.brief_decisions(db, ws.repo_root, agent_id, files),
                                         chunks=knowledge.brief_chunks(db, ws.repo_root, agent_id, prompt, files,
-                                                                      codemap.graph_path(ws)))
+                                                                      codemap.graph_path(ws)),
+                                        analysis=analysis)
     elif prompt and mode == "review":
         prompt = raw_task = prompt + REVIEW_FOOTER.format(agent_id=agent_id, branch=ws.branch)
 
@@ -1541,12 +1553,17 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
             # start needs the same decoration it got the first time. A row
             # from before this change stored the already-decorated text, so
             # it gets decorated a second time here; harmless, if redundant.
+            from brindle.pro import analysis_brief
+
             prompt = decorate_worker_prompt(
                 a.task, a.id, ws, a.done_when, provider, bool(a.headless),
                 plan_first=bool(a.plan_first) and a.plan_state != "approved",
                 report_only=is_review_profile(a.profile, ws.repo_root),
                 decisions=knowledge.replay_decisions(db, a.id),
-                chunks=knowledge.replay_chunks(db, a.id)) + RESUME_NOTE
+                chunks=knowledge.replay_chunks(db, a.id),
+                analysis=analysis_brief.brief_context(
+                    db, ws.repo_root, ws.branch, a.id, a.task, None,
+                    large=analysis_brief.got_context(db, a.id))) + RESUME_NOTE
         else:
             prompt = (a.task + RESUME_NOTE) if a.task else None
         if a.dismissed_at is not None:
@@ -2110,9 +2127,10 @@ def _paste_blocked(agent: Agent) -> bool:
 # -- subagent provider -------------------------------------------------------------
 
 
-def subagent_prompt(profile_prompt: str, task: str, ws: Workspace, done_when: str | None) -> str:
+def subagent_prompt(profile_prompt: str, task: str, ws: Workspace, done_when: str | None,
+                    analysis: str = "") -> str:
     """What the supervisor passes to its Agent tool for a subagent worker."""
-    parts = [profile_prompt.strip(), "Task:\n" + task.strip()]
+    parts = [profile_prompt.strip(), "Task:\n" + task.strip(), analysis]
     if done_when:
         parts.append(f"Finish line: {done_when.strip()}")
     body = "\n\n".join(p for p in parts if p)
@@ -2564,8 +2582,10 @@ def delegate(
     start: str | None = None,
     files: list[str] | None = None,
     weight: str | None = None,
+    analysis_doc: bool = False,
 ) -> tuple[Agent, Workspace]:
-    """Start a worker. ``weight`` is the weight its task was routed as.
+    """Start a worker. ``weight`` is the weight its task was routed as;
+    ``analysis_doc`` asks for an analysis doc whatever the weight.
     ``plan_first`` (None: the repo's ``plan_first`` config)
     makes it get a plan approved before it may edit; ``files`` picks the
     decisions its brief carries. With ``isolate``, the worker gets a new worktree whose
@@ -2599,7 +2619,7 @@ def delegate(
         return spawn(
             db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
             done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
-            weight=weight,
+            weight=weight, analysis_doc=analysis_doc,
         )
 
     if isolate:

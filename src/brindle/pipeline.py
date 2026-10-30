@@ -1334,13 +1334,12 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
 
 
 def _deliverables(ws: Workspace) -> list:
-    """The analysis deliverables the branch adds or changes, read before the merge
+    """The analysis doc written for the branch, read before the merge
     (brindle Pro's doc library); empty on any failure."""
     try:
         from brindle.pro import analysis_docs
 
-        changed = analysis_docs.changed_files(ws.path, git.base_ref(ws.path, workspaces.require_base(ws)))
-        return analysis_docs.collect(ws.path, changed)
+        return analysis_docs.collect(ws.repo_root, ws.branch, {"kind": "task", "ref": ws.branch})
     except Exception:  # noqa: BLE001 - the library is a side effect of merging
         return []
 

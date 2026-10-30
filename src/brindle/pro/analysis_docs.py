@@ -1,18 +1,20 @@
 """The personal analysis-doc library client (brindle Pro; contract in
 ``docs/analysis-docs-plan.md``).
 
-After a branch merges, each added or changed ``.brindle/deliverables/<slug>/``
-(``main.md`` plus its ``appendices/*.md``) is uploaded to ``POST
-/analysis-docs`` with scope ``user``, from a small bounded queue drained by one
-background thread, so brindle never waits on the network and nothing raises
-into it. When the queue is full, uploads are dropped.
+Docs are free-form files written for large work in the branch's docs folder
+outside the repo (:func:`brindle.pro.analysis_brief.docs_dir`). When the
+branch merges they are uploaded together, with their source, to ``POST
+/analysis-docs`` with scope ``user``, from a small bounded queue drained by
+one background thread, so brindle never waits on the network and nothing
+raises into it. When the queue is full, uploads are dropped. After a 200 the
+local copies are deleted; on any failure they stay.
 
-Nothing is sent in air-gap mode, for a deliverable with a file under a
-protected path (the repo's or the org's ``protected_paths``), without the
-``analysis_docs`` entitlement, or when the ``store`` switch resolves to off
-(:func:`resolve_switch`). The first upload prints a one-time notice naming
-``brindle docs off``. ``repo_key`` is the org-key HMAC of the repo's identity
-(:mod:`brindle.pro.orgkey`); without an org key or an identity nothing is sent.
+Nothing is sent in air-gap mode, without the ``analysis_docs`` entitlement
+(the docs then stay in the folder, a Knowledge source), or when the ``store``
+switch resolves to off (:func:`resolve_switch`). The first upload prints a
+one-time notice naming ``brindle docs off``. ``repo_key`` is the org-key HMAC
+of the repo's identity (:mod:`brindle.pro.orgkey`); without an org key or an
+identity nothing is sent.
 
 The ``brindle docs`` commands (:func:`api`, :func:`set_switch`) talk to the
 same endpoints for listing, showing, deleting, sharing and exporting.
@@ -23,7 +25,6 @@ from __future__ import annotations
 import atexit
 import logging
 import queue
-import re
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -34,18 +35,16 @@ from brindle.pro.orgkey import OrgKeys, repo_identity
 log = logging.getLogger(__name__)
 
 FEATURE = "analysis_docs"
-DELIVERABLES = ".brindle/deliverables"
 QUEUE_SIZE = 64
 FLUSH_AT_EXIT = 2.0
 SEND_WAIT = 8.0
 MAX_FILE = 512 * 1024
-MAX_APPENDICES = 20
+MAX_FILES = 20
 SWITCHES = ("standard", "store", "share", "assist", "prompt_analysis")
 PLAN_DEFAULT_ON = frozenset({"store", "standard"})      # on for Pro, off otherwise
-LABELS = ("verified", "inference", "not checked")
 NOTICE_MARK = "analysis-docs-notice"
-NOTICE = ("brindle stores your analysis deliverables (.brindle/deliverables) encrypted in your "
-          "personal library. Turn this off any time with `brindle docs off`.")
+NOTICE = ("brindle stores your analysis docs encrypted in your personal library once their "
+          "branch merges. Turn this off any time with `brindle docs off`.")
 
 
 # -- switches -----------------------------------------------------------------------------------
@@ -62,103 +61,58 @@ def resolve_switch(name: str, user: dict | None = None) -> bool:
     return name in PLAN_DEFAULT_ON
 
 
-# -- reading deliverables ------------------------------------------------------------------------
+# -- reading docs --------------------------------------------------------------------------------
 
 
 @dataclass
 class Doc:
-    slug: str
-    title: str
-    body_md: str
-    appendices: list[dict]
-    meta: dict
-    files: list[str] = field(default_factory=list)      # repo-relative paths, for protected_paths
+    files: list[dict]                                    # {name, md}, named below the docs folder
+    source: dict                                         # {kind, ref}
+    paths: list[tuple[Path, bytes]] = field(default_factory=list)   # each local copy and what was sent
 
 
-def _frontmatter(text: str) -> tuple[dict, str]:
-    import yaml
-
-    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?", text, re.S)
-    if not m:
-        return {}, text
-    try:
-        data = yaml.safe_load(m.group(1))
-    except yaml.YAMLError:
-        data = None
-    data = data if isinstance(data, dict) else {}
-    out = {k: " ".join(v.split()) for k, v in data.items() if k in ("title", "question", "scope")
-           and isinstance(v, str)}
-    return out, text[m.end():]
-
-
-def _section(body: str, name: str) -> str:
-    m = re.search(rf"^##\s+{name}\s*$(.*?)(?=^##\s|\Z)", body, re.S | re.M | re.I)
-    return m.group(1).strip() if m else ""
-
-
-def _bullets(section: str) -> list[str]:
-    return [m.group(1).strip() for m in re.finditer(r"^\s*[-*]\s+(.*)$", section, re.M)]
-
-
-def _meta(front: dict, body: str) -> dict:
-    results, conclusion = _section(body, "Results"), _section(body, "Conclusion")
-    labels = {"verified": 0, "inference": 0, "not_checked": 0}
-    for b in _bullets(results) + _bullets(conclusion):
-        for lab in LABELS:
-            if f"[{lab}]" in b.lower():
-                labels[lab.replace(" ", "_")] += 1
-    return {"question": front.get("question", ""), "conclusion": conclusion[:4000],
-            "metrics": [b[:300] for b in _bullets(results) if re.search(r"\d", b)][:50],
-            "labels": labels}
-
-
-def _plain(root: str, path: Path) -> bool:
-    """Whether no part of ``path`` below ``root`` is a symlink, so reading it
-    stays inside the repo and matches the path the protected-path check sees."""
-    rel = path.relative_to(root)
-    return not any((Path(root) / Path(*rel.parts[:i + 1])).is_symlink() for i in range(len(rel.parts)))
-
-
-def _read(path: Path) -> str:
+def _read(path: Path) -> bytes | None:
+    """The whole file, or None when it is over MAX_FILE or isn't UTF-8 text."""
     with open(path, "rb") as fh:
-        return fh.read(MAX_FILE).decode("utf-8", "replace")
+        data = fh.read(MAX_FILE + 1)
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    return data if len(data) <= MAX_FILE else None
 
 
-def collect(root: str, changed: list[str]) -> list[Doc]:
-    """The deliverables under ``root`` that ``changed`` (repo-relative paths)
-    touches, parsed. A slug without a readable ``main.md`` is skipped."""
-    slugs = []
-    for p in changed:
-        m = re.match(rf"^{re.escape(DELIVERABLES)}/([^/]+)/", p.replace("\\", "/"))
-        if m and m.group(1) not in slugs:
-            slugs.append(m.group(1))
-    docs = []
-    for slug in slugs:
-        d = Path(root) / DELIVERABLES / slug
+def collect(repo_root: str, branch: str, source: dict) -> list[Doc]:
+    """The doc written for ``branch``: every document in its docs folder (as
+    a Knowledge folder source would read them) small enough to upload whole.
+    A larger file is left out, and so never deleted."""
+    from brindle import kb
+    from brindle.pro.analysis_brief import docs_dir
+
+    folder = docs_dir(repo_root, branch)
+    files, paths = [], []
+    try:
+        if folder.is_symlink() or not folder.is_dir():
+            return []
+        for name, p in kb._folder_paths(folder):
+            data = _read(p)
+            if data is not None and len(files) < MAX_FILES:
+                files.append({"name": name, "md": data.decode("utf-8")})
+                paths.append((p, data))
+    except OSError:
+        log.info("analysis doc for %s unreadable; skipped", branch)
+        return []
+    return [Doc(files=files, source=source, paths=paths)] if files else []
+
+
+def _delete_local(doc: Doc) -> None:
+    """Remove the uploaded local copies, leaving any file changed since it was read."""
+    for p, sent in doc.paths:
         try:
-            if not _plain(root, d / "main.md"):
-                continue
-            main = _read(d / "main.md")
-            front, body = _frontmatter(main)
-            apps = [a for a in sorted((d / "appendices").glob("*.md"))
-                    if _plain(root, a) and a.is_file()][:MAX_APPENDICES]
-            docs.append(Doc(
-                slug=slug, title=front.get("title") or slug, body_md=main,
-                appendices=[{"name": a.name, "md": _read(a)} for a in apps],
-                meta=_meta(front, body),
-                files=[f"{DELIVERABLES}/{slug}/main.md",
-                       *(f"{DELIVERABLES}/{slug}/appendices/{a.name}" for a in apps)]))
+            if _read(p) == sent:
+                p.unlink()
         except OSError:
-            log.info("analysis doc %s unreadable; skipped", slug)
-    return docs
-
-
-def changed_files(path: str, base_ref: str) -> list[str]:
-    """Deliverable files the branch at ``path`` adds or changes against ``base_ref``."""
-    from brindle import git
-
-    names = git.paths(["diff", "--name-only", "--diff-filter=AMR", f"{base_ref}...HEAD"], path)
-    return [n for n in names if n.startswith(f"{DELIVERABLES}/")]
+            log.info("analysis doc copy %s not removed", p.name)
 
 
 # -- the uploader ----------------------------------------------------------------------------------
@@ -173,14 +127,12 @@ def _say(text: str) -> None:
 class AnalysisDocs:
     def __init__(self, repo_root: str, *, client=None, store=None, key_store=None,
                  identity: Callable[[], str | None] | None = None,
-                 protected: Callable[[list[str]], list[str]] | None = None,
                  notice: Callable[[str], None] | None = None,
                  start_thread: bool = True) -> None:
         self.repo_root = repo_root
         self._client, self._store = client, store
         self.keys = OrgKeys(store=store, client=client, key_store=key_store)
         self._identity = identity or (lambda: repo_identity(repo_root))
-        self._protected = protected or (lambda files: protected_files(repo_root, files))
         self._notice = notice or _say
         self.queue: queue.Queue = queue.Queue(maxsize=QUEUE_SIZE)
         self.dropped = 0
@@ -243,16 +195,18 @@ class AnalysisDocs:
 
             ent = self.entitlement()
             identity = self._identity() if ent else None
-            if ent is None or identity is None or self._protected(doc.files) or not self._store_on():
+            if ent is None or identity is None or not self._store_on():
                 return
             key = self.keys.get(ent.org_id)
             self._first_notice()
             client, store = self._deps()
-            body = {"scope": {"kind": "user", "id": ent.sub}, "title": doc.title, "body_md": doc.body_md,
-                    "appendices": doc.appendices, "meta": doc.meta, "repo_key": key.repo_key(identity)}
+            body = {"scope": {"kind": "user", "id": ent.sub}, "files": doc.files, "source": doc.source,
+                    "repo_key": key.repo_key(identity)}
             status, _ = auth.authed(client, store, "POST", "/analysis-docs", auth.JSONBody(body))
             if status != 200:
                 log.info("analysis doc not stored (HTTP %s)", status)
+                return
+            _delete_local(doc)
         except Exception as e:  # noqa: BLE001
             log.info("analysis doc not sent (%s)", type(e).__name__)
 
@@ -291,18 +245,6 @@ class AnalysisDocs:
         waiter.start()
         waiter.join(wait)
         return not self.queue.unfinished_tasks
-
-
-def protected_files(repo_root: str, files: list[str]) -> list[str]:
-    """``files`` that the repo's or the org's ``protected_paths`` cover. An
-    org policy that can't be read protects everything."""
-    from brindle import rule_checks
-    from brindle.config import load_repo_config
-
-    globs, why = rule_checks.org_protected_paths(repo_root)
-    if why:
-        return list(files)
-    return rule_checks.protected_files(files, [*load_repo_config(repo_root).protected_paths, *globs])
 
 
 _instances: dict[str, AnalysisDocs] = {}

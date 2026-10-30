@@ -275,7 +275,7 @@ def _await_worker(db: DB, worker_id: str, wait_seconds: int) -> str:
 def _route_clash(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, mode: str, *,
                  isolate: bool, branch: str | None, done_when: str | None, files: list[str] | None,
                  depends_on: list[str] | None, plan_first: bool | None, weight: str | None,
-                 decision: dict, why: list[str]) -> tuple[str | None, str | None]:
+                 decision: dict, why: list[str], analysis_doc: bool = False) -> tuple[str | None, str | None]:
     """Handle a new task's overlap with running work by the repo's ``overlap``
     setting (``tasks.overlap_mode``): (a reply to return instead of starting,
     a warning for the started reply). Queueing waits on the holder's worker;
@@ -295,7 +295,7 @@ def _route_clash(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, 
         t = tasks.enqueue(
             db, caller, ws, profile, task, mode, isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=[*(depends_on or []), clash.holder],
-            plan_first=plan_first, weight=weight,
+            plan_first=plan_first, weight=weight, analysis_doc=analysis_doc,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
         outcome = f"queued as task {t.id} until {clash.holder} merges"
@@ -330,7 +330,7 @@ async def handoff(
     wait_seconds: int = DEFAULT_WAIT_SECONDS, done_when: str | None = None,
     files: list[str] | None = None, depends_on: list[str] | None = None,
     plan_first: bool | None = None, weight: str | None = None, repo: str | None = None,
-    dry_run: bool = False,
+    dry_run: bool = False, analysis_doc: bool = False,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
 
@@ -382,6 +382,9 @@ async def handoff(
     plan_first: the worker must first send a plan with submit_plan and wait
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
+
+    analysis_doc: the worker leaves an analysis doc of its work, as heavy and
+    advanced tasks always do.
     """
     def run() -> str:
         db = DB()
@@ -414,7 +417,7 @@ async def handoff(
             t = tasks.enqueue(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight,
+                weight=effective_weight, analysis_doc=analysis_doc,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller,
@@ -423,13 +426,14 @@ async def handoff(
         reply, warning = _route_clash(
             db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, decision=decision, why=why)
+            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
         if reply:
             return reply
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
                 done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
+                analysis_doc=analysis_doc,
             )
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
@@ -472,6 +476,7 @@ async def assign(
     done_when: str | None = None, files: list[str] | None = None,
     depends_on: list[str] | None = None, plan_first: bool | None = None,
     weight: str | None = None, repo: str | None = None, dry_run: bool = False,
+    analysis_doc: bool = False,
 ) -> str:
     """Start a worker agent on a task and return immediately.
 
@@ -515,6 +520,9 @@ async def assign(
     plan_first: the worker must first send a plan with submit_plan and wait
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
+
+    analysis_doc: the worker leaves an analysis doc of its work, as heavy and
+    advanced tasks always do.
     """
     def run() -> str:
         db = DB()
@@ -547,7 +555,7 @@ async def assign(
             t = tasks.enqueue(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight,
+                weight=effective_weight, analysis_doc=analysis_doc,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller,
@@ -556,13 +564,14 @@ async def assign(
         reply, warning = _route_clash(
             db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, decision=decision, why=why)
+            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
         if reply:
             return reply
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
                 done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
+                analysis_doc=analysis_doc,
             )
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
