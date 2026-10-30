@@ -153,8 +153,9 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 (r for r in [awaiting_review(a, ws)] if r and r.startswith("merge failed")), None)
             # A request the hook holds is pending whatever the screen shows meanwhile.
             drop_orphan_requests(db, row)   # whatever the agent's status: a cancelled call's row
-            asking = (pending_permissions(db, row)
-                      if a["status"] == "waiting" or HOLDS.of_agent(row.id) else [])
+            asking = [p for p in (pending_permissions(db, row)
+                                  if a["status"] == "waiting" or HOLDS.of_agent(row.id) else [])
+                      if _answerable(row, p)]
             out += [InboxItemDTO(kind="permission", reason="asks permission",
                                  detail=p.request.summary() if p.request else None, permission=p.dto, **link)
                     for p in asking]
@@ -196,6 +197,17 @@ class Pending:
     request: permissions.Request | None
     suggestions: list | None                 # Claude Code's own "always allow" updates
     dto: PermissionDTO
+
+
+def _answerable(agent: Agent, p: Pending) -> bool:
+    """Whether answer_permission would take ``p`` (HOLDS.claim's conditions): a
+    hook-held request whose answer is already claimed, or whose digest differs
+    from the one its hook registered, is refused, so it isn't listed. A
+    request at the CLI's own prompt stays, as a terminal-only card."""
+    if p.via != "hook":
+        return True
+    hold = HOLDS.held(agent.id, p.dto.request_id)
+    return hold is not None and hold.answer is None and hold.digest == p.dto.digest
 
 
 def _always_rule(req: permissions.Request | None, suggestions: list | None, repo_root: str | None) -> str | None:

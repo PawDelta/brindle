@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
-import { DaemonError, type DaemonClient } from "../../api/client";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DaemonError } from "../../api/client";
 import type { InboxItemDTO } from "../../api/schema";
 import { FakeDaemon } from "../../test/fakeDaemon";
 import { root } from "../../test/fixtures";
@@ -37,7 +37,8 @@ describe("inbox actions", () => {
   it("drops the card and refetches when the engine says nothing waits on it any more, but keeps it for another refusal", async () => {
     const daemon = new FakeDaemon({ workspaces: [root], inbox: [plan] });
     let refused = "sup1 has no plan awaiting a decision";
-    const client = { ...daemon.client(), inboxAction: () => Promise.reject(new DaemonError("conflict", refused, 409)) } as DaemonClient;
+    const client = daemon.client();
+    vi.spyOn(client, "inboxAction").mockImplementation(() => Promise.reject(new DaemonError("conflict", refused, 409)));
     let refreshes = 0;
     const out: { actions?: InboxActions } = {};
     const inbox = [plan];   // one array: a new one each render would read as a fresh snapshot
