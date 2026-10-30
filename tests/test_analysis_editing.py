@@ -14,15 +14,16 @@ from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: 
 from test_pro_remote_learning import login_as
 
 FILES = [{"name": "design.md", "md": "# Storage\nTTL 60s\n"}]
+DROP = "DELETE /analysis-docs/d1/draft?session=sup&branch=feat%2Fa"
 
 
 @pytest.fixture
 def remote(backend, monkeypatch):
     backend.routes.update({
         "GET /analysis-docs/d1": lambda f, h: (200, {"id": "d1", "version": backend.version, "kind": "living"}),
-        "PUT /analysis-docs/d1/drafts": [(200, {})],
-        "POST /analysis-docs/d1/drafts/publish": [(200, {"version": 2})],
-        "POST /analysis-docs/d1/drafts/drop": [(200, {})],
+        "PUT /analysis-docs/d1/draft": [(200, {})],
+        "POST /analysis-docs/d1/draft/publish": [(200, {"version": 2})],
+        DROP: [(200, {})],
     })
     backend.version = 1
     monkeypatch.setattr(auth.UrllibTransport, "request",
@@ -90,14 +91,14 @@ def test_draft_publishes_on_merge_and_is_dropped_unmerged(outcome, db, remote, t
 
     sup, worker, ws = session(db, tmp_path, mode="handoff")
     ad.save_draft(db, worker, ws.branch, "d1", FILES)
-    assert calls(remote, "PUT /analysis-docs/d1/drafts") == [
+    assert calls(remote, "PUT /analysis-docs/d1/draft") == [
         {"session": "sup", "branch": "feat/a", "base_version": 1, "files": FILES}]
     db.set_result(worker.id, "done")                # the handoff completes: its worker is removed
     mcp_server._await_worker(db, worker.id, 1)
     assert db.get_agent(worker.id) is None
     if outcome in (GONE, GONE_CLASH):
-        remote.routes["POST /analysis-docs/d1/drafts/publish"] = [(503, {}), (200, {"version": 2}) if outcome == GONE
-                                                                  else (409, {"error": "clash", "clashes": []})]
+        remote.routes["POST /analysis-docs/d1/draft/publish"] = [(503, {}), (200, {"version": 2}) if outcome == GONE
+                                                                  else (409, {"error": "section_clash", "clashes": []})]
     if outcome == "removed":
         pipeline.on_workspace_cleanup(db, ws)
     else:
@@ -109,9 +110,9 @@ def test_draft_publishes_on_merge_and_is_dropped_unmerged(outcome, db, remote, t
         db.delete_workspace(sup.workspace_id)       # its agents go with it
         other = add(db, workspace(db, tmp_path, "w9", "feat/z"), "other")
         agents.handle_hook(db, other.id, "stop", {})   # any session's turn ends: the queue is sent
-    published = calls(remote, "POST /analysis-docs/d1/drafts/publish")
-    dropped = calls(remote, "POST /analysis-docs/d1/drafts/drop")
+    published = calls(remote, "POST /analysis-docs/d1/draft/publish")
     draft = {"session": "sup", "branch": "feat/a"}
+    dropped = [draft for _ in calls(remote, DROP)]         # its session and branch are in the query
     assert (published, dropped) == {"merged": ([draft], []), "removed": ([], [draft]), GONE: ([draft, draft], []),
                                     GONE_CLASH: ([draft, draft], [draft])}[outcome]   # no one left to reconcile
     assert states(db) == {} and ad.owed(db) == {} and told == []
@@ -122,8 +123,8 @@ def test_each_branchs_clash_goes_to_the_supervisor_to_reconcile(db, remote, told
     ws_b = workspace(db, tmp_path, "w2", "feat/b")
     worker_b = add(db, ws_b, "w2a", parent=sup.id)
     ad.read_doc(db, worker_b.id, "d1")
-    clash = (409, {"error": "clash", "clashes": [{"section": "Storage", "version": 3}]})
-    remote.routes["POST /analysis-docs/d1/drafts/publish"] = [clash, clash, (200, {"version": 4})]
+    clash = (409, {"error": "section_clash", "clashes": ["Storage"], "base_version": 1, "head_version": 3})
+    remote.routes["POST /analysis-docs/d1/draft/publish"] = [clash, clash, (200, {"version": 4})]
     for worker, ws in ((worker_a, ws_a), (worker_b, ws_b)):
         ad.save_draft(db, worker, ws.branch, "d1", FILES)
         merge(db, ws, tmp_path, monkeypatch)
@@ -134,9 +135,9 @@ def test_each_branchs_clash_goes_to_the_supervisor_to_reconcile(db, remote, told
     with pytest.raises(RuntimeError):               # two drafts clash: it must say which
         ad.save_draft(db, sup, "main", "d1", FILES)
     ad.save_draft(db, sup, "main", "d1", FILES, clashed_branch="feat/b")
-    assert calls(remote, "PUT /analysis-docs/d1/drafts")[-1] == {
+    assert calls(remote, "PUT /analysis-docs/d1/draft")[-1] == {
         "session": "sup", "branch": "feat/b", "base_version": 3, "files": FILES}
-    assert calls(remote, "POST /analysis-docs/d1/drafts/publish")[-1] == {"session": "sup", "branch": "feat/b"}
+    assert calls(remote, "POST /analysis-docs/d1/draft/publish")[-1] == {"session": "sup", "branch": "feat/b"}
     assert (ad.UPDATED_ITEM, "d1", "published") in knowledge.receipt(db, "sup")
     assert states(db) == {("feat/a", "d1"): "clash"}
 
@@ -207,6 +208,7 @@ def test_reviewer_brief_has_the_docs_and_decisions_and_a_stale_doc_holds_the_ver
     monkeypatch.setattr(agents, "finish_review", lambda *a, **k: None)
     agents.submit_review(db, "rev1", True, "looks right")
     assert db.get_agent("rev1").result is None      # held: it read version 1
+    assert calls(remote, "POST /analysis-docs/versions")[-1] == {"doc_ids": ["d1"]}
     ad.read_doc(db, "rev1", "d1")
     agents.submit_review(db, "rev1", True, "still right")
     assert db.get_agent("rev1").result is not None

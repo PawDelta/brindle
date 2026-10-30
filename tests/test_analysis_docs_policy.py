@@ -9,7 +9,7 @@ from brindle.pro._files import private_dir, write_private
 from pro_fixtures import backend, claims, fixed_identity, pro_env, signing_key  # noqa: F401
 from test_analysis_docs import SOURCE, remote, uploader, write_doc  # noqa: F401
 from test_pro_remote_learning import login_as
-from test_pro_team import ORG, login, run, team  # noqa: F401
+from test_pro_team import ORG, login, run, team, team_claims  # noqa: F401
 
 
 @pytest.mark.parametrize("enterprise,group_state,user,group,name,expected", [
@@ -19,7 +19,7 @@ from test_pro_team import ORG, login, run, team  # noqa: F401
     ("off", "default_on", None, "g", "store", True),
     ("off", None, None, "g", "store", False),
     (None, None, None, "g", "store", True),
-    (None, None, None, "g", "import_upload", False),
+    (None, None, None, "g", "prompt_analysis", False),
     pytest.param("off", "enforced_on", None, None, "store", False,
                  marks=pytest.mark.variant("missing group must not select an existing group")),
     pytest.param("off", "enforced_on", None, "unknown", "store", False,
@@ -46,7 +46,7 @@ def test_enforced_off_keeps_upload_local(tmp_path, remote, fixed_identity):
     assert remote.docs == [] and (folder / "summary.md").exists()
 
 
-def test_org_docs_shows_caches_and_updates_policy(team):
+def test_org_docs_shows_caches_and_updates_policy(team, monkeypatch):
     path = f"/orgs/{ORG}/analysis-docs/policy"
     policy = {"switches": {"store": "enforced_off", "assist": "default_on"},
               "groups": {"g": {"switches": {"share": "off"}}}}
@@ -69,6 +69,25 @@ def test_org_docs_shows_caches_and_updates_policy(team):
     assert policy == {"switches": {"store": "enforced_off", "assist": "default_on",
                                    "import_upload": "default_on"},
                       "groups": {"g": {"switches": {"share": "enforced_on"}}}}
+
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+    from brindle.pro import auth
+
+    put = []                                        # a person's own switches: brindle docs on|off --switch
+    team.routes["PUT /me/analysis-docs/settings"] = lambda f, h: put.append(f) or (200, f)
+    monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, m, url, form, headers:
+                        team.request(m, url, form, headers))
+    team.routes["GET /analysis-docs/scopes"] = lambda f, h: (200, {"scopes": [
+        {"kind": "user", "id": "user_1"}, {"kind": "group", "id": "g"}, {"kind": "group", "id": "elsewhere"}]})
+    login(team, team_claims(features=["analysis_docs", "analysis_docs_team", "analysis_docs_enterprise"]))
+    done = CliRunner().invoke(app, ["docs", "off", "--switch", "assist"])
+    assert done.exit_code == 0 and put == [{"switches": {"store": "on", "assist": "off"}}], done.output
+    for args, why in ((["docs", "on"], "store off"),                    # the org enforces store off
+                      (["docs", "off", "--switch", "share"], "share on")):   # and the person's group share on
+        refused = CliRunner().invoke(app, args)
+        assert refused.exit_code == 1 and f"organisation has {why}" in refused.output and len(put) == 1
     login(team, claims(org_id="org_personal", plan="free", features=[]))
     policy["switches"].pop("store")
     team.routes["GET /me/analysis-docs/settings"] = lambda f, h: (200, {"switches": {}})

@@ -1424,6 +1424,36 @@ def delete_doc_destination(db: DB, params: dict, body: Body) -> Any:
     return docs_org_api("DELETE", "destination", repo=_get(body, "repo"), admin=True)
 
 
+def doc_switches(repo: str | None = None) -> dict:
+    """``{"switches": [{name, on, choice, locked, org}]}``: the person's own
+    switches (analysis_docs.switch_states). 402 when not entitled, 502 when
+    the server refuses or can't be read."""
+    from brindle.pro import analysis_docs, auth
+
+    _docs_entitlement(repo)
+    try:
+        return {"switches": analysis_docs.switch_states()}
+    except (RuntimeError, auth.TransportError) as e:
+        raise ServiceError("upstream", str(e), 502) from e
+
+
+def put_doc_switch(db: DB, params: dict, body: Body) -> Any:
+    """Set one of the person's own switches (``name``, ``on``); 403 when their org enforces it."""
+    from brindle.pro import analysis_docs, analysis_policy, auth
+
+    name, on, repo = _get(body, "name", required=True), _get(body, "on", bool, required=True), _get(body, "repo")
+    if name not in analysis_policy.SWITCHES:
+        raise ServiceError("invalid", f"name is one of {', '.join(analysis_policy.SWITCHES)}")
+    _docs_entitlement(repo)
+    try:
+        analysis_docs.set_switch(on, name=name)
+    except analysis_docs.Locked as e:
+        raise ServiceError("forbidden", str(e), 403) from e
+    except (RuntimeError, auth.TransportError) as e:
+        raise ServiceError("upstream", str(e), 502) from e
+    return doc_switches(repo)
+
+
 def docs_scopes(repo: str | None = None) -> list[dict]:
     """Every scope the person reads, as the server lists them
     (``{kind, id, name, can_share}``; their teams too, docs or not)."""
@@ -1910,6 +1940,7 @@ ROUTES = [
     # Before /analysis-docs/{id}.
     Route("/v1/analysis-docs/destination", _endpoint(put_doc_destination), methods=["PUT"]),
     Route("/v1/analysis-docs/destination", _endpoint(delete_doc_destination), methods=["DELETE"]),
+    Route("/v1/analysis-docs/switches", _endpoint(put_doc_switch), methods=["PUT"]),
     _post("/analysis-docs/{id}/share", share_doc),
     Route("/v1/analysis-docs/{id}/share", _endpoint(unshare_doc), methods=["DELETE"]),
     _post("/analysis-docs/{id}/export", export_doc),

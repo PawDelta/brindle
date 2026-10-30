@@ -34,7 +34,9 @@ from brindle import (
     workspaces,
 )
 from brindle.daemon import session_review
-from brindle.daemon.routes_actions import docs_api, docs_everywhere, docs_org_api, docs_scopes, read_edit_target
+from brindle.daemon.routes_actions import (
+    doc_switches, docs_api, docs_everywhere, docs_org_api, docs_scopes, read_edit_target,
+)
 from brindle.db import DB
 from brindle.service import inbox
 from brindle.service.dto import (
@@ -550,7 +552,7 @@ def analysis_doc_map(db: DB, request: Request) -> Any:
         raise ServiceError("bad_request", "choose a scope and code paths at depth 1", 400)
     return docs_api("GET", "/analysis-docs/map", repo=_repo(request),
                     query={"scope_kind": q["scope_kind"], "scope_id": q["scope_id"],
-                           "paths": json.dumps(paths), "depth": "1"})
+                           "paths": ",".join(paths), "depth": "1"})    # the server's list is comma-separated
 
 
 @_json
@@ -570,6 +572,12 @@ def analysis_doc_topics(db: DB, request: Request) -> Any:
 @_json
 def analysis_doc_scopes(db: DB, request: Request) -> Any:
     return {"scopes": docs_scopes(_repo(request))}
+
+
+@_json
+def analysis_doc_switches(db: DB, request: Request) -> Any:
+    """The person's own switches, and which their org has locked (see routes_actions.doc_switches)."""
+    return doc_switches(_repo(request))
 
 
 @_json
@@ -677,6 +685,7 @@ ROUTES = [
     Route("/v1/analysis-docs/scopes", analysis_doc_scopes),
     Route("/v1/analysis-docs/results", analysis_doc_results),
     Route("/v1/analysis-docs/policy", analysis_doc_policy),
+    Route("/v1/analysis-docs/switches", analysis_doc_switches),
     Route("/v1/analysis-docs/export-config", analysis_doc_export_config),
     Route("/v1/analysis-docs/destination", analysis_doc_destination),
     Route("/v1/analysis-docs/{id}", analysis_doc),
