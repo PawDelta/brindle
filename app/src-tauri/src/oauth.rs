@@ -150,6 +150,15 @@ fn allowed(url: &str) -> bool {
         .is_some_and(|host| HOSTS.contains(&host))
 }
 
+/// Never follows a redirect: the allow-list covers the address the page asked
+/// for, and a redirect could name another host (or replay a body there).
+fn provider_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize)]
 pub struct ProviderReply {
     status: u16,
@@ -169,7 +178,7 @@ pub async fn provider_http(
         return Err(format!("refusing {url}: not a Google or Microsoft address"));
     }
     let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
-    let mut request = reqwest::Client::new().request(method, &url);
+    let mut request = provider_client()?.request(method, &url);
     for (name, value) in headers {
         request = request.header(name, value);
     }
@@ -201,6 +210,27 @@ mod tests {
         assert!(!allowed("http://graph.microsoft.com/v1.0"));
         assert!(!allowed("https://graph.microsoft.com.evil.test/x"));
         assert!(!allowed("https://evil.test/?https://graph.microsoft.com/"));
+    }
+
+    #[test]
+    fn provider_client_does_not_follow_a_redirect() {
+        let target = TcpListener::bind("127.0.0.1:0").unwrap();
+        target.set_nonblocking(true).unwrap();
+        let target_port = target.local_addr().unwrap().port();
+        let front = TcpListener::bind("127.0.0.1:0").unwrap();
+        let front_port = front.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = front.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = s.read(&mut buf);
+            let _ = write!(s, "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:{target_port}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        });
+        let status = tauri::async_runtime::block_on(async {
+            provider_client().unwrap().post(format!("http://127.0.0.1:{front_port}/")).body("secret").send().await.unwrap().status().as_u16()
+        });
+        server.join().unwrap();
+        assert_eq!(status, 307);
+        assert!(target.accept().is_err(), "the redirect target was contacted");
     }
 
     #[test]
