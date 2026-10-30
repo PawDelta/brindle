@@ -565,6 +565,19 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
     text TEXT NOT NULL,
     quarantined TEXT
 );
+-- Imported folders added to the personal library (brindle.pro.analysis_imports):
+-- the folder, and each file sent with the library doc it became.
+CREATE TABLE IF NOT EXISTS kb_import_library (
+    source_id TEXT PRIMARY KEY REFERENCES kb_sources(id) ON DELETE CASCADE,
+    added_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kb_import_uploads (
+    source_id TEXT NOT NULL REFERENCES kb_sources(id) ON DELETE CASCADE,
+    external_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    doc_id TEXT NOT NULL,
+    PRIMARY KEY (source_id, external_id)
+);
 -- Only an explicit session request creates a document inbox item.
 CREATE TABLE IF NOT EXISTS doc_requests (
     id TEXT PRIMARY KEY,

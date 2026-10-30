@@ -33,6 +33,7 @@ import type { KnowledgeView } from "../../routes";
 import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
 import { DocsView } from "./DocsView";
+import { ImportedLibrary } from "./ImportedLibrary";
 
 export interface KnowledgeScreenProps {
   client: DaemonClient;
@@ -310,7 +311,7 @@ interface Pending {
   label: string;
 }
 
-function Source({ s, busy, indexing, onSync, onRemove }: { s: KbSource; busy: boolean; indexing: boolean; onSync(): void; onRemove(): void }) {
+function Source({ s, busy, indexing, library, onSync, onRemove }: { s: KbSource; busy: boolean; indexing: boolean; library?: { client: DaemonClient; repo: string; onChanged(): void }; onSync(): void; onRemove(): void }) {
   const indexed = indexing ? "Indexing…" : s.docs === undefined || s.docs === 0 ? "Not indexed yet" : s.docs === 1 ? "1 document indexed" : `${s.docs} documents indexed`;
   return (
     <li className="flex flex-wrap items-center gap-x-s2 gap-y-1 px-s2 py-s1" data-source={s.id} data-indexing={indexing || undefined}>
@@ -345,6 +346,7 @@ function Source({ s, busy, indexing, onSync, onRemove }: { s: KbSource; busy: bo
           Remove
         </button>
       </div>
+      {s.kind === "folder" && library && <ImportedLibrary client={library.client} repo={library.repo} source={s} disabled={busy || indexing} onChanged={library.onChanged} />}
     </li>
   );
 }
@@ -678,7 +680,7 @@ export function KnowledgeScreen({ client, pickFolder, view, doc, session }: Know
           {sources && sources.length > 0 && (
             <ul className={`${card} flex flex-col divide-y divide-line`}>
               {sources.map((s) => (
-                <Source key={s.id} s={s} busy={busy} indexing={s.id in indexing} onSync={() => sync(s)} onRemove={() => remove(s)} />
+                <Source key={s.id} s={s} busy={busy} indexing={s.id in indexing} library={{ client, repo, onChanged: () => void load() }} onSync={() => sync(s)} onRemove={() => remove(s)} />
               ))}
             </ul>
           )}

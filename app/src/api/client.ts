@@ -331,6 +331,15 @@ export interface KbSource {
   added_at?: number;
   docs?: number;
   quarantined?: boolean;
+  /* Added to the personal library (Pro); otherwise the folder stays local. */
+  in_library?: boolean;
+}
+
+/* POST /kb/sources/{id}/library with dry_run: what adding a folder to the library would send. */
+export interface KbLibraryPlan {
+  files: { name: string; bytes: number }[];
+  skipped: { name: string; reason: string }[];
+  allowed: boolean;
 }
 
 /* DELETE /kb/sources/{id} (engine branch desktop/kb-sources): the source is gone. */
@@ -1053,6 +1062,21 @@ export class DaemonClient {
   /* Indexes a source again (POST /kb/sources/{id}/sync?repo=): a job, done when the index is current. */
   syncKbSource(repo: string, id: string) {
     return this.post<Job>(`/kb/sources/${encodeURIComponent(id)}/sync?repo=${encodeURIComponent(repo)}`, {});
+  }
+
+  /* The files adding a folder to the library would upload, and the ones skipped; nothing is sent. */
+  kbLibraryPlan(repo: string, id: string) {
+    return this.post<KbLibraryPlan>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, { dry_run: true });
+  }
+
+  /* Adds a folder to the library and uploads it (403 not_allowed when uploading is off). */
+  addKbToLibrary(repo: string, id: string) {
+    return this.post<unknown>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, {});
+  }
+
+  /* Deletes the folder's docs from the library; the folder stays. */
+  removeKbFromLibrary(repo: string, id: string) {
+    return this.delete<unknown>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, {});
   }
 
   /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.

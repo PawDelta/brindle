@@ -1,0 +1,87 @@
+/* "Add to library" for an imported folder (brindle Pro). Folders stay local
+   until the person confirms the exact list of files that would be uploaded;
+   anything that looks like a secret is skipped and said so. */
+import { useState } from "react";
+import type { DaemonClient, KbLibraryPlan, KbSource } from "../../api/client";
+import { plain } from "../../api/wording";
+import { alert, button, notice, primary, quiet } from "../../components/ui";
+
+const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
+const count = (n: number) => (n === 1 ? "1 file" : `${n} files`);
+
+export function ImportedLibrary({ client, repo, source, disabled, onChanged }: { client: DaemonClient; repo: string; source: KbSource; disabled: boolean; onChanged(): void }) {
+  const [plan, setPlan] = useState<KbLibraryPlan | null>(null);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const run = async (what: () => Promise<unknown>, after?: () => void) => {
+    setWorking(true);
+    setError(null);
+    try {
+      await what();
+      after?.();
+      onChanged();
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setWorking(false);
+    }
+  };
+
+  return (
+    <div className="flex basis-full flex-col gap-1">
+      {source.in_library ? (
+        <div className="flex items-center gap-s1 text-xs text-ink-3">
+          <span>In your library.</span>
+          <button type="button" className={quiet} disabled={disabled || working} onClick={() => void run(() => client.removeKbFromLibrary(repo, source.id))}>
+            Remove from library
+          </button>
+        </div>
+      ) : (
+        !plan && (
+          <div>
+            <button type="button" className={quiet} disabled={disabled || working} onClick={() => void run(async () => setPlan(await client.kbLibraryPlan(repo, source.id)))}>
+              Add to library
+            </button>
+          </div>
+        )
+      )}
+      {plan && (
+        <section className="flex flex-col gap-1 rounded border border-line px-s2 py-s1" aria-label="Files to upload" data-testid="library-plan">
+          <p className="text-sm">{plan.files.length === 0 ? "Nothing in this folder can be uploaded." : `These ${count(plan.files.length)} will be uploaded to your library:`}</p>
+          <ul className="text-xs text-ink-2" aria-label="Will upload">
+            {plan.files.map((f) => (
+              <li key={f.name}>{f.name}</li>
+            ))}
+          </ul>
+          {plan.skipped.length > 0 && (
+            <>
+              <p className="text-sm">Skipped, not uploaded:</p>
+              <ul className="text-xs text-ink-3" aria-label="Skipped">
+                {plan.skipped.map((s) => (
+                  <li key={s.name}>
+                    {s.name}: {s.reason}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+          {!plan.allowed && <p className={notice}>Uploading imported folders is off for you, so nothing can be sent.</p>}
+          <div className="flex gap-1">
+            <button type="button" className={primary} disabled={working || !plan.allowed || plan.files.length === 0} onClick={() => void run(() => client.addKbToLibrary(repo, source.id), () => setPlan(null))}>
+              Upload {count(plan.files.length)}
+            </button>
+            <button type="button" className={button} disabled={working} onClick={() => setPlan(null)}>
+              Cancel
+            </button>
+          </div>
+        </section>
+      )}
+      {error && (
+        <p role="alert" className={alert}>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
