@@ -52,7 +52,8 @@ def test_brief_only_for_large_work(weight, plan, db, backend, tmp_path):
         assert (out, sent, sources, receipt) == ("", [], [], [])
     elif plan == "pro":
         assert f"\n{block}\n" in out and FOLDER in out
-        assert receipt == [(ab.RULE_ITEM, "a1"), (ab.BRIEF_ITEM, "a1"), (ab.DOC_ITEM, "d1")]
+        assert receipt == [(ab.RULE_ITEM, "a1"), (ab.BRIEF_ITEM, "a1"), (ab.DOC_ITEM, "d1"),
+                           (ab.SESSION_DOC_ITEM, "d1")]
         assert sources == []
     else:
         assert sent == [] and FOLDER in out and receipt == [(ab.RULE_ITEM, "a1")]

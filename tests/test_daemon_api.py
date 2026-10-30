@@ -572,23 +572,28 @@ def test_docs_with_no_scope_lists_each_readable_scope_once_per_doc(brindle_home,
     assert topics["topics"] == [{"topic": "refunds", "count": 3}, {"topic": "checkout", "count": 2}]
 
 
-def test_analysis_doc_session_summary_counts_local_session_records(db):
+def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, monkeypatch):
     from brindle import knowledge
     from brindle.pro import analysis_brief
+    from brindle.pro import analysis_docs
 
     with db.tx() as c:
         c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, drafter, state)"
-                  " VALUES ('r1', 'feature', 'writing-doc', 'w1', 'open')")
+                  " VALUES ('r1', 'feature', 'overlap-doc', 'w1', 'open')")
         c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, drafter, state)"
-                  " VALUES ('r1', 'feature', 'published-doc', 'w1', 'publish')")
-    knowledge.record_receipt(db, "r1", [(analysis_brief.DOC_ITEM, "cited-doc", "3"),
-                                         ("analysis_doc_updated", "uploaded-doc", "uploaded")])
+                  " VALUES ('r1', 'feature', 'pending-doc', 'w1', 'publish')")
+    monkeypatch.setattr(analysis_docs, "api", lambda *a, **kw: {"doc_id": "manual-only", "version": 3})
+    analysis_docs.read_doc(db, "r1", "manual-only")
+    knowledge.record_receipt(db, "r1", [(analysis_docs.UPDATED_ITEM, "overlap-doc", "published")])
+    monkeypatch.setattr(analysis_brief, "_brief", lambda *a, **kw: (
+        "A brief", [(analysis_brief.DOC_ITEM, "worker-cited", "4")]))
+    assert analysis_brief.server_brief(db, "w1", "task", [])
     knowledge.record_receipt(db, "other-session", [(analysis_brief.DOC_ITEM, "other-doc", "1")])
 
     code, body = _get("/v1/analysis-docs/session-summary", AUTH, "session=r1")
 
     assert code == 200
-    assert body == {"writing": 1, "updated": 2, "using": 1, "total": 4}
+    assert body == {"writing": 1, "updated": 1, "using": 1, "total": 2}
 
 
 @pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])

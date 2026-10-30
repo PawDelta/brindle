@@ -3152,6 +3152,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         db.update_agent(reviewer.id, review_slot=slot)
         if cited:   # the docs its brief cites, pinned at the versions it got
             knowledge.record_receipt(db, reviewer.id, cited)
+            analysis_brief.record_session_citations(db, reviewer.id, cited)
     return reviewer
 
 

@@ -524,10 +524,9 @@ def analysis_doc_session_summary(db: DB, request: Request) -> Any:
         raise ServiceError("invalid", "session is required", 400)
     drafts = docs.drafts(db, session)
     writing = {doc_id for (_, doc_id), item in drafts.items() if item["state"] == "open"}
-    cited = {doc_id for kind, doc_id, _ in knowledge.receipt(db, session) if kind == analysis_brief.DOC_ITEM}
+    cited = {doc_id for kind, doc_id, _ in knowledge.receipt(db, session)
+             if kind == analysis_brief.SESSION_DOC_ITEM}
     updated = {doc_id for kind, doc_id, _ in knowledge.receipt(db, session) if kind == docs.UPDATED_ITEM}
-    updated.update(doc_id for (_, doc_id), item in drafts.items() if item["state"] == "publish")
-    updated.difference_update(writing)
     return {"writing": len(writing), "updated": len(updated), "using": len(cited),
             "total": len(writing | updated | cited)}
 

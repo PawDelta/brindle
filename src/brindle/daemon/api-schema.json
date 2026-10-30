@@ -3032,11 +3032,11 @@
     },
     {
       "method": "GET",
-      "path": "/v1/analysis-docs/session-summary"
+      "path": "/v1/analysis-docs/scopes"
     },
     {
       "method": "GET",
-      "path": "/v1/analysis-docs/scopes"
+      "path": "/v1/analysis-docs/session-summary"
     },
     {
       "method": "GET",

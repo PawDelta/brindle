@@ -220,6 +220,9 @@ def test_live_reviewer_dedupe_compares_profiles(db, repo, piped):
 
 
 def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch):
+    from brindle import knowledge
+    from brindle.pro import analysis_brief
+
     setup, _ = piped
     ws = setup(second={"heavy": "reviewer-codex"})
     cfg = json.loads((repo / ".brindle" / "config.json").read_text())
@@ -242,6 +245,8 @@ def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch):
     monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, profile, cfg: profile or "reviewer")
     monkeypatch.setattr(agents, "_review_kill_switch", lambda ws_: None)
     cfg = config.load_repo_config(repo)
+    cited = [(analysis_brief.DOC_ITEM, "review-doc", "4")]
+    monkeypatch.setattr(analysis_brief, "review_context", lambda *a, **kw: ("brief", cited))
     parent = db.get_agent("boss")
     agents.start_review(db, parent, ws, "reviewer", None, cfg)
     agents.start_review(db, parent, ws, "reviewer-codex", None, cfg, second=True)
@@ -252,6 +257,8 @@ def test_both_reviewers_start_even_with_checks(db, repo, piped, monkeypatch):
     agents.review_after_checks(db, "boss", ws, "reviewer", cfg=cfg,
                                request_id=detached[0][-1])
     assert sorted(spawned) == ["reviewer", "reviewer-codex"]
+    assert (analysis_brief.SESSION_DOC_ITEM, "review-doc", "4") in knowledge.receipt(db, "boss")
+    assert (analysis_brief.DOC_ITEM, "review-doc", "4") in knowledge.receipt(db, "s0")
 
 
 # -- review-depth suggestions --------------------------------------------------
