@@ -86,6 +86,7 @@ def test_native_credential_from_profiles(repo):
     assert isinstance(NativeAdapter(str(repo / "nowhere")).available({}), tuple)
 
 
+@pytest.mark.brindle_ci_guard
 def test_native_profile_may_not_redirect_another_providers_key(repo):
     """A profile in the repository can name any endpoint; it must not be able
     to send the job's Anthropic or OpenAI key there."""
@@ -138,6 +139,7 @@ def test_native_key_needs_a_plainly_written_url(repo, base_url):
     assert ci_adapters.NativeAdapter.endpoint_host("https://API.Good.test") == "api.good.test"
 
 
+@pytest.mark.brindle_ci_guard
 def test_bare_native_key_reaches_loopback_only(repo):
     d = repo / ".brindle" / "agents"
     d.mkdir(parents=True)
@@ -493,6 +495,7 @@ def test_stuck_screen_reads_a_reviewers_pane(db, repo, monkeypatch):
     assert stuck.startswith("reviewer rev00000's Claude Code stopped on an error it won't retry: API Error: 400")
 
 
+@pytest.mark.brindle_ci_guard
 def test_an_api_error_line_is_capped_and_has_no_secrets():
     from brindle.ci_adapters import api_error_line
 

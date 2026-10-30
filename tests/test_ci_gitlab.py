@@ -141,6 +141,7 @@ def test_api_must_be_https():
         host().comment({**JOB_ENV, "CI_API_V4_URL": "http://gitlab.example.com/api/v4"}, 1, "hi")
 
 
+@pytest.mark.brindle_ci_guard
 def test_api_failure_is_reported_without_the_token():
     with pytest.raises(CIError) as e:
         host(FakeGitLab(status=401)).comment({**JOB_ENV, "CI_JOB_TOKEN": "s3cret-job-token"}, 1, "hi")
@@ -164,6 +165,7 @@ def test_init_refuses_without_entitlement_and_never_overwrites(tmp_path):
     assert (tmp_path / ".gitlab-ci.yml").read_text() == ci_hosts.GITLAB_TEMPLATE
 
 
+@pytest.mark.brindle_ci_guard
 def test_cli_init_host_gitlab_fails_closed(tmp_path, monkeypatch):
     from typer.testing import CliRunner
 

@@ -208,6 +208,7 @@ def test_start_needs_exactly_one_trigger_and_a_valid_validate(job, tmp_path):
     assert cli("start", "--out", out, "--dispatch", "nope").exit_code != 0
 
 
+@pytest.mark.brindle_ci_guard
 def test_validate_checks_never_see_secrets_or_model_keys(job, mkplan, wire, tmp_path, monkeypatch):
     sha = sh("git rev-parse HEAD", job)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
@@ -316,6 +317,7 @@ def test_escalation_does_not_reset_the_dollar_spend(job, mkplan, tmp_path, monke
 # -- adapters and doctor ---------------------------------------------------------------------------
 
 
+@pytest.mark.brindle_ci_guard
 def test_doctor_names_credentials_not_values_and_applies_the_org_rule(job, monkeypatch, tmp_path):
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(tmp_path / "event.json"))
     (tmp_path / "event.json").write_text(json.dumps({"repository": {"owner": {"type": "Organization"}}}))

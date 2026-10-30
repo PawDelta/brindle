@@ -147,8 +147,8 @@ def private_tmux_server():
         os.environ["BRINDLE_TMUX_SOCKET"] = old
 
 
-# Every test in these files is a brindle CI test, except the refusal and fail-closed ones
-# (@pytest.mark.brindle_ci_guard); tests elsewhere carry @pytest.mark.brindle_ci.
+# Every test in these files is a brindle CI test, except the refusal, fail-closed and
+# secret-hygiene ones (@pytest.mark.brindle_ci_guard); tests elsewhere carry @pytest.mark.brindle_ci.
 _BRINDLE_CI_FILES = re.compile(r"(^|/)(test_ci_[^/]*|e2e/test_ci|test_deploy_templates)\.py$")
 
 

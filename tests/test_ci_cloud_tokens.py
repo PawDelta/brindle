@@ -116,6 +116,7 @@ def test_a_failed_first_fetch_leaves_the_cloud_out(tmp_path):
     assert fed.start_cloud_tokens({**AWS, **ACTIONS}, fetch=boom) is None
 
 
+@pytest.mark.brindle_ci_guard
 def test_scrub_job_drops_the_actions_endpoint_but_gives_agents_the_cloud_env(monkeypatch):
     monkeypatch.setattr(ci_client, "_fetch_oidc", lambda *a, **k: jwt(NOW + 600))
     monkeypatch.setattr(fed.time, "time", lambda: NOW)
@@ -139,6 +140,7 @@ def test_scrub_job_drops_the_actions_endpoint_but_gives_agents_the_cloud_env(mon
 
 
 @pytest.mark.parametrize("name", ["ACTIONS_ID_TOKEN_REQUEST_URL", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"])
+@pytest.mark.brindle_ci_guard
 def test_the_actions_endpoint_stays_out_of_panes_whatever_is_kept(name):
     keep = secrets.provider_credentials("claude", name)
     assert name in secrets.pane_unset([name], keep=keep)
@@ -181,6 +183,7 @@ def test_init_writes_the_cloud_template_and_warns(tmp_path):
     assert any("lifetime must cover the job timeout" in s for s in said)
 
 
+@pytest.mark.brindle_ci_guard
 def test_gitlab_agents_get_the_cloud_env_and_never_the_token():
     token = jwt(NOW + 3600, "secret-jti")
     tokens = fed.start_cloud_tokens(gitlab_env(GCP, "BRINDLE_GCP_ID_TOKEN", token))

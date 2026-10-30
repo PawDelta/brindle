@@ -164,6 +164,7 @@ def make_refresher(clock, *, answers=None, expires_in=600.0):
     return r, fetched, exchanged
 
 
+@pytest.mark.brindle_ci_guard
 def test_refresher_survives_an_unexpected_error_and_names_only_its_class(caplog):
     clock = {"t": 1000.0}
     r, _, _ = make_refresher(clock, answers=["sk-ant-oat01-first", RuntimeError("body: sk-ant-oat01-leak"),
@@ -390,6 +391,7 @@ def test_proxy_answers_502_when_the_upstream_is_down():
         call(p.base_url, "GET", "/", headers={})
 
 
+@pytest.mark.brindle_ci_guard
 def test_proxy_logs_nothing(proxy, caplog):
     p, _ = proxy
     with caplog.at_level(logging.DEBUG):
@@ -414,6 +416,7 @@ def test_proxy_has_a_random_secret_and_binds_the_loopback_only(upstream):
 # -- the run's federation ----------------------------------------------------------------------
 
 
+@pytest.mark.brindle_ci_guard
 def test_scrub_job_removes_job_secrets_but_the_agents_still_reach_the_proxy(upstream, monkeypatch):
     from brindle import ci_client, secrets
 

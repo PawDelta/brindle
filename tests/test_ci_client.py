@@ -287,6 +287,7 @@ def test_jwt_exp_ignores_a_non_finite_or_non_numeric_exp():
     assert ci_client._jwt_exp("not-a-jwt") is None
 
 
+@pytest.mark.brindle_ci_guard
 def test_oidc_fetch_says_why_it_failed(monkeypatch):
     import io
     import urllib.error
@@ -648,6 +649,7 @@ def test_plan_verification_failures(plan, signing_key):  # noqa: F811
         ci_client.verify_plan("not.a.jwt", repo=REPO)
 
 
+@pytest.mark.brindle_ci_guard
 def test_plan_errors_never_quote_the_token(plan):
     bad = plan(repo="other/repo")
     with pytest.raises(CIError) as e:
@@ -894,6 +896,7 @@ def test_run_keeps_the_workflow_token_when_the_exchange_fails(plan, ci_repo, tmp
     assert any("HTTP 401" in s and "using the workflow's token" in s for s in said)
 
 
+@pytest.mark.brindle_ci_guard
 def test_validate_reviewers_use_the_proxy_and_checks_see_no_secret(plan, ci_repo, tmp_path, federation):
     sha = head(ci_repo)
     vplan = plan("validation", head_sha=sha,
@@ -914,6 +917,7 @@ def test_validate_reviewers_use_the_proxy_and_checks_see_no_secret(plan, ci_repo
     assert _port_closed(review_env["ANTHROPIC_BASE_URL"])
 
 
+@pytest.mark.brindle_ci_guard
 def test_read_run_token_deletes_the_file(tmp_path):
     p = token_file(tmp_path)
     assert ci_client.read_run_token(p) == RUN_TOKEN
@@ -1141,6 +1145,7 @@ def test_airgap_refuses(plan, monkeypatch):
     assert e.value.code == "airgap" and not server.events
 
 
+@pytest.mark.brindle_ci_guard
 def test_doctor_names_credentials_but_never_values(ci_repo):
     env = {"ANTHROPIC_API_KEY": "sk-ant-very-secret", "OPENAI_API_KEY": "sk-oa-very-secret", "PATH": "/nonexistent"}
     text = ci_client.doctor(env, REPO, str(ci_repo), org=True)
@@ -1217,6 +1222,7 @@ def gh_repo_api(argv, *, required=(), protected=False, refuse=None, branch="main
     return GhProc("{}") if protected else GhProc(code=1, err=NOT_FOUND)
 
 
+@pytest.mark.brindle_ci_guard
 def test_init_never_shows_the_token(plan, ci_repo, tmp_path, monkeypatch, ci_entitled):
     calls = []
     Proc = GhProc
