@@ -3082,6 +3082,17 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     if worker_done_when:
         task += f"\n\nIts finish line: {worker_done_when.strip()}"
 
+    from brindle.pro import analysis_brief
+
+    try:
+        changed = git.paths(["diff", "--name-only", f"{ws.base_branch}...HEAD"], ws.path) if ws.base_branch else []
+    except git.GitError:
+        changed = []
+    covering = analysis_brief.review_context(db, ws.repo_root, (worker.task or "") if worker else "",
+                                             list(dict.fromkeys([*worker_files, *changed])))
+    if covering:
+        task += f"\n\n{covering}"
+
     if check_summary:
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
                  "Take these results into account; don't run the whole suite yourself.")
