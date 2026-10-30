@@ -269,6 +269,10 @@ def on_workspace_cleanup(db: DB, ws: Workspace) -> None:
     except Exception:
         cfg = RepoConfig()
     merged = bool(db.merged_sha(ws.id))
+    if not merged:
+        from brindle.pro import analysis_docs
+
+        analysis_docs.drop_drafts(db, ws)
     worker = agents.workspace_worker(db, ws)
     for a in db.list_agents(ws.id):
         agents.forget_files(a)   # the agent rows go with the workspace
@@ -1344,11 +1348,12 @@ def _deliverables(ws: Workspace) -> list:
         return []
 
 
-def _upload_deliverables(ws: Workspace, docs: list) -> None:
-    if docs:
-        from brindle.pro import analysis_docs
+def _upload_deliverables(db: DB, ws: Workspace, docs: list) -> None:
+    from brindle.pro import analysis_docs
 
+    if docs:
         analysis_docs.on_merged(ws.repo_root, docs)
+    analysis_docs.publish_drafts(db, ws)
 
 
 def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
@@ -1414,7 +1419,7 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
     except git.GitError as e:
         return _settled(db, ws) or f"Not merged: {e}"
     db.set_merged(ws.id, report.sha)
-    _upload_deliverables(ws, deliverables)
+    _upload_deliverables(db, ws, deliverables)
     text = f"Merged {ws.branch} into {ws.base_branch} at {target} ({report.summary()})."
     history.record_safely(
         db, ws.repo_root, "merge", agent=caller, with_usage=True, branch=ws.branch,

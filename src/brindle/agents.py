@@ -2187,12 +2187,14 @@ def condense(head: str, *body: str) -> str:
 
 
 def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
-                  removed: tuple[Agent, Workspace] | None = None) -> str:
+                  removed: tuple[Agent, Workspace] | None = None, docs_checked: bool = False) -> str:
     """Record a worker's or reviewer's result. A piped worker's report goes
     to the pipeline (which reviews and merges the branch); otherwise, and
     with ``forward``, it's sent to the parent as a message. ``removed`` is a
     reviewer and workspace the pipeline has just removed, loaded before that:
-    the result is then only recorded in the history."""
+    the result is then only recorded in the history. A first result waits
+    while an analysis doc the agent read has a newer version it hasn't read
+    (unless the caller already checked: ``docs_checked``)."""
     from brindle import history, pipeline, pricing, usage as usage_mod
 
     if removed and db.get_agent(agent_id) is None:
@@ -2201,6 +2203,10 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
         agent = get(db, agent_id)
         ws = db.get_workspace(agent.workspace_id)
     first = agent.result is None
+    if first and not removed and not docs_checked:
+        stale = stale_analysis_docs(db, agent.id)
+        if stale:
+            return stale
     db.set_result(agent.id, result)
     if ws:
         bus.publish_agent(db, "agent.reported", agent.id, workspace_id=ws.id,
@@ -2345,7 +2351,7 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
         return "Only a reviewer started with request_review can submit a review."
     if is_auditor:   # the completion audit, not a branch review
         text = autopilot.record_audit(db, root_id, approved, summary)
-        report_result(db, caller.id, text, forward=False)
+        report_result(db, caller.id, text, forward=False, docs_checked=True)   # the audit is recorded
         try:
             send_message(db, root_id, text, sender_id=caller.id)
         except (AgentError, tmux.TmuxError):
@@ -2356,6 +2362,9 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
     # whatever the verdict set off is done.
     if caller.result is not None:
         return "Your review was already recorded. You're done."
+    stale = stale_analysis_docs(db, caller.id)
+    if stale:
+        return stale
     # Recorded without the branch's merge lock: a merge holds it while the
     # repo's checks run, for minutes, and a verdict waiting on it left the
     # reviewer's call hanging until its CLI gave up on it, never recorded.
@@ -3082,6 +3091,17 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     if worker_done_when:
         task += f"\n\nIts finish line: {worker_done_when.strip()}"
 
+    from brindle.pro import analysis_brief
+
+    try:
+        changed = git.paths(["diff", "--name-only", f"{ws.base_branch}...HEAD"], ws.path) if ws.base_branch else []
+    except git.GitError:
+        changed = []
+    covering, cited = analysis_brief.review_context(db, ws.repo_root, (worker.task or "") if worker else "",
+                                                    list(dict.fromkeys([*worker_files, *changed])))
+    if covering:
+        task += f"\n\n{covering}"
+
     if check_summary:
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
                  "Take these results into account; don't run the whole suite yourself.")
@@ -3130,6 +3150,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     # which verdict replaces which goes by slot (gates.standing_reviews).
     if reviewer is not None:
         db.update_agent(reviewer.id, review_slot=slot)
+        if cited:   # the docs its brief cites, pinned at the versions it got
+            knowledge.record_receipt(db, reviewer.id, cited)
     return reviewer
 
 
@@ -3730,6 +3752,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # The turn is over: a worker's worktree is snapshotted (brindle.rewind)
         # before anything below could start its next turn.
         snapshot_turn(db, agent)
+        analysis_docs_turn(db, agent)
 
         # Claude Code shows any blocked stop as "Stop hook error" in the chat.
         # Where a person watches (an interactive agent), brindle lets the stop
@@ -3765,6 +3788,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         if payload.get("type") == "agent-turn-complete":
             db.set_status(agent_id, "idle")
             snapshot_turn(db, agent)
+            analysis_docs_turn(db, agent)
             if agent.mode == "interactive" and not db.pending_count(agent_id):
                 # What the Stop hook does for Claude Code: an autopilot
                 # supervisor that stops short is told to keep going (capped
@@ -3901,6 +3925,31 @@ def snapshot_turn(db: DB, agent: Agent) -> int | None:
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't snapshot %s's turn", agent.id)
         return None
+
+
+def stale_analysis_docs(db: DB, agent_id: str) -> str | None:
+    """Why ``agent_id``'s result can't be accepted yet: analysis docs it read
+    have newer versions it hasn't read (brindle.pro.analysis_docs). None to
+    go ahead. Never raises."""
+    try:
+        from brindle.pro import analysis_docs
+
+        return analysis_docs.stale_before_result(db, agent_id)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't check %s's analysis docs", agent_id)
+        return None
+
+
+def analysis_docs_turn(db: DB, agent: Agent) -> None:
+    """At the end of a turn: tell the agent about analysis docs it read that
+    have changed since, and settle drafts its session still owes the server
+    (brindle.pro.analysis_docs). Never raises."""
+    try:
+        from brindle.pro import analysis_docs
+
+        analysis_docs.on_turn(db, agent)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't check %s's analysis docs", agent.id)
 
 
 def agent_for_session(db: DB, session_id: object) -> str | None:

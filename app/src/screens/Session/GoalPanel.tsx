@@ -221,10 +221,14 @@ export interface GoalPanelProps {
   openUrl?: OpenUrl;
   /* Closes the whole session, at once and unasked: the Done step's action. */
   onCloseSession?(): void;
+  /* Opens Knowledge › Docs filtered to this session: the docs line's action. */
+  onOpenDocs?(): void;
 }
 
-export function GoalPanel({ client, repo, root, store, paused = false, compact = false, onReview, openUrl = openExternal, onCloseSession }: GoalPanelProps) {
+export function GoalPanel({ client, repo, root, store, paused = false, compact = false, onReview, openUrl = openExternal, onCloseSession, onOpenDocs }: GoalPanelProps) {
   const [goal, setGoal] = useState<GoalDTO | null>(null);
+  // The docs this session wrote or used; null while unknown or unreachable (the line stays hidden).
+  const [docCount, setDocCount] = useState<number | null>(null);
   // An older engine's stand-in for goal_phase: its word on the session's PR.
   const readiness = usePrReadiness(client, root, store);
   const [loaded, setLoaded] = useState(false);
@@ -247,6 +251,10 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
     if (activeSession.current !== session) return Promise.resolve();
     const seq = ++requestSeq.current;
     const current = () => activeSession.current === session && seq === requestSeq.current;
+    void client.docs({ repo, session: root }).then(
+      (got) => current() && setDocCount(got.docs.length),
+      () => current() && setDocCount(null),
+    );
     return client
       .goal(repo, root)
       .then((next) => {
@@ -268,6 +276,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
     setLoadError(null);
     setActionError(null);
     setEnabling(false);
+    setDocCount(null);
     void refresh();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
@@ -372,6 +381,13 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
         Open the PR ↗
       </button>
     ) : null;
+  /* The session's docs, one quiet line under the milestones; hidden with none. */
+  const docsLine =
+    docCount && docCount > 0 ? (
+      <button type="button" className={`${quiet} self-start text-xs`} data-testid="goal-docs" title="Knowledge › Docs for this session" onClick={onOpenDocs}>
+        {docCount} {docCount === 1 ? "doc" : "docs"} →
+      </button>
+    ) : null;
   /* Done's step, beside the Done status: close the session, one click, nothing asked. */
   const closeSession =
     finished && onCloseSession ? (
@@ -435,6 +451,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
         ) : (
           <p className="px-0.5 text-[11px] text-ink-3">{finished ? "brindle finished this goal." : "No milestones yet."}</p>
         )}
+        {docsLine}
         {step}
         <div className="flex items-center gap-1.5 whitespace-nowrap px-1.5 pt-0.5 text-[11px] text-ink-3" title={goal.detail ?? undefined}>
           <span className="min-w-0 truncate">Checked {lastCheck > 0 ? formatAgo(lastCheck) : "never"}</span>
@@ -507,6 +524,7 @@ export function GoalPanel({ client, repo, root, store, paused = false, compact =
         ) : (
           <p className="text-sm text-ink-3">{finished ? "brindle finished this goal." : "No milestones yet."}</p>
         ))}
+      {docsLine}
     </section>
   );
 }
