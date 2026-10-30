@@ -289,29 +289,65 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     def refresh_bodies(since):
         return [c[1]["refresh_token"] for c in remote.calls[since:] if c[0] == "POST /token/refresh"]
 
-    def interleaved(back):
+    def entitlements(status=200):      # the fake backend's entitlement has no library feature; 503 on request
         def request(method, url, form, headers):
-            if url.endswith("/token/refresh"):
-                deps["store"].save(entry["b"])             # A, then B while the refresh is out
             got = real_request(method, url, form, headers)
-            if "/entitlement" in url:                      # the fake backend's entitlement has no library feature
-                got = (got[0], {**got[1], "entitlement": sign(remote.key, claims(features=["analysis_docs"]))})
-                if back:
-                    deps["store"].save(entry["a"])         # and A again before the new tokens are saved
+            if "/entitlement" in url:
+                got = (status, {**got[1], "entitlement": sign(remote.key, claims(features=["analysis_docs"]))}
+                       if status == 200 else {})
             return got
         remote.request = request
 
-    since = expiring_login()                               # B stays: the new tokens are discarded
-    interleaved(back=False)
+    def scripted_loads(*script):       # the n-th store read first saves a record ("before") or after it ("after")
+        real, reads = deps["store"].load, []
+
+        def load():
+            when, act = script[len(reads)] if len(reads) < len(script) else (None, None)
+            reads.append(1)
+            if when == "before":
+                deps["store"].save(act)
+            got = real()
+            if when == "after":
+                act() if callable(act) else deps["store"].save(act)
+            return got
+        deps["store"].load = load
+
+    def live(since):                   # nothing was revoked: the current sign-in still gets answers
+        return auth.authed(deps["client"], deps["store"], "GET", "/me/analysis-docs/settings")[0] == 200
+
+    since = expiring_login()           # A is read, then the store holds B: nothing at all is sent
+    entitlements()
+    scripted_loads(("after", entry["b"]))
     with pytest.raises(imports.AccountChanged):
         imports._snapshot(deps["client"], deps["store"])
-    assert refresh_bodies(since) == [entry["a"]["refresh_token"]] and deps["store"].load() == entry["b"]
-    since = expiring_login()                               # A, B, A: the same record is back, so they are kept
-    interleaved(back=True)
+    del deps["store"].load
+    assert refresh_bodies(since) == [] and deps["store"].load() == entry["b"]
+    since = expiring_login()           # A, B, A: when the lock is taken A is back, so only A's token goes out
+    scripted_loads(("after", entry["b"]), ("before", entry["a"]))
     snap = imports._snapshot(deps["client"], deps["store"])
-    del remote.request
+    del deps["store"].load
     assert refresh_bodies(since) == [entry["a"]["refresh_token"]] and snap.who == first
     assert snap.token != entry["a"]["access_token"] and deps["store"].load()["access_token"] == snap.token
+    since = expiring_login()           # (a) auth.refresh rotates between the snapshot's read and its lock: one rotation
+    scripted_loads(("after", lambda: auth.refresh(deps["client"], deps["store"], entry["a"])))
+    with pytest.raises(imports.AccountChanged):
+        imports._snapshot(deps["client"], deps["store"])
+    del deps["store"].load
+    assert len(refresh_bodies(since)) == 1 and live(since)
+    since = expiring_login()           # (a) the other way round: the snapshot rotates, a stale auth.refresh reuses it
+    imports._snapshot(deps["client"], deps["store"])
+    auth.refresh(deps["client"], deps["store"], entry["a"])
+    assert len(refresh_bodies(since)) == 1 and live(since)
+    since = expiring_login()           # (b) the entitlement fetch fails after the rotation: the saved pair is kept
+    entitlements(503)
+    with pytest.raises(auth.AuthError):
+        imports._snapshot(deps["client"], deps["store"])
+    saved = deps["store"].load()
+    assert saved["refresh_token"] != entry["a"]["refresh_token"] and saved["access_expires_at"] > time.time()
+    entitlements()
+    assert imports._snapshot(deps["client"], deps["store"]).token == saved["access_token"]
+    assert len(refresh_bodies(since)) == 1
+    del remote.request
     creds = deps["store"].load()
     creds["access_expires_at"] = time.time() + 900
     deps["store"].save(creds)

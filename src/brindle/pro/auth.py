@@ -590,38 +590,27 @@ def refresh(client: Client, store, seen: dict | None = None, *, now: float | Non
     return got[1]
 
 
-def refresh_record(record: dict, transport: Transport | None = None, *, now: float | None = None) -> dict:
-    """Spend ``record``'s own refresh token at ``record``'s own ``base_url`` and
-    return the record with its new tokens and entitlement. It never reads or
-    writes the credential store: what it sends comes from ``record`` alone, so a
-    sign-in that changed meanwhile can neither supply the token nor the host.
-    Persist the result with :func:`save_if_unchanged`."""
+def refresh_captured(store, record: dict, transport: Transport | None = None, *,
+                     now: float | None = None) -> dict:
+    """Refresh a credential ``record`` read earlier, all under the refresh lock like
+    :func:`refresh`: if the store no longer holds exactly ``record`` nothing is
+    sent (``AuthError`` code ``record_changed``); otherwise ``record``'s own
+    refresh token is spent at ``record``'s own ``base_url`` and the rotated pair
+    is saved at once, and only then is the entitlement fetched and the record
+    updated. If that fetch fails, the saved pair is kept and the error raised."""
     now = time.time() if now is None else now
     client = Client(record.get("base_url"), transport)
-    old = record.get("refresh_token")
-    if not old:
-        raise AuthError("not logged in to brindle Pro", code="invalid_grant", revoked=True)
-    status, body = client.post("/token/refresh", {
-        "grant_type": "refresh_token", "refresh_token": old, "client_id": CLIENT_ID})
-    if status != 200:
-        raise _error(status, body)
-    new = {**record, **_token_set(body, now, old_refresh=old), "base_url": client.base}
-    got = _fetch_entitlement(client, new["access_token"], now, new.get("org_id"))
-    if got == 401:
-        raise AuthError("backend refused a fresh access token", code="invalid_token")
-    new["entitlement"] = got[0]
-    return new
-
-
-def save_if_unchanged(store, original: dict, new: dict) -> bool:
-    """Save ``new`` only if the store still holds exactly ``original`` (checked
-    under the refresh lock); otherwise leave the store alone and return False."""
     with refresh_lock():
-        if (store.load() or {}) != original:
-            return False
+        if (store.load() or {}) != record:
+            raise AuthError("the stored sign-in changed", code="record_changed")
+        new = _rotate(client, store, record, now)
+        got = _fetch_entitlement(client, new["access_token"], now, new.get("org_id"))
+        if got == 401:
+            raise AuthError("backend refused a fresh access token", code="invalid_token")
+        new = {**new, "entitlement": got[0]}
         store.save(new)
     license.clear_cache()
-    return True
+    return new
 
 
 def switch_org(client: Client, store, org_id: str | None, *,

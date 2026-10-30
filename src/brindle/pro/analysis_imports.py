@@ -229,12 +229,14 @@ def _snapshot(client=None, store=None) -> Snapshot:
     if pinned is None or client.base != base:
         raise AccountChanged("the stored sign-in does not match the backend in use")
     if float(rec.get("access_expires_at") or 0) <= time.time() + auth.ACCESS_SLACK and rec.get("refresh_token"):
-        # The record's own refresh token goes to the record's own backend, without reading the store; the
-        # new tokens are kept only if the store still holds the record they came from.
-        new = auth.refresh_record(rec, client.transport)
-        if not auth.save_if_unchanged(store, rec, new):
-            raise AccountChanged("the sign-in changed while it was refreshed")
-        rec = new
+        # Under the refresh lock: nothing is sent unless the store still holds this record, whose own
+        # refresh token goes to its own backend; the rotated pair is saved before the entitlement is fetched.
+        try:
+            rec = auth.refresh_captured(store, rec, client.transport)
+        except auth.AuthError as e:
+            if e.code == "record_changed":
+                raise AccountChanged("the sign-in changed while it was refreshed") from e
+            raise
     ent = license.verify(rec.get("entitlement") or "", issuer=base)
     if analysis_docs.FEATURE not in ent.features or ent.in_grace:
         raise RuntimeError("your plan has no analysis doc library (the `analysis_docs` entitlement)")
