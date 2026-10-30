@@ -125,8 +125,8 @@ def test_merge_uploads_the_branch_doc_only_when_it_merges(
     assert len(list(other.rglob("*.md"))) == 2
 
 
-@pytest.mark.parametrize("status", [200, 403])
-def test_docs_export_writes_only_after_a_200(status, tmp_path, remote, monkeypatch):
+@pytest.mark.parametrize("fmt, status", [("zip", 200), ("zip", 403), ("docx", 200), ("md", 200)])
+def test_docs_export_writes_only_after_a_200(fmt, status, tmp_path, remote, monkeypatch):
     from typer.testing import CliRunner
 
     from brindle import git
@@ -136,30 +136,25 @@ def test_docs_export_writes_only_after_a_200(status, tmp_path, remote, monkeypat
     monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, m, url, form, headers: (
         remote.request(m, url, form, headers)))
     login_as(remote, credentials.default_store(), features=("analysis_docs",))
-    remote.routes["GET /analysis-docs/doc1/export?format=zip&destination=download"] = (
-        [(200, {"content": b"PK", "content_type": "application/zip"}) if status == 200
-         else (403, {"error": "destination_not_allowed"})])
+    if fmt == "md":
+        body = b"# Title\n\xff"
+        content_type = "text/markdown"
+    elif fmt == "docx":
+        body = b"PK\x03\x04\x00\xffdocx"
+        content_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    else:
+        body = b"PK"
+        content_type = "application/zip"
+    export_path = f"GET /analysis-docs/doc1/export?format={fmt}&destination=download"
+    if fmt == "md" and status == 200:
+        parsed = auth.UrllibTransport._decode_response(status, body, content_type)[1]
+        remote.routes[export_path] = [(status, parsed)]
+    else:
+        remote.routes[export_path] = [
+            (status, {"content": body, "content_type": content_type} if status == 200
+             else {"error": "destination_not_allowed"})]
     out = tmp_path / "out"
     monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(app, ["docs", "export", "doc1", "--out", str(out)])
-    assert (result.exit_code, out.exists() and (out / "doc1.zip").read_bytes() == b"PK") == (
+    result = CliRunner().invoke(app, ["docs", "export", "doc1", "--format", fmt, "--out", str(out)])
+    assert (result.exit_code, out.exists() and (out / f"doc1.{fmt}").read_bytes() == body) == (
         (0, True) if status == 200 else (1, False))
-
-
-def test_docs_export_writes_docx_bytes_exactly(tmp_path, remote, monkeypatch):
-    from typer.testing import CliRunner
-
-    from brindle import git
-    from brindle.cli import app
-
-    monkeypatch.setattr(git, "main_repo_root", lambda path: str(tmp_path))
-    monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, m, url, form, headers:
-                        remote.request(m, url, form, headers))
-    login_as(remote, credentials.default_store(), features=("analysis_docs",))
-    raw = b"PK\x03\x04\x00\xffdocx"
-    remote.routes["GET /analysis-docs/doc1/export?format=docx&destination=download"] = [
-        (200, {"content": raw, "content_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"})]
-    out = tmp_path / "out"
-    monkeypatch.chdir(tmp_path)
-    result = CliRunner().invoke(app, ["docs", "export", "doc1", "--format", "docx", "--out", str(out)])
-    assert result.exit_code == 0 and (out / "doc1.docx").read_bytes() == raw
