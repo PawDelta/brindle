@@ -10,6 +10,7 @@ from brindle.pro._files import private_dir, read_private
 
 SWITCHES = ("store", "share", "assist", "prompt_analysis", "import_upload")
 STATES = ("off", "default_on", "enforced_on", "enforced_off")
+PLAN_DEFAULT_ON = frozenset({"store", "share", "assist", "import_upload"})   # on for paid plans; prompt_analysis is opt-in
 MAX_CACHE = 1024 * 1024
 
 
@@ -98,4 +99,4 @@ def resolve_switch(name: str, user: dict | None = None, *, group: str | None = N
     for value in (team, enterprise):
         if value in ("default_on", "off"):
             return value == "default_on"
-    return name == "store" and plan in ("pro", "team", "enterprise")
+    return name in PLAN_DEFAULT_ON and plan in ("pro", "team", "enterprise")

@@ -3064,6 +3064,14 @@
     },
     {
       "method": "GET",
+      "path": "/v1/analysis-docs/switches"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/analysis-docs/switches"
+    },
+    {
+      "method": "GET",
       "path": "/v1/analysis-docs/topics"
     },
     {

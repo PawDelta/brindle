@@ -34,7 +34,9 @@ from brindle import (
     workspaces,
 )
 from brindle.daemon import session_review
-from brindle.daemon.routes_actions import docs_api, docs_everywhere, docs_org_api, docs_scopes, read_edit_target
+from brindle.daemon.routes_actions import (
+    doc_switches, docs_api, docs_everywhere, docs_org_api, docs_scopes, read_edit_target,
+)
 from brindle.db import DB
 from brindle.service import inbox
 from brindle.service.dto import (
@@ -570,6 +572,12 @@ def analysis_doc_scopes(db: DB, request: Request) -> Any:
 
 
 @_json
+def analysis_doc_switches(db: DB, request: Request) -> Any:
+    """The person's own switches, and which their org has locked (see routes_actions.doc_switches)."""
+    return doc_switches(_repo(request))
+
+
+@_json
 def analysis_doc_policy(db: DB, request: Request) -> Any:
     """The org's doc policy, including ``export_destinations`` (a subset of download, google_docs, sharepoint)."""
     return docs_org_api("GET", "policy", repo=_repo(request))
@@ -674,6 +682,7 @@ ROUTES = [
     Route("/v1/analysis-docs/scopes", analysis_doc_scopes),
     Route("/v1/analysis-docs/results", analysis_doc_results),
     Route("/v1/analysis-docs/policy", analysis_doc_policy),
+    Route("/v1/analysis-docs/switches", analysis_doc_switches),
     Route("/v1/analysis-docs/export-config", analysis_doc_export_config),
     Route("/v1/analysis-docs/destination", analysis_doc_destination),
     Route("/v1/analysis-docs/{id}", analysis_doc),

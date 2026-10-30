@@ -501,6 +501,19 @@ export interface DocPolicy {
   export_destinations?: ExportDestination[];
 }
 
+export type DocSwitchName = "store" | "share" | "assist" | "prompt_analysis" | "import_upload";
+
+/* GET /analysis-docs/switches: one of the person's own switches. `choice` is
+   theirs (null while unset), `on` what applies, `locked` whether their org
+   enforces it (`org` then says which way). */
+export interface DocSwitch {
+  name: DocSwitchName;
+  on: boolean;
+  choice: "on" | "off" | null;
+  locked: boolean;
+  org: "enforced_on" | "enforced_off" | null;
+}
+
 /* GET /analysis-docs/export-config */
 export interface DocExportConfig {
   google_client_id: string | null;
@@ -1159,6 +1172,16 @@ export class DaemonClient {
   /* The org's doc policy: which export destinations it allows. */
   docPolicy(repo?: string) {
     return this.get<DocPolicy>("/analysis-docs/policy", { repo });
+  }
+
+  /* The person's own doc switches, and which their org has locked. */
+  async docSwitches(repo?: string) {
+    return (await this.get<{ switches: DocSwitch[] }>("/analysis-docs/switches", { repo })).switches;
+  }
+
+  /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked. */
+  async setDocSwitch(name: DocSwitchName, on: boolean) {
+    return (await this.put<{ switches: DocSwitch[] }>("/analysis-docs/switches", { name, on })).switches;
   }
 
   /* The public client ids for the in-app Google / Microsoft sign-in; null hides that button. */

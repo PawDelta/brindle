@@ -2109,27 +2109,32 @@ def docs_export(doc_id: str = typer.Argument(..., help="Document id."),
     typer.echo(f"exported {doc_id} to {Path(out) / name}")
 
 
-def _docs_switch(on: bool) -> None:
+def _docs_switch(on: bool, name: str) -> None:
     from brindle.pro import analysis_docs, auth
 
     _docs_arm()
     try:
-        analysis_docs.set_switch(on)
+        analysis_docs.set_switch(on, name=name)
     except (auth.AuthError, RuntimeError) as e:
         _fail(f"analysis docs: {e}")
-    typer.echo("storing analysis deliverables is " + ("on" if on else "off"))
+    state = "on" if on else "off"
+    typer.echo(f"storing analysis deliverables is {state}" if name == "store" else f"analysis docs: {name} is {state}")
+
+
+_SWITCH_HELP = ("Which of your own switches: store (the default), share, assist, prompt_analysis "
+                "or import_upload.")
 
 
 @docs_app.command("on")
-def docs_on() -> None:
-    """Store your analysis deliverables in your library after they merge (the default for Pro)."""
-    _docs_switch(True)
+def docs_on(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
+    """Turn one of your switches on; without --switch, store your analysis deliverables after they merge."""
+    _docs_switch(True, switch)
 
 
 @docs_app.command("off")
-def docs_off() -> None:
-    """Stop storing your analysis deliverables."""
-    _docs_switch(False)
+def docs_off(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
+    """Turn one of your switches off; without --switch, stop storing your analysis deliverables."""
+    _docs_switch(False, switch)
 
 
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True,

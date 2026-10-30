@@ -297,10 +297,7 @@ def test_brief_and_map_neighbourhood(sign_in, db, tmp_path):
     doc_id = uploaded("sess-w-brief")
 
     task = "Make the checkout cache warm after a deploy"
-    assert analysis_brief.server_brief(db, "task-0", task, ["api/checkout.py"]) == ""   # assist is off by default
-    switches = analysis_docs.fetch_switches()                       # and brindle has no way to turn it on
-    analysis_docs.api("PUT", "/me/analysis-docs/settings", {"switches": {**switches, "assist": "on"}})
-    block = analysis_brief.server_brief(db, "task-1", task, ["api/checkout.py"])
+    block = analysis_brief.server_brief(db, "task-1", task, ["api/checkout.py"])    # assist is on by default
     assert "UNTRUSTED REFERENCE" in block and "checkout" in block.lower()
     assert (analysis_brief.DOC_ITEM, doc_id, "1") in knowledge.receipt(db, "task-1")
 
@@ -310,11 +307,22 @@ def test_brief_and_map_neighbourhood(sign_in, db, tmp_path):
     assert got["paths"] == ["api/checkout.py"]
     assert doc_id in {n.get("id") for n in got["nodes"]}, got["nodes"]
 
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    off = CliRunner().invoke(app, ["docs", "off", "--switch", "assist"])          # the person turns briefs off
+    assert off.exit_code == 0 and "assist is off" in off.output, off.output
+    try:
+        assert analysis_brief.server_brief(db, "task-2", task, ["api/checkout.py"]) == ""
+    finally:
+        assert CliRunner().invoke(app, ["docs", "on", "--switch", "assist"]).exit_code == 0
+    assert analysis_brief.server_brief(db, "task-3", task, ["api/checkout.py"])
+
 
 @pytest.mark.variant("end to end against a live backend; skipped in CI")
 def test_share_and_unshare_with_the_team(sign_in, db, tmp_path):
     from brindle.daemon import routes_actions, routes_read
-    from brindle.pro import analysis_docs
     from brindle.service.errors import ServiceError
 
     sign_in("team-member")
@@ -323,11 +331,16 @@ def test_share_and_unshare_with_the_team(sign_in, db, tmp_path):
     assert {"kind": "group", "id": GROUP, "name": "web", "can_share": True} in got["scopes"]
     merge_upload(db, tmp_path, "w-share", "feat/share")
     doc_id = uploaded("sess-w-share")
-    with pytest.raises(ServiceError, match="switch_off"):                      # sharing is off by default ...
+    status, got = daemon_get(routes_read.analysis_doc_switches)                # the defaults, as the app shows them
+    assert status == 200, got
+    assert {s["name"]: s["on"] for s in got["switches"]} == {
+        "store": True, "share": True, "assist": True, "prompt_analysis": False, "import_upload": True}
+    assert not any(s["locked"] for s in got["switches"])
+    switch = routes_actions.put_doc_switch                                     # the app's toggle
+    assert {s["name"]: s["on"] for s in switch(db, {}, {"name": "share", "on": False})["switches"]}["share"] is False
+    with pytest.raises(ServiceError, match="switch_off"):
         routes_actions.share_doc(db, {"id": doc_id}, {"scope": f"team:{GROUP}"})
-    switches = analysis_docs.fetch_switches()                                  # ... and brindle has no way to
-    analysis_docs.api("PUT", "/me/analysis-docs/settings",                     # turn it on: the raw call does
-                      {"switches": {**switches, "share": "on"}})
+    switch(db, {}, {"name": "share", "on": True})
     routes_actions.share_doc(db, {"id": doc_id}, {"scope": f"team:{GROUP}"})
 
     sign_in("team-admin")                                                    # the group's other member
@@ -370,8 +383,9 @@ def test_export_md_docx_and_zip_bytes(sign_in, db, tmp_path):
 
 @pytest.mark.variant("end to end against a live backend; skipped in CI")
 def test_org_policy_enforced_off_blocks_upload(sign_in, server, db, tmp_path):
-    from brindle.daemon import routes_read
+    from brindle.daemon import routes_actions, routes_read
     from brindle.pro import analysis_docs, analysis_policy, auth, credentials
+    from brindle.service.errors import ServiceError
 
     ent = sign_in("ent-admin")
     org = server["ent_org"]
@@ -383,6 +397,12 @@ def test_org_policy_enforced_off_blocks_upload(sign_in, server, db, tmp_path):
     try:
         assert analysis_policy.fetch(org, client, store)["switches"]["store"] == "enforced_off"
         assert analysis_policy.resolve_switch("store", {"store": "on"}, store=store) is False
+        status, got = daemon_get(routes_read.analysis_doc_switches)            # shown locked, with the org's value
+        assert status == 200 and {"name": "store", "on": False, "choice": None, "locked": True,
+                                  "org": "enforced_off"} in got["switches"], got
+        with pytest.raises(ServiceError) as locked:                            # and the toggle refuses it
+            routes_actions.put_doc_switch(db, {}, {"name": "store", "on": True})
+        assert locked.value.http_status == 403
         merge_upload(db, tmp_path, "w-off", "feat/off")
         status, listed = daemon_get(routes_read.analysis_docs, scope="user", session="sess-w-off")
         assert status == 200 and listed["docs"] == [], listed                # the client sent nothing
@@ -432,9 +452,8 @@ def test_import_upload_and_removal(sign_in):
     from brindle.pro import analysis_docs
 
     ent = sign_in("pro")
-    switches = analysis_docs.fetch_switches()
-    analysis_docs.api("PUT", "/me/analysis-docs/settings", {"switches": {**switches, "import_upload": "on"}})
-    files = [{"path": p, "md": md, "hash": hashlib.sha256(md.encode()).hexdigest()}
+    assert {s["name"]: s["on"] for s in analysis_docs.switch_states()}["import_upload"]   # on by default
+    files =[{"path": p, "md": md, "hash": hashlib.sha256(md.encode()).hexdigest()}
              for p, md in (("notes/a.md", "# Import A\n\nFirst imported note.\n"),
                            ("notes/b.md", "# Import B\n\nSecond imported note.\n"))]
     scope = {"kind": "user", "id": ent.sub}

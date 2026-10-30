@@ -49,7 +49,7 @@ SEND_WAIT = 8.0
 MAX_FILE = 512 * 1024
 MAX_FILES = 20
 SWITCHES = ("standard", "store", "share", "assist", "prompt_analysis")
-PLAN_DEFAULT_ON = frozenset({"store", "standard"})      # on for Pro, off otherwise
+PLAN_DEFAULT_ON = analysis_policy.PLAN_DEFAULT_ON
 NOTICE_MARK = "analysis-docs-notice"
 NOTICE = ("brindle stores your analysis docs encrypted in your personal library once their "
           "branch merges. Turn this off any time with `brindle docs off`.")
@@ -334,9 +334,43 @@ def fetch_switches(client=None, store=None) -> dict:
     return sw if isinstance(sw, dict) else {}
 
 
-def set_switch(on: bool, *, client=None, store=None) -> dict:
-    """Set the user's ``store`` switch, keeping the others."""
-    switches = {**fetch_switches(client, store), "store": "on" if on else "off"}
+class Locked(RuntimeError):
+    """The person's org enforces the switch: their own choice wouldn't apply."""
+
+
+def switch_states(client=None, store=None) -> list[dict]:
+    """The person's own switches (:data:`analysis_policy.SWITCHES`), each as
+    ``{name, on, choice, locked, org}``: ``choice`` is their own "on" or "off"
+    (None while unset), ``on`` what applies, and ``locked`` whether their
+    Enterprise org enforces it, with the org's value in ``org``."""
+    client, store = _session(client, store)
+    ent = require_entitlement(store)
+    choices = fetch_switches(client, store)
+    policy = {"switches": {}, "groups": {}}
+    if "analysis_docs_enterprise" in ent.features:
+        policy = analysis_policy.fetch(ent.org_id, client, store)
+    states = []
+    for name in analysis_policy.SWITCHES:
+        org = policy["switches"].get(name)
+        locked = org in ("enforced_on", "enforced_off")
+        states.append({"name": name, "choice": choices.get(name) if choices.get(name) in ("on", "off") else None,
+                       "on": analysis_policy.resolve_switch(name, choices, policy=policy, org=ent.org_id,
+                                                            plan=ent.plan),
+                       "locked": locked, "org": org if locked else None})
+    return states
+
+
+def set_switch(on: bool, *, name: str = "store", client=None, store=None) -> dict:
+    """Set the person's own ``name`` switch, keeping the others. Raises
+    :class:`Locked` when their org enforces it."""
+    if name not in analysis_policy.SWITCHES:
+        raise RuntimeError(f"no switch {name!r}: one of {', '.join(analysis_policy.SWITCHES)}")
+    client, store = _session(client, store)
+    state = next(s for s in switch_states(client, store) if s["name"] == name)
+    if state["locked"]:
+        raise Locked(f"your organisation has {name} {'on' if state['org'] == 'enforced_on' else 'off'} "
+                     "for everyone")
+    switches = {**fetch_switches(client, store), name: "on" if on else "off"}
     return api("PUT", "/me/analysis-docs/settings", {"switches": switches}, client=client, store=store)
 
 
