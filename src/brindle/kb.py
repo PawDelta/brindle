@@ -277,8 +277,9 @@ def remove_source(db: DB, source_id: str, *, actor: str | None = None,
             pass
     with db.tx() as c:
         src = c.execute("SELECT * FROM kb_sources WHERE id = ?", (source_id,)).fetchone()
-        c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id) SELECT doc_id, source_id"
-                  " FROM kb_import_uploads WHERE source_id = ?", (source_id,))   # whatever remove_from_library could not queue
+        c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
+                  " SELECT doc_id, source_id, identity FROM kb_import_uploads WHERE source_id = ?",
+                  (source_id,))   # whatever remove_from_library could not queue
         if src is None:
             raise KeyError(source_id)
         c.execute("DELETE FROM kb_fts WHERE rowid IN (SELECT kb_chunks.rowid FROM kb_chunks"
@@ -392,19 +393,30 @@ def _index(c, source_id: str, doc: _Doc, chunks, names: dict[str, list[str]]) ->
                           (cid, symbol, node_id))
 
 
-def sources(db: DB, repo_key: str) -> list[dict]:
+def sources(db: DB, repo_key: str, library_identity: str | None = None) -> list[dict]:
     """``repo_key``'s sources, oldest first, each with its live document count
-    and the number of its live documents' quarantined chunks."""
-    return [dict(r) for r in db.conn.execute(
+    and the number of its live documents' quarantined chunks. The library
+    fields are what ``library_identity`` (brindle.pro.analysis_imports.
+    current_identity) sees: ``library_state`` is local, adding, in_library or
+    removing, with ``library_pending`` (files not uploaded) and
+    ``library_removing`` (docs not yet deleted); no identity sees every folder local."""
+    rows = [dict(r) for r in db.conn.execute(
         "SELECT s.*, (SELECT count(*) FROM kb_docs d WHERE d.source_id = s.id AND NOT d.tombstoned) AS docs,"
         " (SELECT count(*) FROM kb_chunks c JOIN kb_docs d ON d.id = c.doc_id WHERE d.source_id = s.id"
         " AND NOT d.tombstoned AND c.quarantined IS NOT NULL) AS quarantined,"
-        " EXISTS (SELECT 1 FROM kb_import_library l WHERE l.source_id = s.id AND l.state = 'in_library') AS in_library,"
-        " COALESCE((SELECT l.pending FROM kb_import_library l WHERE l.source_id = s.id), 0) AS library_pending,"
-        " COALESCE((SELECT CASE WHEN l.state = 'removing' THEN (SELECT count(*) FROM kb_import_deletions x"
-        " WHERE x.source_id = s.id) ELSE 0 END FROM kb_import_library l WHERE l.source_id = s.id), 0)"
+        " COALESCE((SELECT l.state FROM kb_import_library l WHERE l.source_id = s.id AND l.identity = ?),"
+        " 'local') AS library_state,"
+        " COALESCE((SELECT l.pending FROM kb_import_library l WHERE l.source_id = s.id AND l.identity = ?), 0)"
+        " AS library_pending,"
+        " (SELECT count(*) FROM kb_import_deletions x WHERE x.source_id = s.id AND x.identity = ?)"
         " AS library_removing"
-        " FROM kb_sources s WHERE s.repo_key = ? ORDER BY s.added_at", (repo_key,))]
+        " FROM kb_sources s WHERE s.repo_key = ? ORDER BY s.added_at",
+        (library_identity, library_identity, library_identity, repo_key))]
+    for r in rows:
+        r["in_library"] = r["library_state"] == "in_library"
+        if r["library_state"] != "removing":
+            r["library_removing"] = 0
+    return rows
 
 
 def find_source(db: DB, repo_key: str, ref: str) -> str:

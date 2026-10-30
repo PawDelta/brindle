@@ -30,11 +30,15 @@ export function ImportedLibrary({ client, repo, source, disabled, onChanged }: {
 
   return (
     <div className="flex basis-full flex-col gap-1">
-      {source.in_library || source.library_removing ? (
+      {source.library_state === "adding" ? (
+        <p className="text-xs text-ink-3">Adding to your library…</p>
+      ) : source.library_state === "in_library" || source.library_state === "removing" ? (
         <div className="flex items-center gap-s1 text-xs text-ink-3">
           <span>
-            {source.library_removing
-              ? `Removal unfinished: ${count(source.library_removing)} still in your library.`
+            {source.library_state === "removing"
+              ? source.library_removing
+                ? `Removal unfinished: ${count(source.library_removing)} still in your library.`
+                : "Removal unfinished."
               : source.library_pending
                 ? `In your library, but ${count(source.library_pending)} did not upload yet: re-index to try again.`
                 : "In your library."}
@@ -50,7 +54,7 @@ export function ImportedLibrary({ client, repo, source, disabled, onChanged }: {
               })
             }
           >
-            {source.library_removing ? "Finish removing" : "Remove from library"}
+            {source.library_state === "removing" ? "Finish removing" : "Remove from library"}
           </button>
         </div>
       ) : (

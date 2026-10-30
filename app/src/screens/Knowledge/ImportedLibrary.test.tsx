@@ -34,4 +34,11 @@ describe("imported folder library", () => {
     await waitFor(() => expect(calls).toHaveLength(2));
     expect(calls[1]).toEqual({ method: "POST", body: { token: "tok" } });
   });
+
+  it("keeps Finish removing until the folder is finalized, even with nothing left queued", () => {
+    const client = new DaemonClient({ baseUrl: "http://daemon.test", token: "t", fetch: () => Promise.reject(new Error("unused")) });
+    render(<ImportedLibrary client={client} repo="/r" source={{ ...SOURCE, library_state: "removing", library_removing: 0 }} disabled={false} onChanged={() => {}} />);
+    expect(screen.getByRole("button", { name: "Finish removing" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Add to library" })).toBeNull();
+  });
 });

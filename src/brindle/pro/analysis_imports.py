@@ -16,15 +16,22 @@ team's and the enterprise's, :func:`analysis_policy.resolve_switch`).
 
 A folder's library state lives in the local database, so the CLI and the
 daemon agree on it: no row is *local*; otherwise ``adding``, ``in_library`` or
-``removing``. Every operation on a folder (add, background sync, remove, finish
-removing) first claims it in one transaction (:func:`_claim`: an ``op`` with a
-token and a lease); a loser does nothing (a sync) or is ``Busy`` (add, remove).
-The holder does its network work, records results only while its token still
-matches (a doc sent after losing it is queued for deletion instead), then
-releases. Removal claims, flips the state and queues every tracked doc in one
-transaction, and the folder is dropped only when its queue is empty.
-:func:`sync_upload` looks at the switch before anything else, queued deletions
-included.
+``removing``. Every row (membership, each tracked upload, each queued deletion)
+names the identity that authorized it: the backend, user, org and scope of the
+verified sign-in (:func:`current_identity`). An operation acts only on its own
+identity's rows; after an account switch the folder is local again for the new
+identity, which needs its own explicit Add, and the other identity's rows and
+queued deletions stay untouched until it is signed in.
+
+Every operation on a folder (add, background sync, remove, finish removing)
+first claims it in one transaction (:func:`_claim`: an ``op`` with a token and
+a lease); a loser does nothing (a sync) or is ``Busy`` (add, remove). The holder
+does its network work, records results only while its token still matches (a doc
+sent after losing it is queued for deletion instead), then releases. Removal
+claims, flips the state and queues every tracked doc in one transaction, and the
+folder is dropped only when its queue is empty, by a draining of any source
+under that folder's own claim. :func:`sync_upload` looks at the switch before
+anything else, queued deletions included; removal is not switch-gated.
 """
 
 from __future__ import annotations
@@ -119,7 +126,7 @@ def _token(sendable: dict[str, bytes]) -> str:
     return kb.content_hash("\n".join(f"{n}\0{_digest(d)}" for n, d in sorted(sendable.items())))
 
 
-def dry_run(db: DB, source_id: str) -> dict:
+def dry_run(db: DB, source_id: str, *, client=None, store=None) -> dict:
     """Which files would be uploaded and which skipped (with why). Reads the
     folder only; nothing is sent. ``allowed`` says whether an upload could happen
     now; ``token`` is what :func:`add_to_library` takes to upload exactly these."""
@@ -127,49 +134,79 @@ def dry_run(db: DB, source_id: str) -> dict:
     sendable, skipped = _plan(src)
     return {"source": source_id, "ref": _ref(src), "skipped": skipped, "token": _token(sendable),
             "files": [{"name": n, "bytes": len(d)} for n, d in sendable.items()],
-            "allowed": _off_reason() is None, "in_library": state(db, source_id) == IN_LIBRARY}
+            "allowed": _off_reason(client, store) is None,
+            "in_library": state(db, source_id, current_identity(client, store)) == IN_LIBRARY}
 
 
-def state(db: DB, source_id: str) -> str | None:
-    """The folder's library state, None when it is local."""
-    row = db.conn.execute("SELECT state FROM kb_import_library WHERE source_id = ?", (source_id,)).fetchone()
+# -- identity and state ---------------------------------------------------------------------------
+
+
+def _identity_of(client, ent) -> str:
+    return "\n".join((client.base, ent.sub, ent.org_id, "user"))
+
+
+def _who(client=None, store=None):
+    """(client, store, entitlement, identity) of the verified sign-in; raises
+    (``RuntimeError``) in air-gap mode, signed out, or without the library."""
+    client, store = analysis_docs._session(client, store)
+    ent = analysis_docs.require_entitlement(store)
+    return client, store, ent, _identity_of(client, ent)
+
+
+def current_identity(client=None, store=None) -> str | None:
+    """The backend, user, org and scope the library rows are filed under, from
+    the verified sign-in (offline); None when there is none."""
+    try:
+        return _who(client, store)[3]
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def state(db: DB, source_id: str, who: str | None) -> str | None:
+    """The folder's library state for identity ``who``, None when it is local to
+    them (including another identity's folder, or no identity)."""
+    row = db.conn.execute("SELECT state FROM kb_import_library WHERE source_id = ? AND identity = ?",
+                          (source_id, who)).fetchone()
     return row["state"] if row else None
 
 
 def in_library(db: DB, source_id: str) -> bool:
-    """Whether the folder has any library state (including being added or removed)."""
-    return state(db, source_id) is not None
+    """Whether any identity has library state for the folder."""
+    return db.conn.execute("SELECT 1 FROM kb_import_library WHERE source_id = ?", (source_id,)).fetchone() is not None
 
 
-def _claim(db: DB, source_id: str, op: str, allowed: tuple[str | None, ...], *, new_state: str | None = None,
-           local=None) -> str | None:
-    """Claim the folder for one operation (``add``, ``sync`` or ``remove``) in one
-    transaction: its state must be one of ``allowed`` (None: no row yet) and no
-    other operation may hold it (a claim past its ``op_until`` is void). Moves it
-    to ``new_state`` and runs ``local(cursor)`` in the same transaction. Returns
-    the claim's token, or None when the folder is held or in another state."""
+def _claim(db: DB, source_id: str, op: str, allowed: tuple[str | None, ...], who: str, *,
+           new_state: str | None = None, local=None) -> str | None:
+    """Claim the folder for identity ``who``'s operation (``add``, ``sync`` or
+    ``remove``) in one transaction: its state for them must be one of ``allowed``
+    (None: no row yet) and no other operation may hold it (a claim past its
+    ``op_until`` is void). Moves it to ``new_state`` and runs ``local(cursor)`` in
+    the same transaction. Returns the claim's token, or None when the folder is
+    held or in another state."""
     now = time.time()
     token = uuid.uuid4().hex
     with db.tx() as c:
-        row = c.execute("SELECT state, op, op_until FROM kb_import_library WHERE source_id = ?",
-                        (source_id,)).fetchone()
+        row = c.execute("SELECT state, op, op_until FROM kb_import_library WHERE source_id = ? AND identity = ?",
+                        (source_id, who)).fetchone()
         current = row["state"] if row else None
         if current not in allowed or (row and row["op"] and (row["op_until"] or 0) >= now):
             return None
         if row is None:
-            c.execute("INSERT INTO kb_import_library (source_id, added_at, state, op, op_token, op_until)"
-                      " VALUES (?, ?, ?, ?, ?, ?)", (source_id, now, new_state or IN_LIBRARY, op, token, now + LEASE))
+            c.execute("INSERT INTO kb_import_library (source_id, identity, added_at, state, op, op_token, op_until)"
+                      " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                      (source_id, who, now, new_state or IN_LIBRARY, op, token, now + LEASE))
         else:
             c.execute("UPDATE kb_import_library SET state = ?, op = ?, op_token = ?, op_until = ?"
-                      " WHERE source_id = ?", (new_state or current, op, token, now + LEASE, source_id))
+                      " WHERE source_id = ? AND identity = ?", (new_state or current, op, token, now + LEASE,
+                                                                source_id, who))
         if local:
             local(c)
     return token
 
 
 def _holds(c, source_id: str, token: str) -> bool:
-    row = c.execute("SELECT op_token FROM kb_import_library WHERE source_id = ?", (source_id,)).fetchone()
-    return row is not None and row["op_token"] == token
+    return c.execute("SELECT 1 FROM kb_import_library WHERE source_id = ? AND op_token = ?",
+                     (source_id, token)).fetchone() is not None
 
 
 def _renew(db: DB, source_id: str, token: str) -> bool:
@@ -183,17 +220,20 @@ def _renew(db: DB, source_id: str, token: str) -> bool:
 def _release(db: DB, source_id: str, token: str, *, state: str | None = None, drop: bool = False,
              drop_if_no_queue: bool = False) -> None:
     """End the claim (only if still held): optionally move to ``state`` or drop
-    the folder's row, the latter also when ``drop_if_no_queue`` and no doc of it
-    waits for deletion."""
+    the folder's row, the latter also when ``drop_if_no_queue`` and no doc of that
+    identity's waits for deletion."""
     with db.tx() as c:
-        if not _holds(c, source_id, token):
+        row = c.execute("SELECT identity FROM kb_import_library WHERE source_id = ? AND op_token = ?",
+                        (source_id, token)).fetchone()
+        if row is None:
             return
         if drop or (drop_if_no_queue and not c.execute(
-                "SELECT 1 FROM kb_import_deletions WHERE source_id = ?", (source_id,)).fetchone()):
-            c.execute("DELETE FROM kb_import_library WHERE source_id = ?", (source_id,))
+                "SELECT 1 FROM kb_import_deletions WHERE source_id = ? AND identity = ?",
+                (source_id, row["identity"])).fetchone()):
+            c.execute("DELETE FROM kb_import_library WHERE source_id = ? AND op_token = ?", (source_id, token))
         else:
             c.execute("UPDATE kb_import_library SET op = NULL, op_token = NULL, op_until = NULL,"
-                      " state = COALESCE(?, state) WHERE source_id = ?", (state, source_id))
+                      " state = COALESCE(?, state) WHERE source_id = ? AND op_token = ?", (state, source_id, token))
 
 
 def _ref(src) -> str:
@@ -238,9 +278,10 @@ def _delete(client, store, doc_id: str) -> bool:
     return status in (200, 404)
 
 
-def _drain(db: DB, client, store) -> None:
-    """Delete the docs queued for deletion; each stays queued until the server confirms."""
-    for r in db.conn.execute("SELECT doc_id FROM kb_import_deletions").fetchall():
+def _drain(db: DB, client, store, who: str) -> None:
+    """Delete identity ``who``'s queued docs; each stays queued until the server
+    confirms. Another identity's queue is left as it is."""
+    for r in db.conn.execute("SELECT doc_id FROM kb_import_deletions WHERE identity = ?", (who,)).fetchall():
         try:
             if _delete(client, store, r["doc_id"]):
                 with db.tx() as c:
@@ -250,31 +291,40 @@ def _drain(db: DB, client, store) -> None:
 
 
 def drain_pending(db: DB, *, client=None, store=None) -> None:
-    """Delete every queued doc, whatever source (or removed source) queued it.
-    A delete is safe to repeat, so no claim is needed; finishing a folder's
-    removal is its holder's job (:func:`_finish_removal`). Never raises."""
+    """Delete the signed-in identity's queued docs, whichever source (or removed
+    source) queued them, then finish every ``removing`` folder of theirs whose
+    queue is now empty, each under its own claim. Never raises."""
     try:
-        if db.conn.execute("SELECT 1 FROM kb_import_deletions").fetchone():
-            client, store = analysis_docs._session(client, store)
-            _drain(db, client, store)
+        client, store, _, who = _who(client, store)
+        _drain(db, client, store, who)
+        done = db.conn.execute(
+            "SELECT source_id FROM kb_import_library l WHERE identity = ? AND state = ? AND NOT EXISTS"
+            " (SELECT 1 FROM kb_import_deletions x WHERE x.source_id = l.source_id AND x.identity = l.identity)",
+            (who, REMOVING)).fetchall()
+        for r in done:
+            token = _claim(db, r["source_id"], "remove", (REMOVING,), who)
+            if token:
+                _release(db, r["source_id"], token, drop_if_no_queue=True)
     except Exception:  # noqa: BLE001
         log.info("library deletions not drained")
 
 
-def _queue_deletion(c, source_id: str, external_id: str) -> None:
-    c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id) SELECT doc_id, source_id"
-              " FROM kb_import_uploads WHERE source_id = ? AND external_id = ?", (source_id, external_id))
-    c.execute("DELETE FROM kb_import_uploads WHERE source_id = ? AND external_id = ?",
-              (source_id, external_id))
+def _queue_deletion(c, source_id: str, who: str, external_id: str) -> None:
+    c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity) SELECT doc_id, source_id,"
+              " identity FROM kb_import_uploads WHERE source_id = ? AND identity = ? AND external_id = ?",
+              (source_id, who, external_id))
+    c.execute("DELETE FROM kb_import_uploads WHERE source_id = ? AND identity = ? AND external_id = ?",
+              (source_id, who, external_id))
 
 
-def _upload(db: DB, source_id: str, repo_root: str, claim: str, only: dict[str, str] | None = None, *,
+def _upload(db: DB, source_id: str, repo_root: str, claim: str, who: str, only: dict[str, str] | None = None, *,
             client=None, store=None, key_store=None, identity=None) -> dict:
     """Upload new and changed files (only those in ``only``, name to content
     digest, when given), queue the docs of changed-away and removed ones for
     deletion, and drain the queue. ``claim`` is the caller's operation token: it
     is renewed before each upload and checked when a doc is recorded, and the run
-    stops, queueing a doc it just sent, once the claim is lost.
+    stops, queueing a doc it just sent, once the claim is lost. ``who`` is the
+    identity the claim was made for; the sign-in must still be theirs.
     A file that fails stays out of the tracking so the next call tries it again.
     Raises when nothing can be attempted."""
     result = {"uploaded": 0, "deleted": 0, "skipped": 0, "sent": False, "failed": []}
@@ -282,14 +332,15 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, only: dict[str, 
     if reason is not None:
         raise ImportUploadOff(reason)
     src = _source(db, source_id)
-    client, store = analysis_docs._session(client, store)
-    ent = analysis_docs.require_entitlement(store)
+    client, store, ent, signed_in = _who(client, store)
+    if signed_in != who:
+        raise RuntimeError("the signed-in account changed")
     ident = (identity or (lambda: repo_identity(repo_root)))()
     if ident is None:
         raise RuntimeError("this folder's repo has no identity to file the docs under")
     key = OrgKeys(store=store, client=client, key_store=key_store).get(ent.org_id)
     known = {r["external_id"]: r for r in db.conn.execute(
-        "SELECT * FROM kb_import_uploads WHERE source_id = ?", (source_id,))}
+        "SELECT * FROM kb_import_uploads WHERE source_id = ? AND identity = ?", (source_id, who))}
     sendable, skipped = _plan(src)
     result["skipped"] = len(skipped)
     lost = False
@@ -312,13 +363,13 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, only: dict[str, 
                 if not _holds(c, source_id, claim):
                     raise LookupError("this run's claim on the folder was lost")
                 if old is not None:
-                    _queue_deletion(c, source_id, name)
-                c.execute("INSERT INTO kb_import_uploads (source_id, external_id, content_hash, doc_id)"
-                          " VALUES (?, ?, ?, ?)", (source_id, name, digest, doc_id))
+                    _queue_deletion(c, source_id, who, name)
+                c.execute("INSERT INTO kb_import_uploads (source_id, identity, external_id, content_hash, doc_id)"
+                          " VALUES (?, ?, ?, ?, ?)", (source_id, who, name, digest, doc_id))
         except Exception as e:  # noqa: BLE001 - the server has the doc: never lose its id
             with db.tx() as c:
-                c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id) VALUES (?, ?)",
-                          (doc_id, source_id))
+                c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
+                          " VALUES (?, ?, ?)", (doc_id, source_id, who))
             if isinstance(e, LookupError):
                 lost = True
                 break
@@ -330,10 +381,11 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, only: dict[str, 
         with db.tx() as c:
             if _holds(c, source_id, claim):
                 for name in known.keys() - sendable.keys():
-                    _queue_deletion(c, source_id, name)
-    before = db.conn.execute("SELECT count(*) FROM kb_import_deletions").fetchone()[0]
-    _drain(db, client, store)
-    result["deleted"] = before - db.conn.execute("SELECT count(*) FROM kb_import_deletions").fetchone()[0]
+                    _queue_deletion(c, source_id, who, name)
+    count = "SELECT count(*) FROM kb_import_deletions WHERE identity = ?"
+    before = db.conn.execute(count, (who,)).fetchone()[0]
+    _drain(db, client, store, who)
+    result["deleted"] = before - db.conn.execute(count, (who,)).fetchone()[0]
     with db.tx() as c:
         c.execute("UPDATE kb_import_library SET pending = ? WHERE source_id = ? AND op_token = ?",
                   (len(result["failed"]), source_id, claim))
@@ -343,23 +395,20 @@ def _upload(db: DB, source_id: str, repo_root: str, claim: str, only: dict[str, 
 def sync_upload(db: DB, source_id: str, repo_root: str, **deps) -> dict:
     """Bring the library up to date with an added folder (what :func:`brindle.kb.sync`
     calls). The switch is read first: while it is off, or in air-gap mode, nothing
-    is requested, queued deletions included, and the queue stays as it is. It
-    claims the folder first and does nothing when another operation holds it. A
-    folder that is ``removing`` is only drained and, once its queue is empty,
-    dropped; one that is not ``in_library`` gets no upload. Never raises."""
+    is requested, queued deletions included, and the queue stays as it is. Only
+    the signed-in identity's rows are touched: a folder another identity added is
+    local to this one and gets nothing. It then drains the identity's queue
+    (finishing emptied removals), claims the folder, and does nothing when another
+    operation holds it or it is not ``in_library``. Never raises."""
     nothing = {"uploaded": 0, "deleted": 0, "skipped": 0, "sent": False, "failed": []}
     claim = None
     try:
         if _off_reason(deps.get("client"), deps.get("store")) is not None:
             return nothing
+        who = _who(deps.get("client"), deps.get("store"))[3]
         drain_pending(db, client=deps.get("client"), store=deps.get("store"))
-        claim = _claim(db, source_id, "remove", (REMOVING,))
-        if claim:
-            drain_pending(db, client=deps.get("client"), store=deps.get("store"))
-            _release(db, source_id, claim, drop_if_no_queue=True)
-            return nothing
-        claim = _claim(db, source_id, "sync", (IN_LIBRARY,))
-        return _upload(db, source_id, repo_root, claim, **deps) if claim else nothing
+        claim = _claim(db, source_id, "sync", (IN_LIBRARY,), who)
+        return _upload(db, source_id, repo_root, claim, who, **deps) if claim else nothing
     except Exception as e:  # noqa: BLE001
         log.info("imported folder not uploaded (%s)", type(e).__name__)
         return nothing
@@ -382,29 +431,31 @@ class UploadFailed(RuntimeError):
 
 def add_to_library(db: DB, source_id: str, repo_root: str, token: str | None = None, **deps) -> dict:
     """Upload exactly the files a :func:`dry_run` listed (its ``token``) and mark
-    the folder added. ``ImportUploadOff`` when sending is off, ``ManifestChanged``
-    when the folder differs from what was listed, ``Busy`` when another add or a
-    removal holds the folder, ``UploadFailed`` when a file was rejected (the
-    folder is added only if something went up)."""
+    the folder added for the signed-in identity. ``ImportUploadOff`` when sending
+    is off, ``ManifestChanged`` when the folder differs from what was listed,
+    ``Busy`` when another add or a removal holds the folder, ``UploadFailed`` when
+    a file was rejected (the folder is added only if something went up)."""
     src = _source(db, source_id)
     reason = _off_reason(deps.get("client"), deps.get("store"))
     if reason is not None:
         raise ImportUploadOff(reason)
+    who = _who(deps.get("client"), deps.get("store"))[3]
     sendable, _ = _plan(src)
     if token != _token(sendable):
-        raise ManifestChanged(dry_run(db, source_id))
+        raise ManifestChanged(dry_run(db, source_id, client=deps.get("client"), store=deps.get("store")))
     # ADDING is listed for the add that crashed: its lease must have lapsed, as for any claim.
-    claim = _claim(db, source_id, "add", (None, IN_LIBRARY, ADDING), new_state=ADDING)
+    claim = _claim(db, source_id, "add", (None, IN_LIBRARY, ADDING), who, new_state=ADDING)
     if claim is None:
         raise Busy(source_id)
     failed: list[str] | str = []
     result: dict = {}
     try:
-        result = _upload(db, source_id, repo_root, claim, {n: _digest(d) for n, d in sendable.items()}, **deps)
+        result = _upload(db, source_id, repo_root, claim, who, {n: _digest(d) for n, d in sendable.items()}, **deps)
         failed = result["failed"]
     except Exception as e:  # noqa: BLE001
         failed = str(e) or type(e).__name__
-    tracked = db.conn.execute("SELECT 1 FROM kb_import_uploads WHERE source_id = ?", (source_id,)).fetchone()
+    tracked = db.conn.execute("SELECT 1 FROM kb_import_uploads WHERE source_id = ? AND identity = ?",
+                              (source_id, who)).fetchone()
     _release(db, source_id, claim, state=IN_LIBRARY, drop=not tracked)
     if failed:
         raise UploadFailed(failed if isinstance(failed, str) else f"not uploaded: {', '.join(failed)}")
@@ -412,34 +463,33 @@ def add_to_library(db: DB, source_id: str, repo_root: str, token: str | None = N
 
 
 def remove_from_library(db: DB, source_id: str, *, client=None, store=None) -> dict:
-    """Delete the folder's docs server-side. In one transaction the folder is
-    claimed, moved to ``removing`` and every tracked doc is queued for deletion;
-    it stays ``removing`` (so the app can finish it, and every later index
-    deletes what is left) until the queue for it is empty, which the holder
-    checks before dropping it. ``left`` counts the docs not yet deleted.
-    ``Busy`` while another operation holds the folder."""
+    """Delete the signed-in identity's docs of the folder server-side. In one
+    transaction the folder is claimed, moved to ``removing`` and every tracked doc
+    is queued for deletion; it stays ``removing`` (so the app can finish it, and
+    every later index deletes what is left) until the queue for it is empty, which
+    the holder checks before dropping it. ``left`` counts the docs not yet
+    deleted. ``Busy`` while another operation holds the folder. Removal is not
+    switch-gated: deleting reduces what is held, so it works with import_upload
+    off; in air-gap mode, or signed out, it raises and the docs stay queued."""
     _source(db, source_id)
-    # Removal is not switch-gated: deleting reduces what is held, so it works with import_upload off.
-    # Only air-gap mode blocks the network; the docs then stay queued.
-    from brindle import airgap
+    client, store, _, who = _who(client, store)
 
     def queue_all(c) -> None:
-        c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id) SELECT doc_id, source_id"
-                  " FROM kb_import_uploads WHERE source_id = ?", (source_id,))
-        c.execute("DELETE FROM kb_import_uploads WHERE source_id = ?", (source_id,))
+        c.execute("INSERT OR IGNORE INTO kb_import_deletions (doc_id, source_id, identity)"
+                  " SELECT doc_id, source_id, identity FROM kb_import_uploads WHERE source_id = ? AND identity = ?",
+                  (source_id, who))
+        c.execute("DELETE FROM kb_import_uploads WHERE source_id = ? AND identity = ?", (source_id, who))
 
     claim = None
-    if state(db, source_id) is not None:
-        claim = _claim(db, source_id, "remove", (IN_LIBRARY, REMOVING, ADDING), new_state=REMOVING,
+    if state(db, source_id, who) is not None:
+        claim = _claim(db, source_id, "remove", (IN_LIBRARY, REMOVING, ADDING), who, new_state=REMOVING,
                        local=queue_all)
         if claim is None:
             raise Busy(source_id)
     try:
-        if not airgap.enabled():
-            client, store = analysis_docs._session(client, store)
-            _drain(db, client, store)
+        _drain(db, client, store, who)
     finally:
         if claim:
             _release(db, source_id, claim, drop_if_no_queue=True)
-    return {"left": db.conn.execute("SELECT count(*) FROM kb_import_deletions WHERE source_id = ?",
-                                    (source_id,)).fetchone()[0]}
+    return {"left": db.conn.execute("SELECT count(*) FROM kb_import_deletions WHERE source_id = ? AND identity = ?",
+                                    (source_id, who)).fetchone()[0]}

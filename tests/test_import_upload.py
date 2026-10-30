@@ -5,8 +5,8 @@ import pytest
 
 from brindle import airgap, kb
 from brindle.pro import analysis_imports as imports
-from brindle.pro import auth, credentials
-from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
+from brindle.pro import auth, credentials, license
+from pro_fixtures import backend, claims, fixed_identity, pro_env, sign, signing_key  # noqa: F401 - fixtures
 from test_pro_remote_learning import login_as
 
 
@@ -114,19 +114,22 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
     assert kb.sync(db, source, None, "/repo")["uploaded"] == 1             # the real indexing path
     assert remote.docs[-1]["files"][0]["md"].endswith("an hour") and remote.deleted == []
     assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 2}
-    shown = kb.sources(db, "github.com/acme/app")[0]
-    assert (shown["in_library"], shown["library_removing"]) == (0, 2) and remote.deleted == []
+    KEY = "github.com/acme/app"
+
+    def shown(identity=None):
+        return kb.sources(db, KEY, identity or imports.current_identity(deps["client"], deps["store"]))[0]
+
+    assert (shown()["library_state"], shown()["library_removing"]) == ("removing", 2) and remote.deleted == []
     kb.sync(db, source, None, "/repo")                  # an index at the boundary, the DELETE still failing
-    shown = kb.sources(db, "github.com/acme/app")[0]    # what the app reads: "Finish removing" stays
-    assert (shown["in_library"], shown["library_removing"]) == (0, 2) and imports.state(db, source) == "removing"
+    assert (shown()["library_state"], shown()["library_removing"]) == ("removing", 2)   # "Finish removing" stays
     remote.fail_delete, remote.switches = False, {"import_upload": "off"}
     kb.sync(db, source, None, "/repo")                  # switch off: not even the queued deletes go
-    assert remote.deleted == [] and kb.sources(db, "github.com/acme/app")[0]["library_removing"] == 2
+    assert remote.deleted == [] and shown()["library_removing"] == 2
     # Removal is not switch-gated: with the switch off, finishing it still deletes (uploads sent nothing).
     assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
     assert sorted(remote.deleted) == ["d1", "d2"] and not imports.in_library(db, source) and len(remote.docs) == 2
     remote.switches = {"import_upload": "on"}
-    assert kb.sources(db, "github.com/acme/app")[0]["library_removing"] == 0
+    assert shown()["library_state"] == "local"
     # Overlapping syncs with changed content, via the real sync: the second finds the first holding
     # the folder and does nothing (a removal then is refused too); the newer content wins next time.
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)             # d3: "an hour"
@@ -160,11 +163,49 @@ def test_a_changed_file_reuploads_and_removal_survives_a_failed_delete(folder, r
 
     crashed()
     kb.sync(db, source, None, "/repo")      # an index must not finish a removal of an adding folder
-    assert imports.state(db, source) == "adding" and tracked() == ["d5"]
+    assert shown()["library_state"] == "adding" and tracked() == ["d5"]
     imports.add_to_library(db, source, "/repo", token(db, source), **deps)
-    assert imports.state(db, source) == "in_library"
+    assert shown()["library_state"] == "in_library"
     crashed()
     kb.sync(db, source, None, "/repo")
-    assert imports.state(db, source) == "adding" and tracked() == ["d5"] and "d5" not in remote.deleted
+    assert shown()["library_state"] == "adding" and tracked() == ["d5"] and "d5" not in remote.deleted
     assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
-    assert imports.state(db, source) is None and remote.deleted[-1] == "d5"
+    assert shown()["library_state"] == "local" and remote.deleted[-1] == "d5"
+    # Another source's sync drains this folder's queue; the folder, held at that moment, stays
+    # "removing" with nothing queued, so Finish removing is still there and completes it.
+    other = kb.add_source(db, KEY, kb.FOLDER, str(docs.parent / "other"))
+    (docs.parent / "other").mkdir()
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # d6
+    remote.fail_delete = True
+    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 1}
+    remote.fail_delete = False
+    with db.tx() as c:
+        c.execute("UPDATE kb_import_library SET op = 'sync', op_token = 'held', op_until = 9e12")
+    kb.sync(db, other, None, "/repo")
+    assert remote.deleted[-1] == "d6" and (shown()["library_state"], shown()["library_removing"]) == ("removing", 0)
+    with db.tx() as c:
+        c.execute("UPDATE kb_import_library SET op = NULL, op_token = NULL, op_until = NULL")
+    assert imports.remove_from_library(db, source, client=deps["client"], store=deps["store"]) == {"left": 0}
+    assert shown()["library_state"] == "local"
+    # An account switch: the folder is local for the new identity, which uploads nothing; the first
+    # identity's queued deletion stays untouched until it is signed in again.
+    imports.add_to_library(db, source, "/repo", token(db, source), **deps)               # d7
+    first = imports.current_identity(deps["client"], deps["store"])
+    remote.fail_delete = True
+    imports.remove_from_library(db, source, client=deps["client"], store=deps["store"])
+    remote.fail_delete = False
+    sent, gone = len(remote.docs), len(remote.deleted)
+
+    def sign_in_as(sub):
+        creds = deps["store"].load()
+        creds["entitlement"] = sign(remote.key, claims(features=["analysis_docs"], sub=sub))
+        deps["store"].save(creds)
+        license.clear_cache()
+
+    sign_in_as("user_2")
+    kb.sync(db, source, None, "/repo")
+    assert (len(remote.docs), len(remote.deleted)) == (sent, gone)
+    assert shown()["library_state"] == "local" and shown(first)["library_state"] == "removing"
+    sign_in_as("user_1")
+    kb.sync(db, source, None, "/repo")
+    assert remote.deleted[-1] == "d7" and shown()["library_state"] == "local"

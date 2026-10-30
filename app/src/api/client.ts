@@ -331,8 +331,9 @@ export interface KbSource {
   added_at?: number;
   docs?: number;
   quarantined?: boolean;
-  /* Added to the personal library (Pro); otherwise the folder stays local. */
-  in_library?: boolean;
+  /* Where the folder is for the signed-in account: local (the default; it stays on this machine),
+     adding, in_library (Pro) or removing (shown until every doc is deleted). */
+  library_state?: "local" | "adding" | "in_library" | "removing";
   /* Files of an added folder the last upload could not send. */
   library_pending?: number;
   /* Docs of a folder being removed from the library that the server has not deleted yet. */
