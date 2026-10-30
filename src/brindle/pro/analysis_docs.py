@@ -338,16 +338,14 @@ def set_switch(on: bool, *, client=None, store=None) -> dict:
 # same section is kept as a draft and sent to the session's supervisor to
 # reconcile. Snapshot docs are never edited: new work supersedes them.
 #
-# The session root's receipt keeps each draft, keyed by branch and doc, with
-# its state: "open" while the branch is unmerged and "clash" once sent to the
-# supervisor. A publish or drop the server hasn't confirmed yet is owed: it
-# waits in one queue of its own (OWED, apart from any session, so it outlives
-# the session's agents) and is sent again at the end of any agent's turn
-# (:func:`on_turn`) until the server answers.
+# Each draft is a row of its own (``analysis_drafts``: session, branch, doc,
+# the workspace it was saved in and its drafter), apart from the agent and
+# workspace rows, which may go first (a finished handoff's worker is
+# removed before its branch merges). Its state: "open" while the branch is
+# unmerged, "clash" once sent to the supervisor, and "publish" or "drop"
+# while the server hasn't confirmed that yet (owed: sent again at the end of
+# any agent's turn, :func:`on_turn`, whatever became of its session).
 
-DRAFT_ITEM = "analysis_draft"          # on a session: [branch, doc id] -> {"state", "by": the drafter}
-OWED = "analysis-docs:owed"            # the queue's receipt: [session, branch, doc id] -> {"op", "by"}
-OWED_ITEM = "analysis_draft_owed"
 TOLD_ITEM = "analysis_doc_told"        # the newest version of a doc the agent was told about
 CHECKED_ITEM = "analysis_docs_checked"  # when the agent's reads were last checked
 CHECK_EVERY = 300.0                    # seconds between an agent's checks of its reads
@@ -365,12 +363,6 @@ def _pins(db, agent_id: str, kind: str) -> dict[str, str]:
     from brindle import knowledge
 
     return {item: value for k, item, value in knowledge.receipt(db, agent_id) if k == kind}
-
-
-def _unpin(db, agent_id: str, kind: str, doc_id: str) -> None:
-    with db.tx() as c:
-        c.execute("DELETE FROM context_receipts WHERE task_id = ? AND item_kind = ? AND item_id = ?",
-                  (agent_id, kind, doc_id))
 
 
 def _version(value) -> int | None:
@@ -393,21 +385,26 @@ def read_doc(db, agent_id: str, doc_id: str, *, client=None, store=None) -> dict
 
 def drafts(db, session: str) -> dict[tuple[str, str], dict]:
     """The session's drafts: ``(branch, doc id)`` -> ``{"state", "by"}``."""
-    out = {}
-    for key, value in _pins(db, session, DRAFT_ITEM).items():
-        try:
-            branch, doc_id = json.loads(key)
-            out[(branch, doc_id)] = json.loads(value)
-        except (TypeError, ValueError):
-            continue
-    return out
+    rows = db.conn.execute("SELECT branch, doc_id, state, drafter FROM analysis_drafts WHERE session = ?",
+                           (session,)).fetchall()
+    return {(r["branch"], r["doc_id"]): {"state": r["state"], "by": r["drafter"]} for r in rows}
 
 
-def _set_draft(db, session: str, branch: str, doc_id: str, state: str, by: str) -> None:
-    from brindle import knowledge
+def _set_draft(db, session: str, branch: str, doc_id: str, state: str, by: str,
+               workspace_id: str | None = None) -> None:
+    """Record the draft's state; ``workspace_id`` is kept from its first save."""
+    with db.tx() as c:
+        c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, workspace_id, drafter, state)"
+                  " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (session, branch, doc_id) DO UPDATE SET"
+                  " state = excluded.state, drafter = excluded.drafter,"
+                  " workspace_id = COALESCE(excluded.workspace_id, workspace_id)",
+                  (session, branch, doc_id, workspace_id, by, state))
 
-    knowledge.record_receipt(db, session, [(DRAFT_ITEM, json.dumps([branch, doc_id]),
-                                            json.dumps({"state": state, "by": by}))])
+
+def _forget_draft(db, session: str, branch: str, doc_id: str) -> None:
+    with db.tx() as c:
+        c.execute("DELETE FROM analysis_drafts WHERE session = ? AND branch = ? AND doc_id = ?",
+                  (session, branch, doc_id))
 
 
 def save_draft(db, agent, branch: str, doc_id: str, files: list[dict], *, clashed_branch: str | None = None,
@@ -444,43 +441,35 @@ def save_draft(db, agent, branch: str, doc_id: str, files: list[dict], *, clashe
         return {"done": f"Reconciled {doc_id} on {target}: published.",
                 "clash": f"{doc_id} on {target} still clashes: see the message sent to you."
                 }.get(state, f"Reconciled {doc_id} on {target}; brindle sends it again until the server takes it.")
-    _set_draft(db, session, branch, doc_id, "open", agent.id)
+    _set_draft(db, session, branch, doc_id, "open", agent.id, agent.workspace_id)
     return f"Draft of {doc_id} saved on version {base}; it publishes when {branch} merges."
 
 
 def owed(db) -> dict[tuple[str, str, str], dict]:
-    """The queue of unconfirmed publishes and drops: ``(session, branch, doc
-    id)`` -> ``{"op", "by"}``."""
-    out = {}
-    for key, value in _pins(db, OWED, OWED_ITEM).items():
-        try:
-            session, branch, doc_id = json.loads(key)
-            out[(session, branch, doc_id)] = json.loads(value)
-        except (TypeError, ValueError):
-            continue
-    return out
+    """The unconfirmed publishes and drops: ``(session, branch, doc id)`` ->
+    ``{"op", "by"}``."""
+    rows = db.conn.execute("SELECT session, branch, doc_id, state, drafter FROM analysis_drafts"
+                           " WHERE state IN ('publish', 'drop')").fetchall()
+    return {(r["session"], r["branch"], r["doc_id"]): {"op": r["state"], "by": r["drafter"]} for r in rows}
 
 
 def _settle(db, session: str, branch: str, doc_id: str, op: str, by: str, client=None, store=None) -> str:
     """``op`` ("publish" or "drop") the session's draft of ``doc_id`` on
-    ``branch``: owed (queued in OWED) until the server confirms. Returns
-    "done", "clash" (the session's supervisor is told to reconcile it, never
-    the person; with no session left, the draft is dropped instead) or the
-    op still owed. Never raises."""
+    ``branch``: owed (its state) until the server confirms. Returns "done",
+    "clash" (the session's supervisor is told to reconcile it, never the
+    person; with no session left, the draft is dropped instead) or the op
+    still owed. Never raises."""
     from brindle import gates, knowledge
 
-    key = json.dumps([session, branch, doc_id])
-    _unpin(db, session, DRAFT_ITEM, json.dumps([branch, doc_id]))
-    knowledge.record_receipt(db, OWED, [(OWED_ITEM, key, json.dumps({"op": op, "by": by}))])
+    _set_draft(db, session, branch, doc_id, op, by)
     try:
         status, resp = _call("POST", _doc_path(doc_id, f"/drafts/{op}"), {"session": session, "branch": branch},
                              client=client, store=store)
     except Exception as e:  # noqa: BLE001 - owed: settled at a later turn
         log.info("analysis doc draft not settled (%s)", type(e).__name__)
         return op
-    if status == 200 or (op == "publish" and status == 409 and resp.get("error") == "clash"):
-        _unpin(db, OWED, OWED_ITEM, key)
     if status == 200:
+        _forget_draft(db, session, branch, doc_id)
         version = _version(resp.get("version"))
         if op == "publish" and version is not None:   # the drafter made this version: nothing to tell it
             knowledge.record_receipt(db, by, [(TOLD_ITEM, doc_id, str(version))])
@@ -504,13 +493,13 @@ def _settle(db, session: str, branch: str, doc_id: str, op: str, by: str, client
 
 
 def _branch_drafts(db, ws, state: str) -> list[tuple[str, str, str]]:
-    """``(session, doc id, drafter)`` of each draft on ``ws``'s branch in
-    ``state``, across the sessions of ``ws``'s agents."""
-    from brindle import autopilot
-
-    sessions = dict.fromkeys(autopilot.root_of(db, a.id) for a in db.list_agents(ws.id))
-    return [(s, doc_id, d.get("by", s)) for s in sessions for (branch, doc_id), d in drafts(db, s).items()
-            if branch == ws.branch and d.get("state") == state]
+    """``(session, doc id, drafter)`` of each draft saved in ``ws`` on its
+    branch in ``state``: by the draft's own row, so it doesn't matter whether
+    the agents that saved it are still there."""
+    rows = db.conn.execute("SELECT session, doc_id, drafter FROM analysis_drafts"
+                           " WHERE workspace_id = ? AND branch = ? AND state = ?",
+                           (ws.id, ws.branch, state)).fetchall()
+    return [(r["session"], r["doc_id"], r["drafter"]) for r in rows]
 
 
 def publish_drafts(db, ws, *, client=None, store=None) -> None:

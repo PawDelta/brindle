@@ -50,11 +50,11 @@ def workspace(db, tmp_path, ws_id, branch):
     return ws
 
 
-def session(db, tmp_path):
+def session(db, tmp_path, mode="assign"):
     """A supervisor and its worker on branch ``feat/a``, which read ``d1`` at version 1."""
     sup = add(db, workspace(db, tmp_path, "main", "main"), "sup", mode="interactive")
     ws = workspace(db, tmp_path, "w1", "feat/a")
-    worker = add(db, ws, "w1a", parent=sup.id)
+    worker = add(db, ws, "w1a", mode=mode, parent=sup.id)
     ad.read_doc(db, worker.id, "d1")
     return sup, worker, ws
 
@@ -86,10 +86,15 @@ GONE_CLASH = "server down, then the session is gone and the draft clashes"
 
 @pytest.mark.parametrize("outcome", ["merged", "removed", GONE, GONE_CLASH])
 def test_draft_publishes_on_merge_and_is_dropped_unmerged(outcome, db, remote, told, tmp_path, monkeypatch):
-    sup, worker, ws = session(db, tmp_path)
+    from brindle import mcp_server
+
+    sup, worker, ws = session(db, tmp_path, mode="handoff")
     ad.save_draft(db, worker, ws.branch, "d1", FILES)
     assert calls(remote, "PUT /analysis-docs/d1/drafts") == [
         {"session": "sup", "branch": "feat/a", "base_version": 1, "files": FILES}]
+    db.set_result(worker.id, "done")                # the handoff completes: its worker is removed
+    mcp_server._await_worker(db, worker.id, 1)
+    assert db.get_agent(worker.id) is None
     if outcome in (GONE, GONE_CLASH):
         remote.routes["POST /analysis-docs/d1/drafts/publish"] = [(503, {}), (200, {"version": 2}) if outcome == GONE
                                                                   else (409, {"error": "clash", "clashes": []})]

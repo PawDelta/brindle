@@ -532,6 +532,18 @@ CREATE TABLE IF NOT EXISTS context_receipts (
     content_hash TEXT NOT NULL,
     PRIMARY KEY (task_id, item_kind, item_id)
 );
+-- A session's drafts of analysis docs (brindle.pro.analysis_docs owns these):
+-- kept apart from the agent and workspace rows, which may go first.
+CREATE TABLE IF NOT EXISTS analysis_drafts (
+    session TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    doc_id TEXT NOT NULL,
+    workspace_id TEXT,
+    drafter TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('open', 'clash', 'publish', 'drop')),
+    PRIMARY KEY (session, branch, doc_id)
+);
+CREATE INDEX IF NOT EXISTS analysis_drafts_ws ON analysis_drafts(workspace_id, branch, state);
 -- Knowledge sources and their indexed documents (brindle.kb owns these; the
 -- kb_fts full-text table is made in DB._migrate, as SQLite may lack FTS5).
 CREATE TABLE IF NOT EXISTS kb_sources (
