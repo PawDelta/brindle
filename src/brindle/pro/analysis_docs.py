@@ -1,5 +1,4 @@
-"""The personal analysis-doc library client (brindle Pro; contract in
-``docs/analysis-docs-plan.md``).
+"""The personal analysis-doc library client (brindle Pro).
 
 Docs are free-form files written for large work in the branch's docs folder
 outside the repo (:func:`brindle.pro.analysis_brief.docs_dir`). When the

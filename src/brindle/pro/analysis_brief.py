@@ -1,5 +1,4 @@
-"""What large work's brief gets from the analysis-doc library (contract in
-``docs/analysis-docs-plan.md``).
+"""What large work's brief gets from the analysis-doc library (brindle Pro).
 
 Large work (:func:`large_work`) is told to leave a doc: the built-in
 ``analysis/doc`` rule pack and the folder to write it in (:func:`docs_dir`,
