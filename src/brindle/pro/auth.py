@@ -138,13 +138,14 @@ class RawBody(dict):
 
 
 TEXT_KEY = "text"   # a text/* response body comes back under this key
+BINARY_KEY = "content"  # a non-JSON response body comes back as raw bytes
+CONTENT_TYPE_KEY = "content_type"
 
 
 class Transport(Protocol):
     def request(self, method: str, url: str, form: dict | None,
                 headers: dict) -> tuple[int, dict]:
-        """Send ``form`` (urlencoded, or JSON for a :class:`JSONBody`; None
-        for GET) to ``url``; return (status, JSON object)."""
+        """Send ``form`` and return JSON, decoded text, or raw bytes plus content type."""
 
 
 def _origin(u: urllib.parse.SplitResult) -> tuple[str, str, int | None]:
@@ -181,6 +182,22 @@ class UrllibTransport:
                   urllib.request.HTTPDefaultErrorHandler(), urllib.request.UnknownHandler()):
             self.opener.add_handler(h)
 
+    @staticmethod
+    def _decode_response(status: int, body: bytes, content_type: str) -> tuple[int, dict]:
+        ctype = (content_type or "").split(";", 1)[0].strip().lower()
+        if ctype.startswith("text/"):
+            return status, {TEXT_KEY: body.decode("utf-8", "replace"), BINARY_KEY: body,
+                            CONTENT_TYPE_KEY: ctype}
+        if ctype and ctype not in ("application/json", "application/problem+json") and not ctype.endswith("+json"):
+            return status, {BINARY_KEY: body, CONTENT_TYPE_KEY: ctype}
+        try:
+            obj = json.loads(body.decode("utf-8")) if body else {}
+        except (UnicodeDecodeError, ValueError):
+            raise TransportError(f"backend returned a non-JSON response (HTTP {status})") from None
+        if not isinstance(obj, dict):
+            raise TransportError("backend returned an unexpected response")
+        return status, obj
+
     def request(self, method: str, url: str, form: dict | None,
                 headers: dict) -> tuple[int, dict]:
         check_url(url)
@@ -213,16 +230,7 @@ class UrllibTransport:
                 raise TransportError("error reading the backend response") from e
         if len(body) > self.max_bytes:
             raise TransportError("backend response too large")
-        ctype = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-        if ctype.startswith("text/"):
-            return status, {TEXT_KEY: body.decode("utf-8", "replace")}
-        try:
-            obj = json.loads(body.decode("utf-8")) if body else {}
-        except (UnicodeDecodeError, ValueError):
-            raise TransportError(f"backend returned a non-JSON response (HTTP {status})") from None
-        if not isinstance(obj, dict):
-            raise TransportError("backend returned an unexpected response")
-        return status, obj
+        return self._decode_response(status, body, resp.headers.get("Content-Type") or "")
 
 
 # -- client -------------------------------------------------------------------------------------
@@ -580,6 +588,29 @@ def refresh(client: Client, store, seen: dict | None = None, *, now: float | Non
         store.save(cur)
     license.clear_cache()
     return got[1]
+
+
+def refresh_captured(store, record: dict, transport: Transport | None = None, *,
+                     now: float | None = None) -> dict:
+    """Refresh a credential ``record`` read earlier, all under the refresh lock like
+    :func:`refresh`: if the store no longer holds exactly ``record`` nothing is
+    sent (``AuthError`` code ``record_changed``); otherwise ``record``'s own
+    refresh token is spent at ``record``'s own ``base_url`` and the rotated pair
+    is saved at once, and only then is the entitlement fetched and the record
+    updated. If that fetch fails, the saved pair is kept and the error raised."""
+    now = time.time() if now is None else now
+    client = Client(record.get("base_url"), transport)
+    with refresh_lock():
+        if (store.load() or {}) != record:
+            raise AuthError("the stored sign-in changed", code="record_changed")
+        new = _rotate(client, store, record, now)
+        got = _fetch_entitlement(client, new["access_token"], now, new.get("org_id"))
+        if got == 401:
+            raise AuthError("backend refused a fresh access token", code="invalid_token")
+        new = {**new, "entitlement": got[0]}
+        store.save(new)
+    license.clear_cache()
+    return new
 
 
 def switch_org(client: Client, store, org_id: str | None, *,

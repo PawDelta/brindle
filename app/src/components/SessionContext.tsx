@@ -140,6 +140,7 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
         onReview={() => navigate({ screen: "session", root, repo, agent: root, sheet: { kind: "review" } })}
         openUrl={openUrl}
         onCloseSession={closeSession && (() => closeSession(root))}
+        onOpenDocs={() => navigate({ screen: "knowledge", view: "docs", session: root, from: { root, repo } })}
       />
       {sidebarChanges.shown && (
         <ChangesRow

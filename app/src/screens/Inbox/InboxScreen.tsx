@@ -43,6 +43,7 @@ import { alert, button, card, quiet } from "../../components/ui";
 import { agentName, formatAge, rootOf } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
 import { useAppState } from "../../store/useStore";
+import type { Route } from "../../routes";
 import { useJob } from "../Branch/useJob";
 import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
@@ -58,6 +59,7 @@ export interface InboxScreenProps {
   /* Open an item's agent in its session: its provider screen, nothing over it unless `sheet` says
      (a prepared PR's item opens Review & open PR). */
   onOpen?(root: string, repo: string, agent?: string, sheet?: SheetRef): void;
+  onNavigate?(route: Route): void;
   /* Only what waits in this session (its root agent id), from its bar's count; null for everything. */
   session?: string | null;
   /* Back to everything. */
@@ -100,7 +102,7 @@ const PLAIN = "border-line-strong bg-transparent text-ink hover:bg-surface-2";
 const GHOST = "border-transparent text-ink-3 hover:text-ink";
 const LINK = "text-[11.5px] text-branch hover:underline";
 
-export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll, onOpenRule, appUpdates, openUrl = openExternal }: InboxScreenProps) {
+export function InboxScreen({ client, refresh, onOpen, onNavigate, session = null, onShowAll, onOpenRule, appUpdates, openUrl = openExternal }: InboxScreenProps) {
   const updateStatus = useAppState((s) => s.appUpdate);
   // The app's own item belongs to no session: shown on the whole Inbox only.
   const update = session === null && appUpdates ? appUpdateItem(updateStatus) : null;
@@ -118,7 +120,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
 
   // On one session: the items of any of its agents (the whole tree), none from elsewhere.
   // A request the permission items hold is theirs, not a card of its own.
-  const inSession = (i: InboxItemDTO) => session === null || (!!i.agent_id && rootOf(agents, i.agent_id, hidden) === session);
+  const inSession = (i: InboxItemDTO) => session === null || (i.root_id ?? (i.agent_id ? rootOf(agents, i.agent_id, hidden) : null)) === session;
   const here = useMemo(() => (session === null ? inbox : inbox.filter(inSession)).filter((i) => !actions.hidden.has(itemKey(i)) && !asks.held(i)), [inbox, session, agents, hidden, actions.hidden, asks.held]); // eslint-disable-line react-hooks/exhaustive-deps
   const askGroups = useMemo(() => (session === null ? asks.groups : asks.groups.map((g) => ({ ...g, items: g.items.filter((a) => a.root_id === session) })).filter((g) => g.items.length > 0)), [asks.groups, session]);
   const waiting = here.length + askGroups.length + (update ? 1 : 0);
@@ -149,7 +151,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
   const groups = useMemo<Group[]>(() => {
     const bySession = new Map<string, Group>();
     for (const item of here) {
-      const root = item.agent_id ? rootOf(agents, item.agent_id, hidden) : null;
+      const root = item.root_id ?? (item.agent_id ? rootOf(agents, item.agent_id, hidden) : null);
       const key = root ?? (item.agent_id ? `ws:${item.workspace_id ?? item.agent_id}` : item.kind === "setup" ? "setup" : "org");
       let group = bySession.get(key);
       if (!group) {
@@ -172,7 +174,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
   }, [here, agents, hidden, find, repoOf, repos]);
 
   const sessionOf = (item: InboxItemDTO) => {
-    const root = item.agent_id ? rootOf(agents, item.agent_id, hidden) : null;
+    const root = item.root_id ?? (item.agent_id ? rootOf(agents, item.agent_id, hidden) : null);
     const repo = root ? repoOf(root) : null;
     return root && repo ? { root, repo } : null;
   };
@@ -255,7 +257,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
               item.kind === "permission" ? (
                 <PermissionItemCard key={itemKey(item)} item={item} isNew={fresh.has(seenKey(item))} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
               ) : (
-              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(seenKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} />
+              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(seenKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} onNavigate={onNavigate} />
               ),
             )}
           </section>
@@ -266,7 +268,7 @@ export function InboxScreen({ client, refresh, onOpen, session = null, onShowAll
 }
 
 /* One banner card. */
-function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone, onGo, onReview }: {
+function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone, onGo, onReview, onNavigate }: {
   item: InboxItemDTO;
   actions: ReturnType<typeof useInboxActions>;
   who: string | null;
@@ -280,6 +282,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
   onGo?(): void;
   /* Its session with Review & open PR over it. */
   onReview?(): void;
+  onNavigate?(route: Route): void;
 }) {
   const key = itemKey(item);
   const busy = actions.busy.has(key);
@@ -293,6 +296,8 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     body = <pre className="whitespace-pre-wrap font-mono text-xs" data-testid="card-detail">{item.detail}</pre>;
   } else if (item.kind === "org_notice") {
     body = item.detail ? <span>from your org's {item.detail}</span> : null;
+  } else if (item.kind === "doc") {
+    body = <span>{item.detail ?? `Document ${item.doc}`}{item.section && ` · ${item.section}`}</span>;
   } else if (item.kind === "setup") {
     // What the button does, in a line; a fix this app doesn't know: the engine's detail, if any.
     const fix = item.fix ? FIXES[item.fix] : undefined;
@@ -332,8 +337,8 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     acts = <SetupFix item={item} actions={actions} onDone={onDone} />;
   } else if (item.kind === "setup") {
     acts = <span className="text-[11px] text-ink-3">fixed from a terminal: brindle doctor says how</span>;
-  } else if (item.kind === "credentials" || item.kind === "login") {
-    acts = <ItemActions item={item} actions={actions} repo={repo} onDone={onDone} compact />;
+  } else if (item.kind === "credentials" || item.kind === "login" || item.kind === "doc") {
+    acts = <ItemActions item={item} actions={actions} repo={repo} onDone={onDone} onGo={item.kind === "doc" ? onGo : undefined} onNavigate={onNavigate} compact />;
   } else if ((item.kind === "pr_ready" || item.kind === "pr_failed") && onReview) {
     // Nothing is pushed until the person's Open PR in the sheet.
     acts = (
@@ -371,7 +376,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
       <div className="col-span-2 mt-1 flex flex-wrap items-center gap-1.5">
         {acts}
         <span className="flex-1" />
-        {onGo && (
+        {onGo && item.kind !== "doc" && (
           <button type="button" className={`${LINK} whitespace-nowrap`} onClick={onGo}>
             Go to session ›
           </button>

@@ -5,14 +5,19 @@
    later plan from the same agent, shows again). A decision binds to what
    the card showed: an item the engine has replaced since (its detail,
    reason or request id differ in the inbox as it now stands) isn't acted
-   on from the old card. The engine's own refusal (a stale plan, no checks
-   waiting, a permission request that moved on) brings the card back with
-   its message in one line. */
+   on from the old card. The engine's refusal that nothing waits on it any
+   more (a stale plan, no checks waiting, a permission request that moved
+   on) drops the card and refetches the inbox; any other refusal brings the
+   card back with its message in one line. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { DaemonClient, InboxAction } from "../../api/client";
+import { DaemonError, type DaemonClient, type InboxAction } from "../../api/client";
 import type { InboxItemDTO } from "../../api/schema";
 import { actionId, itemKey } from "./items";
+
+/* The engine's 409 wording for "nothing waits on that any more" (service/inbox.answer_permission, agents.approve_plan,
+   routes_actions.inbox_action), as against a refusal about the action itself. */
+const NO_LONGER = /any more|no longer|no checks waiting|no plan awaiting|was answered|its own prompt|isn't a plan-first|supervisor can decide/;
 
 export interface Note {
   text: string;
@@ -81,6 +86,12 @@ export function useInboxActions(client: DaemonClient, refresh: () => Promise<voi
           void refresh();
         })
         .catch((e: unknown) => {
+          // The engine has moved on from the snapshot the card came from: drop it and fetch the truth.
+          if (e instanceof DaemonError && e.status === 409 && NO_LONGER.test(e.message)) {
+            setSettled((s) => new Set(s).add(key));
+            void refresh();
+            return;
+          }
           setNotes((n) => ({ ...n, [key]: { text: e instanceof Error ? e.message : String(e), failed: true } }));
         })
         .finally(() => {

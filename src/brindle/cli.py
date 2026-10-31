@@ -1362,7 +1362,7 @@ def _kb_sync_sources(db: DB, repo_root: str, ids: list[str]) -> None:
     graph = codemap.graph_path(repo_root)
     for source_id in ids:
         try:
-            counts = kb.sync(db, source_id, graph)
+            counts = kb.sync(db, source_id, graph, repo_root)
         except ValueError as e:
             _fail(str(e))
         typer.echo(f"{source_id[:8]}: " + ", ".join(f"{n} {what}" for what, n in counts.items()))
@@ -2041,6 +2041,138 @@ def learning_seed() -> None:
                + (f"; {len(items) - len(sent)} left for the next run" if len(sent) < len(items) else ""))
     if len(sent) < len(items):
         raise typer.Exit(1)
+
+
+docs_app = typer.Typer(no_args_is_help=True,
+                       help="Your personal library of analysis deliverables (brindle Pro).")
+app.add_typer(docs_app, name="docs")
+
+
+def _docs_arm() -> None:
+    """Load this repo's config first, so ``"airgap": true`` in it is in force before any request."""
+    from brindle.config import load_repo_config
+
+    try:
+        load_repo_config(git.main_repo_root(os.getcwd()))
+    except git.GitError:
+        pass
+
+
+def _docs_call(method: str, path: str, body: dict | None = None) -> dict:
+    from brindle.pro import analysis_docs, auth
+
+    _docs_arm()
+    try:
+        return analysis_docs.api(method, path, body)
+    except (auth.AuthError, RuntimeError) as e:
+        _fail(f"analysis docs: {e}")
+        raise
+
+
+def _docs_scope(spec: str) -> tuple[str, str]:
+    kind, _, scope_id = spec.partition(":")
+    kind = {"team": "group", "group": "group", "enterprise": "org", "org": "org"}.get(kind)
+    if not kind or not scope_id:
+        _fail("scope is team:<group id> or org:<org id>")
+    return kind, scope_id
+
+
+@docs_app.command("list")
+def docs_list() -> None:
+    """List the documents in your library."""
+    from brindle.pro import analysis_docs
+
+    _docs_arm()
+    try:
+        sub = analysis_docs.require_entitlement().sub
+    except RuntimeError as e:
+        _fail(f"analysis docs: {e}")
+    resp = _docs_call("GET", f"/analysis-docs?scope_kind=user&scope_id={sub}")
+    for d in resp.get("docs") or []:
+        typer.echo(f"{d.get('doc_id')}  v{d.get('version', 1)}  {d.get('title', '')}")
+
+
+@docs_app.command("show")
+def docs_show(doc_id: str = typer.Argument(..., help="Document id.")) -> None:
+    """Print a document: its main file, then each other file under its name."""
+    d = _docs_call("GET", f"/analysis-docs/{doc_id}")
+    files = [f for f in d.get("files") or [] if isinstance(f, dict)]
+    for i, f in enumerate(files):
+        typer.echo(f.get("md", "") if i == 0 else f"\n--- {f.get('name')} ---\n{f.get('md', '')}")
+
+
+@docs_app.command("delete")
+def docs_delete(doc_id: str = typer.Argument(..., help="Document id.")) -> None:
+    """Delete a document from your library."""
+    _docs_call("DELETE", f"/analysis-docs/{doc_id}")
+    typer.echo(f"deleted {doc_id}")
+
+
+@docs_app.command("share")
+def docs_share(doc_id: str = typer.Argument(..., help="Document id."),
+               scope: str = typer.Argument(..., help="team:<group id> or org:<org id>.")) -> None:
+    """Share a document with a team or your org."""
+    kind, scope_id = _docs_scope(scope)
+    _docs_call("POST", f"/analysis-docs/{doc_id}/share", {"scope": {"kind": kind, "id": scope_id}})
+    typer.echo(f"shared {doc_id} with {scope}")
+
+
+@docs_app.command("unshare")
+def docs_unshare(doc_id: str = typer.Argument(..., help="Document id."),
+                 scope: str = typer.Argument(..., help="team:<group id> or org:<org id>.")) -> None:
+    """Stop sharing a document with a team or your org."""
+    kind, scope_id = _docs_scope(scope)
+    _docs_call("DELETE", f"/analysis-docs/{doc_id}/share/{kind}/{scope_id}")
+    typer.echo(f"unshared {doc_id} from {scope}")
+
+
+@docs_app.command("export")
+def docs_export(doc_id: str = typer.Argument(..., help="Document id."),
+                fmt: str = typer.Option("zip", "--format", "-f", help="md, docx or zip."),
+                out: str = typer.Option(".", "--out", "-o", help="Directory to write the export into.")) -> None:
+    """Download a document from your library (the server checks scope and your org's export policy)."""
+    from brindle.pro import auth
+
+    if fmt not in ("md", "docx", "zip"):
+        _fail("format is md, docx or zip")
+    d = _docs_call("GET", f"/analysis-docs/{doc_id}/export?format={fmt}&destination=download")
+    data = d.get(auth.BINARY_KEY)
+    if not isinstance(data, bytes):
+        _fail("analysis docs: the export response was not binary")
+    if not data:
+        _fail("analysis docs: the export came back empty")
+    name = f"{doc_id}.{fmt}"
+    Path(out).mkdir(parents=True, exist_ok=True)
+    (Path(out) / name).write_bytes(data)
+    typer.echo(f"exported {doc_id} to {Path(out) / name}")
+
+
+def _docs_switch(on: bool, name: str) -> None:
+    from brindle.pro import analysis_docs, auth
+
+    _docs_arm()
+    try:
+        analysis_docs.set_switch(on, name=name)
+    except (auth.AuthError, RuntimeError) as e:
+        _fail(f"analysis docs: {e}")
+    state = "on" if on else "off"
+    typer.echo(f"storing analysis deliverables is {state}" if name == "store" else f"analysis docs: {name} is {state}")
+
+
+_SWITCH_HELP = ("Which of your own switches: store (the default), share, assist, prompt_analysis "
+                "or import_upload.")
+
+
+@docs_app.command("on")
+def docs_on(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
+    """Turn one of your switches on; without --switch, store your analysis deliverables after they merge."""
+    _docs_switch(True, switch)
+
+
+@docs_app.command("off")
+def docs_off(switch: str = typer.Option("store", "--switch", help=_SWITCH_HELP)) -> None:
+    """Turn one of your switches off; without --switch, stop storing your analysis deliverables."""
+    _docs_switch(False, switch)
 
 
 @app.command(context_settings={"allow_extra_args": True, "ignore_unknown_options": True,

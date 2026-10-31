@@ -585,7 +585,7 @@ def enqueue(
     db: DB, caller: Agent | None, caller_ws: Workspace, profile: str, task_text: str, mode: str,
     *, isolate: bool, branch: str | None, done_when: str | None,
     files: list[str] | None, depends_on: list[str] | None, plan_first: bool | None = None,
-    weight: str | None = None,
+    weight: str | None = None, analysis_doc: bool = False,
 ) -> Task:
     """Record a task that can't start yet: no worker, no workspace, just what
     it takes to start it once its dependencies are merged."""
@@ -595,10 +595,13 @@ def enqueue(
         profile=profile, task_text=task_text, mode=mode, isolate=int(isolate),
         branch=branch, done_when=done_when, files=_dumps(files),
         depends_on=_dumps(depends_on), state="pending", created_at=time.time(), weight=weight,
+        analysis_doc=1 if analysis_doc else None,
     )
     db.add_task(t)
     if plan_first is not None:
         db.update_task(t.id, plan_first=int(plan_first))
+    if analysis_doc:
+        db.update_task(t.id, analysis_doc=1)   # add_task writes the original columns only
     bus.publish(db, "task.queued", repo_root=t.repo_root, task_id=t.id, caller_id=t.caller_id,
                 depends_on=depends_on or [])
     return t
@@ -690,7 +693,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         isolate=bool(task.isolate), branch=task.branch, done_when=task.done_when,
         plan_first=None if task.plan_first is None else bool(task.plan_first),
         start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
-        weight=launch_weight,
+        weight=launch_weight, analysis_doc=bool(task.analysis_doc),
     )
     db.update_task(task.id, agent_id=worker.id, state="started", started_at=time.time())
     bus.publish_agent(db, "task.started", worker.id, task_id=task.id)
@@ -893,6 +896,7 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
         db, caller, ws, old.profile, old.task_text, old.mode, isolate=bool(old.isolate),
         branch=old.branch, done_when=old.done_when, files=_loads(old.files), depends_on=deps,
         plan_first=None if old.plan_first is None else bool(old.plan_first), weight=old.weight,
+        analysis_doc=bool(old.analysis_doc),
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."

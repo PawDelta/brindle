@@ -272,6 +272,10 @@ def on_workspace_cleanup(db: DB, ws: Workspace) -> None:
     except Exception:
         cfg = RepoConfig()
     merged = bool(db.merged_sha(ws.id))
+    if not merged:
+        from brindle.pro import analysis_docs
+
+        analysis_docs.drop_drafts(db, ws)
     worker = agents.workspace_worker(db, ws)
     for a in db.list_agents(ws.id):
         agents.forget_files(a)   # the agent rows go with the workspace
@@ -1379,6 +1383,28 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
         return _merge(db, caller, ws, squash, conflicts_out, waiting_on_checks)
 
 
+def _deliverables(db: DB, ws: Workspace) -> list:
+    """The analysis doc written for the branch, read before the merge
+    (brindle Pro's doc library); empty on any failure."""
+    try:
+        from brindle.pro import analysis_docs
+
+        workspace = db.get_workspace(ws.id)
+        session = (workspace.session_root if workspace else None) or ws.session_root
+        source = {"kind": "task", "ref": ws.branch, **({"session": session} if session else {})}
+        return analysis_docs.collect(ws.repo_root, ws.branch, source)
+    except Exception:  # noqa: BLE001 - the library is a side effect of merging
+        return []
+
+
+def _upload_deliverables(db: DB, ws: Workspace, docs: list) -> None:
+    from brindle.pro import analysis_docs
+
+    if docs:
+        analysis_docs.on_merged(ws.repo_root, docs)
+    analysis_docs.publish_drafts(db, ws)
+
+
 def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
            conflicts_out: list[str] | None = None, waiting_on_checks=None) -> str:
     settled = _settled(db, ws)
@@ -1436,11 +1462,13 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
         if gates.head(ws) != report.sha:
             return (f"Not merged: {ws.branch} got new commits while the gates ran. "
                     "Call merge_workspace again to check the new commits.")
+        deliverables = _deliverables(db, ws)
         # git.merge_into serializes merges into one checkout (checkout_lock).
         target = workspaces.merge_back(db, ws, squash=squash)
     except (git.GitError, workspaces.WorkspaceError) as e:
         return _settled(db, ws) or f"Not merged: {e}"
     db.set_merged(ws.id, report.sha)
+    _upload_deliverables(db, ws, deliverables)
     text = f"Merged {ws.branch} into {ws.base_branch} at {target} ({report.summary()})."
     history.record_safely(
         db, ws.repo_root, "merge", agent=caller, with_usage=True, branch=ws.branch,

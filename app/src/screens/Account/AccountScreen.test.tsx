@@ -13,7 +13,7 @@ afterEach(cleanup);
 
 function setup() {
   // A Pro entitlement with every Pro feature; the Team org below has only part of its plan's.
-  const pro = { signed_in: true, name: "sam@example.com", plan: "pro", org_id: "org_sam", status: "active", features: ["learning", "cost", "services", "multi_repo", "coordinator", "settings_sync", "federation", "ci_fix"], seats: 1, role: "owner", expires_at: 1_800_000_000, in_grace: false, grace_until: null, learning: true, learning_note: "not enough similar tasks yet: kept the default" };
+  const pro = { signed_in: true, name: "sam@example.com", plan: "pro", org_id: "org_sam", status: "active", features: ["learning", "cost", "services", "multi_repo", "coordinator", "settings_sync", "federation", "ci_fix", "analysis_docs"], seats: 1, role: "owner", expires_at: 1_800_000_000, in_grace: false, grace_until: null, learning: true, learning_note: "not enough similar tasks yet: kept the default" };
   // Under the team org the engine lists the account's orgs; under the personal one it couldn't (offline).
   const listed = [
     { id: "org_sam", name: "Sam", role: "owner", plan: "pro", personal: true, current: false },

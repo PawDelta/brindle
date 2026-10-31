@@ -21,6 +21,12 @@ export const openExternal: OpenUrl = async (url) => {
    a plain browser tab gets no picker, and Knowledge takes the path typed instead. */
 export type PickFolder = (title: string) => Promise<string | null>;
 
+/* Local Knowledge folders are opened by the shell; their paths never go to Pro. */
+export async function openLocalPath(path: string): Promise<void> {
+  if (!isTauri()) throw new Error("Open local folders in the desktop app.");
+  await invoke("open_local_path", { path });
+}
+
 export const pickFolder: PickFolder | undefined = isTauri()
   ? async (title) => {
       const picked = await open({ directory: true, multiple: false, title });

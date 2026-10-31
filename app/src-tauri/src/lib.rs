@@ -21,6 +21,7 @@
 mod about;
 mod daemon;
 mod engine;
+mod oauth;
 /// Every pane the webview shows, through a real tmux client on a pty.
 pub mod pty_view;
 mod setup;
@@ -87,6 +88,25 @@ fn open_url(url: String) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("couldn't open {url}: {e}"))
+}
+
+/// Open a local Knowledge file or folder with its platform application.
+#[tauri::command]
+fn open_local_path(path: String) -> Result<(), String> {
+    let local = std::path::Path::new(&path);
+    if !local.is_absolute() || !local.exists() {
+        return Err("choose an existing absolute local path".into());
+    }
+    let mut command = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+    } else if cfg!(target_os = "windows") {
+        let mut c = std::process::Command::new("explorer.exe");
+        c.arg(&path);
+        return c.spawn().map(|_| ()).map_err(|e| e.to_string());
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    command.arg(local).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// `brindle --headless-check`: no window; find or start the daemon as the
@@ -178,6 +198,11 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             set_inbox_count,
             open_url,
+            oauth::oauth_listen,
+            oauth::oauth_wait,
+            oauth::oauth_cancel,
+            oauth::provider_http,
+            open_local_path,
             daemon::daemon_connect,
             daemon::daemon_start_step,
             daemon::daemon_request,
@@ -242,6 +267,13 @@ pub fn run() {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_open_rejects_urls_and_relative_paths() {
+        for path in ["https://example.com", "src/cache", "../notes"] {
+            assert!(open_local_path(path.into()).is_err());
+        }
+    }
 
     fn soft_limit() -> libc::rlimit {
         let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };

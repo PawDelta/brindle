@@ -125,7 +125,9 @@ def test_migration_adds_the_native_subagents_table_to_an_old_db(tmp_path):
         CREATE TABLE agents (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, profile TEXT NOT NULL,
           provider TEXT NOT NULL, parent_id TEXT, mode TEXT NOT NULL, status TEXT NOT NULL,
           tmux_window TEXT NOT NULL, result TEXT, created_at REAL NOT NULL);
-        INSERT INTO workspaces VALUES ('w','/r','n','main','b',NULL,'/p',NULL,'s',0);
+        INSERT INTO workspaces (id, repo_root, name, kind, branch, base_branch, path, port_base,
+                                tmux_session, created_at)
+        VALUES ('w','/r','n','main','b',NULL,'/p',NULL,'s',0);
         INSERT INTO agents VALUES ('a','w','p','claude',NULL,'assign','idle','@1',NULL,7.0);
     """)
     con.commit()

@@ -23,7 +23,7 @@ const decision = (id: string, topic: string, body: string, scope: string[], rati
   created_at: Date.now() / 1000 - 3600,
 });
 
-function setup(data: Partial<DaemonData> = {}, pickFolder?: (title: string) => Promise<string | null>) {
+function setup(data: Partial<DaemonData> = {}, pickFolder?: (title: string) => Promise<string | null>, view: "imported" | "decisions" = "decisions") {
   const daemon = new FakeDaemon({
     repos: [{ repo_root: REPO, name: "proj" }],
     decisions: [decision("aaaaaaaa", "storage", "use sqlite for the cache", ["src/cache/**"], "simple"), decision("bbbbbbbb", "logging", "structured logs only", [])],
@@ -43,7 +43,7 @@ function setup(data: Partial<DaemonData> = {}, pickFolder?: (title: string) => P
   render(
     <StoreContext.Provider value={store}>
       <SessionsProvider client={client}>
-        <KnowledgeScreen client={client} pickFolder={pickFolder} />
+        <KnowledgeScreen client={client} pickFolder={pickFolder} view={view} />
       </SessionsProvider>
     </StoreContext.Provider>,
   );
@@ -69,7 +69,8 @@ describe("knowledge screen", () => {
     expect(storage.textContent).toContain("1h ago");
     expect(storage.textContent).toContain("src/cache/**");
     expect(decisions.querySelector('li[data-topic="logging"]')!.textContent).toContain("the whole repo");
-    // A document folder: its name, where it is, what is indexed and when it was added; held-back text said in plain words.
+    // A document folder, under Imported: its name, where it is, what is indexed and when it was added; held-back text said in plain words.
+    fireEvent.click(screen.getByRole("tab", { name: /Imported/ }));
     const sources = screen.getByTestId("sources");
     expect(sources.textContent).toContain("docs");
     expect(sources.textContent).toContain("/home/u/proj/docs");
@@ -78,6 +79,7 @@ describe("knowledge screen", () => {
     expect(sources.textContent).toContain("some text held back");
     // No jargon anywhere on the page, and nobody sent to a terminal.
     expect(page.textContent).not.toMatch(/quarantin|chunk|terminal|brindle kb/i);
+    fireEvent.click(screen.getByRole("tab", { name: /Decisions/ }));
 
     // Search matches a decision's topic, text or rationale, as the engine's --query does, and asks
     // the engine for the documents' best passages: here a rollback note no decision mentions.
@@ -150,13 +152,14 @@ describe("knowledge screen", () => {
     expect(daemon.data.decisions).toHaveLength(1);
     expect(screen.queryByTestId("empty-state")).toBeNull();
     expect(screen.getByRole("searchbox", { name: "Search knowledge" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: /Imported/ }));
     expect(screen.getByTestId("sources").textContent).toContain("No documents yet");
     stop();
   });
 
   it("adds a folder from the native picker, re-indexes and removes one in a click, each through the engine's routes", async () => {
     const picker = vi.fn(() => Promise.resolve("/home/sam/Notes/runbooks"));
-    const { daemon, stop } = setup({}, picker);
+    const { daemon, stop } = setup({}, picker, "imported");
     const sources = await screen.findByTestId("sources");
     await waitFor(() => expect(sources.querySelector('li[data-source="f0e1d2c3b4a5968778695a4b3c2d1e0f"]')).toBeTruthy());
     // Add: the picker fills the path; Add posts it, as the team's; the job ends and the folder is listed, indexed.
