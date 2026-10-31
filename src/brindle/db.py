@@ -995,6 +995,8 @@ class Task:
     plan_first: int | None = None
     weight: str | None = None
     analysis_doc: int | None = None    # an analysis doc was asked for (brindle.pro.analysis_brief)
+    waiting: str | None = None         # pending only for room on the machine: why (brindle.tasks.wait_for_room)
+    waiting_since: float | None = None
 
 
 def _load(cls, row):
@@ -1134,6 +1136,9 @@ class DB:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN weight TEXT")
         if "analysis_doc" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN analysis_doc INTEGER")
+        if "waiting" not in task_cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN waiting TEXT")
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN waiting_since REAL")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(autopilot)")}
         if "checking_since" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN checking_since REAL")

@@ -2103,6 +2103,12 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if any(agents.runs_process(a) for a in working
             if getattr(a, "plan_state", None) != "proposed"):
         return None  # their results arrive as messages and wake it up
+    from brindle import tasks
+
+    if tasks.waiting_for_room(db, agent.id):
+        # Workers queued until the machine has room: they start on their own
+        # (spawn.START_WAIT at the latest) and the start message wakes it. Not a stall.
+        return None
     if (db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD)
             or db.outstanding(agent.id, QUESTION_REMINDER_HEAD)):
         return None  # (#209) the last reminder is still queued or unread: never pile up another

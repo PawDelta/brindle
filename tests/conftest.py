@@ -290,6 +290,18 @@ def fake_agent_cli(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def machine_has_room(monkeypatch):
+    """Workers and check runs start at once, however loaded the machine
+    running the tests is (spawn.no_room); a test that wants it busy sets
+    spawn._load itself. No detached helper waits for room either."""
+    from brindle import spawn, tasks
+
+    monkeypatch.setattr(spawn, "_load", lambda: 0.0)
+    monkeypatch.setattr(spawn, "pressure", lambda: 1)
+    monkeypatch.setattr(tasks, "_wait_in_background", lambda task_id: None)
+
+
+@pytest.fixture(autouse=True)
 def no_signed_in_providers(monkeypatch):
     """No sign-in probes in tests, and no `providers` param on /entitlement
     (tests/test_entitlement_providers.py sets its own)."""

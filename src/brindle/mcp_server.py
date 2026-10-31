@@ -15,7 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
-from brindle import agents, antigravity, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
+from brindle import agents, antigravity, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, spawn, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace, migrated_by_newer
@@ -373,6 +373,44 @@ def _route_clash(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, 
     return reply, clash.warning
 
 
+def _launches_process(profile: str, repo_root: str) -> bool:
+    from brindle.profiles import load_profile
+    from brindle.providers import PROVIDERS
+
+    try:
+        provider = PROVIDERS.get(load_profile(profile, repo_root).provider)
+    except Exception:  # noqa: BLE001 - an unloadable profile fails at the start, with its reason
+        return True
+    return provider is None or provider.launches_process
+
+
+def _queue_for_room(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, mode: str, *,
+                    isolate: bool, branch: str | None, done_when: str | None, files: list[str] | None,
+                    depends_on: list[str] | None, plan_first: bool | None, weight: str | None,
+                    decision: dict, why: list[str], analysis_doc: bool = False) -> str | None:
+    """When the machine has no room for another worker (``tasks.room_wait``),
+    queue the task until it has, and return the reply saying so and why;
+    None to start it now. A second identical assign leaves the queued one.
+    A subagent profile starts no process of brindle's: never queued."""
+    busy = tasks.room_wait()
+    if busy is None or not _launches_process(profile, ws.repo_root):
+        return None
+    existing = tasks.pending_duplicate(db, caller.id, ws.repo_root, task)
+    if existing:
+        return f"Already queued as task {existing.id}; left it in place."
+    t = tasks.enqueue(
+        db, caller, ws, profile, task, mode, isolate=isolate, branch=branch, done_when=done_when,
+        files=files, depends_on=depends_on, plan_first=plan_first, weight=weight,
+        analysis_doc=analysis_doc, waiting=busy,
+    )
+    savings.record(db, ws.repo_root, decision, task_id=t.id)
+    return _remind_goal(db, caller, (
+        f"Queued task {t.id}, not started: {busy}. It starts on its own once there's room "
+        f"(within {spawn.START_WAIT / 60:.0f} min at the latest) and you get a message then; "
+        "list_tasks shows it as waiting for room. Don't assign it again.")
+        + "".join(f"\nprofile: {w}" for w in why))
+
+
 def _start_failure(profile: str, e: Exception) -> str:
     """The reply when a worker couldn't be started. Returned rather than
     raised: an exception with no message reaches the supervisor as a bare
@@ -489,6 +527,12 @@ async def handoff(
             weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
         if reply:
             return reply
+        queued = _queue_for_room(
+            db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
+            done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
+        if queued:
+            return queued
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
@@ -627,6 +671,12 @@ async def assign(
             weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
         if reply:
             return reply
+        queued = _queue_for_room(
+            db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
+            done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
+        if queued:
+            return queued
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,

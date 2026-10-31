@@ -437,7 +437,7 @@ def review_state(db: DB, ws: Workspace, *, head_reader=None) -> str | None:
     if worker.merge_failed and not worker.pipeline:
         why = " ".join(worker.merge_failed.split())
         return "merge failed: " + (why if len(why) <= 200 else why[:199] + "…")
-    checks = "checks running" if gates.marked("checks-running", ws.id) else "waiting for checks"
+    checks = gates.checks_state(ws)
     if worker.pipeline == "ready":
         merging = f"merging, {checks}" if gates.marked("merge-run", ws.id) else "waiting to merge"
         return f"approved, {merging}"

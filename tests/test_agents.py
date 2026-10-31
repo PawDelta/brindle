@@ -413,3 +413,45 @@ def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
     assert capsys.readouterr().err.count("/no/such/cache") == 1
 
 
+def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo, monkeypatch):
+    """Plan 3.5: on a machine with no room an assign queues the task with the
+    reason, list_tasks shows it, autopilot doesn't count it as a stall, and
+    it starts, with a message to the supervisor, once the load falls."""
+    import asyncio
+
+    from conftest import full_text
+    from brindle import autopilot, mcp_server, spawn, tasks
+    from test_merge_order import fake_spawn
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text('{"pipeline": false}')
+    root = workspaces.adopt_root(db, str(repo))
+    boss = Agent("boss", root.id, "supervisor", "claude", None, "interactive", "processing", "@0",
+                 None, time.time())
+    db.add_agent(boss)
+    db.add_autopilot("boss")
+    autopilot.set_goal(db, "boss", "Ship it", [("Feature", "false", None)])
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    load = [14.0]
+    monkeypatch.setattr(spawn, "_load", lambda: load[0])
+    monkeypatch.setattr(spawn, "_cores", lambda: 10)
+
+    out = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
+    busy = "the machine is busy (load 14.0 on 10 cores"
+    assert out.startswith("Queued task") and busy in out, out
+    [t] = db.list_tasks(str(repo), state="pending")
+    assert f"waiting for room: {busy}" in tasks.list_text(db, str(repo))
+    assert [a.id for a in db.list_agents()] == ["boss"]                  # nothing started
+    assert autopilot.on_stop(db, boss, {}) is None                       # waiting, not stalled
+    assert db.get_autopilot("boss").nudges == 0
+
+    load[0] = 2.0
+    assert tasks.start_when_room(db, t.id, poll=0)
+    assert db.get_task(t.id).state == "started"
+    worker = db.get_agent(db.get_task(t.id).agent_id)
+    assert worker.parent_id == "boss"
+    text = full_text(db, "boss", db.pop_pending("boss").body)
+    assert f"Started {worker.id} for task {t.id} (was waiting for room: {busy}" in text
+
+

@@ -700,6 +700,27 @@ def test_gate_runs_checks_and_refuses_dirty_work(db, worker_ws):
     assert not r.ok and "uncommitted" in r.problem
 
 
+def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch):
+    """Plan 3.5: with its slot, a check run on a machine with no room waits
+    for room, showing "checks waiting for room", and runs once the load falls."""
+    from brindle import spawn
+
+    ran = Path(worker_ws.path) / "ran.txt"
+    seen, load = [], [14.0]
+
+    def reading():
+        if gates.marked("checks-room", worker_ws.id):
+            seen.append((gates.checks_state(worker_ws), ran.exists()))
+            load[0] = 2.0   # the load falls while the run waits
+        return load[0]
+
+    monkeypatch.setattr(spawn, "_load", reading)
+    monkeypatch.setattr(spawn, "_cores", lambda: 10)
+    ok, _ = gates.run_checked(db, worker_ws, "touch ran.txt", {}, 60, full=True)
+    assert seen == [("checks waiting for room", False)]
+    assert ok and ran.exists() and gates.checks_state(worker_ws) == "waiting for checks"
+
+
 def test_reviewer_nudged_to_submit(db, worker_ws):
     add_agent(db, worker_ws, "rev", mode="review")
     out = agents.handle_hook(db, "rev", "stop", {})
