@@ -78,6 +78,9 @@ const fake = vi.hoisted(() => {
     onBinary(_fn: Listener<string>) {
       return { dispose() {} };
     }
+    onKey(_fn: Listener<{ key: string; domEvent: KeyboardEvent }>) {
+      return { dispose() {} };
+    }
     onData(fn: Listener<string>) {
       this.typed.push(fn);
       return { dispose: () => (this.typed = this.typed.filter((f) => f !== fn)) };
