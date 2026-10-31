@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 from typing import Callable, Iterable, Mapping
 
+from brindle import spawn
 from brindle.config import brindle_home
 
 REFUSAL_TTL = 3600.0       # seconds a refused profile stays out of routing
@@ -325,8 +326,10 @@ def swap(routing: Mapping[str, list[str]], weight: str | None, profile: str, err
 
 def _claude_p(binary: str, model: str, prompt: str, cwd: str, env: Mapping[str, str],
               run, timeout: float, extra: tuple[str, ...] = ()):
-    return run([binary, "-p", "--model", model, "--output-format", "json", *extra], cwd=cwd,
-               env=dict(env), input=prompt, capture_output=True, text=True, timeout=timeout)
+    argv = [binary, "-p", "--model", model, "--output-format", "json", *extra]
+    if run is None:     # a brindle.spawn read: it changes nothing here, and stops with its request
+        return spawn.read(argv, cwd=cwd, env=dict(env), input=prompt, timeout=timeout)
+    return run(argv, cwd=cwd, env=dict(env), input=prompt, capture_output=True, text=True, timeout=timeout)
 
 
 # A call whose prompt carries text brindle doesn't control (a CLI's screen)
@@ -335,7 +338,7 @@ NO_TOOLS = ("--tools", "", "--strict-mcp-config", "--no-session-persistence")
 
 
 def ask(binary: str, model: str, prompt: str, cwd: str, env: Mapping[str, str], *,
-        run=subprocess.run, timeout: float = PROBE_TIMEOUT) -> str | None:
+        run=None, timeout: float = PROBE_TIMEOUT) -> str | None:
     """One small call to ``model`` through the claude CLI, with no tools: its
     reply, or None when the call failed."""
     try:
@@ -351,7 +354,7 @@ def ask(binary: str, model: str, prompt: str, cwd: str, env: Mapping[str, str], 
 
 
 def probe(binary: str, model: str, cwd: str, env: Mapping[str, str], *,
-          run=subprocess.run, timeout: float = PROBE_TIMEOUT) -> tuple[bool, Cause | None, str]:
+          run=None, timeout: float = PROBE_TIMEOUT) -> tuple[bool, Cause | None, str]:
     """One tiny call to ``model`` through the claude CLI. (answered, the
     model-access cause when it was refused, the error text when it failed)."""
     try:

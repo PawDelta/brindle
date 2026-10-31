@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import json
 import re
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from brindle import spawn
 
 # The test script `npm init` writes; it always fails, so it's no check.
 NPM_PLACEHOLDER = "no test specified"
@@ -124,7 +125,7 @@ def _env_files(root: Path, d: Detected) -> None:
     present = [name for name in ENV_FILES if (root / name).is_file()]
     if not present:
         return
-    proc = subprocess.run(["git", "check-ignore", *present], cwd=root, capture_output=True, text=True)
+    proc = spawn.read(["git", "check-ignore", *present], cwd=root)
     ignored = set(proc.stdout.split())
     d.copy.extend(name for name in present if name in ignored)
 

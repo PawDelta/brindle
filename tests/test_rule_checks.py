@@ -115,6 +115,24 @@ def test_deny_patterns_report_file_and_line_and_cap_the_noise():
     assert len(bad) == 1 and "doesn't compile" in bad[0].detail
 
 
+@pytest.mark.parametrize("path, lines, hits", [
+    ("src/brindle/workspaces.py", ["    proc = subprocess.run(args, cwd=path)"], 1),
+    ("src/brindle/ci.py", ["def f(*, run=subprocess.Popen):", "from subprocess import PIPE, Popen",
+                           "os.system('x')", "await asyncio.create_subprocess_exec('x')"], 4),
+    ("src/brindle/a.py", ["except subprocess.TimeoutExpired:", "# subprocess.run would wait",
+                          "def f(p: subprocess.Popen) -> subprocess.Popen:"], 0),
+    ("src/brindle/spawn.py", ["    return subprocess.run(argv)"], 0),
+    ("tests/test_a.py", ["subprocess.run(['git'])"], 0),
+    ("src/brindle/many.py", ["subprocess.call(x)"] * 11, 11),
+])
+def test_a_direct_subprocess_start_fails_outside_the_allowed_files(path, lines, hits):
+    p = pack(direct_spawn_allowed=["src/brindle/spawn.py"])
+    found = rule_checks.check_direct_spawn(p, added(*lines, path=path))
+    assert len(found) == min(hits, rule_checks.MAX_SHOWN_PER_RULE + 1)
+    assert hits == 0 or found[0].detail.startswith(f"{path}:1: ")
+    assert rule_checks.check_direct_spawn(pack(), added(*lines, path=path)) == []
+
+
 def test_require_tests_for_wants_a_test_file_in_the_diff():
     d = rule_checks.parse_diff(DIFF)
     p = pack(require_tests_for=["src/**/*.py"])

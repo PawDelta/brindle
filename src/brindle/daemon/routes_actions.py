@@ -92,9 +92,7 @@ def start_job(kind: str, work: Callable[[DB, Job], Any], job: Job | None = None,
 def _run_helper(argv: list[str]) -> dict[str, int]:
     """Run a brindle helper in its own session (so it outlives the daemon)
     and wait for it."""
-    proc = subprocess.Popen(argv, start_new_session=True, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return {"exit": proc.wait()}
+    return {"exit": spawn.detach(argv).wait()}
 
 
 class _Progress(io.TextIOBase):
@@ -2068,9 +2066,9 @@ def _streamed(db: DB, job: Job):
     """A ``run`` for a cloud CLI's sign-in: no terminal input, its output
     (the URL or device code to confirm in the browser) as ``job.progress``."""
     def run(argv: list[str], env=None, pass_fds=()) -> subprocess.CompletedProcess:
-        with subprocess.Popen(argv, env=env, pass_fds=pass_fds, stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                              start_new_session=True) as proc:
+        with spawn.start(argv, env=env, pass_fds=pass_fds, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         start_new_session=True) as proc:
             for line in proc.stdout:
                 bus.publish(db, "job.progress", job=job.id, text=line.rstrip("\n"))
         return subprocess.CompletedProcess(argv, proc.returncode)
@@ -2258,12 +2256,18 @@ def _run_upgrade() -> tuple[int, str]:
                                      if p.is_file()), None)
     if uv is None:
         return 127, "uv isn't installed: see https://docs.astral.sh/uv/"
+    proc = spawn.start([uv, "tool", "upgrade", "brindle"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True)
     try:
-        out = subprocess.run([uv, "tool", "upgrade", "brindle"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, text=True, timeout=900)
+        out, _ = proc.communicate(timeout=UPGRADE_SECONDS)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
         return 124, "uv tool upgrade brindle took over 15 minutes and was stopped"
-    return out.returncode, out.stdout or ""
+    return proc.returncode, out or ""
+
+
+UPGRADE_SECONDS = 15 * 60
 
 
 def upgrade_engine(db: DB, params: dict, body: Body) -> Any:

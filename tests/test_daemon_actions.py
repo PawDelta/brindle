@@ -846,9 +846,8 @@ def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_o
     aws = tmp_path / "no-aws" / "config"     # AWS_CONFIG_FILE (conftest)
     aws.parent.mkdir()
     ran = []
-    # The sign-in job's cloud CLI: a fake process, nothing else's.
-    monkeypatch.setattr(routes_actions, "subprocess", SimpleNamespace(
-        **{k: getattr(subprocess, k) for k in ("DEVNULL", "PIPE", "STDOUT", "CompletedProcess")}, Popen=_FakeCLI))
+    # The sign-in job's cloud CLI (started through brindle.spawn): a fake process.
+    monkeypatch.setattr(routes_actions.spawn, "start", _FakeCLI)
     if case == "api_key":
         code, reply = _send("PUT", path, {"method": "api_key"})
         assert code == 200 and (reply["method"], reply["choice"]["method"], reply["cloud"]) == ("api_key",) * 2 + (None,)

@@ -14,6 +14,10 @@ failed check does:
   also change a test file (``tests/``, ``test_*``, ``*_test.*``, ``*.test.*``,
   ``*.spec.*``, ``__tests__/``).
 - ``deny_patterns``: regexes no added line may match.
+- ``direct_spawn_allowed``: globs; once set, an added line of Python that
+  starts a process itself (subprocess's run or Popen, ``os.system`` ...)
+  fails unless its file matches one, or is a test. brindle's own repo sets it
+  so every process its daemon can reach goes through ``brindle.spawn``.
 
 For a Team org member (``org_budgets``) it also fails any change to one of
 the org's ``protected_paths``, whoever the worker is (``run``).
@@ -165,19 +169,28 @@ DIFF_ARGS = (
 )
 
 
-def branch_diff(path: str, base: str) -> Diff:
-    """What the branch at ``path`` commits on top of where it forked from ``base``."""
+def _git_bytes(args: list[str], path: str):
+    """A git read's output as bytes (brindle.spawn.read), its failure a GitError."""
     import subprocess
 
+    from brindle import spawn
+
+    try:
+        return spawn.read(args, cwd=path, text=False, timeout=git.TIMEOUT)
+    except spawn.Busy as e:
+        raise git.GitBusy(f"{' '.join(args)}: {e}") from None
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise git.GitError(f"{' '.join(args)}: {e}") from e
+
+
+def branch_diff(path: str, base: str) -> Diff:
+    """What the branch at ``path`` commits on top of where it forked from ``base``."""
     start = git.merge_base(path, git.base_ref(path, base))
     args = ["git", *DIFF_ARGS, start, "HEAD"]
     # Bytes, not text: a file in some other encoding must not make the gate
     # crash (and so not run), and the diff must reach the parser whole, not
     # stripped. Undecodable bytes become U+FFFD; the line structure survives.
-    try:
-        proc = subprocess.run(args, cwd=path, capture_output=True, timeout=git.TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise git.GitError(f"{' '.join(args)}: {e}") from e
+    proc = _git_bytes(args, path)
     if proc.returncode != 0:
         raise git.GitError(f"{' '.join(args)}: {proc.stderr.decode('utf-8', 'replace').strip()}")
     return parse_diff(proc.stdout.decode("utf-8", "replace"))
@@ -295,12 +308,49 @@ def check_deny_patterns(pack: RulePack, diff: Diff) -> list[Violation]:
     return found
 
 
+# A process started without the gate: subprocess's starters (called, or handed
+# on as a default ``run=``; not named as a type after ``:`` or ``->``), an
+# import of one, os's, pty's and asyncio's.
+_STARTERS = r"(?:run|Popen|call|check_call|check_output|getoutput|getstatusoutput)"
+DIRECT_SPAWN = re.compile(
+    rf"(?<!:)(?<!: )(?<!>)(?<!> )\bsubprocess\.{_STARTERS}\b"
+    rf"|^\s*from\s+subprocess\s+import\b.*\b{_STARTERS}\b"
+    r"|\bos\.(?:system|popen|posix_spawnp?|spawn[lv]p?e?|exec[lv]p?e?|fork(?:pty)?)\s*\("
+    r"|\bpty\.(?:spawn|fork)\s*\(|\basyncio\.create_subprocess_(?:exec|shell)\b")
+
+
+def check_direct_spawn(pack: RulePack, diff: Diff) -> list[Violation]:
+    """With ``direct_spawn_allowed`` set: an added line of Python that starts
+    a process itself, in a file that isn't a test and matches none of those
+    globs (comment lines aside). The gate it bypasses is the repo's own
+    (brindle's is ``brindle.spawn``); the globs are the files that may."""
+    if not pack.direct_spawn_allowed:
+        return []
+    found: list[Violation] = []
+    hits = 0
+    for path, lines in diff.added.items():
+        if not path.endswith(".py") or is_test_file(path) or _matches(path, pack.direct_spawn_allowed):
+            continue
+        for no, text in lines:
+            if not text.lstrip().startswith("#") and DIRECT_SPAWN.search(text):
+                hits += 1
+                if hits <= MAX_SHOWN_PER_RULE:
+                    found.append(Violation(pack.name, "direct_spawn_allowed",
+                                           f"{path}:{no}: starts a process outside the allowed files: "
+                                           f"{text.strip()}"))
+    if hits > MAX_SHOWN_PER_RULE:
+        found.append(Violation(pack.name, "direct_spawn_allowed",
+                               f"... and {hits - MAX_SHOWN_PER_RULE} more lines start a process directly"))
+    return found
+
+
 def check(packs: list[RulePack], diff: Diff) -> list[Violation]:
     found: list[Violation] = []
     for pack in packs:
         found += check_deny_deps(pack, diff)
         found += check_require_tests(pack, diff)
         found += check_deny_patterns(pack, diff)
+        found += check_direct_spawn(pack, diff)
     return found
 
 
@@ -378,15 +428,10 @@ def branch_files(path: str, base: str) -> list[str]:
     """Every path the branch at ``path`` changes since it forked from ``base``:
     added, modified, deleted, both sides of a rename, a mode change or an
     empty new file (which ``branch_diff``'s hunks don't show), a submodule."""
-    import subprocess
-
     start = git.merge_base(path, git.base_ref(path, base))
     args = ["git", "-c", "core.quotepath=false", "-c", "diff.relative=false", "diff", "--name-only",
             "-z", "--no-renames", "--no-ext-diff", start, "HEAD"]
-    try:
-        proc = subprocess.run(args, cwd=path, capture_output=True, timeout=git.TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise git.GitError(f"{' '.join(args)}: {e}") from e
+    proc = _git_bytes(args, path)
     if proc.returncode != 0:
         raise git.GitError(f"{' '.join(args)}: {proc.stderr.decode('utf-8', 'replace').strip()}")
     return [p for p in proc.stdout.decode("utf-8", "surrogateescape").split("\0") if p]

@@ -130,7 +130,9 @@ def tool_names() -> list[str]:
 
 
 def _git(args: list[str], cwd: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    from brindle import spawn
+
+    return spawn.read(["git", *args], cwd=cwd)     # rev-parse, ls-files: reads
 
 
 def _exclude(workspace: str, rel: Path) -> None:
@@ -390,10 +392,10 @@ def _tell_parent_stopped_on_error(db, agent, error_type: str) -> None:
 
 def _flush_soon(agent_id: str, delay: float = 1.5) -> None:
     """Type the agent's next queued message once agy has finished stopping."""
+    from brindle import spawn
     from brindle.providers import brindle_invocation
 
-    subprocess.Popen([*brindle_invocation(), "_flush", agent_id, "--delay", str(delay)],
-                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    spawn.detach([*brindle_invocation(), "_flush", agent_id, "--delay", str(delay)])
 
 
 def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = False) -> dict:

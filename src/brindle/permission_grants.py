@@ -36,7 +36,7 @@ import time
 from dataclasses import dataclass, field, replace
 from urllib.parse import urlsplit
 
-from brindle import permissions
+from brindle import permissions, spawn
 from brindle.permissions import (
     LEVELS,
     PUSH_ARROW,
@@ -713,7 +713,7 @@ GIT_SECONDS = 5
 
 def _git(repo: str, *args: str) -> str | None:
     try:
-        res = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, timeout=GIT_SECONDS)
+        res = spawn.read(["git", "-C", repo, *args], timeout=GIT_SECONDS)
     except (OSError, subprocess.SubprocessError):
         return None
     return res.stdout.strip() if res.returncode == 0 else None

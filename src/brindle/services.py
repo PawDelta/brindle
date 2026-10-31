@@ -16,6 +16,7 @@ import subprocess
 import sys
 from dataclasses import dataclass, field
 
+from brindle import spawn
 from brindle.config import PORT_BLOCK_SIZE, RepoConfig
 from brindle.db import Workspace
 
@@ -129,7 +130,7 @@ def docker_path() -> str | None:
 
 def _docker(args: list[str], timeout: int = 60) -> subprocess.CompletedProcess | None:
     try:
-        return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+        return spawn.action(["docker", *args], timeout=timeout)
     except (OSError, subprocess.TimeoutExpired) as e:
         _say(f"docker {args[0]} failed: {e}")
         return None

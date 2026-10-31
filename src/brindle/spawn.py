@@ -17,6 +17,14 @@ in:
   a checkout). It may wait for room *before* it starts, never past the
   request's deadline (then :class:`Busy`: nothing was done), and once started
   it is never stopped by a deadline.
+- :func:`start` (and :func:`detach`) starts a process the caller looks after
+  itself: a helper that outlives it, a server, a child it talks to over
+  pipes. It waits for room before it starts as an action does.
+
+Every process brindle's daemon can reach starts through here: the repo's
+rule checks fail a branch that adds a direct ``subprocess`` start anywhere
+else (``direct_spawn_allowed`` in ``.brindle/rules/learned.md`` lists the
+CLI-only, interactive and tmux-server files that may).
 
 Room (:func:`room`) is how many more processes the machine can take: its
 cores, minus the current one-minute load, minus this process's own running
@@ -316,13 +324,57 @@ def _background(argv: list[str]) -> list[str]:
 # -- starting processes -------------------------------------------------------
 
 
-def _name(argv: list[str]) -> str:
-    return " ".join(argv[:2])
+def _name(argv: list[str] | str) -> str:
+    return " ".join(argv.split()[:2] if isinstance(argv, str) else argv[:2])
+
+
+def left(seconds: float) -> float:
+    """``seconds``, cut to what is left of the request's deadline (none once
+    the request has committed to an action): the limit for a process the
+    caller started with :func:`start` as a read and stops itself."""
+    dl = _live()
+    return seconds if dl is None else max(0.0, min(seconds, dl.left()))
+
+
+def start(argv: list[str] | str, *, write: bool = True, **popen: Any) -> subprocess.Popen:
+    """Start a process the caller looks after itself (a helper that outlives
+    it, a server, a child it talks to over pipes) and return its Popen.
+
+    Like an action it may wait for room before it starts: until the
+    request's deadline (then Busy, and nothing was started), or with no
+    deadline up to ACTION_WAIT, after which it starts regardless. ``write``:
+    it changes something, so once it starts the request commits
+    (Deadline.committed), as after an action. A read (``write=False``)
+    doesn't, and the caller bounds how long it runs (see :func:`left`).
+
+    It isn't counted in running() once started, and it runs at normal
+    priority: it may outlive the request, and whatever it starts (a worker's
+    agents, a server's clients) would inherit a background priority."""
+    dl = _live()
+    if dl is not None:
+        _admit(dl.at, dl, False, _name(argv))
+    else:
+        _admit(time.monotonic() + ACTION_WAIT, None, False, _name(argv), start_anyway=True)
+    try:
+        proc = subprocess.Popen(argv, **popen)
+        if write and dl is not None:
+            dl.committed = True
+        return proc
+    finally:
+        _release()
+
+
+def detach(argv: list[str], **popen: Any) -> subprocess.Popen:
+    """:func:`start` a helper that outlives this process: its own session, no
+    terminal (stdin and output to /dev/null unless given)."""
+    for name in ("stdin", "stdout", "stderr"):
+        popen.setdefault(name, subprocess.DEVNULL)
+    return start(argv, start_new_session=True, **popen)
 
 
 def read(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
          input: str | bytes | None = None, text: bool = True, timeout: float | None = None,
-         skip: bool = False) -> subprocess.CompletedProcess:
+         skip: bool = False, reap: bool = False) -> subprocess.CompletedProcess:
     """Run a command that changes nothing and return what it printed, like
     ``subprocess.run(capture_output=True)``.
 
@@ -332,7 +384,9 @@ def read(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
     after GRACE) and Busy is raised; past its own ``timeout`` (sooner than
     any deadline) it raises ``subprocess.TimeoutExpired``, as
     ``subprocess.run`` would. ``skip``: raise Skipped at once when there's
-    no room instead of waiting. Once the request has started an action
+    no room instead of waiting. ``reap``: once it has exited, SIGKILL
+    whatever it left running in its process group (a cloud CLI's local auth
+    server). Once the request has started an action
     (Deadline.committed), only ``timeout`` applies."""
     dl = _live()
     now = time.monotonic()
@@ -340,14 +394,14 @@ def read(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
     end = min(own_end, dl.at) if dl is not None else own_end
     _admit(end, dl, skip, _name(argv))
     try:
-        return _run_read(argv, cwd, env, input, text, timeout, dl, end, own_end)
+        return _run_read(argv, cwd, env, input, text, timeout, dl, end, own_end, reap)
     finally:
         _release()
 
 
 def _run_read(argv: list[str], cwd: Any, env: dict[str, str] | None, input: str | bytes | None,
               text: bool, timeout: float | None, dl: Deadline | None, end: float,
-              own_end: float) -> subprocess.CompletedProcess:
+              own_end: float, reap: bool = False) -> subprocess.CompletedProcess:
     env = {**(os.environ if env is None else env), "GIT_OPTIONAL_LOCKS": "0"}
     # Its own session, so stopping it reaches everything it started (git's hooks, a pager).
     p = subprocess.Popen(_background(argv), cwd=cwd, env=env, text=text, start_new_session=True,
@@ -366,6 +420,8 @@ def _run_read(argv: list[str], cwd: Any, env: dict[str, str] | None, input: str 
             except subprocess.TimeoutExpired:
                 first = False
                 continue
+            if reap:     # (the group id could in theory be reused once it is empty)
+                _signal_group(p.pid, signal.SIGKILL)
             return subprocess.CompletedProcess(argv, p.returncode, out, err)
     except BaseException:
         _count_stopped()

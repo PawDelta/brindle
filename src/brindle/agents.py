@@ -24,6 +24,7 @@ from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 
 from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
+from brindle import spawn as processes   # this module's own spawn() starts an agent
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
@@ -861,8 +862,7 @@ def quit_later(root_id: str) -> None:
     prompt back. Runs detached, since pausing closes the sidebar asking."""
     from brindle.providers import brindle_invocation
 
-    subprocess.Popen([*brindle_invocation(), "_quit", root_id], start_new_session=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    processes.detach([*brindle_invocation(), "_quit", root_id])
 
 
 def dismiss_sidebar(db: DB, pane: str | None) -> None:
@@ -1222,7 +1222,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         # Without this process's own Claude Code inbox, if it has one: the
         # helper marks the agent ready, and must not take that inbox for it.
         base = {k: v for k, v in os.environ.items() if k not in (inbox.SOCKET_VAR, inbox.TOKEN_VAR)}
-        subprocess.Popen(
+        processes.start(
             [*brindle_invocation(), "_after-launch", agent.id, *launch_health.helper_token(agent)],
             start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             env={**base, **agent_env(ws, agent.id)},
@@ -2379,8 +2379,7 @@ def warm_checks(ws: Workspace) -> None:
 
 def _detach(args: list[str]) -> None:
     """Start a brindle helper that outlives this process."""
-    subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    processes.detach(args)
 
 
 # A shell that starts the command after it in the background and exits, so the
@@ -2393,9 +2392,7 @@ def _detach_orphan(args: list[str]) -> None:
     shell starts it in the background and exits, so it is nobody's child.
     Stopping an agent stops every process descended from its MCP server
     (brindle.procs), a helper ``_detach`` started there included."""
-    subprocess.run([*ORPHANED, *args],
-                   start_new_session=True, stdin=subprocess.DEVNULL,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    processes.detach([*ORPHANED, *args]).wait()
 
 
 def wait_for_result(db: DB, agent_id: str, timeout: float, poll: float = 2.0) -> str:
@@ -2588,10 +2585,7 @@ def close_later(agent_id: str, delay: float = 5.0) -> None:
     tool call, which must return before its CLI goes away."""
     from brindle.providers import brindle_invocation
 
-    subprocess.Popen(
-        [*brindle_invocation(), "_close", agent_id, "--delay", str(delay)],
-        start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    processes.detach([*brindle_invocation(), "_close", agent_id, "--delay", str(delay)])
 
 
 def _stop(db: DB, agent: Agent) -> None:
@@ -4186,16 +4180,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         elif db.pending_count(agent_id) and not agent.headless:
             # Claude Code hasn't drawn its input box yet; deliver shortly after,
             # from a detached process so this hook returns immediately.
-            import subprocess
-
             from brindle.providers import brindle_invocation
 
-            subprocess.Popen(
-                [*brindle_invocation(), "_flush", agent_id, "--delay",
-                 str(get_provider(agent.provider).ready_delay)],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+            processes.detach([*brindle_invocation(), "_flush", agent_id, "--delay",
+                          str(get_provider(agent.provider).ready_delay)])
     elif event == "prompt-submit":
         db.set_status(agent_id, "processing")
         from brindle import launch_health
