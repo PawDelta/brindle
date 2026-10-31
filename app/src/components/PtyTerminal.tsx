@@ -296,6 +296,15 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     };
     const send = (data: string) => (waiting ? queued(() => void (gone || pty.write(data))) : pty.write(data));
     const typed = term.onData(send);
+    // onData includes protocol replies, which cannot complete a dead key.
+    // Retain it across keyup until xterm handles a key or input completes.
+    let deadKey = false;
+    const completedKey = term.onKey(() => { deadKey = false; });
+    const completedInput = (event: Event) => {
+      const e = event as InputEvent;
+      if (e.data && e.inputType === "insertText" && !e.isComposing) deadKey = false;
+    };
+    term.textarea?.addEventListener("input", completedInput);
     const binary = term.onBinary(send);
     // The wheel's reports as a native terminal sends them (terminalScroll.ts), not xterm.js's one an event.
     const wheel = scrollByWheel(term, send);
@@ -378,8 +387,33 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     // neither the webview's copy nor a key goes to the pane. Each ⌘V has one way to paste, chosen before its default
     // goes on or not: on a Mac (the shell's Edit menu) the webview's paste, `pasting` taking it; elsewhere the key is
     // taken, no webview paste follows, and the app's clipboard is read.
+    // xterm 6 defers ASCII uppercase letters to keypress, even with Caps Lock.
+    // Send these on keydown so a webview needn't supply that legacy event.
+    // Keep IME composition and actual modifier shortcuts on xterm's usual path.
+    let capsLetter = false;
     term.attachCustomKeyEventHandler((e) => {
+      if (e.type === "keypress" && capsLetter) {
+        e.preventDefault();
+        return false;
+      }
+      if (e.type === "keyup") capsLetter = false;
       if (e.type !== "keydown") return true;
+      capsLetter = false;
+      if (e.key === "Dead") deadKey = true;
+      if (
+        !deadKey &&
+        e.getModifierState("CapsLock") &&
+        !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey &&
+        !e.isComposing && e.keyCode !== 229 &&
+        /^[A-Z]$/.test(e.key)
+      ) {
+        // Prevent the textarea's default insertion too: its input event must
+        // not deliver the same character a second time.
+        capsLetter = true;
+        term.input(e.key, true);
+        e.preventDefault();
+        return false;
+      }
       const key = e.key.toLowerCase();
       const copyTo = copied.current;
       if (!mac && key === "c" && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
@@ -434,6 +468,7 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
       clearTimeout(hide);
       setCopiedShown(false);
       term.textarea?.removeEventListener("focus", focused);
+      term.textarea?.removeEventListener("input", completedInput);
       el.removeEventListener("mousedown", focused, true);
       el.removeEventListener("mousedown", keyboard, true);
       window.removeEventListener("focus", atApp);
@@ -444,6 +479,7 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
       window.removeEventListener("mouseup", letGo);
       observer?.disconnect();
       typed.dispose();
+      completedKey.dispose();
       binary.dispose();
       wheel.dispose();
       resized.dispose();
