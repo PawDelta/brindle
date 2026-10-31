@@ -46,4 +46,5 @@ def build_app(token: str, port: int | None = None, poller=None) -> ASGIApp:
     status poller whose bar text and notices ``/v1/events`` relays."""
     app = Starlette(routes=ROUTES)
     app.state.poller = poller
+    app.state.heavy_read_lane = routes_read.HeavyReadLane()
     return Guard(app, token, port)

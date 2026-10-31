@@ -9,11 +9,13 @@ import json
 import logging
 import os
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache, wraps
 from typing import Any
 
+import anyio
+import anyio.to_thread
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
@@ -69,6 +71,33 @@ log = logging.getLogger(__name__)
 COST_DAYS = 30
 
 
+class HeavyReadLane:
+    """App-owned admission and worker limits for slow, synchronous reads.
+
+    Admission never waits. The separate worker limiter keeps these reads
+    out of Starlette's default pool, leaving its capacity for cheap routes.
+    Both limits have the same size so admitted requests have a worker slot.
+    """
+
+    def __init__(self, capacity: int = 4):
+        self.admission = anyio.CapacityLimiter(capacity)
+        self.workers = anyio.CapacityLimiter(capacity)
+
+    async def run(self, handler: Callable[[Request], JSONResponse], request: Request) -> JSONResponse:
+        try:
+            self.admission.acquire_nowait()
+        except anyio.WouldBlock:
+            err = ServiceError("busy", "Heavy read capacity is full", 503)
+            return JSONResponse(err.to_json(), status_code=err.http_status)
+
+        try:
+            # Keep the slot until the synchronous handler has returned,
+            # including its error conversion and closing its thread's DB.
+            return await anyio.to_thread.run_sync(handler, request, limiter=self.workers)
+        finally:
+            self.admission.release()
+
+
 def _json(fn: Callable[[DB, Request], Any]) -> Callable[[Request], JSONResponse]:
     """A sync handler (Starlette runs it on a thread) whose return value is the
     JSON body and whose exceptions become the service's error JSON. Owns the
@@ -86,6 +115,18 @@ def _json(fn: Callable[[DB, Request], Any]) -> Callable[[Request], JSONResponse]
             if err.code == "internal":
                 log.exception("brindle: daemon route %s failed", request.url.path)
             return JSONResponse(err.to_json(), status_code=err.http_status)
+    return handler
+
+
+def _heavy_json(fn: Callable[[DB, Request], Any]) -> Callable[[Request], Awaitable[JSONResponse]]:
+    """Mark a read for bounded admission before creating its DB or worker."""
+    sync_handler = _json(fn)
+
+    @wraps(fn)
+    async def handler(request: Request) -> JSONResponse:
+        lane: HeavyReadLane = request.app.state.heavy_read_lane
+        return await lane.run(sync_handler, request)
+
     return handler
 
 
@@ -177,7 +218,7 @@ def workspace_file(db: DB, request: Request) -> Any:
     return {"path": name, "content": data.decode(), "base": git.hash_blob(ws.path, data, name)}
 
 
-@_json
+@_heavy_json
 def session_readiness(db: DB, request: Request) -> Any:
     """Whether brindle judges the session ready for a PR; ``reasons``: what
     is missing, in plain words (none when it is ready); ``pr``: the PR the
@@ -188,7 +229,7 @@ def session_readiness(db: DB, request: Request) -> Any:
     return {"root_id": root.id, "ready": not why, "reasons": why, "pr": session_review.open_pr(db, root, ws)}
 
 
-@_json
+@_heavy_json
 def session_diff(db: DB, request: Request) -> Any:
     """The session branch against its PR base, each file and hunk with its
     authors (worker ids, "supervisor", "you") and the authors for filtering.
@@ -197,7 +238,7 @@ def session_diff(db: DB, request: Request) -> Any:
     return session_review.diff(db, root, ws)
 
 
-@_json
+@_heavy_json
 def session_tree(db: DB, request: Request) -> Any:
     """The session checkout's tracked files (paths only) and its branch."""
     root, ws = session_review.session(db, request.path_params["root"])
@@ -205,7 +246,7 @@ def session_tree(db: DB, request: Request) -> Any:
             "files": [p for p in git.run(["ls-files", "-z"], ws.path).stdout.split("\0") if p]}
 
 
-@_json
+@_heavy_json
 def session_pr_draft(db: DB, request: Request) -> Any:
     root, ws = session_review.session(db, request.path_params["root"])
     session_review.require_ready(db, root, ws)
