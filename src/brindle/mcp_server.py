@@ -401,9 +401,10 @@ def _queue_for_room(db: DB, caller: Agent, ws: Workspace, profile: str, task: st
     )
     savings.record(db, ws.repo_root, decision, task_id=t.id)
     return _remind_goal(db, caller, (
-        f"Queued task {t.id}, not started: {busy}. It starts on its own once there's room "
-        "and you get a message then; list_tasks shows it as waiting for room. "
-        "Don't assign it again (cancel_task gives it up).")
+        f"Queued task {t.id}, not started: {tasks.load_note(db)}. Your choices: wait (it starts on "
+        "its own once there's room and you get a message then; list_tasks shows it as waiting for "
+        f"room), start_now(\"{t.id}\") to start this worker despite the load, or cancel_task to give "
+        "it up. Don't assign it again.")
         + "".join(f"\nprofile: {w}" for w in why))
 
 
@@ -1024,6 +1025,20 @@ def cancel_task(task_id: str, reason: str = "") -> str:
     caller, _ = _caller(db)
     try:
         return tasks.cancel(db, caller, task_id, reason)
+    except ValueError as e:
+        return f"Error: {e}"
+
+
+@mcp.tool()
+def start_now(task_id: str) -> str:
+    """Start a worker task that is waiting for room now, despite the load
+    (list_tasks shows it as waiting for room). Only worker starts can be
+    forced (check runs keep waiting), and one forced worker may be starting
+    at a time. Only the task's caller or its session root can."""
+    db = DB()
+    caller, _ = _caller(db)
+    try:
+        return tasks.start_now(db, caller, task_id)
     except ValueError as e:
         return f"Error: {e}"
 

@@ -242,13 +242,36 @@ def why() -> str:
             f"{running()} of brindle's processes running{mem.get(level, '')})")
 
 
-def no_room() -> str | None:
+def no_room(repo_root: str | None = None) -> str | None:
     """Why a new worker or check run should wait before it starts (what
     :func:`why` says), or None when the machine has room for it. Unlike a
     read or an action this applies in every process, gate on or off: a worker
     or a check run is the heaviest thing brindle starts. It waits until there
-    is room, however long, or until it is cancelled."""
-    return why() if room() < 1 else None
+    is room or until it is cancelled (a supervisor can start a waiting worker
+    anyway: ``tasks.start_now``), unless the repo's ``wait_for_room`` is false."""
+    if room() >= 1:
+        return None
+    if repo_root is not None:
+        from brindle.config import load_repo_config
+
+        if not load_repo_config(repo_root).wait_for_room:
+            return None
+    return why()
+
+
+def forced_starts() -> int:
+    """How many workers a supervisor started despite the load (durable: it is
+    counted from their tasks, so any process sees every process's)."""
+    try:
+        from brindle.db import DB
+
+        db = DB()
+        try:
+            return db.count_forced_tasks()
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - a health number, never a reason to fail
+        return 0
 
 
 def _has_room() -> bool:
@@ -261,7 +284,8 @@ def stats() -> dict:
     while running (their request ended, or its deadline passed), since this
     process started."""
     with _cond:
-        return {"running": _running, "refused": _refused, "stopped": _stopped}
+        counts = {"running": _running, "refused": _refused, "stopped": _stopped}
+    return {**counts, "forced": forced_starts()}
 
 
 def _count_stopped() -> None:
@@ -304,11 +328,12 @@ def _release() -> None:
 _prefix: list[str] | None = None
 
 
-def _background(argv: list[str]) -> list[str]:
-    """``argv`` at background priority, when the gate is on. Both prefixes
-    exec the command, so the child keeps the pid it was started with."""
+def _background(argv: list[str], force: bool = False) -> list[str]:
+    """``argv`` at background priority, when the gate is on, or always with
+    ``force``. Both prefixes exec the command, so the child keeps the pid it
+    was started with."""
     global _prefix
-    if not _gated:
+    if not _gated and not force:
         return argv
     if _prefix is None:
         if sys.platform == "darwin":

@@ -48,7 +48,7 @@ def sample(app, lag: float) -> dict:
     stats = spawn.stats()
     return {"lag_s": round(lag, 3), "executor_queue": executor, "heavy_queue": heavy,
             "children": stats["running"], "refused": stats["refused"],
-            "stopped": stats["stopped"], "load": round(_load(), 2),
+            "stopped": stats["stopped"], "forced": stats["forced"], "load": round(_load(), 2),
             "room": round(spawn.room(), 1)}
 
 

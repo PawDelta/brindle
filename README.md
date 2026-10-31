@@ -434,6 +434,7 @@ knowing them helps when you tell the supervisor how to work.
 | `list_agents` / `list_tasks` / `list_agent_profiles` | supervisor | who's running, what's queued, which profiles exist; `list_tasks(full=true)` also shows each task's brief and `done_when` |
 | `list_repos` | supervisor | the repos attached to the session (brindle Pro); `repo=<alias>` on `assign`/`handoff` puts a worker there |
 | `cancel_task` | supervisor | cancel a queued task (and its dependents) to re-plan |
+| `start_now` | supervisor | start a worker task that is waiting for room now, despite the load (one forced start at a time) |
 | `requeue` | supervisor | queue a cancelled task again with the same brief, files and profile; `depends_on` replaces its dependencies |
 | `workspace_diff` | supervisor | a worker branch's changes against its base |
 | `request_review` / `submit_review` | supervisor / reviewer | start a reviewer on a branch / record its verdict |
@@ -649,6 +650,7 @@ Goal driving, merge gates and cleanup:
 | `pre_commit` | `true` | run [pre-commit](https://pre-commit.com) over the branch, if the repo uses it |
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
+| `wait_for_room` | `true` | a new worker or check run waits while the machine is busy; `false` starts it at once. While it waits, the supervisor can start a worker anyway with `start_now` |
 | `check_concurrency` | half the logical cores, at least 2, at most 6 and 2 GB of RAM per run | check runs at once on this machine, across branches; the rest wait their turn (`0`: no cap). A run far past its last duration is reported to the supervisor |
 | `fable_escalation` | on, unless the worker runs on a cloud account (Bedrock, Vertex or Foundry) | retry a failed heavy task once on `developer-heavy` before handing it to you; `true` turns it on for a cloud account, `false` off |
 | `usage_limit` | `90` | brindle stops pushing on at this % of your Claude usage limit |

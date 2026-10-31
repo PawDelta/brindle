@@ -625,9 +625,88 @@ def enqueue(
 ROOM_POLL = 5.0   # seconds between the waiting helper's looks at the machine
 
 
-def room_wait() -> str | None:
-    """Why a worker should not start now (``spawn.no_room``), or None."""
-    return spawn.no_room()
+FORCED = "started despite load by supervisor"   # what a forced start's message says
+
+
+def room_wait(repo_root: str | None = None) -> str | None:
+    """Why a worker should not start now (``spawn.no_room``), or None: the
+    machine has room, or the repo's ``wait_for_room`` is off."""
+    return spawn.no_room(repo_root)
+
+
+def load_counts(db: DB) -> tuple[int, int]:
+    """(running workers, running check runs): workers are the process-running
+    agents of a task (not supervisors or reviewers); check runs are counted
+    per workspace, whether or not their worker is still running."""
+    from brindle import gates
+
+    every = db.list_agents()
+    workers = sum(a.mode in ("handoff", "handoff_detached", "assign")
+                  and a.status in ("starting", "processing") and agents.runs_process(a) for a in every)
+    checks = sum(gates.marked("checks-running", ws_id) for ws_id in {a.workspace_id for a in every})
+    return workers, checks
+
+
+def load_note(db: DB) -> str:
+    """Where the load comes from: the machine's (``spawn.why``) and how many
+    of brindle's own workers and check runs are running."""
+    workers, checks = load_counts(db)
+    return f"{spawn.why()}; brindle has {workers} workers and {checks} check runs running"
+
+
+def forced_start(db: DB, ws: Workspace) -> bool:
+    """Whether the worker of ``ws`` was started despite the load (its
+    branch's check runs then run at background priority)."""
+    worker = agents.workspace_worker(db, ws)
+    return worker is not None and any(
+        t.agent_id == worker.id and t.forced for t in db.list_tasks(ws.repo_root, state="started"))
+
+
+def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
+    """Start task ``task_id``, waiting for room, now despite the load, on
+    behalf of ``caller`` (its caller or session root). Only a worker start can
+    be forced, and only one forced start may be in flight (a forced worker
+    still starting): else ``ValueError`` says why."""
+    from brindle import autopilot
+
+    t = db.get_task(task_id)
+    if t is None:
+        raise ValueError(f"No task {task_id}. list_tasks shows what's queued.")
+    mine = caller.id == t.caller_id if caller else t.caller_id is None
+    if not mine and caller and t.caller_id:
+        mine = autopilot.root_of(db, t.caller_id) == caller.id
+    if not mine:
+        raise ValueError(f"Task {task_id} isn't yours to start: only its caller or its session root can.")
+    if t.state != "pending" or t.waiting is None:
+        raise ValueError(f"Task {task_id} is {t.state}, not waiting for room: nothing to force.")
+    caller_ws = db.get_workspace(t.caller_ws_id)
+    if not caller_ws or session_paused(db, t):
+        raise ValueError(f"Task {task_id} can't start now (its session is paused or gone).")
+    try:
+        unmet = unmet_dependencies(db, caller_ws, _loads(t.depends_on), caller_id=t.caller_id,
+                                   dependent_task_id=t.id)
+    except agents.AgentError as e:
+        raise ValueError(str(e)) from e
+    if unmet:
+        raise ValueError(f"Task {task_id} still waits on {', '.join(unmet)}.")
+    if not db.claim_forced_task(t.id):   # the single forced-start slot, taken with the task
+        now = db.get_task(t.id)
+        if now is not None and now.state == "pending":
+            raise ValueError("Another worker was just started despite the load and is still starting; "
+                             "try again once it is up, or let this one wait for room.")
+        raise ValueError(f"Task {task_id} was just started or cancelled.")
+    try:
+        worker = start_queued(db, t)
+    except agents.AgentError as e:
+        db.release_forced_task(t.id)   # frees the slot
+        raise ValueError(f"It could not start: {e}") from e
+    text = f"Started {worker.id} for task {t.id} ({FORCED})."
+    if t.caller_id and (caller is None or caller.id != t.caller_id):
+        try:
+            agents.send_message(db, t.caller_id, text, sender_id=None)
+        except agents.AgentError:
+            pass
+    return text
 
 
 def room_duplicate(db: DB, caller_id: str | None, repo_root: str, task_text: str) -> Task | None:
@@ -644,8 +723,8 @@ def wait_for_room(db: DB, t: Task, why: str) -> None:
     the reason list_tasks shows; the first time, start the helper that
     starts it then."""
     first = t.waiting_since is None
-    db.update_task(t.id, waiting=why, waiting_since=t.waiting_since or time.time())
-    if first:
+    # Only while it is still pending: a task claimed meanwhile (started, forced) is left as it is.
+    if db.set_task_waiting(t.id, why, time.time()) and first:
         _wait_in_background(t.id)
 
 
@@ -666,12 +745,12 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
         t = db.get_task(task_id)
         if t is None or t.state != "pending" or t.waiting is None or session_paused(db, t):
             return False
-        why = room_wait()
+        why = room_wait(t.repo_root)
         if why is None:
             # Unless a dependency added since holds it: merging that starts it.
             return _start_if_ready(db, t, "room on the machine", check_room=False)
         if why != t.waiting:
-            db.update_task(t.id, waiting=why)   # list_tasks shows the machine as it is now
+            db.set_task_waiting(t.id, why, time.time())   # list_tasks shows the machine as it is now
         pause.wait(poll)
 
 
@@ -909,7 +988,7 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     except agents.AgentError as e:
         _cancel(db, t.id, str(e))
         return False
-    why = room_wait() if check_room else None
+    why = room_wait(t.repo_root) if check_room else None
     if why:
         wait_for_room(db, t, why)
         return False
@@ -1029,7 +1108,7 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."
-    why = room_wait()
+    why = room_wait(new.repo_root)
     if why:
         wait_for_room(db, new, why)
         return (f"Requeued task {old.id} as {new.id}, waiting for room: {why}. "
@@ -1089,7 +1168,7 @@ def dry_run_text(db: DB, ws: Workspace, profile: str, why: list[str], files: lis
             lines.append("queue: would not start (overlap)")
         elif mode == "queue":
             lines.append(f"queue: would queue until {clash.holder} merges")
-        elif busy := room_wait():
+        elif busy := room_wait(ws.repo_root):
             lines.append(f"queue: would wait for room: {busy}")
         else:
             lines.append("queue: would start now")
