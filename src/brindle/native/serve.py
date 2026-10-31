@@ -294,11 +294,12 @@ def stop_unused(db, grace: float = 5.0) -> list[str]:
     for host, pid in list(started.items()):
         if host in in_use:
             continue
+        is_ollama = _is_ollama_serve(pid)
+        # Refused (spawn.Busy) past the request's deadline with nothing stopped
+        # or forgotten; else the stop and the record run to their end.
+        spawn.begin_write()
         del started[host]
-        if _is_ollama_serve(pid):
-            # Refused (spawn.Busy) past the request's deadline with nothing
-            # stopped or saved; else the stops and the record run to their end.
-            spawn.begin_write()
+        if is_ollama:
             _stop_group(pid, grace)
             lines.append(f"stopped ollama serve at {host} (pid {pid}): no brindle session uses it")
     _save_started(started)
