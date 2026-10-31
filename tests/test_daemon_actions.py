@@ -116,6 +116,42 @@ def test_deprecated_disable_preserves_goal_and_open_question(db, world):
     assert ap.enabled and ap.goal == "Ship" and ap.state == "blocked" and ap.question
 
 
+@pytest.mark.parametrize("checks", [[], ["true"]])
+def test_review_lock_returns_busy_without_starting_work(db, world, monkeypatch, checks):
+    import fcntl
+    import hashlib
+
+    started = []
+    monkeypatch.setattr(config, "load_repo_config", lambda *a, **k: config.RepoConfig(checks=checks))
+    monkeypatch.setattr(agents, "_review_profile", lambda *a: "reviewer")
+    monkeypatch.setattr(agents, "_request_review", lambda *a: started.append("reviewer"))
+    monkeypatch.setattr(agents, "_detach", lambda *a: started.append("checks"))
+    monkeypatch.setattr(routes_actions, "REVIEW_LOCK_WAIT", 0.05, raising=False)
+    name = "review-dispatch-" + hashlib.sha1(b"w-1").hexdigest()[:16]
+    directory = config.brindle_home() / "locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / f"{name}.lock").open("w") as holder:
+        flock = fcntl.flock
+        flock(holder.fileno(), fcntl.LOCK_EX)
+
+        def guarded_flock(fd, operation):
+            if os.fstat(fd).st_ino == os.fstat(holder.fileno()).st_ino:
+                assert operation != fcntl.LOCK_EX, "review route attempted an unbounded lock wait"
+            return flock(fd, operation)
+
+        monkeypatch.setattr(fcntl, "flock", guarded_flock)
+        before = time.monotonic()
+        code, reply = _send("POST", "/v1/workspaces/w-1/review")
+        assert time.monotonic() - before < 1
+        assert code == 409 and reply["error"]["code"] == "busy", reply
+        assert started == [] and len(db.list_agents("w-1")) == 1
+        assert not agents._review_request_file("w-1", "reviewer").exists()
+        flock(holder.fileno(), fcntl.LOCK_UN)
+        monkeypatch.setattr(fcntl, "flock", flock)
+        code, reply = _send("POST", "/v1/workspaces/w-1/review")
+        assert code == 200 and len(started) == 1, reply
+
+
 def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(db, tmp_path, monkeypatch):
     from brindle import procs, tmux
     from brindle import sessions as sessions_mod
