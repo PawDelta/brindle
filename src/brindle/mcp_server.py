@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from brindle import agents, antigravity, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config
-from brindle.db import DB, Agent, Workspace
+from brindle.db import DB, Agent, Workspace, migrated_by_newer
 from brindle.profiles import list_profiles
 from brindle.view import last_activity
 
@@ -39,13 +39,7 @@ def _migrated_under_us() -> bool:
     """Whether brindle was upgraded under this server and the new version has
     migrated the database since: this server's code no longer writes the rows
     that version expects (see upgrade.py)."""
-    if not upgrade.install.changed():
-        return False
-    db = DB()
-    try:
-        return bool(db.migrated_by_newer())
-    finally:
-        db.conn.close()
+    return upgrade.install.changed() and migrated_by_newer()
 
 
 class _Server(MCPServer):

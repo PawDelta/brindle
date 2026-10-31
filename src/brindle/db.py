@@ -1020,6 +1020,27 @@ def _declared_columns() -> dict[str, frozenset[str]]:
         db.conn.close()
 
 
+def migrated_by_newer() -> bool:
+    """Whether a newer brindle has migrated the database: a ``user_version``
+    past this version's, or columns in this version's tables that its schema
+    doesn't declare (rows this version writes would leave them unset). Read
+    as is, without this version's own setup and migrations; False while there
+    is no database yet."""
+    try:
+        conn = sqlite3.connect(db_path().resolve().as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        if conn.execute("PRAGMA user_version").fetchone()[0] > SCHEMA_VERSION:
+            return True
+        declared = _declared_columns()
+        return any(cols - declared[t] for t, cols in _columns(conn).items() if t in declared)
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 class DB:
     def __init__(self, path: str | None = None) -> None:
         p = str(path) if path is not None else str(db_path())
@@ -1203,14 +1224,6 @@ class DB:
                               "text, heading_path, chunk_id UNINDEXED)")
         except sqlite3.OperationalError:
             pass
-
-    def migrated_by_newer(self) -> list[str]:
-        """The columns ("table.column") of this version's tables that only a
-        newer brindle's migrations made: rows this version writes would leave
-        them unset, for that brindle to read."""
-        declared = _declared_columns()
-        return sorted(f"{t}.{c}" for t, cols in _columns(self.conn).items() if t in declared
-                      for c in cols - declared[t])
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
