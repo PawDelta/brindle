@@ -390,6 +390,64 @@ def test_real_helper_entry_point_with_no_endpoint_cannot_contact_providers(tmp_p
     assert "No supported read-only catalog" in result.explanation
 
 
+BUDGET = 0.2    # seconds of discovery, against a request with 50
+
+
+class _Clock:
+    """A monotonic clock that moves only when a wait for room says it waited."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def monotonic(self):
+        return self.now
+
+
+class _AdvancingCondition:
+    """spawn's condition variable: a wait advances the clock instead of blocking."""
+
+    def __init__(self, clock):
+        self.clock = clock
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def wait(self, seconds):
+        self.clock.now += seconds
+        return False
+
+    def notify_all(self):
+        pass
+
+
+@pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="POSIX process groups")
+def test_a_saturated_machine_spends_the_discovery_budget_not_the_request_deadline(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from brindle import spawn
+
+    clock = _Clock()
+    monkeypatch.setattr(spawn, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(ma, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(spawn, "_cond", _AdvancingCondition(clock))
+    monkeypatch.setattr(spawn, "_gated", True)       # no room: load far above the cores
+    monkeypatch.setattr(spawn, "_cores", lambda: 4)
+    monkeypatch.setattr(spawn, "_load", lambda: 9.0)
+    monkeypatch.setattr(spawn, "_running", 1)
+    popen = Mock()
+    monkeypatch.setattr(ma.subprocess, "Popen", popen)
+    check = ma.ModelAvailabilityChecker(timeout=BUDGET)
+    with spawn.deadline(50):
+        result = check.check(profile(), effective_env={}, cwd=str(tmp_path))
+    assert result.status == "unverified" and "timed out" in result.explanation
+    # Refused at its own budget, not the request's 50 seconds, and no helper started.
+    assert BUDGET <= clock.now - 1000.0 < BUDGET + spawn.POLL
+    popen.assert_not_called()
+
+
 def test_unsupported_platform_never_launches(monkeypatch):
     monkeypatch.setattr(ma.sys, "platform", "win32")
     popen = Mock()

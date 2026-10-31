@@ -8,6 +8,11 @@ resolves its dependencies, cut from the updated base branch. A task with
 declared ``files`` is checked against other active workers' declared and
 actually-changed files, so the caller learns about likely collisions without
 being blocked by them.
+
+A task whose worker would start on a machine with no room for it
+(``spawn.no_room``; ``agents.delegate`` raises ``NoRoom``) is queued the
+same way, 'pending' with the reason in ``waiting``, and started by a
+detached helper (``start_when_room``) once there's room.
 """
 
 from __future__ import annotations
@@ -16,11 +21,12 @@ import fnmatch
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import PurePath
 
-from brindle import agents, bus, conflicts, git, savings
+from brindle import agents, bus, conflicts, git, savings, spawn
 from brindle.db import DB, Agent, Task, Workspace
 
 
@@ -585,10 +591,13 @@ def enqueue(
     db: DB, caller: Agent | None, caller_ws: Workspace, profile: str, task_text: str, mode: str,
     *, isolate: bool, branch: str | None, done_when: str | None,
     files: list[str] | None, depends_on: list[str] | None, plan_first: bool | None = None,
-    weight: str | None = None, analysis_doc: bool = False,
+    weight: str | None = None, analysis_doc: bool = False, waiting: str | None = None,
+    pipeline: str | None = None,
 ) -> Task:
     """Record a task that can't start yet: no worker, no workspace, just what
-    it takes to start it once its dependencies are merged."""
+    it takes to start it once its dependencies are merged, or (``waiting``,
+    why) once the machine has room for it. ``pipeline``: the pipeline state
+    its worker starts in (a branch's second attempt or conflict resolver)."""
     t = Task(
         id=new_id(), repo_root=caller_ws.repo_root, agent_id=None,
         caller_id=caller.id if caller else None, caller_ws_id=caller_ws.id,
@@ -602,9 +611,116 @@ def enqueue(
         db.update_task(t.id, plan_first=int(plan_first))
     if analysis_doc:
         db.update_task(t.id, analysis_doc=1)   # add_task writes the original columns only
+    if pipeline:
+        db.update_task(t.id, pipeline=pipeline)
     bus.publish(db, "task.queued", repo_root=t.repo_root, task_id=t.id, caller_id=t.caller_id,
-                depends_on=depends_on or [])
-    return t
+                depends_on=depends_on or [], waiting=waiting)
+    if waiting:
+        wait_for_room(db, t, waiting)
+    return db.get_task(t.id) or t
+
+
+# -- waiting for room ---------------------------------------------------------------
+
+ROOM_POLL = 5.0   # seconds between the waiting helper's looks at the machine
+
+
+def room_wait() -> str | None:
+    """Why a worker should not start now (``spawn.no_room``), or None."""
+    return spawn.no_room()
+
+
+def room_duplicate(db: DB, caller_id: str | None, repo_root: str, task_text: str) -> Task | None:
+    """A task ``caller_id`` queued for room in ``repo_root`` with the same
+    brief, waiting or being started right now: a repeated assign of it must
+    never start a second worker, whatever the load is by then."""
+    return next((t for state in ("pending", "starting") for t in db.list_tasks(repo_root, state=state)
+                 if t.waiting is not None and t.caller_id == caller_id and t.task_text == task_text),
+                None)
+
+
+def wait_for_room(db: DB, t: Task, why: str) -> None:
+    """Keep pending task ``t`` queued until there's room, with ``why`` as
+    the reason list_tasks shows; the first time, start the helper that
+    starts it then."""
+    first = t.waiting_since is None
+    db.update_task(t.id, waiting=why, waiting_since=t.waiting_since or time.time())
+    if first:
+        _wait_in_background(t.id)
+
+
+def _wait_in_background(task_id: str) -> None:
+    from brindle.providers import brindle_invocation
+
+    agents._detach_orphan([*brindle_invocation(), "_start-when-room", task_id])
+
+
+def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
+    """The detached helper's loop: start task ``task_id`` once there's room
+    (``_start_if_ready`` looks), telling its caller. Ends when it starts, or
+    when the task is no longer waiting (cancelled, held, started by a
+    sweep) or its session is paused (``on_resumed`` takes over). Returns
+    whether it started it."""
+    pause = threading.Event()
+    while True:
+        t = db.get_task(task_id)
+        if t is None or t.state != "pending" or t.waiting is None or session_paused(db, t):
+            return False
+        why = room_wait()
+        if why is None:
+            # Unless a dependency added since holds it: merging that starts it.
+            return _start_if_ready(db, t, "room on the machine", check_room=False)
+        if why != t.waiting:
+            db.update_task(t.id, waiting=why)   # list_tasks shows the machine as it is now
+        pause.wait(poll)
+
+
+def session_paused(db: DB, t: Task) -> bool:
+    """Whether ``t``'s session (its caller, or the caller's root) is paused:
+    a paused session starts nothing, whatever wakes its queued tasks."""
+    if not t.caller_id:
+        return False
+    from brindle import autopilot
+
+    caller, root = db.get_agent(t.caller_id), db.get_agent(autopilot.root_of(db, t.caller_id))
+    return any(a is not None and a.status == "paused" for a in (caller, root))
+
+
+def on_resumed(db: DB, root_id: str) -> None:
+    """Session ``root_id`` was resumed: start its queued tasks that can
+    start now, and give each one still waiting for room its helper back
+    (the old one ended at the pause)."""
+    from brindle import autopilot
+
+    for t in db.list_tasks(state="pending"):
+        if not t.caller_id or autopilot.root_of(db, t.caller_id) != root_id:
+            continue
+        deps = _loads(t.depends_on)
+        if _start_if_ready(db, t, ", ".join(deps) if deps else "the session's resume"):
+            continue
+        now = db.get_task(t.id)
+        if now is not None and now.state == "pending" and now.waiting is not None:
+            _wait_in_background(t.id)
+
+
+def start_with_room_now(db: DB, t: Task) -> bool:
+    """Start pending task ``t`` now if the machine has room (and its
+    dependencies are merged), telling its caller; else it keeps waiting."""
+    return _start_if_ready(db, t, "room on the machine")
+
+
+def start_with_room(db: DB) -> int:
+    """Start every task waiting only for room that can start now, in case
+    its helper died (the cull sweep calls this). Returns how many started."""
+    return sum(start_with_room_now(db, t) for t in db.list_tasks(state="pending") if t.waiting is not None)
+
+
+def waiting_for_room(db: DB, root_id: str) -> list[Task]:
+    """The tasks of session ``root_id`` queued only until the machine has room."""
+    from brindle import autopilot
+
+    return [t for t in db.list_tasks(state="pending")
+            if t.waiting is not None and t.caller_id and autopilot.root_of(db, t.caller_id) == root_id]
 
 
 def record_started(
@@ -694,7 +810,14 @@ def start_queued(db: DB, task: Task) -> Agent:
         plan_first=None if task.plan_first is None else bool(task.plan_first),
         start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
         weight=launch_weight, analysis_doc=bool(task.analysis_doc),
+        admit=False,   # every caller has just looked for room (_start_if_ready, requeue)
+        # Nobody waits on a queued handoff (its reply said "queued" long ago):
+        # detached from its first row, so even a result it reports before this
+        # returns is forwarded to its caller like an assign's.
+        **({"detached": True} if task.mode == "handoff" else {}),
     )
+    if task.pipeline:
+        db.update_agent(worker.id, pipeline=task.pipeline, pipeline_rounds=0)
     db.update_task(task.id, agent_id=worker.id, state="started", started_at=time.time())
     bus.publish_agent(db, "task.started", worker.id, task_id=task.id)
     savings.attach_agent(db, task.id, worker.id)
@@ -769,21 +892,26 @@ def on_merged(db: DB, ws: Workspace) -> None:
             _start_if_ready(db, t, dep_ref)
 
 
-def _start_if_ready(db: DB, t: Task, dep_ref: str) -> bool:
-    """Start pending task ``t`` if every dependency is merged, and tell its
-    caller. The task is claimed first, so a second call (a sweep racing a
+def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> bool:
+    """Start pending task ``t`` if every dependency is merged and the
+    machine has room for it (else it waits for room: ``wait_for_room``), and
+    tell its caller. The task is claimed first, so a second call (a sweep racing a
     merge) finds it taken. A dependency that can never merge cancels it; a
     start that fails cancels it too, with the reason sent to its caller
     (``requeue`` makes a new one). Returns whether it started."""
     caller_ws = db.get_workspace(t.caller_ws_id)
-    if not caller_ws:
-        return False
+    if not caller_ws or session_paused(db, t):
+        return False   # a paused session's tasks stay queued; resuming it starts them (on_resumed)
     try:
         if unmet_dependencies(db, caller_ws, _loads(t.depends_on), caller_id=t.caller_id,
                               dependent_task_id=t.id):
             return False
     except agents.AgentError as e:
         _cancel(db, t.id, str(e))
+        return False
+    why = room_wait() if check_room else None
+    if why:
+        wait_for_room(db, t, why)
         return False
     if not db.claim_task(t.id):
         return False
@@ -795,7 +923,8 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str) -> bool:
         return False
     if t.caller_id:
         try:
-            text = f"Started {new_worker.id} (was waiting on {dep_ref})."
+            text = (f"Started {new_worker.id} for task {t.id} (was waiting for room: {t.waiting})."
+                    if t.waiting else f"Started {new_worker.id} (was waiting on {dep_ref}).")
             new_ws = db.get_workspace(new_worker.workspace_id)
             warning = agents.add_dirs_warning(new_worker, new_ws) if new_ws else None
             if warning:
@@ -900,6 +1029,11 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."
+    why = room_wait()
+    if why:
+        wait_for_room(db, new, why)
+        return (f"Requeued task {old.id} as {new.id}, waiting for room: {why}. "
+                "It starts on its own when there's room.")
     try:
         worker = start_queued(db, new)
     except agents.AgentError as e:
@@ -955,6 +1089,8 @@ def dry_run_text(db: DB, ws: Workspace, profile: str, why: list[str], files: lis
             lines.append("queue: would not start (overlap)")
         elif mode == "queue":
             lines.append(f"queue: would queue until {clash.holder} merges")
+        elif busy := room_wait():
+            lines.append(f"queue: would wait for room: {busy}")
         else:
             lines.append("queue: would start now")
     return "\n".join(lines)
@@ -991,6 +1127,8 @@ def list_text(db: DB, repo_root: str, full: bool = False) -> str:
             parts.append(f"files={','.join(_loads(t.files))}")
         if review is not None:
             parts.append(f"agent={t.agent_id} ws={ws.id} review={review}")
+        if t.state in QUEUED and t.waiting:
+            parts.append(f"waiting for room: {t.waiting}")
         line = " ".join(parts)
         if full:
             line += f"\n  task_text: {t.task_text}"

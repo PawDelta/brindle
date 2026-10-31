@@ -414,6 +414,8 @@ def org_key_env(m: Managed | None, provider: str) -> dict[str, str]:
     import os
     import subprocess
 
+    from brindle import spawn
+
     if not has_org_key(m, provider):
         return {}
     c = m.config
@@ -425,8 +427,7 @@ def org_key_env(m: Managed | None, provider: str) -> dict[str, str]:
         return {var: value}
     name = c.key_helper[0]
     try:
-        out = subprocess.run(list(c.key_helper), shell=False, capture_output=True, text=True,
-                             timeout=KEY_HELPER_TIMEOUT, stdin=subprocess.DEVNULL, check=False)
+        out = spawn.read(list(c.key_helper), timeout=KEY_HELPER_TIMEOUT)
     except FileNotFoundError:
         raise ManagedUnavailable(f"org {m.org_id}'s key helper {name!r} wasn't found") from None
     except (OSError, subprocess.TimeoutExpired) as e:

@@ -11,6 +11,7 @@ from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from brindle import spawn
 from brindle.service.errors import ServiceError
 
 # Tests only: lets a file:// URL (a local bare repo) through. Production refuses it.
@@ -61,8 +62,8 @@ def clone(url: str, dest: Path, on_line: Callable[[str], None]) -> str:
     (git ends them with CR or LF) to ``on_line``. Returns the path; a failure
     raises a ServiceError carrying git's own message."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}      # no prompt to hang on: fail with git's message
-    proc = subprocess.Popen(["git", "clone", "--progress", "--", url, str(dest)], stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
+    proc = spawn.start(["git", "clone", "--progress", "--", url, str(dest)], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
     lines: list[str] = []
     buf = b""
     assert proc.stderr is not None

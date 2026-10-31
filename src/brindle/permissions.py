@@ -90,6 +90,7 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Iterator
 
+from brindle import spawn
 from brindle.config import CONFIG_DIR, config_root, brindle_home
 
 KINDS = ("read", "write", "edit", "bash", "fetch", "mcp", "other")
@@ -1231,6 +1232,9 @@ def candidates(req: Request) -> list[str]:
     return [req.tool] if req.tool else []
 
 
+TRACKED_GIT_SECONDS = 5
+
+
 def is_tracked(path: str | None, roots: list[str]) -> bool:
     """``path`` (symlinks resolved) is a regular file inside one of ``roots``,
     not under .git, and git tracks exactly that path there."""
@@ -1244,9 +1248,9 @@ def is_tracked(path: str | None, roots: list[str]) -> bool:
         if not rel or ".git" in Path(rel).parts:
             continue
         try:
-            res = subprocess.run(
+            res = spawn.read(
                 ["git", "-C", os.path.realpath(root), "--literal-pathspecs", "ls-files", "-z", "--", rel],
-                capture_output=True, text=True, timeout=5)
+                timeout=TRACKED_GIT_SECONDS)
         except (OSError, subprocess.SubprocessError):
             continue
         if res.returncode == 0 and rel in res.stdout.split("\0"):

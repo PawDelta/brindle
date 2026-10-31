@@ -33,6 +33,11 @@ import threading
 import time
 from pathlib import Path
 
+from brindle import spawn
+
+STORE_LIMIT = 30.0   # seconds a keychain / secret-tool lookup may take, waiting for room included
+STORE_WRITE_LIMIT = 30.0   # seconds a write may take once it has started (a brindle.spawn action)
+
 try:
     import fcntl
 except ImportError:     # Windows: threads are still serialized
@@ -74,8 +79,9 @@ class KeychainStore:
         self.service, self.account, self.label = service, account, label
 
     def _run(self, args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(["security", *args], input=stdin, capture_output=True,
-                              text=True, timeout=30, check=False)
+        if args[0] == "find-generic-password":     # a lookup: a brindle.spawn read
+            return spawn.read(["security", *args], timeout=STORE_LIMIT)
+        return spawn.action(["security", *args], input=stdin, timeout=STORE_WRITE_LIMIT)
 
     def load(self) -> dict | None:
         r = self._run(["find-generic-password", "-a", self.account, "-s", self.service, "-w"])
@@ -107,8 +113,9 @@ class SecretServiceStore:
         self.label = label
 
     def _run(self, args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
-        return subprocess.run(["secret-tool", *args], input=stdin, capture_output=True,
-                              text=True, timeout=30, check=False)
+        if args[0] == "lookup":                    # a brindle.spawn read
+            return spawn.read(["secret-tool", *args], timeout=STORE_LIMIT)
+        return spawn.action(["secret-tool", *args], input=stdin, timeout=STORE_WRITE_LIMIT)
 
     def load(self) -> dict | None:
         r = self._run(["lookup", *self.attrs])

@@ -3129,6 +3129,17 @@ def finish_review_cmd(reviewer_id: str, workspace_id: str) -> None:
     agents.finish_review(_helper_db(), reviewer_id, workspace_id)
 
 
+@app.command("_start-when-room", hidden=True)
+def start_when_room_cmd(task_id: str) -> None:
+    """Start a task queued for room on the machine once there is (detached)."""
+    import signal
+
+    from brindle import tasks
+
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    tasks.start_when_room(_helper_db(), task_id)
+
+
 @app.command("_statusline", hidden=True)
 def statusline_cmd() -> None:
     from brindle.providers import status_line

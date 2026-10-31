@@ -1,22 +1,26 @@
 """The daemon under repeated use: the read routes and the events feed, on a
 real tmux server, must hand back every fd and SQLite connection they open."""
 
+import asyncio
 import contextlib
 import faulthandler
 import json
 import os
 import signal
 import sqlite3
+import socket
 import threading
 import time
 
 import anyio
+import httpx2 as httpx
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import identity_lock, tmux, workspaces
+from brindle import git, identity_lock, spawn, tmux, workspaces
+from brindle.daemon import lifecycle, session_review
 from brindle.daemon.app import build_app
-from brindle.db import Agent
+from brindle.db import Agent, Workspace
 
 TOKEN = "t" * 43
 ROUNDS = 5
@@ -150,3 +154,168 @@ def test_daemon_leaks_nothing_under_load(db, repo, monkeypatch):
         hammer(client, socks)
         assert settled(open_fds) <= fds
         assert settled(lambda: len(Tracked.live)) <= conns
+
+
+@pytest.mark.serial
+@pytest.mark.variant("Long supervisor history with clients abandoning and re-asking for attributed diffs")
+def test_session_diff_overload(db, repo, monkeypatch):
+    # Import 204 worker commits and 12 genuine two-parent supervisor merges.
+    # The final merge deletes a base file, making attribution walk the whole history.
+    base, stream = git.out(["rev-parse", "HEAD"], repo), []
+    parent = base
+    for step in range(12):
+        for part in range(18):
+            mark = step * 18 + part + 1
+            branch = "session" if part == 17 else f"worker-{step}"
+            subject = f"Merge branch 'worker-{step}'" if part == 17 else f"edit {mark}"
+            content = f"worker {step}, revision {min(part, 16)}\n"
+            first = f":{mark - 1}" if 0 < part < 17 else parent
+            stream += [f"commit refs/heads/{branch}\nmark :{mark}\n",
+                       f"committer Test <test@example.com> {1700000000 + mark} +0000\n",
+                       f"data {len(subject)}\n{subject}\nfrom {first}\n"]
+            if part == 17:
+                stream.append(f"merge :{mark - 1}\n")
+            for file in range(2):
+                stream.append(f"M 100644 inline file-{step}-{file}.txt\ndata {len(content)}\n{content}")
+            if step == 11:
+                stream.append("D app.py\n")
+            stream.append("\n")
+        parent = f":{mark}"
+    git.run(["fast-import", "--quiet"], repo, input="".join(stream))
+    git.run(["checkout", "-q", "session"], repo)
+    db.add_workspace(Workspace("overload", str(repo), "session", "root", "session", "main",
+                               str(repo), None, "unused", 1000.0))
+    db.add_agent(Agent("overload", "overload", "supervisor", "claude", None, "interactive",
+                       "idle", "", None, 1000.0))
+    db.conn.close()
+    local, started, completed, stopped = threading.local(), [], [], []
+    real_git, real_diff = git.run, session_review.diff
+
+    def counted(*args, **kwargs):
+        if hasattr(local, "count"):
+            local.count += 1
+        return real_git(*args, **kwargs)
+
+    def measured(*args):
+        start, local.count = time.monotonic(), 0
+        started.append(start)
+        try:
+            result = real_diff(*args)
+            completed.append((local.count, time.monotonic() - start, len(result["files"])))
+            return result
+        except spawn.Busy:          # its client left: brindle.spawn stopped its reads
+            stopped.append(start)
+            raise
+        finally:
+            del local.count
+
+    monkeypatch.setattr(git, "run", counted)
+    monkeypatch.setattr(session_review, "diff", measured)
+
+    async def exercise():
+        short, cheap_bound = 0.075, 0.1
+        limiter = anyio.to_thread.current_default_thread_limiter()
+        samples, abandoned, shed, answered, latencies = [], [], [], [], {}
+        loop = asyncio.get_running_loop()
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        app = build_app(TOKEN)
+        lane = app.app.state.heavy_read_lane
+        server = lifecycle.make_server(app)
+        server.config.load()
+        server.lifespan = server.config.lifespan_class(server.config)
+        await server.startup(sockets=[sock])
+        url = f"http://127.0.0.1:{sock.getsockname()[1]}"
+        try:
+            async with httpx.AsyncClient(base_url=url, headers={"Authorization": f"Bearer {TOKEN}"},
+                                         timeout=DEADLINE, trust_env=False) as client:
+                async def read(path, key):
+                    start = time.monotonic()
+                    response = await client.get(path)
+                    response.raise_for_status()
+                    latencies[key] = time.monotonic() - start
+                    return response
+
+                response = await read("/v1/sessions/overload/diff", "diff_baseline")
+                assert len(response.json()["files"]) == 25
+                await read("/v1/meta", "meta_baseline")
+                await read("/v1/repos", "repos_baseline")
+
+                async def poll():
+                    for _ in range(5):
+                        try:
+                            response = await client.get("/v1/sessions/overload/diff",
+                                                        timeout=httpx.Timeout(DEADLINE, read=short))
+                            if response.status_code == 503 and response.json().get("error", {}).get("code") == "busy":
+                                shed.append(time.monotonic())
+                            else:
+                                response.raise_for_status()
+                                answered.append(time.monotonic())
+                        except httpx.ReadTimeout:
+                            abandoned.append(time.monotonic())
+                        stats = limiter.statistics()
+                        samples.append((stats.borrowed_tokens, stats.tasks_waiting, lane.workers.borrowed_tokens))
+
+                async def sample_cheap():
+                    # Cheap reads while the pollers' diffs are really running.
+                    while not pollers_done.is_set():
+                        for path in ("/v1/meta", "/v1/repos"):
+                            busy = lane.workers.borrowed_tokens > 0
+                            start = time.monotonic()
+                            (await client.get(path)).raise_for_status()
+                            # Busy if the heavy lane held a worker when the request began or ended.
+                            during.append((time.monotonic() - start,
+                                           busy or lane.workers.borrowed_tokens > 0))
+
+                # Drop the cached diff: the first poll recomputes the full history.
+                session_review._forget()
+                pollers_done, during = asyncio.Event(), []
+                sampler = asyncio.ensure_future(sample_cheap())
+                outcomes = await asyncio.gather(*(poll() for _ in range(8)), return_exceptions=True)
+                pollers_done.set()
+                await sampler
+                assert all(outcome is None for outcome in outcomes), outcomes
+                overlapped = [seconds for seconds, busy in during if busy]
+                assert overlapped, "no cheap read overlapped heavy work"
+                window = [seconds for seconds, _ in during]
+                executor = loop._default_executor
+                executor_at_probe = [len(executor._threads), executor._work_queue.qsize()] if executor else [0, 0]
+                executor_start = time.monotonic()
+                await asyncio.to_thread(lambda: None)
+                executor_latency = time.monotonic() - executor_start
+                occupancy = limiter.statistics()
+                heavy_at_probe = [lane.admission.borrowed_tokens, lane.workers.borrowed_tokens]
+                await asyncio.gather(read("/v1/meta", "meta_loaded"), read("/v1/repos", "repos_loaded"))
+        finally:
+            # Disconnected requests still own real workers; drain before closing the loop.
+            await asyncio.gather(*list(server.server_state.tasks))
+            await server.shutdown(sockets=[sock])
+            sock.close()
+        print("OVERLOAD " + json.dumps({
+            "latencies_s": latencies, "cheap_during_diffs": [len(overlapped), len(window), max(window)],
+            "abandoned": len(abandoned), "shed": len(shed), "answered": len(answered),
+            "diffs_completed": len(completed), "git_per_diff": sorted({c[0] for c in completed}),
+            "diffs_stopped": len(stopped),
+            "diff_seconds_min_max": [min(c[1] for c in completed[1:] or completed),
+                                     max(c[1] for c in completed[1:] or completed)],
+            "anyio_capacity": limiter.total_tokens, "anyio_peak_active": max(s[0] for s in samples),
+            "anyio_peak_queued": max(s[1] for s in samples),
+            "anyio_at_probe": [occupancy.borrowed_tokens, occupancy.tasks_waiting],
+            "heavy_capacity": lane.workers.total_tokens, "heavy_peak_active": max(s[2] for s in samples),
+            "heavy_admission_workers_at_probe": heavy_at_probe,
+            "executor_probe_s": executor_latency, "executor_threads_queued_at_probe": executor_at_probe,
+        }, sort_keys=True))
+        # A busy response can itself arrive after the client's short bound.
+        assert len(answered) + len(abandoned) + len(shed) == 40
+        # Every diff either finished in full or was stopped with its client; none is lost.
+        assert len(completed) + len(stopped) == len(started) > 1
+        assert all(c[2] == 25 for c in completed)
+        assert limiter.borrowed_tokens == 0
+        assert lane.admission.borrowed_tokens == lane.workers.borrowed_tokens == 0
+        assert occupancy.tasks_waiting == 0
+        assert occupancy.borrowed_tokens < occupancy.total_tokens
+        assert max(latencies["meta_loaded"], latencies["repos_loaded"]) < cheap_bound, latencies
+        assert max(window) < cheap_bound, sorted(window)[-5:]
+
+    with wall_clock(DEADLINE):
+        asyncio.run(exercise())

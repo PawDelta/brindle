@@ -26,7 +26,7 @@ from pathlib import Path
 # be running from the very worktree ``remove`` deletes (a reviewer's `uv run`
 # in it), and a module first imported after that can't be found, which left
 # the row behind.
-from brindle import git, history, rewind, services, tmux
+from brindle import git, history, rewind, services, spawn, tmux
 from brindle.config import (
     PORT_BLOCK_SIZE,
     PORT_RANGE_START,
@@ -211,9 +211,7 @@ def run_commands(commands: list[str], cwd: str, env: dict[str, str]) -> SetupRes
     full_env = {**os.environ, **env}
     for cmd in commands:
         log.append(f"$ {cmd}")
-        proc = subprocess.run(
-            cmd, shell=True, cwd=cwd, env=full_env, capture_output=True, text=True
-        )
+        proc = spawn.action(["/bin/sh", "-c", cmd], cwd=cwd, env=full_env)
         if proc.stdout:
             log.append(proc.stdout.rstrip())
         if proc.stderr:
@@ -441,11 +439,15 @@ def create(
     return Created(ws, how, start_point, copied, setup)
 
 
+GH_SECONDS = 60          # a gh call that talks to GitHub
+GH_REPO_SECONDS = 20     # gh repo view, which only asks about the repo
+
+
 def gh_pr_view(repo_path: str, number: int) -> dict:
     """``gh pr view <number> --json headRefName,baseRefName``, parsed."""
     args = ["gh", "pr", "view", str(number), "--json", "headRefName,baseRefName"]
     try:
-        proc = subprocess.run(args, cwd=repo_path, capture_output=True, text=True, timeout=60)
+        proc = spawn.read(args, cwd=repo_path, timeout=GH_SECONDS)
     except FileNotFoundError as e:
         raise WorkspaceError("`gh` (GitHub CLI) is not installed; it's needed for --pr") from e
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -779,9 +781,11 @@ def existing_pull_request(ws: Workspace) -> str | None:
     """The URL of the PR ``gh`` finds open for ``ws``'s branch, or None."""
     if not shutil.which("gh"):
         return None
-    existing = subprocess.run(["gh", "pr", "view", ws.branch, "--json", "url", "-q", ".url"],
-                              cwd=ws.path, capture_output=True, text=True)
+    existing = spawn.read(["gh", "pr", "view", ws.branch, "--json", "url", "-q", ".url"], cwd=ws.path)
     return existing.stdout.strip() if existing.returncode == 0 and existing.stdout.strip() else None
+
+
+PR_STATE_SECONDS = 3.0
 
 
 def pull_request_merged(url: str, cwd: str) -> bool:
@@ -789,9 +793,9 @@ def pull_request_merged(url: str, cwd: str) -> bool:
     if not shutil.which("gh"):
         return False
     try:
-        out = subprocess.run(["gh", "pr", "view", url, "--json", "state", "-q", ".state"],
-                             cwd=cwd, capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
+        out = spawn.read(["gh", "pr", "view", url, "--json", "state", "-q", ".state"],
+                         cwd=cwd, text=True, timeout=PR_STATE_SECONDS)
+    except (OSError, subprocess.SubprocessError, spawn.Busy):
         return False
     return out.returncode == 0 and out.stdout.strip() == "MERGED"
 
@@ -827,7 +831,7 @@ def open_pull_request(ws: Workspace, title: str | None = None, draft: bool = Fal
         args += (["--title", title] if title else []) + ["--body", with_footer(body, ws.repo_root)]
         if draft:
             args.append("--draft")
-        proc = subprocess.run(args, cwd=ws.path, capture_output=True, text=True)
+        proc = spawn.action(args, cwd=ws.path)
         if proc.returncode == 0:
             return proc.stdout.strip()
         return existing_pull_request(ws)
@@ -840,8 +844,8 @@ def keeps_merged_branches(repo_root: str) -> bool:
     if not shutil.which("gh") or git.ok(["config", "--get", "brindle.deleteOnMergeTip"], repo_root):
         return False
     try:
-        proc = subprocess.run(["gh", "repo", "view", "--json", "deleteBranchOnMerge", "-q", ".deleteBranchOnMerge"],
-                              cwd=repo_root, capture_output=True, text=True, timeout=20)
+        proc = spawn.read(["gh", "repo", "view", "--json", "deleteBranchOnMerge", "-q", ".deleteBranchOnMerge"],
+                          cwd=repo_root, timeout=GH_REPO_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
         return False
     if proc.returncode != 0:
@@ -853,10 +857,11 @@ def keeps_merged_branches(repo_root: str) -> bool:
 def delete_branches_on_merge(repo_root: str) -> bool:
     """Turn on GitHub's automatic deletion of merged PR branches (needs admin)."""
     try:
-        return subprocess.run(["gh", "repo", "edit", "--delete-branch-on-merge"], cwd=repo_root,
-                              capture_output=True, text=True, timeout=30).returncode == 0
+        proc = spawn.action(["gh", "repo", "edit", "--delete-branch-on-merge"], cwd=repo_root,
+                            timeout=GH_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
         return False
+    return proc.returncode == 0
 
 
 def merge_back(db: DB, ws: Workspace, squash: bool = False) -> str:

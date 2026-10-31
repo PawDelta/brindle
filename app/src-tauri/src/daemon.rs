@@ -50,6 +50,8 @@ pub(crate) const ENGINE_STARTING: &str = "engine starting";
 const WS_UNAUTHORIZED: u16 = 4401;
 /// A request's answer; long actions answer at once with a job id.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// What a request says when the daemon doesn't answer within `REQUEST_TIMEOUT`.
+const BUSY_MESSAGE: &str = "The brindle daemon is busy and didn't answer within 60 seconds.";
 /// How many requests may have a connection to the daemon open at once; more
 /// wait for one to finish. Every connection is a file descriptor, and an app
 /// opened from the Finder gets only 256 of them: a burst from the webview
@@ -739,6 +741,12 @@ fn died(e: &io::Error) -> bool {
     )
 }
 
+/// Whether a request's socket timed out waiting on the daemon: `WouldBlock`
+/// (EAGAIN, os error 35 on macOS) is what a socket read timeout reports there.
+fn timed_out(e: &io::Error) -> bool {
+    matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut)
+}
+
 /// Only the daemon's v1 routes, and nothing that could split the request line.
 fn check_route(path: &str) -> Result<(), String> {
     if !path.starts_with("/v1/") || path.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -905,6 +913,8 @@ pub struct Engine {
     next_stream: Arc<AtomicU32>,
     /// What bounds the requests' connections open at once.
     slots: Arc<Slots>,
+    /// How long a request waits for the daemon's answer (`REQUEST_TIMEOUT`), but for tests.
+    request_timeout: Duration,
     /// How the daemon is found: `ensure`, but for tests.
     discover: Arc<dyn Fn() -> Result<DaemonInfo, String> + Send + Sync>,
     /// Run as a stream's connection, made, is about to be kept for it:
@@ -919,6 +929,7 @@ impl Default for Engine {
             streams: Default::default(),
             next_stream: Default::default(),
             slots: Default::default(),
+            request_timeout: REQUEST_TIMEOUT,
             discover: Arc::new(ensure),
             registering: Arc::new(|| {}),
         }
@@ -967,10 +978,12 @@ impl Engine {
                 }
                 Err(e) => return Err(format!("the brindle daemon is unreachable: {e}")),
             };
-            conn.set_timeout(Some(REQUEST_TIMEOUT))
+            conn.set_timeout(Some(self.request_timeout))
                 .map_err(|e| e.to_string())?;
             let reply = match send_request(&mut conn, &info.token, method, path, body) {
                 Ok(reply) => reply,
+                // The daemon didn't answer in time: busy, not broken. Nothing is retried.
+                Err(e) if timed_out(&e) => return Err(BUSY_MESSAGE.into()),
                 // The daemon died under the request (a crash mid-answer). A GET changed nothing:
                 // find or start the next daemon and ask it, once. Anything else may have been
                 // acted on before the daemon went, so it is reported, not sent again.
@@ -2213,6 +2226,33 @@ mod tests {
                 Frame::Close { code: 1000 },
             ]
         );
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_read_timeout_shows_the_busy_message() {
+        use std::os::unix::net::UnixListener;
+        use std::sync::mpsc;
+
+        // Relative: a socket path must stay short (104 bytes on macOS).
+        let sock = PathBuf::from("target/busy-test.sock");
+        let _ = std::fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).unwrap();
+        // Accepts the connection and holds it open, never answering, until the test ends.
+        let (release, held) = mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _conn = listener.accept();
+            let _ = held.recv();
+        });
+        let info = daemon_info(&sock, "tok");
+        let engine = Engine {
+            request_timeout: Duration::from_millis(50),
+            discover: Arc::new(move || Ok(info.clone())),
+            ..Engine::default()
+        };
+        assert_eq!(engine.request("GET", "/v1/status", None).unwrap_err(), BUSY_MESSAGE);
+        drop(release);
         let _ = std::fs::remove_file(&sock);
     }
 }

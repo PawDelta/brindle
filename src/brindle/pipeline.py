@@ -75,15 +75,36 @@ GONE = "Nothing to merge"
 _held = threading.local()
 
 
+class LockTimeout(TimeoutError):
+    """A bounded file-lock acquisition expired before entering its body."""
+
+
 @contextmanager
-def _file_lock(name: str, wait: bool = True):
-    """Without ``wait``, BlockingIOError when another holds it."""
+def _file_lock(name: str, wait: bool = True, *, timeout: float | None = None):
+    """Without ``wait``, BlockingIOError when another holds it.
+
+    With ``timeout``, wait at most that many seconds, then raise LockTimeout.
+    Omitting it preserves the blocking acquisition used by background work.
+    """
     from brindle.config import brindle_home
 
     lock_dir = brindle_home() / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / f"{name}.lock", "w") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        if timeout is None or not wait:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        else:
+            deadline = time.monotonic() + timeout
+            pause = threading.Event()
+            while True:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise LockTimeout(f"{name} is busy") from None
+                    pause.wait(min(0.05, remaining))
         try:
             yield
         finally:
@@ -128,14 +149,14 @@ def branch_start_lock(repo_root: str, branch: str):
 
 
 @contextmanager
-def _reentrant_lock(name: str, wait: bool = True):
+def _reentrant_lock(name: str, wait: bool = True, *, timeout: float | None = None):
     held = getattr(_held, "ids", None)
     if held is None:
         held = _held.ids = set()
     if name in held:
         yield
         return
-    with _file_lock(name, wait):
+    with _file_lock(name, wait, timeout=timeout):
         held.add(name)
         try:
             yield
@@ -416,7 +437,7 @@ def review_state(db: DB, ws: Workspace, *, head_reader=None) -> str | None:
     if worker.merge_failed and not worker.pipeline:
         why = " ".join(worker.merge_failed.split())
         return "merge failed: " + (why if len(why) <= 200 else why[:199] + "…")
-    checks = "checks running" if gates.marked("checks-running", ws.id) else "waiting for checks"
+    checks = gates.checks_state(ws)
     if worker.pipeline == "ready":
         merging = f"merging, {checks}" if gates.marked("merge-run", ws.id) else "waiting to merge"
         return f"approved, {merging}"
@@ -1195,6 +1216,18 @@ def fable_enabled(cfg: RepoConfig, worker: Agent, ws: Workspace) -> bool:
     return not any(env.get(k) not in (None, "", "0", "false") for k in CLOUD_ENV)
 
 
+def _queue_for_room(db: DB, parent: Agent | None, ws: Workspace, profile: str, task: str,
+                    done_when: str | None, state: str, busy: str) -> None:
+    """Queue a branch's follow-up worker (the heavy second attempt, a conflict resolver) in
+    ``ws`` until the machine has room (``agents.NoRoom``, why ``busy``); it
+    starts in pipeline ``state`` and its caller is told then (brindle.tasks)."""
+    from brindle import tasks
+
+    tasks.enqueue(db, parent, ws, profile, task, "assign", isolate=False, branch=None,
+                  done_when=done_when, files=None, depends_on=None, plan_first=False,
+                  waiting=busy, pipeline=state)
+
+
 def _retry_on_heavy(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig, why: str,
                     report: str) -> bool:
     """A heavy task's worker failed (the review still asks for changes after
@@ -1228,6 +1261,17 @@ def _retry_on_heavy(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig, why: 
     try:
         retry, _ws = agents.delegate(db, parent, ws, ESCALATION_PROFILE, task, "assign",
                                      isolate=False, done_when=worker.done_when, plan_first=False)
+    except agents.NoRoom as e:
+        _queue_for_room(db, parent, ws, ESCALATION_PROFILE, task, worker.done_when, "fixing", str(e))
+        db.update_agent(worker.id, pipeline=None)
+        _tell(db, worker.parent_id,
+              agents.condense(
+                  f"[brindle pipeline] `{ws.branch}` (heavy) failed on {worker.profile}: "
+                  f"{agents.first_line(why)} It is retried once on {ESCALATION_PROFILE} in the same "
+                  f"worktree as soon as the machine has room ({e}); list_tasks shows it waiting. "
+                  "Nothing to do unless that fails too.",
+                  f"Why: {why}", f"Worker's last report:\n{report}"), worker.id)
+        return True
     except agents.AgentError:
         return False
     db.update_agent(worker.id, pipeline=None)
@@ -1287,6 +1331,15 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
     try:
         resolver, _ws = agents.delegate(db, parent, ws, profile, task, "assign", isolate=False,
                                         done_when=done_when, plan_first=False)
+    except agents.NoRoom as e:
+        _queue_for_room(db, parent, ws, profile, task, done_when, "resolving", str(e))
+        db.update_agent(worker.id, pipeline=None)
+        _tell(db, parent_id,
+              f"[brindle pipeline] `{ws.branch}` was approved, but merging `{base}` into it conflicts "
+              f"in: {', '.join(files)}. Its worker {worker.id} has finished, so a light worker "
+              f"({profile}) resolves the conflict in its worktree as soon as the machine has room "
+              f"({e}); list_tasks shows it waiting. Nothing to do unless that fails.", worker.id)
+        return
     except agents.AgentError as e:
         db.update_agent(worker.id, pipeline=None)
         _escalate(db, ws, worker)

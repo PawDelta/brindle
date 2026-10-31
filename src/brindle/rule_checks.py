@@ -14,6 +14,10 @@ failed check does:
   also change a test file (``tests/``, ``test_*``, ``*_test.*``, ``*.test.*``,
   ``*.spec.*``, ``__tests__/``).
 - ``deny_patterns``: regexes no added line may match.
+- ``direct_spawn_allowed``: globs; once set, an added line of Python that
+  starts a process itself (subprocess's run or Popen, ``os.system`` ...)
+  fails unless its file matches one, or is a test. brindle's own repo sets it
+  so every process its daemon can reach goes through ``brindle.spawn``.
 
 For a Team org member (``org_budgets``) it also fails any change to one of
 the org's ``protected_paths``, whoever the worker is (``run``).
@@ -38,6 +42,7 @@ from __future__ import annotations
 import fnmatch
 import re
 from dataclasses import dataclass
+from typing import Callable
 
 from brindle import git
 from brindle.profiles import RulePack
@@ -165,19 +170,28 @@ DIFF_ARGS = (
 )
 
 
-def branch_diff(path: str, base: str) -> Diff:
-    """What the branch at ``path`` commits on top of where it forked from ``base``."""
+def _git_bytes(args: list[str], path: str):
+    """A git read's output as bytes (brindle.spawn.read), its failure a GitError."""
     import subprocess
 
+    from brindle import spawn
+
+    try:
+        return spawn.read(args, cwd=path, text=False, timeout=git.TIMEOUT)
+    except spawn.Busy as e:
+        raise git.GitBusy(f"{' '.join(args)}: {e}") from None
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise git.GitError(f"{' '.join(args)}: {e}") from e
+
+
+def branch_diff(path: str, base: str) -> Diff:
+    """What the branch at ``path`` commits on top of where it forked from ``base``."""
     start = git.merge_base(path, git.base_ref(path, base))
     args = ["git", *DIFF_ARGS, start, "HEAD"]
     # Bytes, not text: a file in some other encoding must not make the gate
     # crash (and so not run), and the diff must reach the parser whole, not
     # stripped. Undecodable bytes become U+FFFD; the line structure survives.
-    try:
-        proc = subprocess.run(args, cwd=path, capture_output=True, timeout=git.TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise git.GitError(f"{' '.join(args)}: {e}") from e
+    proc = _git_bytes(args, path)
     if proc.returncode != 0:
         raise git.GitError(f"{' '.join(args)}: {proc.stderr.decode('utf-8', 'replace').strip()}")
     return parse_diff(proc.stdout.decode("utf-8", "replace"))
@@ -295,13 +309,135 @@ def check_deny_patterns(pack: RulePack, diff: Diff) -> list[Violation]:
     return found
 
 
-def check(packs: list[RulePack], diff: Diff) -> list[Violation]:
+# A process started without the gate: subprocess's starters called (wherever
+# the call is: after ``if x:`` or a dict key too), or named without a call
+# (handed on as ``run=``) except as a type after ``:`` or ``->``; an import of
+# one; os's, pty's and asyncio's.
+_STARTERS = r"(?:run|Popen|call|check_call|check_output|getoutput|getstatusoutput)"
+DIRECT_SPAWN = re.compile(
+    rf"\bsubprocess\.{_STARTERS}\s*\("
+    rf"|(?<!:)(?<!: )(?<!>)(?<!> )\bsubprocess\.{_STARTERS}\b"
+    rf"|^\s*from\s+subprocess\s+import\b.*\b{_STARTERS}\b"
+    r"|\bos\.(?:system|popen|posix_spawnp?|spawn[lv]p?e?|exec[lv]p?e?|fork(?:pty)?)\s*\("
+    r"|\bpty\.(?:spawn|fork)\s*\(|\basyncio\.create_subprocess_(?:exec|shell)\b")
+
+
+# The same starters by module, for the syntax-tree check (_direct_starts).
+_STARTER_NAMES = {
+    "subprocess": frozenset({"run", "Popen", "call", "check_call", "check_output", "getoutput",
+                             "getstatusoutput"}),
+    "os": frozenset({"system", "popen", "posix_spawn", "posix_spawnp", "fork", "forkpty"}),
+    "pty": frozenset({"spawn", "fork"}),
+    "asyncio": frozenset({"create_subprocess_exec", "create_subprocess_shell"}),
+}
+_OS_SPAWN_EXEC = re.compile(r"(?:spawn|exec)[lv]p?e?")
+
+
+def _is_starter(module: str, name: str) -> bool:
+    return name in _STARTER_NAMES[module] or (module == "os" and bool(_OS_SPAWN_EXEC.fullmatch(name)))
+
+
+def _direct_starts(source: str) -> list[tuple[int, int]] | None:
+    """The line spans (first, last) where Python ``source`` names a process
+    starter: called or handed on, however it was imported (``import
+    subprocess as sp``, a parenthesized ``from subprocess import (...)``), a
+    call split over lines included; not as a type annotation. None when the
+    source doesn't parse."""
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    modules = {m: m for m in _STARTER_NAMES}     # local name -> module it is
+    names: set[str] = set()                     # local names bound to a starter
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                if a.name in _STARTER_NAMES:
+                    modules[a.asname or a.name] = a.name
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module in _STARTER_NAMES:
+            names.update(a.asname or a.name for a in node.names if _is_starter(node.module, a.name))
+    annotation: set[int] = set()
+    for node in ast.walk(tree):
+        types = [node.annotation] if isinstance(node, (ast.arg, ast.AnnAssign)) and node.annotation else []
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns:
+            types.append(node.returns)
+        for t in types:
+            annotation.update(id(n) for n in ast.walk(t))
+    spans = []
+    for node in ast.walk(tree):
+        if id(node) in annotation:
+            continue
+        if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id in modules and _is_starter(modules[node.value.id], node.attr)):
+            spans.append((node.lineno, node.end_lineno or node.lineno))
+        elif isinstance(node, ast.Name) and node.id in names and isinstance(node.ctx, ast.Load):
+            spans.append((node.lineno, node.end_lineno or node.lineno))
+    return spans
+
+
+def _spawning_lines(lines: list[tuple[int, str]], source: str | None) -> list[tuple[int, str]]:
+    """The added ``lines`` of one file that start a process directly: by its
+    syntax tree when ``source`` (the file as committed) parses, else by
+    DIRECT_SPAWN line by line."""
+    spans = _direct_starts(source) if source is not None else None
+    if spans is None:
+        return [(no, t) for no, t in lines if not t.lstrip().startswith("#") and DIRECT_SPAWN.search(t)]
+    return [(no, t) for no, t in lines if any(first <= no <= last for first, last in spans)]
+
+
+def check_direct_spawn(pack: RulePack, diff: Diff,
+                       source: Callable[[str], str | None] | None = None) -> list[Violation]:
+    """With ``direct_spawn_allowed`` set: an added line of Python that starts
+    a process itself, in a file that isn't a test and matches none of those
+    globs. ``source(path)`` gives the file as committed, read as a syntax
+    tree (aliases, multi-line imports and calls); without it, or when it
+    doesn't parse, each added line is matched on its own (comment lines
+    aside). The gate it bypasses is the repo's own (brindle's is
+    ``brindle.spawn``); the globs are the files that may."""
+    if not pack.direct_spawn_allowed:
+        return []
+    found: list[Violation] = []
+    hits = 0
+    for path, lines in diff.added.items():
+        if not path.endswith(".py") or is_test_file(path) or _matches(path, pack.direct_spawn_allowed):
+            continue
+        for no, text in _spawning_lines(lines, source(path) if source else None):
+            hits += 1
+            if hits <= MAX_SHOWN_PER_RULE:
+                found.append(Violation(pack.name, "direct_spawn_allowed",
+                                       f"{path}:{no}: starts a process outside the allowed files: "
+                                       f"{text.strip()}"))
+    if hits > MAX_SHOWN_PER_RULE:
+        found.append(Violation(pack.name, "direct_spawn_allowed",
+                               f"... and {hits - MAX_SHOWN_PER_RULE} more lines start a process directly"))
+    return found
+
+
+def check(packs: list[RulePack], diff: Diff,
+          source: Callable[[str], str | None] | None = None) -> list[Violation]:
+    """Every pack's mechanical rules against ``diff``; ``source(path)``, the
+    file as committed, lets check_direct_spawn read its syntax tree."""
     found: list[Violation] = []
     for pack in packs:
         found += check_deny_deps(pack, diff)
         found += check_require_tests(pack, diff)
         found += check_deny_patterns(pack, diff)
+        found += check_direct_spawn(pack, diff, source)
     return found
+
+
+def committed_source(path: str) -> Callable[[str], str | None]:
+    """``source`` for :func:`check`: a file of the checkout at ``path`` as
+    HEAD has it, or None when git can't show it."""
+    def read(rel: str) -> str | None:
+        try:
+            proc = _git_bytes(["git", "show", f"HEAD:{rel}"], path)
+        except git.GitError:
+            return None
+        return proc.stdout.decode("utf-8", "replace") if proc.returncode == 0 else None
+    return read
 
 
 def format_violations(violations: list[Violation]) -> str:
@@ -378,15 +514,10 @@ def branch_files(path: str, base: str) -> list[str]:
     """Every path the branch at ``path`` changes since it forked from ``base``:
     added, modified, deleted, both sides of a rename, a mode change or an
     empty new file (which ``branch_diff``'s hunks don't show), a submodule."""
-    import subprocess
-
     start = git.merge_base(path, git.base_ref(path, base))
     args = ["git", "-c", "core.quotepath=false", "-c", "diff.relative=false", "diff", "--name-only",
             "-z", "--no-renames", "--no-ext-diff", start, "HEAD"]
-    try:
-        proc = subprocess.run(args, cwd=path, capture_output=True, timeout=git.TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired) as e:
-        raise git.GitError(f"{' '.join(args)}: {e}") from e
+    proc = _git_bytes(args, path)
     if proc.returncode != 0:
         raise git.GitError(f"{' '.join(args)}: {proc.stderr.decode('utf-8', 'replace').strip()}")
     return [p for p in proc.stdout.decode("utf-8", "surrogateescape").split("\0") if p]
@@ -487,7 +618,7 @@ def run(db, ws) -> Result | None:
         files = branch_files(ws.path, base) if scope or protected else []
     except (git.GitError, workspaces.WorkspaceError) as e:
         return Result(names, [], problem=f"couldn't read the branch's diff: {e}")
-    violations = check(packs, diff) if diff is not None else []
+    violations = check(packs, diff, committed_source(ws.path)) if diff is not None else []
     return Result(names, violations + check_write_scope(scope, files)
                   + check_protected_paths(protected, files))
 

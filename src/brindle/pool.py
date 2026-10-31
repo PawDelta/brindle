@@ -23,12 +23,11 @@ import fcntl
 import hashlib
 import os
 import shutil
-import subprocess
 import time
 import uuid
 from pathlib import Path
 
-from brindle import git, workspaces
+from brindle import git, spawn, workspaces
 from brindle.config import RepoConfig, load_repo_config, worktree_root, worktrees_dir
 from brindle.db import DB, PoolEntry, Workspace
 
@@ -177,10 +176,7 @@ def fill_in_background(repo_root: str) -> None:
     from brindle.providers import brindle_invocation
 
     try:
-        subprocess.Popen(
-            [*brindle_invocation(), "_pool-fill", repo_root],
-            start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        spawn.detach([*brindle_invocation(), "_pool-fill", repo_root])
     except OSError:
         pass
 

@@ -50,6 +50,7 @@ from brindle.pro import route_health
 
 # An agent this new may not have its window recorded yet.
 LAUNCH_GRACE = agents.LAUNCH_GRACE
+LOCK_MAX_AGE = 24 * 3600   # a lock file untouched this long is cleaned up
 # How long a message waits for its normal delivery (a hook, the start-up
 # flush) before a sweep retries it.
 FLUSH_RETRY_AFTER = 30.0
@@ -151,6 +152,13 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     from brindle import autopilot
 
     done.extend(autopilot.usage_sweep(db, now))
+
+    # 1b'. Tasks queued for room on the machine whose helper is gone: start them once there is.
+    from brindle import tasks
+
+    started = tasks.start_with_room(db)
+    if started:
+        done.append(f"started {started} task(s) that were waiting for room")
 
     # 1c. Workers at their dollar budget (brindle Pro): warn, or stop if asked to.
     from brindle import budget
@@ -704,6 +712,38 @@ def clean_locks(db: DB, now: float | None = None) -> int:
                 try:
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
+                    continue
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed + _clean_old_locks(now)
+
+
+# Lock kinds whose acquirers (gates._open_locked) recheck the file after locking,
+# so deleting one while it is held can't leave a waiter on an unlinked inode.
+# (not check-slot-N.lock: the machine-wide slots are opened without a recheck).
+_REVALIDATED_LOCKS = re.compile(r"(check|checks-running|checks-room|review-request|review-run|merge-run)-[0-9a-f]{16}\.lock")
+
+
+def _clean_old_locks(now: float) -> int:
+    """Delete old ``locks/*.lock`` files of the kinds above, untouched for
+    LOCK_MAX_AGE, but only after taking it non-blocking, so a lock somebody
+    holds is never removed."""
+    removed = 0
+    for path in (brindle_home() / "locks").glob("*.lock"):
+        if not _REVALIDATED_LOCKS.fullmatch(path.name):
+            continue
+        try:
+            if now - path.stat().st_mtime <= LOCK_MAX_AGE:
+                continue
+            with open(path) as f:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                # a concurrent cleanup may have replaced the file since we opened it
+                if not os.path.samestat(os.stat(path), os.fstat(f.fileno())):
                     continue
                 path.unlink()
                 removed += 1

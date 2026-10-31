@@ -317,6 +317,7 @@ def refresh_claude_usage(*, force: bool = False) -> bool:
     global _claude_usage_at
     import subprocess
 
+    from brindle import spawn
     from brindle.providers import claude_binary
 
     if not force and time.time() - _claude_usage_at < CLAUDE_USAGE_REFRESH_SECONDS:
@@ -325,9 +326,8 @@ def refresh_claude_usage(*, force: bool = False) -> bool:
     if _key_billed("claude"):
         return False
     try:
-        proc = subprocess.run([claude_binary(), "-p", "/usage"], capture_output=True, text=True,
-                              timeout=CLAUDE_USAGE_TIMEOUT, cwd=str(brindle_home()),
-                              stdin=subprocess.DEVNULL)
+        proc = spawn.read([claude_binary(), "-p", "/usage"], timeout=CLAUDE_USAGE_TIMEOUT,
+                          cwd=str(brindle_home()))
     except (OSError, subprocess.TimeoutExpired):
         return False
     windows = parse_claude_usage(proc.stdout) if proc.returncode == 0 else []

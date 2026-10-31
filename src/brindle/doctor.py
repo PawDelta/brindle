@@ -16,6 +16,7 @@ from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
+from brindle import spawn
 from brindle.db import DB
 
 OK, WARN, FAIL = "ok", "warn", "fail"
@@ -28,9 +29,13 @@ class Check:
     detail: str
 
 
+VERSION_SECONDS = 15
+TMUX_SECONDS = 10
+
+
 def _version(cmd: list[str]) -> str | None:
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        out = spawn.read(cmd, timeout=VERSION_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
         return None
     text = (out.stdout or out.stderr).strip().splitlines()
@@ -442,7 +447,7 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
         try:
             sock = os.environ.get("BRINDLE_TMUX_SOCKET")
             cmd = ["tmux", *(["-L", sock] if sock else []), "-V"]
-            subprocess.run(cmd, capture_output=True, timeout=10)
+            spawn.read(cmd, timeout=TMUX_SECONDS)
             focus = tmux._tmux("show-options", "-gs", "focus-events", check=False).stdout.strip()
             out.append(Check(OK, "tmux focus-events", focus or "not set yet (brindle sets it at launch)"))
         except tmux.TmuxTimeout as e:
@@ -513,8 +518,7 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
                                  "no graphify graph: agents find code by grepping. Run /graphify once."))
         except ValueError as e:
             out.append(Check(FAIL, "repo config", str(e)))
-        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=repo_root,
-                               capture_output=True, text=True).stdout.strip()
+        dirty = spawn.read(["git", "status", "--porcelain"], cwd=repo_root).stdout.strip()
         if dirty:
             out.append(Check(WARN, "working tree",
                              "uncommitted changes: workers branch from committed work only"))

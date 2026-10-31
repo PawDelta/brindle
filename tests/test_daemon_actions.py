@@ -116,6 +116,42 @@ def test_deprecated_disable_preserves_goal_and_open_question(db, world):
     assert ap.enabled and ap.goal == "Ship" and ap.state == "blocked" and ap.question
 
 
+@pytest.mark.parametrize("checks", [[], ["true"]])
+def test_review_lock_returns_busy_without_starting_work(db, world, monkeypatch, checks):
+    import fcntl
+    import hashlib
+
+    started = []
+    monkeypatch.setattr(config, "load_repo_config", lambda *a, **k: config.RepoConfig(checks=checks))
+    monkeypatch.setattr(agents, "_review_profile", lambda *a: "reviewer")
+    monkeypatch.setattr(agents, "_request_review", lambda *a: started.append("reviewer"))
+    monkeypatch.setattr(agents, "_detach", lambda *a: started.append("checks"))
+    monkeypatch.setattr(routes_actions, "REVIEW_LOCK_WAIT", 0.05, raising=False)
+    name = "review-dispatch-" + hashlib.sha1(b"w-1").hexdigest()[:16]
+    directory = config.brindle_home() / "locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    with (directory / f"{name}.lock").open("w") as holder:
+        flock = fcntl.flock
+        flock(holder.fileno(), fcntl.LOCK_EX)
+
+        def guarded_flock(fd, operation):
+            if os.fstat(fd).st_ino == os.fstat(holder.fileno()).st_ino:
+                assert operation != fcntl.LOCK_EX, "review route attempted an unbounded lock wait"
+            return flock(fd, operation)
+
+        monkeypatch.setattr(fcntl, "flock", guarded_flock)
+        before = time.monotonic()
+        code, reply = _send("POST", "/v1/workspaces/w-1/review")
+        assert time.monotonic() - before < 1
+        assert code == 409 and reply["error"]["code"] == "busy", reply
+        assert started == [] and len(db.list_agents("w-1")) == 1
+        assert not agents._review_request_file("w-1", "reviewer").exists()
+        flock(holder.fileno(), fcntl.LOCK_UN)
+        monkeypatch.setattr(fcntl, "flock", flock)
+        code, reply = _send("POST", "/v1/workspaces/w-1/review")
+        assert code == 200 and len(started) == 1, reply
+
+
 def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(db, tmp_path, monkeypatch):
     from brindle import procs, tmux
     from brindle import sessions as sessions_mod
@@ -810,9 +846,8 @@ def test_provider_connection_method_is_saved_reaches_the_pane_and_respects_the_o
     aws = tmp_path / "no-aws" / "config"     # AWS_CONFIG_FILE (conftest)
     aws.parent.mkdir()
     ran = []
-    # The sign-in job's cloud CLI: a fake process, nothing else's.
-    monkeypatch.setattr(routes_actions, "subprocess", SimpleNamespace(
-        **{k: getattr(subprocess, k) for k in ("DEVNULL", "PIPE", "STDOUT", "CompletedProcess")}, Popen=_FakeCLI))
+    # The sign-in job's cloud CLI (started through brindle.spawn): a fake process.
+    monkeypatch.setattr(routes_actions.spawn, "start", _FakeCLI)
     if case == "api_key":
         code, reply = _send("PUT", path, {"method": "api_key"})
         assert code == 200 and (reply["method"], reply["choice"]["method"], reply["cloud"]) == ("api_key",) * 2 + (None,)
@@ -1283,6 +1318,7 @@ def test_opencode_cloud_identity_dispatch(db, world, tmp_path, monkeypatch, rout
         db.set_status("wk", state)
         db.update_autopilot("sup", state="blocked", note="Credentials need attention")
         healthy = False
+        cloud_login._google_expiry_cache.clear()   # the sign-in lapsed: no token left to reuse
         assert _send("POST", "/v1/sessions/sup/continue")[0] == 409
         assert db.get_autopilot("sup").state == "blocked"
         healthy = True
@@ -1723,6 +1759,8 @@ def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, a
 @pytest.fixture
 def lead(db, repo, tmp_path, monkeypatch):
     """A session ``lead`` on branch ``sess`` (base main) in its own checkout, its goal reached; jobs run inline."""
+    from brindle import spawn
+    monkeypatch.setattr(spawn, "room", lambda: 4)
     sh(f"git worktree add -q -b sess {tmp_path / 'sess'} main", repo)
     ws = workspaces.adopt_root(db, str(tmp_path / "sess"))
     db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, time.time()))
@@ -1794,6 +1832,40 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     _commit(sess, "d.py", "d\n")
     assert missing() == 1
     assert [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))] == ["lead"]
+
+
+@pytest.mark.parametrize("obstacle", ["identity", "interrupted"])
+def test_readiness_prepares_after_startup_and_recovers(db, lead, monkeypatch, obstacle):
+    from brindle import gates, git, identity_lock
+    from brindle.daemon import session_review
+    head = _commit(Path(lead.path), "a.py", "a\n")
+    config.set_local(lead.repo_root, "checks", ["validate"])
+    held = []
+    monkeypatch.setattr(routes_actions, "_spawn", held.append)
+    monkeypatch.setattr(gates, "run_checked", lambda *a, **kw: (True, ""))
+    watch = session_review.ReadinessWatch()
+    watch.sweep(db)
+    if obstacle == "identity":
+        monkeypatch.setattr(identity_lock, "locked_by", lambda *a: "other")
+        watch.sweep(db)
+        assert held == []
+        monkeypatch.setattr(identity_lock, "locked_by", lambda *a: None)
+    watch.sweep(db)
+    assert len(held) == 1
+    if obstacle == "interrupted":
+        def fail(*a, **kw):
+            raise RuntimeError("checks unavailable")
+        monkeypatch.setattr(gates, "run_checked", fail)
+        held.pop()()
+        watch.sweep(db)
+        assert held == []  # respect preparation's existing backoff
+        routes_actions._PR_TRIED[("lead", "sess")] = (head, time.monotonic() - 61)
+        monkeypatch.setattr(gates, "run_checked", lambda *a, **kw: (True, ""))
+        watch.sweep(db)
+    held.pop()()
+    monkeypatch.setattr(git, "run", lambda *a, **kw: pytest.fail("settled preparation ran git"))
+    watch.sweep(db)
+    assert db.conn.execute("SELECT state FROM session_pr_prep WHERE root_id = 'lead'").fetchone()[0] == "passed"
 
 
 def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):

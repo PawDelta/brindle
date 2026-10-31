@@ -38,10 +38,12 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+from brindle import spawn
+
 if TYPE_CHECKING:
     from brindle.db import Workspace
 
-GRAPH = Path("graphify-out") / "graph.json"
+GRAPH =Path("graphify-out") / "graph.json"
 # Read-only graphify commands, pre-approved for Claude agents.
 ALLOWED_TOOLS = ["Bash(graphify query:*)", "Bash(graphify explain:*)", "Bash(graphify path:*)",
                  "Bash(graphify affected:*)"]
@@ -377,7 +379,7 @@ def _request_refresh(checkout: str, repo_root: str | None, *, background: bool) 
 
                 log = brindle_home() / "graphify.log"
                 with log.open("a", encoding="utf-8") as out:
-                    subprocess.Popen(
+                    spawn.start(
                         [sys.executable, "-P", "-c",
                          "import sys; from brindle.codemap import _run_refresh; "
                          "_run_refresh(sys.argv[1], sys.argv[2] or None, int(sys.argv[3]))",
@@ -451,7 +453,7 @@ def _start_refresh(checkout: str, repo_root: str | None, lock_fd: int) -> Callab
     log = brindle_home() / "graphify.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     with open(log, "a", encoding="utf-8") as out:
-        proc = subprocess.Popen(
+        proc = spawn.start(
             ["nice", "-n", "10", "graphify", "update", checkout, "--force"],
             cwd=checkout,
             start_new_session=True,
