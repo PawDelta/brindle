@@ -715,7 +715,8 @@ def clean_locks(db: DB, now: float | None = None) -> int:
 
 # Lock kinds whose acquirers (gates._open_locked) recheck the file after locking,
 # so deleting one while it is held can't leave a waiter on an unlinked inode.
-_REVALIDATED_LOCKS = ("check-", "checks-running-", "review-request-", "review-run-", "merge-run-")
+# (not check-slot-N.lock: the machine-wide slots are opened without a recheck).
+_REVALIDATED_LOCKS = re.compile(r"(check|checks-running|review-request|review-run|merge-run)-[0-9a-f]{16}\.lock")
 
 
 def _clean_old_locks(now: float) -> int:
@@ -724,7 +725,7 @@ def _clean_old_locks(now: float) -> int:
     holds is never removed."""
     removed = 0
     for path in (brindle_home() / "locks").glob("*.lock"):
-        if not path.name.startswith(_REVALIDATED_LOCKS):
+        if not _REVALIDATED_LOCKS.fullmatch(path.name):
             continue
         try:
             if now - path.stat().st_mtime <= LOCK_MAX_AGE:

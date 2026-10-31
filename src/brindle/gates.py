@@ -290,30 +290,23 @@ def _marker_file(kind: str, ws_id: str):
     return lock_dir / (f"{kind}-" + hashlib.sha1(ws_id.encode()).hexdigest()[:16] + ".lock")
 
 
-def _open_locked(path, op: int, cancel=None):
-    """Open ``path`` and lock it with ``op`` (waiting, or until ``cancel``
-    is true), returning the open file. Cull deletes old lock files while
-    holding them, so once the lock is ours check the file on disk is still the
-    one we hold, else reopen: a lock on an unlinked file excludes nobody."""
+def _still_ours(path, f) -> bool:
+    """Whether ``path`` on disk is still the file ``f`` holds. Cull deletes old
+    lock files while holding them, so after taking a lock check this: a lock on
+    an unlinked file excludes nobody, and the caller must reopen."""
+    try:
+        return os.path.samestat(os.stat(path), os.fstat(f.fileno()))
+    except FileNotFoundError:
+        return False
+
+
+def _open_locked(path, op: int):
+    """Open ``path`` and lock it with ``op`` (waiting), returning the open file."""
     while True:
         f = open(path, "w")
         try:
-            if cancel is None:
-                fcntl.flock(f.fileno(), op)
-            else:
-                while True:
-                    try:
-                        fcntl.flock(f.fileno(), op | fcntl.LOCK_NB)
-                        break
-                    except BlockingIOError:
-                        if cancel():
-                            raise Abandoned("lock")
-                        time.sleep(SLOT_POLL)
-            try:
-                same = os.path.samestat(os.stat(path), os.fstat(f.fileno()))
-            except FileNotFoundError:
-                same = False
-            if same:
+            fcntl.flock(f.fileno(), op)
+            if _still_ours(path, f):
                 return f
         except BaseException:
             f.close()
@@ -452,7 +445,24 @@ def _check_lock(repo_root: str, tree: str, cmd: str, cancel=None):
     key = hashlib.sha1(f"{repo_root}\0{tree}\0{cmd}".encode()).hexdigest()[:16]
     lock_dir = brindle_home() / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    with _open_locked(lock_dir / f"check-{key}.lock", fcntl.LOCK_EX, cancel) as f:
+    lock_path = lock_dir / f"check-{key}.lock"
+    with open(lock_path, "w") as f:
+        if cancel is None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        else:
+            while True:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if cancel():
+                        raise Abandoned("lock")
+                    time.sleep(SLOT_POLL)
+        if not _still_ours(lock_path, f):   # cull removed it while we waited: lock the new file
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            with _check_lock(repo_root, tree, cmd, cancel) as result_file:
+                yield result_file
+            return
         try:
             yield lock_dir / f"check-{key}.result"
         finally:
