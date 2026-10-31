@@ -213,7 +213,7 @@ def test_session_diff_overload(db, repo, monkeypatch):
     monkeypatch.setattr(session_review, "diff", measured)
 
     async def exercise():
-        short, cheap_bound = 0.075, 2.0
+        short, cheap_bound = 0.075, 0.1
         limiter = anyio.to_thread.current_default_thread_limiter()
         samples, abandoned, shed, answered, latencies = [], [], [], [], {}
         loop = asyncio.get_running_loop()
@@ -256,8 +256,28 @@ def test_session_diff_overload(db, repo, monkeypatch):
                         stats = limiter.statistics()
                         samples.append((stats.borrowed_tokens, stats.tasks_waiting, lane.workers.borrowed_tokens))
 
+                async def sample_cheap():
+                    # Cheap reads while the pollers' diffs are really running.
+                    while not pollers_done.is_set():
+                        for path in ("/v1/meta", "/v1/repos"):
+                            busy = lane.workers.borrowed_tokens > 0
+                            start = time.monotonic()
+                            (await client.get(path)).raise_for_status()
+                            # Busy if the heavy lane held a worker when the request began or ended.
+                            during.append((time.monotonic() - start,
+                                           busy or lane.workers.borrowed_tokens > 0))
+
+                # Drop the cached diff: the first poll recomputes the full history.
+                session_review._forget()
+                pollers_done, during = asyncio.Event(), []
+                sampler = asyncio.ensure_future(sample_cheap())
                 outcomes = await asyncio.gather(*(poll() for _ in range(8)), return_exceptions=True)
+                pollers_done.set()
+                await sampler
                 assert all(outcome is None for outcome in outcomes), outcomes
+                overlapped = [seconds for seconds, busy in during if busy]
+                assert overlapped, "no cheap read overlapped heavy work"
+                window = [seconds for seconds, _ in during]
                 executor = loop._default_executor
                 executor_at_probe = [len(executor._threads), executor._work_queue.qsize()] if executor else [0, 0]
                 executor_start = time.monotonic()
@@ -272,7 +292,8 @@ def test_session_diff_overload(db, repo, monkeypatch):
             await server.shutdown(sockets=[sock])
             sock.close()
         print("OVERLOAD " + json.dumps({
-            "latencies_s": latencies, "abandoned": len(abandoned), "shed": len(shed), "answered": len(answered),
+            "latencies_s": latencies, "cheap_during_diffs": [len(overlapped), len(window), max(window)],
+            "abandoned": len(abandoned), "shed": len(shed), "answered": len(answered),
             "diffs_completed": len(completed), "git_per_diff": sorted({c[0] for c in completed}),
             "diffs_stopped": len(stopped),
             "diff_seconds_min_max": [min(c[1] for c in completed[1:] or completed),
@@ -294,6 +315,7 @@ def test_session_diff_overload(db, repo, monkeypatch):
         assert occupancy.tasks_waiting == 0
         assert occupancy.borrowed_tokens < occupancy.total_tokens
         assert max(latencies["meta_loaded"], latencies["repos_loaded"]) < cheap_bound, latencies
+        assert max(window) < cheap_bound, sorted(window)[-5:]
 
     with wall_clock(DEADLINE):
         asyncio.run(exercise())
