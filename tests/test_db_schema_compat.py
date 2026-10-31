@@ -1,8 +1,11 @@
 import time
 
+import pytest
+
 from brindle.db import DB, Task, Workspace
 
 
+@pytest.mark.variant("live incident 2026-10-30: an app update added columns and open sessions' inserts failed")
 def test_an_older_engine_writes_and_reads_rows_a_newer_engine_added_columns_to(tmp_path):
     """A newer brindle migrates the shared database while an older one (a
     session's MCP server, say) keeps running against it: every write names its
