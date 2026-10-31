@@ -624,12 +624,16 @@ def test_logout_and_a_signed_out_doctor_fix_remove_the_federation_directory(aws_
     ("codex", "linux", "EACCES"),
     ("az", "linux", "InstallAzureCLIDeb"),
     ("az", "darwin", None),
+    ("claude", "linux", "(or: npm install -g @anthropic-ai/claude-code)  [with npm on Linux, if that fails with EACCES"),
+    ("claude", "darwin", "(or: npm install -g @anthropic-ai/claude-code)"),
 ])
 def test_install_hint_gives_linux_alternatives_only_on_linux(monkeypatch, tool, platform, wanted):
     monkeypatch.setattr(sys, "platform", platform)
     hint = company_login.install_hint(tool)
-    assert company_login.INSTALL[tool] in hint
+    assert hint.startswith(company_login.INSTALL[tool])
+    assert tool != "claude" or hint.startswith("curl -fsSL https://claude.ai/install.sh | bash")
     assert (wanted in hint) if wanted else hint == company_login.INSTALL[tool]
+    assert ("EACCES" in hint) == (platform == "linux" and tool != "az")
 
 
 def test_wsl_browser_interactive_login_gets_its_env(monkeypatch):
@@ -667,11 +671,3 @@ def test_signing_in_adopts_the_agents_launched_while_signed_out(monkeypatch):
     monkeypatch.setattr(signin_pause, "check", lambda provider, cache=False: 1 / 0)
     assert go(setup)[0]
 
-
-@pytest.mark.parametrize("platform", ["linux", "darwin"])
-def test_claude_install_hint_leads_with_the_official_installer(monkeypatch, platform):
-    monkeypatch.setattr(sys, "platform", platform)
-    hint = company_login.install_hint("claude")
-    assert hint.startswith("curl -fsSL https://claude.ai/install.sh | bash")
-    assert "(or: npm install -g @anthropic-ai/claude-code)" in hint
-    assert ("EACCES" in hint) == (platform == "linux")
