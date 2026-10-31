@@ -157,13 +157,11 @@ def test_daemon_leaks_nothing_under_load(db, repo, monkeypatch):
 
 
 class ReadDeadlineMiss(AssertionError):
-    """Only the measured cheap-read deadline can be an expected failure."""
+    """A measured cheap read exceeded its response deadline."""
 
 
 @pytest.mark.serial
 @pytest.mark.variant("Long supervisor history with clients abandoning and re-asking for attributed diffs")
-@pytest.mark.xfail(strict=True, raises=ReadDeadlineMiss,
-                   reason="Abandoned session diffs exhaust AnyIO and delay cheap reads past 300 ms")
 def test_session_diff_overload(db, repo, monkeypatch):
     # Import 204 worker commits and 12 genuine two-parent supervisor merges.
     # The final merge deletes a base file, making attribution walk the whole history.
@@ -194,7 +192,7 @@ def test_session_diff_overload(db, repo, monkeypatch):
     db.add_agent(Agent("overload", "overload", "supervisor", "claude", None, "interactive",
                        "idle", "", None, 1000.0))
     db.conn.close()
-    local, completed = threading.local(), []
+    local, started, completed = threading.local(), [], []
     real_git, real_diff = git.run, session_review.diff
 
     def counted(*args, **kwargs):
@@ -204,6 +202,7 @@ def test_session_diff_overload(db, repo, monkeypatch):
 
     def measured(*args):
         start, local.count = time.monotonic(), 0
+        started.append(start)
         try:
             result = real_diff(*args)
             completed.append((local.count, time.monotonic() - start, len(result["files"])))
@@ -217,11 +216,13 @@ def test_session_diff_overload(db, repo, monkeypatch):
     async def exercise():
         short, cheap_bound = 0.075, 0.3
         limiter = anyio.to_thread.current_default_thread_limiter()
-        samples, abandoned, latencies = [], [], {}
+        samples, abandoned, shed, latencies = [], [], [], {}
         loop = asyncio.get_running_loop()
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))
-        server = lifecycle.make_server(build_app(TOKEN))
+        app = build_app(TOKEN)
+        lane = app.app.state.heavy_read_lane
+        server = lifecycle.make_server(app)
         server.config.load()
         server.lifespan = server.config.lifespan_class(server.config)
         await server.startup(sockets=[sock])
@@ -246,11 +247,14 @@ def test_session_diff_overload(db, repo, monkeypatch):
                         try:
                             response = await client.get("/v1/sessions/overload/diff",
                                                         timeout=httpx.Timeout(DEADLINE, read=short))
-                            response.raise_for_status()
+                            if response.status_code == 503 and response.json().get("error", {}).get("code") == "busy":
+                                shed.append(time.monotonic())
+                            else:
+                                response.raise_for_status()
                         except httpx.ReadTimeout:
                             abandoned.append(time.monotonic())
                         stats = limiter.statistics()
-                        samples.append((stats.borrowed_tokens, stats.tasks_waiting))
+                        samples.append((stats.borrowed_tokens, stats.tasks_waiting, lane.workers.borrowed_tokens))
 
                 outcomes = await asyncio.gather(*(poll() for _ in range(8)), return_exceptions=True)
                 assert all(outcome is None for outcome in outcomes), outcomes
@@ -260,6 +264,7 @@ def test_session_diff_overload(db, repo, monkeypatch):
                 await asyncio.to_thread(lambda: None)
                 executor_latency = time.monotonic() - executor_start
                 occupancy = limiter.statistics()
+                heavy_at_probe = [lane.admission.borrowed_tokens, lane.workers.borrowed_tokens]
                 await asyncio.gather(read("/v1/meta", "meta_loaded"), read("/v1/repos", "repos_loaded"))
         finally:
             # Disconnected requests still own real workers; drain before closing the loop.
@@ -267,17 +272,21 @@ def test_session_diff_overload(db, repo, monkeypatch):
             await server.shutdown(sockets=[sock])
             sock.close()
         print("OVERLOAD " + json.dumps({
-            "latencies_s": latencies, "abandoned": len(abandoned),
+            "latencies_s": latencies, "abandoned": len(abandoned), "shed": len(shed),
             "diffs_completed": len(completed), "git_per_diff": sorted({c[0] for c in completed}),
             "diff_seconds_min_max": [min(c[1] for c in completed[1:]), max(c[1] for c in completed[1:])],
             "anyio_capacity": limiter.total_tokens, "anyio_peak_active": max(s[0] for s in samples),
             "anyio_peak_queued": max(s[1] for s in samples),
             "anyio_at_probe": [occupancy.borrowed_tokens, occupancy.tasks_waiting],
+            "heavy_capacity": lane.workers.total_tokens, "heavy_peak_active": max(s[2] for s in samples),
+            "heavy_admission_workers_at_probe": heavy_at_probe,
             "executor_probe_s": executor_latency, "executor_threads_queued_at_probe": executor_at_probe,
         }, sort_keys=True))
-        assert abandoned and len(completed) == 41
+        # A busy response can itself arrive after the client's short bound.
+        assert abandoned and len(completed) == len(started) > 1
         assert all(c[2] == 25 for c in completed)
         assert limiter.borrowed_tokens == 0
+        assert lane.admission.borrowed_tokens == lane.workers.borrowed_tokens == 0
         if max(latencies["meta_loaded"], latencies["repos_loaded"]) > cheap_bound:
             raise ReadDeadlineMiss(latencies)
 

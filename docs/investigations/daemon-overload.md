@@ -1,14 +1,20 @@
 # Daemon overload investigation
 
-Verdict: **reproduced on unmodified production code**, with an important
-qualification about the pools. Abandoned session diffs occupy AnyIO workers
-and delay a cheap synchronous read, `/v1/repos`. `/v1/meta` also missed its
-300 ms bound in a clean run, but the asyncio default executor was empty.
-The observation does not establish the proposed chain through that executor.
+Verdict: **pool saturation reproduced before (`56e845a4`), avoided after
+the heavy-route lane (`a085f9f1`); the 300 ms deadline remains intermittent**.
+Previously, abandoned
+session diffs filled AnyIO's default pool and delayed `/v1/repos`.
+After rebasing onto `brindle/session-21`, the same load occupied the separate
+four-worker heavy lane and shed excess requests. Both cheap reads passed
+their unchanged 300 ms bound in one completed run, producing strict XPASS;
+the marker was removed. The next run missed the bound for `/v1/repos`
+despite zero default-pool occupancy. All results, including this failure,
+are retained below; the passing run is not a stable-gate claim.
 
 ## Setup and method
 
-Measured on macOS arm64, CPython 3.12.12, at production revision `56e845a4`.
+Measured on macOS arm64, CPython 3.12.12, before at production revision
+`56e845a4` and after at `a085f9f1` (which includes the heavy-route lane).
 Only the soak test and this report change. The test uses the existing isolated
 repository and database fixtures, `build_app`, and the daemon's real uvicorn
 HTTP protocol on an ephemeral loopback TCP port. No tmux session is needed.
@@ -23,6 +29,8 @@ An isolated HTTP diff and both cheap reads establish the baseline. Eight
 concurrent pollers then each issue five diff requests, abandon the response
 after 75 ms, close their connections, and ask again. Connection establishment
 has a separate, longer bound. AnyIO's default 40-token limiter is unchanged.
+After the lane change, received HTTP 503 responses count separately as shed
+only when their error code is `busy`; other received errors still fail.
 Both cheap reads run concurrently after the pollers finish; their complete
 response times are compared with 300 ms, retaining the actual late latency.
 
@@ -41,7 +49,7 @@ or removal of instrumentation. Completion and file-count assertions ensure
 that an HTTP error or an unfinished handler cannot masquerade as overload.
 The existing 50-second wall-clock guard bounds the network exercise.
 
-## Final harness measurements
+## Before (`56e845a4`)
 
 The final fixture failed on unchanged production code before adding any
 xfail marker. Every handler completed, and the sole failure was the measured
@@ -61,14 +69,77 @@ cheap-read deadline:
 | Asyncio executor no-op latency | 0.0194 s |
 | Complete pytest run, including fixture and cleanup | 16.20 s |
 
-The final test uses `xfail(strict=True, raises=ReadDeadlineMiss)`: only the
-read-latency failure is expected. Fixture, HTTP, completion, and cleanup
-failures remain failures. A future implementation that serves both reads
-within 300 ms produces a strict XPASS requiring removal of the marker.
+The original test used `xfail(strict=True, raises=ReadDeadlineMiss)`:
+only the read-latency failure was expected. Fixture, HTTP, completion, and
+cleanup failures remained failures. The lane change subsequently produced
+strict XPASS, so the marker has been removed.
 The variant marker identifies the deliberate concurrent incident input;
 this is one added test, within the checker’s 150-line allowance.
 
-## Observations while scaling
+## After heavy-route lane (`a085f9f1`)
+
+The fixture, eight pollers, 40 attempts, 75 ms response bound, and 300 ms
+cheap-read assertion are unchanged. The harness now records the app's
+separate heavy admission/worker limiters as well as the default pool.
+
+| Measurement | Result |
+| --- | ---: |
+| Git processes inside each admitted diff | 70 |
+| Baseline HTTP diff | 2.005 s |
+| Loaded diff execution, min–max | 2.767–2.907 s |
+| Baseline `/v1/meta` / `/v1/repos` | 0.0067 / 0.0129 s |
+| Loaded `/v1/meta` / `/v1/repos` | 0.0503 / 0.0474 s |
+| Client-abandoned requests | 19 |
+| Received 503 `busy` responses (shed) | 21 |
+| Admitted / completed loaded diffs | 4 / 4 |
+| Default AnyIO occupied / capacity at probe | 0 / 40 |
+| Default AnyIO sampled peak occupied / queued | 0 / 0 |
+| Heavy worker occupied / capacity at probe | 4 / 4 |
+| Heavy admission occupied / capacity at probe | 4 / 4 |
+| Heavy worker sampled peak occupied | 4 |
+| Asyncio executor threads / queued before probe | 0 / 0 |
+| Asyncio executor no-op latency | 0.0516 s |
+| Complete pytest run, including fixture and cleanup | 7.03 s |
+| Result with original strict marker | XPASS |
+
+The immediate finish-line run after removing the marker failed the unchanged
+read assertion (no intervening workload or production changes):
+
+| Measurement | Result |
+| --- | ---: |
+| Git processes inside each admitted diff | 70 |
+| Baseline HTTP diff | 1.513 s |
+| Loaded diff execution, min–max | 2.694–2.769 s |
+| Baseline `/v1/meta` / `/v1/repos` | 0.0031 / 0.0083 s |
+| Loaded `/v1/meta` / `/v1/repos` | 0.2150 / 0.3771 s |
+| Client-abandoned / received shed | 7 / 33 |
+| Admitted / completed loaded diffs | 4 / 4 |
+| Default AnyIO occupied / capacity; queued at probe | 0 / 40; 0 |
+| Heavy admission / worker occupancy at probe | 4 / 4 |
+| Asyncio executor threads / queued before probe | 0 / 0 |
+| Asyncio executor no-op latency | 0.0023 s |
+| Complete pytest run | 6.40 s |
+| Result without xfail | `ReadDeadlineMiss` |
+
+The test retains its unchanged bound and has no xfail. Restoring a strict
+xfail would merely exchange intermittent FAIL for intermittent XPASS.
+No repeated sampling or timing-bound change was used to conceal this result.
+
+A client can abandon before receiving even a `busy` response. Therefore
+the 19 abandoned requests include 15 requests that did not start a diff;
+the received shed count is not the server's total rejection count. Cleanup
+checks every started diff completed, rather than assuming every abandoned
+client acquired a worker. Both default and heavy limiters must release all
+tokens after draining.
+
+The initial after-lane trial exposed that accounting mistake: 9 abandoned,
+31 received shed, and only 4 loaded diffs completed. That trial also measured
+meta/repos at 0.381/0.402 s despite zero default-pool occupancy. It failed
+the old completion assertion, not the read assertion. This is evidence that
+the 300 ms threshold remains sensitive to host scheduling; the passing run
+does not prove an unconditional latency guarantee. The bound was not relaxed.
+
+## Before: observations while scaling
 
 The first, larger fixture had 240 commits, 80 merges, and 32 text files.
 It measured **282 git processes per diff**, 2.234 s baseline HTTP diff latency,
@@ -103,10 +174,11 @@ early connection-establishment failure counts as the reproduction.
 
 ## Interpretation and limits
 
-`routes_read._json` produces synchronous Starlette handlers, so a diff
-occupies one AnyIO token until it returns even after its HTTP client leaves.
-The same pool dispatches `/v1/repos`, which only reads workspace rows here.
-Repeated requests can therefore fill the pool and stall an unrelated read.
+Before the lane, `routes_read._json` dispatched session diffs through
+Starlette's default AnyIO limiter, retaining a token even after the HTTP
+client left. The same pool dispatches `/v1/repos`, which only reads workspace
+rows here. After the lane, session diffs use `_heavy_json`: admission rejects
+excess work immediately and admitted work uses a separate four-token limiter.
 The history cost follows first-parent steps, merges, and blamed files, not
 just the number of commits: `_deleters` performs two git commands per step,
 `_owners` one per merged parent, and `_blame` one per file with additions.
@@ -137,6 +209,8 @@ uv run pytest tests/test_daemon_soak.py -q -m serial -k overload
 ```
 
 Add `-s` to see the JSON measurements. This requires permission to bind a
-loopback socket. The exact finish-line command above completed with
-`1 deselected, 1 xfailed in 34.08s` after the strict marker was added.
+loopback socket. Before the lane, the exact finish-line command completed
+with `1 deselected, 1 xfailed in 34.08s` after the strict marker was added.
+After the lane and removal of xfail, it failed the read deadline in 6.40 s
+as detailed above. Handling that intermittent timing failure remains open.
 The full suite is left to brindle's merge gate.
