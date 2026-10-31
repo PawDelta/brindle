@@ -481,3 +481,64 @@ def test_sweep_retries_a_flush_the_pane_blocked(db, ws, monkeypatch):
     assert db.pending_count("boss") == 0
     cull.sweep(db, now=later)
     assert len(pasted) == 1
+
+
+def test_lock_cleanup_keeps_held_and_status_read_creates_nothing(db, brindle_home):
+    import fcntl
+    from brindle import gates
+
+    assert gates.marked("review", "w1") is False
+    assert list((brindle_home / "locks").glob("*")) == []
+    old = time.time() - cull.LOCK_MAX_AGE - 60
+    held, free, slot = (brindle_home / "locks" / n for n in (
+        "check-" + "a" * 16 + ".lock", "review-run-" + "b" * 16 + ".lock", "check-slot-0.lock"))
+    for p in (held, free, slot):
+        p.write_text("")
+        os.utime(p, (old, old))
+    with open(held) as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+        assert cull.clean_locks(db) == 1
+    assert held.exists() and slot.exists() and not free.exists()
+
+
+def test_lock_cleanup_race_waiter_relocks_the_new_file(brindle_home, monkeypatch):
+    import fcntl
+    from brindle import gates
+
+    path = brindle_home / "locks" / "review-run-x.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    real = fcntl.flock
+    calls = []
+
+    def flock(fd, op):
+        if not calls:   # cleanup unlinks the file the waiter just opened
+            calls.append(1)
+            path.unlink()
+            path.write_text("")
+            path.unlink()
+        return real(fd, op)
+
+    monkeypatch.setattr(gates.fcntl, "flock", flock)
+    with gates._open_locked(path, fcntl.LOCK_SH) as f:
+        assert os.path.samestat(os.stat(path), os.fstat(f.fileno()))
+
+
+def test_lock_cleanup_race_check_lock_waiter_relocks(brindle_home, monkeypatch):
+    import fcntl
+    from brindle import gates
+
+    real = fcntl.flock
+    calls = []
+
+    def flock(fd, op):
+        if not calls:   # cleanup unlinks the check lock the waiter just opened
+            calls.append(1)
+            for p in (brindle_home / "locks").glob("check-*.lock"):
+                p.unlink()
+        return real(fd, op)
+
+    monkeypatch.setattr(gates.fcntl, "flock", flock)
+    with gates._check_lock("/r", "t", "cmd") as result:
+        (lock,) = (brindle_home / "locks").glob("check-*.lock")
+        assert result.name == lock.name.replace(".lock", ".result")

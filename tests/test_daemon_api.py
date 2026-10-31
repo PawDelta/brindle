@@ -486,6 +486,58 @@ def test_peer_pid_names_the_unix_socket_caller():
         assert peer.peer_pid(a) == os.getpid()
 
 
+@pytest.mark.parametrize("outcome", ["allowed", "error", "limit"])
+def test_caller_check_single_flight(monkeypatch, outcome):
+    from brindle.daemon import auth
+    release = threading.Event()
+    calls = []
+    def check(pid):
+        calls.append(threading.current_thread().name)
+        release.wait()
+        if outcome == "error":
+            raise RuntimeError("private process data")
+    monkeypatch.setattr(peer, "agent_caller", check)
+    bounded = hasattr(auth, "CALLER_CHECK_LIMIT")
+    if outcome == "limit":
+        monkeypatch.setattr(auth, "CALLER_CHECK_LIMIT", 0, raising=False)
+    async def exercise():
+        async def route(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200})
+        async def request():
+            sent = []
+            async def send(message):
+                sent.append(message)
+            await guard(scope, None, send)
+            return sent[0]["status"]
+        guard = Guard(route, TOKEN)
+        guard._callers[123] = (-float("inf"), None)
+        scope = {"type": "http", "path": "/v1/meta", "headers": [
+            (b"authorization", f"Bearer {TOKEN}".encode())], peer.PEER_PID: 123}
+        requests = [asyncio.create_task(request()) for _ in range(24)]
+        dispatched = asyncio.get_running_loop().create_future()
+        asyncio.get_running_loop().call_soon(dispatched.set_result, None)
+        await dispatched
+        try:
+            if outcome != "limit" or not bounded:
+                release.set()
+            statuses = await asyncio.gather(*requests)
+            assert statuses == [200 if outcome == "allowed" else 403] * 24
+            assert await request() == statuses[0]
+            if outcome == "limit":
+                guard._callers[123] = (-float("inf"), None)
+                monkeypatch.setattr(auth, "CALLER_CHECK_LIMIT", auth.CALLER_TTL)
+                asyncio.get_running_loop().call_soon(release.set)
+                assert await request() == 403
+        finally:
+            release.set()
+            await asyncio.gather(*getattr(guard, "_caller_checks", {}).values(), return_exceptions=True)
+        if outcome == "limit":
+            assert await request() == 403
+    asyncio.run(exercise())
+    assert len(calls) == 1
+    assert calls[0].startswith("brindle-caller")
+
+
 def test_window_size_cleanup_unsets_manual_only_on_brindles_own_windows_once(db, monkeypatch):
     # The old streaming daemon left window-size manual on windows it sized.
     db.add_workspace(Workspace("ws", "/r", "root", "main", "main", None, "/r", None, "brindle-root", 1.0))
