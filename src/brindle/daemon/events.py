@@ -13,6 +13,7 @@ import asyncio
 import dataclasses
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -39,6 +40,7 @@ class Feed:
         self._git_status = git_status
         self._alive: dict[str, bool] | None = None
         self._git: dict[str, dict] = {}
+        self._session_git: dict[str, tuple] = {}
         self._bar: object = False        # nothing sent yet (None is a real "no bar")
         self._due = {"live": 0.0, "git": 0.0}
 
@@ -105,6 +107,11 @@ class Feed:
 
         status = self._git_status or status_cache.cached_status
         out = []
+        roots = {}
+        for agent in self.db.list_agents():
+            if agent.parent_id is None:
+                roots.setdefault(agent.workspace_id, []).append(agent.id)
+        signatures = {}
         for ws in self.db.find_workspaces():
             if self.repo_root is not None and ws.repo_root != self.repo_root:
                 continue
@@ -115,6 +122,26 @@ class Feed:
             if self._git.get(ws.id) != st:
                 self._git[ws.id] = st
                 out.append({"type": "git", "workspace_id": ws.id, "status": st})
+            if ws.id not in roots:
+                continue
+            try:
+                index = status_cache._worktree_gitdir(Path(ws.path)) / "index"
+                try:
+                    info = index.stat()
+                    index_state = (info.st_mtime_ns, info.st_size, info.st_ino)
+                except FileNotFoundError:
+                    index_state = None
+                # Counts miss an amend, reset, or staging a different patch in
+                # an already dirty file. Read HEAD through linked/packed refs.
+                signature = (status_cache.read_head(ws.path), index_state, st)
+            except (OSError, ValueError, IndexError):
+                continue
+            for root in roots[ws.id]:
+                signatures[root] = signature
+                before = self._session_git.get(root)
+                if before is not None and before != signature:
+                    bus.publish_ws(self.db, "session.changed", ws, root_id=root)
+        self._session_git = signatures
         return out
 
     def _status(self) -> list[dict]:
