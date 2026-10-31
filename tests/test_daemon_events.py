@@ -9,6 +9,39 @@ from brindle.daemon.auth import WS_UNAUTHORIZED
 TOKEN = "t" * 43
 
 
+def test_status_fingerprint(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from brindle import git, status_cache
+
+    (tmp_path / ".git").mkdir()
+    source = tmp_path / "main.py"
+    source.write_text("original")
+    nested = tmp_path / "src"
+    nested.mkdir()
+    calls = []
+    monkeypatch.setattr(git, "base_ref", lambda *a: "main")
+    monkeypatch.setattr(git, "ahead_behind", lambda *a: (0, 0))
+    monkeypatch.setattr(git, "run", lambda *a: (calls.append(a), SimpleNamespace(stdout="## main\n"))[1])
+    status_cache.clear()
+    try:
+        status_cache.cached_status(tmp_path, "main", now=0)
+        calls.clear()
+        for now in (5, 10, 15, 30):
+            status_cache.cached_status(tmp_path, "main", now=now)
+        assert calls == []
+        source.write_text("modified and longer")
+        status_cache.cached_status(tmp_path, "main", now=31)
+        status_cache.cached_status(tmp_path, "main", now=32)
+        assert len(calls) == 1
+        (nested / "new.py").write_text("new")
+        status_cache.cached_status(tmp_path, "main", now=33)
+        assert len(calls) == 2
+        status_cache.cached_status(tmp_path, "main", now=1000)
+        assert len(calls) == 3
+    finally:
+        status_cache.clear()
+
+
 @pytest.mark.variant("a wrong first-frame token must close the socket with WS_UNAUTHORIZED")
 def test_missing_token_is_rejected(db):
     with TestClient(build_app(TOKEN)) as client, \
