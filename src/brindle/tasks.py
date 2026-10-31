@@ -659,11 +659,12 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
     """The detached helper's loop: start task ``task_id`` once there's room
     (``_start_if_ready`` looks), telling its caller. Ends when it starts, or
     when the task is no longer waiting (cancelled, held, started by a
-    sweep). Returns whether it started it."""
+    sweep) or its session is paused (``on_resumed`` takes over). Returns
+    whether it started it."""
     pause = threading.Event()
     while True:
         t = db.get_task(task_id)
-        if t is None or t.state != "pending" or t.waiting is None:
+        if t is None or t.state != "pending" or t.waiting is None or session_paused(db, t):
             return False
         why = room_wait()
         if why is None:
@@ -672,6 +673,34 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
         if why != t.waiting:
             db.update_task(t.id, waiting=why)   # list_tasks shows the machine as it is now
         pause.wait(poll)
+
+
+def session_paused(db: DB, t: Task) -> bool:
+    """Whether ``t``'s session (its caller, or the caller's root) is paused:
+    a paused session starts nothing, whatever wakes its queued tasks."""
+    if not t.caller_id:
+        return False
+    from brindle import autopilot
+
+    caller, root = db.get_agent(t.caller_id), db.get_agent(autopilot.root_of(db, t.caller_id))
+    return any(a is not None and a.status == "paused" for a in (caller, root))
+
+
+def on_resumed(db: DB, root_id: str) -> None:
+    """Session ``root_id`` was resumed: start its queued tasks that can
+    start now, and give each one still waiting for room its helper back
+    (the old one ended at the pause)."""
+    from brindle import autopilot
+
+    for t in db.list_tasks(state="pending"):
+        if not t.caller_id or autopilot.root_of(db, t.caller_id) != root_id:
+            continue
+        deps = _loads(t.depends_on)
+        if _start_if_ready(db, t, ", ".join(deps) if deps else "the session's resume"):
+            continue
+        now = db.get_task(t.id)
+        if now is not None and now.state == "pending" and now.waiting is not None:
+            _wait_in_background(t.id)
 
 
 def start_with_room_now(db: DB, t: Task) -> bool:
@@ -785,6 +814,9 @@ def start_queued(db: DB, task: Task) -> Agent:
     )
     if task.pipeline:
         db.update_agent(worker.id, pipeline=task.pipeline, pipeline_rounds=0)
+    # Nobody waits on a queued handoff (its reply said "queued" long ago):
+    # it starts as one, then its result is forwarded to its caller like an assign's.
+    agents.detach(db, worker.id)
     db.update_task(task.id, agent_id=worker.id, state="started", started_at=time.time())
     bus.publish_agent(db, "task.started", worker.id, task_id=task.id)
     savings.attach_agent(db, task.id, worker.id)
@@ -867,8 +899,8 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     start that fails cancels it too, with the reason sent to its caller
     (``requeue`` makes a new one). Returns whether it started."""
     caller_ws = db.get_workspace(t.caller_ws_id)
-    if not caller_ws:
-        return False
+    if not caller_ws or session_paused(db, t):
+        return False   # a paused session's tasks stay queued; resuming it starts them (on_resumed)
     try:
         if unmet_dependencies(db, caller_ws, _loads(t.depends_on), caller_id=t.caller_id,
                               dependent_task_id=t.id):

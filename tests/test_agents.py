@@ -413,10 +413,13 @@ def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
     assert capsys.readouterr().err.count("/no/such/cache") == 1
 
 
-def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo, monkeypatch):
-    """Plan 3.5: on a machine with no room an assign queues the task with the
-    reason, list_tasks shows it, autopilot doesn't count it as a stall, and
-    it starts, with a message to the supervisor, once the load falls."""
+@pytest.mark.parametrize("tool", ["assign", "handoff"])
+def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo, monkeypatch, tool):
+    """Plan 3.5: on a machine with no room an assign (or handoff) queues the
+    task with the reason, list_tasks shows it, autopilot doesn't count it as
+    a stall, a paused session starts nothing even once the load falls, and
+    resumed, it starts, with a message to the supervisor, and its result
+    reaches the supervisor when it reports."""
     import asyncio
 
     from conftest import full_text
@@ -437,7 +440,7 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     monkeypatch.setattr(spawn, "_load", lambda: load[0])
     monkeypatch.setattr(spawn, "_cores", lambda: 10)
 
-    out = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
+    out = asyncio.run(getattr(mcp_server, tool)("developer", "do A", branch="feat-a"))
     busy = "the machine is busy (load 14.0 on 10 cores"
     assert out.startswith("Queued task") and busy in out, out
     [t] = db.list_tasks(str(repo), state="pending")
@@ -450,12 +453,19 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     tasks.sweep(db)
     assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
 
+    db.set_status("boss", "paused")
     load[0] = 2.0
-    assert tasks.start_when_room(db, t.id, poll=0)
+    assert not tasks.start_when_room(db, t.id, poll=0) and tasks.start_with_room(db) == 0
+    assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
+
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: db_.set_status(a.id, "processing"))
+    agents.resume(db, "boss")
     assert db.get_task(t.id).state == "started"
     worker = db.get_agent(db.get_task(t.id).agent_id)
-    assert worker.parent_id == "boss"
+    assert worker.parent_id == "boss" and worker.mode == {"assign": "assign", "handoff": "handoff_detached"}[tool]
     text = full_text(db, "boss", db.pop_pending("boss").body)
     assert f"Started {worker.id} for task {t.id} (was waiting for room: {busy}" in text
+    agents.report_result(db, worker.id, "did A")
+    assert "did A" in full_text(db, "boss", db.pop_pending("boss").body)
 
 

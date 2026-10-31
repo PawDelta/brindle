@@ -1585,6 +1585,12 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         resumed.append(a)
     if any(a.id == root_id for a in resumed):
         knowledge.note(db, root_id, knowledge.RESUME)
+        from brindle import tasks
+
+        try:
+            tasks.on_resumed(db, root_id)   # queued tasks the pause held back
+        except Exception:  # noqa: BLE001 - a queued task must never keep the session from resuming
+            log.exception("brindle: starting %s's queued tasks on resume failed", root_id)
     ap = db.get_autopilot(root_id)
     failed_still = [a for a in candidates if db.get_agent(a.id) and db.get_agent(a.id).status == "failed"]
     if ap and ap.state == "blocked" and resumed and not failed_still:
