@@ -7,6 +7,7 @@ transaction.
 
 from __future__ import annotations
 
+import functools
 import re
 import signal
 import sqlite3
@@ -1004,6 +1005,42 @@ def _load(cls, row):
     return cls(**{k: row[k] for k in row.keys() if k in names})
 
 
+def _columns(conn: sqlite3.Connection) -> dict[str, frozenset[str]]:
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+    return {t: frozenset(r[1] for r in conn.execute(f'PRAGMA table_info("{t}")')) for t in tables}
+
+
+@functools.cache
+def _declared_columns() -> dict[str, frozenset[str]]:
+    """The columns this version's schema and migrations give each table."""
+    db = DB(":memory:")
+    try:
+        return _columns(db.conn)
+    finally:
+        db.conn.close()
+
+
+def migrated_by_newer() -> bool:
+    """Whether a newer brindle has migrated the database: a ``user_version``
+    past this version's, or columns in this version's tables that its schema
+    doesn't declare (rows this version writes would leave them unset). Read
+    as is, without this version's own setup and migrations; False while there
+    is no database yet."""
+    try:
+        conn = sqlite3.connect(db_path().resolve().as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        if conn.execute("PRAGMA user_version").fetchone()[0] > SCHEMA_VERSION:
+            return True
+        declared = _declared_columns()
+        return any(cols - declared[t] for t, cols in _columns(conn).items() if t in declared)
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
 class DB:
     def __init__(self, path: str | None = None) -> None:
         p = str(path) if path is not None else str(db_path())
@@ -1059,7 +1096,8 @@ class DB:
                           " agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,"
                           " doc_id BLOB NOT NULL, title TEXT, section TEXT, why TEXT NOT NULL,"
                           " created_at REAL NOT NULL)")
-                c.execute("INSERT INTO doc_requests SELECT r.id, r.agent_id, r.doc_id, d.title,"
+                c.execute("INSERT INTO doc_requests (id, agent_id, doc_id, title, section, why, created_at)"
+                          " SELECT r.id, r.agent_id, r.doc_id, d.title,"
                           " r.section, r.why, r.created_at FROM local_doc_requests r"
                           " JOIN kb_docs d ON d.id = r.doc_id")
                 c.execute("DROP TABLE local_doc_requests")
@@ -1930,7 +1968,8 @@ class DB:
         claim's token for ``hold_review``, or None when another got it."""
         now = time.time()
         if held is None:
-            cur = self.conn.execute("INSERT OR IGNORE INTO review_claims VALUES (?,?,?,NULL,?)",
+            cur = self.conn.execute("INSERT OR IGNORE INTO review_claims (workspace_id, sha, slot, agent_id,"
+                                    " claimed_at) VALUES (?,?,?,NULL,?)",
                                     (workspace_id, sha, slot, now))
         else:
             cur = self.conn.execute(

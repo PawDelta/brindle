@@ -10,7 +10,12 @@ The MCP server never restarts for that: its client doesn't reconnect a stdio
 server that exits, so every agent would lose brindle's tools. Instead it loads
 everything it will ever read from the install when it starts (`preload`), and
 keeps serving that version consistently; a server started after the upgrade
-gets the new one. The sidebar checks between refreshes whether the install
+gets the new one. Once the new version has migrated the database, though, the
+old code's rows would miss what the new one expects, so the server refuses
+every tool and tells its client to reconnect. (Re-exec'ing on the same stdio
+isn't safe instead: other tool calls may be mid-way through a merge, the
+client won't initialize the new process again, and requests already read
+into this one's buffers would be lost.) The sidebar checks between refreshes whether the install
 changed and, if it did, execs itself again in its pane."""
 
 from __future__ import annotations

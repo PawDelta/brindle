@@ -125,11 +125,12 @@ def _rollup(c, cutoff: float) -> None:
         old = c.execute("SELECT samples FROM stage_timings WHERE day=? AND repo_root=? AND stage=?",
                         (day, repo, stage)).fetchone()
         values = (json.loads(old["samples"]) if old else []) + new
-        c.execute("INSERT OR REPLACE INTO stage_timings VALUES (?, ?, ?, ?, ?, ?, ?)",
+        c.execute("INSERT OR REPLACE INTO stage_timings (day, repo_root, stage, n, median_s, p90_s, samples)"
+                  " VALUES (?, ?, ?, ?, ?, ?, ?)",
                   (day, repo, stage, len(values), statistics.median(values),
                    _percentile(sorted(values), 0.9), json.dumps(values)))
     c.execute("DELETE FROM stage_open")
-    c.executemany("INSERT INTO stage_open VALUES (?, ?, ?, ?)",
+    c.executemany("INSERT INTO stage_open (workspace_id, stage, who, ts) VALUES (?, ?, ?, ?)",
                   [(*k, v) for k, v in open_at.items()])
 
 

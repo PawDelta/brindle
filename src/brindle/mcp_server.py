@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from brindle import agents, antigravity, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config
-from brindle.db import DB, Agent, Workspace
+from brindle.db import DB, Agent, Workspace, migrated_by_newer
 from brindle.profiles import list_profiles
 from brindle.view import last_activity
 
@@ -26,6 +26,8 @@ MAX_DIFF_CHARS = 60_000
 MAX_STAT_LINES = 60
 
 STALE_NOTICE = "brindle was updated since this session started; run /mcp to reconnect"
+MIGRATED_ERROR = ("brindle was updated, run /mcp → brindle → Reconnect: this session's brindle tools "
+                  "still run the old version, and the new one has changed brindle's database")
 
 
 def _calling_agent() -> Agent | None:
@@ -33,12 +35,22 @@ def _calling_agent() -> Agent | None:
     return DB().get_agent(agent_id) if agent_id else None
 
 
+def _migrated_under_us() -> bool:
+    """Whether brindle was upgraded under this server and the new version has
+    migrated the database since: this server's code no longer writes the rows
+    that version expects (see upgrade.py)."""
+    return upgrade.install.changed() and migrated_by_newer()
+
+
 class _Server(MCPServer):
     """Refuses, before any tool runs, a tool its caller's role may not call
     (coordinator.refusal), and leaves it out of the caller's tool list: the
-    coordinator's allowlist is enforced here, never left to its prompt."""
+    coordinator's allowlist is enforced here, never left to its prompt.
+    Refuses every tool once a newer brindle migrated the database under it."""
 
     async def call_tool(self, name, arguments, context=None):
+        if _migrated_under_us():
+            raise ToolError(MIGRATED_ERROR)
         try:
             refused = coordinator.refusal(_calling_agent(), name)
             if refused:
