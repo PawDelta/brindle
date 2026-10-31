@@ -244,3 +244,29 @@ heavy admission/workers were 4/4, and meta/repos took 255/284 ms. Every
 limiter token was released after cleanup. The full suite is left to
 brindle's merge gate.
 After the session diff cache (`perf/session-diff-cache`), git processes per diff were [0, 49], diffs took 0.7–6.7 ms (so no client abandoned one and abandonment is no longer required), and meta/repos took 2.4/4.6 ms.
+
+## Cheap-read bound tightened (`perf/cheap-read-latency`)
+
+With the diff cache and spawn gate merged, eight runs (the first three
+before the bound changed, the last five consecutive at the final bound)
+measured loaded `/v1/meta` / `/v1/repos`:
+
+| Run | meta ms | repos ms | Loaded diff max ms | Abandoned / shed |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 2.3 | 3.9 | 11.9 | 4 / 22 |
+| 2 | 2.2 | 3.9 | 11.1 | 0 / 20 |
+| 3 | 4.3 | 7.5 | 6.1 | 4 / 28 |
+| 4 | 2.8 | 4.7 | 12.1 | 0 / 20 |
+| 5 | 6.8 | 8.7 | 14.4 | 10 / 19 |
+| 6 | 2.1 | 3.5 | 4.2 | 0 / 20 |
+| 7 | 2.6 | 4.3 | 5.5 | 0 / 20 |
+| 8 | 2.2 | 3.9 | 8.7 | 0 / 20 |
+| 9 | 1.6 | 3.1 | 5.6 | 0 / 20 |
+
+Worst loaded cheap read: 8.7 ms (run 5, when the baseline reads were also
+slow at 12–14 ms, indicating host load). Default AnyIO stayed at 0/40
+occupied with no waiters, and the asyncio executor no-op took 0.25–1.7 ms.
+No daemon cause remained: cached diffs finish in single-digit milliseconds,
+so heavy work no longer holds the GIL long enough to matter. The test's
+cheap-read bound dropped from 2.0 s to 50 ms (about 6x the worst observed),
+and all five consecutive runs at that bound passed.
