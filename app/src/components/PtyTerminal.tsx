@@ -295,13 +295,16 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
         .finally(() => void waiting--);
     };
     const send = (data: string) => (waiting ? queued(() => void (gone || pty.write(data))) : pty.write(data));
-    // A dead key can finish through keypress or IME input. Retain it across
-    // keyup until xterm delivers the completed input through onData.
+    const typed = term.onData(send);
+    // onData includes protocol replies, which cannot complete a dead key.
+    // Retain it across keyup until xterm handles a key or input completes.
     let deadKey = false;
-    const typed = term.onData((data) => {
-      deadKey = false;
-      send(data);
-    });
+    const completedKey = term.onKey(() => { deadKey = false; });
+    const completedInput = (event: Event) => {
+      const e = event as InputEvent;
+      if (e.data && e.inputType === "insertText" && !e.isComposing) deadKey = false;
+    };
+    term.textarea?.addEventListener("input", completedInput);
     const binary = term.onBinary(send);
     // The wheel's reports as a native terminal sends them (terminalScroll.ts), not xterm.js's one an event.
     const wheel = scrollByWheel(term, send);
@@ -465,6 +468,7 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
       clearTimeout(hide);
       setCopiedShown(false);
       term.textarea?.removeEventListener("focus", focused);
+      term.textarea?.removeEventListener("input", completedInput);
       el.removeEventListener("mousedown", focused, true);
       el.removeEventListener("mousedown", keyboard, true);
       window.removeEventListener("focus", atApp);
@@ -475,6 +479,7 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
       window.removeEventListener("mouseup", letGo);
       observer?.disconnect();
       typed.dispose();
+      completedKey.dispose();
       binary.dispose();
       wheel.dispose();
       resized.dispose();
