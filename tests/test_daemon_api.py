@@ -230,7 +230,7 @@ def test_health_log_watch_warns_only_when_the_loop_itself_is_late(monkeypatch, s
     waits = [0]
     server = SimpleNamespace(should_exit=False)
 
-    async def sleep(seconds):
+    async def elapse(seconds):
         waits[0] += 1
         now[0] += seconds
         if stalled and waits[0] == 2:
@@ -243,7 +243,7 @@ def test_health_log_watch_warns_only_when_the_loop_itself_is_late(monkeypatch, s
 
     monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", slow_sweep)
     activity = lifecycle.Activity(build_app(TOKEN, port=8123))
-    asyncio.run(lifecycle._watch(server, activity, False, sleep=sleep, clock=lambda: now[0]))
+    asyncio.run(lifecycle._watch(server, activity, False, wait=elapse, clock=lambda: now[0]))
 
     entries = [json.loads(line) for line in debuglog.log_path().read_text().splitlines()]
     warnings = [e for e in entries if e["level"] == "warning"]
@@ -260,6 +260,12 @@ def test_health_log_counts_work_waiting_in_the_default_executor_and_heavy_lane()
 
     from brindle.daemon import health
 
+    async def _settle():
+        """Return once every task created so far has run its first step."""
+        done = asyncio.get_running_loop().create_future()
+        asyncio.get_running_loop().call_soon(done.set_result, None)
+        await done
+
     async def exercise():
         loop = asyncio.get_running_loop()
         loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
@@ -273,13 +279,13 @@ def test_health_log_counts_work_waiting_in_the_default_executor_and_heavy_lane()
         try:
             jobs = [asyncio.create_task(asyncio.to_thread(blocked))]
             jobs += [asyncio.create_task(asyncio.to_thread(lambda: None)) for _ in range(7)]
-            await asyncio.sleep(0)      # every job reaches the pool; one is running
+            await _settle()             # every job reaches the pool; one is running
             assert started.wait(5)
             app = lifecycle.Activity(build_app(TOKEN, port=8123))
             lane = app.state.heavy_read_lane
             lane.workers.total_tokens = 0       # no worker slot: five reads queue behind it
             waiting = [asyncio.create_task(lane.workers.acquire()) for _ in range(5)]
-            await asyncio.sleep(0)
+            await _settle()
             assert health._queues(app) == (7, 5)
         finally:
             # Always let the blocked pool job finish: asyncio.run joins the pool at exit.

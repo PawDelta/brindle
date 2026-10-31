@@ -216,8 +216,19 @@ def _agents_running() -> bool:
         return True     # can't tell: stay up rather than strand an app
 
 
+async def _elapse(seconds: float) -> None:
+    """Return once ``seconds`` have passed on the event loop's timer."""
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+    handle = loop.call_later(seconds, done.set_result, None)
+    try:
+        await done
+    finally:
+        handle.cancel()
+
+
 async def _watch(server, activity: Activity, idle_exit: bool, *,
-                 sleep=asyncio.sleep, clock=time.monotonic) -> None:
+                 wait=_elapse, clock=time.monotonic) -> None:
     from brindle.daemon import health
     from brindle.daemon.session_review import ReadinessWatch
     from brindle.upgrade import InstallWatch
@@ -227,7 +238,7 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     monitor = health.Monitor(clock)
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
-        await sleep(WATCH_INTERVAL)
+        await wait(WATCH_INTERVAL)
         try:
             monitor.tick(activity, due)     # the daemon's own health, into debuglog
         except Exception:  # noqa: BLE001 - health logging must never stop the watch
