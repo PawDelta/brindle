@@ -115,6 +115,7 @@ def test_an_abandoned_read_leaves_no_process(tmp_path, monkeypatch):
     """The app disconnects mid-request: the read's whole group is stopped,
     SIGKILL for what ignores SIGTERM, and the handler gets Busy."""
     monkeypatch.setattr(spawn, "GRACE", 0.2)
+    stopped_before = spawn.stats()["stopped"]
     pids = tmp_path / "pids"
     script = f'trap "" TERM; tail -f /dev/null & echo $$ $! > {pids}; wait'
     got: list[BaseException] = []
@@ -130,6 +131,7 @@ def test_an_abandoned_read_leaves_no_process(tmp_path, monkeypatch):
     assert got
     assert time.monotonic() - t0 < 5       # the disconnect, not the 30 second deadline
     assert _until(lambda: not any(procs.alive(int(p)) for p in pids.read_text().split()))
+    assert spawn.stats()["stopped"] == stopped_before + 1
     assert spawn.running() == 0
 
 

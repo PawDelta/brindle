@@ -849,6 +849,41 @@ def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None) -> No
     bus.publish_agent(db, "session.pr_opened", key[0], url=url)
 
 
+def _preparation_pending(db: DB, root_id: str) -> bool:
+    """Whether preparation needs dispatch, without git on a settled session.
+
+    Readiness may be cached while a lock clears, a job finishes or its
+    backoff expires. Read these independent inputs on each sweep; the
+    dispatch below still takes the work lock and rechecks the live checkout.
+    """
+    root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    if ws is None:
+        return True  # the normal dispatch reports a missing session
+    try:
+        own, _ = review._git_dirs(ws.path)
+        if (own / "HEAD").read_text().strip() != f"ref: refs/heads/{ws.branch}":
+            return True  # refresh a branch switch even if its commit is unchanged
+    except (OSError, UnicodeDecodeError, ValueError):
+        return True
+    key = (root_id, ws.branch)
+    with _PR_LOCK:
+        if key in _PR_WORK:
+            return False
+    if identity_lock.locked_by(root_id):
+        return False
+    if db.conn.execute(f"SELECT 1 FROM session_prs WHERE {_SESSION_PR} AND url IS NOT NULL", key).fetchone():
+        return False
+    fp = review._fingerprint(ws, ws.base_branch) if ws.base_branch else None
+    if fp is None:
+        return True
+    row = db.conn.execute(f"SELECT sha, state FROM session_pr_prep WHERE {_SESSION_PR}", key).fetchone()
+    if row and row["sha"] == fp.head and row["state"] != "checking":
+        return False
+    tried, at = _PR_TRIED.get(key, (None, 0.0))
+    return tried != fp.head or time.monotonic() - at >= PREPARE_AGAIN_SECONDS
+
+
 def prepare_pr(db: DB, root_id: str) -> Job | None:
     """Prepare the ready session ``root_id``'s PR for the person's approval:
     draft its title, run the full pre-PR checks on its HEAD (gates.pr_checked,
@@ -858,6 +893,8 @@ def prepare_pr(db: DB, root_id: str) -> Job | None:
     branch has a PR (new commits wait for the person's Push), while the
     session belongs to another identity, or while this daemon is already
     preparing it."""
+    if not _preparation_pending(db, root_id):
+        return None
     root, ws = review.session(db, root_id)
     key = (root.id, ws.branch)
     if identity_lock.locked_by(root.id) or review.open_pr(db, root, ws) or not _start_pr_work(key):

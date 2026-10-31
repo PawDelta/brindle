@@ -244,3 +244,45 @@ heavy admission/workers were 4/4, and meta/repos took 255/284 ms. Every
 limiter token was released after cleanup. The full suite is left to
 brindle's merge gate.
 After the session diff cache (`perf/session-diff-cache`), git processes per diff were [0, 49], diffs took 0.7–6.7 ms (so no client abandoned one and abandonment is no longer required), and meta/repos took 2.4/4.6 ms.
+
+## Cheap-read bound tightened (`perf/cheap-read-latency`)
+
+A first attempt probed `/v1/meta` and `/v1/repos` only after every poller
+finished. With the cache warm, no heavy work was left by then, so those
+2–9 ms numbers measured an idle daemon and are discarded. The test now
+drops the cached diff (`session_review._forget()`) before polling, so the
+first poll recomputes the full history (49 git processes, 1–2.5 s), and a
+sampler reads `/v1/meta` and `/v1/repos` back to back (the awaits yield to
+the loop) while the pollers run. The bound applies to every sample taken in
+the polling window, including the cold first pair. Each request is also
+marked busy if the heavy lane held a worker when it began or ended, and the
+test separately fails if no request overlapped heavy work.
+
+An intermediate version applied the bound only to requests marked busy
+before they were sent, which excluded the cold first pair; it is replaced.
+Its numbers (max 6–55 ms) are discarded. Runs of the final harness: every
+sample in the window counts toward "max". Run 1 was the first at the 100 ms
+bound; runs 2–6 are the five consecutive passes after the final edit:
+
+| Run | Busy / all samples | Max over all samples ms | Recompute s |
+| ---: | ---: | ---: | ---: |
+| 1 | 3 / 4 | 77.7 | 1.06 |
+| 2 | 35 / 36 | 37.5 | 1.00 |
+| 3 | 17 / 18 | 25.4 | 1.06 |
+| 4 | 5 / 6 | 67.3 | 0.92 |
+| 5 | 15 / 16 | 45.8 | 0.95 |
+| 6 | 23 / 24 | 34.6 | 1.08 |
+
+The slowest samples (67–78 ms) are the cold first pair, issued as the
+recompute starts. After-probe `/v1/meta` / `/v1/repos` were 1.4–1.9 / 2.7–5.3
+ms. Default AnyIO peaked at 1 occupied of 40 with no waiters; the asyncio
+executor no-op took 0.2–0.34 ms.
+
+Cheap reads under a real recompute therefore peak at 25–78 ms, tracking host
+load. The bound is 100 ms (originally 2.0 s); 77.7 ms is the worst seen, so
+the margin is thin on a loaded host. The remaining delay
+is consistent with the in-process recompute's CPU and GIL contention plus
+host load; the harness shares one process with the clients and cannot
+separate those, so this does not show that no daemon cause remains. Moving
+the recompute out of process would be the next step if the bound must drop
+further.

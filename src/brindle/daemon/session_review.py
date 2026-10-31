@@ -32,11 +32,12 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from brindle import agents, autopilot, bus, git, knowledge, pipeline, tasks, workspaces
+from brindle import agents, autopilot, bus, git, knowledge, pipeline, spawn, tasks, workspaces
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
@@ -192,25 +193,72 @@ def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
 
 
 MERGE_POLL_SECONDS = 60.0
+MERGE_CHECK_SECONDS = 3.0
 _merge_polled = 0.0
+_merge_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pr-merged")
+_merge_lock = threading.Lock()
+_merge_checks: dict[tuple[str, str, str, str], Future] = {}
+_merge_order: dict[str, list[tuple[str, str, str, str]]] = {}
 
 
 def poll_merged(db: DB) -> None:
-    """Record, at most once a minute, the open session PRs ``gh`` reports merged."""
+    """Check open PRs concurrently, with one bounded wait for the round.
+
+    Only the daemon thread touches its DB. A check still running is shared
+    by later rounds; the fixed pool bounds even a check that ignores its
+    deadline. The first PR advances each round, independent of whether a
+    queued check was cancelled or ran after its execution window expired.
+    """
     global _merge_polled
-    if time.monotonic() - _merge_polled < MERGE_POLL_SECONDS:
+    if not _merge_lock.acquire(blocking=False):
         return
-    _merge_polled = time.monotonic()
-    for row in db.conn.execute("SELECT root_id, branch, url FROM session_prs"
-                               " WHERE url IS NOT NULL AND merged_at IS NULL").fetchall():
-        root = db.get_agent(row["root_id"])
-        ws = db.get_workspace(root.workspace_id) if root else None
-        if ws is not None and workspaces.pull_request_merged(row["url"], ws.repo_root):
-            # Only the PR that was asked about: a replacement recorded meanwhile has its own state.
-            if db.conn.execute("UPDATE session_prs SET merged_at = ? WHERE root_id = ? AND branch = ?"
-                               " AND url = ?", (time.time(), row["root_id"], row["branch"],
-                                                row["url"])).rowcount:
-                bus.publish_agent(db, "session.pr_merged", row["root_id"], url=row["url"])
+    try:
+        due = time.monotonic() - _merge_polled >= MERGE_POLL_SECONDS
+        if due:
+            _merge_polled = time.monotonic()
+            with spawn.deadline(MERGE_CHECK_SECONDS) as limit:
+                check = spawn.carry(workspaces.pull_request_merged)
+                path = str(db.path)
+                priority = {key: n for n, key in enumerate(_merge_order.get(path, []))}
+                rows = db.conn.execute("SELECT root_id, branch, url FROM session_prs"
+                                       " WHERE url IS NOT NULL AND merged_at IS NULL").fetchall()
+                checks = [((path, row["root_id"], row["branch"], row["url"]), row) for row in rows]
+                if priority:
+                    checks.sort(key=lambda item: priority.get(item[0], len(priority)))
+                # Rotate by one so every PR eventually gets the first fresh
+                # window, even if the gate only admits one read per round.
+                if checks:
+                    _merge_order[path] = [key for key, _ in checks[1:] + checks[:1]]
+                for key, row in checks:
+                    root = db.get_agent(row["root_id"])
+                    ws = db.get_workspace(root.workspace_id) if root else None
+                    if ws is not None and key not in _merge_checks:
+                        _merge_checks[key] = _merge_pool.submit(check, row["url"], ws.repo_root)
+                pending = [f for k, f in _merge_checks.items() if k[0] == str(db.path)]
+                if pending:
+                    remaining = max(0.0, limit.left())
+                    wait(pending, timeout=remaining)
+                for future in pending:
+                    future.cancel()  # running reads stop at their deadline; queued ones never start
+        for key, future in list(_merge_checks.items()):
+            if key[0] != str(db.path) or not future.done():
+                continue
+            del _merge_checks[key]
+            if future.cancelled():
+                continue
+            try:
+                merged = future.result()
+            except Exception:  # noqa: BLE001 - an unavailable PR never stops the round
+                log.exception("brindle: couldn't check a session PR")
+                continue
+            _, root_id, branch, url = key
+            if merged and db.conn.execute(
+                "UPDATE session_prs SET merged_at = ? WHERE root_id = ? AND branch = ?"
+                " AND url = ? AND merged_at IS NULL", (time.time(), root_id, branch, url)
+            ).rowcount:
+                bus.publish_agent(db, "session.pr_merged", root_id, url=url)
+    finally:
+        _merge_lock.release()
 
 
 def require_ready(db: DB, root: Agent, ws: Workspace) -> None:
@@ -746,11 +794,74 @@ class ReadinessWatch:
 
     def __init__(self) -> None:
         self.ready: dict[str, bool] | None = None
+        self.fingerprints: dict[str, tuple] = {}
+        self._tracked: dict[str, tuple[tuple[str, int], list[str] | None]] = {}
+
+    def _working_tree(self, ws: Workspace, fp: _Fingerprint) -> tuple | None:
+        """Stat only tracked paths, including files below nested directories.
+
+        The index supplies their names once, then only when it changes.
+        Unstaged edits, deletions, restorations and mode changes invalidate
+        readiness without launching git in an unchanged checkout.
+        A gitlink's directory timestamps cannot describe its nested working
+        tree. Keep its presence in the index cache, but let git judge its
+        readiness on each round rather than keeping incomplete facts.
+        """
+        key = (ws.path, fp.index)
+        cached = self._tracked.get(ws.id)
+        if cached is None or cached[0] != key:
+            entries = git.run(["ls-files", "--stage", "-z"], ws.path).stdout.split("\0")
+            names = [entry.partition("\t")[2] for entry in entries if entry]
+            if any(entry.startswith("160000 ") for entry in entries):
+                names = None
+            cached = (key, names)
+            self._tracked[ws.id] = cached
+        if cached[1] is None:
+            return None
+        try:
+            own, _ = _git_dirs(ws.path)
+            head = (own / "HEAD").read_text()
+            stamps = []
+            for name in cached[1]:
+                try:
+                    stat = (Path(ws.path) / name).lstat()
+                    stamps.append((stat.st_mode, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+                except FileNotFoundError:
+                    stamps.append(None)
+            return head, tuple(stamps)
+        except OSError:
+            return None
+
+    def _state(self, db: DB, root_id: str, ap, ms) -> tuple | None:
+        """Readiness's git, working-tree and DB inputs.
+
+        Worker, queue and login changes matter even when HEAD hasn't moved.
+        Unknown git layouts are never cached. Preparation rows are outputs,
+        so their writes must not invalidate an otherwise unchanged session.
+        """
+        root = db.get_agent(root_id)
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if ws is None or not ws.base_branch:
+            return None
+        fp = _fingerprint(ws, ws.base_branch)
+        if fp is None:
+            return None
+        working = self._working_tree(ws, fp)
+        if working is None:
+            return None
+        tree = agents.tree(db, root_id)
+        return (fp, working, repr(ws), repr(ap), repr(ms), repr(tree),
+                repr([db.get_workspace(a.workspace_id) for a in tree]),
+                repr(tasks.queued(db)), repr(db.get_login_state(root_id)),
+                repr(load_repo_config(ws.repo_root)))
 
     def sweep(self, db: DB) -> list[str]:
         """The sessions that just became ready (each announced on the bus)."""
+        if spawn.room() < 1:
+            return []
         poll_merged(db)
         now: dict[str, bool] = {}
+        fingerprints: dict[str, tuple] = {}
         for (root_id,) in db.conn.execute("SELECT root_id FROM autopilot").fetchall():
             ap, ms = db.get_autopilot(root_id), db.milestones(root_id)
             # Only a reached goal (or one whose every milestone passes) can be ready: skip the git work otherwise.
@@ -758,9 +869,17 @@ class ReadinessWatch:
                 now[root_id] = False
                 continue
             try:
+                state = self._state(db, root_id, ap, ms)
+                if state is not None:
+                    fingerprints[root_id] = state
+                    if self.fingerprints.get(root_id) == state and self.ready is not None:
+                        now[root_id] = self.ready.get(root_id, False)
+                        continue
                 now[root_id] = not reasons(db, *session(db, root_id))
             except (ServiceError, git.GitError, workspaces.WorkspaceError):
+                fingerprints.pop(root_id, None)
                 now[root_id] = False
+        self.fingerprints = fingerprints
         was, self.ready = self.ready, now
         if was is None:
             return []
@@ -774,6 +893,8 @@ class ReadinessWatch:
                 db.conn.execute("DELETE FROM session_pr_prep WHERE root_id = ?", (r,))
                 continue
             try:
+                # Preparation has its own pending/in-flight/backoff state;
+                # cached readiness must not hide a newly eligible preparation.
                 routes_actions.prepare_pr(db, r)
             except Exception:  # noqa: BLE001 - one session's PR never stops the others'
                 log.exception("brindle: couldn't prepare %s's PR", r)
