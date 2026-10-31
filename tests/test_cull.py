@@ -498,3 +498,26 @@ def test_lock_cleanup_keeps_held_and_status_read_creates_nothing(db, brindle_hom
         fcntl.flock(f.fileno(), fcntl.LOCK_SH)
         assert cull.clean_locks(db) == 1
     assert held.exists() and not free.exists()
+
+
+def test_lock_cleanup_race_waiter_relocks_the_new_file(brindle_home, monkeypatch):
+    import fcntl
+    from brindle import gates
+
+    path = brindle_home / "locks" / "review-run-x.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("")
+    real = fcntl.flock
+    calls = []
+
+    def flock(fd, op):
+        if not calls:   # cleanup unlinks the file the waiter just opened
+            calls.append(1)
+            path.unlink()
+            path.write_text("")
+            path.unlink()
+        return real(fd, op)
+
+    monkeypatch.setattr(gates.fcntl, "flock", flock)
+    with gates._open_locked(path, fcntl.LOCK_SH) as f:
+        assert os.path.samestat(os.stat(path), os.fstat(f.fileno()))

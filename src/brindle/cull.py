@@ -713,11 +713,19 @@ def clean_locks(db: DB, now: float | None = None) -> int:
     return removed + _clean_old_locks(now)
 
 
+# Lock kinds whose acquirers (gates._open_locked) recheck the file after locking,
+# so deleting one while it is held can't leave a waiter on an unlinked inode.
+_REVALIDATED_LOCKS = ("check-", "checks-running-", "review-request-", "review-run-", "merge-run-")
+
+
 def _clean_old_locks(now: float) -> int:
-    """Delete any ``locks/*.lock`` untouched for LOCK_MAX_AGE, but only after
-    taking it non-blocking, so a lock somebody holds is never removed."""
+    """Delete old ``locks/*.lock`` files of the kinds above, untouched for
+    LOCK_MAX_AGE, but only after taking it non-blocking, so a lock somebody
+    holds is never removed."""
     removed = 0
     for path in (brindle_home() / "locks").glob("*.lock"):
+        if not path.name.startswith(_REVALIDATED_LOCKS):
+            continue
         try:
             if now - path.stat().st_mtime <= LOCK_MAX_AGE:
                 continue
@@ -725,6 +733,9 @@ def _clean_old_locks(now: float) -> int:
                 try:
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
+                    continue
+                # a concurrent cleanup may have replaced the file since we opened it
+                if not os.path.samestat(os.stat(path), os.fstat(f.fileno())):
                     continue
                 path.unlink()
                 removed += 1
