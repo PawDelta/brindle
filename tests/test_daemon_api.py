@@ -480,10 +480,14 @@ def test_caller_check_single_flight(monkeypatch, outcome):
             assert await request() == statuses[0]
             if outcome == "limit":
                 guard._callers[123] = (-float("inf"), None)
+                monkeypatch.setattr(auth, "CALLER_CHECK_LIMIT", auth.CALLER_TTL)
+                asyncio.get_running_loop().call_soon(release.set)
                 assert await request() == 403
         finally:
             release.set()
             await asyncio.gather(*getattr(guard, "_caller_checks", {}).values(), return_exceptions=True)
+        if outcome == "limit":
+            assert await request() == 403
     asyncio.run(exercise())
     assert len(calls) == 1
     assert calls[0].startswith("brindle-caller")

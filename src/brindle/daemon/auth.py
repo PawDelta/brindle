@@ -64,6 +64,7 @@ class Guard:
         self._origins = set(APP_ORIGINS)
         self._callers: dict[int, tuple[float, str | None]] = {}   # pid -> (when, agent_caller)
         self._caller_checks: dict[int, asyncio.Future[str | None]] = {}
+        self._caller_deadlines: dict[int, float] = {}
         if port:
             self._origins |= {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
 
@@ -123,10 +124,19 @@ class Guard:
                 self._callers[pid] = (time.monotonic(), _CALLER_UNCHECKED)
                 return _CALLER_UNCHECKED
             self._caller_checks[pid] = check
+            self._caller_deadlines[pid] = now + CALLER_CHECK_LIMIT
             check.add_done_callback(partial(self._caller_checked, pid))
+        deadline = self._caller_deadlines[pid]
         try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
             # One disconnected request must not cancel everyone else's check.
-            return await asyncio.wait_for(asyncio.shield(check), CALLER_CHECK_LIMIT)
+            refused = await asyncio.wait_for(asyncio.shield(check), remaining)
+            # Completion and the deadline can become ready in the same turn.
+            if time.monotonic() >= deadline:
+                raise asyncio.TimeoutError
+            return refused
         except Exception:
             # Never expose process data from an exception to the requester.
             self._callers[pid] = (time.monotonic(), _CALLER_UNCHECKED)
@@ -136,16 +146,19 @@ class Guard:
         """Publish the result before removing the in-flight entry.
 
         This also consumes failures when every request has disconnected.
-        Cache from completion, so a slow check still gets the full TTL.
+        Late results are consumed but cannot authorize a caller.
         """
         refused = _CALLER_UNCHECKED
         if not check.cancelled():
             try:
-                refused = check.result()
+                result = check.result()
+                if time.monotonic() < self._caller_deadlines[pid]:
+                    refused = result
             except Exception:
                 pass
         self._callers[pid] = (time.monotonic(), refused)
         self._caller_checks.pop(pid, None)
+        self._caller_deadlines.pop(pid, None)
 
     def _token_ok(self, token: object) -> bool:
         return isinstance(token, str) and hmac.compare_digest(token.strip().encode(), self._token)
