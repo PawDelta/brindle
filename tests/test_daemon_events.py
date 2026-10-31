@@ -9,6 +9,94 @@ from brindle.daemon.auth import WS_UNAUTHORIZED
 TOKEN = "t" * 43
 
 
+def test_readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from brindle import git, spawn
+    from brindle.daemon import routes_actions, session_review as review
+    from brindle.db import Agent, Workspace
+    private = tmp_path / ".git"
+    (private / "refs/heads").mkdir(parents=True)
+    (private / "HEAD").write_text("ref: refs/heads/s")
+    (private / "refs/heads/s").write_text("a" * 40)
+    (private / "refs/heads/main").write_text("b" * 40)
+    db.add_workspace(Workspace("w", str(tmp_path), "s", "worktree", "s", "main", str(tmp_path), None, "s", 0))
+    db.add_agent(Agent("s", "w", "supervisor", "claude", None, "interactive", "idle", "", None, 0))
+    db.add_autopilot("s")
+    db.update_autopilot("s", state="done")
+    reads, prepared = [], []
+    monkeypatch.setattr(spawn, "room", lambda: 1)
+    monkeypatch.setattr(git, "run", lambda *a, **kw: reads.append(a) or SimpleNamespace(stdout="s", returncode=0))
+    monkeypatch.setattr(git, "dirty_files", lambda *a, **kw: reads.append("dirty") or [])
+    monkeypatch.setattr(git, "base_ref", lambda *a: "main")
+    monkeypatch.setattr(git, "ahead_behind", lambda *a: (0, 1))
+    monkeypatch.setattr(routes_actions, "prepare_pr", lambda *a: prepared.append(a[-1]))
+    watch = review.ReadinessWatch()
+    watch.sweep(db)
+    reads.clear()
+    watch.sweep(db)
+    assert reads == [] and prepared == []
+    (private / "refs/heads/s").write_text("c" * 40)
+    watch.sweep(db)
+    assert reads and prepared == ["s"]
+    reads.clear()
+    db.set_status("s", "waiting")
+    watch.sweep(db)
+    assert reads and watch.ready == {"s": False}
+    reads.clear()
+    monkeypatch.setattr(spawn, "room", lambda: 0)
+    monkeypatch.setattr(review, "_merge_polled", 0)
+    db.set_status("s", "idle")
+    watch.sweep(db)
+    assert reads == [] and watch.ready == {"s": False} and review._merge_polled == 0
+
+
+def test_readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
+    import threading
+    from brindle import spawn, workspaces
+    from brindle.daemon import session_review as review
+    from brindle.db import Agent, DB, Workspace
+    for n in range(2):
+        key = str(n)
+        db.add_workspace(Workspace(key, "/repo", key, "worktree", key, "main", "/repo", None, key, 0))
+        db.add_agent(Agent(key, key, "supervisor", "claude", None, "interactive", "idle", "", None, 0))
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES (?, ?, ?, ?)",
+                        (key, key, f"https://github.com/o/r/pull/{n}", 0))
+    release, both, finished = threading.Event(), threading.Event(), threading.Event()
+    started, lock = [], threading.Lock()
+    def slow(*args, **kwargs):
+        assert spawn.current() is not None
+        with lock:
+            started.append(args)
+            if len(started) == 2:
+                both.set()
+        release.wait()
+        raise spawn.Busy("read stopped")
+    monkeypatch.setattr(spawn, "read", slow)
+    monkeypatch.setattr(workspaces.shutil, "which", lambda *a: "gh")
+    monkeypatch.setattr(spawn, "room", lambda: 2)
+    monkeypatch.setattr(review, "_merge_polled", 0)
+    monkeypatch.setattr(review, "MERGE_CHECK_SECONDS", 0.05, raising=False)
+    def sweep():
+        connection = DB(db.path)
+        try:
+            review.ReadinessWatch().sweep(connection)
+        finally:
+            connection.conn.close()
+            finished.set()
+
+    worker = threading.Thread(target=sweep)
+    worker.start()
+    try:
+        assert both.wait(1)
+        assert finished.wait(1)
+        monkeypatch.setattr(review, "_merge_polled", 0)
+        review.ReadinessWatch().sweep(db)
+        assert len(started) == 2
+    finally:
+        release.set()
+        worker.join(1)
+
+
 @pytest.mark.parametrize("memory", [False, True])
 def test_session_changed_tracks_head_and_index_without_status_changes(db, tmp_path, memory):
     from brindle import git
