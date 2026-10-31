@@ -1,5 +1,6 @@
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from unittest.mock import Mock
@@ -517,11 +518,14 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
             load[0] = 2.0   # admitted after the first look
             return False
 
-        real_background = spawn._background
-        monkeypatch.setattr(spawn, "_background", lambda argv: wrapped.append(argv) or real_background(argv))
+        real_start = spawn.start   # the admission gate is off here, as in a plain MCP process
+        monkeypatch.setattr(spawn, "start", lambda argv, **kw: wrapped.append(argv) or real_start(argv, **kw))
         monkeypatch.setattr(gates, "SLOT_POLL", 0)
         ok, _ = gates.run_checked(db, wws, "touch ran.txt", {}, 60, cancel=cancel, full=True)
-        assert ok and seen == [False] and wrapped and ran.exists()
+        assert ok and seen == [False] and ran.exists()
+        [argv] = wrapped
+        assert Path(argv[0]).name == ("taskpolicy" if sys.platform == "darwin" else "nice")
+        assert argv[-3:] == ["/bin/sh", "-c", "touch ran.txt"]
         db.set_status(worker.id, "idle")                # reported, but its check run is still going
         with gates.marker("checks-running", wws.id):
             assert tasks.load_counts(db) == (0, 1)

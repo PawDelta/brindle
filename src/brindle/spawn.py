@@ -328,11 +328,12 @@ def _release() -> None:
 _prefix: list[str] | None = None
 
 
-def _background(argv: list[str]) -> list[str]:
-    """``argv`` at background priority, when the gate is on. Both prefixes
-    exec the command, so the child keeps the pid it was started with."""
+def _background(argv: list[str], force: bool = False) -> list[str]:
+    """``argv`` at background priority, when the gate is on, or always with
+    ``force``. Both prefixes exec the command, so the child keeps the pid it
+    was started with."""
     global _prefix
-    if not _gated:
+    if not _gated and not force:
         return argv
     if _prefix is None:
         if sys.platform == "darwin":

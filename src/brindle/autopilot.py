@@ -1231,7 +1231,7 @@ def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,
     true the command is killed and ``CheckCancelled`` is raised.
     ``background``: at background priority (``spawn._background``)."""
     proc = spawn.start(
-        spawn._background(["/bin/sh", "-c", cmd]) if background else cmd, shell=not background, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
+        spawn._background(["/bin/sh", "-c", cmd], force=True) if background else cmd, shell=not background, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True,
     )
     if cancel is None:
