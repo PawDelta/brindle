@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -186,28 +187,51 @@ def test_an_edit_whose_client_leaves_as_it_commits_keeps_the_commit(repo, monkey
     assert (repo / "app.py").read_bytes() == b"new\n"
 
 
-def test_a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db, repo, monkeypatch):
-    """Stopping the agent's processes and recording it paused once failed on
-    the stopped deadline after its window was already gone."""
-    session = "brindle_spawn_stop"
-    tmux.ensure_session(session, str(repo), {})
-    pane = tmux._tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:",
-                      "cat").stdout.strip()
-    db.add_workspace(Workspace("w", str(repo), "w", "worktree", "main", "main", str(repo), None,
-                               session, 1.0))
-    db.add_agent(Agent("a1", "w", profile="developer", provider="claude", parent_id=None, mode="assign",
-                       status="running", tmux_window=pane, result=None, created_at=1.0,
-                       tmux_server=tmux.current_server()))
-    real_kill = tmux.kill_window
+class _FakePs:
+    """The ``ps`` child procs.table starts through spawn.read: the agent's
+    pane (5001) and the tree that outlived its window."""
+    started: list[list[str]] = []
+    pid, returncode = 0, 0
 
-    def kill(target):
-        real_kill(target)
+    def __init__(self, argv, **kw):
+        self.started.append(argv)
+
+    def communicate(self, input=None, timeout=None):
+        return "5001 1 cat\n5002 5001 node dev-server\n5003 5002 python -m pytest\n", ""
+
+
+def test_a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db, repo, tmp_path, monkeypatch):
+    """Stopping the agent's processes, ending its native subagents and
+    recording it paused once failed on the stopped deadline, after its window
+    was already gone."""
+    from brindle import sidebar_follow
+
+    db.add_workspace(Workspace("w", str(repo), "w", "worktree", "main", "main", str(repo), None, "s", 1.0))
+    db.add_agent(Agent("a1", "w", profile="developer", provider="claude", parent_id=None, mode="assign",
+                       status="running", tmux_window="%7", result=None, created_at=1.0))
+    db.start_native_subagent("sub1", "a1", "explore")
+    closed, terminated = [], set()
+    monkeypatch.setattr(agents, "same_server", lambda agent, panes=None: True)
+    monkeypatch.setattr(agents, "owns_pane", lambda db, agent, owners=None: True)
+    monkeypatch.setattr(sidebar_follow, "rescue_sidebar_from_window", lambda db, agent: None)
+    monkeypatch.setattr(tmux, "window_pids", lambda target, server=None: [5001])
+
+    def kill_window(target):
+        closed.append(target)
         spawn.current().stop()             # the client leaves right after the first change
 
-    monkeypatch.setattr(tmux, "kill_window", kill)
+    monkeypatch.setattr(tmux, "kill_window", kill_window)
+    monkeypatch.setattr(procs, "Path", lambda p: tmp_path / "no-proc")    # ps, not /proc, on Linux too
+    monkeypatch.setattr(subprocess, "Popen", _FakePs)
+    _FakePs.started = []
+    monkeypatch.setattr(procs, "terminate", lambda pids, grace=3.0: terminated.update(pids) or len(pids))
+
     with spawn.deadline(30):
         agents.pause_worker(db, db.get_agent("a1"))
-    assert pane not in tmux.list_panes()
+    assert closed == ["%7"]
+    assert [argv[0] for argv in _FakePs.started] == ["ps"]   # admitted through spawn.read
+    assert terminated == {5001, 5002, 5003}
+    assert all(s.ended_at is not None for s in db.native_subagents("a1"))
     assert db.get_agent("a1").status == "paused"
 
 
