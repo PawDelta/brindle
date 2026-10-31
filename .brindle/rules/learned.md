@@ -7,6 +7,21 @@ deny_patterns:
   - timeout.*=.*[0-9]+
 require_tests_for:
   - tests/conftest.py
+# Every process the daemon can reach starts through brindle.spawn (read,
+# action, start, detach); only these files may start one directly.
+direct_spawn_allowed:
+  - src/brindle/spawn.py          # the gate itself
+  - src/brindle/tmux.py           # starts the tmux server; changes run at tmux's own priority
+  - src/brindle/cli.py            # CLI commands: editor, pager, attach, the person's terminal
+  - src/brindle/demo.py           # `brindle demo`
+  - src/brindle/upgrade.py        # re-execs the CLI
+  - src/brindle/watch.py          # `brindle watch` and the sidebar: tmux attach
+  - src/brindle/sidebar_logo.py   # the sidebar pane's own tmux display
+  - src/brindle/ci_client.py      # `brindle ci` and the CI runner, never the daemon
+  - src/brindle/ci_adapters.py    # the CI runner's review adapters
+  - src/brindle/native/tools.py   # the native agent runner's own tool calls (in the agent's process)
+  - src/brindle/native/lsp.py     # the native agent runner's language server
+  - scripts/*                     # repo scripts
 ---
 Tests in this repo must earn their place. CI fails a pull request whose new test
 covers no line or branch that other tests don't (scripts/check_new_tests.py), or

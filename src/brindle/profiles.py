@@ -19,7 +19,8 @@ parent's, its ``rules`` packs add to the parent's, and its prompt is appended
 to the parent's. ``rules: [pack, ...]`` names rule packs (``brindle.rule_packs``):
 markdown files under ``.brindle/rules/``, ``~/.brindle/rules/`` or brindle's
 built-ins whose text joins the agent's prompt and whose mechanical rules
-(``deny_deps``, ``require_tests_for``, ``deny_patterns``) are checked against
+(``deny_deps``, ``require_tests_for``, ``deny_patterns``,
+``direct_spawn_allowed``) are checked against
 the branch before it is reviewed or merged (``brindle.rule_checks``).
 
 ``write_scope``, ``read_scope`` and ``env_allow`` (lists of globs) are brindle
@@ -178,6 +179,8 @@ class RulePack:
         deny_patterns:                   # regexes no added line may match
           - shell=True
           - eval\\(
+        direct_spawn_allowed:            # only these files may start a process directly
+          - src/app/spawn.py
         ---
         Never shell out with shell=True...
     """
@@ -187,11 +190,15 @@ class RulePack:
     deny_deps: list[str] = field(default_factory=list)
     require_tests_for: list[str] = field(default_factory=list)
     deny_patterns: list[str] = field(default_factory=list)
+    # Set: an added line of Python outside these globs (and outside tests) may
+    # not start a process itself (subprocess, os.system, ...); see rule_checks.
+    direct_spawn_allowed: list[str] = field(default_factory=list)
     source: str = ""   # where it was read from, for `brindle profile show`
 
     @property
     def mechanical(self) -> bool:
-        return bool(self.deny_deps or self.require_tests_for or self.deny_patterns)
+        return bool(self.deny_deps or self.require_tests_for or self.deny_patterns
+                    or self.direct_spawn_allowed)
 
 
 _COMMENT = re.compile(r"(?:^|\s)#.*$")
@@ -680,6 +687,7 @@ def load_rule_pack(name: str, repo_root: str | None = None) -> RulePack:
         deny_deps=_list(meta.get("deny_deps")) or [],
         require_tests_for=_list(meta.get("require_tests_for")) or [],
         deny_patterns=_list(meta.get("deny_patterns")) or [],
+        direct_spawn_allowed=_list(meta.get("direct_spawn_allowed")) or [],
         source=source,
     )
 
@@ -727,6 +735,7 @@ def _required_packs(names: list[str]) -> list[RulePack]:
             deny_deps=_list(meta.get("deny_deps")) or [],
             require_tests_for=_list(meta.get("require_tests_for")) or [],
             deny_patterns=_list(meta.get("deny_patterns")) or [],
+            direct_spawn_allowed=_list(meta.get("direct_spawn_allowed")) or [],
             source=f"org rule pack {name}"))
     return out
 
@@ -775,6 +784,9 @@ def _mechanical_lines(pack: RulePack) -> list[str]:
                      + " must come with a test file in the same diff")
     if pack.deny_patterns:
         lines.append("no added line may match: " + ", ".join(f"/{p}/" for p in pack.deny_patterns))
+    if pack.direct_spawn_allowed:
+        lines.append("an added line may start a process directly (subprocess, os.system, asyncio "
+                     "subprocesses) only in: " + ", ".join(f"`{g}`" for g in pack.direct_spawn_allowed))
     return lines
 
 

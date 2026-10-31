@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config, workspace_config
-from brindle import bus, escapes, knowledge
+from brindle import bus, escapes, knowledge, spawn
 from brindle.db import DB, Agent, Autopilot, Milestone, Workspace, check_state
 from brindle.profiles import load_profile
 
@@ -1229,7 +1229,7 @@ def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,
     """Run one check command. Returns (passed, the tail of its output).
     ``cancel``, if given, is polled while the command runs; when it turns
     true the command is killed and ``CheckCancelled`` is raised."""
-    proc = subprocess.Popen(
+    proc = spawn.start(
         cmd, shell=True, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True,
     )
@@ -1284,8 +1284,7 @@ def checking(ap: Autopilot, timeout: float = 900.0) -> bool:
 
 def _detach(args: list[str]) -> None:
     """Start a brindle helper that outlives this process."""
-    subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    spawn.detach(args)
 
 
 def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | None,

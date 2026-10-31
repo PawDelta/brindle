@@ -130,7 +130,18 @@ def tool_names() -> list[str]:
 
 
 def _git(args: list[str], cwd: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    from brindle import spawn
+
+    return spawn.read(["git", *args], cwd=cwd)     # rev-parse, ls-files: reads
+
+
+def _begin_write() -> None:
+    """Refused (spawn.Busy, nothing written) once the request's deadline has
+    passed or it was stopped; otherwise the request commits, so the file
+    write and the exclude after it run to their end (brindle.spawn)."""
+    from brindle import spawn
+
+    spawn.begin_write()
 
 
 def _exclude(workspace: str, rel: Path) -> None:
@@ -172,6 +183,7 @@ def _merge_json(workspace: str, rel: Path, section: str, key: str, value: object
         )
     created = not path.exists()
     target[key] = value
+    _begin_write()      # past here the write and its exclude run to their end
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     if created:
@@ -222,6 +234,7 @@ def install(workspace: str, permission_policy: bool = False, strict: bool = Fals
     rule = Path(workspace) / AGENTS_DIR / "rules" / "brindle.md"
     if not rule.exists() or rule.read_text(encoding="utf-8") != RULE:
         created = not rule.exists()
+        _begin_write()
         rule.parent.mkdir(parents=True, exist_ok=True)
         rule.write_text(RULE, encoding="utf-8")
         if created:
@@ -390,10 +403,10 @@ def _tell_parent_stopped_on_error(db, agent, error_type: str) -> None:
 
 def _flush_soon(agent_id: str, delay: float = 1.5) -> None:
     """Type the agent's next queued message once agy has finished stopping."""
+    from brindle import spawn
     from brindle.providers import brindle_invocation
 
-    subprocess.Popen([*brindle_invocation(), "_flush", agent_id, "--delay", str(delay)],
-                     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    spawn.detach([*brindle_invocation(), "_flush", agent_id, "--delay", str(delay)])
 
 
 def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = False) -> dict:

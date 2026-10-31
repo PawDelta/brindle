@@ -11,12 +11,11 @@ order."""
 from __future__ import annotations
 
 import os
-import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from brindle import agents, git, scratch, tmux, view, workspaces
+from brindle import agents, git, scratch, spawn, tmux, view, workspaces
 from brindle import sessions as sessions_mod
 from brindle.db import DB, Agent, Workspace
 from brindle.service.dto import SessionDTO
@@ -145,8 +144,7 @@ def cull_detached(repo_root: str | None = None) -> None:
     from brindle.providers import brindle_invocation
 
     repo = ["--repo", repo_root] if repo_root else []
-    subprocess.Popen([*brindle_invocation(), "_cull", *repo], start_new_session=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    spawn.detach([*brindle_invocation(), "_cull", *repo])
 
 
 # -- start -------------------------------------------------------------------

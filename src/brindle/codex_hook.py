@@ -47,6 +47,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from brindle import spawn
+
 EVENT = "codex-permission-request"
 # Seconds Codex gives the hook: room for the default permission_hold_seconds
 # (a day) plus agents.HOOK_SLACK. Codex caps only SessionEnd hooks' timeouts
@@ -297,10 +299,10 @@ class _AppServer:
     def __init__(self, binary: str, flags: list[str], timeout: float = 30.0):
         self.timeout = timeout
         try:
-            self.proc = subprocess.Popen([binary, "app-server", *flags], stdin=subprocess.PIPE,
-                                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-                                         start_new_session=True,
-                                         env={**os.environ, "CODEX_HOME": str(codex_home())})
+            self.proc = spawn.start([binary, "app-server", *flags], stdin=subprocess.PIPE,
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                    start_new_session=True,
+                                    env={**os.environ, "CODEX_HOME": str(codex_home())})
         except OSError as e:
             raise CodexHookError(f"couldn't run {binary}: {e}") from e
         self.lines: queue.Queue = queue.Queue()

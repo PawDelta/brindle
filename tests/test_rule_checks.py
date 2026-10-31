@@ -115,6 +115,33 @@ def test_deny_patterns_report_file_and_line_and_cap_the_noise():
     assert len(bad) == 1 and "doesn't compile" in bad[0].detail
 
 
+@pytest.mark.parametrize("path, lines, hits", [
+    ("src/brindle/workspaces.py", ["proc = subprocess.run(args, cwd=path)"], 1),
+    ("src/brindle/ci.py", ["def f(*, run=subprocess.Popen): pass", "from subprocess import PIPE, Popen",
+                           "Popen(x)", "os.system('x')", "async def g(): await asyncio.create_subprocess_exec('x')"],
+     4),
+    pytest.param("src/brindle/b.py", [
+        "import subprocess as sp", "sp.run(args)",
+        "from subprocess import (", "    Popen as P,", ")", "P(args)",
+        'result = {"out": subprocess.check_output', "    (args)}",
+        "if ready: subprocess.run(args)"], 4,
+        marks=pytest.mark.variant("bypasses from review: an alias, a multi-line import and call, a colon")),
+    ("src/brindle/a.py", ["try: pass", "except subprocess.TimeoutExpired: pass", "# subprocess.run would wait",
+                          "def f(p: subprocess.Popen) -> subprocess.Popen: pass", "x: subprocess.Popen = None"], 0),
+    ("src/brindle/spawn.py", ["subprocess.run(argv)"], 0),
+    ("tests/test_a.py", ["subprocess.run(['git'])"], 0),
+    ("src/brindle/many.py", ["subprocess.call(x)"] * 11, 11),
+    ("src/brindle/broken.py", ["def f(:", "    subprocess.run(x)"], 1),     # doesn't parse: line by line
+])
+def test_a_direct_subprocess_start_fails_outside_the_allowed_files(path, lines, hits):
+    p = pack(direct_spawn_allowed=["src/brindle/spawn.py"])
+    source = "\n".join(lines) + "\n"
+    found = rule_checks.check_direct_spawn(p, added(*lines, path=path), lambda rel: source)
+    assert len(found) == min(hits, rule_checks.MAX_SHOWN_PER_RULE + 1)
+    assert all(v.detail.startswith(f"{path}:") for v in found[:hits][:rule_checks.MAX_SHOWN_PER_RULE])
+    assert rule_checks.check_direct_spawn(pack(), added(*lines, path=path)) == []
+
+
 def test_require_tests_for_wants_a_test_file_in_the_diff():
     d = rule_checks.parse_diff(DIFF)
     p = pack(require_tests_for=["src/**/*.py"])
@@ -203,6 +230,17 @@ def test_run_checks_the_workers_packs(db, branch):
     assert v.detail.endswith("/: return subprocess.run(cmd, shell=True)")
     assert result.summary().startswith("FAIL `rules security/backend`\n- security/backend")
     assert gates.summary_failed(result.summary())
+    # The direct-spawn rule reads the committed file: an aliased start is found.
+    root = Path(branch.repo_root)
+    (root / ".brindle" / "rules").mkdir(parents=True, exist_ok=True)
+    (root / ".brindle" / "rules" / "gate.md").write_text("---\nname: gate\ndirect_spawn_allowed: [spawn.py]\n---\n")
+    (root / ".brindle" / "agents" / "gated.md").write_text("---\nname: gated\nextends: developer\nrules: gate\n---\n")
+    (Path(branch.path) / "alias.py").write_text("import subprocess as sp\n\nsp.call(['x'])\n")
+    sh("git add alias.py && git commit -qm alias", Path(branch.path))
+    db.delete_agent("w1")
+    add_worker(db, branch, "gated")
+    assert sorted(v.detail.split(": ")[0] for v in rule_checks.run(db, branch).violations) == [
+        "alias.py:3", "svc.py:4"]
 
 
 def test_a_profile_that_wont_load_is_a_failure_not_a_pass(db, branch, repo):

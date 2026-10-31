@@ -70,7 +70,7 @@ def test_with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips(
 def test_past_its_deadline_nothing_starts_even_with_room(tmp_path):
     marker = tmp_path / "ran"
     with spawn.deadline(-1):
-        for start in (spawn.read, spawn.action):
+        for start in (spawn.read, spawn.action, spawn.start):
             with pytest.raises(spawn.Busy):
                 start(["touch", str(marker)])
         with pytest.raises(spawn.Busy):
@@ -78,6 +78,14 @@ def test_past_its_deadline_nothing_starts_even_with_room(tmp_path):
         # The real sign-in probe (conftest stubs it) is gated too: no answer is "can't tell".
         assert REAL_PROBE(["touch", str(marker)]) is None
     assert not marker.exists()
+
+
+def test_a_started_helper_commits_its_request_and_a_started_read_does_not():
+    with spawn.deadline(30) as dl:
+        spawn.start(["true"], write=False).wait()
+        assert not dl.committed and spawn.left(100) <= 30      # a read is still held to the deadline
+        spawn.detach(["true"]).wait()
+        assert dl.committed and spawn.left(100) == 100
 
 
 def _serve(method: str, handler, disconnect_when=None, cancel_when=None) -> None:

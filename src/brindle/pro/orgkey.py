@@ -40,6 +40,8 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 
+from brindle import spawn
+
 log = logging.getLogger(__name__)
 
 KEYS_ACCOUNT = "learning-keys"
@@ -82,8 +84,7 @@ class OrgKey:
 
 def _git(repo_root: str, *args: str) -> str | None:
     try:
-        r = subprocess.run(["git", "-C", repo_root, *args], capture_output=True, text=True,
-                           timeout=GIT_TIMEOUT, check=False)
+        r = spawn.read(["git", "-C", repo_root, *args], timeout=GIT_TIMEOUT)
     except (OSError, subprocess.SubprocessError):
         return None
     return r.stdout if r.returncode == 0 else None

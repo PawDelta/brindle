@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brindle import cloud_login, model_access
+from brindle import cloud_login, model_access, spawn
 
 NOW = 1_800_000_000.0
 
@@ -243,6 +243,35 @@ def test_issue189_a_timed_out_gcloud_leaves_no_process_behind(tmp_path, monkeypa
                 os.kill(int(pidfile.read_text()), signal.SIGKILL)
             except (ProcessLookupError, ValueError):
                 pass
+
+
+def test_a_cli_probe_that_exits_leaves_nothing_of_its_own_running():
+    # A cloud CLI can leave a local auth server behind in its group when it exits.
+    out = cloud_login.run_bounded(["sh", "-c", "tail -f /dev/null >/dev/null 2>&1 & echo $!"]).stdout
+    pid = int(out)
+    try:
+        end = time.monotonic() + 5
+        while _alive(pid) and time.monotonic() < end:
+            pass
+        assert not _alive(pid)
+    finally:
+        if _alive(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("provider, stopped", [("vertex", False), ("foundry", True), ("bedrock", False)])
+def test_under_an_expired_or_stopped_deadline_no_cloud_cli_starts(provider, stopped, tmp_path, monkeypatch):
+    # GET provider_connection reaches gcloud, az and aws through cloud_login.status;
+    # a request the app gave up on must not start them.
+    started = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: started.append(argv))
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "adc.json"), "AWS_PROFILE": "dev"}
+    with spawn.deadline(30 if stopped else -1) as dl:
+        if stopped:
+            dl.stop()
+        with pytest.raises(spawn.Busy):
+            cloud_login.refresh(provider, env=env, home=tmp_path)
+    assert started == []
 
 
 def test_google_token_cache_concurrent_misses_share_one_gcloud_call(tmp_path, monkeypatch):

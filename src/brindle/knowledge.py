@@ -20,7 +20,7 @@ import time
 import uuid
 from pathlib import Path
 
-from brindle import bus
+from brindle import bus, spawn
 from brindle.db import DB
 from brindle.pro.orgkey import GIT_TIMEOUT, normalize_remote
 
@@ -46,8 +46,7 @@ def repo_key(repo_root: str | Path) -> str:
     """``host/owner/repo`` of the origin remote, else the repo's absolute path."""
     root = str(Path(repo_root).resolve())
     try:
-        r = subprocess.run(["git", "-C", root, "config", "--get", "remote.origin.url"],
-                           capture_output=True, text=True, timeout=GIT_TIMEOUT, check=False)
+        r = spawn.read(["git", "-C", root, "config", "--get", "remote.origin.url"], timeout=GIT_TIMEOUT)
         url = r.stdout if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         url = ""

@@ -20,7 +20,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from brindle import provider_homes
+from brindle import provider_homes, spawn
 
 PROVIDERS = ("claude", "codex", "opencode", "antigravity")
 NAMES = {"claude": "Claude Code", "codex": "Codex", "opencode": "OpenCode", "antigravity": "Antigravity"}
@@ -99,8 +99,7 @@ def probe_version(path: str) -> str | None:
         return None
     if key not in _VERSIONS:
         try:
-            out = subprocess.run([path, "--version"], capture_output=True, text=True,
-                                 timeout=VERSION_PROBE_TIMEOUT, stdin=subprocess.DEVNULL)
+            out = spawn.read([path, "--version"], timeout=VERSION_PROBE_TIMEOUT)
             m = re.search(r"\d+\.\d+\.\d+[\w.+-]*", out.stdout + out.stderr)
             _VERSIONS[key] = m.group(0) if m else None
         except (OSError, subprocess.TimeoutExpired):
@@ -256,8 +255,8 @@ def install(provider: str, progress: Callable[[str], None]) -> dict[str, Any]:
     _check(provider)
     command = OFFICIAL[provider]
     progress(f"$ {command}")
-    proc = subprocess.Popen(["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, text=True)
+    proc = spawn.start(["bash", "-c", command], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True)
     timer = threading.Timer(INSTALL_TIMEOUT, proc.kill)
     timer.start()
     tail: list[str] = []

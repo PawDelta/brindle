@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
-from brindle import model_access
+from brindle import model_access, spawn
 
 CLI_TIMEOUT = 15.0
 # A sign-in tab this old is dead: AWS and Azure device codes and Google's
@@ -327,26 +327,13 @@ def _aws(env: Mapping[str, str], home: Path, now: float) -> LoginStatus:
 
 def run_bounded(argv: list[str], *, capture_output: bool = True, text: bool = True,
                 timeout: float = CLI_TIMEOUT, env=None) -> subprocess.CompletedProcess:
-    """``subprocess.run`` for a cloud CLI that leaves nothing behind: the CLI
-    gets no terminal and its own process group, and a timeout ends the whole
-    group (gcloud is a wrapper around python, which may hold a local auth
-    server and its port), not just the wrapper."""
-    with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, text=text, env=env,
-                          start_new_session=True) as proc:
-        try:
-            out, err = proc.communicate(timeout=timeout)
-        except BaseException:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                proc.kill()
-            raise      # Popen's exit reaps the wrapper
-        try:    # a server the CLI left running (trade-off: the group id could in theory
-            os.killpg(proc.pid, signal.SIGKILL)    # be reused once the group is empty)
-        except OSError:
-            pass
-        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    """A cloud CLI probe that leaves nothing behind, as a brindle.spawn read:
+    the CLI gets no terminal and its own process group; ``timeout`` (raising
+    TimeoutExpired), the request's deadline or its stop (raising spawn.Busy)
+    ends the whole group (gcloud is a wrapper around python, which may hold a
+    local auth server and its port), not just the wrapper, and so does the
+    wrapper's exit. Past the deadline it never starts."""
+    return spawn.read(argv, env=env, text=text, timeout=timeout, reap=True)
 
 
 def _full_env(env: Mapping[str, str] | None) -> dict[str, str] | None:
@@ -773,7 +760,7 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
         try:
             # The child inherits the locked descriptor: the lock is held until
             # the sign-in exits, however long the person takes.
-            proc = (popen or subprocess.Popen)(
+            proc = (popen or spawn.start)(
                 shlex.split(s.refresh_cmd), env=child_env, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True, pass_fds=(fd,))

@@ -18,12 +18,11 @@ import os
 import resource
 import signal
 import socket
-import subprocess
 import time
 from pathlib import Path
 
 import brindle
-from brindle import procs, upgrade
+from brindle import procs, spawn, upgrade
 from brindle.config import brindle_home
 
 HOST = "127.0.0.1"
@@ -73,8 +72,7 @@ def _is_daemon(pid: int) -> bool:
     that got the pid of one that died without cleaning up)."""
     if not procs.alive(pid):
         return False
-    cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
-                         capture_output=True, text=True).stdout
+    cmd = spawn.read(["ps", "-o", "command=", "-p", str(pid)], timeout=procs.PS_LIMIT).stdout
     return "brindle" in cmd and "daemon" in cmd
 
 

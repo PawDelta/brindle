@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
+from brindle import spawn
 from brindle.config import RepoConfig, brindle_home
 from brindle.native.client import Endpoint
 from brindle.profiles import list_profiles
@@ -159,7 +160,7 @@ def start_ollama(server: Server, log: Path | None = None) -> subprocess.Popen:
     out.write(f"\n== brindle: starting ollama serve for {', '.join(server.profiles)} "
               f"at {time.strftime('%Y-%m-%d %H:%M:%S')}\n".encode())
     out.flush()
-    proc = subprocess.Popen(
+    proc = spawn.start(
         ["ollama", "serve"], env=ollama_env(server),
         stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -226,11 +227,13 @@ def ensure(repo_root: str | None, cfg: RepoConfig, *, log: Path | None = None) -
     return lines
 
 
+PS_SECONDS = 5
+
+
 def _is_ollama_serve(pid: int) -> bool:
     """Whether ``pid`` is still an ``ollama serve`` (not a reused pid)."""
     try:
-        out = subprocess.run(["ps", "-ww", "-o", "command=", "-p", str(pid)],
-                             capture_output=True, text=True, timeout=5).stdout
+        out = spawn.read(["ps", "-ww", "-o", "command=", "-p", str(pid)], timeout=PS_SECONDS).stdout
     except (OSError, subprocess.SubprocessError):
         return False
     return "ollama" in out and "serve" in out
@@ -291,8 +294,12 @@ def stop_unused(db, grace: float = 5.0) -> list[str]:
     for host, pid in list(started.items()):
         if host in in_use:
             continue
+        is_ollama = _is_ollama_serve(pid)
+        # Refused (spawn.Busy) past the request's deadline with nothing stopped
+        # or forgotten; else the stop and the record run to their end.
+        spawn.begin_write()
         del started[host]
-        if _is_ollama_serve(pid):
+        if is_ollama:
             _stop_group(pid, grace)
             lines.append(f"stopped ollama serve at {host} (pid {pid}): no brindle session uses it")
     _save_started(started)
