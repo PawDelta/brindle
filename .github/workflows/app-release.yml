@@ -1182,11 +1182,12 @@ jobs:
         if: always() && steps.signing.outputs.signed == 'true'
         run: az logout || true
 
-      # The WSL client's tests, with its Windows-only code compiled in (the
-      # build above left the front end's dist/ that the shell embeds).
+      # The WSL client's tests (finding the daemon, and the pane views'
+      # bridge), with its Windows-only code compiled in (the build above left
+      # the front end's dist/ that the shell embeds).
       - name: WSL client tests
         run: |
-          cargo test --manifest-path app/src-tauri/Cargo.toml --lib wsl::
+          cargo test --manifest-path app/src-tauri/Cargo.toml --lib -- wsl:: pty_bridge::
 
       - name: Collect
         id: collect

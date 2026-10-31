@@ -5,9 +5,11 @@
    seam, "a terminal stream for this pane": PtyViewOpener (open, write,
    resize, and its bytes, exit and error back, then close). On macOS and
    Linux it is the shell's pty view (src-tauri/src/pty_view.rs,
-   tauriPtyView); the measuring rig and the e2e tests reach the same Rust
-   over a local WebSocket (wsPtyView, src-tauri/examples/pty_ws.rs);
-   Windows's will be the engine's WSL bridge. Bytes are bytes both ways:
+   tauriPtyView); on Windows the same tauriPtyView, the shell relaying the
+   engine's view in WSL over its daemon's WebSocket
+   (src-tauri/src/pty_bridge.rs); the measuring rig and the e2e tests reach
+   the same Rust over a local WebSocket (wsPtyView,
+   src-tauri/examples/pty_ws.rs). Bytes are bytes both ways:
    what the client prints goes to xterm.js as is, what xterm.js says the
    person typed (keys, pastes, mouse reports) goes to the client as is. */
 
@@ -62,8 +64,8 @@ export interface PtyView {
 export type PtyViewOpener = (at: PtyViewTarget, size: { cols: number; rows: number }, handlers: PtyViewHandlers) => PtyView;
 
 /* pty_view_status: whether panes can show through the pty view. "unusable":
-   it can't work here (tmux older than 3.2, or none; Windows, until its
-   bridge), in words to show. */
+   it can't work here (tmux older than 3.2, or none; on Windows, an engine
+   in WSL too old to serve views), in words to show. */
 export type PtyStatus = { kind: "pending" } | { kind: "ready"; tmux: string } | { kind: "unusable"; message: string };
 
 /* How the app shows panes: the pty view's status, the seam, and where what
