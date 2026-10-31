@@ -649,6 +649,8 @@ Goal driving, merge gates and cleanup:
 | `pre_commit` | `true` | run [pre-commit](https://pre-commit.com) over the branch, if the repo uses it |
 | `max_agents` | `4` | workers running at once per session (`0`: no cap) |
 | `check_timeout` | `900` | seconds each check may take |
+| `wait_for_room` | `true` | a new worker or check run waits while the machine is busy; `false` starts it at once |
+| `room_max_wait` | `600` | seconds a waiting worker or check run waits for room before it starts anyway |
 | `check_concurrency` | half the logical cores, at least 2, at most 6 and 2 GB of RAM per run | check runs at once on this machine, across branches; the rest wait their turn (`0`: no cap). A run far past its last duration is reported to the supervisor |
 | `fable_escalation` | on, unless the worker runs on a cloud account (Bedrock, Vertex or Foundry) | retry a failed heavy task once on `developer-heavy` before handing it to you; `true` turns it on for a cloud account, `false` off |
 | `usage_limit` | `90` | brindle stops pushing on at this % of your Claude usage limit |

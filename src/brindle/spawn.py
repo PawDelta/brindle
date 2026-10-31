@@ -242,13 +242,23 @@ def why() -> str:
             f"{running()} of brindle's processes running{mem.get(level, '')})")
 
 
-def no_room() -> str | None:
+def no_room(repo_root: str | None = None, since: float | None = None) -> str | None:
     """Why a new worker or check run should wait before it starts (what
     :func:`why` says), or None when the machine has room for it. Unlike a
     read or an action this applies in every process, gate on or off: a worker
     or a check run is the heaviest thing brindle starts. It waits until there
-    is room, however long, or until it is cancelled."""
-    return why() if room() < 1 else None
+    is room or until it is cancelled, but not forever: never when the repo's
+    ``wait_for_room`` is false, and not past ``room_max_wait`` seconds after
+    ``since`` (a wall-clock time, when the wait began)."""
+    if room() >= 1:
+        return None
+    if repo_root is not None:
+        from brindle.config import load_repo_config
+
+        cfg = load_repo_config(repo_root)
+        if not cfg.wait_for_room or (since is not None and time.time() - since >= cfg.room_max_wait):
+            return None
+    return why()
 
 
 def _has_room() -> bool:

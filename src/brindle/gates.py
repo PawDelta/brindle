@@ -378,10 +378,11 @@ def _room_for_check(ws: Workspace, cancel=None):
     (``Abandoned``)."""
     from brindle import spawn
 
-    if spawn.no_room() is not None:
+    if spawn.no_room(ws.repo_root) is not None:
         pause = threading.Event()
+        began = time.time()
         with marker("checks-room", ws.id):
-            while spawn.no_room() is not None:
+            while spawn.no_room(ws.repo_root, began) is not None:
                 if cancel is not None and cancel():
                     raise Abandoned("room")
                 pause.wait(SLOT_POLL)

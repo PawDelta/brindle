@@ -625,9 +625,11 @@ def enqueue(
 ROOM_POLL = 5.0   # seconds between the waiting helper's looks at the machine
 
 
-def room_wait() -> str | None:
-    """Why a worker should not start now (``spawn.no_room``), or None."""
-    return spawn.no_room()
+def room_wait(repo_root: str | None = None, since: float | None = None) -> str | None:
+    """Why a worker should not start now (``spawn.no_room``), or None: the
+    machine has room, or its wait ended (``wait_for_room`` off, or
+    ``room_max_wait`` seconds since ``since``)."""
+    return spawn.no_room(repo_root, since)
 
 
 def room_duplicate(db: DB, caller_id: str | None, repo_root: str, task_text: str) -> Task | None:
@@ -666,7 +668,7 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
         t = db.get_task(task_id)
         if t is None or t.state != "pending" or t.waiting is None or session_paused(db, t):
             return False
-        why = room_wait()
+        why = room_wait(t.repo_root, t.waiting_since)
         if why is None:
             # Unless a dependency added since holds it: merging that starts it.
             return _start_if_ready(db, t, "room on the machine", check_room=False)
@@ -909,7 +911,7 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     except agents.AgentError as e:
         _cancel(db, t.id, str(e))
         return False
-    why = room_wait() if check_room else None
+    why = room_wait(t.repo_root, t.waiting_since) if check_room else None
     if why:
         wait_for_room(db, t, why)
         return False
@@ -925,6 +927,10 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
         try:
             text = (f"Started {new_worker.id} for task {t.id} (was waiting for room: {t.waiting})."
                     if t.waiting else f"Started {new_worker.id} (was waiting on {dep_ref}).")
+            if t.waiting and t.waiting_since and spawn.room() < 1:   # its wait ran out, the machine did not clear
+                text = (f"Started {new_worker.id} for task {t.id} after waiting "
+                        f"{round((time.time() - t.waiting_since) / 60)} min for room; "
+                        f"{spawn.why().replace('is busy', 'is still busy', 1)}.")
             new_ws = db.get_workspace(new_worker.workspace_id)
             warning = agents.add_dirs_warning(new_worker, new_ws) if new_ws else None
             if warning:
@@ -1029,7 +1035,7 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."
-    why = room_wait()
+    why = room_wait(new.repo_root)
     if why:
         wait_for_room(db, new, why)
         return (f"Requeued task {old.id} as {new.id}, waiting for room: {why}. "
@@ -1089,7 +1095,7 @@ def dry_run_text(db: DB, ws: Workspace, profile: str, why: list[str], files: lis
             lines.append("queue: would not start (overlap)")
         elif mode == "queue":
             lines.append(f"queue: would queue until {clash.holder} merges")
-        elif busy := room_wait():
+        elif busy := room_wait(ws.repo_root):
             lines.append(f"queue: would wait for room: {busy}")
         else:
             lines.append("queue: would start now")

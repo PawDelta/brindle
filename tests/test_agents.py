@@ -413,9 +413,11 @@ def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
     assert capsys.readouterr().err.count("/no/such/cache") == 1
 
 
-@pytest.mark.parametrize("tool, reports", [("assign", "later"), ("handoff", "later"),
-                                           ("handoff", "while it starts")])
-def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo, monkeypatch, tool, reports):
+@pytest.mark.parametrize("tool, reports, ends", [
+    ("assign", "later", "load falls"), ("handoff", "later", "load falls"),
+    ("handoff", "while it starts", "load falls"),
+    ("assign", "later", "max wait"), ("assign", "later", "wait off")])
+def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo, monkeypatch, tool, reports, ends):
     """Plan 3.5: on a machine with no room an assign (or handoff) queues the
     task with the reason, list_tasks shows it, autopilot doesn't count it as
     a stall, a paused session starts nothing even once the load falls, and
@@ -450,13 +452,18 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     assert [a.id for a in db.list_agents()] == ["boss"]                  # nothing started
     assert autopilot.on_stop(db, boss, {}) is None                       # waiting, not stalled
     assert db.get_autopilot("boss").nudges == 0
-    # However long the machine stays full, the task waits rather than overload it.
-    db.update_task(t.id, waiting_since=time.time() - 86400)
+    # Until room_max_wait (default 600 s) is up, the task waits rather than overload the machine.
+    db.update_task(t.id, waiting_since=time.time() - 500)
     tasks.sweep(db)
     assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
 
     db.set_status("boss", "paused")
-    load[0] = 2.0
+    if ends == "load falls":
+        load[0] = 2.0
+    elif ends == "max wait":   # the fake clock: the wait began 11 minutes ago, the load never fell
+        db.update_task(t.id, waiting_since=time.time() - 660)
+    else:
+        (repo / ".brindle" / "config.json").write_text('{"pipeline": false, "wait_for_room": false}')
     assert not tasks.start_when_room(db, t.id, poll=0) and tasks.start_with_room(db) == 0
     assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
 
@@ -475,7 +482,11 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     if reports == "later":
         agents.report_result(db, worker.id, "did A", docs_checked=True)
     told = [full_text(db, "boss", db.pop_pending("boss").body) for _ in range(db.pending_count("boss"))]
-    assert sum(f"Started {worker.id} for task {t.id} (was waiting for room: {busy}" in m for m in told) == 1
+    if ends == "max wait":
+        assert sum(f"Started {worker.id} for task {t.id} after waiting 11 min for room; "
+                   "the machine is still busy (load 14.0" in m for m in told) == 1
+    elif ends == "load falls":
+        assert sum(f"Started {worker.id} for task {t.id} (was waiting for room: {busy}" in m for m in told) == 1
     assert sum("did A" in m for m in told) == 1, told
 
 
