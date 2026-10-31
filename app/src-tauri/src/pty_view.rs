@@ -43,7 +43,9 @@
 
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::io::Read;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -387,6 +389,7 @@ pub const LAYOUT_FORMAT: &str = "#{@brindle_sidebar}\t#{pane_left}\t#{pane_right
 
 /// What `crop_now` reads of the view's client, a line a client (`list-clients -F`): its pid, its
 /// width, and how far into a window wider than it tmux has panned.
+#[cfg_attr(not(unix), allow(dead_code))]
 const CLIENT_FORMAT: &str = "#{client_pid}\t#{client_width}\t#{window_offset_x}";
 
 /// The crop for a window's panes as `LAYOUT_FORMAT` lists them, for a view
@@ -436,6 +439,7 @@ pub fn crop_of(panes: &str, visible: u16, client: Option<(u16, u16)>) -> Crop {
 /// The crop of the view session `view`'s window for a view `visible` columns wide (its client
 /// that and the crop's columns), as it is now, if tmux can say (the session is there). `client`:
 /// the pid of the view's client, once it is attached.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn crop_now(tmux_bin: &Path, server: &[String], view: &str, visible: u16, client: Option<u32>) -> Option<Crop> {
     let out = tmux(tmux_bin).args(server).args(["list-panes", "-t", &format!("={view}:"), "-F", LAYOUT_FORMAT]).output().ok().filter(|out| out.status.success())?;
     let panes = String::from_utf8_lossy(&out.stdout);
@@ -589,6 +593,7 @@ fn forward_from(mut reads: impl Reads, mut on_data: impl FnMut(&[u8]), on_exit: 
 pub const RELEASE_GAP: std::time::Duration = std::time::Duration::from_millis(15);
 
 /// Where in `data` each SGR mouse release (`ESC [ < b ; x ; y m`) starts.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn sgr_releases(data: &[u8]) -> Vec<usize> {
     let mut at = Vec::new();
     let mut i = 0;
@@ -612,6 +617,7 @@ fn sgr_releases(data: &[u8]) -> Vec<usize> {
 /// What the person typed, to the view's client: as it comes, but each mouse
 /// release `RELEASE_GAP` after the write before it, so tmux reads it apart.
 /// `last`: when the last write went.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn write_input(writer: &mut impl Write, data: &[u8], last: &mut Option<std::time::Instant>) -> io::Result<()> {
     // What's before each release goes, then the release (and what follows it) once the gap has passed.
     let mut from = 0;
@@ -637,6 +643,7 @@ pub struct PtyView {
     tmux: PathBuf,
     server: Vec<String>,
     view: String,
+    #[cfg_attr(not(unix), allow(dead_code))]
     master: Arc<File>,
     /// The view's size in cells, and the columns cropped off it (`Crop`):
     /// the client's pty is the two together.
@@ -964,6 +971,7 @@ impl PtyViews {
     /// The view `claim` opened, kept if its page is still the one loaded and
     /// hasn't closed it meanwhile; else handed back, for the caller to drop
     /// (which takes its session, and its client with it).
+    #[allow(clippy::result_large_err)] // handed back to be dropped, never carried far
     pub fn register(&self, claim: Claim, view: PtyView) -> Result<(), PtyView> {
         let mut views = self.lock();
         if views.generation != claim.generation || !views.pending.remove(&claim.id) {
@@ -2020,6 +2028,7 @@ mod tests {
     }
 
     /// The keys every tmux from 3.2 has in the view's table, and ones it only has later.
+    #[cfg_attr(not(unix), allow(dead_code))]
     const BASELINE_KEYS: [&str; 6] = ["MouseDown1Pane", "MouseDown2Pane", "MouseDrag1Pane", "WheelUpPane", "DoubleClick1Pane", "TripleClick1Pane"];
 
     /// The view on `server`, whose tmux is older than the client's: it opens,

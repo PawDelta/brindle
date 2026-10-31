@@ -45,6 +45,7 @@ pub(crate) const START_TIMEOUT: Duration = Duration::from_secs(20);
 /// How a start's failure begins while the daemon it started still runs but
 /// doesn't listen yet: not a failure. The webview (api/engine.ts) keeps
 /// "Starting brindle…" up and asks again.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) const ENGINE_STARTING: &str = "engine starting";
 /// The close code for a WebSocket whose first frame wasn't the token (auth.WS_UNAUTHORIZED).
 const WS_UNAUTHORIZED: u16 = 4401;
@@ -68,6 +69,7 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 pub(crate) const ENGINE_TOO_OLD: &str = "engine too old";
 /// How a start's failure begins when an app that carries its engine finds
 /// another install's `brindle daemon`, one a person started, using brindle's home.
+#[cfg_attr(windows, allow(dead_code))]
 pub(crate) const ENGINE_CONFLICT: &str = "engine conflict";
 /// How long a daemon being replaced has to shut down after SIGTERM before it
 /// is killed, as `brindle daemon stop` kills one (lifecycle.STOP_GRACE). What
@@ -130,6 +132,8 @@ fn ps(pid: u32, field: &str) -> Option<String> {
 }
 
 /// What an app that carries its engine does with the running daemon.
+// Unix-only, as are the start steps: Windows starts its daemon in WSL (wsl.rs).
+#[cfg_attr(windows, allow(dead_code))]
 #[derive(Debug, PartialEq)]
 pub(crate) enum Reuse {
     /// Its own engine's, of this build: use it.
@@ -348,6 +352,7 @@ fn starting_in(home: &Path) -> bool {
 /// (`daemon_start_step`) while it waits.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "step", rename_all = "lowercase")]
+#[cfg_attr(windows, allow(dead_code))]
 pub enum StartStep {
     /// Stopping daemon `pid`: another build's (from before an update), or another install's.
     Stopping { pid: u32 },
