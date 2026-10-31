@@ -31,6 +31,10 @@ TOKEN = "t" * 43
 def _get(path: str, headers: dict[str, str], query: str = "", peer_pid: int | None = None) -> tuple[int, dict]:
     """One HTTP request straight through the ASGI app (``peer_pid``: as if
     that process called on the Unix socket)."""
+    return asyncio.run(_read_request(build_app(TOKEN, port=8123), path, headers, query, peer_pid))
+
+
+async def _read_request(app, path, headers, query="", peer_pid=None):
     sent: list[dict] = []
 
     async def receive():
@@ -45,7 +49,7 @@ def _get(path: str, headers: dict[str, str], query: str = "", peer_pid: int | No
              "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
     if peer_pid is not None:
         scope[peer.PEER_PID] = peer_pid
-    asyncio.run(build_app(TOKEN, port=8123)(scope, receive, send))
+    await app(scope, receive, send)
     body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
     return sent[0]["status"], json.loads(body)
 
@@ -168,6 +172,47 @@ def test_tcp_daemon_needs_the_token_on_requests_and_as_the_ws_first_frame(tmp_pa
 
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+
+def test_heavy_lane(db, monkeypatch):
+    import anyio.to_thread
+    from brindle.daemon import routes_read
+
+    async def exercise():
+        entered = asyncio.Queue()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def blocked(*args):
+            loop.call_soon_threadsafe(entered.put_nowait, None)
+            release.wait()
+            raise ValueError("blocked handler finished")
+
+        monkeypatch.setattr(routes_read.session_review, "session", blocked)
+        app = build_app(TOKEN, port=8123)
+        paths = [f"/v1/sessions/r1/{suffix}" for suffix in
+                 ("diff", "pr/readiness", "tree", "pr/draft")]
+        normal = anyio.to_thread.current_default_thread_limiter()
+        previous = normal.total_tokens
+        normal.total_tokens = 1
+        pending = [asyncio.create_task(_read_request(app, paths[0], AUTH)) for _ in range(4)]
+        try:
+            for _ in pending:
+                await asyncio.wait_for(entered.get(), 1)
+            assert (await asyncio.wait_for(_read_request(app, "/v1/meta", AUTH), 1))[0] == 200
+            assert (await asyncio.wait_for(_read_request(app, "/v1/repos", AUTH), 1))[0] == 200
+            for path in paths:
+                code, body = await asyncio.wait_for(_read_request(app, path, AUTH), 1)
+                assert code == 503 and body["error"]["code"] == "busy"
+        finally:
+            release.set()
+            responses = await asyncio.gather(*pending)
+            normal.total_tokens = previous
+        assert all(code == 400 for code, _ in responses)
+        for path in paths:
+            assert (await _read_request(app, path, AUTH))[0] == 400
+
+    asyncio.run(exercise())
 
 
 @pytest.fixture
@@ -439,6 +484,58 @@ def test_peer_pid_names_the_unix_socket_caller():
     a, b = socket.socketpair(socket.AF_UNIX)
     with a, b:
         assert peer.peer_pid(a) == os.getpid()
+
+
+@pytest.mark.parametrize("outcome", ["allowed", "error", "limit"])
+def test_caller_check_single_flight(monkeypatch, outcome):
+    from brindle.daemon import auth
+    release = threading.Event()
+    calls = []
+    def check(pid):
+        calls.append(threading.current_thread().name)
+        release.wait()
+        if outcome == "error":
+            raise RuntimeError("private process data")
+    monkeypatch.setattr(peer, "agent_caller", check)
+    bounded = hasattr(auth, "CALLER_CHECK_LIMIT")
+    if outcome == "limit":
+        monkeypatch.setattr(auth, "CALLER_CHECK_LIMIT", 0, raising=False)
+    async def exercise():
+        async def route(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200})
+        async def request():
+            sent = []
+            async def send(message):
+                sent.append(message)
+            await guard(scope, None, send)
+            return sent[0]["status"]
+        guard = Guard(route, TOKEN)
+        guard._callers[123] = (-float("inf"), None)
+        scope = {"type": "http", "path": "/v1/meta", "headers": [
+            (b"authorization", f"Bearer {TOKEN}".encode())], peer.PEER_PID: 123}
+        requests = [asyncio.create_task(request()) for _ in range(24)]
+        dispatched = asyncio.get_running_loop().create_future()
+        asyncio.get_running_loop().call_soon(dispatched.set_result, None)
+        await dispatched
+        try:
+            if outcome != "limit" or not bounded:
+                release.set()
+            statuses = await asyncio.gather(*requests)
+            assert statuses == [200 if outcome == "allowed" else 403] * 24
+            assert await request() == statuses[0]
+            if outcome == "limit":
+                guard._callers[123] = (-float("inf"), None)
+                monkeypatch.setattr(auth, "CALLER_CHECK_LIMIT", auth.CALLER_TTL)
+                asyncio.get_running_loop().call_soon(release.set)
+                assert await request() == 403
+        finally:
+            release.set()
+            await asyncio.gather(*getattr(guard, "_caller_checks", {}).values(), return_exceptions=True)
+        if outcome == "limit":
+            assert await request() == 403
+    asyncio.run(exercise())
+    assert len(calls) == 1
+    assert calls[0].startswith("brindle-caller")
 
 
 def test_window_size_cleanup_unsets_manual_only_on_brindles_own_windows_once(db, monkeypatch):
