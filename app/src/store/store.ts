@@ -105,6 +105,8 @@ function applyMessage(state: AppState, m: StreamMessage): AppState {
 
 function applyEvent(state: AppState, e: BusEvent): AppState {
   switch (e.kind) {
+    case "session.changed":
+      return state;
     case "agent.status": {
       const status = e.payload.status;
       if (typeof status !== "string" || !e.agent_id) return { ...state, stale: true };
