@@ -14,6 +14,26 @@ from brindle import cloud_login, model_access
 
 NOW = 1_800_000_000.0
 
+
+def test_google_token_cache_runs_gcloud_once_until_near_expiry(tmp_path):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="ya29.SECRET\n", stderr="")
+
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "adc.json")}
+
+    def check(at):
+        return cloud_login.status("vertex", env=env, home=tmp_path, now=at, run=fake_run,
+                                  expiry=lambda token: 3600.0)
+
+    first, second = check(NOW), check(NOW + 60)
+    assert first.ok and second.ok and second.expires_at == first.expires_at
+    assert "SECRET" not in repr(second) and len(calls) == 1
+    check(NOW + 3600 - 100)    # inside the margin before expiry: asks gcloud again
+    assert len(calls) == 2
+
 VERTEX_ERROR = ('API Error: Could not load Google Cloud credentials · '
                 '{"error":"invalid_grant","error_description":"reauth related error (invalid_rapt)",'
                 '"error_subtype":"invalid_rapt"}')

@@ -1283,6 +1283,7 @@ def test_opencode_cloud_identity_dispatch(db, world, tmp_path, monkeypatch, rout
         db.set_status("wk", state)
         db.update_autopilot("sup", state="blocked", note="Credentials need attention")
         healthy = False
+        cloud_login._google_expiry_cache.clear()   # the sign-in lapsed: no token left to reuse
         assert _send("POST", "/v1/sessions/sup/continue")[0] == 409
         assert db.get_autopilot("sup").state == "blocked"
         healthy = True
