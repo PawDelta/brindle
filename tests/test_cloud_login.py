@@ -243,3 +243,41 @@ def test_issue189_a_timed_out_gcloud_leaves_no_process_behind(tmp_path, monkeypa
                 os.kill(int(pidfile.read_text()), signal.SIGKILL)
             except (ProcessLookupError, ValueError):
                 pass
+
+
+def test_google_token_cache_concurrent_misses_share_one_gcloud_call(tmp_path, monkeypatch):
+    import threading
+    calls, entered, release, keyed = [], threading.Event(), threading.Event(), threading.Event()
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            entered.set()
+            release.wait()
+        return SimpleNamespace(returncode=0, stdout="ya29.SECRET\n", stderr="")
+
+    real_key = cloud_login._google_cache_key
+
+    def key(full):
+        if entered.is_set():
+            keyed.set()       # the second caller is past the cache-miss fast path's setup
+        return real_key(full)
+
+    monkeypatch.setattr(cloud_login, "_google_cache_key", key)
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "adc.json")}
+    results = []
+
+    def check():
+        results.append(cloud_login.status("vertex", env=env, home=tmp_path, now=NOW, run=fake_run,
+                                          expiry=lambda token: 3600.0))
+
+    first = threading.Thread(target=check)
+    first.start()
+    entered.wait()
+    second = threading.Thread(target=check)
+    second.start()
+    keyed.wait()
+    release.set()
+    first.join()
+    second.join()
+    assert len(calls) == 1 and [r.ok for r in results] == [True, True]

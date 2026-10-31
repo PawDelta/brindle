@@ -21,6 +21,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -422,6 +423,8 @@ _GOOGLE_TOKEN_MARGIN = 300.0
 # Expiry (epoch seconds) of the access token gcloud last minted, by the env that
 # selects the account. Only the expiry is kept, never the token.
 _google_expiry_cache: dict[tuple, float] = {}
+_google_locks: dict[tuple, threading.Lock] = {}
+_google_locks_guard = threading.Lock()
 
 
 def _google_cache_key(full: Mapping[str, str]) -> tuple:
@@ -439,10 +442,17 @@ def _google(run, env, now: float, expiry) -> LoginStatus:
     full = {**os.environ, **(env or {})}
     refresh = "gcloud auth application-default login" if _google_browser_login(full) else ""
     key = _google_cache_key(full)
-    cached = _google_expiry_cache.get(key)
-    if cached is not None and cached - now > _GOOGLE_TOKEN_MARGIN:
-        return _from_expiry(cached, refresh, now, "")
-    _google_expiry_cache.pop(key, None)
+    with _google_locks_guard:
+        lock = _google_locks.setdefault(key, threading.Lock())
+    with lock:   # one gcloud call per identity; the others wait, then reuse its result
+        cached = _google_expiry_cache.get(key)
+        if cached is not None and cached - now > _GOOGLE_TOKEN_MARGIN:
+            return _from_expiry(cached, refresh, now, "")
+        _google_expiry_cache.pop(key, None)
+        return _google_mint(run, env, now, expiry, key, refresh)
+
+
+def _google_mint(run, env, now: float, expiry, key: tuple, refresh: str) -> LoginStatus:
     try:
         proc = run(["gcloud", "auth", "application-default", "print-access-token"],
                    capture_output=True, text=True, timeout=CLI_TIMEOUT, env=_full_env(env))
