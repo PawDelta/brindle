@@ -336,7 +336,8 @@ def left(seconds: float) -> float:
     return seconds if dl is None else max(0.0, min(seconds, dl.left()))
 
 
-def start(argv: list[str] | str, *, write: bool = True, **popen: Any) -> subprocess.Popen:
+def start(argv: list[str] | str, *, write: bool = True, until: float | None = None,
+          **popen: Any) -> subprocess.Popen:
     """Start a process the caller looks after itself (a helper that outlives
     it, a server, a child it talks to over pipes) and return its Popen.
 
@@ -346,13 +347,18 @@ def start(argv: list[str] | str, *, write: bool = True, **popen: Any) -> subproc
     it changes something, so once it starts the request commits
     (Deadline.committed), as after an action. A read (``write=False``)
     doesn't, and the caller bounds how long it runs (see :func:`left`).
+    ``until`` (``time.monotonic()``): the caller's own budget, which ends
+    the wait for room too: past it (or the deadline, whichever is sooner)
+    the start is refused with Busy, never made late.
 
     It isn't counted in running() once started, and it runs at normal
     priority: it may outlive the request, and whatever it starts (a worker's
     agents, a server's clients) would inherit a background priority."""
     dl = _live()
     if dl is not None:
-        _admit(dl.at, dl, False, _name(argv))
+        _admit(dl.at if until is None else min(dl.at, until), dl, False, _name(argv))
+    elif until is not None:
+        _admit(until, None, False, _name(argv))
     else:
         _admit(time.monotonic() + ACTION_WAIT, None, False, _name(argv), start_anyway=True)
     try:

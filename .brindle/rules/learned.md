@@ -19,7 +19,8 @@ direct_spawn_allowed:
   - src/brindle/sidebar_logo.py   # the sidebar pane's own tmux display
   - src/brindle/ci_client.py      # `brindle ci` and the CI runner, never the daemon
   - src/brindle/ci_adapters.py    # the CI runner's review adapters
-  - src/brindle/native/*          # the native agent runner: its tools, LSP and model server
+  - src/brindle/native/tools.py   # the native agent runner's own tool calls (in the agent's process)
+  - src/brindle/native/lsp.py     # the native agent runner's language server
   - scripts/*                     # repo scripts
 ---
 Tests in this repo must earn their place. CI fails a pull request whose new test

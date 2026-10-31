@@ -390,6 +390,28 @@ def test_real_helper_entry_point_with_no_endpoint_cannot_contact_providers(tmp_p
     assert "No supported read-only catalog" in result.explanation
 
 
+BUDGET = 0.2    # seconds of discovery, against a request with 50
+
+
+@pytest.mark.skipif(sys.platform not in ("darwin", "linux"), reason="POSIX process groups")
+def test_a_saturated_machine_spends_the_discovery_budget_not_the_request_deadline(monkeypatch, tmp_path):
+    from brindle import spawn
+
+    monkeypatch.setattr(spawn, "_gated", True)       # no room: load far above the cores
+    monkeypatch.setattr(spawn, "_cores", lambda: 4)
+    monkeypatch.setattr(spawn, "_load", lambda: 9.0)
+    monkeypatch.setattr(spawn, "_running", 1)
+    popen = Mock()
+    monkeypatch.setattr(ma.subprocess, "Popen", popen)
+    check = ma.ModelAvailabilityChecker(timeout=BUDGET)
+    started = time.monotonic()
+    with spawn.deadline(50):
+        result = check.check(profile(), effective_env={}, cwd=str(tmp_path))
+    assert result.status == "unverified" and "timed out" in result.explanation
+    assert time.monotonic() - started < 2      # its own budget, not the request's 50 seconds
+    popen.assert_not_called()
+
+
 def test_unsupported_platform_never_launches(monkeypatch):
     monkeypatch.setattr(ma.sys, "platform", "win32")
     popen = Mock()

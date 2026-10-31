@@ -308,12 +308,14 @@ def check_deny_patterns(pack: RulePack, diff: Diff) -> list[Violation]:
     return found
 
 
-# A process started without the gate: subprocess's starters (called, or handed
-# on as a default ``run=``; not named as a type after ``:`` or ``->``), an
-# import of one, os's, pty's and asyncio's.
+# A process started without the gate: subprocess's starters called (wherever
+# the call is: after ``if x:`` or a dict key too), or named without a call
+# (handed on as ``run=``) except as a type after ``:`` or ``->``; an import of
+# one; os's, pty's and asyncio's.
 _STARTERS = r"(?:run|Popen|call|check_call|check_output|getoutput|getstatusoutput)"
 DIRECT_SPAWN = re.compile(
-    rf"(?<!:)(?<!: )(?<!>)(?<!> )\bsubprocess\.{_STARTERS}\b"
+    rf"\bsubprocess\.{_STARTERS}\s*\("
+    rf"|(?<!:)(?<!: )(?<!>)(?<!> )\bsubprocess\.{_STARTERS}\b"
     rf"|^\s*from\s+subprocess\s+import\b.*\b{_STARTERS}\b"
     r"|\bos\.(?:system|popen|posix_spawnp?|spawn[lv]p?e?|exec[lv]p?e?|fork(?:pty)?)\s*\("
     r"|\bpty\.(?:spawn|fork)\s*\(|\basyncio\.create_subprocess_(?:exec|shell)\b")

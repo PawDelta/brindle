@@ -172,6 +172,23 @@ def test_stop_unused_stops_the_server_and_its_runner_when_no_session_uses_it(db,
     assert not serve.pids_path().exists()
 
 
+def test_stop_unused_stops_nothing_once_its_request_stopped_after_the_probe(db, monkeypatch, fake_serve):
+    # POST pause_session reaches stop_unused: an app that left after the ps probe
+    # answered gets busy, with the server and its record untouched.
+    from brindle import spawn
+
+    p = fake_serve()
+    serve.record_started("http://localhost:11434", p.pid)
+    monkeypatch.setattr(serve, "hosts_in_use", lambda db: set())
+    real = serve._is_ollama_serve
+    with spawn.deadline(30) as dl:
+        monkeypatch.setattr(serve, "_is_ollama_serve", lambda pid: (real(pid), dl.stop())[0])
+        with pytest.raises(spawn.Busy):
+            serve.stop_unused(db, grace=2.0)
+    assert p.poll() is None
+    assert serve.started_servers() == {"http://localhost:11434": p.pid}
+
+
 def test_stop_unused_keeps_a_server_a_running_session_uses(db, monkeypatch, fake_serve):
     p = fake_serve()
     serve.record_started("http://localhost:11434", p.pid)

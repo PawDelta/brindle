@@ -135,6 +135,15 @@ def _git(args: list[str], cwd: str) -> subprocess.CompletedProcess:
     return spawn.read(["git", *args], cwd=cwd)     # rev-parse, ls-files: reads
 
 
+def _begin_write() -> None:
+    """Refused (spawn.Busy, nothing written) once the request's deadline has
+    passed or it was stopped; otherwise the request commits, so the file
+    write and the exclude after it run to their end (brindle.spawn)."""
+    from brindle import spawn
+
+    spawn.begin_write()
+
+
 def _exclude(workspace: str, rel: Path) -> None:
     common = _git(["rev-parse", "--path-format=absolute", "--git-common-dir"], workspace)
     if common.returncode != 0:
@@ -174,6 +183,7 @@ def _merge_json(workspace: str, rel: Path, section: str, key: str, value: object
         )
     created = not path.exists()
     target[key] = value
+    _begin_write()      # past here the write and its exclude run to their end
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     if created:
@@ -224,6 +234,7 @@ def install(workspace: str, permission_policy: bool = False, strict: bool = Fals
     rule = Path(workspace) / AGENTS_DIR / "rules" / "brindle.md"
     if not rule.exists() or rule.read_text(encoding="utf-8") != RULE:
         created = not rule.exists()
+        _begin_write()
         rule.parent.mkdir(parents=True, exist_ok=True)
         rule.write_text(RULE, encoding="utf-8")
         if created:

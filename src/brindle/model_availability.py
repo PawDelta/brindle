@@ -264,10 +264,13 @@ def _isolated_discovery(request: Request, timeout: float) -> Catalog:
     if len(payload) > 4096:
         raise _DiscoveryError("failed")
     deadline = time.monotonic() + spawn.left(timeout)     # never past the request's own
-    with spawn.start([sys.executable, os.path.abspath(__file__), "--discover"], write=False,
-                     env=dict(request.env), cwd=request.cwd, stdin=subprocess.PIPE,
-                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                     start_new_session=True) as proc:
+    try:     # the budget covers any wait for room: no helper starts after it is spent
+        proc = spawn.start([sys.executable, os.path.abspath(__file__), "--discover"], write=False,
+                           until=deadline, env=dict(request.env), cwd=request.cwd, stdin=subprocess.PIPE,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    except spawn.Busy:
+        raise TimeoutError from None
+    with proc:
         try:
             try:
                 proc.stdin.write(payload)
