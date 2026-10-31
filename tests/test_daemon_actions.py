@@ -1867,7 +1867,8 @@ def _readiness_prepares_after_startup_and_recovers(db, lead, monkeypatch, obstac
 
 
 @pytest.mark.parametrize("scenario, params", [
-    pytest.param(_review_lock_returns_busy_without_starting_work, {"checks": []}, id="review_lock-no-checks"),
+    pytest.param(_review_lock_returns_busy_without_starting_work, {"checks": []}, id="review_lock-no-checks",
+                 marks=pytest.mark.variant("a repo with no checks takes the reviewer-only path; it must also report busy")),
     pytest.param(_review_lock_returns_busy_without_starting_work, {"checks": ["true"]}, id="review_lock-checks"),
     pytest.param(_readiness_prepares_after_startup_and_recovers, {"obstacle": "identity"}, id="readiness-identity"),
     pytest.param(_readiness_prepares_after_startup_and_recovers, {"obstacle": "interrupted"},
