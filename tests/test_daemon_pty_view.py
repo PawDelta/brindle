@@ -112,6 +112,9 @@ def test_an_older_servers_client_is_the_executable_listening_on_its_socket(tmp_p
     # The "server" is this test's own socket, so the kernel names this Python as its
     # peer: its executable is picked only if it says it is the server's version.
     monkeypatch.chdir(tmp_path)     # a short socket path (macOS caps them at 104 bytes)
+    # Whether this host's Python sits in a folder only root or this user can write to
+    # varies (a CI runner's toolcache may be group-writable); this test is about the peer lookup.
+    monkeypatch.setattr(pv, "_trusted_exe", lambda exe: True)
     listening = socket.socket(socket.AF_UNIX)
     listening.bind("server")
     listening.listen()
