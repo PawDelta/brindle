@@ -392,7 +392,7 @@ fn start_in(
     engine: Option<&Path>,
     patience: Duration,
 ) -> Result<DaemonInfo, String> {
-    let usable = |info: &DaemonInfo| engine.is_none_or(|engine| reuse_running(engine, info) == Reuse::Use);
+    let usable = |info: &DaemonInfo| engine.map_or(true, |engine| reuse_running(engine, info) == Reuse::Use);
     let log_path = home.join(START_LOG);
     let pending = STARTING.lock().ok().and_then(|mut s| s.as_mut()?.remove(home));
     let Starting { mut child, since } = match pending {
@@ -939,7 +939,7 @@ impl Engine {
     /// but a TCP port it has let go of can be taken by any local process: on
     /// TCP only, check it's still the daemon before connecting (and sending
     /// the token).
-    fn current(&self) -> Result<DaemonInfo, String> {
+    pub(crate) fn current(&self) -> Result<DaemonInfo, String> {
         let known = self.info.lock().map_err(|e| e.to_string())?.clone();
         match known {
             Some(info) if info.socket.is_some() || still_running(&info) => Ok(info),

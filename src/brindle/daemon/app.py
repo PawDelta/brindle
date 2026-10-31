@@ -18,6 +18,7 @@ from brindle.daemon import routes_read
 from brindle.daemon.auth import Guard
 from brindle.daemon.events import events
 from brindle.daemon.holds import ROUTES as HOLD_ROUTES
+from brindle.daemon.pty_view import pty_view
 from brindle.daemon.routes_actions import ROUTES as ACTIONS
 from brindle.daemon.routes_org_permissions import ROUTES as ORG_PERMISSION_ROUTES
 
@@ -33,11 +34,13 @@ async def meta(request: Request) -> JSONResponse:
         "db_path": str(db_path()),
         "tmux": shutil.which("tmux") is not None,
         "airgap": airgap.enabled(),
+        "pty_view": True,       # WS /v1/pty_view: the Windows app's WSL bridge
     })
 
 
 ROUTES = [Route("/v1/meta", meta), *routes_read.ROUTES,
-          WebSocketRoute("/v1/events", events), *ACTIONS, *HOLD_ROUTES, *ORG_PERMISSION_ROUTES]
+          WebSocketRoute("/v1/events", events), WebSocketRoute("/v1/pty_view", pty_view),
+          *ACTIONS, *HOLD_ROUTES, *ORG_PERMISSION_ROUTES]
 
 
 def build_app(token: str, port: int | None = None, poller=None) -> ASGIApp:
