@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import json
 import os
 import resource
@@ -8,21 +9,23 @@ import sqlite3
 import stat
 import tempfile
 import threading
+import time
 from http.client import HTTPConnection
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import sh
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from wsproto import ConnectionType, WSConnection
 from wsproto.events import AcceptConnection, CloseConnection, Request, TextMessage
 
-from brindle import cost, doctor, identity_lock, keystore, knowledge, procs, tmux, workspaces
+from brindle import cost, doctor, git, identity_lock, keystore, knowledge, procs, tmux, workspaces
 from brindle import kb as kb_mod
-from brindle.daemon import events, lifecycle, peer, terminal
+from brindle.daemon import events, lifecycle, peer, session_review, terminal
 from brindle.daemon.app import build_app
 from brindle.daemon.auth import WS_UNAUTHORIZED, Guard
-from brindle.db import Agent, Workspace
+from brindle.db import DB, Agent, Workspace
 from brindle.pro import license
 
 TOKEN = "t" * 43
@@ -898,3 +901,116 @@ def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, e
     code, body = _get("/v1/analysis-docs/results", AUTH, "repo=/r")
     assert code == 200 and (body["enough"], body["compared"], body["briefed"]) == (enough, briefed, briefed + 1)
     assert (body["with_brief"], body["without_brief"]) == ((1.0, 3.0) if enough else (None, None))
+
+
+def _diff_session(db, repo, tmp_path) -> tuple[Agent, Workspace]:
+    """A session ``lead`` on ``sess``: a merged worker that adds a.py and deletes a
+    line of the base's shared.py, then the supervisor's b.py and a line added
+    to the base's app.py. Nothing kept yet."""
+    (repo / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 21)))
+    sh("git add -A && git commit -qm shared", repo)
+    sess = tmp_path / "sess"
+    sh(f"git worktree add -q -b sess {sess} main", repo)
+    ws = workspaces.adopt_root(db, str(sess))
+    db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, time.time()))
+    sh("git switch -q -c feat-a", sess)
+    (sess / "a.py").write_text("a\n")
+    (sess / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 21) if n != 5))
+    sh("git add -A && git commit -qm work && git switch -q sess", sess)
+    git.merge_into(ws.repo_root, sess, "feat-a", squash=False)
+    (sess / "b.py").write_text("b\n")
+    (sess / "app.py").write_text("print('hi')\nprint('lead')\n")
+    sh("git add -A && git commit -qm lead", sess)
+    session_review._forget()
+    return db.get_agent("lead"), ws
+
+
+def test_session_diff_reruns_git_only_for_what_changed(db, repo, tmp_path, monkeypatch):
+    root, ws = _diff_session(db, repo, tmp_path)
+    sess = Path(ws.path)
+    first = session_review.diff(db, root, ws)
+    ran, real_run, real_blame = [], git.run_env, session_review._blame
+    monkeypatch.setattr(git, "run_env", lambda args, *a, **kw: ran.append(args) or real_run(args, *a, **kw))
+
+    def older():    # git work on an older commit: a diff not naming HEAD, or a merge's commits
+        head = sh("git rev-parse HEAD", sess)
+        return [a for a in ran if ("diff" in a and head not in a) or "rev-list" in a]
+
+    assert session_review.diff(db, root, ws) == first and ran == []
+    # One new commit, touching a.py and shared.py: git runs for it and blames those two, not b.py or app.py.
+    (sess / "a.py").write_text("a\nmore\n")
+    (sess / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 21) if n != 5) + "21\n")
+    sh("git commit -qam edit", sess)
+    got = session_review.diff(db, root, ws)
+    assert [a[-1] for a in ran if "blame" in a] == ["a.py", "shared.py"] and older() == []
+    session_review._forget()
+    assert session_review.diff(db, root, ws) == got
+    # A computation that fails keeps nothing: the next ask computes again.
+    (sess / "c.py").write_text("c\n")
+    sh("git add c.py && git commit -qm c", sess)
+
+    def broken(*a):
+        raise git.GitError("blame failed")
+    monkeypatch.setattr(session_review, "_blame", broken)
+    with pytest.raises(git.GitError):
+        session_review.diff(db, root, ws)
+    monkeypatch.setattr(session_review, "_blame", real_blame)
+    ran.clear()
+    got = session_review.diff(db, root, ws)
+    assert [a[-1] for a in ran if "blame" in a] == ["c.py"]
+    session_review._forget()
+    assert session_review.diff(db, root, ws) == got
+    # The first deletion of app.py's base line: followed through the older commits without diffing them again.
+    (sess / "app.py").write_text("print('lead')\n")
+    sh("git commit -qam unhi", sess)
+    ran.clear()
+    got = session_review.diff(db, root, ws)
+    assert older() == []
+    session_review._forget()
+    assert session_review.diff(db, root, ws) == got
+    # The same once the base file was renamed and then only added to: followed under its new name too.
+    sh("git mv shared.py common.py && git commit -qm rename", sess)
+    (sess / "common.py").write_text("0\n" + (sess / "common.py").read_text())
+    sh("git commit -qam add", sess)
+    session_review._forget()
+    session_review.diff(db, root, ws)
+    (sess / "common.py").write_text((sess / "common.py").read_text().replace("15\n", ""))
+    sh("git commit -qam unfifteen", sess)
+    ran.clear()
+    got = session_review.diff(db, root, ws)
+    assert older() == [] and any(f["old_path"] == "shared.py" for f in got["files"])
+    session_review._forget()
+    assert session_review.diff(db, root, ws) == got
+    # A base only git resolves (origin/main) moves with HEAD unchanged: computed again.
+    qualified = dataclasses.replace(ws, base_branch="origin/main")
+    assert session_review.diff(db, root, qualified)["files"]
+    sh("git update-ref refs/remotes/origin/main HEAD", sess)
+    assert session_review.diff(db, root, qualified)["files"] == []
+
+
+def test_session_diff_concurrent_asks_share_one_computation(db, repo, tmp_path, monkeypatch):
+    root, ws = _diff_session(db, repo, tmp_path)
+    real, runs, joined, got = session_review._compute, [], [], []
+    wait_s = 30
+
+    def compute(*a):
+        runs.append(a)
+        with session_review._lock:      # every other ask has joined this one before it runs
+            joined.append(session_review._lock.wait_for(lambda: session_review._flights["lead"].joined == 9, wait_s))
+        return real(*a)
+
+    def ask():
+        own = DB()
+        try:
+            got.append(session_review.diff(own, own.get_agent("lead"), own.get_workspace(ws.id)))
+        finally:
+            own.conn.close()
+
+    monkeypatch.setattr(session_review, "_compute", compute)
+    threads = [threading.Thread(target=ask) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(runs) == 1 and joined == [True]
+    assert len(got) == 10 and all(g == got[0] for g in got) and got[0]["files"]
