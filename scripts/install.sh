@@ -36,7 +36,7 @@ if ! have tmux; then
     step "installing tmux"
     brew install tmux
   elif have apt-get; then
-    warn "tmux is missing. Install it with: sudo apt-get install -y tmux"
+    warn "tmux is missing. Install it with: sudo apt install tmux"
   elif have dnf; then
     warn "tmux is missing. Install it with: sudo dnf install -y tmux"
   else
