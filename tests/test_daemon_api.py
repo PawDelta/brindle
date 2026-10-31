@@ -218,26 +218,79 @@ def test_heavy_lane(db, monkeypatch):
     asyncio.run(exercise())
 
 
-def test_health_log_warns_with_lag_and_queues_when_the_loop_stalls(monkeypatch):
+@pytest.mark.parametrize("stalled", [True, False])
+def test_health_log_watch_warns_only_when_the_loop_itself_is_late(monkeypatch, stalled):
+    """On virtual time: a 2s maintenance sweep the watch awaits is not lag; a
+    wait that ends 3s late is, and its warning carries the lag."""
     from brindle import debuglog
-    from brindle.daemon import health
+    from brindle.daemon import lifecycle, session_review
 
     monkeypatch.setattr(debuglog, "enabled", lambda: True)
-    queues = [(0, 0)]
-    monkeypatch.setattr(health, "_queues", lambda app: queues[0])
     now = [0.0]
-    monitor = health.Monitor(interval=5.0, clock=lambda: now[0])
-    monitor.tick(None)                  # a normal wake-up: no lag, no stall
-    queues[0] = (7, 0)                  # default-executor backs up while the loop is stuck
-    now[0] = 8.0                        # woke 3 seconds late
-    monitor.tick(None)
+    waits = [0]
+    server = SimpleNamespace(should_exit=False)
+
+    async def sleep(seconds):
+        waits[0] += 1
+        now[0] += seconds
+        if stalled and waits[0] == 2:
+            now[0] += 3.0               # the loop ran nothing for 3 seconds past the wait
+        if waits[0] == 3:
+            server.should_exit = True
+
+    def slow_sweep(self):
+        now[0] += 2.0                   # maintenance the watch awaits: slow, loop free
+
+    monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", slow_sweep)
+    activity = lifecycle.Activity(build_app(TOKEN, port=8123))
+    asyncio.run(lifecycle._watch(server, activity, False, sleep=sleep, clock=lambda: now[0]))
 
     entries = [json.loads(line) for line in debuglog.log_path().read_text().splitlines()]
     warnings = [e for e in entries if e["level"] == "warning"]
-    assert len(warnings) == 1
-    assert warnings[0]["source"] == "daemon.health"
-    assert warnings[0]["detail"]["lag_s"] == 3.0
-    assert warnings[0]["detail"]["executor_queue"] == 7
+    if stalled:
+        assert len(warnings) == 1
+        assert warnings[0]["source"] == "daemon.health"
+        assert warnings[0]["detail"]["lag_s"] == 3.0
+    else:
+        assert warnings == []
+
+
+def test_health_log_counts_work_waiting_in_the_default_executor_and_heavy_lane():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from brindle.daemon import health
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        started, release = threading.Event(), threading.Event()
+
+        def blocked():
+            started.set()
+            release.wait()
+
+        jobs, waiting, lane = [], [], None
+        try:
+            jobs = [asyncio.create_task(asyncio.to_thread(blocked))]
+            jobs += [asyncio.create_task(asyncio.to_thread(lambda: None)) for _ in range(7)]
+            await asyncio.sleep(0)      # every job reaches the pool; one is running
+            assert started.wait(5)
+            app = lifecycle.Activity(build_app(TOKEN, port=8123))
+            lane = app.state.heavy_read_lane
+            lane.workers.total_tokens = 0       # no worker slot: five reads queue behind it
+            waiting = [asyncio.create_task(lane.workers.acquire()) for _ in range(5)]
+            await asyncio.sleep(0)
+            assert health._queues(app) == (7, 5)
+        finally:
+            # Always let the blocked pool job finish: asyncio.run joins the pool at exit.
+            release.set()
+            for task in waiting:
+                task.cancel()
+            await asyncio.gather(*waiting, *jobs, return_exceptions=True)
+            if lane is not None:
+                lane.workers.total_tokens = 4
+
+    asyncio.run(exercise())
 
 
 @pytest.fixture

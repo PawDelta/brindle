@@ -183,6 +183,11 @@ class Activity:
         self.open = 0
         self.last = time.monotonic()
 
+    @property
+    def state(self):
+        """The wrapped app's state (heavy_read_lane), as if unwrapped."""
+        return self.app.state
+
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] == "lifespan":
             await self.app(scope, receive, send)
@@ -211,19 +216,20 @@ def _agents_running() -> bool:
         return True     # can't tell: stay up rather than strand an app
 
 
-async def _watch(server, activity: Activity, idle_exit: bool) -> None:
+async def _watch(server, activity: Activity, idle_exit: bool, *,
+                 sleep=asyncio.sleep, clock=time.monotonic) -> None:
+    from brindle.daemon import health
     from brindle.daemon.session_review import ReadinessWatch
     from brindle.upgrade import InstallWatch
 
-    from brindle.daemon import health
-
     install = InstallWatch()
     ready = ReadinessWatch()
-    monitor = health.Monitor(WATCH_INTERVAL)
+    monitor = health.Monitor(clock)
     while not server.should_exit:
-        await asyncio.sleep(WATCH_INTERVAL)
+        due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
+        await sleep(WATCH_INTERVAL)
         try:
-            monitor.tick(activity)          # the daemon's own health, into debuglog
+            monitor.tick(activity, due)     # the daemon's own health, into debuglog
         except Exception:  # noqa: BLE001 - health logging must never stop the watch
             log.debug("brindle: couldn't record the daemon's health", exc_info=True)
         await asyncio.to_thread(ready.sweep_safely)     # session.pr_ready when a session becomes ready
