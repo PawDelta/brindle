@@ -54,9 +54,26 @@ def _tool(name: str, required: bool, why: str, version_args: list[str] | None = 
     return Check(OK, name, f"{path}" + (f" ({version[:40]})" if version else ""))
 
 
+# Linux package managers and their tmux install, in the order looked for.
+TMUX_LINUX = (("apt-get", "sudo apt install tmux"), ("dnf", "sudo dnf install tmux"),
+              ("pacman", "sudo pacman -S tmux"), ("zypper", "sudo zypper install tmux"),
+              ("apk", "sudo apk add tmux"))
+
+
+def tmux_install() -> str:
+    """How to install tmux here: Homebrew on macOS, else this distro's package manager."""
+    if sys.platform == "darwin":
+        return "brew install tmux"
+    for manager, cmd in TMUX_LINUX:
+        if shutil.which(manager):
+            return cmd
+    return "sudo apt install tmux (or your distro's package manager)"
+
+
 CLI_INSTALL = {
-    "claude": ("Claude Code", "npm install -g @anthropic-ai/claude-code (or see https://code.claude.com; "
-                              "on Linux, EACCES means set a user prefix first: `npm config set prefix ~/.local`)"),
+    "claude": ("Claude Code", "curl -fsSL https://claude.ai/install.sh | bash (or: npm install -g "
+                              "@anthropic-ai/claude-code; on Linux, EACCES means set a user prefix first: "
+                              "`npm config set prefix ~/.local`)"),
     "codex": ("Codex", "npm install -g @openai/codex (on Linux, EACCES means set a user prefix first: "
                        "`npm config set prefix ~/.local`)"),
     "antigravity": ("Google Antigravity", "see https://antigravity.google"),
@@ -73,7 +90,7 @@ def preflight(provider: str) -> list[str]:
     problems = []
     if not shutil.which("tmux"):
         problems.append("tmux isn't installed: brindle runs every agent in a tmux window. "
-                        "Install: brew install tmux (Debian/Ubuntu: sudo apt install tmux)")
+                        f"Install: {tmux_install()}")
     binary = {"claude": providers.claude_binary, "codex": providers.codex_binary,
               "antigravity": antigravity.binary, "opencode": opencode.binary}.get(provider)
     if binary:
@@ -168,8 +185,12 @@ def signin_checks(repo_root: str | None = None) -> list[Check]:
         limit = quota.note(provider)
         if limit and quota.headroom(provider) <= 10 and level == OK:
             level = WARN
-        out.append(Check(level, f"{CLI_INSTALL[provider][0]} sign-in",
-                         f"{signin}; quota: {limit or 'no limit in effect'}"))
+        # A signed-out CLI has no quota to speak of, unless a limit was recorded before.
+        if limit:
+            quota_text = f"; quota: {limit}"
+        else:
+            quota_text = "" if why else "; quota: no limit in effect"
+        out.append(Check(level, f"{CLI_INSTALL[provider][0]} sign-in", f"{signin}{quota_text}"))
     return out
 
 
@@ -195,6 +216,10 @@ def credential_checks() -> list[Check]:
                                "it is approved (`brindle keys set ANTHROPIC_API_KEY` or `brindle doctor "
                                "--fix`), not the subscription")
                 out.append(Check(level, "claude", detail))
+            elif providers.signed_out("claude"):
+                # The sign-in line above is the failure; this one only says there's no credential yet.
+                out.append(Check(WARN, "claude", "no credential yet: Claude Code isn't signed in "
+                                 "(see Claude Code sign-in above)"))
             else:
                 out.append(Check(OK, "claude", "subscription login"))
             continue
@@ -354,7 +379,7 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
     out.append(Check(OK if v >= (3, 11) else FAIL, "python",
                      f"{v.major}.{v.minor}.{v.micro}" + ("" if v >= (3, 11) else " (brindle needs 3.11 or newer)")))
     out.append(_tool("tmux", True, "brindle runs every agent in a tmux window", ["-V"],
-                     "brew install tmux (Debian/Ubuntu: sudo apt install tmux)"))
+                     tmux_install()))
     out.append(_tool("claude", True, "the supervisor and the built-in profiles use Claude Code",
                      install=CLI_INSTALL["claude"][1]))
     out.append(_tool("codex", False, "only needed for Codex agents (reviewer-codex)",

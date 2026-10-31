@@ -150,8 +150,7 @@ def check(provider: str, repo_root: str | None = None, *, env: dict[str, str] | 
     items = []
     if not shutil.which("tmux"):
         items.append(Item("setup", "tmux", provider, "Install tmux",
-                          "brindle runs every agent in a tmux window. Install: brew install tmux "
-                          "(Debian/Ubuntu: sudo apt install tmux)"))
+                          f"brindle runs every agent in a tmux window. Install: {doctor.tmux_install()}"))
     exe = _binary(provider)
     if not (providers.which_cli(exe) or os.path.isfile(exe)):
         name, how = doctor.CLI_INSTALL[provider]
