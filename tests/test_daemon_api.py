@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import sh
+from conftest import run_scenario, sh
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from wsproto import ConnectionType, WSConnection
 from wsproto.events import AcceptConnection, CloseConnection, Request, TextMessage
@@ -177,7 +177,7 @@ def test_tcp_daemon_needs_the_token_on_requests_and_as_the_ws_first_frame(tmp_pa
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 
-def test_heavy_lane(db, monkeypatch):
+def _heavy_lane(db, monkeypatch):
     import anyio.to_thread
     from brindle.daemon import routes_read
 
@@ -218,8 +218,7 @@ def test_heavy_lane(db, monkeypatch):
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize("stalled", [True, False])
-def test_health_log_watch_warns_only_when_the_loop_itself_is_late(monkeypatch, stalled):
+def _health_log_watch_warns_only_when_the_loop_itself_is_late(monkeypatch, stalled):
     """On virtual time: a 2s maintenance sweep the watch awaits is not lag; a
     wait that ends 3s late is, and its warning carries the lag."""
     from brindle import debuglog
@@ -255,7 +254,7 @@ def test_health_log_watch_warns_only_when_the_loop_itself_is_late(monkeypatch, s
         assert warnings == []
 
 
-def test_health_log_counts_work_waiting_in_the_default_executor_and_heavy_lane():
+def _health_log_counts_work_waiting_in_the_default_executor_and_heavy_lane():
     from concurrent.futures import ThreadPoolExecutor
 
     from brindle.daemon import health
@@ -570,8 +569,7 @@ def test_peer_pid_names_the_unix_socket_caller():
         assert peer.peer_pid(a) == os.getpid()
 
 
-@pytest.mark.parametrize("outcome", ["allowed", "error", "limit"])
-def test_caller_check_single_flight(monkeypatch, outcome):
+def _caller_check_single_flight(monkeypatch, outcome):
     from brindle.daemon import auth
     release = threading.Event()
     calls = []
@@ -1006,7 +1004,7 @@ def _diff_session(db, repo, tmp_path) -> tuple[Agent, Workspace]:
     return db.get_agent("lead"), ws
 
 
-def test_session_diff_reruns_git_only_for_what_changed(db, repo, tmp_path, monkeypatch):
+def _session_diff_reruns_git_only_for_what_changed(db, repo, tmp_path, monkeypatch):
     root, ws = _diff_session(db, repo, tmp_path)
     sess = Path(ws.path)
     first = session_review.diff(db, root, ws)
@@ -1069,7 +1067,7 @@ def test_session_diff_reruns_git_only_for_what_changed(db, repo, tmp_path, monke
     assert session_review.diff(db, root, qualified)["files"] == []
 
 
-def test_session_diff_concurrent_asks_share_one_computation(db, repo, tmp_path, monkeypatch):
+def _session_diff_concurrent_asks_share_one_computation(db, repo, tmp_path, monkeypatch):
     root, ws = _diff_session(db, repo, tmp_path)
     real, runs, joined, got = session_review._compute, [], [], []
     wait_s = 30
@@ -1095,3 +1093,21 @@ def test_session_diff_concurrent_asks_share_one_computation(db, repo, tmp_path, 
         t.join()
     assert len(runs) == 1 and joined == [True]
     assert len(got) == 10 and all(g == got[0] for g in got) and got[0]["files"]
+
+
+@pytest.mark.parametrize("scenario, params", [
+    pytest.param(_heavy_lane, {}, id="heavy_lane"),
+    pytest.param(_health_log_watch_warns_only_when_the_loop_itself_is_late, {"stalled": True},
+                 id="health_log-late"),
+    pytest.param(_health_log_watch_warns_only_when_the_loop_itself_is_late, {"stalled": False},
+                 id="health_log-on-time"),
+    pytest.param(_health_log_counts_work_waiting_in_the_default_executor_and_heavy_lane, {},
+                 id="health_log-queues"),
+    pytest.param(_caller_check_single_flight, {"outcome": "allowed"}, id="caller_check-allowed"),
+    pytest.param(_caller_check_single_flight, {"outcome": "error"}, id="caller_check-error"),
+    pytest.param(_caller_check_single_flight, {"outcome": "limit"}, id="caller_check-limit"),
+    pytest.param(_session_diff_reruns_git_only_for_what_changed, {}, id="session_diff-reruns"),
+    pytest.param(_session_diff_concurrent_asks_share_one_computation, {}, id="session_diff-concurrent"),
+])
+def test_daemon_overload_lanes_health_caller_check_and_session_diff(request, scenario, params):
+    run_scenario(request, scenario, params)

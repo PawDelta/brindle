@@ -9,13 +9,14 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from conftest import run_scenario
 
 from brindle import cloud_login, model_access, spawn
 
 NOW = 1_800_000_000.0
 
 
-def test_google_token_cache_runs_gcloud_once_until_near_expiry(tmp_path):
+def _token_cache_runs_gcloud_once_until_near_expiry(tmp_path):
     calls = []
 
     def fake_run(cmd, **kw):
@@ -245,7 +246,7 @@ def test_issue189_a_timed_out_gcloud_leaves_no_process_behind(tmp_path, monkeypa
                 pass
 
 
-def test_a_cli_probe_that_exits_leaves_nothing_of_its_own_running():
+def _subprocess_probe_that_exits_leaves_nothing_of_its_own_running():
     # A cloud CLI can leave a local auth server behind in its group when it exits.
     out = cloud_login.run_bounded(["sh", "-c", "tail -f /dev/null >/dev/null 2>&1 & echo $!"]).stdout
     pid = int(out)
@@ -259,8 +260,7 @@ def test_a_cli_probe_that_exits_leaves_nothing_of_its_own_running():
             os.kill(pid, signal.SIGKILL)
 
 
-@pytest.mark.parametrize("provider, stopped", [("vertex", False), ("foundry", True), ("bedrock", False)])
-def test_under_an_expired_or_stopped_deadline_no_cloud_cli_starts(provider, stopped, tmp_path, monkeypatch):
+def _under_an_expired_or_stopped_deadline_no_cloud_cli_starts(provider, stopped, tmp_path, monkeypatch):
     # GET provider_connection reaches gcloud, az and aws through cloud_login.status;
     # a request the app gave up on must not start them.
     started = []
@@ -274,7 +274,7 @@ def test_under_an_expired_or_stopped_deadline_no_cloud_cli_starts(provider, stop
     assert started == []
 
 
-def test_google_token_cache_concurrent_misses_share_one_gcloud_call(tmp_path, monkeypatch):
+def _token_cache_concurrent_misses_share_one_gcloud_call(tmp_path, monkeypatch):
     import threading
     calls, entered, release, progressed = [], threading.Event(), threading.Event(), threading.Event()
     wait = 10   # a bound so a broken run fails instead of hanging
@@ -325,3 +325,21 @@ def test_google_token_cache_concurrent_misses_share_one_gcloud_call(tmp_path, mo
         first.join()
         second.join()
     assert len(calls) == 1 and [r.ok for r in results] == [True, True]
+
+
+def _deadline_row(provider, stopped):
+    return pytest.param(_under_an_expired_or_stopped_deadline_no_cloud_cli_starts,
+                        {"provider": provider, "stopped": stopped}, id=f"deadline-{provider}")
+
+
+@pytest.mark.parametrize("scenario, params", [
+    pytest.param(_token_cache_runs_gcloud_once_until_near_expiry, {}, id="token_cache-expiry"),
+    pytest.param(_subprocess_probe_that_exits_leaves_nothing_of_its_own_running, {}, id="subprocess-probe"),
+    _deadline_row("vertex", False),
+    _deadline_row("foundry", True),
+    _deadline_row("bedrock", False),
+    pytest.param(_token_cache_concurrent_misses_share_one_gcloud_call, {},
+                 id="token_cache-concurrent", marks=pytest.mark.variant("concurrent token misses share one gcloud call")),
+])
+def test_cloud_cli_token_cache_deadline_and_subprocess(request, scenario, params):
+    run_scenario(request, scenario, params)

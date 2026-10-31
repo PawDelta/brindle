@@ -19,6 +19,16 @@ def full_text(db, agent_id, body):
     return agents.full_message(db, agent_id, int(body.rsplit(marker, 1)[1].rstrip(")")))
 
 
+def run_scenario(request, scenario, params=None):
+    """Run one row of a scenario table: ``scenario``'s arguments come from
+    ``params`` where named there, otherwise from the fixtures of that name."""
+    import inspect
+
+    params = params or {}
+    return scenario(**{n: params[n] if n in params else request.getfixturevalue(n)
+                       for n in inspect.signature(scenario).parameters})
+
+
 def sh(cmd: str, cwd: Path) -> str:
     return subprocess.run(
         cmd, shell=True, cwd=cwd, check=True, capture_output=True, text=True

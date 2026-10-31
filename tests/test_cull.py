@@ -6,6 +6,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from conftest import run_scenario
 
 from brindle import agents, cull, procs, tmux, view, workspaces
 from brindle.db import Agent, Workspace
@@ -483,7 +484,7 @@ def test_sweep_retries_a_flush_the_pane_blocked(db, ws, monkeypatch):
     assert len(pasted) == 1
 
 
-def test_lock_cleanup_keeps_held_and_status_read_creates_nothing(db, brindle_home):
+def _keeps_held_and_status_read_creates_nothing(db, brindle_home):
     import fcntl
     from brindle import gates
 
@@ -501,7 +502,7 @@ def test_lock_cleanup_keeps_held_and_status_read_creates_nothing(db, brindle_hom
     assert held.exists() and slot.exists() and not free.exists()
 
 
-def test_lock_cleanup_race_waiter_relocks_the_new_file(brindle_home, monkeypatch):
+def _race_waiter_relocks_the_new_file(brindle_home, monkeypatch):
     import fcntl
     from brindle import gates
 
@@ -524,7 +525,7 @@ def test_lock_cleanup_race_waiter_relocks_the_new_file(brindle_home, monkeypatch
         assert os.path.samestat(os.stat(path), os.fstat(f.fileno()))
 
 
-def test_lock_cleanup_race_check_lock_waiter_relocks(brindle_home, monkeypatch):
+def _race_check_lock_waiter_relocks(brindle_home, monkeypatch):
     import fcntl
     from brindle import gates
 
@@ -542,3 +543,12 @@ def test_lock_cleanup_race_check_lock_waiter_relocks(brindle_home, monkeypatch):
     with gates._check_lock("/r", "t", "cmd") as result:
         (lock,) = (brindle_home / "locks").glob("check-*.lock")
         assert result.name == lock.name.replace(".lock", ".result")
+
+
+@pytest.mark.parametrize("scenario", [
+    pytest.param(_keeps_held_and_status_read_creates_nothing, id="held"),
+    pytest.param(_race_waiter_relocks_the_new_file, id="race-waiter"),
+    pytest.param(_race_check_lock_waiter_relocks, id="race-check-lock"),
+])
+def test_lock_cleanup(request, scenario):
+    run_scenario(request, scenario)
