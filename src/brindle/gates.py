@@ -290,13 +290,36 @@ def _marker_file(kind: str, ws_id: str):
     return lock_dir / (f"{kind}-" + hashlib.sha1(ws_id.encode()).hexdigest()[:16] + ".lock")
 
 
+def _still_ours(path, f) -> bool:
+    """Whether ``path`` on disk is still the file ``f`` holds. Cull deletes old
+    lock files while holding them, so after taking a lock check this: a lock on
+    an unlinked file excludes nobody, and the caller must reopen."""
+    try:
+        return os.path.samestat(os.stat(path), os.fstat(f.fileno()))
+    except FileNotFoundError:
+        return False
+
+
+def _open_locked(path, op: int):
+    """Open ``path`` and lock it with ``op`` (waiting), returning the open file."""
+    while True:
+        f = open(path, "w")
+        try:
+            fcntl.flock(f.fileno(), op)
+            if _still_ours(path, f):
+                return f
+        except BaseException:
+            f.close()
+            raise
+        f.close()
+
+
 @contextmanager
 def marker(kind: str, ws_id: str):
     """Mark something of ``kind`` at work on workspace ``ws_id`` for as long
     as this is held (``marked`` tells). Shared, so two holders don't wait on
     each other, and the lock goes with a holder that dies."""
-    with open(_marker_file(kind, ws_id), "w") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+    with _open_locked(_marker_file(kind, ws_id), fcntl.LOCK_SH) as f:
         try:
             yield
         finally:
@@ -305,7 +328,12 @@ def marker(kind: str, ws_id: str):
 
 def marked(kind: str, ws_id: str) -> bool:
     """Whether anything holds ``marker(kind, ws_id)`` right now."""
-    with open(_marker_file(kind, ws_id), "w") as f:
+    path = _marker_file(kind, ws_id)
+    try:
+        f = open(path)   # a read never creates the file: no marker, nothing held
+    except FileNotFoundError:
+        return False
+    with f:
         try:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -417,7 +445,8 @@ def _check_lock(repo_root: str, tree: str, cmd: str, cancel=None):
     key = hashlib.sha1(f"{repo_root}\0{tree}\0{cmd}".encode()).hexdigest()[:16]
     lock_dir = brindle_home() / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
-    with open(lock_dir / f"check-{key}.lock", "w") as f:
+    lock_path = lock_dir / f"check-{key}.lock"
+    with open(lock_path, "w") as f:
         if cancel is None:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         else:
@@ -429,6 +458,11 @@ def _check_lock(repo_root: str, tree: str, cmd: str, cancel=None):
                     if cancel():
                         raise Abandoned("lock")
                     time.sleep(SLOT_POLL)
+        if not _still_ours(lock_path, f):   # cull removed it while we waited: lock the new file
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            with _check_lock(repo_root, tree, cmd, cancel) as result_file:
+                yield result_file
+            return
         try:
             yield lock_dir / f"check-{key}.result"
         finally:
