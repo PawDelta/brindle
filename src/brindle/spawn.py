@@ -165,6 +165,7 @@ def carry(fn: Callable[..., T]) -> Callable[..., T]:
 
 _gated = False
 _running = 0
+_refused = 0
 _cond = threading.Condition()
 
 
@@ -236,22 +237,31 @@ def _has_room() -> bool:
     return not _gated or _running == 0 or room() >= 1
 
 
+def stats() -> dict:
+    """How many gated processes run now, and how many starts were refused
+    (skipped or stopped for want of room) since this process started."""
+    return {"running": _running, "refused": _refused}
+
+
 def _admit(end: float, dl: Deadline | None, skip: bool, what: str, start_anyway: bool = False) -> None:
     """Count a start in, once there's room. Raises Skipped (``skip``) or
     Busy (``end`` passed, or ``dl`` stopped) instead; with ``start_anyway``
     it starts at ``end`` instead of failing."""
-    global _running
+    global _running, _refused
     with _cond:
         while True:
             if dl is not None and dl.stopped:
+                _refused += 1
                 raise Busy(f"{what} was not started: {dl.reason}")
             left = end - time.monotonic()
             if left <= 0 and not start_anyway:   # past it: never start, room or not
+                _refused += 1
                 raise Busy(f"{what} was not started: "
                            + (why() if not _has_room() else "the request's deadline passed"))
             if left <= 0 or _has_room():
                 break
             if skip:
+                _refused += 1
                 raise Skipped(f"{what} skipped: {why()}")
             _cond.wait(min(POLL, left))
         _running += 1

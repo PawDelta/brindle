@@ -218,6 +218,28 @@ def test_heavy_lane(db, monkeypatch):
     asyncio.run(exercise())
 
 
+def test_health_log_warns_with_lag_and_queues_when_the_loop_stalls(monkeypatch):
+    from brindle import debuglog
+    from brindle.daemon import health
+
+    monkeypatch.setattr(debuglog, "enabled", lambda: True)
+    queues = [(0, 0)]
+    monkeypatch.setattr(health, "_queues", lambda app: queues[0])
+    now = [0.0]
+    monitor = health.Monitor(interval=5.0, clock=lambda: now[0])
+    monitor.tick(None)                  # a normal wake-up: no lag, no stall
+    queues[0] = (7, 0)                  # default-executor backs up while the loop is stuck
+    now[0] = 8.0                        # woke 3 seconds late
+    monitor.tick(None)
+
+    entries = [json.loads(line) for line in debuglog.log_path().read_text().splitlines()]
+    warnings = [e for e in entries if e["level"] == "warning"]
+    assert len(warnings) == 1
+    assert warnings[0]["source"] == "daemon.health"
+    assert warnings[0]["detail"]["lag_s"] == 3.0
+    assert warnings[0]["detail"]["executor_queue"] == 7
+
+
 @pytest.fixture
 def seeded(db, repo, monkeypatch):
     """A repo with a session (root + worker), a decision, a KB source and a locked worker."""
