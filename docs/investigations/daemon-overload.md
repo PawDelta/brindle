@@ -252,36 +252,35 @@ finished. With the cache warm, no heavy work was left by then, so those
 2–9 ms numbers measured an idle daemon and are discarded. The test now
 drops the cached diff (`session_review._forget()`) before polling, so the
 first poll recomputes the full history (49 git processes, 1–2.5 s), and a
-sampler reads `/v1/meta` and `/v1/repos` every ~10 ms while the pollers run.
-Each sample records whether the heavy lane had a worker at that moment, and
-the test fails if no sample overlapped heavy work.
+sampler reads `/v1/meta` and `/v1/repos` back to back (the awaits yield to
+the loop) while the pollers run. The bound applies to every sample taken in
+the polling window, including the cold first pair. Each request is also
+marked busy if the heavy lane held a worker when it began or ended, and the
+test separately fails if no request overlapped heavy work.
 
-Eleven runs with real overlap, "overlapped" being samples taken while the
-heavy lane was busy; max is the slowest overlapped cheap read. Runs 1–6 used
-a 50 ms bound; runs 7–11, five consecutive passes, used the final 100 ms
-bound:
+An intermediate version applied the bound only to requests marked busy
+before they were sent, which excluded the cold first pair; it is replaced.
+Its numbers (max 6–55 ms) are discarded. Runs of the final harness: every
+sample in the window counts toward "max". Run 1 was the first at the 100 ms
+bound; runs 2–6 are the five consecutive passes after the final edit:
 
-| Run | Overlapped / all samples | Max overlapped ms | Recompute s |
+| Run | Busy / all samples | Max over all samples ms | Recompute s |
 | ---: | ---: | ---: | ---: |
-| 1 | 4 / 6 | 20.5 | 1.69 |
-| 2 | 4 / 6 | 11.0 | 1.45 |
-| 3 | 12 / 14 | 38.1 | 1.88 |
-| 4 | 2 / 4 | 27.3 | 1.58 |
-| 5 | 12 / 14 | 45.1 | 1.72 |
-| 6 | 18 / 20 | 28.5 | 1.46 |
-| 7 | 10 / 12 | 54.8 | 2.44 |
-| 8 | 6 / 8 | 34.0 | 1.32 |
-| 9 | 14 / 16 | 18.9 | 0.97 |
-| 10 | 14 / 16 | 16.0 | 1.06 |
-| 11 | 6 / 8 | 6.4 | 0.93 |
+| 1 | 3 / 4 | 77.7 | 1.06 |
+| 2 | 35 / 36 | 37.5 | 1.00 |
+| 3 | 17 / 18 | 25.4 | 1.06 |
+| 4 | 5 / 6 | 67.3 | 0.92 |
+| 5 | 15 / 16 | 45.8 | 0.95 |
+| 6 | 23 / 24 | 34.6 | 1.08 |
 
-After-probe `/v1/meta` / `/v1/repos` were 1.4–7.3 / 3.1–9.6 ms. Default
-AnyIO peaked at 1 occupied of 40 with no waiters; the asyncio executor no-op
-took 0.26–1.0 ms.
+The slowest samples (67–78 ms) are the cold first pair, issued as the
+recompute starts. After-probe `/v1/meta` / `/v1/repos` were 1.4–1.9 / 2.7–5.3
+ms. Default AnyIO peaked at 1 occupied of 40 with no waiters; the asyncio
+executor no-op took 0.2–0.34 ms.
 
-Cheap reads under a real recompute therefore peak at 6–55 ms, tracking host
-load. The 50 ms bound would have failed on run 7 (54.8 ms), so the bound is
-100 ms (about 2x the worst observed; originally 2.0 s). The remaining delay
+Cheap reads under a real recompute therefore peak at 25–78 ms, tracking host
+load. The bound is 100 ms (originally 2.0 s); 77.7 ms is the worst seen, so
+the margin is thin on a loaded host. The remaining delay
 is consistent with the in-process recompute's CPU and GIL contention plus
 host load; the harness shares one process with the clients and cannot
 separate those, so this does not show that no daemon cause remains. Moving
