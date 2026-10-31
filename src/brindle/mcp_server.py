@@ -373,6 +373,40 @@ def _route_clash(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, 
     return reply, clash.warning
 
 
+def _room_duplicate(db: DB, caller: Agent, ws: Workspace, task: str) -> str | None:
+    """The reply when this exact task is already queued for room (or being
+    started from that queue): never a second worker for it. If there's room
+    now, the queued one starts instead of waiting for its helper."""
+    t = tasks.room_duplicate(db, caller.id, ws.repo_root, task)
+    if t is None:
+        return None
+    if t.state == "pending" and tasks.start_with_room_now(db, t):
+        t = db.get_task(t.id)
+        return _remind_goal(db, caller, f"This task was already queued as task {t.id}; there's room "
+                            f"now, so it started: worker {t.agent_id}. Nothing else was started.")
+    state = "being started right now" if t.state != "pending" else f"waiting for room: {t.waiting}"
+    return f"Already queued as task {t.id} ({state}); left it in place."
+
+
+def _queue_for_room(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, mode: str, *,
+                    isolate: bool, branch: str | None, done_when: str | None, files: list[str] | None,
+                    depends_on: list[str] | None, plan_first: bool | None, weight: str | None,
+                    decision: dict, why: list[str], busy: str, analysis_doc: bool = False) -> str:
+    """The machine has no room for another worker (``agents.NoRoom``, why
+    ``busy``): queue the task until it has, and return the reply saying so."""
+    t = tasks.enqueue(
+        db, caller, ws, profile, task, mode, isolate=isolate, branch=branch, done_when=done_when,
+        files=files, depends_on=depends_on, plan_first=plan_first, weight=weight,
+        analysis_doc=analysis_doc, waiting=busy,
+    )
+    savings.record(db, ws.repo_root, decision, task_id=t.id)
+    return _remind_goal(db, caller, (
+        f"Queued task {t.id}, not started: {busy}. It starts on its own once there's room "
+        "and you get a message then; list_tasks shows it as waiting for room. "
+        "Don't assign it again (cancel_task gives it up).")
+        + "".join(f"\nprofile: {w}" for w in why))
+
+
 def _start_failure(profile: str, e: Exception) -> str:
     """The reply when a worker couldn't be started. Returned rather than
     raised: an exception with no message reaches the supervisor as a bare
@@ -468,6 +502,9 @@ async def handoff(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        repeated = _room_duplicate(db, caller, ws, task)
+        if repeated:
+            return repeated
         try:
             unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id)
         except agents.AgentError as e:
@@ -495,6 +532,12 @@ async def handoff(
                 done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
                 analysis_doc=analysis_doc,
             )
+        except agents.NoRoom as e:
+            return _queue_for_room(
+                db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
+                done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+                weight=effective_weight, decision=decision, why=why, busy=str(e),
+                analysis_doc=analysis_doc)
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
         started = tasks.record_started(
@@ -606,6 +649,9 @@ async def assign(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        repeated = _room_duplicate(db, caller, ws, task)
+        if repeated:
+            return repeated
         try:
             unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id)
         except agents.AgentError as e:
@@ -633,6 +679,12 @@ async def assign(
                 done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
                 analysis_doc=analysis_doc,
             )
+        except agents.NoRoom as e:
+            return _queue_for_room(
+                db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
+                done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+                weight=effective_weight, decision=decision, why=why, busy=str(e),
+                analysis_doc=analysis_doc)
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
         started = tasks.record_started(

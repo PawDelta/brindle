@@ -234,6 +234,15 @@ def why() -> str:
             f"{running()} of brindle's processes running{mem.get(level, '')})")
 
 
+def no_room() -> str | None:
+    """Why a new worker or check run should wait before it starts (what
+    :func:`why` says), or None when the machine has room for it. Unlike a
+    read or an action this applies in every process, gate on or off: a worker
+    or a check run is the heaviest thing brindle starts. It waits until there
+    is room, however long, or until it is cancelled."""
+    return why() if room() < 1 else None
+
+
 def _has_room() -> bool:
     return not _gated or _running == 0 or room() >= 1
 

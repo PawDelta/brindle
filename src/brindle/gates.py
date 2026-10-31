@@ -351,7 +351,7 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
 
     slots = _concurrency(ws)
     env = {"PYTEST_XDIST_AUTO_NUM_WORKERS": str(check_xdist_workers(slots)), **env}
-    with _check_slot(slots, cancel), marker("checks-running", ws.id):
+    with _check_slot(slots, cancel), _room_for_check(ws, cancel), marker("checks-running", ws.id):
         last = db.check_duration(ws.repo_root, cmd)
         watch = _watch_slow(db, ws, cmd, last, timeout) if last is not None else None
         started = time.monotonic()
@@ -366,6 +366,38 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
         if ok:
             db.set_check_duration(ws.repo_root, cmd, time.monotonic() - started)
         return ok, out
+
+
+@contextmanager
+def _room_for_check(ws: Workspace, cancel=None):
+    """With its slot held, wait until the machine has room for the run
+    (``spawn.no_room``): a full suite started on a saturated machine only
+    makes everything slower. While it waits, ``marker("checks-room")`` makes
+    the branch read "checks waiting for room: <why>" (``checks_state``), so
+    silence isn't taken for a stall. ``cancel`` gives the wait up
+    (``Abandoned``)."""
+    from brindle import spawn
+
+    if spawn.no_room() is not None:
+        pause = threading.Event()
+        with marker("checks-room", ws.id):
+            while spawn.no_room() is not None:
+                if cancel is not None and cancel():
+                    raise Abandoned("room")
+                pause.wait(SLOT_POLL)
+    yield
+
+
+def checks_state(ws: Workspace) -> str:
+    """Where ``ws``'s check run stands: running, waiting for room on the
+    machine (``_room_for_check``) and why, or waiting (for a slot, or to start)."""
+    from brindle import spawn
+
+    if marked("checks-running", ws.id):
+        return "checks running"
+    if marked("checks-room", ws.id):
+        return f"checks waiting for room: {spawn.why()}"
+    return "waiting for checks"
 
 
 def slow_after(last: float) -> float:

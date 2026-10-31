@@ -153,6 +153,13 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 
     done.extend(autopilot.usage_sweep(db, now))
 
+    # 1b'. Tasks queued for room on the machine whose helper is gone: start them once there is.
+    from brindle import tasks
+
+    started = tasks.start_with_room(db)
+    if started:
+        done.append(f"started {started} task(s) that were waiting for room")
+
     # 1c. Workers at their dollar budget (brindle Pro): warn, or stop if asked to.
     from brindle import budget
 
@@ -716,7 +723,7 @@ def clean_locks(db: DB, now: float | None = None) -> int:
 # Lock kinds whose acquirers (gates._open_locked) recheck the file after locking,
 # so deleting one while it is held can't leave a waiter on an unlinked inode.
 # (not check-slot-N.lock: the machine-wide slots are opened without a recheck).
-_REVALIDATED_LOCKS = re.compile(r"(check|checks-running|review-request|review-run|merge-run)-[0-9a-f]{16}\.lock")
+_REVALIDATED_LOCKS = re.compile(r"(check|checks-running|checks-room|review-request|review-run|merge-run)-[0-9a-f]{16}\.lock")
 
 
 def _clean_old_locks(now: float) -> int:

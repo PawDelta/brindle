@@ -413,3 +413,69 @@ def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
     assert capsys.readouterr().err.count("/no/such/cache") == 1
 
 
+@pytest.mark.parametrize("tool, reports", [("assign", "later"), ("handoff", "later"),
+                                           ("handoff", "while it starts")])
+def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo, monkeypatch, tool, reports):
+    """Plan 3.5: on a machine with no room an assign (or handoff) queues the
+    task with the reason, list_tasks shows it, autopilot doesn't count it as
+    a stall, a paused session starts nothing even once the load falls, and
+    resumed, it starts, with a message to the supervisor, and its result
+    reaches the supervisor exactly once, even when it reports before its
+    start has returned."""
+    import asyncio
+
+    from conftest import full_text
+    from brindle import autopilot, events, mcp_server, spawn, tasks
+
+    # The real spawn, with a launch that only marks the agent running.
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: db_.set_status(a.id, "processing"))
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text('{"pipeline": false}')
+    root = workspaces.adopt_root(db, str(repo))
+    boss = Agent("boss", root.id, "supervisor", "claude", None, "interactive", "processing", "@0",
+                 None, time.time())
+    db.add_agent(boss)
+    db.add_autopilot("boss")
+    autopilot.set_goal(db, "boss", "Ship it", [("Feature", "false", None)])
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    load = [14.0]
+    monkeypatch.setattr(spawn, "_load", lambda: load[0])
+    monkeypatch.setattr(spawn, "_cores", lambda: 10)
+
+    out = asyncio.run(getattr(mcp_server, tool)("developer", "do A", branch="feat-a"))
+    busy = "the machine is busy (load 14.0 on 10 cores"
+    assert out.startswith("Queued task") and busy in out, out
+    [t] = db.list_tasks(str(repo), state="pending")
+    assert f"waiting for room: {busy}" in tasks.list_text(db, str(repo))
+    assert [a.id for a in db.list_agents()] == ["boss"]                  # nothing started
+    assert autopilot.on_stop(db, boss, {}) is None                       # waiting, not stalled
+    assert db.get_autopilot("boss").nudges == 0
+    # However long the machine stays full, the task waits rather than overload it.
+    db.update_task(t.id, waiting_since=time.time() - 86400)
+    tasks.sweep(db)
+    assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
+
+    db.set_status("boss", "paused")
+    load[0] = 2.0
+    assert not tasks.start_when_room(db, t.id, poll=0) and tasks.start_with_room(db) == 0
+    assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
+
+    if reports == "while it starts":
+        emit = events.emit
+
+        def finished_at_once(cfg, kind, ws, agent, **kw):   # delegate's last step before it returns
+            emit(cfg, kind, ws, agent, **kw)
+            agents.report_result(db, agent.id, "did A", docs_checked=True)
+
+        monkeypatch.setattr(events, "emit", finished_at_once)
+    agents.resume(db, "boss")
+    assert db.get_task(t.id).state == "started"
+    worker = db.get_agent(db.get_task(t.id).agent_id)
+    assert worker.parent_id == "boss" and worker.mode == {"assign": "assign", "handoff": "handoff_detached"}[tool]
+    if reports == "later":
+        agents.report_result(db, worker.id, "did A", docs_checked=True)
+    told = [full_text(db, "boss", db.pop_pending("boss").body) for _ in range(db.pending_count("boss"))]
+    assert sum(f"Started {worker.id} for task {t.id} (was waiting for room: {busy}" in m for m in told) == 1
+    assert sum("did A" in m for m in told) == 1, told
+
+

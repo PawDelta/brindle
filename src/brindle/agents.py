@@ -386,8 +386,12 @@ def spawn(
     files: list[str] | None = None,
     weight: str | None = None,
     analysis_doc: bool = False,
+    detached: bool = False,
 ) -> Agent:
-    """Start an agent in ``ws``. ``weight`` is the weight its task was routed
+    """Start an agent in ``ws``. ``detached``: a handoff nobody waits on (a
+    queued one) is recorded as 'handoff_detached' from the start, so a
+    result it reports at once is forwarded; it is briefed as a handoff.
+    ``weight`` is the weight its task was routed
     as, kept on the agent so the owner's per-kind effort and instructions apply
     from the first launch. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``; their brief carries the
@@ -464,7 +468,8 @@ def spawn(
         raise PreflightBlocked([off])
     agent = Agent(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
-        parent_id=parent_id, mode=mode, status="starting", tmux_window="",
+        parent_id=parent_id, mode="handoff_detached" if detached and mode == "handoff" else mode,
+        status="starting", tmux_window="",
         result=None, created_at=time.time(), task=raw_task, headless=int(headless) or None,
         done_when=done_when, review_sha=review_sha,
         # Its CLI's config home, decided once here: every later check, its
@@ -1585,6 +1590,12 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         resumed.append(a)
     if any(a.id == root_id for a in resumed):
         knowledge.note(db, root_id, knowledge.RESUME)
+        from brindle import tasks
+
+        try:
+            tasks.on_resumed(db, root_id)   # queued tasks the pause held back
+        except Exception:  # noqa: BLE001 - a queued task must never keep the session from resuming
+            log.exception("brindle: starting %s's queued tasks on resume failed", root_id)
     ap = db.get_autopilot(root_id)
     failed_still = [a for a in candidates if db.get_agent(a.id) and db.get_agent(a.id).status == "failed"]
     if ap and ap.state == "blocked" and resumed and not failed_still:
@@ -2676,6 +2687,28 @@ def _branch_from_task(profile: str, task: str, agent_hint: str) -> str:
     return f"brindle/{profile}/{'-'.join(words)[:40].strip('-') or 'task'}-{agent_hint}"
 
 
+class NoRoom(AgentError):
+    """The machine has no room for another worker (``brindle.spawn.no_room``,
+    the reason is the message); nothing was started or created. Callers
+    queue the start instead (``tasks.enqueue(waiting=...)``)."""
+
+
+def admission(profile: str, repo_root: str) -> str | None:
+    """Why a worker on ``profile`` must wait for room before it starts, or
+    None. A subagent profile starts no process of brindle's: never held."""
+    from brindle import spawn as gate
+    from brindle.providers import PROVIDERS
+
+    busy = gate.no_room()
+    if busy is None:
+        return None
+    try:
+        provider = PROVIDERS.get(load_profile(profile, repo_root).provider)
+    except Exception:  # noqa: BLE001 - an unloadable profile fails at its start, with its reason
+        return busy
+    return busy if provider is None or provider.launches_process else None
+
+
 def delegate(
     db: DB,
     caller: Agent | None,
@@ -2692,8 +2725,12 @@ def delegate(
     files: list[str] | None = None,
     weight: str | None = None,
     analysis_doc: bool = False,
+    admit: bool = True,
+    detached: bool = False,
 ) -> tuple[Agent, Workspace]:
-    """Start a worker. ``weight`` is the weight its task was routed as;
+    """Start a worker, or raise ``NoRoom`` (nothing created) when the machine
+    has no room for it (``admission``); ``admit`` False skips that, for a
+    caller that has just looked. ``detached``: see ``spawn``. ``weight`` is the weight its task was routed as;
     ``analysis_doc`` asks for an analysis doc whatever the weight.
     ``plan_first`` (None: the repo's ``plan_first`` config)
     makes it get a plan approved before it may edit; ``files`` picks the
@@ -2721,6 +2758,9 @@ def delegate(
     why = model_problem(profile, caller_ws)
     if why:
         raise AgentError(why)
+    busy = admission(profile, caller_ws.repo_root) if admit else None
+    if busy:
+        raise NoRoom(busy)
     def start_worker(ws: Workspace) -> Agent:
         # Startup dialogs are handled by the detached _after-launch helper, so
         # handoff/assign return as soon as the window exists instead of polling
@@ -2728,7 +2768,7 @@ def delegate(
         return spawn(
             db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
             done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
-            weight=weight, analysis_doc=analysis_doc,
+            weight=weight, analysis_doc=analysis_doc, **({"detached": True} if detached else {}),
         )
 
     if isolate:
