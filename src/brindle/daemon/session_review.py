@@ -282,9 +282,11 @@ class _Lru:
 
 
 # Commits never change, so neither does what is kept by their shas: a diff
-# between two commits (weighed by its patches' size) and a merge's commits.
+# between two commits (weighed by its patches' size), a merge's commits and
+# a commit's files.
 _DIFFS = _Lru(64 << 20, lambda files: 1 + sum(len(f[3]) for f in files))
 _MERGED = _Lru(1 << 20, lambda commits: 1 + len(commits))
+_TREES = _Lru(1 << 20, lambda paths: 1 + len(paths))
 _RESULTS = _Lru(32)     # session id -> (its _Fingerprint, its _Facts)
 
 
@@ -425,19 +427,49 @@ def _run_file_diffs(ws: Workspace, a: str, b: str, *opts: str) -> list[tuple[str
     return out
 
 
-def _deleters(ws: Workspace, chain: list[tuple[str, str]],
-              wanted: dict[str, list[int]]) -> dict[str, dict[int, str]]:
+def _touches(ws: Workspace, mb: str, head: str) -> dict[str, frozenset[str]]:
+    """Each first-parent commit since ``mb`` -> the paths its diff from its
+    first parent touches (a rename's both names)."""
+    text = git.run(["log", "--first-parent", "-m", "--no-renames", "--name-only", "-z", "--format=%x01%H",
+                    f"{mb}..{head}"], ws.path).stdout
+    out: dict[str, set[str]] = {}
+    sha, fresh = None, False
+    for token in text.split("\0"):
+        if fresh and token.startswith("\n"):    # the line break after a commit's header
+            token = token[1:]
+        if token.startswith("\x01"):
+            sha, fresh = token[1:], True
+            out[sha] = set()
+        elif token and sha is not None:
+            out[sha].add(token)
+            fresh = False
+    return {sha: frozenset(paths) for sha, paths in out.items()}
+
+
+def _base_paths(ws: Workspace, mb: str) -> frozenset[str]:
+    """The files at ``mb``: the only ones a base line can be deleted from."""
+    if (hit := _TREES.get(mb)) is None:
+        hit = frozenset(filter(None, git.run(["ls-tree", "-r", "-z", "--name-only", mb], ws.path).stdout.split("\0")))
+        _TREES.put(mb, hit)
+    return hit
+
+
+def _deleters(ws: Workspace, chain: list[tuple[str, str]], wanted: dict[str, list[int]],
+              touches: dict[str, frozenset[str]]) -> dict[str, dict[int, str]]:
     """Base path -> its deleted base lines -> the commit that deleted each. Each line is
     carried along the session's first-parent history (``chain``: each commit
     and its first parent, oldest first) and goes to the commit whose diff
     from its first parent removes it: a merge's for a merged worker's
-    deletion, never a diff against a worker's branch."""
+    deletion, never a diff against a worker's branch. A commit that
+    ``touches`` none of the files followed can't move a line: skipped."""
     at = {path: {n: n for n in lines} for path, lines in wanted.items()}     # base line -> its number now
     named = {path: path for path in wanted}                                  # its name now -> base path
     found: dict[str, dict[int, str]] = {path: {} for path in wanted}
     for sha, first in chain:
         if not named:
             break
+        if sha in touches and touches[sha].isdisjoint(named):
+            continue
         for _, old_path, path, patch in _file_diffs(ws, first, sha, "-U0"):
             base = named.pop(old_path or path, None)
             if base is None:
@@ -456,19 +488,17 @@ def _deleters(ws: Workspace, chain: list[tuple[str, str]],
     return found
 
 
-def _blames(ws: Workspace, mb: str, head: str, chain: list[tuple[str, str]], added: dict[str, tuple[int, ...]],
-            prev: _Facts | None) -> dict[str, tuple[tuple[int, ...], dict[int, str]]]:
+def _blames(ws: Workspace, mb: str, head: str, chain: list[tuple[str, str]], touches: dict[str, frozenset[str]],
+            added: dict[str, tuple[int, ...]], prev: _Facts | None) -> dict[str, tuple[tuple[int, ...], dict[int, str]]]:
     """``_Facts.blamed`` for the files with ``added`` lines. A file that no
-    first-parent commit since ``prev``'s HEAD touched keeps ``prev``'s blame:
+    first-parent commit since ``prev``'s HEAD ``touches`` keeps ``prev``'s blame:
     blame hands a file its first parent has unchanged wholly to that parent,
     so it walks down to ``prev``'s HEAD and finds what it found then."""
     shas = [sha for sha, _ in chain]
     kept: dict[str, tuple[tuple[int, ...], dict[int, str]]] = {}
-    if prev is not None and prev.path == ws.path and prev.base_sha == mb and prev.head in shas:
-        touched: set[str | None] = set()
-        for sha, first in chain[shas.index(prev.head) + 1:]:
-            for _, old_path, path, _ in _file_diffs(ws, first, sha, "-U0"):
-                touched.update((old_path, path))
+    if (prev is not None and prev.path == ws.path and prev.base_sha == mb and prev.head in shas
+            and all(sha in touches for sha in shas)):
+        touched = set().union(*(touches[sha] for sha in shas[shas.index(prev.head) + 1:]))
         kept = {path: found for path, found in prev.blamed.items() if path not in touched}
     out = {}
     for path, lines in added.items():
@@ -483,16 +513,21 @@ def _compute(ws: Workspace, base: str, fp: _Fingerprint | None, prev: _Facts | N
     head = fp.head if fp else git.out(["rev-parse", "HEAD"], ws.path)
     ref = git.base_ref(ws.path, base)
     if fp:
-        ref = {base: fp.local, f"origin/{base}": fp.origin}.get(ref) or ref
+        ref = {base: fp.local or fp.other, f"origin/{base}": fp.origin}.get(ref) or ref
     mb = git.out(["merge-base", ref, head], ws.path)
     log_ = _log(ws, mb, head)
     chain = [(sha, first) for sha, first, _, _ in reversed(log_)]
+    touches, in_base = _touches(ws, mb, head), _base_paths(ws, mb)
+    for sha, first in chain:
+        # A base line deleted later may need any of these to follow it: run once, then kept.
+        if sha not in touches or not touches[sha].isdisjoint(in_base):
+            _file_diffs(ws, first, sha, "-U0")
     changed = _file_diffs(ws, mb, head)
     hunks = [(old_path or path, path, _hunks(patch)) for _, old_path, path, patch in changed]
     deleted = _deleters(ws, chain, {was: [n for h in hs for n in h["deleted"]]
-                                    for was, _, hs in hunks if any(h["deleted"] for h in hs)})
+                                    for was, _, hs in hunks if any(h["deleted"] for h in hs)}, touches)
     added = {path: tuple(n for h in hs for n in h["added"]) for _, path, hs in hunks}
-    blamed = _blames(ws, mb, head, chain, {path: lines for path, lines in added.items() if lines}, prev)
+    blamed = _blames(ws, mb, head, chain, touches, {path: lines for path, lines in added.items() if lines}, prev)
     return _Facts(ws.path, mb, head, tuple(log_), _named(ws, mb, head), changed, deleted, blamed)
 
 
@@ -508,6 +543,7 @@ class _Fingerprint:
     head: str
     local: str | None       # refs/heads/<base>
     origin: str | None      # refs/remotes/origin/<base>
+    other: str | None       # without either: what git resolves <base> to (origin/main, refs/heads/main, a tag)
     index: int              # the index's mtime (ns); 0 without one
 
 
@@ -553,19 +589,35 @@ def _ref(own: Path, common: Path, name: str, depth: int = 0) -> str | None:
     return text
 
 
+def _resolved(own: Path, common: Path, base: str) -> str | None:
+    """What git resolves ``base`` to (its rev-parse rules), when it is
+    neither a branch nor one of origin's: a qualified ref, a tag, a sha."""
+    if SHA_RE.fullmatch(base):
+        return base
+    for name in (base, f"refs/{base}", f"refs/tags/{base}", f"refs/heads/{base}", f"refs/remotes/{base}",
+                 f"refs/remotes/{base}/HEAD"):
+        if (sha := _ref(own, common, name)) is not None:
+            return sha
+    return None
+
+
 def _fingerprint(ws: Workspace, base: str) -> _Fingerprint | None:
     """The checkout's fingerprint, read from its git files; None when they
-    can't be read that way (a reftable repo, no commit yet)."""
+    can't be read that way (a reftable repo, no commit yet, a base only git
+    itself can resolve): then nothing is reused."""
     try:
         own, common = _git_dirs(ws.path)
         if (common / "reftable").exists() or (head := _ref(own, common, "HEAD")) is None:
+            return None
+        local, origin = _ref(own, common, f"refs/heads/{base}"), _ref(own, common, f"refs/remotes/origin/{base}")
+        other = None
+        if local is None and origin is None and (other := _resolved(own, common, base)) is None:
             return None
         try:
             index = (own / "index").stat().st_mtime_ns
         except FileNotFoundError:
             index = 0
-        return _Fingerprint(ws.path, base, head, _ref(own, common, f"refs/heads/{base}"),
-                            _ref(own, common, f"refs/remotes/origin/{base}"), index)
+        return _Fingerprint(ws.path, base, head, local, origin, other, index)
     except (OSError, UnicodeDecodeError, ValueError):
         return None
 
@@ -625,7 +677,7 @@ def _session_facts(root_id: str, ws: Workspace, base: str) -> _Facts:
 
 def _forget() -> None:
     """Drop everything kept."""
-    for kept in (_DIFFS, _MERGED, _RESULTS):
+    for kept in (_DIFFS, _MERGED, _TREES, _RESULTS):
         kept.clear()
 
 

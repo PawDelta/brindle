@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import json
 import os
 import resource
@@ -904,7 +905,8 @@ def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, e
 
 def _diff_session(db, repo, tmp_path) -> tuple[Agent, Workspace]:
     """A session ``lead`` on ``sess``: a merged worker that adds a.py and deletes a
-    line of the base's shared.py, then the supervisor's b.py. Nothing kept yet."""
+    line of the base's shared.py, then the supervisor's b.py and a line added
+    to the base's app.py. Nothing kept yet."""
     (repo / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 21)))
     sh("git add -A && git commit -qm shared", repo)
     sess = tmp_path / "sess"
@@ -917,6 +919,7 @@ def _diff_session(db, repo, tmp_path) -> tuple[Agent, Workspace]:
     sh("git add -A && git commit -qm work && git switch -q sess", sess)
     git.merge_into(ws.repo_root, sess, "feat-a", squash=False)
     (sess / "b.py").write_text("b\n")
+    (sess / "app.py").write_text("print('hi')\nprint('lead')\n")
     sh("git add -A && git commit -qm lead", sess)
     session_review._forget()
     return db.get_agent("lead"), ws
@@ -928,15 +931,18 @@ def test_session_diff_reruns_git_only_for_what_changed(db, repo, tmp_path, monke
     first = session_review.diff(db, root, ws)
     ran, real_run, real_blame = [], git.run_env, session_review._blame
     monkeypatch.setattr(git, "run_env", lambda args, *a, **kw: ran.append(args) or real_run(args, *a, **kw))
+
+    def older():    # git work on an older commit: a diff not naming HEAD, or a merge's commits
+        head = sh("git rev-parse HEAD", sess)
+        return [a for a in ran if ("diff" in a and head not in a) or "rev-list" in a]
+
     assert session_review.diff(db, root, ws) == first and ran == []
-    # One new commit, touching a.py and shared.py: git runs for it and blames those two, not b.py.
+    # One new commit, touching a.py and shared.py: git runs for it and blames those two, not b.py or app.py.
     (sess / "a.py").write_text("a\nmore\n")
     (sess / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 21) if n != 5) + "21\n")
     sh("git commit -qam edit", sess)
-    head = sh("git rev-parse HEAD", sess)
     got = session_review.diff(db, root, ws)
-    assert [a[-1] for a in ran if "blame" in a] == ["a.py", "shared.py"]
-    assert [a for a in ran if ("diff" in a and head not in a) or "rev-list" in a] == []
+    assert [a[-1] for a in ran if "blame" in a] == ["a.py", "shared.py"] and older() == []
     session_review._forget()
     assert session_review.diff(db, root, ws) == got
     # A computation that fails keeps nothing: the next ask computes again.
@@ -954,6 +960,19 @@ def test_session_diff_reruns_git_only_for_what_changed(db, repo, tmp_path, monke
     assert [a[-1] for a in ran if "blame" in a] == ["c.py"]
     session_review._forget()
     assert session_review.diff(db, root, ws) == got
+    # The first deletion of app.py's base line: followed through the older commits without diffing them again.
+    (sess / "app.py").write_text("print('lead')\n")
+    sh("git commit -qam unhi", sess)
+    ran.clear()
+    got = session_review.diff(db, root, ws)
+    assert older() == []
+    session_review._forget()
+    assert session_review.diff(db, root, ws) == got
+    # A base only git resolves (origin/main) moves with HEAD unchanged: computed again.
+    qualified = dataclasses.replace(ws, base_branch="origin/main")
+    assert session_review.diff(db, root, qualified)["files"]
+    sh("git update-ref refs/remotes/origin/main HEAD", sess)
+    assert session_review.diff(db, root, qualified)["files"] == []
 
 
 def test_session_diff_concurrent_asks_share_one_computation(db, repo, tmp_path, monkeypatch):
