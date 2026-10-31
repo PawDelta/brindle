@@ -14,13 +14,26 @@ from the review sheet ("review edits: ...") is the person's ("you"), any
 other direct commit the supervisor's. A hunk's added lines are blamed; its
 deleted ones go to the first-parent step (a merge, for a worker's deletion)
 that removed them; a change with
-neither (a mode change, a binary file) takes its file's authors."""
+neither (a mode change, a binary file) takes its file's authors.
+
+The diff is polled, so its git work is kept: a commit's diff and a merge's
+commits never change, and a session's last result is reused while its
+fingerprint (HEAD, the base refs, the index's mtime, read from git's files
+without starting git) holds. When new commits land only their diffs run, and
+only the files they touched are blamed again. One computation runs per
+session at a time; who asks meanwhile shares it. Who wrote what is read from
+the db on every ask, so a worker's id is never stale."""
 
 from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
+from collections import OrderedDict
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from brindle import agents, autopilot, bus, git, knowledge, pipeline, tasks, workspaces
@@ -237,18 +250,93 @@ def _worker(db: DB, ws: Workspace, branch: str) -> dict[str, Any]:
     return {"id": branch, "kind": "worker", "profile": None, "branch": branch}
 
 
-def _owners(db: DB, root: Agent, ws: Workspace,
-            mb: str) -> tuple[dict[str, str], dict[str, dict], list[tuple[str, str]]]:
-    """Each commit since ``mb`` -> its author's id, those authors, and the
-    first-parent history (each commit and its first parent, oldest first)."""
+class _Lru:
+    """Values by key; the least recently used go first once their total
+    weight passes ``most``."""
+
+    def __init__(self, most: int, weigh: Callable[[Any], int] = lambda value: 1) -> None:
+        self.most, self.weigh, self.used = most, weigh, 0
+        self.items: OrderedDict[Any, Any] = OrderedDict()
+        self.lock = threading.Lock()
+
+    def get(self, key: Any) -> Any:
+        with self.lock:
+            if key not in self.items:
+                return None
+            self.items.move_to_end(key)
+            return self.items[key]
+
+    def put(self, key: Any, value: Any) -> None:
+        with self.lock:
+            if key in self.items:
+                self.used -= self.weigh(self.items.pop(key))
+            self.items[key] = value
+            self.used += self.weigh(value)
+            while self.used > self.most and len(self.items) > 1:
+                self.used -= self.weigh(self.items.popitem(last=False)[1])
+
+    def clear(self) -> None:
+        with self.lock:
+            self.items.clear()
+            self.used = 0
+
+
+# Commits never change, so neither does what is kept by their shas: a diff
+# between two commits (weighed by its patches' size) and a merge's commits.
+_DIFFS = _Lru(64 << 20, lambda files: 1 + sum(len(f[3]) for f in files))
+_MERGED = _Lru(1 << 20, lambda commits: 1 + len(commits))
+_RESULTS = _Lru(32)     # session id -> (its _Fingerprint, its _Facts)
+
+
+@dataclass(frozen=True)
+class _Facts:
+    """A session diff's git side for one HEAD and base: everything but who
+    its commits' authors are, which the db says on each ask."""
+    path: str
+    base_sha: str
+    head: str
+    # The first-parent history, newest first: each commit, its first parent,
+    # its subject and, for a merge, each merged tip's commits.
+    log: tuple[tuple[str, str, str, tuple[tuple[str, ...], ...]], ...]
+    named: tuple[tuple[str, tuple[str, ...]], ...]          # each commit since the base and the files it touched
+    changed: tuple[tuple[str, str | None, str, str], ...]   # _file_diffs(base_sha, head)
+    deleted: dict[str, dict[int, str]]          # base path -> base line -> the commit that deleted it
+    blamed: dict[str, tuple[tuple[int, ...], dict[int, str]]]   # path -> (its added lines, line -> their commit)
+
+
+def _merged(ws: Workspace, first: str, tip: str) -> tuple[str, ...]:
+    """The commits a merge of ``tip`` onto ``first`` brought in."""
+    if (hit := _MERGED.get((first, tip))) is None:
+        hit = tuple(git.out(["rev-list", f"{first}..{tip}"], ws.path).split())
+        _MERGED.put((first, tip), hit)
+    return hit
+
+
+def _log(ws: Workspace, mb: str, head: str) -> list[tuple[str, str, str, tuple[tuple[str, ...], ...]]]:
+    """``_Facts.log`` for ``mb``..``head``."""
+    out = []
+    for line in git.run(["log", "--first-parent", "--format=%H%x00%P%x00%s", f"{mb}..{head}"],
+                        ws.path).stdout.splitlines():
+        sha, parents, subject = line.split("\0", 2)
+        first, *tips = parents.split()
+        out.append((sha, first, subject, tuple(_merged(ws, first, tip) for tip in tips)))
+    return out
+
+
+def _named(ws: Workspace, mb: str, head: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Each commit since ``mb`` and the files it touched."""
+    text = git.run(["-c", "core.quotePath=false", "log", "--format=%x01%H", "--name-only", f"{mb}..{head}"],
+                   ws.path).stdout
+    return tuple((sha, tuple(filter(None, files)))
+                 for sha, *files in (chunk.split("\n") for chunk in text.split("\x01")[1:]))
+
+
+def _owners(db: DB, root: Agent, ws: Workspace, facts: _Facts) -> tuple[dict[str, str], dict[str, dict]]:
+    """Each commit since the base -> its author's id, and those authors."""
     people = {SUPERVISOR: {"id": SUPERVISOR, "kind": SUPERVISOR, "profile": root.profile, "branch": ws.branch},
               YOU: {"id": YOU, "kind": YOU, "profile": None, "branch": None}}
     owner: dict[str, str] = {}
-    chain: list[tuple[str, str]] = []
-    log_text = git.run(["log", "--first-parent", "--format=%H%x00%P%x00%s", f"{mb}..HEAD"], ws.path).stdout
-    for line in log_text.splitlines():
-        sha, parents, subject = line.split("\0", 2)
-        first, *merged = parents.split()
+    for sha, _, subject, merged in facts.log:
         m = (MERGED_RE if merged else SQUASHED_RE).match(subject)
         if m:
             who = _worker(db, ws, m.group(1))
@@ -257,21 +345,17 @@ def _owners(db: DB, root: Agent, ws: Workspace,
         else:
             key = YOU if subject.startswith(f"{EDIT_MESSAGE}: ") else SUPERVISOR
         owner[sha] = key
-        chain.insert(0, (sha, first))
-        for tip in merged:
-            for c in git.out(["rev-list", f"{first}..{tip}"], ws.path).split():
+        for commits in merged:
+            for c in commits:
                 owner.setdefault(c, key)
-    return owner, people, chain
+    return owner, people
 
 
-def _file_authors(ws: Workspace, mb: str, owner: dict[str, str]) -> dict[str, list[str]]:
-    """Path -> the authors of the commits since ``mb`` that touched it."""
-    text = git.run(["-c", "core.quotePath=false", "log", "--format=%x01%H", "--name-only", f"{mb}..HEAD"],
-                   ws.path).stdout
+def _file_authors(facts: _Facts, owner: dict[str, str]) -> dict[str, list[str]]:
+    """Path -> the authors of the commits since the base that touched it."""
     found: dict[str, list[str]] = {}
-    for chunk in text.split("\x01")[1:]:
-        sha, *files = chunk.split("\n")
-        for f in filter(None, files):
+    for sha, files in facts.named:
+        for f in files:
             who = owner.get(sha, SUPERVISOR)
             if who not in found.setdefault(f, []):
                 found[f].append(who)
@@ -312,15 +396,22 @@ def _ranges(lines: list[int]) -> list[str]:
     return [arg for a, b in runs for arg in ("-L", f"{a},{b}")]
 
 
-def _blame(ws: Workspace, mb: str, path: str, lines: list[int], owner: dict[str, str]) -> dict[int, str]:
-    """New-side line -> its author, for ``lines`` of ``path`` at HEAD."""
-    text = git.run(["blame", "--line-porcelain", *_ranges(lines), f"{mb}..HEAD", "--", path], ws.path).stdout
-    return {int(m.group(2)): owner.get(m.group(1), SUPERVISOR)
-            for m in map(BLAME_RE.match, text.splitlines()) if m}
+def _blame(ws: Workspace, mb: str, head: str, path: str, lines: list[int]) -> dict[int, str]:
+    """New-side line -> the commit that wrote it, for ``lines`` of ``path`` at ``head``."""
+    text = git.run(["blame", "--line-porcelain", *_ranges(lines), f"{mb}..{head}", "--", path], ws.path).stdout
+    return {int(m.group(2)): m.group(1) for m in map(BLAME_RE.match, text.splitlines()) if m}
 
 
-def _file_diffs(ws: Workspace, a: str, b: str, *opts: str) -> list[tuple[str, str | None, str, str]]:
-    """``a``..``b`` per file: (status letter, old path if renamed, path, its patch)."""
+def _file_diffs(ws: Workspace, a: str, b: str, *opts: str) -> tuple[tuple[str, str | None, str, str], ...]:
+    """``a``..``b`` per file: (status letter, old path if renamed, path, its
+    patch). ``a`` and ``b`` are commits' shas, so what is found is kept."""
+    if (hit := _DIFFS.get((a, b, opts))) is None:
+        hit = tuple(_run_file_diffs(ws, a, b, *opts))
+        _DIFFS.put((a, b, opts), hit)
+    return hit
+
+
+def _run_file_diffs(ws: Workspace, a: str, b: str, *opts: str) -> list[tuple[str, str | None, str, str]]:
     base = ["-c", "core.quotePath=false", "diff", "-M", "--no-color", "--no-ext-diff", *opts]
     names = git.run([*base, "-z", "--name-status", a, b], ws.path).stdout.split("\0")
     patches = re.split(r"^(?=diff --git )", git.run([*base, "--src-prefix=a/", "--dst-prefix=b/", "--patch", a, b],
@@ -334,9 +425,9 @@ def _file_diffs(ws: Workspace, a: str, b: str, *opts: str) -> list[tuple[str, st
     return out
 
 
-def _deleters(ws: Workspace, chain: list[tuple[str, str]], wanted: dict[str, list[int]],
-              owner: dict[str, str]) -> dict[str, dict[int, str]]:
-    """Base path -> its deleted base lines -> who deleted each. Each line is
+def _deleters(ws: Workspace, chain: list[tuple[str, str]],
+              wanted: dict[str, list[int]]) -> dict[str, dict[int, str]]:
+    """Base path -> its deleted base lines -> the commit that deleted each. Each line is
     carried along the session's first-parent history (``chain``: each commit
     and its first parent, oldest first) and goes to the commit whose diff
     from its first parent removes it: a merge's for a merged worker's
@@ -355,7 +446,7 @@ def _deleters(ws: Workspace, chain: list[tuple[str, str]], wanted: dict[str, lis
             moved = {}
             for line, n in at[base].items():
                 if any(start <= n < start + count for start, count, _ in hunks if count):
-                    found[base][line] = owner.get(sha, SUPERVISOR)
+                    found[base][line] = sha
                 else:   # shifted by every hunk before it (an insertion lands after its old line)
                     moved[line] = n + sum(new - count for start, count, new in hunks
                                           if (start + count <= n if count else start < n))
@@ -365,25 +456,197 @@ def _deleters(ws: Workspace, chain: list[tuple[str, str]], wanted: dict[str, lis
     return found
 
 
+def _blames(ws: Workspace, mb: str, head: str, chain: list[tuple[str, str]], added: dict[str, tuple[int, ...]],
+            prev: _Facts | None) -> dict[str, tuple[tuple[int, ...], dict[int, str]]]:
+    """``_Facts.blamed`` for the files with ``added`` lines. A file that no
+    first-parent commit since ``prev``'s HEAD touched keeps ``prev``'s blame:
+    blame hands a file its first parent has unchanged wholly to that parent,
+    so it walks down to ``prev``'s HEAD and finds what it found then."""
+    shas = [sha for sha, _ in chain]
+    kept: dict[str, tuple[tuple[int, ...], dict[int, str]]] = {}
+    if prev is not None and prev.path == ws.path and prev.base_sha == mb and prev.head in shas:
+        touched: set[str | None] = set()
+        for sha, first in chain[shas.index(prev.head) + 1:]:
+            for _, old_path, path, _ in _file_diffs(ws, first, sha, "-U0"):
+                touched.update((old_path, path))
+        kept = {path: found for path, found in prev.blamed.items() if path not in touched}
+    out = {}
+    for path, lines in added.items():
+        hit = kept.get(path)
+        out[path] = hit if hit is not None and hit[0] == lines else (lines, _blame(ws, mb, head, path, list(lines)))
+    return out
+
+
+def _compute(ws: Workspace, base: str, fp: _Fingerprint | None, prev: _Facts | None) -> _Facts:
+    """The session diff's git side, at ``fp``'s HEAD and base when there is
+    one; ``prev``: the session's last, whose blame is reused where it holds."""
+    head = fp.head if fp else git.out(["rev-parse", "HEAD"], ws.path)
+    ref = git.base_ref(ws.path, base)
+    if fp:
+        ref = {base: fp.local, f"origin/{base}": fp.origin}.get(ref) or ref
+    mb = git.out(["merge-base", ref, head], ws.path)
+    log_ = _log(ws, mb, head)
+    chain = [(sha, first) for sha, first, _, _ in reversed(log_)]
+    changed = _file_diffs(ws, mb, head)
+    hunks = [(old_path or path, path, _hunks(patch)) for _, old_path, path, patch in changed]
+    deleted = _deleters(ws, chain, {was: [n for h in hs for n in h["deleted"]]
+                                    for was, _, hs in hunks if any(h["deleted"] for h in hs)})
+    added = {path: tuple(n for h in hs for n in h["added"]) for _, path, hs in hunks}
+    blamed = _blames(ws, mb, head, chain, {path: lines for path, lines in added.items() if lines}, prev)
+    return _Facts(ws.path, mb, head, tuple(log_), _named(ws, mb, head), changed, deleted, blamed)
+
+
+# -- what changed, without starting git ---------------------------------------
+
+
+@dataclass(frozen=True)
+class _Fingerprint:
+    """What a session diff's git side depends on: while it holds, so does
+    the last one."""
+    path: str
+    base: str
+    head: str
+    local: str | None       # refs/heads/<base>
+    origin: str | None      # refs/remotes/origin/<base>
+    index: int              # the index's mtime (ns); 0 without one
+
+
+SHA_RE = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+_PER_WORKTREE = ("refs/worktree/", "refs/bisect/", "refs/rewritten/")
+
+
+def _git_dirs(path: str) -> tuple[Path, Path]:
+    """A checkout's own git dir and its repo's common one."""
+    own = Path(path) / ".git"
+    if own.is_file():
+        text = own.read_text().strip()
+        if not text.startswith("gitdir:"):
+            raise ValueError(f"{own}: not a gitdir link")
+        own = Path(path) / text.removeprefix("gitdir:").strip()
+    common = own
+    if (own / "commondir").is_file():
+        common = own / (own / "commondir").read_text().strip()
+    return own, common
+
+
+def _packed(common: Path) -> dict[str, str]:
+    try:
+        lines = (common / "packed-refs").read_text().splitlines()
+    except FileNotFoundError:
+        return {}
+    return {name: sha for sha, _, name in (line.partition(" ") for line in lines) if SHA_RE.fullmatch(sha)}
+
+
+def _ref(own: Path, common: Path, name: str, depth: int = 0) -> str | None:
+    """``name``'s commit from the loose or packed refs; None when there is no such ref."""
+    if depth > 4:
+        raise ValueError(f"{name}: symbolic refs too deep")
+    where = own if name == "HEAD" or name.startswith(_PER_WORKTREE) else common
+    try:
+        text = (where / name).read_text().strip()
+    except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
+        return _packed(common).get(name)
+    if text.startswith("ref:"):
+        return _ref(own, common, text.removeprefix("ref:").strip(), depth + 1)
+    if not SHA_RE.fullmatch(text):
+        raise ValueError(f"{name}: {text!r} is not a commit")
+    return text
+
+
+def _fingerprint(ws: Workspace, base: str) -> _Fingerprint | None:
+    """The checkout's fingerprint, read from its git files; None when they
+    can't be read that way (a reftable repo, no commit yet)."""
+    try:
+        own, common = _git_dirs(ws.path)
+        if (common / "reftable").exists() or (head := _ref(own, common, "HEAD")) is None:
+            return None
+        try:
+            index = (own / "index").stat().st_mtime_ns
+        except FileNotFoundError:
+            index = 0
+        return _Fingerprint(ws.path, base, head, _ref(own, common, f"refs/heads/{base}"),
+                            _ref(own, common, f"refs/remotes/origin/{base}"), index)
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+class _Flight:
+    """A session's computation under way, which whoever asks meanwhile shares."""
+
+    def __init__(self, fp: _Fingerprint | None) -> None:
+        self.fp, self.done, self.joined = fp, False, 0
+        self.facts: _Facts | None = None
+        self.error: BaseException | None = None
+
+
+_lock = threading.Condition()
+_flights: dict[str, _Flight] = {}
+
+
+def _session_facts(root_id: str, ws: Workspace, base: str) -> _Facts:
+    """The session's last facts while its fingerprint holds; else one
+    computation, shared, kept only once it completes."""
+    fp = _fingerprint(ws, base)
+    while True:
+        with _lock:
+            stored = _RESULTS.get(root_id)
+            if fp is not None and stored is not None and stored[0] == fp:
+                return stored[1]
+            flight = _flights.get(root_id)
+            if flight is None:
+                flight = _flights[root_id] = _Flight(fp)
+                prev = stored[1] if stored else None
+                break
+            flight.joined += 1
+            _lock.notify_all()
+            _lock.wait_for(lambda f=flight: f.done)
+            if flight.fp == fp:
+                if flight.error is not None:
+                    raise flight.error
+                assert flight.facts is not None
+                return flight.facts
+            # It computed for another fingerprint: look again.
+    try:
+        facts = _compute(ws, base, fp, prev)
+    except BaseException as e:
+        with _lock:
+            flight.error, flight.done = e, True
+            del _flights[root_id]
+            _lock.notify_all()
+        raise
+    with _lock:
+        if fp is not None:
+            _RESULTS.put(root_id, (fp, facts))
+        flight.facts, flight.done = facts, True
+        del _flights[root_id]
+        _lock.notify_all()
+    return facts
+
+
+def _forget() -> None:
+    """Drop everything kept."""
+    for kept in (_DIFFS, _MERGED, _RESULTS):
+        kept.clear()
+
+
 def diff(db: DB, root: Agent, ws: Workspace) -> dict[str, Any]:
     """The session branch against its PR base, attributed."""
     base = workspaces.require_base(ws)
-    mb = git.merge_base(ws.path, git.base_ref(ws.path, base))
-    owner, people, chain = _owners(db, root, ws, mb)
-    by_file = _file_authors(ws, mb, owner)
-    changed = [(path, old_path, status, patch, _hunks(patch))
-               for status, old_path, path, patch in _file_diffs(ws, mb, "HEAD")]
-    deleters = _deleters(ws, chain, {old_path or path: [n for h in hunks for n in h["deleted"]]
-                                     for path, old_path, _, _, hunks in changed
-                                     if any(h["deleted"] for h in hunks)}, owner)
+    facts = _session_facts(root.id, ws, base)
+    owner, people = _owners(db, root, ws, facts)
+    by_file = _file_authors(facts, owner)
+
+    def author(commits: dict[int, str], n: int) -> str:
+        return owner.get(commits[n], SUPERVISOR) if n in commits else SUPERVISOR
+
     files, seen = [], []
-    for path, old_path, status, patch, hunks in changed:
-        added = [n for h in hunks for n in h["added"]]
-        blamed = _blame(ws, mb, path, added, owner) if added else {}
-        unblamed = deleters.get(old_path or path, {})
+    for status, old_path, path, patch in facts.changed:
+        hunks = _hunks(patch)
+        blamed = facts.blamed[path][1] if path in facts.blamed else {}
+        unblamed = facts.deleted.get(old_path or path, {})
         fallback = by_file.get(path) or [SUPERVISOR]
         for h in hunks:
-            who = [blamed.get(n, SUPERVISOR) for n in h["added"]] + [unblamed.get(n, SUPERVISOR) for n in h["deleted"]]
+            who = [author(blamed, n) for n in h["added"]] + [author(unblamed, n) for n in h["deleted"]]
             h["authors"] = list(dict.fromkeys(who)) or fallback
             h["text"] = "\n".join(h.pop("lines"))
             del h["added"], h["deleted"]
@@ -392,9 +655,8 @@ def diff(db: DB, root: Agent, ws: Workspace) -> dict[str, Any]:
         files.append({"path": path, "old_path": old_path, "status": status,
                       "binary": "\nBinary files " in patch or patch.startswith("Binary files "),
                       "authors": authors, "hunks": hunks})
-    return {"root_id": root.id, "branch": ws.branch, "base": base, "base_sha": mb,
-            "head": git.out(["rev-parse", "HEAD"], ws.path), "files": files,
-            "workers": [people[k] for k in dict.fromkeys(seen)]}
+    return {"root_id": root.id, "branch": ws.branch, "base": base, "base_sha": facts.base_sha,
+            "head": facts.head, "files": files, "workers": [people[k] for k in dict.fromkeys(seen)]}
 
 
 # -- the PR ------------------------------------------------------------------
