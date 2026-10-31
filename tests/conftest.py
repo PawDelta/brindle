@@ -91,6 +91,15 @@ _TEST_COUNT = [0]
 
 
 @pytest.fixture(autouse=True)
+def _fresh_google_token_cache():
+    """The Google token-expiry cache is process-wide; a test never inherits one."""
+    from brindle import cloud_login
+    cloud_login._google_expiry_cache.clear()
+    yield
+    cloud_login._google_expiry_cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def test_tmux_server(monkeypatch):
     """Each test gets its own tmux server (``brindle-test-<pid>-<n>``), not
     one shared by every test on the worker. A detached helper an earlier test
