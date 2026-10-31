@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import sh
+from conftest import run_scenario, sh
 
 from brindle import agents, git, procs, providers, spawn, status_cache, tmux
 from brindle.daemon import routes_actions
@@ -36,12 +36,7 @@ def _until(cond, within: float = 5.0) -> bool:
     return cond()
 
 
-@pytest.mark.parametrize("load, level, expected", [
-    (2.0, 1, 5.0),       # 8 cores - load 2 - 1 running
-    (2.0, 2, 2.5),       # memory-pressure warning: half
-    (2.0, 4, -1.0),      # critical: nothing but what's running
-])
-def test_room(monkeypatch, load, level, expected):
+def _room(monkeypatch, load, level, expected):
     monkeypatch.setattr(spawn, "_cores", lambda: 8)
     monkeypatch.setattr(spawn, "_load", lambda: load)
     monkeypatch.setattr(spawn, "pressure", lambda: level)
@@ -49,7 +44,7 @@ def test_room(monkeypatch, load, level, expected):
     assert spawn.room() == expected
 
 
-def test_with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips(overloaded, repo):
+def _with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips(overloaded, repo):
     t0 = time.monotonic()
     with spawn.deadline(0.3), pytest.raises(git.GitBusy):     # both a GitError and a Busy
         git.run(["status"], repo)
@@ -67,7 +62,7 @@ def test_with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips(
     assert spawn.running() == 1
 
 
-def test_past_its_deadline_nothing_starts_even_with_room(tmp_path):
+def _past_its_deadline_nothing_starts_even_with_room(tmp_path):
     marker = tmp_path / "ran"
     with spawn.deadline(-1):
         for start in (spawn.read, spawn.action, spawn.start):
@@ -80,7 +75,7 @@ def test_past_its_deadline_nothing_starts_even_with_room(tmp_path):
     assert not marker.exists()
 
 
-def test_a_started_helper_commits_its_request_and_a_started_read_does_not():
+def _a_started_helper_commits_its_request_and_a_started_read_does_not():
     with spawn.deadline(30) as dl:
         spawn.start(["true"], write=False).wait()
         assert not dl.committed and spawn.left(100) <= 30      # a read is still held to the deadline
@@ -119,7 +114,7 @@ def _serve(method: str, handler, disconnect_when=None, cancel_when=None) -> None
     asyncio.run(main())
 
 
-def test_an_abandoned_read_leaves_no_process(tmp_path, monkeypatch):
+def _an_abandoned_read_leaves_no_process(tmp_path, monkeypatch):
     """The app disconnects mid-request: the read's whole group is stopped,
     SIGKILL for what ignores SIGTERM, and the handler gets Busy."""
     monkeypatch.setattr(spawn, "GRACE", 0.2)
@@ -143,7 +138,7 @@ def test_an_abandoned_read_leaves_no_process(tmp_path, monkeypatch):
     assert spawn.running() == 0
 
 
-def test_a_cancelled_request_stops_the_read_its_thread_left_running():
+def _a_cancelled_request_stops_the_read_its_thread_left_running():
     got: list[BaseException] = []
 
     def handler() -> None:
@@ -158,7 +153,7 @@ def test_a_cancelled_request_stops_the_read_its_thread_left_running():
     assert time.monotonic() - t0 < 5       # the cancellation, not the 30 second deadline
 
 
-def test_a_post_whose_client_left_mid_action_runs_to_its_end(tmp_path):
+def _a_post_whose_client_left_mid_action_runs_to_its_end(tmp_path):
     """Once an action has started the request is a transaction: the action
     and the reads after it (bookkeeping, a rollback) finish, client or not."""
     started, go = tmp_path / "started", tmp_path / "go"
@@ -176,7 +171,7 @@ def test_a_post_whose_client_left_mid_action_runs_to_its_end(tmp_path):
     assert got == ["done\n", True, "after\n"]
 
 
-def test_an_edit_whose_client_leaves_as_it_commits_keeps_the_commit(repo, monkeypatch):
+def _an_edit_whose_client_leaves_as_it_commits_keeps_the_commit(repo, monkeypatch):
     """The reads after the commit (its sha) once failed on the stopped
     deadline, and the rollback put the old file back under the new commit."""
     ws = Workspace("w", str(repo), "w", "worktree", "main", "main", str(repo), None, "s", 1.0)
@@ -210,7 +205,7 @@ class _FakePs:
         return "5001 1 cat\n5002 5001 node dev-server\n5003 5002 python -m pytest\n", ""
 
 
-def test_a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db, repo, tmp_path, monkeypatch):
+def _a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db, repo, tmp_path, monkeypatch):
     """Stopping the agent's processes, ending its native subagents and
     recording it paused once failed on the stopped deadline, after its window
     was already gone."""
@@ -245,7 +240,7 @@ def test_a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db,
     assert db.get_agent("a1").status == "paused"
 
 
-def test_warm_fans_out_under_the_request_deadline(monkeypatch):
+def _warm_fans_out_under_the_request_deadline(monkeypatch):
     """status_cache.warm runs its reads on a thread pool, whose threads don't
     copy the request's context."""
     stopped: list[str] = []
@@ -264,7 +259,7 @@ def test_warm_fans_out_under_the_request_deadline(monkeypatch):
     assert sorted(stopped) == ["a", "b"]
 
 
-def test_a_hash_whose_clean_filter_stalls_stops_at_the_deadline(repo):
+def _a_hash_whose_clean_filter_stalls_stops_at_the_deadline(repo):
     sh("git config filter.stall.clean 'tail -f /dev/null' && echo '*.txt filter=stall' > .gitattributes", repo)
     t0 = time.monotonic()
     with spawn.deadline(0.5), pytest.raises(git.GitBusy):
@@ -273,7 +268,7 @@ def test_a_hash_whose_clean_filter_stalls_stops_at_the_deadline(repo):
     assert spawn.running() == 0
 
 
-def test_a_git_status_stopped_partway_leaves_no_index_lock(repo, tmp_path):
+def _a_git_status_stopped_partway_leaves_no_index_lock(repo, tmp_path):
     """git status holds .git/index.lock while it asks a dirty submodule for
     its own status; a submodule whose fsmonitor hook never answers keeps it
     there until the read is stopped."""
@@ -290,3 +285,31 @@ def test_a_git_status_stopped_partway_leaves_no_index_lock(repo, tmp_path):
     with pytest.raises(git.GitError):
         git.run(["status"], repo, timeout=limit)
     assert not (repo / ".git" / "index.lock").exists()
+
+
+def _row(scenario, id, why=None, **params):
+    return pytest.param(scenario, params, id=id, marks=[pytest.mark.variant(why)] if why else [])
+
+
+@pytest.mark.parametrize("scenario, params", [
+    _row(_room, "room-ample", load=2.0, level=1, expected=5.0),            # 8 cores - load 2 - 1 running
+    _row(_room, "room-pressure-warning", load=2.0, level=2, expected=2.5),   # memory-pressure warning: half
+    _row(_room, "room-pressure-critical", load=2.0, level=4, expected=-1.0),  # nothing but what's running
+    _row(_with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips, "overload-no-room"),
+    _row(_past_its_deadline_nothing_starts_even_with_room, "deadline-passed"),
+    _row(_a_started_helper_commits_its_request_and_a_started_read_does_not, "subprocess-helper-vs-read"),
+    _row(_an_abandoned_read_leaves_no_process, "abandoned-read"),
+    _row(_a_cancelled_request_stops_the_read_its_thread_left_running, "cancelled-read"),
+    _row(_a_post_whose_client_left_mid_action_runs_to_its_end, "client-left-post",
+         "an action whose client left still finishes"),
+    _row(_an_edit_whose_client_leaves_as_it_commits_keeps_the_commit, "client-left-edit",
+         "an edit whose client left as it commits keeps its commit"),
+    _row(_a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes, "client-left-stop",
+         "a stop whose client left still finishes"),
+    _row(_warm_fans_out_under_the_request_deadline, "deadline-warm"),
+    _row(_a_hash_whose_clean_filter_stalls_stops_at_the_deadline, "deadline-hash"),
+    _row(_a_git_status_stopped_partway_leaves_no_index_lock, "stopped-git-status",
+         "a stopped git status leaves no index.lock"),
+])
+def test_spawn_overload_and_request_deadline(request, scenario, params):
+    run_scenario(request, scenario, params)

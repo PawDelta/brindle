@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from conftest import sh
+from conftest import run_scenario, sh
 from test_reliability import CLAUDE_BUSY, CLAUDE_IDLE
 
 from brindle import agents, autopilot, bus, config, coordinator, pipeline, preflight, providers, workspaces
@@ -116,8 +116,7 @@ def test_deprecated_disable_preserves_goal_and_open_question(db, world):
     assert ap.enabled and ap.goal == "Ship" and ap.state == "blocked" and ap.question
 
 
-@pytest.mark.parametrize("checks", [[], ["true"]])
-def test_review_lock_returns_busy_without_starting_work(db, world, monkeypatch, checks):
+def _review_lock_returns_busy_without_starting_work(db, world, monkeypatch, checks):
     import fcntl
     import hashlib
 
@@ -1834,8 +1833,7 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     assert [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))] == ["lead"]
 
 
-@pytest.mark.parametrize("obstacle", ["identity", "interrupted"])
-def test_readiness_prepares_after_startup_and_recovers(db, lead, monkeypatch, obstacle):
+def _readiness_prepares_after_startup_and_recovers(db, lead, monkeypatch, obstacle):
     from brindle import gates, git, identity_lock
     from brindle.daemon import session_review
     head = _commit(Path(lead.path), "a.py", "a\n")
@@ -1866,6 +1864,17 @@ def test_readiness_prepares_after_startup_and_recovers(db, lead, monkeypatch, ob
     monkeypatch.setattr(git, "run", lambda *a, **kw: pytest.fail("settled preparation ran git"))
     watch.sweep(db)
     assert db.conn.execute("SELECT state FROM session_pr_prep WHERE root_id = 'lead'").fetchone()[0] == "passed"
+
+
+@pytest.mark.parametrize("scenario, params", [
+    pytest.param(_review_lock_returns_busy_without_starting_work, {"checks": []}, id="review_lock-no-checks"),
+    pytest.param(_review_lock_returns_busy_without_starting_work, {"checks": ["true"]}, id="review_lock-checks"),
+    pytest.param(_readiness_prepares_after_startup_and_recovers, {"obstacle": "identity"}, id="readiness-identity"),
+    pytest.param(_readiness_prepares_after_startup_and_recovers, {"obstacle": "interrupted"},
+                 id="readiness-interrupted"),
+])
+def test_review_lock_and_readiness_preparation(request, scenario, params):
+    run_scenario(request, scenario, params)
 
 
 def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):

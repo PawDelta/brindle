@@ -1,4 +1,5 @@
 import pytest
+from conftest import run_scenario
 from starlette.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -19,8 +20,7 @@ def _open_readiness_prs(db, count):
                         (key, key, f"https://github.com/o/r/pull/{n}"))
 
 
-@pytest.mark.parametrize("gitlink", [False, True])
-def test_readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
+def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
     from types import SimpleNamespace
     from brindle import git, spawn
     from brindle.daemon import routes_actions, session_review as review
@@ -68,7 +68,7 @@ def test_readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink)
     assert reads == [] and watch.ready == {"s": True} and review._merge_polled == 0
 
 
-def test_readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
+def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     import threading
     from brindle import spawn, workspaces
     from brindle.daemon import session_review as review
@@ -109,9 +109,7 @@ def test_readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
         worker.join(1)
 
 
-@pytest.mark.parametrize("queued", ["cancelled", pytest.param("expired", marks=pytest.mark.variant(
-    "a queued check starts after deadline expiry before the sweep can cancel it"))])
-def test_readiness_deferred_prs_get_a_turn(db, monkeypatch, queued):
+def _readiness_deferred_prs_get_a_turn(db, monkeypatch, queued):
     from concurrent.futures import Future
     from brindle import spawn, workspaces
     from brindle.daemon import session_review as review
@@ -152,8 +150,7 @@ def test_readiness_deferred_prs_get_a_turn(db, monkeypatch, queued):
     assert {url.rsplit("/", 1)[1] for url in seen} == {str(n) for n in range(5)}
 
 
-@pytest.mark.parametrize("memory", [False, True])
-def test_session_changed_tracks_head_and_index_without_status_changes(db, tmp_path, memory):
+def _session_changed_tracks_head_and_index_without_status_changes(db, tmp_path, memory):
     from brindle import git
     from brindle.daemon.events import Feed
     from brindle.db import Agent, DB, Workspace
@@ -189,7 +186,7 @@ def test_session_changed_tracks_head_and_index_without_status_changes(db, tmp_pa
     other_db.conn.close()
 
 
-def test_status_fingerprint(tmp_path, monkeypatch):
+def _status_fingerprint(tmp_path, monkeypatch):
     from types import SimpleNamespace
     from brindle import git, status_cache
 
@@ -220,6 +217,23 @@ def test_status_fingerprint(tmp_path, monkeypatch):
         assert len(calls) == 3
     finally:
         status_cache.clear()
+
+
+@pytest.mark.parametrize("scenario, params", [
+    pytest.param(_readiness_reuses_unchanged_sessions, {"gitlink": False}, id="readiness-reuses"),
+    pytest.param(_readiness_reuses_unchanged_sessions, {"gitlink": True}, id="readiness-reuses-gitlink"),
+    pytest.param(_readiness_slow_gh_is_parallel_and_bounded, {}, id="readiness-slow-gh"),
+    pytest.param(_readiness_deferred_prs_get_a_turn, {"queued": "cancelled"}, id="readiness-deferred-cancelled"),
+    pytest.param(_readiness_deferred_prs_get_a_turn, {"queued": "expired"}, id="readiness-deferred-expired",
+                 marks=pytest.mark.variant("a queued check starts after deadline expiry before the sweep can cancel it")),
+    pytest.param(_session_changed_tracks_head_and_index_without_status_changes, {"memory": False},
+                 id="session_changed-file-db"),
+    pytest.param(_session_changed_tracks_head_and_index_without_status_changes, {"memory": True},
+                 id="session_changed-memory-db"),
+    pytest.param(_status_fingerprint, {}, id="status_fingerprint"),
+])
+def test_readiness_and_status_fingerprint(request, scenario, params):
+    run_scenario(request, scenario, params)
 
 
 @pytest.mark.variant("a wrong first-frame token must close the socket with WS_UNAUTHORIZED")
