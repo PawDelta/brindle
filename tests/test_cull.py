@@ -481,3 +481,20 @@ def test_sweep_retries_a_flush_the_pane_blocked(db, ws, monkeypatch):
     assert db.pending_count("boss") == 0
     cull.sweep(db, now=later)
     assert len(pasted) == 1
+
+
+def test_lock_cleanup_keeps_held_and_status_read_creates_nothing(db, brindle_home):
+    import fcntl
+    from brindle import gates
+
+    assert gates.marked("review", "w1") is False
+    assert list((brindle_home / "locks").glob("*")) == []
+    old = time.time() - cull.LOCK_MAX_AGE - 60
+    held, free = (brindle_home / "locks" / n for n in ("check-held.lock", "check-free.lock"))
+    for p in (held, free):
+        p.write_text("")
+        os.utime(p, (old, old))
+    with open(held) as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_SH)
+        assert cull.clean_locks(db) == 1
+    assert held.exists() and not free.exists()

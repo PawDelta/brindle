@@ -305,7 +305,12 @@ def marker(kind: str, ws_id: str):
 
 def marked(kind: str, ws_id: str) -> bool:
     """Whether anything holds ``marker(kind, ws_id)`` right now."""
-    with open(_marker_file(kind, ws_id), "w") as f:
+    path = _marker_file(kind, ws_id)
+    try:
+        f = open(path)   # a read never creates the file: no marker, nothing held
+    except FileNotFoundError:
+        return False
+    with f:
         try:
             fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:

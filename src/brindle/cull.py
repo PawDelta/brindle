@@ -50,6 +50,7 @@ from brindle.pro import route_health
 
 # An agent this new may not have its window recorded yet.
 LAUNCH_GRACE = agents.LAUNCH_GRACE
+LOCK_MAX_AGE = 24 * 3600   # a lock file untouched this long is cleaned up
 # How long a message waits for its normal delivery (a hook, the start-up
 # flush) before a sweep retries it.
 FLUSH_RETRY_AFTER = 30.0
@@ -701,6 +702,26 @@ def clean_locks(db: DB, now: float | None = None) -> int:
             if now - path.stat().st_mtime <= LAUNCH_GRACE:
                 continue
             with open(path, "a") as f:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    continue
+                path.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed + _clean_old_locks(now)
+
+
+def _clean_old_locks(now: float) -> int:
+    """Delete any ``locks/*.lock`` untouched for LOCK_MAX_AGE, but only after
+    taking it non-blocking, so a lock somebody holds is never removed."""
+    removed = 0
+    for path in (brindle_home() / "locks").glob("*.lock"):
+        try:
+            if now - path.stat().st_mtime <= LOCK_MAX_AGE:
+                continue
+            with open(path) as f:
                 try:
                     fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
                 except BlockingIOError:
