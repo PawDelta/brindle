@@ -26,7 +26,7 @@ from pathlib import Path
 # be running from the very worktree ``remove`` deletes (a reviewer's `uv run`
 # in it), and a module first imported after that can't be found, which left
 # the row behind.
-from brindle import git, history, rewind, services, tmux
+from brindle import git, history, rewind, services, spawn, tmux
 from brindle.config import (
     PORT_BLOCK_SIZE,
     PORT_RANGE_START,
@@ -784,14 +784,17 @@ def existing_pull_request(ws: Workspace) -> str | None:
     return existing.stdout.strip() if existing.returncode == 0 and existing.stdout.strip() else None
 
 
+PR_STATE_SECONDS = 3.0
+
+
 def pull_request_merged(url: str, cwd: str) -> bool:
     """Whether ``gh`` reports the PR at ``url`` merged (False when it can't tell)."""
     if not shutil.which("gh"):
         return False
     try:
-        out = subprocess.run(["gh", "pr", "view", url, "--json", "state", "-q", ".state"],
-                             cwd=cwd, capture_output=True, text=True, timeout=30)
-    except (OSError, subprocess.SubprocessError):
+        out = spawn.read(["gh", "pr", "view", url, "--json", "state", "-q", ".state"],
+                         cwd=cwd, text=True, timeout=PR_STATE_SECONDS)
+    except (OSError, subprocess.SubprocessError, spawn.Busy):
         return False
     return out.returncode == 0 and out.stdout.strip() == "MERGED"
 

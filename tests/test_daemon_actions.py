@@ -1760,6 +1760,8 @@ def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, a
 @pytest.fixture
 def lead(db, repo, tmp_path, monkeypatch):
     """A session ``lead`` on branch ``sess`` (base main) in its own checkout, its goal reached; jobs run inline."""
+    from brindle import spawn
+    monkeypatch.setattr(spawn, "room", lambda: 4)
     sh(f"git worktree add -q -b sess {tmp_path / 'sess'} main", repo)
     ws = workspaces.adopt_root(db, str(tmp_path / "sess"))
     db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, time.time()))
@@ -1831,6 +1833,40 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     _commit(sess, "d.py", "d\n")
     assert missing() == 1
     assert [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))] == ["lead"]
+
+
+@pytest.mark.parametrize("obstacle", ["identity", "interrupted"])
+def test_readiness_prepares_after_startup_and_recovers(db, lead, monkeypatch, obstacle):
+    from brindle import gates, git, identity_lock
+    from brindle.daemon import session_review
+    head = _commit(Path(lead.path), "a.py", "a\n")
+    config.set_local(lead.repo_root, "checks", ["validate"])
+    held = []
+    monkeypatch.setattr(routes_actions, "_spawn", held.append)
+    monkeypatch.setattr(gates, "run_checked", lambda *a, **kw: (True, ""))
+    watch = session_review.ReadinessWatch()
+    watch.sweep(db)
+    if obstacle == "identity":
+        monkeypatch.setattr(identity_lock, "locked_by", lambda *a: "other")
+        watch.sweep(db)
+        assert held == []
+        monkeypatch.setattr(identity_lock, "locked_by", lambda *a: None)
+    watch.sweep(db)
+    assert len(held) == 1
+    if obstacle == "interrupted":
+        def fail(*a, **kw):
+            raise RuntimeError("checks unavailable")
+        monkeypatch.setattr(gates, "run_checked", fail)
+        held.pop()()
+        watch.sweep(db)
+        assert held == []  # respect preparation's existing backoff
+        routes_actions._PR_TRIED[("lead", "sess")] = (head, time.monotonic() - 61)
+        monkeypatch.setattr(gates, "run_checked", lambda *a, **kw: (True, ""))
+        watch.sweep(db)
+    held.pop()()
+    monkeypatch.setattr(git, "run", lambda *a, **kw: pytest.fail("settled preparation ran git"))
+    watch.sweep(db)
+    assert db.conn.execute("SELECT state FROM session_pr_prep WHERE root_id = 'lead'").fetchone()[0] == "passed"
 
 
 def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):
