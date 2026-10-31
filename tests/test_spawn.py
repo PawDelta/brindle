@@ -10,10 +10,10 @@ from pathlib import Path
 import pytest
 from conftest import sh
 
-from brindle import git, procs, providers, spawn, status_cache
+from brindle import agents, git, procs, providers, spawn, status_cache, tmux
 from brindle.daemon import routes_actions
 from brindle.daemon.app import Deadlines
-from brindle.db import Workspace
+from brindle.db import Agent, Workspace
 
 REAL_PROBE = providers._auth_probe      # conftest stubs it for every test
 
@@ -184,6 +184,31 @@ def test_an_edit_whose_client_leaves_as_it_commits_keeps_the_commit(repo, monkey
     assert commit == sh("git rev-parse HEAD", repo)
     assert sh("git show HEAD:app.py", repo) == "new"
     assert (repo / "app.py").read_bytes() == b"new\n"
+
+
+def test_a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db, repo, monkeypatch):
+    """Stopping the agent's processes and recording it paused once failed on
+    the stopped deadline after its window was already gone."""
+    session = "brindle_spawn_stop"
+    tmux.ensure_session(session, str(repo), {})
+    pane = tmux._tmux("new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:",
+                      "cat").stdout.strip()
+    db.add_workspace(Workspace("w", str(repo), "w", "worktree", "main", "main", str(repo), None,
+                               session, 1.0))
+    db.add_agent(Agent("a1", "w", profile="developer", provider="claude", parent_id=None, mode="assign",
+                       status="running", tmux_window=pane, result=None, created_at=1.0,
+                       tmux_server=tmux.current_server()))
+    real_kill = tmux.kill_window
+
+    def kill(target):
+        real_kill(target)
+        spawn.current().stop()             # the client leaves right after the first change
+
+    monkeypatch.setattr(tmux, "kill_window", kill)
+    with spawn.deadline(30):
+        agents.pause_worker(db, db.get_agent("a1"))
+    assert pane not in tmux.list_panes()
+    assert db.get_agent("a1").status == "paused"
 
 
 def test_warm_fans_out_under_the_request_deadline(monkeypatch):

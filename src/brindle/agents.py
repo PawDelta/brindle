@@ -2587,8 +2587,11 @@ def _stop(db: DB, agent: Agent) -> None:
     """Stop an agent: its window, and every process of its that outlives the
     window (Claude Code's daemon can host the real session; see brindle.procs).
     A pane id a newer agent has since been given is left alone (see owns_pane)."""
-    from brindle import procs
+    from brindle import procs, spawn
 
+    # Refused past a request's deadline, before anything is touched; otherwise the
+    # stop (sidebar rescue, window, processes, bookkeeping) runs to its end, client or not.
+    spawn.begin_write()
     # Only a window on the server brindle is using: another server's pane
     # ids mean other panes here (see same_server).
     window = agent.tmux_window if same_server(agent) and owns_pane(db, agent) else ""

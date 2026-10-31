@@ -110,6 +110,9 @@ def _start(base: list[str], args: tuple[str, ...], input: str | None = None) -> 
     try:
         if _is_read(args):
             return spawn.read([*base, *args], input=input, timeout=timeout())
+        # A change: refused past the request's deadline, else the request runs to its end
+        # (brindle.spawn.begin_write). At tmux's normal priority, not through spawn.action.
+        spawn.begin_write()
         return subprocess.run([*base, *args], capture_output=True, text=True, input=input,
                               timeout=timeout())
     except spawn.Busy as e:
@@ -735,6 +738,7 @@ def move_pane(pane: str, target: str, columns: int = 30, position: str = "left")
     has exited), that window closes behind it: the pane itself moves and
     keeps running, and a window holding nothing but the sidebar is no use to
     anyone. Refusing instead would strand the sidebar there, out of sight."""
+    spawn.begin_write()     # the move and its hooks run to their end, client or not
     old_window = pane_window(pane)
     geometry, axis = _sidebar_geometry(position, columns)
     _tmux("join-pane", "-d", *geometry, "-s", pane, "-t", target, check=False)
