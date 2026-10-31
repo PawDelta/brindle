@@ -98,7 +98,7 @@ signed in. Claude Code is the default for the supervisor, workers and reviewer
 There's also a free brindle desktop app for macOS and Linux (on Windows, use the CLI inside WSL2). It's a download from the brindle website and runs on the same engine; the CLI keeps working alongside it. `brindle app` opens the app, or prints the download link if it isn't installed. `brindle daemon` runs the local API the app talks to: over a Unix socket by default, or on `--tcp` at 127.0.0.1 for WSL. Over `--tcp` the daemon can't check whether a caller is an agent, so its token is the only gate: keep TCP for the WSL client.
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.5.6`). A session started before an upgrade keeps
+session shows it too (`brindle 0.5.7`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
