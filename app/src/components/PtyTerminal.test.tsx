@@ -43,6 +43,26 @@ function mount(paste?: () => Promise<string>, write: (text: string) => Promise<v
 
 const parsed = (term: import("@xterm/xterm").Terminal) => act(() => new Promise<void>((r) => term.write("", r)));
 
+it("sends Caps Lock letters on keydown exactly once without invoking clipboard shortcuts", () => {
+  const { written, copied, term } = mount();
+  const textarea = term().textarea!;
+  for (const key of "ACV") {
+    const press = (type: string) => {
+      const e = new KeyboardEvent(type, { key, keyCode: key.charCodeAt(0), charCode: type === "keypress" ? key.charCodeAt(0) : 0, bubbles: true, cancelable: true });
+      Object.defineProperty(e, "getModifierState", { value: (name: string) => name === "CapsLock" });
+      act(() => void textarea.dispatchEvent(e));
+      return e;
+    };
+    expect(press("keydown").defaultPrevented).toBe(true);
+    expect(written.at(-1)).toBe(key);
+    // A webview that also emits keypress must not send the same letter twice.
+    press("keypress");
+    press("keyup");
+  }
+  expect(written).toEqual(["A", "C", "V"]);
+  expect(copied).toEqual([]);
+});
+
 it("draws the client's bytes as they come and sends what xterm.js says, as is", async () => {
   const { written, opened, term } = mount();
   expect(opened.at).toEqual({ server: "brindle", target: "s:@1" });
