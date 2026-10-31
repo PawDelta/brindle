@@ -469,19 +469,34 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     if ends == "forced in flight":   # a competing force while the first is really starting is refused
         asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b"))
         [b] = [x for x in db.list_tasks(str(repo), state="pending") if x.id != t.id]
-        real_start, refused = tasks.start_queued, []
+        from dataclasses import replace
 
-        def competing(db_, task):   # another process's start_now, mid-start of the first
+        from brindle.db import DB
+
+        other = DB()   # a second process: its own connection to the same database
+        stale = db.get_task(t.id)   # what its sweep and helper read before the claim
+        real_start, seen, helpers = tasks.start_queued, {}, []
+        monkeypatch.setattr(tasks, "_wait_in_background", helpers.append)
+
+        def competing(db_, task):   # at the claim boundary: the first is claimed, not yet launched
             try:
-                tasks.start_now(db_, boss, b.id)
+                tasks.start_now(other, boss, b.id)
             except ValueError:
-                refused.append(db_.get_task(b.id).state)
+                seen["refused"] = other.get_task(b.id).state
+            seen["swept"] = tasks._start_if_ready(other, stale, "room on the machine", check_room=False)
+            tasks.wait_for_room(other, replace(stale, waiting_since=None), "busy again")   # stale sweep
+            other.set_task_waiting(t.id, "busy again", time.time())                       # stale helper
+            seen["in_flight"] = other.get_task(t.id)
             return real_start(db_, task)
 
         monkeypatch.setattr(tasks, "start_queued", competing)
         tasks.start_now(db, boss, t.id)
-        assert refused == ["pending"] and db.get_task(t.id).state == "started"
-        assert db.get_task(b.id).state == "pending" and len(db.list_agents()) == 2
+        mid = seen["in_flight"]
+        assert seen["refused"] == "pending" and not seen["swept"] and not helpers
+        assert mid.state == "starting" and mid.forced == 1 and mid.waiting != "busy again"
+        assert db.get_task(t.id).state == "started" and db.get_task(t.id).forced == 1
+        assert db.get_task(b.id).state == "pending" and len(db.list_agents()) == 2   # one launch
+        assert spawn.stats()["forced"] == 1
         return
     if ends == "start now":
         from brindle import gates
@@ -489,7 +504,7 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
         assert tasks.load_counts(db) == (0, 0)          # the processing supervisor is no worker
         forced = spawn.stats()["forced"]
         tasks.start_now(db, boss, t.id)
-        assert db.get_task(t.id).state == "started" and db.get_task(t.id).waiting == tasks.FORCED
+        assert db.get_task(t.id).state == "started" and db.get_task(t.id).forced == 1
         assert spawn.stats()["forced"] == forced + 1
         worker = db.get_agent(db.get_task(t.id).agent_id)
         wws = db.get_workspace(worker.workspace_id)

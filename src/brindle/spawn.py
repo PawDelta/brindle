@@ -263,12 +263,11 @@ def forced_starts() -> int:
     """How many workers a supervisor started despite the load (durable: it is
     counted from their tasks, so any process sees every process's)."""
     try:
-        from brindle import tasks
         from brindle.db import DB
 
         db = DB()
         try:
-            return db.count_tasks_waiting_as(tasks.FORCED)
+            return db.count_forced_tasks()
         finally:
             db.conn.close()
     except Exception:  # noqa: BLE001 - a health number, never a reason to fail

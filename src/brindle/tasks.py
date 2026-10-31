@@ -625,7 +625,7 @@ def enqueue(
 ROOM_POLL = 5.0   # seconds between the waiting helper's looks at the machine
 
 
-FORCED = "started despite load by supervisor"   # a forced start's `waiting`, on its task for good
+FORCED = "started despite load by supervisor"   # what a forced start's message says
 
 
 def room_wait(repo_root: str | None = None) -> str | None:
@@ -659,7 +659,7 @@ def forced_start(db: DB, ws: Workspace) -> bool:
     branch's check runs then run at background priority)."""
     worker = agents.workspace_worker(db, ws)
     return worker is not None and any(
-        t.agent_id == worker.id and t.waiting == FORCED for t in db.list_tasks(ws.repo_root, state="started"))
+        t.agent_id == worker.id and t.forced for t in db.list_tasks(ws.repo_root, state="started"))
 
 
 def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
@@ -689,7 +689,7 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
         raise ValueError(str(e)) from e
     if unmet:
         raise ValueError(f"Task {task_id} still waits on {', '.join(unmet)}.")
-    if not db.claim_forced_task(t.id, FORCED):   # the single forced-start slot, taken with the task
+    if not db.claim_forced_task(t.id):   # the single forced-start slot, taken with the task
         now = db.get_task(t.id)
         if now is not None and now.state == "pending":
             raise ValueError("Another worker was just started despite the load and is still starting; "
@@ -698,7 +698,7 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
     try:
         worker = start_queued(db, t)
     except agents.AgentError as e:
-        db.update_task(t.id, state="pending", waiting=t.waiting)   # frees the slot
+        db.release_forced_task(t.id)   # frees the slot
         raise ValueError(f"It could not start: {e}") from e
     text = f"Started {worker.id} for task {t.id} ({FORCED})."
     if t.caller_id and (caller is None or caller.id != t.caller_id):
@@ -723,8 +723,8 @@ def wait_for_room(db: DB, t: Task, why: str) -> None:
     the reason list_tasks shows; the first time, start the helper that
     starts it then."""
     first = t.waiting_since is None
-    db.update_task(t.id, waiting=why, waiting_since=t.waiting_since or time.time())
-    if first:
+    # Only while it is still pending: a task claimed meanwhile (started, forced) is left as it is.
+    if db.set_task_waiting(t.id, why, time.time()) and first:
         _wait_in_background(t.id)
 
 
@@ -750,7 +750,7 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
             # Unless a dependency added since holds it: merging that starts it.
             return _start_if_ready(db, t, "room on the machine", check_room=False)
         if why != t.waiting:
-            db.update_task(t.id, waiting=why)   # list_tasks shows the machine as it is now
+            db.set_task_waiting(t.id, why, time.time())   # list_tasks shows the machine as it is now
         pause.wait(poll)
 
 
