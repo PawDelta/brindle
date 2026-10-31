@@ -68,6 +68,11 @@ class Guard:
         if port:
             self._origins |= {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
 
+    @property
+    def state(self):
+        """The wrapped app's state (heavy_read_lane, poller), as if unwrapped."""
+        return self.app.state
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
