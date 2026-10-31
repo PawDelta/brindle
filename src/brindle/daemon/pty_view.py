@@ -34,6 +34,7 @@ import logging
 import os
 import pty
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -44,6 +45,7 @@ from pathlib import Path
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from brindle import tmux
+from brindle.daemon import peer
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +92,7 @@ CROP_SECONDS = 1.0              # the crop is looked at after each redraw, and t
 LOOK_GAP = 0.05                 # and no sooner than this after the last look
 RELEASE_GAP = 0.015             # a mouse release waits this long behind the input before it
 CLOSE_SECONDS = 5.0             # the client's time to exit once its session has gone
+LOCAL_PEERCRED, XUCRED_SIZE = 1, 76     # macOS <sys/un.h>, <sys/ucred.h>: the peer's struct xucred
 
 _views = itertools.count(1)
 
@@ -234,25 +237,104 @@ def admit(server: str | None) -> list[str]:
     return args
 
 
-def _tmux(server: list[str], *args: str, input: str | None = None) -> subprocess.CompletedProcess:
-    """A tmux command on ``server``. ``-u``: UTF-8 whatever the locale."""
+def _tmux(server: list[str], *args: str, input: str | None = None,
+          binary: str | None = None) -> subprocess.CompletedProcess:
+    """A tmux command on ``server``, run by ``binary`` (the engine's tmux by
+    default; a view's own, client_for). ``-u``: UTF-8 whatever the locale."""
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
     io = {"input": input} if input is not None else {"stdin": subprocess.DEVNULL}
     try:
-        return subprocess.run([tmux._bin(), "-u", *server, *args], capture_output=True, text=True,
-                              env=env, timeout=tmux.timeout(), **io)
+        return subprocess.run([binary or tmux._bin(), "-u", *server, *args], capture_output=True,
+                              text=True, env=env, timeout=tmux.timeout(), **io)
     except (OSError, subprocess.TimeoutExpired) as e:
         raise ViewError(f"couldn't run tmux: {e}") from None
 
 
-def _clear_stale(server: list[str]) -> None:
+def client_version(binary: str) -> str:
+    """What the tmux ``binary`` says its version is (``tmux 3.8``)."""
+    return _tmux([], "-V", binary=binary).stdout.strip()
+
+
+def _peer_of(socket_path: Path) -> tuple[int, int] | None:
+    """Who listens on the Unix socket at ``socket_path``, as the kernel says
+    (not as the server answers): its uid and pid."""
+    try:
+        with socket.socket(socket.AF_UNIX) as sock:
+            sock.connect(str(socket_path))
+            pid = peer.peer_pid(sock)
+            if sys.platform == "darwin":
+                # struct xucred: cr_version, then cr_uid.
+                uid = struct.unpack_from("I", sock.getsockopt(peer.SOL_LOCAL, LOCAL_PEERCRED, XUCRED_SIZE), 4)[0]
+            else:
+                cred = sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i"))
+                uid = struct.unpack("3i", cred)[1]
+    except (OSError, AttributeError, struct.error):
+        return None
+    return None if pid is None else (uid, pid)
+
+
+def _exe_of(pid: int) -> Path | None:
+    """The executable process ``pid`` runs."""
+    if sys.platform == "darwin":
+        import ctypes
+
+        buf = ctypes.create_string_buffer(4096)
+        try:
+            n = ctypes.CDLL("/usr/lib/libproc.dylib").proc_pidpath(pid, buf, len(buf))
+        except OSError:
+            return None
+        return Path(os.fsdecode(buf.raw[:n])) if n > 0 else None
+    try:
+        return Path(os.readlink(f"/proc/{pid}/exe"))
+    except OSError:
+        return None
+
+
+def _trusted_exe(exe: Path) -> bool:
+    """Whether ``exe`` is safe to run as this user: it and its folder owned
+    by root or this user, and writable by no one else."""
+    def safe(p: Path) -> bool:
+        try:
+            st = p.stat()
+        except OSError:
+            return False
+        return st.st_uid in (0, os.getuid()) and not st.st_mode & 0o022
+
+    try:
+        exe = exe.resolve(strict=True)
+    except OSError:
+        return False
+    return safe(exe) and safe(exe.parent)
+
+
+def client_for(binary: str, ours: str, socket_path: Path, theirs: str) -> str:
+    """The tmux the view's client runs. A client attaches only to a server
+    of its own version, so ``binary`` (``ours``: its -V) when the server runs
+    the same (``theirs``), else the executable of the process listening on
+    its socket: only one of this user's, that no one else can write to, and
+    that says it is that version. Nothing the server answers picks it
+    (pty_view.rs's client_for)."""
+    if ours == theirs:
+        return binary
+    found = _peer_of(socket_path)
+    exe = _exe_of(found[1]) if found is not None and found[0] == os.getuid() else None
+    try:
+        if exe is not None and _trusted_exe(exe) and client_version(str(exe)) == theirs:
+            return str(exe)
+    except ViewError:
+        pass
+    raise ViewError(f"The agents' tmux server is {theirs} and the engine's is {ours}: a tmux client "
+                    "only attaches to a server of its own version, and the server's own tmux couldn't be found.")
+
+
+def _clear_stale(server: list[str], binary: str) -> None:
     """View sessions a daemon that is gone left on the server (it died before
     its client attached): killed. Another running process's stay."""
-    out = _tmux(server, "list-sessions", "-F", "#{session_name}")
+    out = _tmux(server, "list-sessions", "-F", "#{session_name}", binary=binary)
     for session in out.stdout.splitlines():
         pid = view_owner(session)
         if pid is not None and pid != os.getpid() and not _alive(pid):
-            _tmux(server, "kill-session", "-t", f"={session}")
+            _tmux(server, "kill-session", "-t", f"={session}", binary=binary)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -306,16 +388,16 @@ def crop_of(panes: str, visible: int, client: tuple[int, int] | None) -> Crop:
     return Crop()
 
 
-def crop_now(server: list[str], view: str, visible: int, client: int | None) -> Crop | None:
+def crop_now(server: list[str], view: str, visible: int, client: int | None, binary: str) -> Crop | None:
     """The crop of the view session's window as it is now, if tmux can say.
     ``client``: the pid of the view's client, once it is attached."""
     try:
-        out = _tmux(server, "list-panes", "-t", f"={view}:", "-F", LAYOUT_FORMAT)
+        out = _tmux(server, "list-panes", "-t", f"={view}:", "-F", LAYOUT_FORMAT, binary=binary)
         if out.returncode:
             return None
         on = None
         if client is not None:
-            listed = _tmux(server, "list-clients", "-t", f"={view}", "-F", CLIENT_FORMAT)
+            listed = _tmux(server, "list-clients", "-t", f"={view}", "-F", CLIENT_FORMAT, binary=binary)
             for line in listed.stdout.splitlines():
                 pid, width, panned = (line.split("\t") + ["", "", ""])[:3]
                 if pid == str(client) and width.isdigit():
@@ -405,9 +487,9 @@ class PtyView:
     """One open view: a tmux client on a pty of its own. Its methods block
     (tmux runs as a process): the route calls them on threads."""
 
-    def __init__(self, server: list[str], view: str, proc: subprocess.Popen, master: int, tty: str,
-                 size: tuple[int, int], crop: Crop) -> None:
-        self.server, self.view, self.proc, self.tty = server, view, proc, tty
+    def __init__(self, binary: str, server: list[str], view: str, proc: subprocess.Popen, master: int,
+                 tty: str, size: tuple[int, int], crop: Crop) -> None:
+        self.binary, self.server, self.view, self.proc, self.tty = binary, server, view, proc, tty
         self.size, self.crop = size, crop
         self._master = master
         self._lock = threading.Lock()       # the master fd, its size, and closing
@@ -422,44 +504,59 @@ class PtyView:
         args = admit(server)
         if not valid_target(target):
             raise ViewError(f"not a tmux target: {target}")
-        ours = _tmux([], "-V").stdout.strip()
+        engine = tmux._bin()
+        ours = client_version(engine)
         check_version(ours, "The engine's tmux")
-        running = _tmux(args, "display-message", "-p", "#{version}")
+        running = _tmux(args, "display-message", "-p", "#{version}", binary=engine)
         if running.returncode:
             raise ViewError(f"the agent's tmux server isn't there: {running.stderr.strip()}")
         theirs = f"tmux {running.stdout.strip()}"
         check_version(theirs, "The agents' tmux server")
-        if theirs != ours:
-            # A client attaches only to a server of its own version.
-            raise ViewError(f"The agents' tmux server is {theirs} and the engine's is {ours}: "
-                            "a tmux client only attaches to a server of its own version.")
-        _clear_stale(args)
+        # Every tmux command of the view from here on is the client's tmux's.
+        binary = client_for(engine, ours, _socket(args), theirs)
+        _clear_stale(args, binary)
         cols, rows = _clamp(cols), _clamp(rows)
         view = f"{VIEW_PREFIX}{os.getpid()}-{next(_views)}"
-        made = _tmux(args, *prepare_args(view, target, cols, rows), input=view_bindings(parse_version(theirs)))
+        try:
+            return cls._attach(binary, args, parse_version(theirs), view, target, cols, rows)
+        except BaseException:
+            # Whatever failed, after the session may have been made: it goes (it
+            # has no destroy-unattached yet), and the first error is the one raised.
+            try:
+                _tmux(args, "kill-session", "-t", f"={view}", binary=binary)
+            except ViewError:
+                log.debug("brindle: couldn't kill %s", view, exc_info=True)
+            raise
+
+    @classmethod
+    def _attach(cls, binary: str, args: list[str], version: tuple[int, int], view: str, target: str,
+                cols: int, rows: int) -> PtyView:
+        """The view session made and a client attached to it (open's second half)."""
+        made = _tmux(args, *prepare_args(view, target, cols, rows), input=view_bindings(version), binary=binary)
         if made.returncode:
-            _tmux(args, "kill-session", "-t", f"={view}")
             raise ViewError(f"tmux couldn't make the view: {made.stderr.strip()}")
-        crop = crop_now(args, view, cols, None) or Crop()
+        crop = crop_now(args, view, cols, None, binary) or Crop()
         try:
             master, slave = pty.openpty()
         except OSError as e:
-            _tmux(args, "kill-session", "-t", f"={view}")
             raise ViewError(f"couldn't attach: {e}") from None
+        proc = None
         try:
             _set_size(slave, (cols, rows), crop)
             env = {k: v for k, v in os.environ.items() if k != "TMUX"} | {"TERM": "xterm-256color"}
             # No controlling terminal: resize() tells the client its size changed itself.
-            proc = subprocess.Popen([tmux._bin(), *args, *attach_args(view)], stdin=slave, stdout=slave,
+            proc = subprocess.Popen([binary, *args, *attach_args(view)], stdin=slave, stdout=slave,
                                     stderr=slave, env=env, start_new_session=True)
             tty = os.ttyname(slave)
         except OSError as e:
             os.close(master)
-            _tmux(args, "kill-session", "-t", f"={view}")
+            if proc is not None:
+                proc.kill()
+                proc.wait()
             raise ViewError(f"couldn't attach: {e}") from None
         finally:
             os.close(slave)     # the client's alone: its exit ends the master's reads
-        return cls(args, view, proc, master, tty, (cols, rows), crop)
+        return cls(binary, args, view, proc, master, tty, (cols, rows), crop)
 
     def start_reading(self, post) -> None:
         """The client's bytes to ``post`` as the pty gives them, then its exit code."""
@@ -493,7 +590,7 @@ class PtyView:
 
     def look(self) -> Crop | None:
         """The window's crop looked at again: the new one when it has changed, else None."""
-        crop = crop_now(self.server, self.view, self.size[0], self.proc.pid)
+        crop = crop_now(self.server, self.view, self.size[0], self.proc.pid, self.binary)
         if crop is None or crop == self.crop:
             return None
         self.crop = crop
@@ -516,7 +613,7 @@ class PtyView:
         had they typed in it. Switching the view's own client to the session
         it is already on makes it the window's latest client, and sends the
         pane nothing (pty_view.rs's take_window)."""
-        out = _tmux(self.server, "switch-client", "-E", "-c", self.tty, "-t", f"={self.view}")
+        out = _tmux(self.server, "switch-client", "-E", "-c", self.tty, "-t", f"={self.view}", binary=self.binary)
         if out.returncode:
             raise ViewError(f"tmux couldn't give the view the window: {out.stderr.strip()}")
 
@@ -524,7 +621,7 @@ class PtyView:
         """The view session goes, which detaches its client; the agent's window
         stays in the agent's session. Then the pty."""
         try:
-            _tmux(self.server, "kill-session", "-t", f"={self.view}")
+            _tmux(self.server, "kill-session", "-t", f"={self.view}", binary=self.binary)
         except ViewError:
             log.debug("brindle: couldn't kill %s", self.view, exc_info=True)
         try:

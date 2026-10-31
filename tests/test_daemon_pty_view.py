@@ -1,6 +1,7 @@
 import os
 import pty
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -104,6 +105,41 @@ def _until(ws, done) -> bytes:
         assert frame["type"] == "websocket.send" and "exit" not in (frame.get("text") or ""), frame
         seen += frame.get("bytes") or b""
     return seen
+
+
+@pytest.mark.parametrize("matches", [True, False])
+def test_an_older_servers_client_is_the_executable_listening_on_its_socket(tmp_path, monkeypatch, matches):
+    # The "server" is this test's own socket, so the kernel names this Python as its
+    # peer: its executable is picked only if it says it is the server's version.
+    monkeypatch.chdir(tmp_path)     # a short socket path (macOS caps them at 104 bytes)
+    listening = socket.socket(socket.AF_UNIX)
+    listening.bind("server")
+    listening.listen()
+    theirs = pv.client_version(sys.executable) if matches else "tmux 9.9"
+    with listening:
+        if matches:
+            picked = pv.client_for("tmux", "tmux 3.8", pv.Path("server"), theirs)
+            assert pv.Path(picked).resolve() == pv.Path(sys.executable).resolve()
+        else:
+            with pytest.raises(pv.ViewError):
+                pv.client_for("tmux", "tmux 3.8", pv.Path("server"), theirs)
+
+
+@pytest.mark.skipif(not shutil.which("tmux"), reason="needs tmux")
+def test_a_view_that_fails_once_its_session_is_made_leaves_no_session(db, monkeypatch):
+    tmux._tmux("new-session", "-d", "-s", "agent", "cat")
+    real = pv._tmux
+
+    def prepared_then_hung(server, *args, **kw):
+        out = real(server, *args, **kw)
+        if "new-session" in args:   # the view session made, then tmux took too long to answer
+            raise pv.ViewError("couldn't run tmux: timed out")
+        return out
+
+    monkeypatch.setattr(pv, "_tmux", prepared_then_hung)
+    with pytest.raises(pv.ViewError):
+        pv.PtyView.open(tmux.current_server(), "=agent:", 80, 24)
+    assert _views() == []
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="needs tmux")
