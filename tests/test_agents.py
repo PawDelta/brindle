@@ -513,16 +513,17 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
         # A check run on its branch still waits for room under the same load, then runs in the background.
         ran, seen, wrapped = Path(wws.path) / "ran.txt", [], []
 
-        def cancel():   # polled on every look at the machine while the run waits
-            seen.append(ran.exists())
-            load[0] = 2.0   # admitted after the first look
+        def cancel():   # polled while the run waits for a slot or room, and again while it runs
+            if gates.marked("checks-room", wws.id):
+                seen.append(ran.exists())
+                load[0] = 2.0   # admitted after a look at the full machine
             return False
 
         real_start = spawn.start   # the admission gate is off here, as in a plain MCP process
         monkeypatch.setattr(spawn, "start", lambda argv, **kw: wrapped.append(argv) or real_start(argv, **kw))
         monkeypatch.setattr(gates, "SLOT_POLL", 0)
         ok, _ = gates.run_checked(db, wws, "touch ran.txt", {}, 60, cancel=cancel, full=True)
-        assert ok and seen == [False] and ran.exists()
+        assert ok and seen and not any(seen) and ran.exists()
         [argv] = wrapped
         assert Path(argv[0]).name == ("taskpolicy" if sys.platform == "darwin" else "nice")
         assert argv[-3:] == ["/bin/sh", "-c", "touch ran.txt"]
