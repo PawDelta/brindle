@@ -13,6 +13,9 @@ import asyncio
 import dataclasses
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Lock
+from weakref import WeakValueDictionary
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
@@ -27,6 +30,29 @@ PAGE = 500
 connected = 0       # open /v1/events clients: with none, nobody is there to answer a held request
 
 
+class _SessionChanges:
+    def __init__(self) -> None:
+        self.lock = Lock()
+        self.signatures: dict[str, tuple] = {}
+
+
+_changes_lock = Lock()
+_changes: WeakValueDictionary[object, _SessionChanges] = WeakValueDictionary()
+
+
+def _session_changes(db) -> _SessionChanges:
+    # Connections to one on-disk database share observations; independent
+    # in-memory databases must keep their identities. State lives only as
+    # long as at least one feed holds it.
+    key = db.conn if db.path == ":memory:" else Path(db.path).resolve()
+    with _changes_lock:
+        shared = _changes.get(key)
+        if shared is None:
+            shared = _SessionChanges()
+            _changes[key] = shared
+        return shared
+
+
 class Feed:
     """What one client is told, as plain dicts. Every method is synchronous and
     blocking (SQLite, tmux, git): the route runs them on one worker thread."""
@@ -39,6 +65,7 @@ class Feed:
         self._git_status = git_status
         self._alive: dict[str, bool] | None = None
         self._git: dict[str, dict] = {}
+        self._changes = _session_changes(db)
         self._bar: object = False        # nothing sent yet (None is a real "no bar")
         self._due = {"live": 0.0, "git": 0.0}
 
@@ -101,10 +128,20 @@ class Feed:
         return ws.repo_root if ws else None
 
     def _git_sweep(self) -> list[dict]:
+        # Serialize observation as well as publication: a feed must not compare
+        # an older read after another feed has published a newer signature.
+        with self._changes.lock:
+            return self._sweep_git()
+
+    def _sweep_git(self) -> list[dict]:
         from brindle import status_cache
 
         status = self._git_status or status_cache.cached_status
         out = []
+        roots = {}
+        for agent in self.db.list_agents():
+            if agent.parent_id is None:
+                roots.setdefault(agent.workspace_id, []).append(agent.id)
         for ws in self.db.find_workspaces():
             if self.repo_root is not None and ws.repo_root != self.repo_root:
                 continue
@@ -115,6 +152,25 @@ class Feed:
             if self._git.get(ws.id) != st:
                 self._git[ws.id] = st
                 out.append({"type": "git", "workspace_id": ws.id, "status": st})
+            if ws.id not in roots:
+                continue
+            try:
+                index = status_cache._worktree_gitdir(Path(ws.path)) / "index"
+                try:
+                    info = index.stat()
+                    index_state = (info.st_mtime_ns, info.st_size, info.st_ino)
+                except FileNotFoundError:
+                    index_state = None
+                # Counts miss an amend, reset, or staging a different patch in
+                # an already dirty file. Read HEAD through linked/packed refs.
+                signature = (status_cache.read_head(ws.path), index_state, st)
+            except (OSError, ValueError, IndexError):
+                continue
+            for root in roots[ws.id]:
+                before = self._changes.signatures.get(root)
+                if before is not None and before != signature:
+                    bus.publish_ws(self.db, "session.changed", ws, root_id=root)
+                self._changes.signatures[root] = signature
         return out
 
     def _status(self) -> list[dict]:

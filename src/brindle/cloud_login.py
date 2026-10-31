@@ -21,6 +21,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -29,7 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
-from brindle import model_access
+from brindle import model_access, spawn
 
 CLI_TIMEOUT = 15.0
 # A sign-in tab this old is dead: AWS and Azure device codes and Google's
@@ -326,26 +327,13 @@ def _aws(env: Mapping[str, str], home: Path, now: float) -> LoginStatus:
 
 def run_bounded(argv: list[str], *, capture_output: bool = True, text: bool = True,
                 timeout: float = CLI_TIMEOUT, env=None) -> subprocess.CompletedProcess:
-    """``subprocess.run`` for a cloud CLI that leaves nothing behind: the CLI
-    gets no terminal and its own process group, and a timeout ends the whole
-    group (gcloud is a wrapper around python, which may hold a local auth
-    server and its port), not just the wrapper."""
-    with subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, text=text, env=env,
-                          start_new_session=True) as proc:
-        try:
-            out, err = proc.communicate(timeout=timeout)
-        except BaseException:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except OSError:
-                proc.kill()
-            raise      # Popen's exit reaps the wrapper
-        try:    # a server the CLI left running (trade-off: the group id could in theory
-            os.killpg(proc.pid, signal.SIGKILL)    # be reused once the group is empty)
-        except OSError:
-            pass
-        return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+    """A cloud CLI probe that leaves nothing behind, as a brindle.spawn read:
+    the CLI gets no terminal and its own process group; ``timeout`` (raising
+    TimeoutExpired), the request's deadline or its stop (raising spawn.Busy)
+    ends the whole group (gcloud is a wrapper around python, which may hold a
+    local auth server and its port), not just the wrapper, and so does the
+    wrapper's exit. Past the deadline it never starts."""
+    return spawn.read(argv, env=env, text=text, timeout=timeout, reap=True)
 
 
 def _full_env(env: Mapping[str, str] | None) -> dict[str, str] | None:
@@ -418,9 +406,40 @@ def tokeninfo_expiry(token: str, timeout: float = CLI_TIMEOUT) -> float | None:
         return None
 
 
+_GOOGLE_TOKEN_MARGIN = 300.0
+# Expiry (epoch seconds) of the access token gcloud last minted, by the env that
+# selects the account. Only the expiry is kept, never the token.
+_google_expiry_cache: dict[tuple, float] = {}
+_google_locks: dict[tuple, threading.Lock] = {}
+_google_locks_guard = threading.Lock()
+
+
+def _google_cache_key(full: Mapping[str, str]) -> tuple:
+    adc = Path(full.get("GOOGLE_APPLICATION_CREDENTIALS") or _gcloud_adc_file(full))
+    try:
+        stamp = adc.stat().st_mtime_ns   # a new sign-in rewrites the file
+    except OSError:
+        stamp = None
+    names = ("CLOUDSDK_CONFIG", "GOOGLE_APPLICATION_CREDENTIALS", "CLOUDSDK_CORE_ACCOUNT",
+             "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT", "CLOUDSDK_ACTIVE_CONFIG_NAME", "HOME")
+    return (*(full.get(n) for n in names), stamp)
+
+
 def _google(run, env, now: float, expiry) -> LoginStatus:
     full = {**os.environ, **(env or {})}
     refresh = "gcloud auth application-default login" if _google_browser_login(full) else ""
+    key = _google_cache_key(full)
+    with _google_locks_guard:
+        lock = _google_locks.setdefault(key, threading.Lock())
+    with lock:   # one gcloud call per identity; the others wait, then reuse its result
+        cached = _google_expiry_cache.get(key)
+        if cached is not None and cached - now > _GOOGLE_TOKEN_MARGIN:
+            return _from_expiry(cached, refresh, now, "")
+        _google_expiry_cache.pop(key, None)
+        return _google_mint(run, env, now, expiry, key, refresh)
+
+
+def _google_mint(run, env, now: float, expiry, key: tuple, refresh: str) -> LoginStatus:
     try:
         proc = run(["gcloud", "auth", "application-default", "print-access-token"],
                    capture_output=True, text=True, timeout=CLI_TIMEOUT, env=_full_env(env))
@@ -433,6 +452,7 @@ def _google(run, env, now: float, expiry) -> LoginStatus:
         left = expiry(token)
         if left is None:
             return LoginStatus(True, None, refresh, "logged in; token expiry unknown")
+        _google_expiry_cache[key] = now + left
         return _from_expiry(now + left, refresh, now, "")
     if model_access.expired_login(f"{proc.stdout or ''}\n{proc.stderr or ''}") is not None:
         return LoginStatus(False, None, refresh, "login expired (invalid_grant)", expired=True)
@@ -740,7 +760,7 @@ def sign_in(provider: str | None = None, *, env: Mapping[str, str] | None = None
         try:
             # The child inherits the locked descriptor: the lock is held until
             # the sign-in exits, however long the person takes.
-            proc = (popen or subprocess.Popen)(
+            proc = (popen or spawn.start)(
                 shlex.split(s.refresh_cmd), env=child_env, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True, pass_fds=(fd,))

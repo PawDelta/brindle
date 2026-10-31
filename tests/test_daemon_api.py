@@ -1,4 +1,5 @@
 import asyncio
+import dataclasses
 import json
 import os
 import resource
@@ -8,21 +9,23 @@ import sqlite3
 import stat
 import tempfile
 import threading
+import time
 from http.client import HTTPConnection
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from conftest import run_scenario, sh
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from wsproto import ConnectionType, WSConnection
 from wsproto.events import AcceptConnection, CloseConnection, Request, TextMessage
 
-from brindle import cost, doctor, identity_lock, keystore, knowledge, procs, tmux, workspaces
+from brindle import cost, doctor, git, identity_lock, keystore, knowledge, procs, tmux, workspaces
 from brindle import kb as kb_mod
-from brindle.daemon import events, lifecycle, peer, terminal
+from brindle.daemon import events, lifecycle, peer, session_review, terminal
 from brindle.daemon.app import build_app
 from brindle.daemon.auth import WS_UNAUTHORIZED, Guard
-from brindle.db import Agent, Workspace
+from brindle.db import DB, Agent, Workspace
 from brindle.pro import license
 
 TOKEN = "t" * 43
@@ -31,6 +34,10 @@ TOKEN = "t" * 43
 def _get(path: str, headers: dict[str, str], query: str = "", peer_pid: int | None = None) -> tuple[int, dict]:
     """One HTTP request straight through the ASGI app (``peer_pid``: as if
     that process called on the Unix socket)."""
+    return asyncio.run(_read_request(build_app(TOKEN, port=8123), path, headers, query, peer_pid))
+
+
+async def _read_request(app, path, headers, query="", peer_pid=None):
     sent: list[dict] = []
 
     async def receive():
@@ -45,7 +52,7 @@ def _get(path: str, headers: dict[str, str], query: str = "", peer_pid: int | No
              "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
     if peer_pid is not None:
         scope[peer.PEER_PID] = peer_pid
-    asyncio.run(build_app(TOKEN, port=8123)(scope, receive, send))
+    await app(scope, receive, send)
     body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
     return sent[0]["status"], json.loads(body)
 
@@ -168,6 +175,127 @@ def test_tcp_daemon_needs_the_token_on_requests_and_as_the_ws_first_frame(tmp_pa
 
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+
+def _heavy_lane(db, monkeypatch):
+    import anyio.to_thread
+    from brindle.daemon import routes_read
+
+    async def exercise():
+        entered = asyncio.Queue()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def blocked(*args):
+            loop.call_soon_threadsafe(entered.put_nowait, None)
+            release.wait()
+            raise ValueError("blocked handler finished")
+
+        monkeypatch.setattr(routes_read.session_review, "session", blocked)
+        app = build_app(TOKEN, port=8123)
+        paths = [f"/v1/sessions/r1/{suffix}" for suffix in
+                 ("diff", "pr/readiness", "tree", "pr/draft")]
+        normal = anyio.to_thread.current_default_thread_limiter()
+        previous = normal.total_tokens
+        normal.total_tokens = 1
+        pending = [asyncio.create_task(_read_request(app, paths[0], AUTH)) for _ in range(4)]
+        try:
+            for _ in pending:
+                await asyncio.wait_for(entered.get(), 1)
+            assert (await asyncio.wait_for(_read_request(app, "/v1/meta", AUTH), 1))[0] == 200
+            assert (await asyncio.wait_for(_read_request(app, "/v1/repos", AUTH), 1))[0] == 200
+            for path in paths:
+                code, body = await asyncio.wait_for(_read_request(app, path, AUTH), 1)
+                assert code == 503 and body["error"]["code"] == "busy"
+        finally:
+            release.set()
+            responses = await asyncio.gather(*pending)
+            normal.total_tokens = previous
+        assert all(code == 400 for code, _ in responses)
+        for path in paths:
+            assert (await _read_request(app, path, AUTH))[0] == 400
+
+    asyncio.run(exercise())
+
+
+def _health_log_watch_warns_only_when_the_loop_itself_is_late(monkeypatch, stalled):
+    """On virtual time: a 2s maintenance sweep the watch awaits is not lag; a
+    wait that ends 3s late is, and its warning carries the lag."""
+    from brindle import debuglog
+    from brindle.daemon import lifecycle, session_review
+
+    monkeypatch.setattr(debuglog, "enabled", lambda: True)
+    now = [0.0]
+    waits = [0]
+    server = SimpleNamespace(should_exit=False)
+
+    async def elapse(seconds):
+        waits[0] += 1
+        now[0] += seconds
+        if stalled and waits[0] == 2:
+            now[0] += 3.0               # the loop ran nothing for 3 seconds past the wait
+        if waits[0] == 3:
+            server.should_exit = True
+
+    def slow_sweep(self):
+        now[0] += 2.0                   # maintenance the watch awaits: slow, loop free
+
+    monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", slow_sweep)
+    activity = lifecycle.Activity(build_app(TOKEN, port=8123))
+    asyncio.run(lifecycle._watch(server, activity, False, wait=elapse, clock=lambda: now[0]))
+
+    entries = [json.loads(line) for line in debuglog.log_path().read_text().splitlines()]
+    warnings = [e for e in entries if e["level"] == "warning"]
+    if stalled:
+        assert len(warnings) == 1
+        assert warnings[0]["source"] == "daemon.health"
+        assert warnings[0]["detail"]["lag_s"] == 3.0
+    else:
+        assert warnings == []
+
+
+def _health_log_counts_work_waiting_in_the_default_executor_and_heavy_lane():
+    from concurrent.futures import ThreadPoolExecutor
+
+    from brindle.daemon import health
+
+    async def _settle():
+        """Return once every task created so far has run its first step."""
+        done = asyncio.get_running_loop().create_future()
+        asyncio.get_running_loop().call_soon(done.set_result, None)
+        await done
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+        started, release = threading.Event(), threading.Event()
+
+        def blocked():
+            started.set()
+            release.wait()
+
+        jobs, waiting, lane = [], [], None
+        try:
+            jobs = [asyncio.create_task(asyncio.to_thread(blocked))]
+            jobs += [asyncio.create_task(asyncio.to_thread(lambda: None)) for _ in range(7)]
+            await _settle()             # every job reaches the pool; one is running
+            assert started.wait(5)
+            app = lifecycle.Activity(build_app(TOKEN, port=8123))
+            lane = app.state.heavy_read_lane
+            lane.workers.total_tokens = 0       # no worker slot: five reads queue behind it
+            waiting = [asyncio.create_task(lane.workers.acquire()) for _ in range(5)]
+            await _settle()
+            assert health._queues(app) == (7, 5)
+        finally:
+            # Always let the blocked pool job finish: asyncio.run joins the pool at exit.
+            release.set()
+            for task in waiting:
+                task.cancel()
+            await asyncio.gather(*waiting, *jobs, return_exceptions=True)
+            if lane is not None:
+                lane.workers.total_tokens = 4
+
+    asyncio.run(exercise())
 
 
 @pytest.fixture
@@ -439,6 +567,57 @@ def test_peer_pid_names_the_unix_socket_caller():
     a, b = socket.socketpair(socket.AF_UNIX)
     with a, b:
         assert peer.peer_pid(a) == os.getpid()
+
+
+def _caller_check_single_flight(monkeypatch, outcome):
+    from brindle.daemon import auth
+    release = threading.Event()
+    calls = []
+    def check(pid):
+        calls.append(threading.current_thread().name)
+        release.wait()
+        if outcome == "error":
+            raise RuntimeError("private process data")
+    monkeypatch.setattr(peer, "agent_caller", check)
+    bounded = hasattr(auth, "CALLER_CHECK_LIMIT")
+    if outcome == "limit":
+        monkeypatch.setattr(auth, "CALLER_CHECK_LIMIT", 0, raising=False)
+    async def exercise():
+        async def route(scope, receive, send):
+            await send({"type": "http.response.start", "status": 200})
+        async def request():
+            sent = []
+            async def send(message):
+                sent.append(message)
+            await guard(scope, None, send)
+            return sent[0]["status"]
+        guard = Guard(route, TOKEN)
+        guard._callers[123] = (-float("inf"), None)
+        scope = {"type": "http", "path": "/v1/meta", "headers": [
+            (b"authorization", f"Bearer {TOKEN}".encode())], peer.PEER_PID: 123}
+        requests = [asyncio.create_task(request()) for _ in range(24)]
+        dispatched = asyncio.get_running_loop().create_future()
+        asyncio.get_running_loop().call_soon(dispatched.set_result, None)
+        await dispatched
+        try:
+            if outcome != "limit" or not bounded:
+                release.set()
+            statuses = await asyncio.gather(*requests)
+            assert statuses == [200 if outcome == "allowed" else 403] * 24
+            assert await request() == statuses[0]
+            if outcome == "limit":
+                guard._callers[123] = (-float("inf"), None)
+                monkeypatch.setattr(auth, "CALLER_CHECK_LIMIT", auth.CALLER_TTL)
+                asyncio.get_running_loop().call_soon(release.set)
+                assert await request() == 403
+        finally:
+            release.set()
+            await asyncio.gather(*getattr(guard, "_caller_checks", {}).values(), return_exceptions=True)
+        if outcome == "limit":
+            assert await request() == 403
+    asyncio.run(exercise())
+    assert len(calls) == 1
+    assert calls[0].startswith("brindle-caller")
 
 
 def test_window_size_cleanup_unsets_manual_only_on_brindles_own_windows_once(db, monkeypatch):
@@ -801,3 +980,134 @@ def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, e
     code, body = _get("/v1/analysis-docs/results", AUTH, "repo=/r")
     assert code == 200 and (body["enough"], body["compared"], body["briefed"]) == (enough, briefed, briefed + 1)
     assert (body["with_brief"], body["without_brief"]) == ((1.0, 3.0) if enough else (None, None))
+
+
+def _diff_session(db, repo, tmp_path) -> tuple[Agent, Workspace]:
+    """A session ``lead`` on ``sess``: a merged worker that adds a.py and deletes a
+    line of the base's shared.py, then the supervisor's b.py and a line added
+    to the base's app.py. Nothing kept yet."""
+    (repo / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 21)))
+    sh("git add -A && git commit -qm shared", repo)
+    sess = tmp_path / "sess"
+    sh(f"git worktree add -q -b sess {sess} main", repo)
+    ws = workspaces.adopt_root(db, str(sess))
+    db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, time.time()))
+    sh("git switch -q -c feat-a", sess)
+    (sess / "a.py").write_text("a\n")
+    (sess / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 21) if n != 5))
+    sh("git add -A && git commit -qm work && git switch -q sess", sess)
+    git.merge_into(ws.repo_root, sess, "feat-a", squash=False)
+    (sess / "b.py").write_text("b\n")
+    (sess / "app.py").write_text("print('hi')\nprint('lead')\n")
+    sh("git add -A && git commit -qm lead", sess)
+    session_review._forget()
+    return db.get_agent("lead"), ws
+
+
+def _session_diff_reruns_git_only_for_what_changed(db, repo, tmp_path, monkeypatch):
+    root, ws = _diff_session(db, repo, tmp_path)
+    sess = Path(ws.path)
+    first = session_review.diff(db, root, ws)
+    ran, real_run, real_blame = [], git.run_env, session_review._blame
+    monkeypatch.setattr(git, "run_env", lambda args, *a, **kw: ran.append(args) or real_run(args, *a, **kw))
+
+    def older():    # git work on an older commit: a diff not naming HEAD, or a merge's commits
+        head = sh("git rev-parse HEAD", sess)
+        return [a for a in ran if ("diff" in a and head not in a) or "rev-list" in a]
+
+    assert session_review.diff(db, root, ws) == first and ran == []
+    # One new commit, touching a.py and shared.py: git runs for it and blames those two, not b.py or app.py.
+    (sess / "a.py").write_text("a\nmore\n")
+    (sess / "shared.py").write_text("".join(f"{n}\n" for n in range(1, 21) if n != 5) + "21\n")
+    sh("git commit -qam edit", sess)
+    got = session_review.diff(db, root, ws)
+    assert [a[-1] for a in ran if "blame" in a] == ["a.py", "shared.py"] and older() == []
+    session_review._forget()
+    assert session_review.diff(db, root, ws) == got
+    # A computation that fails keeps nothing: the next ask computes again.
+    (sess / "c.py").write_text("c\n")
+    sh("git add c.py && git commit -qm c", sess)
+
+    def broken(*a):
+        raise git.GitError("blame failed")
+    monkeypatch.setattr(session_review, "_blame", broken)
+    with pytest.raises(git.GitError):
+        session_review.diff(db, root, ws)
+    monkeypatch.setattr(session_review, "_blame", real_blame)
+    ran.clear()
+    got = session_review.diff(db, root, ws)
+    assert [a[-1] for a in ran if "blame" in a] == ["c.py"]
+    session_review._forget()
+    assert session_review.diff(db, root, ws) == got
+    # The first deletion of app.py's base line: followed through the older commits without diffing them again.
+    (sess / "app.py").write_text("print('lead')\n")
+    sh("git commit -qam unhi", sess)
+    ran.clear()
+    got = session_review.diff(db, root, ws)
+    assert older() == []
+    session_review._forget()
+    assert session_review.diff(db, root, ws) == got
+    # The same once the base file was renamed and then only added to: followed under its new name too.
+    sh("git mv shared.py common.py && git commit -qm rename", sess)
+    (sess / "common.py").write_text("0\n" + (sess / "common.py").read_text())
+    sh("git commit -qam add", sess)
+    session_review._forget()
+    session_review.diff(db, root, ws)
+    (sess / "common.py").write_text((sess / "common.py").read_text().replace("15\n", ""))
+    sh("git commit -qam unfifteen", sess)
+    ran.clear()
+    got = session_review.diff(db, root, ws)
+    assert older() == [] and any(f["old_path"] == "shared.py" for f in got["files"])
+    session_review._forget()
+    assert session_review.diff(db, root, ws) == got
+    # A base only git resolves (origin/main) moves with HEAD unchanged: computed again.
+    qualified = dataclasses.replace(ws, base_branch="origin/main")
+    assert session_review.diff(db, root, qualified)["files"]
+    sh("git update-ref refs/remotes/origin/main HEAD", sess)
+    assert session_review.diff(db, root, qualified)["files"] == []
+
+
+def _session_diff_concurrent_asks_share_one_computation(db, repo, tmp_path, monkeypatch):
+    root, ws = _diff_session(db, repo, tmp_path)
+    real, runs, joined, got = session_review._compute, [], [], []
+    wait_s = 30
+
+    def compute(*a):
+        runs.append(a)
+        with session_review._lock:      # every other ask has joined this one before it runs
+            joined.append(session_review._lock.wait_for(lambda: session_review._flights["lead"].joined == 9, wait_s))
+        return real(*a)
+
+    def ask():
+        own = DB()
+        try:
+            got.append(session_review.diff(own, own.get_agent("lead"), own.get_workspace(ws.id)))
+        finally:
+            own.conn.close()
+
+    monkeypatch.setattr(session_review, "_compute", compute)
+    threads = [threading.Thread(target=ask) for _ in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(runs) == 1 and joined == [True]
+    assert len(got) == 10 and all(g == got[0] for g in got) and got[0]["files"]
+
+
+@pytest.mark.parametrize("scenario, params", [
+    pytest.param(_heavy_lane, {}, id="heavy_lane"),
+    pytest.param(_health_log_watch_warns_only_when_the_loop_itself_is_late, {"stalled": True},
+                 id="health_log-late"),
+    pytest.param(_health_log_watch_warns_only_when_the_loop_itself_is_late, {"stalled": False},
+                 id="health_log-on-time"),
+    pytest.param(_health_log_counts_work_waiting_in_the_default_executor_and_heavy_lane, {},
+                 id="health_log-queues"),
+    pytest.param(_caller_check_single_flight, {"outcome": "allowed"}, id="caller_check-allowed"),
+    pytest.param(_caller_check_single_flight, {"outcome": "error"}, id="caller_check-error"),
+    pytest.param(_caller_check_single_flight, {"outcome": "limit"}, id="caller_check-limit"),
+    pytest.param(_session_diff_reruns_git_only_for_what_changed, {}, id="session_diff-reruns"),
+    pytest.param(_session_diff_concurrent_asks_share_one_computation, {}, id="session_diff-concurrent"),
+])
+def test_daemon_overload_lanes_health_caller_check_and_session_diff(request, scenario, params):
+    run_scenario(request, scenario, params)

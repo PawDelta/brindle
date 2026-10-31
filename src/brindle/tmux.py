@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Iterable
 
-from brindle import __version__
+from brindle import __version__, spawn
 
 
 class TmuxError(RuntimeError):
@@ -28,6 +28,12 @@ class TmuxTimeout(TmuxError):
     a caller that would otherwise judge agents by the answer (a cull, a
     pause, a session drop) must give up instead, which is why list_panes
     raises this rather than returning an empty snapshot."""
+
+
+class TmuxBusy(TmuxTimeout, spawn.Busy):
+    """A tmux read the machine had no room for, or that its request stopped
+    (see brindle.spawn). Like a timeout, the answer says nothing about any
+    pane or session, so a caller judging agents by it gives up the same way."""
 
 
 DEFAULT_TIMEOUT = 30.0
@@ -86,6 +92,34 @@ def _base() -> list[str]:
 # one brindle is using (see current_server).
 _THIS_SERVER: object = object()
 
+# Commands that only ask (and can't start a server): they run as brindle.spawn
+# reads, at background priority in the daemon and stopped at their request's
+# deadline. Everything else runs as it always has: a command that starts the
+# server must not hand it (and every agent pane) background priority.
+_READS = frozenset({"capture-pane", "has-session", "list-clients", "list-panes", "list-sessions",
+                    "list-windows", "show-environment", "show-options"})
+
+
+def _is_read(args: tuple[str, ...]) -> bool:
+    if not args or ";" in args:
+        return False
+    return args[0] in _READS or (args[0] == "display-message" and "-p" in args)
+
+
+def _start(base: list[str], args: tuple[str, ...], input: str | None = None) -> subprocess.CompletedProcess:
+    try:
+        if _is_read(args):
+            return spawn.read([*base, *args], input=input, timeout=timeout())
+        # A change: refused past the request's deadline, else the request runs to its end
+        # (brindle.spawn.begin_write). At tmux's normal priority, not through spawn.action.
+        spawn.begin_write()
+        return subprocess.run([*base, *args], capture_output=True, text=True, input=input,
+                              timeout=timeout())
+    except spawn.Busy as e:
+        raise TmuxBusy(f"tmux {args[0] if args else ''}: {e}") from None
+    except subprocess.TimeoutExpired:
+        raise _hung(base, args) from None
+
 
 def _tmux(*args: str, input: str | None = None, check: bool = True,
           server: object = _THIS_SERVER) -> subprocess.CompletedProcess:
@@ -94,11 +128,7 @@ def _tmux(*args: str, input: str | None = None, check: bool = True,
 
         raise TmuxError(f"tmux is not installed. Install: {tmux_install()}")
     base = _base() if server is _THIS_SERVER else _argv(server)  # type: ignore[arg-type]
-    try:
-        proc = subprocess.run([*base, *args], capture_output=True, text=True, input=input,
-                              timeout=timeout())
-    except subprocess.TimeoutExpired:
-        raise _hung(base, args) from None
+    proc = _start(base, args, input)
     if check and proc.returncode != 0:
         raise TmuxError(f"tmux {' '.join(args)}: {proc.stderr.strip()}")
     return proc
@@ -710,6 +740,7 @@ def move_pane(pane: str, target: str, columns: int = 30, position: str = "left")
     has exited), that window closes behind it: the pane itself moves and
     keeps running, and a window holding nothing but the sidebar is no use to
     anyone. Refusing instead would strand the sidebar there, out of sight."""
+    spawn.begin_write()     # the move and its hooks run to their end, client or not
     old_window = pane_window(pane)
     geometry, axis = _sidebar_geometry(position, columns)
     _tmux("join-pane", "-d", *geometry, "-s", pane, "-t", target, check=False)
@@ -915,11 +946,7 @@ def other_servers(prefix: str = "brindle-") -> list[str]:
 
 
 def _on(server: str, *args: str) -> subprocess.CompletedProcess:
-    base = _argv(server)
-    try:
-        return subprocess.run([*base, *args], capture_output=True, text=True, timeout=timeout())
-    except subprocess.TimeoutExpired:
-        raise _hung(base, args) from None
+    return _start(_argv(server), args)
 
 
 def server_homes(server: str) -> list[str | None] | None:

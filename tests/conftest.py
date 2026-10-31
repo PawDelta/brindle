@@ -19,6 +19,16 @@ def full_text(db, agent_id, body):
     return agents.full_message(db, agent_id, int(body.rsplit(marker, 1)[1].rstrip(")")))
 
 
+def run_scenario(request, scenario, params=None):
+    """Run one row of a scenario table: ``scenario``'s arguments come from
+    ``params`` where named there, otherwise from the fixtures of that name."""
+    import inspect
+
+    params = params or {}
+    return scenario(**{n: params[n] if n in params else request.getfixturevalue(n)
+                       for n in inspect.signature(scenario).parameters})
+
+
 def sh(cmd: str, cwd: Path) -> str:
     return subprocess.run(
         cmd, shell=True, cwd=cwd, check=True, capture_output=True, text=True
@@ -88,6 +98,15 @@ def _reap_run_leftovers(known: set[str]) -> list[str]:
 # The tmux server socket of the test running now (see test_tmux_server).
 _TEST_SERVER: list[str] = []
 _TEST_COUNT = [0]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_google_token_cache():
+    """The Google token-expiry cache is process-wide; a test never inherits one."""
+    from brindle import cloud_login
+    cloud_login._google_expiry_cache.clear()
+    yield
+    cloud_login._google_expiry_cache.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -278,6 +297,18 @@ def fake_agent_cli(tmp_path, monkeypatch):
     stub.chmod(0o755)
     monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(stub))
     monkeypatch.setenv("BRINDLE_CODEX_BIN", str(stub))
+
+
+@pytest.fixture(autouse=True)
+def machine_has_room(monkeypatch):
+    """Workers and check runs start at once, however loaded the machine
+    running the tests is (spawn.no_room); a test that wants it busy sets
+    spawn._load itself. No detached helper waits for room either."""
+    from brindle import spawn, tasks
+
+    monkeypatch.setattr(spawn, "_load", lambda: 0.0)
+    monkeypatch.setattr(spawn, "pressure", lambda: 1)
+    monkeypatch.setattr(tasks, "_wait_in_background", lambda task_id: None)
 
 
 @pytest.fixture(autouse=True)

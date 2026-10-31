@@ -9,10 +9,31 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from conftest import run_scenario
 
-from brindle import cloud_login, model_access
+from brindle import cloud_login, model_access, spawn
 
 NOW = 1_800_000_000.0
+
+
+def _token_cache_runs_gcloud_once_until_near_expiry(tmp_path):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="ya29.SECRET\n", stderr="")
+
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "adc.json")}
+
+    def check(at):
+        return cloud_login.status("vertex", env=env, home=tmp_path, now=at, run=fake_run,
+                                  expiry=lambda token: 3600.0)
+
+    first, second = check(NOW), check(NOW + 60)
+    assert first.ok and second.ok and second.expires_at == first.expires_at
+    assert "SECRET" not in repr(second) and len(calls) == 1
+    check(NOW + 3600 - 100)    # inside the margin before expiry: asks gcloud again
+    assert len(calls) == 2
 
 VERTEX_ERROR = ('API Error: Could not load Google Cloud credentials · '
                 '{"error":"invalid_grant","error_description":"reauth related error (invalid_rapt)",'
@@ -223,3 +244,102 @@ def test_issue189_a_timed_out_gcloud_leaves_no_process_behind(tmp_path, monkeypa
                 os.kill(int(pidfile.read_text()), signal.SIGKILL)
             except (ProcessLookupError, ValueError):
                 pass
+
+
+def _subprocess_probe_that_exits_leaves_nothing_of_its_own_running():
+    # A cloud CLI can leave a local auth server behind in its group when it exits.
+    out = cloud_login.run_bounded(["sh", "-c", "tail -f /dev/null >/dev/null 2>&1 & echo $!"]).stdout
+    pid = int(out)
+    try:
+        end = time.monotonic() + 5
+        while _alive(pid) and time.monotonic() < end:
+            pass
+        assert not _alive(pid)
+    finally:
+        if _alive(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
+def _under_an_expired_or_stopped_deadline_no_cloud_cli_starts(provider, stopped, tmp_path, monkeypatch):
+    # GET provider_connection reaches gcloud, az and aws through cloud_login.status;
+    # a request the app gave up on must not start them.
+    started = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: started.append(argv))
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "adc.json"), "AWS_PROFILE": "dev"}
+    with spawn.deadline(30 if stopped else -1) as dl:
+        if stopped:
+            dl.stop()
+        with pytest.raises(spawn.Busy):
+            cloud_login.refresh(provider, env=env, home=tmp_path)
+    assert started == []
+
+
+def _token_cache_concurrent_misses_share_one_gcloud_call(tmp_path, monkeypatch):
+    import threading
+    calls, entered, release, progressed = [], threading.Event(), threading.Event(), threading.Event()
+    wait = 10   # a bound so a broken run fails instead of hanging
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if len(calls) == 1:
+            entered.set()
+            release.wait(wait)
+        else:
+            progressed.set()   # without coordination the second caller mints its own token
+        return SimpleNamespace(returncode=0, stdout="ya29.SECRET\n", stderr="")
+
+    class WatchedLock:
+        """The per-identity lock, reporting when a second caller reaches for it."""
+        def __init__(self):
+            self.lock, self.entries = threading.Lock(), 0
+
+        def __enter__(self):
+            self.entries += 1
+            if self.entries == 2:
+                progressed.set()   # the second caller missed the cache and is about to wait
+            self.lock.acquire()
+
+        def __exit__(self, *exc):
+            self.lock.release()
+
+    class WatchedLocks(dict):
+        def setdefault(self, key, default=None):
+            return super().setdefault(key, WatchedLock())
+
+    monkeypatch.setattr(cloud_login, "_google_locks", WatchedLocks())
+    env = {"GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "adc.json")}
+    results = []
+
+    def check():
+        results.append(cloud_login.status("vertex", env=env, home=tmp_path, now=NOW, run=fake_run,
+                                          expiry=lambda token: 3600.0))
+
+    first, second = threading.Thread(target=check), threading.Thread(target=check)
+    try:
+        first.start()
+        assert entered.wait(wait)
+        second.start()
+        assert progressed.wait(wait)   # the second caller is now blocked on the lock (or past it)
+    finally:
+        release.set()
+        first.join()
+        second.join()
+    assert len(calls) == 1 and [r.ok for r in results] == [True, True]
+
+
+def _deadline_row(provider, stopped):
+    return pytest.param(_under_an_expired_or_stopped_deadline_no_cloud_cli_starts,
+                        {"provider": provider, "stopped": stopped}, id=f"deadline-{provider}")
+
+
+@pytest.mark.parametrize("scenario, params", [
+    pytest.param(_token_cache_runs_gcloud_once_until_near_expiry, {}, id="token_cache-expiry"),
+    pytest.param(_subprocess_probe_that_exits_leaves_nothing_of_its_own_running, {}, id="subprocess-probe"),
+    _deadline_row("vertex", False),
+    _deadline_row("foundry", True),
+    _deadline_row("bedrock", False),
+    pytest.param(_token_cache_concurrent_misses_share_one_gcloud_call, {},
+                 id="token_cache-concurrent", marks=pytest.mark.variant("concurrent token misses share one gcloud call")),
+])
+def test_cloud_cli_token_cache_deadline_and_subprocess(request, scenario, params):
+    run_scenario(request, scenario, params)

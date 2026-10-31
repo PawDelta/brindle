@@ -252,6 +252,8 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 
 def _isolated_discovery(request: Request, timeout: float) -> Catalog:
+    from brindle import spawn
+
     if sys.platform not in ("darwin", "linux"):
         raise _DiscoveryError("platform")
     payload = json.dumps({"provider": request.provider, "base_url": request.base_url,
@@ -261,11 +263,14 @@ def _isolated_discovery(request: Request, timeout: float) -> Catalog:
     # the worker env, including HOME, PATH and credential exclusions.
     if len(payload) > 4096:
         raise _DiscoveryError("failed")
-    deadline = time.monotonic() + timeout
-    with subprocess.Popen([sys.executable, os.path.abspath(__file__), "--discover"],
-                          env=dict(request.env), cwd=request.cwd, stdin=subprocess.PIPE,
-                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                          start_new_session=True) as proc:
+    deadline = time.monotonic() + spawn.left(timeout)     # never past the request's own
+    try:     # the budget covers any wait for room: no helper starts after it is spent
+        proc = spawn.start([sys.executable, os.path.abspath(__file__), "--discover"], write=False,
+                           until=deadline, env=dict(request.env), cwd=request.cwd, stdin=subprocess.PIPE,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True)
+    except spawn.Busy:
+        raise TimeoutError from None
+    with proc:
         try:
             try:
                 proc.stdin.write(payload)
@@ -310,13 +315,14 @@ def _ids(data: object, field_name: str, id_name: str) -> set[str]:
 
 
 def _codex_catalog() -> Catalog:
+    from brindle import spawn
     from brindle.providers import codex_binary
 
     # Protocol: https://developers.openai.com/codex/app-server#models
     # No thread/start, turn/start, login or auth commands. The outer helper
     # process owns the wall timeout and this child's process group.
-    with subprocess.Popen([codex_binary(), "app-server"], stdin=subprocess.PIPE,
-                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+    with spawn.start([codex_binary(), "app-server"], write=False, stdin=subprocess.PIPE,
+                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
         total = 0
 
         def send(message):
@@ -368,10 +374,11 @@ def _codex_catalog() -> Catalog:
 
 
 def _antigravity_catalog() -> Catalog:
+    from brindle import spawn
     from brindle.antigravity import binary
 
-    with subprocess.Popen([binary(), "models"], stdin=subprocess.DEVNULL,
-                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+    with spawn.start([binary(), "models"], write=False, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
         try:
             output = proc.stdout.read(MAX_BYTES + 1)
             if len(output) > MAX_BYTES or proc.wait() != 0:

@@ -55,6 +55,33 @@ def test_existing_config_is_kept_and_tracked_files_are_left_alone(repo):
         antigravity.install(str(repo))
 
 
+@pytest.mark.parametrize("stop_after", ["ls-files", "rev-parse"])
+def test_a_config_write_is_all_or_nothing_when_its_request_stops(repo, monkeypatch, stop_after):
+    # Stopped once the tracked-file check answered: nothing is written. Stopped
+    # once the file is written: its exclude still lands (the request committed).
+    from brindle import spawn
+
+    real = antigravity._git
+    with spawn.deadline(30) as dl:
+        def git(args, cwd):
+            if args[0] == "rev-parse" and stop_after == "rev-parse":
+                dl.stop()
+            out = real(args, cwd)
+            if args[0] == "ls-files" and stop_after == "ls-files":
+                dl.stop()
+            return out
+
+        monkeypatch.setattr(antigravity, "_git", git)
+        rel = antigravity.AGENTS_DIR / "mcp_config.json"
+        if stop_after == "ls-files":
+            with pytest.raises(spawn.Busy):
+                antigravity._merge_json(str(repo), rel, "mcpServers", "brindle", {"command": "b"})
+        else:
+            antigravity._merge_json(str(repo), rel, "mcpServers", "brindle", {"command": "b"})
+    assert (repo / rel).exists() == (stop_after == "rev-parse")
+    assert ("/" + rel.as_posix() in (repo / ".git" / "info" / "exclude").read_text()) == (stop_after == "rev-parse")
+
+
 def test_hook_finds_its_agent_from_the_agy_process(db, ws, monkeypatch):
     add_agent(db, ws, status="processing")
     monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)

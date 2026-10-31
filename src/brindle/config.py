@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from brindle import spawn
 
 CONFIG_DIR = ".brindle"
 CONFIG_FILE = "config.json"
@@ -263,8 +264,7 @@ def _read_shared(root: Path, branch: str | None) -> dict:
     path = root / CONFIG_DIR / CONFIG_FILE
     if branch:
         try:
-            proc = subprocess.run(["git", "show", f"{branch}:{CONFIG_DIR}/{CONFIG_FILE}"], cwd=root,
-                                  capture_output=True, text=True)
+            proc = spawn.read(["git", "show", f"{branch}:{CONFIG_DIR}/{CONFIG_FILE}"], cwd=root)
         except OSError:
             proc = None
         if proc is not None and proc.returncode == 0:

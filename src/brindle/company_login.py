@@ -23,7 +23,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-from brindle import cloud_credential, config
+from brindle import cloud_credential, config, spawn
 from brindle.pro.license import request_cached
 
 log = logging.getLogger(__name__)
@@ -92,11 +92,10 @@ def run_cmd(argv: list[str], timeout: float = CHECK_TIMEOUT, interactive: bool =
         if interactive:
             proc = subprocess.run(argv, timeout=timeout, check=False, env=env)
             return proc.returncode, ""
-        # Never hand a probe the terminal: `claude` turns newline translation
-        # back on when it exits, which shifts the curses sidebar's drawing.
-        feed = {"input": stdin} if stdin is not None else {"stdin": subprocess.DEVNULL}
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False,
-                              cwd=cwd, env=env, **feed)
+        # Never hand a probe the terminal (a brindle.spawn read never does):
+        # `claude` turns newline translation back on when it exits, which
+        # shifts the curses sidebar's drawing.
+        proc = spawn.read(argv, timeout=timeout, cwd=cwd, env=env, input=stdin)
         return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
     except subprocess.TimeoutExpired:
         return 124, "timed out"

@@ -40,7 +40,7 @@ from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
-from brindle import git
+from brindle import git, spawn
 
 if TYPE_CHECKING:
     from brindle.db import DB, Workspace
@@ -406,8 +406,8 @@ def affected_tests(graph: Path, node_id: str, cwd: str) -> set[str] | None:
     """The test files ``graphify affected`` lists for ``node_id``; None when
     the lookup itself failed (not the same as reaching no test)."""
     try:
-        proc = subprocess.run(["graphify", "affected", node_id, "--graph", str(graph)], cwd=cwd,
-                              capture_output=True, text=True, timeout=GRAPHIFY_SECONDS)
+        proc = spawn.read(["graphify", "affected", node_id, "--graph", str(graph)], cwd=cwd,
+                          timeout=GRAPHIFY_SECONDS)
     except (OSError, subprocess.TimeoutExpired):
         return None
     if proc.returncode != 0:

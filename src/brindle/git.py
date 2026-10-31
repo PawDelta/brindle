@@ -15,12 +15,54 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from brindle import spawn
+
 TIMEOUT = 120
 BASE_CONFIG_KEY = "brindle-base"
 
 
 class GitError(RuntimeError):
     pass
+
+
+class GitBusy(GitError, spawn.Busy):
+    """A git read the machine had no room for, or that its request stopped
+    (see brindle.spawn): a GitError like a timeout, and a Busy for the daemon."""
+
+
+# Commands that change nothing in the repo: they run as brindle.spawn reads
+# (stopped at their request's deadline, never taking git's optional locks).
+# Everything else (merge, commit, checkout, fetch, push, worktree add ...) is
+# an action, which no deadline stops once it has started.
+_READS = frozenset({
+    "blame", "cat-file", "check-attr", "check-ignore", "cherry", "count-objects", "describe",
+    "diff", "diff-files", "diff-index", "diff-tree", "for-each-ref", "grep", "log", "ls-files",
+    "ls-tree", "merge-base", "merge-tree", "name-rev", "patch-id", "rev-list", "rev-parse",
+    "shortlog", "show", "show-ref", "status", "var",
+})
+_GLOBAL_WITH_VALUE = {"-c", "-C", "--git-dir", "--work-tree", "--namespace"}
+
+
+def is_read(args: list[str]) -> bool:
+    """Whether ``git <args>`` only reads (see _READS)."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 2 if args[i] in _GLOBAL_WITH_VALUE else 1
+    if i >= len(args):
+        return False
+    cmd, rest = args[i], args[i + 1:]
+    if cmd in _READS:
+        return True
+    words = [a for a in rest if not a.startswith("-")]
+    if cmd == "config":
+        return any(a in ("--get", "--get-all", "--get-regexp", "--list", "-l") for a in rest)
+    if cmd == "symbolic-ref":    # a second name would set the ref
+        return len(words) <= 1 and "-d" not in rest and "--delete" not in rest
+    if cmd == "remote":
+        return not words or words[0] == "get-url"
+    if cmd == "worktree":
+        return bool(words) and words[0] == "list"
+    return False
 
 
 def run(args: list[str], cwd: str | Path, check: bool = True,
@@ -34,10 +76,11 @@ def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
     """``run`` with its own environment (e.g. ``GIT_INDEX_FILE`` for a scratch
     index that leaves the checkout's real index alone; see brindle.rewind)."""
     to = TIMEOUT if timeout is None else timeout
+    start = spawn.read if is_read(args) else spawn.action
     try:
-        proc = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, timeout=to, env=env, input=input
-        )
+        proc = start(["git", *args], cwd=cwd, env=env, input=input, timeout=to)
+    except spawn.Busy as e:
+        raise GitBusy(f"git {' '.join(args)}: {e}") from e
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
     if check and proc.returncode != 0:
@@ -474,8 +517,11 @@ def hash_blob(cwd: str | Path, data: bytes, path: str, write: bool = False) -> s
     path's clean filters applied; ``path`` is a name, not a pathspec). With
     ``write`` the blob is stored too."""
     args = ["hash-object", *(["-w"] if write else []), "--stdin", f"--path={path}"]
+    start = spawn.action if write else spawn.read     # a clean filter can stall: a read stops with its request
     try:
-        proc = subprocess.run(["git", *args], cwd=cwd, input=data, capture_output=True, timeout=TIMEOUT)
+        proc = start(["git", *args], cwd=cwd, input=data, text=False, timeout=TIMEOUT)
+    except spawn.Busy as e:
+        raise GitBusy(f"git {' '.join(args)}: {e}") from e
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
     if proc.returncode != 0:

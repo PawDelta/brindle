@@ -16,6 +16,7 @@ import { NO_SHELL, NO_WINDOW } from "./ProviderSurface";
 import { SessionScreen } from "./SessionScreen";
 import { closeSessionLabel } from "./AgentMenu";
 import { sessionWork } from "./tree";
+import { SessionContext, sidebarChanges } from "../../components/SessionContext";
 
 describe("sessionWork", () => {
   const agent = (id: string, parent_id: string | null = null) => ({ id, profile: "claude", provider: "claude", status: "processing", mode: "worker", parent_id, subagents: [] });
@@ -149,6 +150,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  sidebarChanges.shown = false;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -172,6 +174,7 @@ function Harness({ client, root, repo, refresh, store, agents, onOpen }: {
   const [picked, setPicked] = useState<{ agent: string; sheet: SheetRef | null }>({ agent: root, sheet: null });
   return (
     <>
+      {sidebarChanges.shown && <SessionContext session={{ root, repo }} route={{ screen: "session", root, repo }} navigate={() => {}} refresh={refresh} />}
       <div data-testid="tree">
         {agents.map((id) => (
           <button key={id} type="button" data-agent={id} onClick={() => setPicked({ agent: id, sheet: null })}>
@@ -218,6 +221,7 @@ const title = () => screen.getByTestId("surface-title").textContent;
 
 describe("SessionScreen", () => {
   it("shows live session changes before PR readiness in the chat's place, goes back to the chat with ← Chat or Esc keeping drafts, and edits hunks in either layout", async () => {
+    sidebarChanges.shown = true;
     let holdDiff: Promise<void> | null = null;
     let diffReads = 0;
     const { daemon, sync, term } = mount({ sup1: live, w1: live }, {
@@ -238,14 +242,16 @@ describe("SessionScreen", () => {
     expect(screen.queryByTestId("session-changes")).toBeNull();
     expect(screen.queryByTestId("back-to-chat")).toBeNull();
     const openChanges = () => fireEvent.click(screen.getByTestId("open-changes"));
-    // The diff is read before Changes is first opened, and again on a git status event.
-    await waitFor(() => expect(diffReads).toBeGreaterThan(0));
+    // The screen and sidebar share one initial read and one per change event.
+    await waitFor(() => expect(screen.getByTestId("changes-count").textContent).toBe("2 files +2 −1"));
+    expect(diffReads).toBe(1);
     pick("w1");
     const terminal = term();
     const readsBefore = diffReads;
     daemon.data.sessionFiles.sup1["docs/readme.md"] = "hello\nworld\n";
-    daemon.send({ type: "git", workspace_id: root.id, status: { branch: "brindle/session-18", base: "main", ahead: 0, behind: 0, dirty_files: ["docs/readme.md"], unpushed: 0 } });
-    await waitFor(() => expect(diffReads).toBeGreaterThan(readsBefore));
+    daemon.publish("session.changed", { root_id: "sup1" });
+    await waitFor(() => expect(screen.getByTestId("changes-count").textContent).toBe("2 files +3 −1"));
+    expect(diffReads).toBe(readsBefore + 1);
     openChanges();
     const changes = () => within(screen.getByTestId("session-changes"));
     const summary = () => changes().getByTestId("changes-summary").textContent;
@@ -314,23 +320,23 @@ describe("SessionScreen", () => {
     // An external amend can change content without changing any git-status field.
     vi.useFakeTimers();
     try {
-      // Opened under the fake clock, so the periodic refresh runs on it.
+      // Opening reads afresh; an amend arrives through the stream.
       await act(async () => {
         openChanges();
         await vi.advanceTimersByTimeAsync(0);
       });
       daemon.data.sessionFiles.sup1["docs/readme.md"] = "amended\nsecond\nthird\n";
-      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      await act(async () => { daemon.publish("session.changed", { root_id: "sup1" }); await vi.advanceTimersByTimeAsync(0); });
       expect(summary()).toContain("+5 −1");
       fireEvent.click(changes().getByTitle("docs/readme.md"));
       expect(changes().getByTestId("hunk").textContent).toContain("+amended");
       fireEvent.click(changes().getByTitle("src/a.ts"));
       expect(changes().getByRole("textbox")).toHaveProperty("value", "keep this draft");
 
-      // Periodic and opening refreshes share one in-flight request and one queued refresh.
+      // Events and opening refreshes share one in-flight request and one queued refresh.
       let release!: () => void;
       holdDiff = new Promise<void>((resolve) => { release = resolve; });
-      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      await act(async () => { daemon.publish("session.changed", { root_id: "sup1" }); await vi.advanceTimersByTimeAsync(0); });
       const pendingReads = diffReads;
       fireEvent.click(screen.getByTestId("back-to-chat"));
       await act(async () => {

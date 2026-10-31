@@ -10,8 +10,13 @@ workspaces, that adds up. This module:
   and
 - caches the rest of the status behind a cheap fingerprint (mtimes of the
   worktree's index, HEAD and logs/HEAD files, plus the base ref's
-  mtime/sha), so a workspace nothing has touched costs zero git subprocesses
-  on a redraw.
+  mtime/sha and the worktree's top-level entries), so a workspace nothing
+  has touched costs zero git subprocesses on a redraw. Only the root is
+  listed: dependency directories are never walked by the fingerprint.
+
+In-place edits below the root may leave all these timestamps untouched.
+A five-minute safety refresh bounds the delay for those changes without
+running a full git status on every few dashboard refreshes.
 
 The cache is process-lifetime, module-level state: correct for one
 long-lived ``brindle watch``/``brindle ls`` process, not meant to be shared
@@ -20,14 +25,15 @@ across processes.
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from brindle import git
+from brindle import git, spawn
 
-TTL = 10.0  # safety net: recompute at least this often even if nothing else invalidated the cache
+TTL = 300.0  # safety net for changes below the shallow worktree fingerprint
 WARM_WORKERS = 8
 
 _base_ref_cache: dict[tuple[str, str], tuple[tuple, str]] = {}
@@ -128,8 +134,26 @@ def _cached_base_ref(path: Path, base: str, common: Path) -> str:
     return ref
 
 
+def _worktree_fingerprint(path: Path) -> tuple:
+    """Stat immediate children without descending into dependency trees.
+
+    File metadata catches top-level edits; directory metadata catches new,
+    removed or renamed children one level down. Sort by name so directory
+    enumeration order cannot invalidate an otherwise unchanged workspace.
+    Nanosecond timestamps and sizes also catch rapid successive edits.
+    """
+    entries = []
+    with os.scandir(path) as children:
+        for child in children:
+            if child.name == ".git":
+                continue
+            stat = child.stat(follow_symlinks=False)
+            entries.append((child.name, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size))
+    return tuple(sorted(entries))
+
+
 def _fingerprint(path: Path, wt_gitdir: Path, common: Path,
-                 ref: str) -> tuple[float, float, float, float, float]:
+                 ref: str) -> tuple:
     index_mtime = _mtime(wt_gitdir / "index")
     head_mtime = _mtime(wt_gitdir / "HEAD")
     # Catches ref-moving operations (commit --amend, reset --soft, rebase)
@@ -140,13 +164,12 @@ def _fingerprint(path: Path, wt_gitdir: Path, common: Path,
     ref_mtime = _mtime(_ref_file(common, ref))
     if ref_mtime == 0.0:
         ref_mtime = _mtime(common / "packed-refs")
-    # A file appearing/disappearing/renaming anywhere under the worktree root
-    # touches that directory's mtime (though not its own parent's, if nested
-    # deeper); catches the common "new untracked file at the top level" case
-    # cheaply. Editing an existing tracked file in place touches neither this
-    # nor the index, so that case waits for the TTL safety net.
+    # The root catches top-level additions/removals, and the shallow entry
+    # stats catch edits and immediate subdirectory changes. Deeper changes
+    # still converge through the safety refresh, without recursive scanning.
     root_mtime = _mtime(path)
-    return (index_mtime, head_mtime, logs_head_mtime, ref_mtime, root_mtime)
+    entries = _worktree_fingerprint(path)
+    return (index_mtime, head_mtime, logs_head_mtime, ref_mtime, root_mtime, entries)
 
 
 def _parse_branch_header(line: str) -> tuple[str | None, bool, int]:
@@ -235,4 +258,4 @@ def warm(pairs: list[tuple[str, str | None]], now: float | None = None) -> None:
             pass
 
     with ThreadPoolExecutor(max_workers=min(WARM_WORKERS, len(pairs))) as pool:
-        list(pool.map(one, pairs))
+        list(pool.map(spawn.carry(one), pairs))   # under the request's deadline, if any

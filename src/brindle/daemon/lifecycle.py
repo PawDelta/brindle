@@ -18,12 +18,11 @@ import os
 import resource
 import signal
 import socket
-import subprocess
 import time
 from pathlib import Path
 
 import brindle
-from brindle import procs, upgrade
+from brindle import procs, spawn, upgrade
 from brindle.config import brindle_home
 
 HOST = "127.0.0.1"
@@ -73,8 +72,7 @@ def _is_daemon(pid: int) -> bool:
     that got the pid of one that died without cleaning up)."""
     if not procs.alive(pid):
         return False
-    cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
-                         capture_output=True, text=True).stdout
+    cmd = spawn.read(["ps", "-o", "command=", "-p", str(pid)], timeout=procs.PS_LIMIT).stdout
     return "brindle" in cmd and "daemon" in cmd
 
 
@@ -183,6 +181,11 @@ class Activity:
         self.open = 0
         self.last = time.monotonic()
 
+    @property
+    def state(self):
+        """The wrapped app's state (heavy_read_lane), as if unwrapped."""
+        return self.app.state
+
     async def __call__(self, scope, receive, send) -> None:
         if scope["type"] == "lifespan":
             await self.app(scope, receive, send)
@@ -211,14 +214,33 @@ def _agents_running() -> bool:
         return True     # can't tell: stay up rather than strand an app
 
 
-async def _watch(server, activity: Activity, idle_exit: bool) -> None:
+async def _elapse(seconds: float) -> None:
+    """Return once ``seconds`` have passed on the event loop's timer."""
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+    handle = loop.call_later(seconds, done.set_result, None)
+    try:
+        await done
+    finally:
+        handle.cancel()
+
+
+async def _watch(server, activity: Activity, idle_exit: bool, *,
+                 wait=_elapse, clock=time.monotonic) -> None:
+    from brindle.daemon import health
     from brindle.daemon.session_review import ReadinessWatch
     from brindle.upgrade import InstallWatch
 
     install = InstallWatch()
     ready = ReadinessWatch()
+    monitor = health.Monitor(clock)
     while not server.should_exit:
-        await asyncio.sleep(WATCH_INTERVAL)
+        due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
+        await wait(WATCH_INTERVAL)
+        try:
+            monitor.tick(activity, due)     # the daemon's own health, into debuglog
+        except Exception:  # noqa: BLE001 - health logging must never stop the watch
+            log.debug("brindle: couldn't record the daemon's health", exc_info=True)
         await asyncio.to_thread(ready.sweep_safely)     # session.pr_ready when a session becomes ready
         if install.changed():
             server.should_exit = True
@@ -267,6 +289,9 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     _raise_file_limit()
     token = new_token()
     socks, info = prepare(token, unix=unix, tcp=tcp)
+    from brindle import spawn
+
+    spawn.enable()      # every process the daemon starts waits for room (brindle.spawn)
     from brindle.daemon.events import start_poller
 
     poller = start_poller()

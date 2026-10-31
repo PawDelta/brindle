@@ -27,6 +27,8 @@ import hmac
 import json
 import secrets
 import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
@@ -36,6 +38,11 @@ APP_ORIGINS = ("tauri://localhost", "http://tauri.localhost")
 FIRST_FRAME_TIMEOUT = 10.0      # seconds a WebSocket has to send its token
 WS_UNAUTHORIZED = 4401          # close code for a WebSocket whose first frame isn't the token
 CALLER_TTL = 5.0                # seconds a Unix-socket caller's agent check is reused
+CALLER_CHECK_LIMIT = 5.0         # includes time queued behind other caller checks
+# Process-wide, so guards cannot grow a separate pool for every connection.
+# A stuck process probe must not occupy the daemon's default executor.
+_CALLER_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="brindle-caller")
+_CALLER_UNCHECKED = "the caller can't be checked"
 
 
 def _hold_route(path: str) -> bool:
@@ -56,8 +63,15 @@ class Guard:
         self._token = token.encode()
         self._origins = set(APP_ORIGINS)
         self._callers: dict[int, tuple[float, str | None]] = {}   # pid -> (when, agent_caller)
+        self._caller_checks: dict[int, asyncio.Future[str | None]] = {}
+        self._caller_deadlines: dict[int, float] = {}
         if port:
             self._origins |= {f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+
+    @property
+    def state(self):
+        """The wrapped app's state (heavy_read_lane, poller), as if unwrapped."""
+        return self.app.state
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] not in ("http", "websocket"):
@@ -96,14 +110,60 @@ class Guard:
         await self.app(scope, receive, send)
 
     async def _agent_caller(self, pid: int) -> str | None:
-        """peer.agent_caller, remembered for CALLER_TTL: it lists every
-        process, and the app makes many requests."""
+        """Share a bounded caller check and remember its result for CALLER_TTL.
+
+        Threads cannot be stopped when their waiter expires. Keep the future
+        until the worker finishes, including after refusal or cancellation,
+        so repeated requests cannot queue more work for that pid.
+        """
         now = time.monotonic()
         hit = self._callers.get(pid)
-        if hit is None or now - hit[0] > CALLER_TTL:
-            self._callers = {p: h for p, h in self._callers.items() if now - h[0] <= CALLER_TTL}
-            hit = self._callers[pid] = (now, await asyncio.to_thread(peer.agent_caller, pid))
-        return hit[1]
+        if hit is not None and now - hit[0] <= CALLER_TTL:
+            return hit[1]
+        self._callers = {p: h for p, h in self._callers.items() if now - h[0] <= CALLER_TTL}
+        check = self._caller_checks.get(pid)
+        if check is None:
+            try:
+                check = asyncio.get_running_loop().run_in_executor(_CALLER_EXECUTOR, peer.agent_caller, pid)
+            except Exception:
+                self._callers[pid] = (time.monotonic(), _CALLER_UNCHECKED)
+                return _CALLER_UNCHECKED
+            self._caller_checks[pid] = check
+            self._caller_deadlines[pid] = now + CALLER_CHECK_LIMIT
+            check.add_done_callback(partial(self._caller_checked, pid))
+        deadline = self._caller_deadlines[pid]
+        try:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            # One disconnected request must not cancel everyone else's check.
+            refused = await asyncio.wait_for(asyncio.shield(check), remaining)
+            # Completion and the deadline can become ready in the same turn.
+            if time.monotonic() >= deadline:
+                raise asyncio.TimeoutError
+            return refused
+        except Exception:
+            # Never expose process data from an exception to the requester.
+            self._callers[pid] = (time.monotonic(), _CALLER_UNCHECKED)
+            return _CALLER_UNCHECKED
+
+    def _caller_checked(self, pid: int, check: asyncio.Future[str | None]) -> None:
+        """Publish the result before removing the in-flight entry.
+
+        This also consumes failures when every request has disconnected.
+        Late results are consumed but cannot authorize a caller.
+        """
+        refused = _CALLER_UNCHECKED
+        if not check.cancelled():
+            try:
+                result = check.result()
+                if time.monotonic() < self._caller_deadlines[pid]:
+                    refused = result
+            except Exception:
+                pass
+        self._callers[pid] = (time.monotonic(), refused)
+        self._caller_checks.pop(pid, None)
+        self._caller_deadlines.pop(pid, None)
 
     def _token_ok(self, token: object) -> bool:
         return isinstance(token, str) and hmac.compare_digest(token.strip().encode(), self._token)

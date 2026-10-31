@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from brindle import quota
+from brindle import quota, spawn
 from brindle.config import RepoConfig
 
 
@@ -75,7 +75,7 @@ def test_claude_usage_command_feeds_quota_and_keeps_model_caps(monkeypatch):
     assert windows[0].resets_at == 1791843000.0 and windows[1].resets_at == 1792429200.0
     assert 0 < windows[2].resets_at - now < 86400
     monkeypatch.setattr(time, "time", lambda: now)
-    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
+    monkeypatch.setattr(spawn, "read", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
     monkeypatch.setattr(quota, "_key_billed", lambda p: False)
     assert quota.refresh_claude_usage(force=True)
     # a one-model cap shows, but doesn't hold up the plan's other models

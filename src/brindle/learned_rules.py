@@ -53,6 +53,9 @@ MAX_FINDINGS_PER_CALL = 60      # the oldest unseen ones first; the rest wait fo
 FINDING_CHARS = 1200
 CALL_TIMEOUT = 300
 CHECK_KEYS = ("deny_patterns", "deny_deps", "require_tests_for")
+# The pack's own lists that no learned rule adds to, kept as they are when it
+# is rewritten (brindle's repo lists its direct-spawn allowlist there).
+KEPT_KEYS = ("direct_spawn_allowed",)
 
 # What submit_review records for a branch review (agents.submit_review); a
 # completion audit's verdict reads differently and isn't a finding.
@@ -556,14 +559,14 @@ def write_rule(repo_root: str, r: LearnedRule) -> Path:
     body = ""
     if path.is_file():
         meta, body = _frontmatter(path.read_text(encoding="utf-8"))
-    lists = {k: list(_list(meta.get(k)) or []) for k in CHECK_KEYS}
+    lists = {k: list(_list(meta.get(k)) or []) for k in (*CHECK_KEYS, *KEPT_KEYS)}
     for k, items in checks_of(r).items():
         for item in items:
             if item not in lists[k] and _frontmatter_item(item) is not None:
                 lists[k].append(item)
     header = [f"name: {meta.get('name') or 'learned'}",
               f"description: {meta.get('description') or PACK_DESCRIPTION}"]
-    for k in CHECK_KEYS:
+    for k in (*CHECK_KEYS, *KEPT_KEYS):
         items = [i for i in (_frontmatter_item(x) for x in lists[k]) if i is not None]
         if items:
             header.append(f"{k}:")
@@ -605,10 +608,9 @@ def refresh_later(repo_root: str) -> None:
     try:
         if not entitled():
             return
+        from brindle import spawn
         from brindle.providers import brindle_invocation
 
-        subprocess.Popen([*brindle_invocation(), "_learn-rules", repo_root],
-                         start_new_session=True, stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        spawn.detach([*brindle_invocation(), "_learn-rules", repo_root])
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't start the learned-rules refresh")

@@ -24,6 +24,7 @@ from contextlib import ExitStack, contextmanager
 from types import SimpleNamespace
 
 from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
+from brindle import spawn as processes   # this module's own spawn() starts an agent
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace
@@ -386,8 +387,12 @@ def spawn(
     files: list[str] | None = None,
     weight: str | None = None,
     analysis_doc: bool = False,
+    detached: bool = False,
 ) -> Agent:
-    """Start an agent in ``ws``. ``weight`` is the weight its task was routed
+    """Start an agent in ``ws``. ``detached``: a handoff nobody waits on (a
+    queued one) is recorded as 'handoff_detached' from the start, so a
+    result it reports at once is forwarded; it is briefed as a handoff.
+    ``weight`` is the weight its task was routed
     as, kept on the agent so the owner's per-kind effort and instructions apply
     from the first launch. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``; their brief carries the
@@ -464,7 +469,8 @@ def spawn(
         raise PreflightBlocked([off])
     agent = Agent(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
-        parent_id=parent_id, mode=mode, status="starting", tmux_window="",
+        parent_id=parent_id, mode="handoff_detached" if detached and mode == "handoff" else mode,
+        status="starting", tmux_window="",
         result=None, created_at=time.time(), task=raw_task, headless=int(headless) or None,
         done_when=done_when, review_sha=review_sha,
         # Its CLI's config home, decided once here: every later check, its
@@ -856,8 +862,7 @@ def quit_later(root_id: str) -> None:
     prompt back. Runs detached, since pausing closes the sidebar asking."""
     from brindle.providers import brindle_invocation
 
-    subprocess.Popen([*brindle_invocation(), "_quit", root_id], start_new_session=True,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    processes.detach([*brindle_invocation(), "_quit", root_id])
 
 
 def dismiss_sidebar(db: DB, pane: str | None) -> None:
@@ -1217,7 +1222,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         # Without this process's own Claude Code inbox, if it has one: the
         # helper marks the agent ready, and must not take that inbox for it.
         base = {k: v for k, v in os.environ.items() if k not in (inbox.SOCKET_VAR, inbox.TOKEN_VAR)}
-        subprocess.Popen(
+        processes.start(
             [*brindle_invocation(), "_after-launch", agent.id, *launch_health.helper_token(agent)],
             start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             env={**base, **agent_env(ws, agent.id)},
@@ -1585,6 +1590,12 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         resumed.append(a)
     if any(a.id == root_id for a in resumed):
         knowledge.note(db, root_id, knowledge.RESUME)
+        from brindle import tasks
+
+        try:
+            tasks.on_resumed(db, root_id)   # queued tasks the pause held back
+        except Exception:  # noqa: BLE001 - a queued task must never keep the session from resuming
+            log.exception("brindle: starting %s's queued tasks on resume failed", root_id)
     ap = db.get_autopilot(root_id)
     failed_still = [a for a in candidates if db.get_agent(a.id) and db.get_agent(a.id).status == "failed"]
     if ap and ap.state == "blocked" and resumed and not failed_still:
@@ -2368,8 +2379,7 @@ def warm_checks(ws: Workspace) -> None:
 
 def _detach(args: list[str]) -> None:
     """Start a brindle helper that outlives this process."""
-    subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    processes.detach(args)
 
 
 # A shell that starts the command after it in the background and exits, so the
@@ -2382,9 +2392,7 @@ def _detach_orphan(args: list[str]) -> None:
     shell starts it in the background and exits, so it is nobody's child.
     Stopping an agent stops every process descended from its MCP server
     (brindle.procs), a helper ``_detach`` started there included."""
-    subprocess.run([*ORPHANED, *args],
-                   start_new_session=True, stdin=subprocess.DEVNULL,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    processes.detach([*ORPHANED, *args]).wait()
 
 
 def wait_for_result(db: DB, agent_id: str, timeout: float, poll: float = 2.0) -> str:
@@ -2577,18 +2585,18 @@ def close_later(agent_id: str, delay: float = 5.0) -> None:
     tool call, which must return before its CLI goes away."""
     from brindle.providers import brindle_invocation
 
-    subprocess.Popen(
-        [*brindle_invocation(), "_close", agent_id, "--delay", str(delay)],
-        start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
+    processes.detach([*brindle_invocation(), "_close", agent_id, "--delay", str(delay)])
 
 
 def _stop(db: DB, agent: Agent) -> None:
     """Stop an agent: its window, and every process of its that outlives the
     window (Claude Code's daemon can host the real session; see brindle.procs).
     A pane id a newer agent has since been given is left alone (see owns_pane)."""
-    from brindle import procs
+    from brindle import procs, spawn
 
+    # Refused past a request's deadline, before anything is touched; otherwise the
+    # stop (sidebar rescue, window, processes, bookkeeping) runs to its end, client or not.
+    spawn.begin_write()
     # Only a window on the server brindle is using: another server's pane
     # ids mean other panes here (see same_server).
     window = agent.tmux_window if same_server(agent) and owns_pane(db, agent) else ""
@@ -2673,6 +2681,28 @@ def _branch_from_task(profile: str, task: str, agent_hint: str) -> str:
     return f"brindle/{profile}/{'-'.join(words)[:40].strip('-') or 'task'}-{agent_hint}"
 
 
+class NoRoom(AgentError):
+    """The machine has no room for another worker (``brindle.spawn.no_room``,
+    the reason is the message); nothing was started or created. Callers
+    queue the start instead (``tasks.enqueue(waiting=...)``)."""
+
+
+def admission(profile: str, repo_root: str) -> str | None:
+    """Why a worker on ``profile`` must wait for room before it starts, or
+    None. A subagent profile starts no process of brindle's: never held."""
+    from brindle import spawn as gate
+    from brindle.providers import PROVIDERS
+
+    busy = gate.no_room()
+    if busy is None:
+        return None
+    try:
+        provider = PROVIDERS.get(load_profile(profile, repo_root).provider)
+    except Exception:  # noqa: BLE001 - an unloadable profile fails at its start, with its reason
+        return busy
+    return busy if provider is None or provider.launches_process else None
+
+
 def delegate(
     db: DB,
     caller: Agent | None,
@@ -2689,8 +2719,12 @@ def delegate(
     files: list[str] | None = None,
     weight: str | None = None,
     analysis_doc: bool = False,
+    admit: bool = True,
+    detached: bool = False,
 ) -> tuple[Agent, Workspace]:
-    """Start a worker. ``weight`` is the weight its task was routed as;
+    """Start a worker, or raise ``NoRoom`` (nothing created) when the machine
+    has no room for it (``admission``); ``admit`` False skips that, for a
+    caller that has just looked. ``detached``: see ``spawn``. ``weight`` is the weight its task was routed as;
     ``analysis_doc`` asks for an analysis doc whatever the weight.
     ``plan_first`` (None: the repo's ``plan_first`` config)
     makes it get a plan approved before it may edit; ``files`` picks the
@@ -2718,6 +2752,9 @@ def delegate(
     why = model_problem(profile, caller_ws)
     if why:
         raise AgentError(why)
+    busy = admission(profile, caller_ws.repo_root) if admit else None
+    if busy:
+        raise NoRoom(busy)
     def start_worker(ws: Workspace) -> Agent:
         # Startup dialogs are handled by the detached _after-launch helper, so
         # handoff/assign return as soon as the window exists instead of polling
@@ -2725,7 +2762,7 @@ def delegate(
         return spawn(
             db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
             done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
-            weight=weight, analysis_doc=analysis_doc,
+            weight=weight, analysis_doc=analysis_doc, **({"detached": True} if detached else {}),
         )
 
     if isolate:
@@ -3114,11 +3151,16 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
                                   second=second, slot=slot)
 
 
-def review_dispatch_lock(workspace_id: str):
-    """Share the dispatch lock with recovery's read of the failed agent."""
+def review_dispatch_lock(workspace_id: str, *, timeout: float | None = None):
+    """Share dispatch with recovery; optionally bound acquisition for a request.
+
+    Nested dispatches in the same thread reuse the lock. Background callers
+    omit ``timeout`` and keep waiting until the current dispatcher finishes.
+    """
     from brindle import pipeline
 
-    return pipeline._reentrant_lock("review-dispatch-" + hashlib.sha1(workspace_id.encode()).hexdigest()[:16])
+    return pipeline._reentrant_lock("review-dispatch-" + hashlib.sha1(workspace_id.encode()).hexdigest()[:16],
+                                    timeout=timeout)
 
 
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
@@ -4138,16 +4180,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         elif db.pending_count(agent_id) and not agent.headless:
             # Claude Code hasn't drawn its input box yet; deliver shortly after,
             # from a detached process so this hook returns immediately.
-            import subprocess
-
             from brindle.providers import brindle_invocation
 
-            subprocess.Popen(
-                [*brindle_invocation(), "_flush", agent_id, "--delay",
-                 str(get_provider(agent.provider).ready_delay)],
-                start_new_session=True,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
+            processes.detach([*brindle_invocation(), "_flush", agent_id, "--delay",
+                          str(get_provider(agent.provider).ready_delay)])
     elif event == "prompt-submit":
         db.set_status(agent_id, "processing")
         from brindle import launch_health

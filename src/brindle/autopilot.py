@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config, workspace_config
-from brindle import bus, escapes, knowledge
+from brindle import bus, escapes, knowledge, spawn
 from brindle.db import DB, Agent, Autopilot, Milestone, Workspace, check_state
 from brindle.profiles import load_profile
 
@@ -1229,7 +1229,7 @@ def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,
     """Run one check command. Returns (passed, the tail of its output).
     ``cancel``, if given, is polled while the command runs; when it turns
     true the command is killed and ``CheckCancelled`` is raised."""
-    proc = subprocess.Popen(
+    proc = spawn.start(
         cmd, shell=True, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True,
     )
@@ -1284,8 +1284,7 @@ def checking(ap: Autopilot, timeout: float = 900.0) -> bool:
 
 def _detach(args: list[str]) -> None:
     """Start a brindle helper that outlives this process."""
-    subprocess.Popen(args, start_new_session=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    spawn.detach(args)
 
 
 def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | None,
@@ -2103,6 +2102,12 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if any(agents.runs_process(a) for a in working
             if getattr(a, "plan_state", None) != "proposed"):
         return None  # their results arrive as messages and wake it up
+    from brindle import tasks
+
+    if tasks.waiting_for_room(db, agent.id):
+        # Workers queued until the machine has room: they start on their own
+        # (spawn.START_WAIT at the latest) and the start message wakes it. Not a stall.
+        return None
     if (db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD)
             or db.outstanding(agent.id, QUESTION_REMINDER_HEAD)):
         return None  # (#209) the last reminder is still queued or unread: never pile up another

@@ -36,7 +36,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from brindle import agents, autopilot, bus, gates, git, identity_lock, knowledge, pipeline, preflight, scratch, tmux, workspaces
+from brindle import agents, autopilot, bus, gates, git, identity_lock, knowledge, pipeline, preflight, scratch, spawn, tmux, workspaces
 from brindle import sessions as sessions_mod
 from brindle.daemon import session_review as review
 from brindle.daemon import terminal
@@ -92,9 +92,7 @@ def start_job(kind: str, work: Callable[[DB, Job], Any], job: Job | None = None,
 def _run_helper(argv: list[str]) -> dict[str, int]:
     """Run a brindle helper in its own session (so it outlives the daemon)
     and wait for it."""
-    proc = subprocess.Popen(argv, start_new_session=True, stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return {"exit": proc.wait()}
+    return {"exit": spawn.detach(argv).wait()}
 
 
 class _Progress(io.TextIOBase):
@@ -424,6 +422,8 @@ def rewind_agent(db: DB, params: dict, body: Body) -> Any:
 
 # -- workspaces ------------------------------------------------------------------
 
+REVIEW_LOCK_WAIT = 1.0
+
 
 def review_workspace(db: DB, params: dict, body: Body) -> Any:
     from brindle.config import load_repo_config
@@ -432,8 +432,14 @@ def review_workspace(db: DB, params: dict, body: Body) -> Any:
     if ws.kind != "worktree":
         raise ServiceError("invalid", "only a worker's workspace (its own branch and worktree) can be reviewed")
     # With checks, a detached helper runs them first; review.submitted ends it.
-    reviewer = agents.start_review(db, None, ws, _get(body, "profile"), _get(body, "focus"),
-                                   load_repo_config(ws.repo_root, branch=ws.base_branch))
+    # Acquire before dispatch can publish a claim or start any work. Nested
+    # engine acquisitions reuse this lock, including the path without checks.
+    try:
+        with agents.review_dispatch_lock(ws.id, timeout=REVIEW_LOCK_WAIT):
+            reviewer = agents.start_review(db, None, ws, _get(body, "profile"), _get(body, "focus"),
+                                           load_repo_config(ws.repo_root, branch=ws.base_branch))
+    except pipeline.LockTimeout:
+        raise ServiceError("busy", "another review dispatch is in progress", 409) from None
     return {"reviewer": reviewer.id if reviewer else None, "checks_running": reviewer is None}
 
 
@@ -624,6 +630,8 @@ def commit_edit(ws: Workspace, rel: str, data: bytes | None, base: str | None,
     try:
         if base is not None and (len(base) < 7 or not git.hash_blob(ws.path, before, name).startswith(base)):
             raise ServiceError("stale", f"{rel} has changed since the diff was shown; reload it", 409)
+        # The first write: from here the edit runs to its end (commit or rollback), client or not.
+        spawn.begin_write()
         if data is None:
             os.unlink(leaf, dir_fd=dir_fd)
         else:
@@ -839,6 +847,41 @@ def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None) -> No
     bus.publish_agent(db, "session.pr_opened", key[0], url=url)
 
 
+def _preparation_pending(db: DB, root_id: str) -> bool:
+    """Whether preparation needs dispatch, without git on a settled session.
+
+    Readiness may be cached while a lock clears, a job finishes or its
+    backoff expires. Read these independent inputs on each sweep; the
+    dispatch below still takes the work lock and rechecks the live checkout.
+    """
+    root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    if ws is None:
+        return True  # the normal dispatch reports a missing session
+    try:
+        own, _ = review._git_dirs(ws.path)
+        if (own / "HEAD").read_text().strip() != f"ref: refs/heads/{ws.branch}":
+            return True  # refresh a branch switch even if its commit is unchanged
+    except (OSError, UnicodeDecodeError, ValueError):
+        return True
+    key = (root_id, ws.branch)
+    with _PR_LOCK:
+        if key in _PR_WORK:
+            return False
+    if identity_lock.locked_by(root_id):
+        return False
+    if db.conn.execute(f"SELECT 1 FROM session_prs WHERE {_SESSION_PR} AND url IS NOT NULL", key).fetchone():
+        return False
+    fp = review._fingerprint(ws, ws.base_branch) if ws.base_branch else None
+    if fp is None:
+        return True
+    row = db.conn.execute(f"SELECT sha, state FROM session_pr_prep WHERE {_SESSION_PR}", key).fetchone()
+    if row and row["sha"] == fp.head and row["state"] != "checking":
+        return False
+    tried, at = _PR_TRIED.get(key, (None, 0.0))
+    return tried != fp.head or time.monotonic() - at >= PREPARE_AGAIN_SECONDS
+
+
 def prepare_pr(db: DB, root_id: str) -> Job | None:
     """Prepare the ready session ``root_id``'s PR for the person's approval:
     draft its title, run the full pre-PR checks on its HEAD (gates.pr_checked,
@@ -848,6 +891,8 @@ def prepare_pr(db: DB, root_id: str) -> Job | None:
     branch has a PR (new commits wait for the person's Push), while the
     session belongs to another identity, or while this daemon is already
     preparing it."""
+    if not _preparation_pending(db, root_id):
+        return None
     root, ws = review.session(db, root_id)
     key = (root.id, ws.branch)
     if identity_lock.locked_by(root.id) or review.open_pr(db, root, ws) or not _start_pr_work(key):
@@ -2021,9 +2066,9 @@ def _streamed(db: DB, job: Job):
     """A ``run`` for a cloud CLI's sign-in: no terminal input, its output
     (the URL or device code to confirm in the browser) as ``job.progress``."""
     def run(argv: list[str], env=None, pass_fds=()) -> subprocess.CompletedProcess:
-        with subprocess.Popen(argv, env=env, pass_fds=pass_fds, stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                              start_new_session=True) as proc:
+        with spawn.start(argv, env=env, pass_fds=pass_fds, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                         start_new_session=True) as proc:
             for line in proc.stdout:
                 bus.publish(db, "job.progress", job=job.id, text=line.rstrip("\n"))
         return subprocess.CompletedProcess(argv, proc.returncode)
@@ -2211,12 +2256,18 @@ def _run_upgrade() -> tuple[int, str]:
                                      if p.is_file()), None)
     if uv is None:
         return 127, "uv isn't installed: see https://docs.astral.sh/uv/"
+    proc = spawn.start([uv, "tool", "upgrade", "brindle"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                       stderr=subprocess.STDOUT, text=True)
     try:
-        out = subprocess.run([uv, "tool", "upgrade", "brindle"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, text=True, timeout=900)
+        out, _ = proc.communicate(timeout=UPGRADE_SECONDS)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.communicate()
         return 124, "uv tool upgrade brindle took over 15 minutes and was stopped"
-    return out.returncode, out.stdout or ""
+    return proc.returncode, out or ""
+
+
+UPGRADE_SECONDS = 15 * 60
 
 
 def upgrade_engine(db: DB, params: dict, body: Body) -> Any:
