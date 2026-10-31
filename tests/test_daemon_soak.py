@@ -17,7 +17,7 @@ import httpx2 as httpx
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import git, identity_lock, tmux, workspaces
+from brindle import git, identity_lock, spawn, tmux, workspaces
 from brindle.daemon import lifecycle, session_review
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
@@ -188,7 +188,7 @@ def test_session_diff_overload(db, repo, monkeypatch):
     db.add_agent(Agent("overload", "overload", "supervisor", "claude", None, "interactive",
                        "idle", "", None, 1000.0))
     db.conn.close()
-    local, started, completed = threading.local(), [], []
+    local, started, completed, stopped = threading.local(), [], [], []
     real_git, real_diff = git.run, session_review.diff
 
     def counted(*args, **kwargs):
@@ -203,6 +203,9 @@ def test_session_diff_overload(db, repo, monkeypatch):
             result = real_diff(*args)
             completed.append((local.count, time.monotonic() - start, len(result["files"])))
             return result
+        except spawn.Busy:          # its client left: brindle.spawn stopped its reads
+            stopped.append(start)
+            raise
         finally:
             del local.count
 
@@ -271,7 +274,9 @@ def test_session_diff_overload(db, repo, monkeypatch):
         print("OVERLOAD " + json.dumps({
             "latencies_s": latencies, "abandoned": len(abandoned), "shed": len(shed), "answered": len(answered),
             "diffs_completed": len(completed), "git_per_diff": sorted({c[0] for c in completed}),
-            "diff_seconds_min_max": [min(c[1] for c in completed[1:]), max(c[1] for c in completed[1:])],
+            "diffs_stopped": len(stopped),
+            "diff_seconds_min_max": [min(c[1] for c in completed[1:] or completed),
+                                     max(c[1] for c in completed[1:] or completed)],
             "anyio_capacity": limiter.total_tokens, "anyio_peak_active": max(s[0] for s in samples),
             "anyio_peak_queued": max(s[1] for s in samples),
             "anyio_at_probe": [occupancy.borrowed_tokens, occupancy.tasks_waiting],
@@ -281,7 +286,8 @@ def test_session_diff_overload(db, repo, monkeypatch):
         }, sort_keys=True))
         # A busy response can itself arrive after the client's short bound.
         assert len(answered) + len(abandoned) + len(shed) == 40
-        assert len(completed) == len(started) > 1
+        # Every diff either finished in full or was stopped with its client; none is lost.
+        assert len(completed) + len(stopped) == len(started) > 1
         assert all(c[2] == 25 for c in completed)
         assert limiter.borrowed_tokens == 0
         assert lane.admission.borrowed_tokens == lane.workers.borrowed_tokens == 0

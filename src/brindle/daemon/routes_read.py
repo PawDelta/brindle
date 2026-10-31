@@ -34,6 +34,7 @@ from brindle import (
     profiles,
     quota,
     sessions,
+    spawn,
     tmux,
     view,
     workspaces,
@@ -399,7 +400,7 @@ def _key_rows(repo: str | None) -> list[dict]:
 
     names = keystore.known_names(repo)
     with ThreadPoolExecutor(max_workers=8) as pool:    # the reads wait on subprocesses, not the CPU
-        return list(pool.map(row, names))
+        return list(pool.map(spawn.carry(row), names))
 
 
 @_json
@@ -514,7 +515,7 @@ def _routing(db: DB, request: Request, learn: bool) -> Any:
         signed = {k: probe(k) for k in probes}
     else:
         with ThreadPoolExecutor(max_workers=max(1, len(probes))) as pool:
-            signed = dict(zip(probes, pool.map(probe, probes)))
+            signed = dict(zip(probes, pool.map(spawn.carry(probe), probes)))
     rows = []
     for p in every:
         errors, warnings = profiles.lint_profile(p.name, lib)
