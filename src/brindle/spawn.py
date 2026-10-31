@@ -73,10 +73,16 @@ class Skipped(Busy):
 @dataclass
 class Deadline:
     """When a request's reads must be done (``at``, ``time.monotonic()``),
-    and whether it was stopped early (the client went away)."""
+    and whether it was stopped early (the client went away).
+
+    ``committed``: an action of this request has started. From then on the
+    request is a transaction that must run to its end (the reads after a
+    commit, its bookkeeping, a rollback), so neither the deadline nor a stop
+    applies to anything it starts any more."""
 
     at: float
     reason: str | None = None
+    committed: bool = False
     _stopped: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def left(self) -> float:
@@ -117,6 +123,25 @@ def deadline(seconds: float) -> Iterator[Deadline]:
 
 def current() -> Deadline | None:
     return _deadline.get()
+
+
+def begin_write() -> None:
+    """The request is about to change something itself (a file written from
+    Python, say), not through :func:`action`: raise Busy if its deadline has
+    passed or it was stopped, so nothing was done; otherwise commit it, so
+    the reads, bookkeeping and rollback that follow run to their end."""
+    dl = _live()
+    if dl is None:
+        return
+    if dl.stopped or dl.left() <= 0:
+        raise Busy(f"nothing was changed: {dl.reason or 'the request deadline passed'}")
+    dl.committed = True
+
+
+def _live() -> Deadline | None:
+    """The deadline in force: none once the request has committed to an action."""
+    dl = _deadline.get()
+    return None if dl is None or dl.committed else dl
 
 
 def carry(fn: Callable[..., T]) -> Callable[..., T]:
@@ -278,8 +303,9 @@ def read(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
     after GRACE) and Busy is raised; past its own ``timeout`` (sooner than
     any deadline) it raises ``subprocess.TimeoutExpired``, as
     ``subprocess.run`` would. ``skip``: raise Skipped at once when there's
-    no room instead of waiting."""
-    dl = _deadline.get()
+    no room instead of waiting. Once the request has started an action
+    (Deadline.committed), only ``timeout`` applies."""
+    dl = _live()
     now = time.monotonic()
     own_end = now + timeout if timeout is not None else math.inf
     end = min(own_end, dl.at) if dl is not None else own_end
@@ -301,6 +327,8 @@ def _run_read(argv: list[str], cwd: Any, env: dict[str, str] | None, input: str 
     first = True
     try:
         while True:
+            if dl is not None and dl.committed:   # another thread of the request started an action
+                dl, end = None, own_end
             left = end - time.monotonic()
             if left <= 0 or (dl is not None and dl.stopped):
                 break
@@ -359,11 +387,13 @@ def action(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = Non
     ``subprocess.run(capture_output=True)``. It may wait for room before it
     starts: until the request's deadline (then Busy, and nothing was done),
     or with no deadline up to ``wait`` seconds (ACTION_WAIT), after which it
-    starts regardless. Once started, no deadline stops it; ``timeout`` is
-    the caller's own hard limit, as with ``subprocess.run``."""
-    dl = _deadline.get()
+    starts regardless. Once started, no deadline stops it, nor anything else
+    the request starts after it (Deadline.committed); ``timeout`` is the
+    caller's own hard limit, as with ``subprocess.run``."""
+    dl = _live()
     if dl is not None:
         _admit(dl.at, dl, False, _name(argv))
+        dl.committed = True      # admitted: the rest of the request is its transaction
     else:
         _admit(time.monotonic() + (ACTION_WAIT if wait is None else wait), None, False,
                _name(argv), start_anyway=True)

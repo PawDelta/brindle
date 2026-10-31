@@ -1433,13 +1433,18 @@ def set_agy_model_provider(value: str | None) -> None:
         raise
 
 
+AUTH_PROBE_LIMIT = 10.0   # seconds a CLI's sign-in check may take
+
+
 def _auth_probe(argv: list[str], env: dict[str, str] | None = None) -> tuple[int, str] | None:
     import subprocess
 
+    from brindle import spawn
+
+    # A read: no room, a request deadline passed or the client gone is "can't tell", like a timeout.
     try:
-        out = subprocess.run(argv, capture_output=True, text=True, timeout=10,
-                             stdin=subprocess.DEVNULL, env=env)
-    except (OSError, subprocess.TimeoutExpired):
+        out = spawn.read(argv, env=env, timeout=AUTH_PROBE_LIMIT)
+    except (OSError, subprocess.TimeoutExpired, spawn.Busy):
         return None
     return out.returncode, (out.stdout or "") + (out.stderr or "")
 

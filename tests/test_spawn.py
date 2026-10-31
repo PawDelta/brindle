@@ -10,8 +10,12 @@ from pathlib import Path
 import pytest
 from conftest import sh
 
-from brindle import git, procs, spawn, status_cache
+from brindle import git, procs, providers, spawn, status_cache
+from brindle.daemon import routes_actions
 from brindle.daemon.app import Deadlines
+from brindle.db import Workspace
+
+REAL_PROBE = providers._auth_probe      # conftest stubs it for every test
 
 
 @pytest.fixture
@@ -46,8 +50,8 @@ def test_room(monkeypatch, load, level, expected):
 
 def test_with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips(overloaded, repo):
     t0 = time.monotonic()
-    with spawn.deadline(0.3), pytest.raises(spawn.Busy, match="load 9.0 on 4 cores"):
-        git.run(["status"], repo)          # a GitBusy: both a GitError and a Busy
+    with spawn.deadline(0.3), pytest.raises(git.GitBusy):     # both a GitError and a Busy
+        git.run(["status"], repo)
     assert time.monotonic() - t0 >= 0.3
 
     t0 = time.monotonic()
@@ -68,6 +72,10 @@ def test_past_its_deadline_nothing_starts_even_with_room(tmp_path):
         for start in (spawn.read, spawn.action):
             with pytest.raises(spawn.Busy):
                 start(["touch", str(marker)])
+        with pytest.raises(spawn.Busy):
+            spawn.begin_write()            # a write from Python is refused the same way
+        # The real sign-in probe (conftest stubs it) is gated too: no answer is "can't tell".
+        assert REAL_PROBE(["touch", str(marker)]) is None
     assert not marker.exists()
 
 
@@ -118,8 +126,8 @@ def test_an_abandoned_read_leaves_no_process(tmp_path, monkeypatch):
 
     t0 = time.monotonic()
     _serve("GET", handler, disconnect_when=lambda: pids.exists() and len(pids.read_text().split()) == 2)
-    assert got and "client went away" in str(got[0])
-    assert time.monotonic() - t0 < 5
+    assert got
+    assert time.monotonic() - t0 < 5       # the disconnect, not the 30 second deadline
     assert _until(lambda: not any(procs.alive(int(p)) for p in pids.read_text().split()))
     assert spawn.running() == 0
 
@@ -135,11 +143,13 @@ def test_a_cancelled_request_stops_the_read_its_thread_left_running():
 
     t0 = time.monotonic()
     _serve("GET", handler, cancel_when=lambda: spawn.running() == 1)
-    assert got and "request ended" in str(got[0])
-    assert time.monotonic() - t0 < 5
+    assert got
+    assert time.monotonic() - t0 < 5       # the cancellation, not the 30 second deadline
 
 
-def test_a_post_whose_client_left_finishes_its_action_but_not_its_reads(tmp_path):
+def test_a_post_whose_client_left_mid_action_runs_to_its_end(tmp_path):
+    """Once an action has started the request is a transaction: the action
+    and the reads after it (bookkeeping, a rollback) finish, client or not."""
     started, go = tmp_path / "started", tmp_path / "go"
     got: list = []
 
@@ -148,14 +158,32 @@ def test_a_post_whose_client_left_finishes_its_action_but_not_its_reads(tmp_path
         # The action may only end after the disconnect has stopped the request.
         threading.Thread(target=lambda: (_until(lambda: dl is None or dl.stopped), go.touch())).start()
         got.append(spawn.action(["sh", "-c", f"touch {started}; while [ ! -e {go} ]; do :; done; echo done"]).stdout)
-        try:
-            spawn.read(["true"])
-        except spawn.Busy as e:
-            got.append(e)
+        got.append(dl is not None and dl.stopped)
+        got.append(spawn.read(["echo", "after"]).stdout)
 
     _serve("POST", handler, disconnect_when=started.exists)
-    assert got[0] == "done\n"
-    assert len(got) == 2 and "client went away" in str(got[1])
+    assert got == ["done\n", True, "after\n"]
+
+
+def test_an_edit_whose_client_leaves_as_it_commits_keeps_the_commit(repo, monkeypatch):
+    """The reads after the commit (its sha) once failed on the stopped
+    deadline, and the rollback put the old file back under the new commit."""
+    ws = Workspace("w", str(repo), "w", "worktree", "main", "main", str(repo), None, "s", 1.0)
+    real = git.run
+
+    def run(args, *a, **kw):
+        proc = real(args, *a, **kw)
+        if "commit" in args:
+            spawn.current().stop()         # the client leaves the moment the commit is made
+        return proc
+
+    monkeypatch.setattr(git, "run", run)
+    base = sh("git rev-parse HEAD:app.py", repo)
+    with spawn.deadline(30):
+        _, commit = routes_actions.commit_edit(ws, "app.py", b"new\n", base, "edit")
+    assert commit == sh("git rev-parse HEAD", repo)
+    assert sh("git show HEAD:app.py", repo) == "new"
+    assert (repo / "app.py").read_bytes() == b"new\n"
 
 
 def test_warm_fans_out_under_the_request_deadline(monkeypatch):

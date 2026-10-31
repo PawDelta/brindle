@@ -36,7 +36,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from brindle import agents, autopilot, bus, gates, git, identity_lock, knowledge, pipeline, preflight, scratch, tmux, workspaces
+from brindle import agents, autopilot, bus, gates, git, identity_lock, knowledge, pipeline, preflight, scratch, spawn, tmux, workspaces
 from brindle import sessions as sessions_mod
 from brindle.daemon import session_review as review
 from brindle.daemon import terminal
@@ -632,6 +632,8 @@ def commit_edit(ws: Workspace, rel: str, data: bytes | None, base: str | None,
     try:
         if base is not None and (len(base) < 7 or not git.hash_blob(ws.path, before, name).startswith(base)):
             raise ServiceError("stale", f"{rel} has changed since the diff was shown; reload it", 409)
+        # The first write: from here the edit runs to its end (commit or rollback), client or not.
+        spawn.begin_write()
         if data is None:
             os.unlink(leaf, dir_fd=dir_fd)
         else:
