@@ -700,14 +700,20 @@ def test_gate_runs_checks_and_refuses_dirty_work(db, worker_ws):
     assert not r.ok and "uncommitted" in r.problem
 
 
-def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch):
+@pytest.mark.parametrize("ends", ["load falls", "wait off"])
+def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch, ends):
     """Plan 3.5: with its slot, a check run on a machine with no room waits
     for room, showing "checks waiting for room" and why, for as many polls as
-    the machine stays full, and runs once the load falls."""
+    the machine stays full, and runs once the load falls (or at once when
+    wait_for_room is off)."""
     from brindle import spawn
 
     ran = Path(worker_ws.path) / "ran.txt"
     seen, load = [], [14.0]
+    if ends == "wait off":
+        cfg = Path(worker_ws.repo_root) / ".brindle" / "config.json"
+        cfg.parent.mkdir(exist_ok=True)
+        cfg.write_text('{"wait_for_room": false}')
 
     def cancel():   # polled on every look at the machine while the run waits
         if gates.marked("checks-room", worker_ws.id):
@@ -721,7 +727,7 @@ def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch
     monkeypatch.setattr(gates, "SLOT_POLL", 0)
     ok, _ = gates.run_checked(db, worker_ws, "touch ran.txt", {}, 60, cancel=cancel, full=True)
     waiting = "checks waiting for room: the machine is busy (load 14.0 on 10 cores"
-    assert len(seen) == 2 and all(s.startswith(waiting) and not done for s, done in seen), seen
+    assert len(seen) == (2 if ends == "load falls" else 0) and all(s.startswith(waiting) and not done for s, done in seen), seen
     assert ok and ran.exists() and gates.checks_state(worker_ws) == "waiting for checks"
 
 

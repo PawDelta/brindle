@@ -120,7 +120,6 @@ class RepoConfig:
     max_agents: int = 5                # workers running at once per session; 0 means no cap
     check_timeout: int = 900           # seconds allowed for each check command
     wait_for_room: bool = True         # a new worker or check run waits while the machine is busy; false starts it at once
-    room_max_wait: int = 600           # seconds a waiting worker or check run waits before it starts anyway
     check_concurrency: int = 4         # check runs at once on this machine, across branches; the rest queue (0: no cap)
     usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
     limit_cooldown_minutes: int | None = None  # how long a provider that hit its limit counts as unavailable (default 300 for Antigravity)
@@ -383,7 +382,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
-                "check_concurrency", "wait_for_room", "room_max_wait",
+                "check_concurrency", "wait_for_room",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",
                 "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",

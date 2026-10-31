@@ -416,7 +416,8 @@ def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
 @pytest.mark.parametrize("tool, reports, ends", [
     ("assign", "later", "load falls"), ("handoff", "later", "load falls"),
     ("handoff", "while it starts", "load falls"),
-    ("assign", "later", "max wait"), ("assign", "later", "wait off")])
+    ("assign", "later", "start now"), ("assign", "later", "forced in flight"),
+    ("assign", "later", "wait off")])
 def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo, monkeypatch, tool, reports, ends):
     """Plan 3.5: on a machine with no room an assign (or handoff) queues the
     task with the reason, list_tasks shows it, autopilot doesn't count it as
@@ -444,26 +445,45 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     monkeypatch.setattr(spawn, "_load", lambda: load[0])
     monkeypatch.setattr(spawn, "_cores", lambda: 10)
 
+    if ends == "wait off":   # configured from the outset: the real dispatch starts a worker at once
+        (repo / ".brindle" / "config.json").write_text('{"pipeline": false, "wait_for_room": false}')
+        out = asyncio.run(getattr(mcp_server, tool)("developer", "do A", branch="feat-a"))
+        assert not out.startswith("Queued") and not db.list_tasks(str(repo), state="pending")
+        assert len(db.list_agents()) == 2
+        return
     out = asyncio.run(getattr(mcp_server, tool)("developer", "do A", branch="feat-a"))
     busy = "the machine is busy (load 14.0 on 10 cores"
-    assert out.startswith("Queued task") and busy in out, out
+    assert out.startswith("Queued task") and busy in out and "start_now" in out, out
     [t] = db.list_tasks(str(repo), state="pending")
     assert f"waiting for room: {busy}" in tasks.list_text(db, str(repo))
     assert [a.id for a in db.list_agents()] == ["boss"]                  # nothing started
-    assert autopilot.on_stop(db, boss, {}) is None                       # waiting, not stalled
+    # Waiting is not a stall (no nudge), but the supervisor is reminded which task waits.
+    reminder = autopilot.on_stop(db, boss, {})
+    assert t.id in reminder["reason"] and "start_now" in reminder["reason"]
     assert db.get_autopilot("boss").nudges == 0
-    # Until room_max_wait (default 600 s) is up, the task waits rather than overload the machine.
-    db.update_task(t.id, waiting_since=time.time() - 500)
+    # However long the machine stays full, the task waits rather than overload it.
+    db.update_task(t.id, waiting_since=time.time() - 86400)
     tasks.sweep(db)
     assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
 
+    if ends == "forced in flight":   # a forced worker is still starting: a second force is refused
+        asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b"))
+        [b] = [x for x in db.list_tasks(str(repo), state="pending") if x.id != t.id]
+        db.update_task(t.id, state="starting", waiting=tasks.FORCED)
+        with pytest.raises(ValueError, match="still starting"):
+            tasks.start_now(db, boss, b.id)
+        assert db.get_task(b.id).state == "pending" and len(db.list_agents()) == 1
+        return
+    if ends == "start now":
+        forced = spawn.stats()["forced"]
+        msg = tasks.start_now(db, boss, t.id)
+        assert tasks.FORCED in msg and db.get_task(t.id).state == "started"
+        assert db.get_task(t.id).waiting == tasks.FORCED and spawn.stats()["forced"] == forced + 1
+        assert spawn.no_room(str(repo)) is not None     # only worker starts are forced: checks keep waiting
+        return
+
     db.set_status("boss", "paused")
-    if ends == "load falls":
-        load[0] = 2.0
-    elif ends == "max wait":   # the fake clock: the wait began 11 minutes ago, the load never fell
-        db.update_task(t.id, waiting_since=time.time() - 660)
-    else:
-        (repo / ".brindle" / "config.json").write_text('{"pipeline": false, "wait_for_room": false}')
+    load[0] = 2.0
     assert not tasks.start_when_room(db, t.id, poll=0) and tasks.start_with_room(db) == 0
     assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
 
@@ -482,11 +502,7 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     if reports == "later":
         agents.report_result(db, worker.id, "did A", docs_checked=True)
     told = [full_text(db, "boss", db.pop_pending("boss").body) for _ in range(db.pending_count("boss"))]
-    if ends == "max wait":
-        assert sum(f"Started {worker.id} for task {t.id} after waiting 11 min for room; "
-                   "the machine is still busy (load 14.0" in m for m in told) == 1
-    elif ends == "load falls":
-        assert sum(f"Started {worker.id} for task {t.id} (was waiting for room: {busy}" in m for m in told) == 1
+    assert sum(f"Started {worker.id} for task {t.id} (was waiting for room: {busy}" in m for m in told) == 1
     assert sum("did A" in m for m in told) == 1, told
 
 

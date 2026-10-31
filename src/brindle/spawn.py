@@ -242,23 +242,31 @@ def why() -> str:
             f"{running()} of brindle's processes running{mem.get(level, '')})")
 
 
-def no_room(repo_root: str | None = None, since: float | None = None) -> str | None:
+def no_room(repo_root: str | None = None) -> str | None:
     """Why a new worker or check run should wait before it starts (what
     :func:`why` says), or None when the machine has room for it. Unlike a
     read or an action this applies in every process, gate on or off: a worker
     or a check run is the heaviest thing brindle starts. It waits until there
-    is room or until it is cancelled, but not forever: never when the repo's
-    ``wait_for_room`` is false, and not past ``room_max_wait`` seconds after
-    ``since`` (a wall-clock time, when the wait began)."""
+    is room or until it is cancelled (a supervisor can start a waiting worker
+    anyway: ``tasks.start_now``), unless the repo's ``wait_for_room`` is false."""
     if room() >= 1:
         return None
     if repo_root is not None:
         from brindle.config import load_repo_config
 
-        cfg = load_repo_config(repo_root)
-        if not cfg.wait_for_room or (since is not None and time.time() - since >= cfg.room_max_wait):
+        if not load_repo_config(repo_root).wait_for_room:
             return None
     return why()
+
+
+_forced = 0
+
+
+def count_forced() -> None:
+    """A worker was started despite the load, by its supervisor (``stats``)."""
+    global _forced
+    with _cond:
+        _forced += 1
 
 
 def _has_room() -> bool:
@@ -271,7 +279,7 @@ def stats() -> dict:
     while running (their request ended, or its deadline passed), since this
     process started."""
     with _cond:
-        return {"running": _running, "refused": _refused, "stopped": _stopped}
+        return {"running": _running, "refused": _refused, "stopped": _stopped, "forced": _forced}
 
 
 def _count_stopped() -> None:
