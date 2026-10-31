@@ -575,6 +575,7 @@ export interface DocSwitch {
 /* GET /analysis-docs/export-config */
 export interface DocExportConfig {
   google_client_id: string | null;
+  google_client_secret: string | null;
   microsoft_client_id: string | null;
 }
 

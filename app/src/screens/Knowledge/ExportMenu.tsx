@@ -103,7 +103,7 @@ export function ExportMenu({ client, id, title, repo, pickFolder, onSaid, sessio
 
   const toGoogle = () =>
     act(async () => {
-      if (!sess.signedIn("google")) await sess.signIn("google", config!.google_client_id!);
+      if (!sess.signedIn("google")) await sess.signIn("google", config!.google_client_id!, config!.google_client_secret);
       const file = await docx("google_docs");
       const up = await sess.uploadToGoogle(file.name, file.bytes);
       return up.url ? `Opened as a Google Doc: ${up.url}` : "Saved as a Google Doc in your Drive.";
