@@ -46,21 +46,32 @@ const parsed = (term: import("@xterm/xterm").Terminal) => act(() => new Promise<
 it("sends Caps Lock letters on keydown exactly once without invoking clipboard shortcuts", () => {
   const { written, copied, term } = mount();
   const textarea = term().textarea!;
+  const press = (type: string, key: string, keyCode = key.charCodeAt(0)) => {
+    const e = new KeyboardEvent(type, { key, keyCode, charCode: type === "keypress" ? key.charCodeAt(0) : 0, bubbles: true, cancelable: true });
+    Object.defineProperty(e, "getModifierState", { value: (name: string) => name === "CapsLock" });
+    act(() => void textarea.dispatchEvent(e));
+    return e;
+  };
   for (const key of "ACV") {
-    const press = (type: string) => {
-      const e = new KeyboardEvent(type, { key, keyCode: key.charCodeAt(0), charCode: type === "keypress" ? key.charCodeAt(0) : 0, bubbles: true, cancelable: true });
-      Object.defineProperty(e, "getModifierState", { value: (name: string) => name === "CapsLock" });
-      act(() => void textarea.dispatchEvent(e));
-      return e;
-    };
-    expect(press("keydown").defaultPrevented).toBe(true);
+    expect(press("keydown", key).defaultPrevented).toBe(true);
     expect(written.at(-1)).toBe(key);
     // A webview that also emits keypress must not send the same letter twice.
-    press("keypress");
-    press("keyup");
+    press("keypress", key);
+    press("keyup", key);
   }
   expect(written).toEqual(["A", "C", "V"]);
   expect(copied).toEqual([]);
+  // A dead key survives its keyup; xterm must receive the composed letter
+  // and clear its pending dead key before the following navigation key.
+  press("keydown", "Dead", 222);
+  press("keyup", "Dead", 222);
+  press("keydown", "A");
+  press("keypress", "Á");
+  press("keyup", "A");
+  press("keydown", "ArrowLeft", 37);
+  expect(written).toEqual(["A", "C", "V", "Á", "\x1b[D"]);
+  press("keydown", "B");
+  expect(written.at(-1)).toBe("B");
 });
 
 it("draws the client's bytes as they come and sends what xterm.js says, as is", async () => {
