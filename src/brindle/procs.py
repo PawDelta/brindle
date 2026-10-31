@@ -27,10 +27,14 @@ from __future__ import annotations
 import os
 import re
 import signal
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from brindle import spawn
+
+# Seconds ``ps`` may take, waiting for room included (see brindle.spawn).
+PS_LIMIT = 30.0
 
 
 @dataclass
@@ -58,8 +62,7 @@ def table() -> dict[int, Proc]:
             out[int(d.name)] = Proc(int(d.name), ppid, f"{cmd} {env}")
         return out
     # macOS (BSD ps): `e` appends each process's environment to its command.
-    listing = subprocess.run(["ps", "xeww", "-o", "pid=,ppid=,command="],
-                             capture_output=True, text=True).stdout
+    listing = spawn.read(["ps", "xeww", "-o", "pid=,ppid=,command="], timeout=PS_LIMIT).stdout
     for line in listing.splitlines():
         parts = line.split(None, 2)
         if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():

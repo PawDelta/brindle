@@ -267,6 +267,9 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     _raise_file_limit()
     token = new_token()
     socks, info = prepare(token, unix=unix, tcp=tcp)
+    from brindle import spawn
+
+    spawn.enable()      # every process the daemon starts waits for room (brindle.spawn)
     from brindle.daemon.events import start_poller
 
     poller = start_poller()
