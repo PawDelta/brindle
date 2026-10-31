@@ -1,0 +1,365 @@
+{
+  "attach": {
+    "args": [
+      "-u",
+      "-T",
+      "RGB,256,mouse,title,bpaste,focus,sync,usstyle,strikethrough,overline,cstyle,clipboard,hyperlinks",
+      "attach-session",
+      "-t",
+      "=brindle-view-7-1:",
+      ";",
+      "set-option",
+      "-t",
+      "=brindle-view-7-1:",
+      "destroy-unattached",
+      "on"
+    ],
+    "view": "brindle-view-7-1"
+  },
+  "bindings": {
+    "3.2": "bind-key -T brindle-view MouseDown1Pane select-pane -t = \\; send-keys -M\nbind-key -T brindle-view MouseDown2Pane select-pane -t = \\; if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send -M\" \"paste -p\"\nbind-key -T brindle-view MouseDrag1Pane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send -M\" \"copy-mode -M\"\nbind-key -T brindle-view WheelUpPane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send -M\" \"copy-mode -e\"\nbind-key -T brindle-view DoubleClick1Pane select-pane -t = \\; if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send -M\" \"copy-mode -H ; send -X select-word ; run -d0.3 ; send -X copy-pipe-and-cancel\"\nbind-key -T brindle-view TripleClick1Pane select-pane -t = \\; if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send -M\" \"copy-mode -H ; send -X select-line ; run -d0.3 ; send -X copy-pipe-and-cancel\"\nbind-key -T brindle-view C-M-S-F12 if-shell -F \"#{selection_present}\" \"send-keys -X copy-selection-no-clear\"\nbind-key -T brindle-view C-M-S-F11 if-shell -F \"#{selection_present}\" \"send-keys -X copy-selection-and-cancel\" \"send-keys C-c\"\n",
+    "3.7": "bind-key -T brindle-view MouseDown1Pane select-pane -t = \\; send-keys -M\nbind-key -T brindle-view MouseDown2Pane select-pane -t = \\; if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send -M\" \"paste -p\"\nbind-key -T brindle-view MouseDrag1Pane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send -M\" \"copy-mode -M\"\nbind-key -T brindle-view WheelUpPane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send -M\" \"copy-mode -e\"\nbind-key -T brindle-view DoubleClick1Pane select-pane -t = \\; if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send -M\" \"copy-mode -H ; send -X select-word ; run -d0.3 ; send -X copy-pipe-and-cancel\"\nbind-key -T brindle-view TripleClick1Pane select-pane -t = \\; if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send -M\" \"copy-mode -H ; send -X select-line ; run -d0.3 ; send -X copy-pipe-and-cancel\"\nbind-key -T brindle-view WheelUpPane if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" { send-keys -M } { copy-mode -e }\nbind-key -T brindle-view MouseDown1ScrollbarUp if-shell -F -t = \"#{pane_in_mode}\" { send-keys -X page-up } { copy-mode -u }\nbind-key -T brindle-view MouseDown1ScrollbarDown if-shell -F -t = \"#{pane_in_mode}\" { send-keys -X page-down } { copy-mode -d }\nbind-key -T brindle-view MouseDrag1ScrollbarSlider if-shell -F -t = \"#{pane_in_mode}\" { send-keys -X scroll-to-mouse } { copy-mode -S }\nbind-key -T brindle-view C-M-S-F12 if-shell -F \"#{selection_present}\" \"send-keys -X copy-selection-no-clear\"\nbind-key -T brindle-view C-M-S-F11 if-shell -F \"#{selection_present}\" \"send-keys -X copy-selection-and-cancel\" \"send-keys C-c\"\n"
+  },
+  "check_version": [
+    [
+      "tmux 3.2",
+      null
+    ],
+    [
+      "tmux 3.0a",
+      "The agents' tmux server is tmux 3.0a, and brindle needs tmux 3.2 or newer to show a session. Update tmux, then reopen the session."
+    ],
+    [
+      "garbage",
+      "The agents' tmux server says its version is \"garbage\", which brindle can't read: it needs tmux 3.2 or newer."
+    ]
+  ],
+  "client_format": "#{client_pid}\t#{client_width}\t#{window_offset_x}",
+  "crop_of": [
+    {
+      "client": null,
+      "crop": {
+        "cols": 31,
+        "left": 31,
+        "width": null
+      },
+      "panes": "s1\t0\t29\t0\t24\t121\t25\t0\t0\t0\n\t31\t120\t0\t24\t121\t25\t0\t0\t0",
+      "visible": 90
+    },
+    {
+      "client": null,
+      "crop": {
+        "cols": 31,
+        "left": 0,
+        "width": null
+      },
+      "panes": "\t0\t89\t0\t24\t121\t25\t0\t0\t0\ns1\t91\t120\t0\t24\t121\t25\t0\t0\t0",
+      "visible": 90
+    },
+    {
+      "client": null,
+      "crop": {
+        "cols": 0,
+        "left": 0,
+        "width": null
+      },
+      "panes": "s1\t0\t29\t0\t24\t121\t25\t1\t0\t0\n\t31\t120\t0\t24\t121\t25\t1\t0\t0",
+      "visible": 90
+    },
+    {
+      "client": null,
+      "crop": {
+        "cols": 0,
+        "left": 0,
+        "width": null
+      },
+      "panes": "\t0\t120\t0\t11\t121\t25\t0\t0\t0\ns1\t0\t120\t13\t24\t121\t25\t0\t0\t0",
+      "visible": 90
+    },
+    {
+      "client": null,
+      "crop": {
+        "cols": 0,
+        "left": 0,
+        "width": null
+      },
+      "panes": "garbage",
+      "visible": 90
+    },
+    {
+      "client": [
+        121,
+        0
+      ],
+      "crop": {
+        "cols": 31,
+        "left": 0,
+        "width": 69
+      },
+      "panes": "\t0\t68\t0\t24\t100\t25\t0\t0\t0\ns1\t70\t99\t0\t24\t100\t25\t0\t0\t0",
+      "visible": 90
+    },
+    {
+      "client": [
+        121,
+        0
+      ],
+      "crop": {
+        "cols": 31,
+        "left": 31,
+        "width": 69
+      },
+      "panes": "s1\t0\t29\t0\t24\t100\t25\t0\t0\t0\n\t31\t99\t0\t24\t100\t25\t0\t0\t0",
+      "visible": 90
+    },
+    {
+      "client": [
+        121,
+        10
+      ],
+      "crop": {
+        "cols": 31,
+        "left": 21,
+        "width": null
+      },
+      "panes": "s1\t0\t29\t0\t24\t160\t25\t0\t0\t0\n\t31\t159\t0\t24\t160\t25\t0\t1\t5",
+      "visible": 90
+    },
+    {
+      "client": [
+        121,
+        40
+      ],
+      "crop": {
+        "cols": 31,
+        "left": 0,
+        "width": null
+      },
+      "panes": "s1\t0\t29\t0\t24\t160\t25\t0\t0\t0\n\t31\t159\t0\t24\t160\t25\t0\t1\t5",
+      "visible": 90
+    },
+    {
+      "client": [
+        121,
+        39
+      ],
+      "crop": {
+        "cols": 31,
+        "left": 22,
+        "width": null
+      },
+      "panes": "s1\t0\t29\t0\t24\t160\t25\t0\t0\t0\n\t31\t159\t0\t24\t160\t25\t0\t1\t119",
+      "visible": 90
+    },
+    {
+      "client": [
+        121,
+        39
+      ],
+      "crop": {
+        "cols": 31,
+        "left": 31,
+        "width": null
+      },
+      "panes": "s1\t0\t29\t0\t24\t160\t25\t0\t0\t0\n\t31\t159\t0\t24\t160\t25\t0\t1\t128",
+      "visible": 90
+    }
+  ],
+  "features": "RGB,256,mouse,title,bpaste,focus,sync,usstyle,strikethrough,overline,cstyle,clipboard,hyperlinks",
+  "key_table": "brindle-view",
+  "layout_format": "#{@brindle_sidebar}\t#{pane_left}\t#{pane_right}\t#{pane_top}\t#{pane_bottom}\t#{window_width}\t#{window_height}\t#{window_zoomed_flag}\t#{pane_active}\t#{cursor_x}",
+  "min_tmux": [
+    3,
+    2
+  ],
+  "parse_version": [
+    [
+      "tmux 3.7c",
+      [
+        3,
+        7
+      ]
+    ],
+    [
+      "tmux 3.2a",
+      [
+        3,
+        2
+      ]
+    ],
+    [
+      "3.10",
+      [
+        3,
+        10
+      ]
+    ],
+    [
+      "tmux next-3.4",
+      [
+        3,
+        4
+      ]
+    ],
+    [
+      "tmux 3.0a",
+      [
+        3,
+        0
+      ]
+    ],
+    [
+      "tmux master",
+      [
+        9999,
+        0
+      ]
+    ],
+    [
+      "tmux openbsd-7.5",
+      [
+        9999,
+        0
+      ]
+    ],
+    [
+      "nonsense",
+      null
+    ]
+  ],
+  "prepare": {
+    "args": [
+      "new-session",
+      "-d",
+      "-s",
+      "brindle-view-7-1",
+      "-n",
+      "brindle-view-placeholder",
+      "-x",
+      "90",
+      "-y",
+      "25",
+      "cat",
+      ";",
+      "link-window",
+      "-s",
+      "agents:a1",
+      "-t",
+      "=brindle-view-7-1:",
+      ";",
+      "kill-window",
+      "-t",
+      "=brindle-view-7-1:brindle-view-placeholder",
+      ";",
+      "set-option",
+      "-t",
+      "=brindle-view-7-1:",
+      "status",
+      "off",
+      ";",
+      "set-option",
+      "-t",
+      "=brindle-view-7-1:",
+      "prefix",
+      "None",
+      ";",
+      "set-option",
+      "-t",
+      "=brindle-view-7-1:",
+      "prefix2",
+      "None",
+      ";",
+      "set-option",
+      "-t",
+      "=brindle-view-7-1:",
+      "mouse",
+      "on",
+      ";",
+      "set-option",
+      "-t",
+      "=brindle-view-7-1:",
+      "key-table",
+      "brindle-view",
+      ";",
+      "source-file",
+      "-"
+    ],
+    "cols": 90,
+    "rows": 25,
+    "target": "agents:a1",
+    "view": "brindle-view-7-1"
+  },
+  "server_args": [
+    {
+      "args": [],
+      "server": null
+    },
+    {
+      "args": [
+        "-L",
+        "brindle"
+      ],
+      "server": "brindle"
+    },
+    {
+      "args": [],
+      "server": "default"
+    },
+    {
+      "args": [
+        "-S",
+        "/tmp/brindle/agents.sock"
+      ],
+      "server": "/tmp/brindle/agents.sock"
+    },
+    {
+      "args": null,
+      "server": "not a name"
+    }
+  ],
+  "valid_target": [
+    [
+      "agents:a1",
+      true
+    ],
+    [
+      "%12",
+      true
+    ],
+    [
+      "@3",
+      true
+    ],
+    [
+      "-t",
+      false
+    ],
+    [
+      "a;b",
+      false
+    ],
+    [
+      "",
+      false
+    ]
+  ],
+  "view_owner": [
+    [
+      "brindle-view-4242-7",
+      4242
+    ],
+    [
+      "brindle-view-placeholder",
+      null
+    ],
+    [
+      "brindle-view-12-x",
+      null
+    ],
+    [
+      "agents",
+      null
+    ]
+  ],
+  "view_prefix": "brindle-view-"
+}

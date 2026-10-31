@@ -292,6 +292,9 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     try:
         asyncio.run(run())
     finally:
+        from brindle.daemon import pty
+
+        pty.close_all()     # views a socket still had open as the server stopped
         for s in socks:
             s.close()
         cleanup(info)
