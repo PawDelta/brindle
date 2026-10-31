@@ -76,7 +76,9 @@ impl Guard {
 fn serve(stream: TcpStream, guard: &Guard) -> Result<(), String> {
     stream.set_nodelay(true).map_err(|e| e.to_string())?;
     let writer = stream.try_clone().map_err(|e| e.to_string())?;
-    // A page from anywhere else is refused before the handshake completes.
+    // A page from anywhere else is refused before the handshake completes. The Err is
+    // tungstenite's callback type, not ours to box.
+    #[allow(clippy::result_large_err)]
     let same_origin = |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
         if guard.origin_ok(req.headers().get("origin").and_then(|o| o.to_str().ok())) {
             Ok(res)

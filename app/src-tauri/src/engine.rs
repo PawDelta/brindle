@@ -245,6 +245,8 @@ mod tests {
     }
 
     #[test]
+    // A constant per target, asserted for each.
+    #[allow(clippy::assertions_on_constants)]
     fn a_release_on_macos_never_falls_back_to_path() {
         if cfg!(target_os = "macos") {
             assert_eq!(PATH_FALLBACK, cfg!(debug_assertions));

@@ -223,7 +223,7 @@ pub fn release_build_wanted(current: &Version, remote: &str) -> Result<bool, Str
     Ok(match remote.cmp_precedence(current) {
         Ordering::Greater => true,
         Ordering::Less => false,
-        Ordering::Equal => release_run(current).map_or(true, |mine| run > mine),
+        Ordering::Equal => release_run(current).is_none_or(|mine| run > mine),
     })
 }
 

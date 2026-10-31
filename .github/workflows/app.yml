@@ -117,3 +117,43 @@ jobs:
           [ -f app/dist/index.html ] || echo '<!doctype html>' > app/dist/index.html
       - name: Test
         run: cargo test --manifest-path app/src-tauri/Cargo.toml
+
+  windows:
+    # Windows, where the app reaches the engine in WSL: the shell's Rust compiled, linted
+    # and tested there, and the front end's tests. Hosted runners have no WSL2, so nothing
+    # here drives a real tmux: the tests that do are unix-only.
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install
+        run: npm --prefix app ci
+      - name: Front-end tests
+        run: npm --prefix app test -- --run
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            app/src-tauri/target
+          key: cargo-test-${{ runner.os }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-test-${{ runner.os }}-
+      # The shell embeds the front end's dist/ at compile time.
+      - name: Front end for the shell
+        shell: bash
+        run: |
+          mkdir -p app/dist
+          [ -f app/dist/index.html ] || echo '<!doctype html>' > app/dist/index.html
+      - name: Clippy
+        run: cargo clippy --manifest-path app/src-tauri/Cargo.toml --all-targets -- -D warnings
+      - name: Test
+        run: cargo test --manifest-path app/src-tauri/Cargo.toml

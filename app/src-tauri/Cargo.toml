@@ -5,7 +5,7 @@ description = "The brindle desktop app"
 authors = ["PawDelta"]
 license-file = "../../LICENSE"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.82"
 
 [lib]
 name = "brindle_desktop_lib"
