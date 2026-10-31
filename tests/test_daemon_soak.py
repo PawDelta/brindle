@@ -213,7 +213,7 @@ def test_session_diff_overload(db, repo, monkeypatch):
     monkeypatch.setattr(session_review, "diff", measured)
 
     async def exercise():
-        short, cheap_bound = 0.075, 0.1
+        short, cheap_bound = 0.075, 1.0   # 5x under the 5 s starvation it guards; CI macOS runners hit 146 ms
         limiter = anyio.to_thread.current_default_thread_limiter()
         samples, abandoned, shed, answered, latencies = [], [], [], [], {}
         loop = asyncio.get_running_loop()
