@@ -75,15 +75,36 @@ GONE = "Nothing to merge"
 _held = threading.local()
 
 
+class LockTimeout(TimeoutError):
+    """A bounded file-lock acquisition expired before entering its body."""
+
+
 @contextmanager
-def _file_lock(name: str, wait: bool = True):
-    """Without ``wait``, BlockingIOError when another holds it."""
+def _file_lock(name: str, wait: bool = True, *, timeout: float | None = None):
+    """Without ``wait``, BlockingIOError when another holds it.
+
+    With ``timeout``, wait at most that many seconds, then raise LockTimeout.
+    Omitting it preserves the blocking acquisition used by background work.
+    """
     from brindle.config import brindle_home
 
     lock_dir = brindle_home() / "locks"
     lock_dir.mkdir(parents=True, exist_ok=True)
     with open(lock_dir / f"{name}.lock", "w") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        if timeout is None or not wait:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        else:
+            deadline = time.monotonic() + timeout
+            pause = threading.Event()
+            while True:
+                try:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise LockTimeout(f"{name} is busy") from None
+                    pause.wait(min(0.05, remaining))
         try:
             yield
         finally:
@@ -128,14 +149,14 @@ def branch_start_lock(repo_root: str, branch: str):
 
 
 @contextmanager
-def _reentrant_lock(name: str, wait: bool = True):
+def _reentrant_lock(name: str, wait: bool = True, *, timeout: float | None = None):
     held = getattr(_held, "ids", None)
     if held is None:
         held = _held.ids = set()
     if name in held:
         yield
         return
-    with _file_lock(name, wait):
+    with _file_lock(name, wait, timeout=timeout):
         held.add(name)
         try:
             yield
