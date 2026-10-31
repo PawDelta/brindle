@@ -668,6 +668,11 @@ def set_goal(db: DB, root_id: str, goal: str,
     _adopt_legacy(db, root_id)
     old = {(m.title, m.check_cmd): m for m in db.milestones(root_id)}
     ap = db.get_autopilot(root_id)
+    from brindle.pro import analysis_brief
+
+    # A goal that becomes large work (new, or grown to 2+ milestones) gets the
+    # server's brief once, whichever way it was set.
+    briefed = analysis_brief.large_work(milestones=len(old)) and ap is not None and ap.goal == goal.strip()
     fields: dict[str, object] = {}
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
@@ -690,6 +695,26 @@ def set_goal(db: DB, root_id: str, goal: str,
     write_goals_file(db, root_id)
     knowledge.note(db, root_id, knowledge.INTENT,
                    {"summary": "\n".join([goal.strip(), *(m[0] for m in milestones)]), "paths": []})
+    if analysis_brief.large_work(milestones=len(milestones)) and not briefed:
+        brief = analysis_brief.server_brief(db, root_id, "\n".join([goal.strip(), *(m[0] for m in milestones)]), [])
+        if brief:
+            db.enqueue(root_id, brief, None)
+
+
+def _goal_doc_rule(db: DB, root_id: str) -> str:
+    """For a goal of 2+ milestones, now reached: the rule to leave its analysis doc."""
+    from brindle.pro import analysis_brief
+
+    try:
+        root = db.get_agent(root_id)
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if ws is None or not analysis_brief.large_work(milestones=len(db.milestones(root_id))):
+            return ""
+        return ("This goal had 2+ milestones: before you tell the user, leave its analysis doc.\n\n"
+                + analysis_brief.doc_rule(db, ws.repo_root, ws.branch))
+    except Exception:  # noqa: BLE001 - extra guidance, never a reason to lose the verdict
+        log.info("goal analysis doc rule not added", exc_info=True)
+        return ""
 
 
 CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy", "opencode": "opencode"}
@@ -1604,9 +1629,10 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
         db.update_autopilot(root_id, state="done", note=None, audit_ok=1, auditor_id=None,
                             audit_history=new_history)
         db.bump_progress(root_id)
+        rule = _goal_doc_rule(db, root_id)
         return (f"[brindle] Completion audit of {sha}: APPROVED. Every milestone passes and the "
                 f"auditor found the goal fully delivered: the goal is reached. Tell the user."
-                f"\n\n{summary}")
+                f"\n\n{summary}" + (f"\n\n{rule}" if rule else ""))
     audit_fails = new_history.count("(gaps found)")
     if audit_fails >= MAX_AUDIT_PASSES:
         db.update_autopilot(root_id, state="blocked", note=summary.strip()[:4000], audit_ok=0,

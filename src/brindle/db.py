@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
     port_base INTEGER,
     tmux_session TEXT NOT NULL,
     created_at REAL NOT NULL,
+    session_root TEXT,
     UNIQUE (repo_root, name)
 );
 CREATE TABLE IF NOT EXISTS agents (
@@ -612,6 +613,18 @@ CREATE TABLE IF NOT EXISTS context_receipts (
     content_hash TEXT NOT NULL,
     PRIMARY KEY (task_id, item_kind, item_id)
 );
+-- A session's drafts of analysis docs (brindle.pro.analysis_docs owns these):
+-- kept apart from the agent and workspace rows, which may go first.
+CREATE TABLE IF NOT EXISTS analysis_drafts (
+    session TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    doc_id TEXT NOT NULL,
+    workspace_id TEXT,
+    drafter TEXT NOT NULL,
+    state TEXT NOT NULL CHECK (state IN ('open', 'clash', 'publish', 'drop')),
+    PRIMARY KEY (session, branch, doc_id)
+);
+CREATE INDEX IF NOT EXISTS analysis_drafts_ws ON analysis_drafts(workspace_id, branch, state);
 -- Knowledge sources and their indexed documents (brindle.kb owns these; the
 -- kb_fts full-text table is made in DB._migrate, as SQLite may lack FTS5).
 CREATE TABLE IF NOT EXISTS kb_sources (
@@ -645,6 +658,50 @@ CREATE TABLE IF NOT EXISTS kb_chunks (
     text TEXT NOT NULL,
     quarantined TEXT
 );
+-- Imported folders added to the personal library (brindle.pro.analysis_imports):
+-- the folder, and a cache of each file sent (path to hash, plus the doc it became).
+-- Every row names the identity that authorized it (backend, user, org, scope); a different
+-- signed-in identity sees the folder as local and leaves these rows alone.
+CREATE TABLE IF NOT EXISTS kb_import_library (
+    source_id TEXT NOT NULL REFERENCES kb_sources(id) ON DELETE CASCADE,
+    identity TEXT NOT NULL,
+    added_at REAL NOT NULL,
+    pending INTEGER NOT NULL DEFAULT 0,   -- files the last upload could not send
+    -- adding | in_library | removing (no row: local); removing is kept until the server
+    -- confirms every delete.
+    state TEXT NOT NULL DEFAULT 'in_library' CHECK (state IN ('adding', 'in_library', 'removing')),
+    -- The one operation working on the folder (brindle.pro.analysis_imports): claimed in a
+    -- transaction, recorded against only while op_token still matches, until op_until.
+    op TEXT CHECK (op IN ('add', 'sync', 'remove')),
+    op_token TEXT,
+    op_until REAL,
+    PRIMARY KEY (source_id, identity)
+);
+-- Folder removals the server has not confirmed for a source that was deleted meanwhile. Not
+-- tied to the source, so they outlive it until the folder DELETE succeeds.
+CREATE TABLE IF NOT EXISTS kb_import_removals (
+    source_id TEXT NOT NULL,
+    identity TEXT NOT NULL,
+    PRIMARY KEY (source_id, identity)
+);
+CREATE TABLE IF NOT EXISTS kb_import_uploads (
+    source_id TEXT NOT NULL REFERENCES kb_sources(id) ON DELETE CASCADE,
+    identity TEXT NOT NULL,
+    external_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    doc_id TEXT NOT NULL,
+    PRIMARY KEY (source_id, identity, external_id)
+);
+-- Only an explicit session request creates a document inbox item.
+CREATE TABLE IF NOT EXISTS doc_requests (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    doc_id BLOB NOT NULL,          -- integer local id or opaque server string id, without coercion
+    title TEXT,
+    section TEXT,
+    why TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 CREATE INDEX IF NOT EXISTS kb_chunks_doc ON kb_chunks(doc_id);
 CREATE TABLE IF NOT EXISTS kb_links (
     chunk_id TEXT NOT NULL REFERENCES kb_chunks(id) ON DELETE CASCADE,
@@ -672,6 +729,7 @@ class Workspace:
     port_base: int | None
     tmux_session: str
     created_at: float
+    session_root: str | None = None
 
 
 @dataclass
@@ -935,6 +993,7 @@ class Task:
     started_at: float | None = None
     plan_first: int | None = None
     weight: str | None = None
+    analysis_doc: int | None = None    # an analysis doc was asked for (brindle.pro.analysis_brief)
 
 
 def _load(cls, row):
@@ -988,6 +1047,22 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        workspace_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(workspaces)")}
+        if "session_root" not in workspace_cols:
+            self.conn.execute("ALTER TABLE workspaces ADD COLUMN session_root TEXT")
+        if any(r["table"] == "kb_docs" for r in self.conn.execute("PRAGMA foreign_key_list(doc_requests)")):
+            # Early local-only requests referenced kb_docs. Keep their ids and
+            # titles while allowing server-only references in the same store.
+            with self.tx() as c:
+                c.execute("ALTER TABLE doc_requests RENAME TO local_doc_requests")
+                c.execute("CREATE TABLE doc_requests (id TEXT PRIMARY KEY,"
+                          " agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,"
+                          " doc_id BLOB NOT NULL, title TEXT, section TEXT, why TEXT NOT NULL,"
+                          " created_at REAL NOT NULL)")
+                c.execute("INSERT INTO doc_requests SELECT r.id, r.agent_id, r.doc_id, d.title,"
+                          " r.section, r.why, r.created_at FROM local_doc_requests r"
+                          " JOIN kb_docs d ON d.id = r.doc_id")
+                c.execute("DROP TABLE local_doc_requests")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(agents)")}
         for col, kind in (("status_since", "REAL"), ("task", "TEXT"), ("session_ref", "TEXT"),
                           ("stop_blocked", "INTEGER"), ("headless", "INTEGER"),
@@ -1019,6 +1094,8 @@ class DB:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN plan_first INTEGER")
         if "weight" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN weight TEXT")
+        if "analysis_doc" not in task_cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN analysis_doc INTEGER")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(autopilot)")}
         if "checking_since" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN checking_since REAL")
@@ -1125,11 +1202,17 @@ class DB:
     def add_workspace(self, ws: Workspace) -> None:
         with self.tx() as c:
             c.execute(
-                "INSERT INTO workspaces VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO workspaces (id, repo_root, name, kind, branch, base_branch, path, port_base,"
+                " tmux_session, created_at, session_root) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (ws.id, ws.repo_root, ws.name, ws.kind, ws.branch, ws.base_branch,
-                 ws.path, ws.port_base, ws.tmux_session, ws.created_at),
+                 ws.path, ws.port_base, ws.tmux_session, ws.created_at, ws.session_root),
             )
         bus.publish_ws(self, "workspace.created", ws, workspace_kind=ws.kind, branch=ws.branch)
+
+    def set_workspace_session_root(self, workspace_id: str, session_root: str) -> None:
+        """Remember which session owns work in this workspace, even after its worker exits."""
+        with self.tx() as c:
+            c.execute("UPDATE workspaces SET session_root = ? WHERE id = ?", (session_root, workspace_id))
 
     def get_workspace(self, ws_id: str) -> Workspace | None:
         row = self.conn.execute("SELECT * FROM workspaces WHERE id=?", (ws_id,)).fetchone()

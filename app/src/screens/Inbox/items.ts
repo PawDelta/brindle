@@ -22,6 +22,7 @@ export function loginProvider(item: InboxItemDTO, provider?: string | null): Log
 }
 
 export const KIND_LABEL: Record<string, string> = {
+  doc: "Doc to read",
   waiting: "Waiting for you",
   permission: "Permission",
   question: "Question",
@@ -57,6 +58,7 @@ export const kindLabel = (item: InboxItemDTO) => KIND_LABEL[item.kind] ?? item.k
 
 /* A short word for the kind, as a pill. */
 export const KIND_SHORT: Record<string, string> = {
+  doc: "Doc to read",
   waiting: "waiting",
   permission: "permission",
   question: "question",
@@ -178,7 +180,7 @@ export const completable = (item: InboxItemDTO): boolean => item.kind === "crede
 export const needsDecision = (item: InboxItemDTO): boolean => ["plan", "review", "merge_failed", "proposed_checks"].includes(item.kind);
 
 /* The id POST /inbox/{id}/{action} takes: an org notice's notice_id, else the agent's. */
-export const actionId = (item: InboxItemDTO) => (item.kind === "org_notice" ? item.notice_id : item.agent_id) ?? "";
+export const actionId = (item: InboxItemDTO) => (item.kind === "doc" ? item.request_id : item.kind === "org_notice" ? item.notice_id : item.agent_id) ?? "";
 
 /* Stable across snapshots, so a new item can be told from one already seen.
    A setup item belongs to no agent: it is told by what it fixes; an org Block by what it says. */
@@ -192,6 +194,7 @@ export const FILTERS: { key: string; label: string; kinds: string[] }[] = [
   { key: "plans", label: "Plans", kinds: ["plan"] },
   { key: "reviews", label: "Reviews", kinds: ["review", "merge_failed"] },
   { key: "checks", label: "Checks", kinds: ["proposed_checks"] },
+  { key: "docs", label: "Docs", kinds: ["doc"] },
   { key: "other", label: "Other", kinds: ["credentials", "login", "org_notice", "org_blocked", "setup"] },
 ];
 

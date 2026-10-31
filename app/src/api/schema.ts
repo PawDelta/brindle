@@ -454,12 +454,15 @@ export interface InboxItemDTO {
   action?: InboxActionDTO | null;
   agent_id?: string | null;
   detail?: string | null;
+  doc?: number | string | null;
   fix?: string | null;
   kind: string;
   notice_id?: string | null;
   permission?: PermissionDTO | null;
   reason: string;
+  request_id?: string | null;
   root_id?: string | null;
+  section?: string | null;
   workspace_id?: string | null;
 }
 /**

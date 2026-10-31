@@ -375,6 +375,14 @@ def test_response_size_is_capped(server):
         auth.UrllibTransport(max_bytes=1024).request("POST", f"http://127.0.0.1:{port}/big", {}, {})
 
 
+def test_binary_response_is_returned_without_decoding(server):
+    routes, port = server
+    raw = b"PK\x03\x04\x00\xff"
+    routes[("GET", "/binary")] = (200, {"Content-Type": "application/vnd.test+octet-stream"}, raw)
+    assert auth.UrllibTransport().request("GET", f"http://127.0.0.1:{port}/binary", None, {}) == (
+        200, {auth.BINARY_KEY: raw, auth.CONTENT_TYPE_KEY: "application/vnd.test+octet-stream"})
+
+
 def test_redirect_to_another_host_is_refused(server):
     routes, port = server
     routes[("POST", "/r")] = (307, {"Location": f"http://localhost:{port}/ok"}, b"")

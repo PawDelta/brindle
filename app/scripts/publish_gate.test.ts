@@ -209,7 +209,8 @@ describe("app-release publish gate", () => {
     expect(readFileSync(workflow, "utf8")).not.toMatch(/contents: write|gh release/);
     const publish = readFileSync(engineWorkflow("publish.yml"), "utf8");
     const jobs = publish.slice(publish.indexOf("\njobs:\n")).split("\n").filter((line) => /^ {2}[a-z-]+:$/.test(line));
-    const guards = publish.split("    if: startsWith(github.event.release.tag_name, 'v')\n").length - 1;
+    // A job switched off (`if: false`, the deploy templates until brindle CI launches) runs for no tag at all.
+    const guards = publish.split(/\n {4}if: (?:startsWith\(github\.event\.release\.tag_name, 'v'\)|false)\n/).length - 1;
     expect(jobs.length).toBeGreaterThan(0);
     expect(guards).toBe(jobs.length);
     const ci = readFileSync(engineWorkflow("ci.yml"), "utf8");

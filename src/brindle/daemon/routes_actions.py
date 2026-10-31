@@ -335,6 +335,8 @@ _TRANSFERRING: dict[str, tuple[Job, tuple[str, str | None]]] = {}     # scratch 
 def inbox_action(db: DB, params: dict, body: Body) -> Any:
     """``id`` is the item's agent (an org notice's ``notice_id`` for "read")."""
     item, action = params["id"], params["action"]
+    if action == "dismiss":
+        return inbox.dismiss_doc_read(db, item)
     if action == "read":
         from brindle.pro import status
 
@@ -1047,7 +1049,7 @@ def _kb_sync_job(kind: str, repo: str, source_id: str) -> Job:
 
     def work(db: DB, job: Job) -> Any:
         try:
-            return kb.sync(db, source_id, codemap.graph_path(repo))
+            return kb.sync(db, source_id, codemap.graph_path(repo), repo)
         except ValueError as e:
             raise ServiceError("invalid", str(e)) from None
         finally:
@@ -1086,6 +1088,43 @@ def remove_kb_source(db: DB, params: dict, body: Body) -> Any:
     _, _, source_id = _kb_source(db, params, params["id"])
     kb.remove_source(db, source_id)
     return {"removed": source_id}
+
+
+def kb_library(db: DB, params: dict, body: Body) -> Any:
+    """Add an imported folder to the personal library. With ``dry_run`` true,
+    only list the files that would go and the ones skipped (and a ``token``
+    for that list); nothing is sent. Otherwise upload exactly the listed
+    files, or answer ``changed`` with a fresh list when the folder differs."""
+    from brindle.pro import analysis_imports as imports
+
+    repo, _, source_id = _kb_source(db, params, params["id"])
+    try:
+        if _get(body, "dry_run", bool, default=False):
+            return imports.dry_run(db, source_id)
+        return imports.add_to_library(db, source_id, repo, _get(body, "token", required=True))
+    except imports.ImportUploadOff as e:
+        raise ServiceError("not_allowed", str(e), 403) from e
+    except imports.ManifestChanged as e:   # not uploaded: confirm the fresh list
+        return {"changed": True, **e.plan}
+    except imports.UploadFailed as e:
+        raise ServiceError("upstream", str(e), 502) from e
+    except imports.Busy as e:
+        raise ServiceError("busy", "this folder is being uploaded or removed already", 409) from e
+    except ValueError as e:
+        raise ServiceError("invalid", str(e)) from e
+
+
+def unlibrary_kb_source(db: DB, params: dict, body: Body) -> Any:
+    """Remove an imported folder's docs from the library (the folder stays)."""
+    from brindle.pro import analysis_imports as imports
+
+    _, _, source_id = _kb_source(db, params, params["id"])
+    try:
+        return imports.remove_from_library(db, source_id)
+    except imports.Busy as e:
+        raise ServiceError("busy", "this folder is being uploaded or removed already", 409) from e
+    except (RuntimeError, ValueError) as e:
+        raise ServiceError("upstream", str(e), 502) from e
 
 
 PERMISSION_MODES = ("default", "auto")
@@ -1596,6 +1635,199 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
     account = _pro_account()
     account.cmd_org_use(None, _get(body, "org", required=True))
     return {"messages": _said(account)}
+
+
+# -- analysis docs: brindle Pro's library, proxied (the reads are in routes_read) ----
+# Answers pass through as the server gave them, held in memory only; a file
+# reaches disk only on an export to a folder the person picked.
+
+DOC_SCOPES = {"user": "user", "team": "group", "group": "group", "enterprise": "org", "org": "org"}
+EXPORT_FORMATS = ("md", "docx", "zip")
+EXPORT_DESTINATIONS = ("download", "google_docs", "sharepoint")
+
+
+def _docs_entitlement(repo: str | None):
+    from brindle import config
+    from brindle.pro import analysis_docs
+
+    if repo:
+        config.load_repo_config(repo)        # its air-gap setting applies first
+    try:
+        return analysis_docs.require_entitlement()
+    except RuntimeError as e:
+        raise ServiceError("not_entitled", str(e), 402) from e
+
+
+def docs_api(method: str, path: str, body: dict | None = None, *, repo: str | None = None,
+             query: dict[str, str] | None = None, scope: str | None = None) -> dict:
+    """One call to the library: ``scope`` is ``user`` or ``team:<id>`` /
+    ``org:<id>``. Not entitled (or in the repo's air-gap mode) is 402 before
+    anything is sent; the server's refusal is 502 with its reason; signed
+    out is 401."""
+    from urllib.parse import urlencode
+
+    from brindle.pro import analysis_docs, auth
+
+    ent = _docs_entitlement(repo)
+    query = dict(query or {})
+    if scope:
+        query.update(zip(("scope_kind", "scope_id"), doc_scope(scope, ent.sub)))
+    try:
+        return analysis_docs.api(method, path + (f"?{urlencode(query)}" if query else ""), body)
+    except (RuntimeError, auth.TransportError) as e:    # unreachable, or an answer it can't read: not signed out
+        raise ServiceError("upstream", str(e), 502) from e
+
+
+def docs_org_api(method: str, tail: str, body: dict | None = None, *, repo: str | None = None,
+                 admin: bool = False) -> dict:
+    """``/orgs/<org>/analysis-docs/<tail>`` for the verified entitlement's org;
+    ``admin`` refuses (403, nothing sent) unless its role is owner or admin."""
+    from urllib.parse import quote
+
+    ent = _docs_entitlement(repo)
+    if admin and ent.role not in ("owner", "admin"):
+        raise ServiceError("forbidden", "only an organisation owner or admin can do this", 403)
+    return docs_api(method, f"/orgs/{quote(ent.org_id, safe='')}/analysis-docs/{tail}", body, repo=repo)
+
+
+def put_doc_destination(db: DB, params: dict, body: Body) -> Any:
+    """Connect the team's export destination (``kind``, ``target``, ``credential``; admin only)."""
+    payload = {"kind": _get(body, "kind", required=True),
+               "target": _get(body, "target", (str, dict), required=True),    # a SharePoint site and folder, or {drive_id, folder_id?}
+               "credential": _get(body, "credential", (str, dict), required=True)}    # a service account's JSON, or an app's ids and secret
+    return docs_org_api("PUT", "destination", payload, repo=_get(body, "repo"), admin=True)
+
+
+def delete_doc_destination(db: DB, params: dict, body: Body) -> Any:
+    return docs_org_api("DELETE", "destination", repo=_get(body, "repo"), admin=True)
+
+
+def doc_switches(repo: str | None = None) -> dict:
+    """``{"switches": [{name, on, choice, locked, org}]}``: the person's own
+    switches (analysis_docs.switch_states). 402 when not entitled, 502 when
+    the server refuses or can't be read."""
+    from brindle.pro import analysis_docs, auth
+
+    _docs_entitlement(repo)
+    try:
+        return {"switches": analysis_docs.switch_states()}
+    except (RuntimeError, auth.TransportError) as e:
+        raise ServiceError("upstream", str(e), 502) from e
+
+
+def put_doc_switch(db: DB, params: dict, body: Body) -> Any:
+    """Set one of the person's own switches (``name``, ``on``); 403 when their org enforces it."""
+    from brindle.pro import analysis_docs, analysis_policy, auth
+
+    name, on, repo = _get(body, "name", required=True), _get(body, "on", bool, required=True), _get(body, "repo")
+    if name not in analysis_policy.SWITCHES:
+        raise ServiceError("invalid", f"name is one of {', '.join(analysis_policy.SWITCHES)}")
+    _docs_entitlement(repo)
+    try:
+        analysis_docs.set_switch(on, name=name)
+    except analysis_docs.Locked as e:
+        raise ServiceError("forbidden", str(e), 403) from e
+    except (RuntimeError, auth.TransportError) as e:
+        raise ServiceError("upstream", str(e), 502) from e
+    return doc_switches(repo)
+
+
+def docs_scopes(repo: str | None = None) -> list[dict]:
+    """Every scope the person reads, as the server lists them
+    (``{kind, id, name, can_share}``; their teams too, docs or not)."""
+    scopes = docs_api("GET", "/analysis-docs/scopes", repo=repo).get("scopes")
+    return [s for s in scopes or [] if isinstance(s, dict) and s.get("kind") in DOC_SCOPES.values()
+            and isinstance(s.get("id"), str)]
+
+
+def scope_spec(scope: dict) -> str:
+    """A server scope as docs_api's ``scope``: user, team:<id> or org:<id>."""
+    return "user" if scope["kind"] == "user" else f"{'team' if scope['kind'] == 'group' else 'org'}:{scope['id']}"
+
+
+def docs_everywhere(path: str, repo: str | None, query: dict[str, str]) -> list[dict]:
+    """GET ``path`` (a list the server answers per scope) in each scope of
+    :func:`docs_scopes`: the answers that came back. A scope that refuses
+    is skipped unless every one does."""
+    got, refused = [], None
+    for spec in dict.fromkeys(scope_spec(s) for s in docs_scopes(repo)):
+        try:
+            got.append(docs_api("GET", path, repo=repo, query=query, scope=spec))
+        except ServiceError as e:
+            refused = refused or e
+    if refused and not got:
+        raise refused
+    return got
+
+
+def doc_scope(spec: str, sub: str) -> tuple[str, str]:
+    """``user`` (the person's own), ``team:<id>`` or ``org:<id>`` as the server's (kind, id)."""
+    kind, _, scope_id = spec.partition(":")
+    kind = DOC_SCOPES.get(kind, "")
+    scope_id = sub if kind == "user" else scope_id
+    if not kind or not scope_id:
+        raise ServiceError("invalid", "scope is user, team:<id> or org:<id>")
+    return kind, scope_id
+
+
+def _doc_path(params: dict, *rest: str) -> str:
+    from urllib.parse import quote
+
+    return "/".join(["/analysis-docs", *(quote(p, safe="") for p in (params["id"], *rest))])
+
+
+def share_doc(db: DB, params: dict, body: Body) -> Any:
+    """Share a doc with ``scope`` (team:<id> or org:<id>; never ``user``)."""
+    kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
+    return docs_api("POST", _doc_path(params, "share"), {"scope": {"kind": kind, "id": scope_id}},
+                    repo=params.get("repo"))
+
+
+def unshare_doc(db: DB, params: dict, body: Body) -> Any:
+    """Stop sharing a doc with ``scope`` (team:<id> or org:<id>)."""
+    kind, scope_id = doc_scope(_get(body, "scope", required=True), "")
+    return docs_api("DELETE", _doc_path(params, "share", kind, scope_id), repo=params.get("repo"))
+
+
+def delete_doc(db: DB, params: dict, body: Body) -> Any:
+    return docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
+
+
+def export_doc(db: DB, params: dict, body: Body) -> Any:
+    """The doc as ``format`` (md, docx or zip; the server renders it and
+    checks scope and the org's export policy). Markdown arrives as text; a
+    Word or zip file as bytes once the Pro transport carries them (until
+    then, a 502 saying it can't read the answer). With ``dir`` (a folder the
+    person picked) the file is written there and its path answered;
+    without, its ``filename`` and ``content_b64`` go back to the app and
+    nothing is written."""
+    import base64
+    import re
+
+    from brindle.pro import auth
+
+    fmt = _get(body, "format", default="md")
+    if fmt not in EXPORT_FORMATS:
+        raise ServiceError("invalid", "format is md, docx or zip")
+    destination = _get(body, "destination", default="download")
+    if destination not in EXPORT_DESTINATIONS:
+        raise ServiceError("invalid", "destination is download, google_docs or sharepoint")
+    got = docs_api("GET", _doc_path(params, "export"), repo=params.get("repo"),
+                   query={"format": fmt, "destination": destination})
+    text = got.get(auth.TEXT_KEY)
+    data = text.encode() if isinstance(text, str) else next(
+        (v for v in got.values() if isinstance(v, (bytes, bytearray))), b"")
+    if not data:
+        raise ServiceError("upstream", "the export came back empty", 502)
+    name = f"{re.sub(r'[^A-Za-z0-9_-]+', '-', params['id']).strip('-') or 'doc'}.{fmt}"
+    folder = _get(body, "dir")
+    if folder is None:
+        return {"filename": name, "content_b64": base64.b64encode(data).decode()}
+    folder = Path(folder).expanduser()
+    if not folder.is_dir():
+        raise ServiceError("invalid", f"not a folder: {folder}")
+    (folder / name).write_bytes(data)
+    return {"filename": name, "path": str(folder / name)}
 
 
 # -- terminals: the real command in a terminal the app shows -------------------------
@@ -2150,6 +2382,8 @@ ROUTES = [
     _post("/kb/sources", add_kb_source),
     Route("/v1/kb/sources/{id}", _endpoint(remove_kb_source), methods=["DELETE"]),
     _post("/kb/sources/{id}/sync", sync_kb_source),
+    _post("/kb/sources/{id}/library", kb_library),
+    Route("/v1/kb/sources/{id}/library", _endpoint(unlibrary_kb_source), methods=["DELETE"]),
     Route("/v1/config", _endpoint(patch_config), methods=["PATCH"]),
     # Agents never get here: the guard refuses them (see brindle.daemon.auth).
     Route("/v1/user-settings", _endpoint(patch_user_settings), methods=["PATCH"]),
@@ -2175,6 +2409,15 @@ ROUTES = [
     _post("/account/login", account_login),
     _post("/account/logout", account_logout),
     _post("/account/switch-org", account_switch_org),
+    # GET on these paths reads (routes_read).
+    # Before /analysis-docs/{id}.
+    Route("/v1/analysis-docs/destination", _endpoint(put_doc_destination), methods=["PUT"]),
+    Route("/v1/analysis-docs/destination", _endpoint(delete_doc_destination), methods=["DELETE"]),
+    Route("/v1/analysis-docs/switches", _endpoint(put_doc_switch), methods=["PUT"]),
+    _post("/analysis-docs/{id}/share", share_doc),
+    Route("/v1/analysis-docs/{id}/share", _endpoint(unshare_doc), methods=["DELETE"]),
+    _post("/analysis-docs/{id}/export", export_doc),
+    Route("/v1/analysis-docs/{id}", _endpoint(delete_doc), methods=["DELETE"]),
     # Like every route, refused to agent callers by the guard.
     _post("/providers/{provider}/login", provider_login),
     _post("/providers/{provider}/preflight", profile_preflight),

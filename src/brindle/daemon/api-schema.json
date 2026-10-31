@@ -2456,6 +2456,21 @@
           "default": null,
           "title": "Detail"
         },
+        "doc": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Doc"
+        },
         "fix": {
           "anyOf": [
             {
@@ -2499,6 +2514,18 @@
           "title": "Reason",
           "type": "string"
         },
+        "request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request Id"
+        },
         "root_id": {
           "anyOf": [
             {
@@ -2510,6 +2537,18 @@
           ],
           "default": null,
           "title": "Root Id"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
         },
         "workspace_id": {
           "anyOf": [
@@ -6984,6 +7023,78 @@
     },
     {
       "method": "GET",
+      "path": "/v1/analysis-docs"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/analysis-docs/destination"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/destination"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/analysis-docs/destination"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/export-config"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/map"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/policy"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/results"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/scopes"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/session-summary"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/switches"
+    },
+    {
+      "method": "PUT",
+      "path": "/v1/analysis-docs/switches"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/topics"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/analysis-docs/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/analysis-docs/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/analysis-docs/{id}/export"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/analysis-docs/{id}/share"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/analysis-docs/{id}/share"
+    },
+    {
+      "method": "GET",
       "path": "/v1/cloud/options"
     },
     {
@@ -7089,6 +7200,14 @@
     {
       "method": "DELETE",
       "path": "/v1/kb/sources/{id}"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/kb/sources/{id}/library"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/kb/sources/{id}/library"
     },
     {
       "method": "POST",
