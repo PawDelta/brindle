@@ -386,8 +386,12 @@ def spawn(
     files: list[str] | None = None,
     weight: str | None = None,
     analysis_doc: bool = False,
+    detached: bool = False,
 ) -> Agent:
-    """Start an agent in ``ws``. ``weight`` is the weight its task was routed
+    """Start an agent in ``ws``. ``detached``: a handoff nobody waits on (a
+    queued one) is recorded as 'handoff_detached' from the start, so a
+    result it reports at once is forwarded; it is briefed as a handoff.
+    ``weight`` is the weight its task was routed
     as, kept on the agent so the owner's per-kind effort and instructions apply
     from the first launch. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``; their brief carries the
@@ -464,7 +468,8 @@ def spawn(
         raise PreflightBlocked([off])
     agent = Agent(
         id=agent_id, workspace_id=ws.id, profile=profile.name, provider=provider.name,
-        parent_id=parent_id, mode=mode, status="starting", tmux_window="",
+        parent_id=parent_id, mode="handoff_detached" if detached and mode == "handoff" else mode,
+        status="starting", tmux_window="",
         result=None, created_at=time.time(), task=raw_task, headless=int(headless) or None,
         done_when=done_when, review_sha=review_sha,
         # Its CLI's config home, decided once here: every later check, its
@@ -2721,10 +2726,11 @@ def delegate(
     weight: str | None = None,
     analysis_doc: bool = False,
     admit: bool = True,
+    detached: bool = False,
 ) -> tuple[Agent, Workspace]:
     """Start a worker, or raise ``NoRoom`` (nothing created) when the machine
     has no room for it (``admission``); ``admit`` False skips that, for a
-    caller that has just looked. ``weight`` is the weight its task was routed as;
+    caller that has just looked. ``detached``: see ``spawn``. ``weight`` is the weight its task was routed as;
     ``analysis_doc`` asks for an analysis doc whatever the weight.
     ``plan_first`` (None: the repo's ``plan_first`` config)
     makes it get a plan approved before it may edit; ``files`` picks the
@@ -2762,7 +2768,7 @@ def delegate(
         return spawn(
             db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
             done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
-            weight=weight, analysis_doc=analysis_doc,
+            weight=weight, analysis_doc=analysis_doc, **({"detached": True} if detached else {}),
         )
 
     if isolate:

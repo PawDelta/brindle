@@ -811,12 +811,13 @@ def start_queued(db: DB, task: Task) -> Agent:
         start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
         weight=launch_weight, analysis_doc=bool(task.analysis_doc),
         admit=False,   # every caller has just looked for room (_start_if_ready, requeue)
+        # Nobody waits on a queued handoff (its reply said "queued" long ago):
+        # detached from its first row, so even a result it reports before this
+        # returns is forwarded to its caller like an assign's.
+        **({"detached": True} if task.mode == "handoff" else {}),
     )
     if task.pipeline:
         db.update_agent(worker.id, pipeline=task.pipeline, pipeline_rounds=0)
-    # Nobody waits on a queued handoff (its reply said "queued" long ago):
-    # it starts as one, then its result is forwarded to its caller like an assign's.
-    agents.detach(db, worker.id)
     db.update_task(task.id, agent_id=worker.id, state="started", started_at=time.time())
     bus.publish_agent(db, "task.started", worker.id, task_id=task.id)
     savings.attach_agent(db, task.id, worker.id)
