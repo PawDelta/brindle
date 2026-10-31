@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from typer.testing import CliRunner
 
 from brindle import detect, doctor
@@ -65,6 +67,32 @@ def test_init_fails_on_doctor_failure(repo, monkeypatch):
     assert "tmux" in res.output
 
 
+def test_init_says_commit_its_own_output_instead_of_warning(repo, monkeypatch):
+    monkeypatch.chdir(repo)
+    dirty = doctor.Check(doctor.WARN, "working tree", "uncommitted changes: workers branch from committed work only")
+    monkeypatch.setattr(doctor, "checks", lambda root: [dirty])
+    res = CliRunner().invoke(app, ["init"])
+    assert res.exit_code == 0, res.output
+    assert "uncommitted changes" not in res.output
+    assert "commit .brindle/" in res.output and "git add .brindle" in res.output
+    assert "Ready" in res.output
+
+    # Other uncommitted work is still worth the warning, next to the commit step.
+    (repo / "app.py").write_text("print('changed')\n")
+    res = CliRunner().invoke(app, ["init"])
+    assert "uncommitted changes" in res.output and "commit .brindle/" in res.output
+
+
+def test_init_with_committed_config_says_nothing_about_committing(repo, monkeypatch):
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(doctor, "checks", lambda root: [])
+    CliRunner().invoke(app, ["init"])
+    sh("git add .brindle && git commit -qm config", repo)
+    res = CliRunner().invoke(app, ["init"])
+    assert res.exit_code == 0, res.output
+    assert "commit .brindle/" not in res.output
+
+
 def test_init_outside_git_points_at_scratch(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     res = CliRunner().invoke(app, ["init"])
@@ -75,7 +103,9 @@ def test_init_outside_git_points_at_scratch(tmp_path, monkeypatch):
 def test_preflight_names_missing_cli(monkeypatch):
     monkeypatch.setenv("BRINDLE_CLAUDE_BIN", "/nonexistent/claude")
     problems = doctor.preflight("claude")
-    assert any("Claude Code" in p and "npm install" in p for p in problems)
+    hint = next(p for p in problems if "Claude Code" in p)
+    # The official installer first; npm is the alternative.
+    assert hint.index("curl -fsSL https://claude.ai/install.sh | bash") < hint.index("npm install")
     assert not any("Claude Code" in p for p in doctor.preflight("shell"))
 
 
@@ -154,3 +184,43 @@ def test_demo_repo_has_failing_goal(brindle_home):
     assert subprocess.run(["git", "status", "--porcelain"], cwd=root, capture_output=True, text=True).stdout == ""
     assert demo.create() != root
     assert load_repo_config(demo.create(local=True)).default_agent == "developer-local"
+
+
+def test_demo_says_nothing_about_the_autopilot_flag_nobody_passed(tmp_path, monkeypatch):
+    from brindle import cli, demo
+
+    monkeypatch.chdir(tmp_path)   # demo chdirs into its repo; this puts the cwd back afterwards
+    monkeypatch.setattr(demo, "create", lambda local=False: tmp_path)
+    started = []
+    monkeypatch.setattr(cli, "start", lambda **kw: started.append(kw))
+    res = CliRunner().invoke(app, ["demo"])
+    assert res.exit_code == 0, res.output
+    assert "deprecated" not in res.output
+    assert started[0]["autopilot"] is None and started[0]["demo"] is True
+
+
+@pytest.mark.parametrize("platform, managers, wanted", [
+    ("darwin", ["apt-get"], "brew install tmux"),
+    ("linux", ["apt-get"], "sudo apt install tmux"),
+    ("linux", ["dnf"], "sudo dnf install tmux"),
+    ("linux", [], "sudo apt install tmux (or your distro's package manager)"),
+])
+def test_tmux_hint_fits_the_platform(monkeypatch, platform, managers, wanted):
+    monkeypatch.setattr(doctor.sys, "platform", platform)
+    monkeypatch.setattr(doctor.shutil, "which", lambda name: f"/usr/bin/{name}" if name in managers else None)
+    assert doctor.tmux_install() == wanted
+    # tmux itself is missing here too, so preflight names the same command.
+    assert any(p.endswith(f"Install: {wanted}") for p in doctor.preflight("shell"))
+
+
+def test_help_names_no_source_files():
+    import click
+    import typer.main
+
+    def walk(cmd, path):
+        out = CliRunner().invoke(app, [*path, "--help"], terminal_width=200).output
+        assert "src/brindle" not in out and ".py`" not in out, path
+        for name, sub in (cmd.commands.items() if isinstance(cmd, click.Group) else ()):
+            walk(sub, [*path, name])
+
+    walk(typer.main.get_command(app), [])

@@ -90,7 +90,9 @@ _THIS_SERVER: object = object()
 def _tmux(*args: str, input: str | None = None, check: bool = True,
           server: object = _THIS_SERVER) -> subprocess.CompletedProcess:
     if not shutil.which(_bin()):
-        raise TmuxError("tmux is not installed (macOS: `brew install tmux`)")
+        from brindle.doctor import tmux_install
+
+        raise TmuxError(f"tmux is not installed. Install: {tmux_install()}")
     base = _base() if server is _THIS_SERVER else _argv(server)  # type: ignore[arg-type]
     try:
         proc = subprocess.run([*base, *args], capture_output=True, text=True, input=input,

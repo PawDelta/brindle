@@ -666,3 +666,12 @@ def test_signing_in_adopts_the_agents_launched_while_signed_out(monkeypatch):
     # A failing check never fails the sign-in over adopting.
     monkeypatch.setattr(signin_pause, "check", lambda provider, cache=False: 1 / 0)
     assert go(setup)[0]
+
+
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_claude_install_hint_leads_with_the_official_installer(monkeypatch, platform):
+    monkeypatch.setattr(sys, "platform", platform)
+    hint = company_login.install_hint("claude")
+    assert hint.startswith("curl -fsSL https://claude.ai/install.sh | bash")
+    assert "(or: npm install -g @anthropic-ai/claude-code)" in hint
+    assert ("EACCES" in hint) == (platform == "linux")

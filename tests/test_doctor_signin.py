@@ -167,3 +167,19 @@ def test_doctor_says_org_managed(installed, tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)   # the org's settings win over it
     c = credentials()["claude"]
     assert (c.level, c.detail) == (doctor.OK, "org-managed (apiKeyHelper)")
+
+
+def test_signed_out_claude_has_no_credential_line_that_says_all_is_well(installed, monkeypatch):
+    replies = {"auth": (1, json.dumps({"loggedIn": False}))}
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: replies.get(argv[1]))
+    signin = lines()["Claude Code sign-in"]
+    assert signin.level == doctor.FAIL and "quota" not in signin.detail
+    c = credentials()["claude"]
+    assert c.level == doctor.WARN
+    assert "subscription login" not in c.detail and "isn't signed in" in c.detail
+
+
+def test_signed_in_claude_shows_its_subscription_login(installed, monkeypatch):
+    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: SIGNED_IN.get(argv[1]))
+    assert lines()["Claude Code sign-in"].detail.endswith("quota: no limit in effect")
+    assert (credentials()["claude"].level, credentials()["claude"].detail) == (doctor.OK, "subscription login")

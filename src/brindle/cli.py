@@ -199,6 +199,12 @@ def init(
         typer.secho(f"✓ wrote {path}", fg="green")
     typer.echo("")
     results = [c for c in doctor_mod.checks(root) if c.level != doctor_mod.OK]
+    # .brindle/ is meant to be committed (the local file in it is gitignored)
+    # and brindle reads it uncommitted meanwhile, so init's own output is a
+    # step to take, not an uncommitted-changes warning.
+    ours, others = _uncommitted(root)
+    if ours and not others:
+        results = [c for c in results if c.name != "working tree"]
     # Optional pieces (Codex, a local model, ...) are one line on a first run.
     optional = [c.name for c in results if doctor_mod.is_optional(c)]
     shown = [c for c in results if not doctor_mod.is_optional(c)]
@@ -206,10 +212,23 @@ def init(
         typer.echo(doctor_mod.render(shown))
     if optional:
         typer.echo(f"optional, not set up: {', '.join(optional)} (`brindle doctor` says how)")
+    if ours:
+        typer.echo(f"Next: commit {CONFIG_DIR}/ to share this config with your team: "
+                   f"git add {CONFIG_DIR} && git commit -m 'Add brindle config'")
     if any(c.level == doctor_mod.FAIL for c in results):
         raise typer.Exit(1)
-    typer.secho("Ready. Commit .brindle/config.json, then run `brindle` and tell the supervisor what to build.",
-                fg="green")
+    typer.secho("Ready. Run `brindle` and tell the supervisor what to build.", fg="green")
+
+
+def _uncommitted(root: str) -> tuple[bool, bool]:
+    """Whether .brindle/ has uncommitted changes, and whether anything else in ``root`` does."""
+    from brindle.config import CONFIG_DIR
+
+    out = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=root,
+                         capture_output=True, text=True).stdout
+    paths = [line[3:].strip('"') for line in out.splitlines() if line.strip()]
+    ours = [p for p in paths if p.startswith(f"{CONFIG_DIR}/")]
+    return bool(ours), len(ours) < len(paths)
 
 
 @app.command()
@@ -228,7 +247,7 @@ def demo(
     typer.echo(f"demo repo: {root}")
     os.chdir(root)
     start(prompt=None, provider=None, attach=attach, watch=True,
-          autopilot=True, branch=None, worktree=None, demo=True)
+          autopilot=None, branch=None, worktree=None, demo=True)
 
 
 @app.command()
@@ -2058,8 +2077,7 @@ def _run_account(args: list[str]) -> None:
 # -- brindle audit (brindle Enterprise: the local tamper-evident audit chain) ---------------------
 
 audit_app = typer.Typer(no_args_is_help=True,
-                        help="brindle Enterprise: the local tamper-evident audit log "
-                             "(~/.brindle/audit; see `src/brindle/pro/audit_chain.py`).")
+                        help="brindle Enterprise: the local tamper-evident audit log (~/.brindle/audit).")
 app.add_typer(audit_app, name="audit")
 
 

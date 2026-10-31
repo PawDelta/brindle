@@ -254,3 +254,13 @@ def test_workers_launch_falls_back_when_a_pick_is_not_ready(db, repo, monkeypatc
     assert ("isn't ready for light tasks" in capsys.readouterr().err) is (light is None)
     assert len(probes) == (0 if pick != "local-qwen3-coder" else 1 if light else 2)
     assert len(signin_probes) == 1
+
+
+def test_claude_sign_in_installs_with_the_official_installer_through_a_shell(monkeypatch):
+    ran, asked = [], []
+    monkeypatch.setattr(doctor, "signin_providers", lambda: [])
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: ["claude"])
+    picker.sign_in("claude", run=lambda argv, **kw: ran.append(argv) or (0, ""),
+                   confirm=lambda q, **kw: asked.append(q) or True, echo=lambda s: None)
+    assert ran[0] == ["sh", "-c", "curl -fsSL https://claude.ai/install.sh | bash"]
+    assert "claude.ai/install.sh" in asked[0] and "npm" not in asked[0]

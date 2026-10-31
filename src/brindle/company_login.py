@@ -36,9 +36,11 @@ INSTALL = {
     "aws": "brew install awscli  (https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html)",
     "gcloud": "brew install --cask google-cloud-sdk  (https://cloud.google.com/sdk/docs/install)",
     "az": "brew install azure-cli  (https://learn.microsoft.com/cli/azure/install-azure-cli)",
-    "claude": "npm install -g @anthropic-ai/claude-code",
+    "claude": "curl -fsSL https://claude.ai/install.sh | bash",
     "codex": "npm install -g @openai/codex",
 }
+# Another way to install it, named after INSTALL's command.
+ALTERNATIVE = {"claude": "npm install -g @anthropic-ai/claude-code"}
 
 # What to do instead on Linux (and WSL), where there is no brew and a global
 # npm install into a root-owned prefix fails with EACCES. INSTALL stays the
@@ -50,14 +52,16 @@ INSTALL_LINUX = {
     "gcloud": "Linux: `sudo snap install google-cloud-cli --classic` (or https://cloud.google.com/sdk/docs/install)",
     "az": "Linux: `curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash` "
           "(https://learn.microsoft.com/cli/azure/install-azure-cli-linux)",
-    "claude": NPM_PREFIX_NOTE,
+    "claude": "with npm on Linux, if that fails with EACCES: `npm config set prefix ~/.local`, then retry (no sudo)",
     "codex": NPM_PREFIX_NOTE,
 }
 
 
 def install_hint(tool: str) -> str:
-    """How to install ``tool``, with the Linux alternative appended on Linux."""
+    """How to install ``tool``, then any other way to, with the Linux alternative appended on Linux."""
     hint = INSTALL[tool]
+    if tool in ALTERNATIVE:
+        hint += f"  (or: {ALTERNATIVE[tool]})"
     if sys.platform.startswith("linux"):
         hint += f"  [{INSTALL_LINUX[tool]}]"
     return hint
