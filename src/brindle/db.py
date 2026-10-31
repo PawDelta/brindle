@@ -2480,6 +2480,21 @@ class DB:
                 "UPDATE tasks SET state='starting' WHERE id=? AND state='pending'", (task_id,)
             ).rowcount == 1
 
+    def claim_forced_task(self, task_id: str, marker: str) -> bool:
+        """Move a pending task to 'starting' with ``waiting`` = ``marker``,
+        unless another task is 'starting' with that marker: one statement, so
+        of two processes racing for the single forced-start slot only one wins."""
+        with self.tx() as c:
+            return c.execute(
+                "UPDATE tasks SET state='starting', waiting=? WHERE id=? AND state='pending' "
+                "AND NOT EXISTS (SELECT 1 FROM tasks WHERE state='starting' AND waiting=?)",
+                (marker, task_id, marker),
+            ).rowcount == 1
+
+    def count_tasks_waiting_as(self, marker: str) -> int:
+        """How many tasks (any state) have ``waiting`` = ``marker``."""
+        return self.conn.execute("SELECT COUNT(*) FROM tasks WHERE waiting=?", (marker,)).fetchone()[0]
+
     def get_reported_spend(self, agent_id: str) -> float:
         row = self.conn.execute("SELECT reported_usd FROM agent_reported_spend WHERE agent_id=?", (agent_id,)).fetchone()
         return float(row[0]) if row else 0.0

@@ -453,33 +453,63 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
         return
     out = asyncio.run(getattr(mcp_server, tool)("developer", "do A", branch="feat-a"))
     busy = "the machine is busy (load 14.0 on 10 cores"
-    assert out.startswith("Queued task") and busy in out and "start_now" in out, out
+    assert out.startswith("Queued task") and busy in out, out
     [t] = db.list_tasks(str(repo), state="pending")
     assert f"waiting for room: {busy}" in tasks.list_text(db, str(repo))
     assert [a.id for a in db.list_agents()] == ["boss"]                  # nothing started
     # Waiting is not a stall (no nudge), but the supervisor is reminded which task waits.
     reminder = autopilot.on_stop(db, boss, {})
-    assert t.id in reminder["reason"] and "start_now" in reminder["reason"]
+    assert t.id in reminder["reason"]
     assert db.get_autopilot("boss").nudges == 0
     # However long the machine stays full, the task waits rather than overload it.
     db.update_task(t.id, waiting_since=time.time() - 86400)
     tasks.sweep(db)
     assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
 
-    if ends == "forced in flight":   # a forced worker is still starting: a second force is refused
+    if ends == "forced in flight":   # a competing force while the first is really starting is refused
         asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b"))
         [b] = [x for x in db.list_tasks(str(repo), state="pending") if x.id != t.id]
-        db.update_task(t.id, state="starting", waiting=tasks.FORCED)
-        with pytest.raises(ValueError, match="still starting"):
-            tasks.start_now(db, boss, b.id)
-        assert db.get_task(b.id).state == "pending" and len(db.list_agents()) == 1
+        real_start, refused = tasks.start_queued, []
+
+        def competing(db_, task):   # another process's start_now, mid-start of the first
+            try:
+                tasks.start_now(db_, boss, b.id)
+            except ValueError:
+                refused.append(db_.get_task(b.id).state)
+            return real_start(db_, task)
+
+        monkeypatch.setattr(tasks, "start_queued", competing)
+        tasks.start_now(db, boss, t.id)
+        assert refused == ["pending"] and db.get_task(t.id).state == "started"
+        assert db.get_task(b.id).state == "pending" and len(db.list_agents()) == 2
         return
     if ends == "start now":
+        from brindle import gates
+
+        assert tasks.load_counts(db) == (0, 0)          # the processing supervisor is no worker
         forced = spawn.stats()["forced"]
-        msg = tasks.start_now(db, boss, t.id)
-        assert tasks.FORCED in msg and db.get_task(t.id).state == "started"
-        assert db.get_task(t.id).waiting == tasks.FORCED and spawn.stats()["forced"] == forced + 1
-        assert spawn.no_room(str(repo)) is not None     # only worker starts are forced: checks keep waiting
+        tasks.start_now(db, boss, t.id)
+        assert db.get_task(t.id).state == "started" and db.get_task(t.id).waiting == tasks.FORCED
+        assert spawn.stats()["forced"] == forced + 1
+        worker = db.get_agent(db.get_task(t.id).agent_id)
+        wws = db.get_workspace(worker.workspace_id)
+        assert tasks.load_counts(db) == (1, 0)
+        # A check run on its branch still waits for room under the same load, then runs in the background.
+        ran, seen, wrapped = Path(wws.path) / "ran.txt", [], []
+
+        def cancel():   # polled on every look at the machine while the run waits
+            seen.append(ran.exists())
+            load[0] = 2.0   # admitted after the first look
+            return False
+
+        real_background = spawn._background
+        monkeypatch.setattr(spawn, "_background", lambda argv: wrapped.append(argv) or real_background(argv))
+        monkeypatch.setattr(gates, "SLOT_POLL", 0)
+        ok, _ = gates.run_checked(db, wws, "touch ran.txt", {}, 60, cancel=cancel, full=True)
+        assert ok and seen == [False] and wrapped and ran.exists()
+        db.set_status(worker.id, "idle")                # reported, but its check run is still going
+        with gates.marker("checks-running", wws.id):
+            assert tasks.load_counts(db) == (0, 1)
         return
 
     db.set_status("boss", "paused")

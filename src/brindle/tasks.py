@@ -634,14 +634,24 @@ def room_wait(repo_root: str | None = None) -> str | None:
     return spawn.no_room(repo_root)
 
 
+def load_counts(db: DB) -> tuple[int, int]:
+    """(running workers, running check runs): workers are the process-running
+    agents of a task (not supervisors or reviewers); check runs are counted
+    per workspace, whether or not their worker is still running."""
+    from brindle import gates
+
+    every = db.list_agents()
+    workers = sum(a.mode in ("handoff", "handoff_detached", "assign")
+                  and a.status in ("starting", "processing") and agents.runs_process(a) for a in every)
+    checks = sum(gates.marked("checks-running", ws_id) for ws_id in {a.workspace_id for a in every})
+    return workers, checks
+
+
 def load_note(db: DB) -> str:
     """Where the load comes from: the machine's (``spawn.why``) and how many
     of brindle's own workers and check runs are running."""
-    from brindle import gates
-
-    live = [a for a in db.list_agents() if a.status in ("starting", "processing") and agents.runs_process(a)]
-    checks = sum(gates.marked("checks-running", a.workspace_id) for a in live)
-    return f"{spawn.why()}; brindle has {len(live)} workers and {checks} check runs running"
+    workers, checks = load_counts(db)
+    return f"{spawn.why()}; brindle has {workers} workers and {checks} check runs running"
 
 
 def forced_start(db: DB, ws: Workspace) -> bool:
@@ -669,9 +679,6 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
         raise ValueError(f"Task {task_id} isn't yours to start: only its caller or its session root can.")
     if t.state != "pending" or t.waiting is None:
         raise ValueError(f"Task {task_id} is {t.state}, not waiting for room: nothing to force.")
-    if any(o.waiting == FORCED for o in db.list_tasks(state="starting")):
-        raise ValueError("Another worker was just started despite the load and is still starting; "
-                         "try again once it is up, or let this one wait for room.")
     caller_ws = db.get_workspace(t.caller_ws_id)
     if not caller_ws or session_paused(db, t):
         raise ValueError(f"Task {task_id} can't start now (its session is paused or gone).")
@@ -682,15 +689,17 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
         raise ValueError(str(e)) from e
     if unmet:
         raise ValueError(f"Task {task_id} still waits on {', '.join(unmet)}.")
-    if not db.claim_task(t.id):
+    if not db.claim_forced_task(t.id, FORCED):   # the single forced-start slot, taken with the task
+        now = db.get_task(t.id)
+        if now is not None and now.state == "pending":
+            raise ValueError("Another worker was just started despite the load and is still starting; "
+                             "try again once it is up, or let this one wait for room.")
         raise ValueError(f"Task {task_id} was just started or cancelled.")
-    db.update_task(t.id, waiting=FORCED)
     try:
         worker = start_queued(db, t)
     except agents.AgentError as e:
-        db.update_task(t.id, state="pending", waiting=t.waiting)
+        db.update_task(t.id, state="pending", waiting=t.waiting)   # frees the slot
         raise ValueError(f"It could not start: {e}") from e
-    spawn.count_forced()
     text = f"Started {worker.id} for task {t.id} ({FORCED})."
     if t.caller_id and (caller is None or caller.id != t.caller_id):
         try:

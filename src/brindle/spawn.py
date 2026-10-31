@@ -259,14 +259,20 @@ def no_room(repo_root: str | None = None) -> str | None:
     return why()
 
 
-_forced = 0
+def forced_starts() -> int:
+    """How many workers a supervisor started despite the load (durable: it is
+    counted from their tasks, so any process sees every process's)."""
+    try:
+        from brindle import tasks
+        from brindle.db import DB
 
-
-def count_forced() -> None:
-    """A worker was started despite the load, by its supervisor (``stats``)."""
-    global _forced
-    with _cond:
-        _forced += 1
+        db = DB()
+        try:
+            return db.count_tasks_waiting_as(tasks.FORCED)
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - a health number, never a reason to fail
+        return 0
 
 
 def _has_room() -> bool:
@@ -279,7 +285,8 @@ def stats() -> dict:
     while running (their request ended, or its deadline passed), since this
     process started."""
     with _cond:
-        return {"running": _running, "refused": _refused, "stopped": _stopped, "forced": _forced}
+        counts = {"running": _running, "refused": _refused, "stopped": _stopped}
+    return {**counts, "forced": forced_starts()}
 
 
 def _count_stopped() -> None:
