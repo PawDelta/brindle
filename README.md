@@ -1,8 +1,5 @@
 # brindle
 
-*[pawdelta.com/brindle](https://pawdelta.com/brindle/) · Published on PyPI as `brindle`; the command is `brindle`. This project is
-unrelated to the Brindle desktop app at brindle.dev.*
-
 A supervisor for your coding agents that won't call work done until it's proven.
 brindle runs Claude Code, Codex and open-weight models side by side, each in its own
 git worktree. A supervisor agent splits up the work and hands it out. Each branch
@@ -10,28 +7,52 @@ merges only after a reviewer approves
 that exact commit and your checks pass. A goal is done only when its check commands
 exit 0.
 
+**Who it's for:** developers who already use Claude Code, Codex or Google Antigravity
+and want several agents working in parallel on one repo, with a review and a test
+gate before anything merges. For a one-line fix, plain `claude` is quicker
+([Recommended use](#recommended-use)).
+
+**What it adds over running the CLI directly:** a worktree and branch per worker,
+merges gated on a reviewer's approval of the exact commit plus your checks, goals
+that count as done only when their check commands exit 0, and a session that keeps
+going, pauses at your usage limit and resumes after the reset, until those checks pass.
+
 ```sh
-curl -fsSL pawdelta.com/brindle/install | sh   # installs uv and tmux if missing, then brindle
+curl -fsSL pawdelta.com/brindle/install | sh   # installs uv (and tmux on macOS) if missing, then brindle
 # or, if you already have uv and tmux:
 uv tool install brindle
 
 brindle demo        # watch it finish a practice repo in a few minutes
 ```
 
-brindle is free to use, including at work, under the [brindle License 1.0](LICENSE): you
-may install and run it, but not modify or redistribute it or use it to build a competing
-service ([details](#license)).
+macOS, Linux, or Windows through WSL2. You need tmux and at least one agent CLI,
+installed and signed in ([Install](#install)).
+
+**License:** source-available, not open source. brindle is free to use, including at
+work, under the [brindle License 1.0](LICENSE): you may install and run it, but not
+modify it (beyond the changes the license permits) or redistribute it, or use it to
+build a competing service ([details](#license)).
+
+**Free and paid:** the core workflow is free, with no plan limit on agents, workers or
+sessions (by default up to 5 workers at once per session, set by `max_agents`), and
+Free needs no account. brindle Pro is $20/month; brindle Team is $40/seat/month,
+up to 20 seats ([what each adds](#brindle-pro-and-team),
+[pricing](https://pawdelta.com/brindle/pricing/)).
 
 ![brindle demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-demo.gif)
 
 *`brindle demo`, recorded on brindle 0.4.1 (sped up about 2.7×, 20 seconds): two workers in parallel, each branch reviewed and merged, both milestones verified by their check commands.*
 
+Website: [pawdelta.com/brindle](https://pawdelta.com/brindle/) · Published on PyPI as
+`brindle`; the command is `brindle`.
+
 - **Done means a command passed.** A goal is split into milestones, each with a
   check command that brindle runs itself. A milestone is verified when its check exits
   0, re-run after later merges to catch regressions, never when a model says so.
 - **Reviewed before it merges.** A reviewer approves the exact sha, then
-  pre-commit and your `checks` run. Codex reviews Claude's work (or a local model
-  does) when available. Nothing reaches your default branch on its own.
+  pre-commit and your `checks` run. The default reviewer is Claude; set
+  `review_profile` to `reviewer-codex` or `reviewer-local` for a second model's
+  view. Nothing reaches your default branch on its own.
 - **Parallel agents, no collisions.** Every worker gets its own worktree and
   branch, cut from a freshly fetched base, with its own block of ports and
   optional per-worktree databases (brindle Pro).
@@ -53,8 +74,10 @@ service ([details](#license)).
 curl -fsSL pawdelta.com/brindle/install | sh
 ```
 
-The script ([scripts/install.sh](scripts/install.sh)) installs uv and tmux if
-they're missing, then brindle, then runs `brindle doctor`. Run it again to upgrade.
+The script ([scripts/install.sh](scripts/install.sh)) installs uv if it's missing
+and tmux if it's missing (with Homebrew on macOS; elsewhere it prints the command to
+run), then brindle (Python 3.11 or newer, which uv fetches if needed), then runs
+`brindle doctor`. Run it again to upgrade.
 Session starts check PyPI at most once a day and show available updates in the status
 bar and `brindle doctor`; set `"auto_update": true` in `~/.brindle/config.json` to
 upgrade in the background (restart to use it). Checks skip local and editable
@@ -67,12 +90,15 @@ uv tool install brindle
 uv tool install --editable ~/Projects/brindle   # or from a local checkout
 ```
 
-brindle drives Claude Code, so you need that too (`npm install -g @anthropic-ai/claude-code`).
+brindle drives the agent CLIs you already use, so you need at least one installed and
+signed in. Claude Code is the default for the supervisor, workers and reviewer
+(`npm install -g @anthropic-ai/claude-code`, then `claude auth login`); Codex
+(`brindle -s codex` makes it the supervisor) and Google Antigravity work too.
 
 There's also a free brindle desktop app for macOS, Linux, and Windows (via WSL). It's a download from the brindle website and runs on the same engine; the CLI keeps working alongside it. `brindle app` opens the app, or prints the download link if it isn't installed. `brindle daemon` runs the local API the app talks to: over a Unix socket by default, or on `--tcp` at 127.0.0.1 for WSL. Over `--tcp` the daemon can't check whether a caller is an agent, so its token is the only gate: keep TCP for the WSL client.
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.4.3`). A session started before an upgrade keeps
+session shows it too (`brindle 0.5.5`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -1036,7 +1062,9 @@ brindle is complete on its own. brindle Pro adds hosted learning (which profile
 to use for which kind of task; per person on Pro, per organization on Team,
 and kept private) and brindle Team adds org policies (allowed providers
 and models, human review before merges) and an audit feed of what brindle did.
-Plans and prices: https://pawdelta.com/brindle#pricing.
+Free needs no account. brindle Pro is $20/month and brindle Team $40/seat/month, up
+to 20 seats; brindle Enterprise is by contact. Plans and prices:
+https://pawdelta.com/brindle/pricing/.
 
 Run `brindle account` to see every paid feature, which ones your plan includes,
 how to use them, and the next step to get the rest:
@@ -2338,6 +2366,10 @@ The pre-push hook that ran these before every push is off for now
 ## License
 
 brindle is source-available, not open source: you may install and use it under the
-[brindle License 1.0](LICENSE), which does not allow changing or redistributing it,
+[brindle License 1.0](LICENSE), which does not allow changing it (beyond the
+permitted changes it lists: contributions, configuration and plugins, private fixes)
+or redistributing it,
 using it for the competing services listed in [SCHEDULE-A](SCHEDULE-A), or getting
 around paid-feature checks.
+
+This project is unrelated to the Brindle desktop app at brindle.dev.
