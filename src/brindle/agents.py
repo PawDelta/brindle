@@ -3114,11 +3114,16 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
                                   second=second, slot=slot)
 
 
-def review_dispatch_lock(workspace_id: str):
-    """Share the dispatch lock with recovery's read of the failed agent."""
+def review_dispatch_lock(workspace_id: str, *, timeout: float | None = None):
+    """Share dispatch with recovery; optionally bound acquisition for a request.
+
+    Nested dispatches in the same thread reuse the lock. Background callers
+    omit ``timeout`` and keep waiting until the current dispatcher finishes.
+    """
     from brindle import pipeline
 
-    return pipeline._reentrant_lock("review-dispatch-" + hashlib.sha1(workspace_id.encode()).hexdigest()[:16])
+    return pipeline._reentrant_lock("review-dispatch-" + hashlib.sha1(workspace_id.encode()).hexdigest()[:16],
+                                    timeout=timeout)
 
 
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
