@@ -518,10 +518,15 @@ def _compute(ws: Workspace, base: str, fp: _Fingerprint | None, prev: _Facts | N
     log_ = _log(ws, mb, head)
     chain = [(sha, first) for sha, first, _, _ in reversed(log_)]
     touches, in_base = _touches(ws, mb, head), _base_paths(ws, mb)
+    renamed: set[str] = set()       # the names base files took since
     for sha, first in chain:
-        # A base line deleted later may need any of these to follow it: run once, then kept.
-        if sha not in touches or not touches[sha].isdisjoint(in_base):
-            _file_diffs(ws, first, sha, "-U0")
+        # A base line deleted later may need any commit that touched its file (under any of its
+        # names) to follow it: each runs once, then is kept.
+        if sha in touches and touches[sha].isdisjoint(in_base) and touches[sha].isdisjoint(renamed):
+            continue
+        for _, old_path, path, _ in _file_diffs(ws, first, sha, "-U0"):
+            if old_path is not None and (old_path in in_base or old_path in renamed):
+                renamed.add(path)
     changed = _file_diffs(ws, mb, head)
     hunks = [(old_path or path, path, _hunks(patch)) for _, old_path, path, patch in changed]
     deleted = _deleters(ws, chain, {was: [n for h in hs for n in h["deleted"]]

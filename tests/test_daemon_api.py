@@ -968,6 +968,19 @@ def test_session_diff_reruns_git_only_for_what_changed(db, repo, tmp_path, monke
     assert older() == []
     session_review._forget()
     assert session_review.diff(db, root, ws) == got
+    # The same once the base file was renamed and then only added to: followed under its new name too.
+    sh("git mv shared.py common.py && git commit -qm rename", sess)
+    (sess / "common.py").write_text("0\n" + (sess / "common.py").read_text())
+    sh("git commit -qam add", sess)
+    session_review._forget()
+    session_review.diff(db, root, ws)
+    (sess / "common.py").write_text((sess / "common.py").read_text().replace("15\n", ""))
+    sh("git commit -qam unfifteen", sess)
+    ran.clear()
+    got = session_review.diff(db, root, ws)
+    assert older() == [] and any(f["old_path"] == "shared.py" for f in got["files"])
+    session_review._forget()
+    assert session_review.diff(db, root, ws) == got
     # A base only git resolves (origin/main) moves with HEAD unchanged: computed again.
     qualified = dataclasses.replace(ws, base_branch="origin/main")
     assert session_review.diff(db, root, qualified)["files"]
