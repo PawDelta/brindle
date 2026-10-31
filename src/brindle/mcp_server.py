@@ -15,7 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
-from brindle import agents, antigravity, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, spawn, tasks, upgrade, workspaces
+from brindle import agents, antigravity, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace, migrated_by_newer
@@ -373,31 +373,27 @@ def _route_clash(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, 
     return reply, clash.warning
 
 
-def _launches_process(profile: str, repo_root: str) -> bool:
-    from brindle.profiles import load_profile
-    from brindle.providers import PROVIDERS
-
-    try:
-        provider = PROVIDERS.get(load_profile(profile, repo_root).provider)
-    except Exception:  # noqa: BLE001 - an unloadable profile fails at the start, with its reason
-        return True
-    return provider is None or provider.launches_process
+def _room_duplicate(db: DB, caller: Agent, ws: Workspace, task: str) -> str | None:
+    """The reply when this exact task is already queued for room (or being
+    started from that queue): never a second worker for it. If there's room
+    now, the queued one starts instead of waiting for its helper."""
+    t = tasks.room_duplicate(db, caller.id, ws.repo_root, task)
+    if t is None:
+        return None
+    if t.state == "pending" and tasks.start_with_room_now(db, t):
+        t = db.get_task(t.id)
+        return _remind_goal(db, caller, f"This task was already queued as task {t.id}; there's room "
+                            f"now, so it started: worker {t.agent_id}. Nothing else was started.")
+    state = "being started right now" if t.state != "pending" else f"waiting for room: {t.waiting}"
+    return f"Already queued as task {t.id} ({state}); left it in place."
 
 
 def _queue_for_room(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, mode: str, *,
                     isolate: bool, branch: str | None, done_when: str | None, files: list[str] | None,
                     depends_on: list[str] | None, plan_first: bool | None, weight: str | None,
-                    decision: dict, why: list[str], analysis_doc: bool = False) -> str | None:
-    """When the machine has no room for another worker (``tasks.room_wait``),
-    queue the task until it has, and return the reply saying so and why;
-    None to start it now. A second identical assign leaves the queued one.
-    A subagent profile starts no process of brindle's: never queued."""
-    busy = tasks.room_wait()
-    if busy is None or not _launches_process(profile, ws.repo_root):
-        return None
-    existing = tasks.pending_duplicate(db, caller.id, ws.repo_root, task)
-    if existing:
-        return f"Already queued as task {existing.id}; left it in place."
+                    decision: dict, why: list[str], busy: str, analysis_doc: bool = False) -> str:
+    """The machine has no room for another worker (``agents.NoRoom``, why
+    ``busy``): queue the task until it has, and return the reply saying so."""
     t = tasks.enqueue(
         db, caller, ws, profile, task, mode, isolate=isolate, branch=branch, done_when=done_when,
         files=files, depends_on=depends_on, plan_first=plan_first, weight=weight,
@@ -406,8 +402,8 @@ def _queue_for_room(db: DB, caller: Agent, ws: Workspace, profile: str, task: st
     savings.record(db, ws.repo_root, decision, task_id=t.id)
     return _remind_goal(db, caller, (
         f"Queued task {t.id}, not started: {busy}. It starts on its own once there's room "
-        f"(within {spawn.START_WAIT / 60:.0f} min at the latest) and you get a message then; "
-        "list_tasks shows it as waiting for room. Don't assign it again.")
+        "and you get a message then; list_tasks shows it as waiting for room. "
+        "Don't assign it again (cancel_task gives it up).")
         + "".join(f"\nprofile: {w}" for w in why))
 
 
@@ -506,6 +502,9 @@ async def handoff(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        repeated = _room_duplicate(db, caller, ws, task)
+        if repeated:
+            return repeated
         try:
             unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id)
         except agents.AgentError as e:
@@ -527,18 +526,18 @@ async def handoff(
             weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
         if reply:
             return reply
-        queued = _queue_for_room(
-            db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
-            done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
-        if queued:
-            return queued
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
                 done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
                 analysis_doc=analysis_doc,
             )
+        except agents.NoRoom as e:
+            return _queue_for_room(
+                db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
+                done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+                weight=effective_weight, decision=decision, why=why, busy=str(e),
+                analysis_doc=analysis_doc)
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
         started = tasks.record_started(
@@ -650,6 +649,9 @@ async def assign(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        repeated = _room_duplicate(db, caller, ws, task)
+        if repeated:
+            return repeated
         try:
             unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id)
         except agents.AgentError as e:
@@ -671,18 +673,18 @@ async def assign(
             weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
         if reply:
             return reply
-        queued = _queue_for_room(
-            db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
-            done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
-        if queued:
-            return queued
         try:
             worker, wws = agents.delegate(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
                 done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
                 analysis_doc=analysis_doc,
             )
+        except agents.NoRoom as e:
+            return _queue_for_room(
+                db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
+                done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+                weight=effective_weight, decision=decision, why=why, busy=str(e),
+                analysis_doc=analysis_doc)
         except Exception as e:  # noqa: BLE001
             return _start_failure(profile, e)
         started = tasks.record_started(

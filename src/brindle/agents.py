@@ -2676,6 +2676,28 @@ def _branch_from_task(profile: str, task: str, agent_hint: str) -> str:
     return f"brindle/{profile}/{'-'.join(words)[:40].strip('-') or 'task'}-{agent_hint}"
 
 
+class NoRoom(AgentError):
+    """The machine has no room for another worker (``brindle.spawn.no_room``,
+    the reason is the message); nothing was started or created. Callers
+    queue the start instead (``tasks.enqueue(waiting=...)``)."""
+
+
+def admission(profile: str, repo_root: str) -> str | None:
+    """Why a worker on ``profile`` must wait for room before it starts, or
+    None. A subagent profile starts no process of brindle's: never held."""
+    from brindle import spawn as gate
+    from brindle.providers import PROVIDERS
+
+    busy = gate.no_room()
+    if busy is None:
+        return None
+    try:
+        provider = PROVIDERS.get(load_profile(profile, repo_root).provider)
+    except Exception:  # noqa: BLE001 - an unloadable profile fails at its start, with its reason
+        return busy
+    return busy if provider is None or provider.launches_process else None
+
+
 def delegate(
     db: DB,
     caller: Agent | None,
@@ -2692,8 +2714,11 @@ def delegate(
     files: list[str] | None = None,
     weight: str | None = None,
     analysis_doc: bool = False,
+    admit: bool = True,
 ) -> tuple[Agent, Workspace]:
-    """Start a worker. ``weight`` is the weight its task was routed as;
+    """Start a worker, or raise ``NoRoom`` (nothing created) when the machine
+    has no room for it (``admission``); ``admit`` False skips that, for a
+    caller that has just looked. ``weight`` is the weight its task was routed as;
     ``analysis_doc`` asks for an analysis doc whatever the weight.
     ``plan_first`` (None: the repo's ``plan_first`` config)
     makes it get a plan approved before it may edit; ``files`` picks the
@@ -2721,6 +2746,9 @@ def delegate(
     why = model_problem(profile, caller_ws)
     if why:
         raise AgentError(why)
+    busy = admission(profile, caller_ws.repo_root) if admit else None
+    if busy:
+        raise NoRoom(busy)
     def start_worker(ws: Workspace) -> Agent:
         # Startup dialogs are handled by the detached _after-launch helper, so
         # handoff/assign return as soon as the window exists instead of polling

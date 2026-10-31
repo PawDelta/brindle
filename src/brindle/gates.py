@@ -371,17 +371,17 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
 @contextmanager
 def _room_for_check(ws: Workspace, cancel=None):
     """With its slot held, wait until the machine has room for the run
-    (``spawn.no_room``), ``spawn.START_WAIT`` at most: a full suite started
-    on a saturated machine only makes everything slower. While it waits,
-    ``marker("checks-room")`` makes the branch read "checks waiting for room"
-    (``checks_state``), so silence isn't taken for a stall. ``cancel`` gives
-    the wait up (``Abandoned``)."""
+    (``spawn.no_room``): a full suite started on a saturated machine only
+    makes everything slower. While it waits, ``marker("checks-room")`` makes
+    the branch read "checks waiting for room: <why>" (``checks_state``), so
+    silence isn't taken for a stall. ``cancel`` gives the wait up
+    (``Abandoned``)."""
     from brindle import spawn
 
     if spawn.no_room() is not None:
-        began, pause = time.monotonic(), threading.Event()
+        pause = threading.Event()
         with marker("checks-room", ws.id):
-            while spawn.no_room() is not None and time.monotonic() - began < spawn.START_WAIT:
+            while spawn.no_room() is not None:
                 if cancel is not None and cancel():
                     raise Abandoned("room")
                 pause.wait(SLOT_POLL)
@@ -390,10 +390,14 @@ def _room_for_check(ws: Workspace, cancel=None):
 
 def checks_state(ws: Workspace) -> str:
     """Where ``ws``'s check run stands: running, waiting for room on the
-    machine (``_room_for_check``), or waiting (for a slot, or to start)."""
+    machine (``_room_for_check``) and why, or waiting (for a slot, or to start)."""
+    from brindle import spawn
+
     if marked("checks-running", ws.id):
         return "checks running"
-    return "checks waiting for room" if marked("checks-room", ws.id) else "waiting for checks"
+    if marked("checks-room", ws.id):
+        return f"checks waiting for room: {spawn.why()}"
+    return "waiting for checks"
 
 
 def slow_after(last: float) -> float:

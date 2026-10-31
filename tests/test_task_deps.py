@@ -610,6 +610,32 @@ def test_requeue_with_a_cancelled_dependency_asks_for_new_ones(db, repo, boss):
     assert out.startswith("Error") and "depends_on" in out
 
 
+# -- waiting for room ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("state", ["pending", "starting"])
+def test_repeating_an_assign_queued_for_room_never_starts_a_second_worker(db, repo, boss, monkeypatch, state):
+    """The load falls before the queued task's helper looks again, and the
+    supervisor assigns the same task: the queued one starts (or, already
+    being started, is left alone), never a second worker beside it."""
+    from brindle import spawn
+
+    load = [14.0]
+    monkeypatch.setattr(spawn, "_load", lambda: load[0])
+    monkeypatch.setattr(spawn, "_cores", lambda: 10)
+    assert asyncio.run(mcp_server.assign("developer", "do A")).startswith("Queued task")
+    [t] = db.list_tasks(str(repo))
+    db.update_task(t.id, state=state)
+    load[0] = 2.0
+    out = asyncio.run(mcp_server.assign("developer", "do A"))
+    workers = [a for a in db.list_agents() if a.mode == "assign"]
+    assert len(db.list_tasks(str(repo))) == 1 and t.id in out, out
+    if state == "pending":
+        assert [w.id for w in workers] == [db.get_task(t.id).agent_id]
+    else:
+        assert workers == [] and db.get_task(t.id).state == "starting"
+
+
 # -- dry_run --------------------------------------------------------------------
 
 

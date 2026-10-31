@@ -232,16 +232,12 @@ def why() -> str:
             f"{running()} of brindle's processes running{mem.get(level, '')})")
 
 
-START_WAIT = 600.0   # seconds a new worker or check run waits for room before starting anyway
-
-
 def no_room() -> str | None:
     """Why a new worker or check run should wait before it starts (what
     :func:`why` says), or None when the machine has room for it. Unlike a
     read or an action this applies in every process, gate on or off: a worker
-    or a check run is the heaviest thing brindle starts. Callers start it
-    anyway after :data:`START_WAIT`, so a machine that stays busy delays the
-    work but never stops it."""
+    or a check run is the heaviest thing brindle starts. It waits until there
+    is room, however long, or until it is cancelled."""
     return why() if room() < 1 else None
 
 

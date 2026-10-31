@@ -10,9 +10,9 @@ actually-changed files, so the caller learns about likely collisions without
 being blocked by them.
 
 A task whose worker would start on a machine with no room for it
-(``spawn.no_room``) is queued the same way, 'pending' with the reason in
-``waiting``, and started by a detached helper (``start_when_room``) once
-there's room, or once it has waited ``spawn.START_WAIT``.
+(``spawn.no_room``; ``agents.delegate`` raises ``NoRoom``) is queued the
+same way, 'pending' with the reason in ``waiting``, and started by a
+detached helper (``start_when_room``) once there's room.
 """
 
 from __future__ import annotations
@@ -592,10 +592,12 @@ def enqueue(
     *, isolate: bool, branch: str | None, done_when: str | None,
     files: list[str] | None, depends_on: list[str] | None, plan_first: bool | None = None,
     weight: str | None = None, analysis_doc: bool = False, waiting: str | None = None,
+    pipeline: str | None = None,
 ) -> Task:
     """Record a task that can't start yet: no worker, no workspace, just what
     it takes to start it once its dependencies are merged, or (``waiting``,
-    why) once the machine has room for it."""
+    why) once the machine has room for it. ``pipeline``: the pipeline state
+    its worker starts in (a branch's second attempt or conflict resolver)."""
     t = Task(
         id=new_id(), repo_root=caller_ws.repo_root, agent_id=None,
         caller_id=caller.id if caller else None, caller_ws_id=caller_ws.id,
@@ -609,6 +611,8 @@ def enqueue(
         db.update_task(t.id, plan_first=int(plan_first))
     if analysis_doc:
         db.update_task(t.id, analysis_doc=1)   # add_task writes the original columns only
+    if pipeline:
+        db.update_task(t.id, pipeline=pipeline)
     bus.publish(db, "task.queued", repo_root=t.repo_root, task_id=t.id, caller_id=t.caller_id,
                 depends_on=depends_on or [], waiting=waiting)
     if waiting:
@@ -621,13 +625,18 @@ def enqueue(
 ROOM_POLL = 5.0   # seconds between the waiting helper's looks at the machine
 
 
-def room_wait(t: Task | None = None, now: float | None = None) -> str | None:
-    """Why a worker should not start now (``spawn.no_room``), or None: there
-    is room, or ``t`` has already waited ``spawn.START_WAIT`` for it."""
-    now = time.time() if now is None else now
-    if t is not None and t.waiting_since is not None and now - t.waiting_since >= spawn.START_WAIT:
-        return None
+def room_wait() -> str | None:
+    """Why a worker should not start now (``spawn.no_room``), or None."""
     return spawn.no_room()
+
+
+def room_duplicate(db: DB, caller_id: str | None, repo_root: str, task_text: str) -> Task | None:
+    """A task ``caller_id`` queued for room in ``repo_root`` with the same
+    brief, waiting or being started right now: a repeated assign of it must
+    never start a second worker, whatever the load is by then."""
+    return next((t for state in ("pending", "starting") for t in db.list_tasks(repo_root, state=state)
+                 if t.waiting is not None and t.caller_id == caller_id and t.task_text == task_text),
+                None)
 
 
 def wait_for_room(db: DB, t: Task, why: str) -> None:
@@ -650,13 +659,13 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
     """The detached helper's loop: start task ``task_id`` once there's room
     (``_start_if_ready`` looks), telling its caller. Ends when it starts, or
     when the task is no longer waiting (cancelled, held, started by a
-    sweep); ``spawn.START_WAIT`` bounds it. Returns whether it started it."""
+    sweep). Returns whether it started it."""
     pause = threading.Event()
     while True:
         t = db.get_task(task_id)
         if t is None or t.state != "pending" or t.waiting is None:
             return False
-        why = room_wait(t)
+        why = room_wait()
         if why is None:
             # Unless a dependency added since holds it: merging that starts it.
             return _start_if_ready(db, t, "room on the machine", check_room=False)
@@ -665,11 +674,16 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
         pause.wait(poll)
 
 
+def start_with_room_now(db: DB, t: Task) -> bool:
+    """Start pending task ``t`` now if the machine has room (and its
+    dependencies are merged), telling its caller; else it keeps waiting."""
+    return _start_if_ready(db, t, "room on the machine")
+
+
 def start_with_room(db: DB) -> int:
     """Start every task waiting only for room that can start now, in case
     its helper died (the cull sweep calls this). Returns how many started."""
-    return sum(_start_if_ready(db, t, "room on the machine")
-               for t in db.list_tasks(state="pending") if t.waiting is not None)
+    return sum(start_with_room_now(db, t) for t in db.list_tasks(state="pending") if t.waiting is not None)
 
 
 def waiting_for_room(db: DB, root_id: str) -> list[Task]:
@@ -767,7 +781,10 @@ def start_queued(db: DB, task: Task) -> Agent:
         plan_first=None if task.plan_first is None else bool(task.plan_first),
         start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
         weight=launch_weight, analysis_doc=bool(task.analysis_doc),
+        admit=False,   # every caller has just looked for room (_start_if_ready, requeue)
     )
+    if task.pipeline:
+        db.update_agent(worker.id, pipeline=task.pipeline, pipeline_rounds=0)
     db.update_task(task.id, agent_id=worker.id, state="started", started_at=time.time())
     bus.publish_agent(db, "task.started", worker.id, task_id=task.id)
     savings.attach_agent(db, task.id, worker.id)
@@ -859,7 +876,7 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     except agents.AgentError as e:
         _cancel(db, t.id, str(e))
         return False
-    why = room_wait(t) if check_room else None
+    why = room_wait() if check_room else None
     if why:
         wait_for_room(db, t, why)
         return False

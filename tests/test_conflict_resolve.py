@@ -132,6 +132,31 @@ def test_a_finished_workers_conflict_goes_to_a_light_worker_in_its_worktree(db, 
     assert "Merged feat into main" in merged and "resolved" in merged
 
 
+def test_a_resolver_waits_for_room_then_starts_resolving_in_the_worktree(db, repo, conflicted, monkeypatch):
+    """Plan 3.5: a pipeline-started worker waits for room like an assigned one."""
+    from brindle import spawn, tasks
+    from test_merge_order import fake_spawn
+
+    ws = conflicted()
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id != "w1")
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    load = [14.0]
+    monkeypatch.setattr(spawn, "_load", lambda: load[0])
+    monkeypatch.setattr(spawn, "_cores", lambda: 10)
+    pipeline.on_review(db, db.get_agent("rev0"), ws, True, "lgtm")
+    [t] = db.list_tasks(str(repo), state="pending")
+    assert "load 14.0 on 10 cores" in t.waiting and t.caller_id == "boss"
+    assert [a.id for a in db.list_agents(ws.id) if a.mode == "assign"] == ["w1"]   # nothing started
+    [fyi] = boss_messages(db)
+    assert "as soon as the machine has room" in fyi and "needs you" not in fyi
+
+    load[0] = 2.0
+    assert tasks.start_when_room(db, t.id, poll=0)
+    resolver = db.get_agent(db.get_task(t.id).agent_id)
+    assert resolver.workspace_id == ws.id and resolver.pipeline == "resolving"
+    assert db.get_agent("w1").pipeline is None
+
+
 def test_when_no_resolver_can_start_the_conflict_needs_the_supervisor(db, repo, conflicted, monkeypatch):
     ws = conflicted()
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id != "w1")

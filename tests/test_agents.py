@@ -445,6 +445,10 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     assert [a.id for a in db.list_agents()] == ["boss"]                  # nothing started
     assert autopilot.on_stop(db, boss, {}) is None                       # waiting, not stalled
     assert db.get_autopilot("boss").nudges == 0
+    # However long the machine stays full, the task waits rather than overload it.
+    db.update_task(t.id, waiting_since=time.time() - 86400)
+    tasks.sweep(db)
+    assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
 
     load[0] = 2.0
     assert tasks.start_when_room(db, t.id, poll=0)
