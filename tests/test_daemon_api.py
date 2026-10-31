@@ -763,9 +763,16 @@ def test_doc_policy_and_export_config_are_proxied(monkeypatch):
 
     monkeypatch.setattr(analysis_docs, "require_entitlement",
                         lambda store=None: SimpleNamespace(sub="u1", org_id="o1", role="member"))
-    monkeypatch.setattr(analysis_docs, "api", lambda method, path, body=None, **kw: {"path": path})
+    config = {"google_client_id": "g", "google_client_secret": "s", "microsoft_client_id": None}
+
+    def fake_api(method, path, body=None, **kw):
+        return config if path == "/analysis-docs/export-config" else {"path": path}
+
+    monkeypatch.setattr(analysis_docs, "api", fake_api)
     assert _get("/v1/analysis-docs/policy", AUTH)[1] == {"path": "/orgs/o1/analysis-docs/policy"}
-    assert _get("/v1/analysis-docs/export-config", AUTH)[1] == {"path": "/analysis-docs/export-config"}
+    assert _get("/v1/analysis-docs/export-config", AUTH)[1] == config
+    config["google_client_secret"] = None
+    assert _get("/v1/analysis-docs/export-config", AUTH)[1]["google_client_secret"] is None
 @pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])
 def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, enough):
     from brindle.db import Task
