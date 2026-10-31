@@ -243,3 +243,4 @@ client abandonment. At the probe, default AnyIO was 0/40 with zero waiters,
 heavy admission/workers were 4/4, and meta/repos took 255/284 ms. Every
 limiter token was released after cleanup. The full suite is left to
 brindle's merge gate.
+After the session diff cache (`perf/session-diff-cache`), git processes per diff were [0, 49], diffs took 0.7–6.7 ms (so no client abandoned one and abandonment is no longer required), and meta/repos took 2.4/4.6 ms.

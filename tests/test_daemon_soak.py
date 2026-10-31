@@ -281,7 +281,7 @@ def test_session_diff_overload(db, repo, monkeypatch):
         }, sort_keys=True))
         # A busy response can itself arrive after the client's short bound.
         assert len(answered) + len(abandoned) + len(shed) == 40
-        assert abandoned and len(completed) == len(started) > 1
+        assert len(completed) == len(started) > 1
         assert all(c[2] == 25 for c in completed)
         assert limiter.borrowed_tokens == 0
         assert lane.admission.borrowed_tokens == lane.workers.borrowed_tokens == 0
