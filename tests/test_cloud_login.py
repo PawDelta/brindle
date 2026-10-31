@@ -247,23 +247,37 @@ def test_issue189_a_timed_out_gcloud_leaves_no_process_behind(tmp_path, monkeypa
 
 def test_google_token_cache_concurrent_misses_share_one_gcloud_call(tmp_path, monkeypatch):
     import threading
-    calls, entered, release, keyed = [], threading.Event(), threading.Event(), threading.Event()
+    calls, entered, release, progressed = [], threading.Event(), threading.Event(), threading.Event()
+    wait = 10   # a bound so a broken run fails instead of hanging
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
         if len(calls) == 1:
             entered.set()
-            release.wait()
+            release.wait(wait)
+        else:
+            progressed.set()   # without coordination the second caller mints its own token
         return SimpleNamespace(returncode=0, stdout="ya29.SECRET\n", stderr="")
 
-    real_key = cloud_login._google_cache_key
+    class WatchedLock:
+        """The per-identity lock, reporting when a second caller reaches for it."""
+        def __init__(self):
+            self.lock, self.entries = threading.Lock(), 0
 
-    def key(full):
-        if entered.is_set():
-            keyed.set()       # the second caller is past the cache-miss fast path's setup
-        return real_key(full)
+        def __enter__(self):
+            self.entries += 1
+            if self.entries == 2:
+                progressed.set()   # the second caller missed the cache and is about to wait
+            self.lock.acquire()
 
-    monkeypatch.setattr(cloud_login, "_google_cache_key", key)
+        def __exit__(self, *exc):
+            self.lock.release()
+
+    class WatchedLocks(dict):
+        def setdefault(self, key, default=None):
+            return super().setdefault(key, WatchedLock())
+
+    monkeypatch.setattr(cloud_login, "_google_locks", WatchedLocks())
     env = {"GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "adc.json")}
     results = []
 
@@ -271,13 +285,14 @@ def test_google_token_cache_concurrent_misses_share_one_gcloud_call(tmp_path, mo
         results.append(cloud_login.status("vertex", env=env, home=tmp_path, now=NOW, run=fake_run,
                                           expiry=lambda token: 3600.0))
 
-    first = threading.Thread(target=check)
-    first.start()
-    entered.wait()
-    second = threading.Thread(target=check)
-    second.start()
-    keyed.wait()
-    release.set()
-    first.join()
-    second.join()
+    first, second = threading.Thread(target=check), threading.Thread(target=check)
+    try:
+        first.start()
+        assert entered.wait(wait)
+        second.start()
+        assert progressed.wait(wait)   # the second caller is now blocked on the lock (or past it)
+    finally:
+        release.set()
+        first.join()
+        second.join()
     assert len(calls) == 1 and [r.ok for r in results] == [True, True]
