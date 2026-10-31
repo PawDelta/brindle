@@ -286,3 +286,7 @@ host load; the harness shares one process with the clients and cannot
 separate those, so this does not show that no daemon cause remains. Moving
 the recompute out of process would be the next step if the bound must drop
 further.
+
+## Bound for shared CI runners
+
+GitHub's macOS runner saw one 146 ms cheap read during a real 49-process recompute (the bound was 100 ms, the local worst 78 ms) while all structural guarantees held (AnyIO 1/40, no waiters, 32 shed, 6 stopped). The bound is now 1 s, about 7x above that read and 5x below the 5,044 ms starvation.
