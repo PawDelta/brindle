@@ -122,7 +122,8 @@ def test_an_older_servers_client_is_the_executable_listening_on_its_socket(tmp_p
     with listening:
         if matches:
             picked = pv.client_for("tmux", "tmux 3.8", pv.Path("server"), theirs)
-            assert pv.Path(picked).resolve() == pv.Path(sys.executable).resolve()
+            # This process's own executable (a framework Python runs Python.app's, not sys.executable).
+            assert pv.Path(picked).resolve() == pv._exe_of(os.getpid()).resolve()
         else:
             with pytest.raises(pv.ViewError):
                 pv.client_for("tmux", "tmux 3.8", pv.Path("server"), theirs)
