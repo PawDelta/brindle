@@ -1761,7 +1761,6 @@ def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, a
 def lead(db, repo, tmp_path, monkeypatch):
     """A session ``lead`` on branch ``sess`` (base main) in its own checkout, its goal reached; jobs run inline."""
     from brindle import spawn
-
     monkeypatch.setattr(spawn, "room", lambda: 4)
     sh(f"git worktree add -q -b sess {tmp_path / 'sess'} main", repo)
     ws = workspaces.adopt_root(db, str(tmp_path / "sess"))

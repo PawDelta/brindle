@@ -198,7 +198,7 @@ _merge_polled = 0.0
 _merge_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="pr-merged")
 _merge_lock = threading.Lock()
 _merge_checks: dict[tuple[str, str, str, str], Future] = {}
-_merge_deferred: dict[str, list[tuple[str, str, str, str]]] = {}
+_merge_order: dict[str, list[tuple[str, str, str, str]]] = {}
 
 
 def poll_merged(db: DB) -> None:
@@ -206,7 +206,8 @@ def poll_merged(db: DB) -> None:
 
     Only the daemon thread touches its DB. A check still running is shared
     by later rounds; the fixed pool bounds even a check that ignores its
-    deadline. Queued checks that didn't get a turn can run next minute.
+    deadline. The first PR advances each round, independent of whether a
+    queued check was cancelled or ran after its execution window expired.
     """
     global _merge_polled
     if not _merge_lock.acquire(blocking=False):
@@ -218,13 +219,16 @@ def poll_merged(db: DB) -> None:
             with spawn.deadline(MERGE_CHECK_SECONDS) as limit:
                 check = spawn.carry(workspaces.pull_request_merged)
                 path = str(db.path)
-                deferred = {key: n for n, key in enumerate(_merge_deferred.get(path, []))}
+                priority = {key: n for n, key in enumerate(_merge_order.get(path, []))}
                 rows = db.conn.execute("SELECT root_id, branch, url FROM session_prs"
                                        " WHERE url IS NOT NULL AND merged_at IS NULL").fetchall()
                 checks = [((path, row["root_id"], row["branch"], row["url"]), row) for row in rows]
-                # Previously queued PRs go first, with this round's fresh deadline.
-                if deferred:
-                    checks.sort(key=lambda item: deferred.get(item[0], len(deferred)))
+                if priority:
+                    checks.sort(key=lambda item: priority.get(item[0], len(priority)))
+                # Rotate by one so every PR eventually gets the first fresh
+                # window, even if the gate only admits one read per round.
+                if checks:
+                    _merge_order[path] = [key for key, _ in checks[1:] + checks[:1]]
                 for key, row in checks:
                     root = db.get_agent(row["root_id"])
                     ws = db.get_workspace(root.workspace_id) if root else None
@@ -236,8 +240,6 @@ def poll_merged(db: DB) -> None:
                     wait(pending, timeout=remaining)
                 for future in pending:
                     future.cancel()  # running reads stop at their deadline; queued ones never start
-                _merge_deferred[path] = [key for key, future in _merge_checks.items()
-                                         if key[0] == path and future.cancelled()]
         for key, future in list(_merge_checks.items()):
             if key[0] != str(db.path) or not future.done():
                 continue
@@ -793,7 +795,7 @@ class ReadinessWatch:
     def __init__(self) -> None:
         self.ready: dict[str, bool] | None = None
         self.fingerprints: dict[str, tuple] = {}
-        self._tracked: dict[str, tuple[tuple[str, int], list[str]]] = {}
+        self._tracked: dict[str, tuple[tuple[str, int], list[str] | None]] = {}
 
     def _working_tree(self, ws: Workspace, fp: _Fingerprint) -> tuple | None:
         """Stat only tracked paths, including files below nested directories.
@@ -801,13 +803,21 @@ class ReadinessWatch:
         The index supplies their names once, then only when it changes.
         Unstaged edits, deletions, restorations and mode changes invalidate
         readiness without launching git in an unchanged checkout.
+        A gitlink's directory timestamps cannot describe its nested working
+        tree. Keep its presence in the index cache, but let git judge its
+        readiness on each round rather than keeping incomplete facts.
         """
         key = (ws.path, fp.index)
         cached = self._tracked.get(ws.id)
         if cached is None or cached[0] != key:
-            names = git.run(["ls-files", "--cached", "-z"], ws.path).stdout.split("\0")
-            cached = (key, [name for name in names if name])
+            entries = git.run(["ls-files", "--stage", "-z"], ws.path).stdout.split("\0")
+            names = [entry.partition("\t")[2] for entry in entries if entry]
+            if any(entry.startswith("160000 ") for entry in entries):
+                names = None
+            cached = (key, names)
             self._tracked[ws.id] = cached
+        if cached[1] is None:
+            return None
         try:
             own, _ = _git_dirs(ws.path)
             head = (own / "HEAD").read_text()

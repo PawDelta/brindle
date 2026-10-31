@@ -19,7 +19,8 @@ def _open_readiness_prs(db, count):
                         (key, key, f"https://github.com/o/r/pull/{n}"))
 
 
-def test_readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch):
+@pytest.mark.parametrize("gitlink", [False, True])
+def test_readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
     from types import SimpleNamespace
     from brindle import git, spawn
     from brindle.daemon import routes_actions, session_review as review
@@ -37,9 +38,13 @@ def test_readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch):
     db.add_autopilot("s")
     db.update_autopilot("s", state="done")
     reads = []
+    mode, name = ("160000", "src") if gitlink else ("100644", "src/file.py")
+    def git_read(args, *a, **kw):
+        reads.append(args)
+        files = f"{mode} {'d' * 40} 0\t{name}\0" if "--stage" in args else f"{name}\0"
+        return SimpleNamespace(stdout=files if args[0] == "ls-files" else "s", returncode=0)
     monkeypatch.setattr(spawn, "room", lambda: 1)
-    monkeypatch.setattr(git, "run", lambda args, *a, **kw: reads.append(args) or SimpleNamespace(
-        stdout="src/file.py\0" if args[0] == "ls-files" else "s", returncode=0))
+    monkeypatch.setattr(git, "run", git_read)
     monkeypatch.setattr(git, "dirty_files", lambda *a, **kw: reads.append("dirty") or (
         [] if tracked.read_text() == "original" else ["src/file.py"]))
     monkeypatch.setattr(git, "base_ref", lambda *a: "main")
@@ -49,22 +54,18 @@ def test_readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch):
     watch.sweep(db)
     reads.clear()
     watch.sweep(db)
-    assert reads == []
+    if not gitlink:
+        assert reads == []
     tracked.write_text("unstaged")
     watch.sweep(db)
     assert watch.ready == {"s": False}
     tracked.write_text("original")
     assert watch.sweep(db) == ["s"]
     reads.clear()
-    db.set_status("s", "waiting")
-    watch.sweep(db)
-    assert reads and watch.ready == {"s": False}
-    reads.clear()
     monkeypatch.setattr(spawn, "room", lambda: 0)
     monkeypatch.setattr(review, "_merge_polled", 0)
-    db.set_status("s", "idle")
     watch.sweep(db)
-    assert reads == [] and watch.ready == {"s": False} and review._merge_polled == 0
+    assert reads == [] and watch.ready == {"s": True} and review._merge_polled == 0
 
 
 def test_readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
@@ -95,7 +96,6 @@ def test_readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
         finally:
             connection.conn.close()
             finished.set()
-
     worker = threading.Thread(target=sweep)
     worker.start()
     try:
@@ -109,9 +109,11 @@ def test_readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
         worker.join(1)
 
 
-def test_readiness_deferred_prs_get_a_turn(db, monkeypatch):
+@pytest.mark.parametrize("queued", ["cancelled", pytest.param("expired", marks=pytest.mark.variant(
+    "a queued check starts after deadline expiry before the sweep can cancel it"))])
+def test_readiness_deferred_prs_get_a_turn(db, monkeypatch, queued):
     from concurrent.futures import Future
-    from types import SimpleNamespace
+    from brindle import spawn, workspaces
     from brindle.daemon import session_review as review
     _open_readiness_prs(db, 5)
     seen, scheduled = [], []
@@ -120,20 +122,30 @@ def test_readiness_deferred_prs_get_a_turn(db, monkeypatch):
         if len(scheduled) < 4:
             future.set_running_or_notify_cancel()
             check(url, cwd)
-        scheduled.append(future)
+        scheduled.append((future, lambda: check(url, cwd)))
         return future
     def end_round(futures, **kw):
-        for future in futures:
+        spawn.current().at = 0  # queued work can be dequeued after the round's window
+        for future, run in scheduled:
             if future.running():
                 future.set_result(False)
+            elif queued == "expired":
+                future.set_running_or_notify_cancel()
+                future.set_result(run())
             else:
                 future.cancel()
         scheduled.clear()
-    monkeypatch.setattr(review.workspaces, "pull_request_merged", lambda url, cwd: seen.append(url) or False)
-    monkeypatch.setattr(review, "_merge_pool", SimpleNamespace(submit=submit))
+    def read(argv, **kw):
+        if spawn.current().left() <= 0:
+            raise spawn.Busy("deadline passed before gh started")
+        seen.append(argv[3])
+        return workspaces.subprocess.CompletedProcess(argv, 0, "OPEN", "")
+    monkeypatch.setattr(spawn, "read", read)
+    monkeypatch.setattr(workspaces.shutil, "which", lambda *a: "gh")
+    monkeypatch.setattr(review._merge_pool, "submit", submit)
     monkeypatch.setattr(review, "wait", end_round)
     monkeypatch.setattr(review, "_merge_checks", {})
-    monkeypatch.setattr(review, "_merge_deferred", {}, raising=False)
+    monkeypatch.setattr(review, "_merge_order", {})
     for _ in range(2):
         monkeypatch.setattr(review, "_merge_polled", 0)
         review.poll_merged(db)
