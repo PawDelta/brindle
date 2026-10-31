@@ -2,14 +2,25 @@
 
 Verdict: **pool saturation reproduced before (`56e845a4`), avoided after
 the heavy-route lane (`a085f9f1`); the 300 ms deadline remains intermittent**.
-Previously, abandoned
-session diffs filled AnyIO's default pool and delayed `/v1/repos`.
+Previously, abandoned session diffs filled AnyIO's default pool and delayed `/v1/repos`.
 After rebasing onto `brindle/session-21`, the same load occupied the separate
 four-worker heavy lane and shed excess requests. Both cheap reads passed
 their unchanged 300 ms bound in one completed run, producing strict XPASS;
 the marker was removed. The next run missed the bound for `/v1/repos`
 despite zero default-pool occupancy. All results, including this failure,
-are retained below; the passing run is not a stable-gate claim.
+are retained below. The gate now checks the lane's isolation guarantee,
+successful reads, complete request accounting, and a loose 2-second sanity
+bound, with no xfail. The tighter latency target moves to follow-up work
+after the diff cache and spawn gate land.
+
+| Historical measurement | Loaded meta | Loaded repos | Default pool at probe |
+| --- | ---: | ---: | ---: |
+| Before (`56e845a4`) | 311 ms | 5,044 ms | 40/40 |
+| After lane, run 1 (`a085f9f1`) | 50 ms | 47 ms | 0/40 |
+| After lane, run 2 (`a085f9f1`) | 215 ms | 377 ms | 0/40 |
+
+The supervisor reported host load around 50 from parallel workers during
+run 2. The harness did not measure host load itself.
 
 ## Setup and method
 
@@ -31,8 +42,13 @@ after 75 ms, close their connections, and ask again. Connection establishment
 has a separate, longer bound. AnyIO's default 40-token limiter is unchanged.
 After the lane change, received HTTP 503 responses count separately as shed
 only when their error code is `busy`; other received errors still fail.
-Both cheap reads run concurrently after the pollers finish; their complete
-response times are compared with 300 ms, retaining the actual late latency.
+Both cheap reads run concurrently after the pollers finish. At that probe,
+the gate requires zero default-pool waiters and fewer borrowed tokens than
+capacity. Both reads must succeed within a 2-second sanity bound. All 40
+client outcomes must be accounted for as successful responses, abandoned
+responses, or received 503 `busy` responses. Every started diff must finish,
+and all default/heavy limiter tokens must be released after draining.
+The historical measurements below used the original 300 ms target.
 
 Instrumentation delegates to the original `session_review.diff` and
 `git.run`: thread-local counters count actual git invocations inside each
@@ -78,9 +94,10 @@ this is one added test, within the checker’s 150-line allowance.
 
 ## After heavy-route lane (`a085f9f1`)
 
-The fixture, eight pollers, 40 attempts, 75 ms response bound, and 300 ms
-cheap-read assertion are unchanged. The harness now records the app's
-separate heavy admission/worker limiters as well as the default pool.
+These two historical runs kept the fixture, eight pollers, 40 attempts,
+75 ms response bound, and original 300 ms cheap-read assertion unchanged.
+The harness also recorded the app's separate heavy admission/worker
+limiters as well as the default pool.
 
 | Measurement | Result |
 | --- | ---: |
@@ -121,9 +138,12 @@ read assertion (no intervening workload or production changes):
 | Complete pytest run | 6.40 s |
 | Result without xfail | `ReadDeadlineMiss` |
 
-The test retains its unchanged bound and has no xfail. Restoring a strict
-xfail would merely exchange intermittent FAIL for intermittent XPASS.
-No repeated sampling or timing-bound change was used to conceal this result.
+These results led to an explicit supervisor decision: gate on default-pool
+availability, successful reads, complete request accounting, and a 2-second
+sanity bound. There is no xfail. Restoring a strict xfail would merely
+exchange intermittent FAIL for intermittent XPASS. The original 300 ms
+miss remains recorded; the tighter performance target belongs to the
+follow-up task once the diff cache and spawn gate land.
 
 A client can abandon before receiving even a `busy` response. Therefore
 the 19 abandoned requests include 15 requests that did not start a diff;
@@ -137,7 +157,8 @@ The initial after-lane trial exposed that accounting mistake: 9 abandoned,
 meta/repos at 0.381/0.402 s despite zero default-pool occupancy. It failed
 the old completion assertion, not the read assertion. This is evidence that
 the 300 ms threshold remains sensitive to host scheduling; the passing run
-does not prove an unconditional latency guarantee. The bound was not relaxed.
+does not prove an unconditional latency guarantee. The original bound was
+unchanged throughout those historical runs.
 
 ## Before: observations while scaling
 
@@ -198,9 +219,10 @@ returned only a browser shell and its content endpoint returned HTTP 403;
 its Problem section could not be read. The supplied task hypothesis guided
 the investigation.
 
-Follow up by comparing a captured incident history, recording event-loop
-lag and OS scheduling under load, and measuring Unix authentication and
-action traffic independently. No production mitigation is included.
+Follow up on the tight-latency target after the diff cache and spawn gate
+land. Compare a captured incident history, record event-loop lag and OS
+scheduling under load, and measure Unix authentication and action traffic
+independently. No production mitigation is included in this branch.
 
 ## Re-run
 
@@ -211,6 +233,13 @@ uv run pytest tests/test_daemon_soak.py -q -m serial -k overload
 Add `-s` to see the JSON measurements. This requires permission to bind a
 loopback socket. Before the lane, the exact finish-line command completed
 with `1 deselected, 1 xfailed in 34.08s` after the strict marker was added.
-After the lane and removal of xfail, it failed the read deadline in 6.40 s
-as detailed above. Handling that intermittent timing failure remains open.
-The full suite is left to brindle's merge gate.
+After the lane and removal of xfail, the historical 300 ms gate failed in
+6.40 s as detailed above. The current gate uses the lane guarantees and
+the supervisor-approved 2-second sanity bound.
+The current gate passed with `-s`: `1 passed, 1 deselected in 5.63s`.
+It accounted for 11 client abandonments, 29 received `busy` responses, and
+zero successful poll responses; all four admitted diffs completed after
+client abandonment. At the probe, default AnyIO was 0/40 with zero waiters,
+heavy admission/workers were 4/4, and meta/repos took 255/284 ms. Every
+limiter token was released after cleanup. The full suite is left to
+brindle's merge gate.
