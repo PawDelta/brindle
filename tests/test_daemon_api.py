@@ -31,6 +31,10 @@ TOKEN = "t" * 43
 def _get(path: str, headers: dict[str, str], query: str = "", peer_pid: int | None = None) -> tuple[int, dict]:
     """One HTTP request straight through the ASGI app (``peer_pid``: as if
     that process called on the Unix socket)."""
+    return asyncio.run(_read_request(build_app(TOKEN, port=8123), path, headers, query, peer_pid))
+
+
+async def _read_request(app, path, headers, query="", peer_pid=None):
     sent: list[dict] = []
 
     async def receive():
@@ -45,7 +49,7 @@ def _get(path: str, headers: dict[str, str], query: str = "", peer_pid: int | No
              "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()]}
     if peer_pid is not None:
         scope[peer.PEER_PID] = peer_pid
-    asyncio.run(build_app(TOKEN, port=8123)(scope, receive, send))
+    await app(scope, receive, send)
     body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
     return sent[0]["status"], json.loads(body)
 
@@ -168,6 +172,47 @@ def test_tcp_daemon_needs_the_token_on_requests_and_as_the_ws_first_frame(tmp_pa
 
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+
+def test_heavy_lane(db, monkeypatch):
+    import anyio.to_thread
+    from brindle.daemon import routes_read
+
+    async def exercise():
+        entered = asyncio.Queue()
+        release = threading.Event()
+        loop = asyncio.get_running_loop()
+
+        def blocked(*args):
+            loop.call_soon_threadsafe(entered.put_nowait, None)
+            release.wait()
+            raise ValueError("blocked handler finished")
+
+        monkeypatch.setattr(routes_read.session_review, "session", blocked)
+        app = build_app(TOKEN, port=8123)
+        paths = [f"/v1/sessions/r1/{suffix}" for suffix in
+                 ("diff", "pr/readiness", "tree", "pr/draft")]
+        normal = anyio.to_thread.current_default_thread_limiter()
+        previous = normal.total_tokens
+        normal.total_tokens = 1
+        pending = [asyncio.create_task(_read_request(app, paths[0], AUTH)) for _ in range(4)]
+        try:
+            for _ in pending:
+                await asyncio.wait_for(entered.get(), 1)
+            assert (await asyncio.wait_for(_read_request(app, "/v1/meta", AUTH), 1))[0] == 200
+            assert (await asyncio.wait_for(_read_request(app, "/v1/repos", AUTH), 1))[0] == 200
+            for path in paths:
+                code, body = await asyncio.wait_for(_read_request(app, path, AUTH), 1)
+                assert code == 503 and body["error"]["code"] == "busy"
+        finally:
+            release.set()
+            responses = await asyncio.gather(*pending)
+            normal.total_tokens = previous
+        assert all(code == 400 for code, _ in responses)
+        for path in paths:
+            assert (await _read_request(app, path, AUTH))[0] == 400
+
+    asyncio.run(exercise())
 
 
 @pytest.fixture
