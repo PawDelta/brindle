@@ -46,7 +46,9 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, TypeVar
+
+T = TypeVar("T")
 
 GRACE = 2.0          # seconds a stopped read has between SIGTERM and SIGKILL
 POLL = 0.25          # seconds between checks while a read runs or a start waits
@@ -115,6 +117,23 @@ def deadline(seconds: float) -> Iterator[Deadline]:
 
 def current() -> Deadline | None:
     return _deadline.get()
+
+
+def carry(fn: Callable[..., T]) -> Callable[..., T]:
+    """``fn``, to run on a thread pool's threads under the caller's deadline:
+    ``ThreadPoolExecutor`` threads don't copy the context, so a request's
+    reads fanned out to a pool would otherwise have none. Every call shares
+    the one Deadline, so stopping the request stops them all."""
+    dl = _deadline.get()
+
+    def run(*args: Any, **kwargs: Any) -> T:
+        token = _deadline.set(dl)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _deadline.reset(token)
+
+    return run
 
 
 # -- room ---------------------------------------------------------------------
@@ -201,15 +220,14 @@ def _admit(end: float, dl: Deadline | None, skip: bool, what: str, start_anyway:
         while True:
             if dl is not None and dl.stopped:
                 raise Busy(f"{what} was not started: {dl.reason}")
-            if _has_room():
+            left = end - time.monotonic()
+            if left <= 0 and not start_anyway:   # past it: never start, room or not
+                raise Busy(f"{what} was not started: "
+                           + (why() if not _has_room() else "the request's deadline passed"))
+            if left <= 0 or _has_room():
                 break
             if skip:
                 raise Skipped(f"{what} skipped: {why()}")
-            left = end - time.monotonic()
-            if left <= 0:
-                if start_anyway:
-                    break
-                raise Busy(f"{what} was not started: {why()}")
             _cond.wait(min(POLL, left))
         _running += 1
 

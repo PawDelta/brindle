@@ -517,8 +517,11 @@ def hash_blob(cwd: str | Path, data: bytes, path: str, write: bool = False) -> s
     path's clean filters applied; ``path`` is a name, not a pathspec). With
     ``write`` the blob is stored too."""
     args = ["hash-object", *(["-w"] if write else []), "--stdin", f"--path={path}"]
+    start = spawn.action if write else spawn.read     # a clean filter can stall: a read stops with its request
     try:
-        proc = subprocess.run(["git", *args], cwd=cwd, input=data, capture_output=True, timeout=TIMEOUT)
+        proc = start(["git", *args], cwd=cwd, input=data, text=False, timeout=TIMEOUT)
+    except spawn.Busy as e:
+        raise GitBusy(f"git {' '.join(args)}: {e}") from e
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
     if proc.returncode != 0:

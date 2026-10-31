@@ -25,7 +25,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from brindle import git
+from brindle import git, spawn
 
 TTL = 10.0  # safety net: recompute at least this often even if nothing else invalidated the cache
 WARM_WORKERS = 8
@@ -235,4 +235,4 @@ def warm(pairs: list[tuple[str, str | None]], now: float | None = None) -> None:
             pass
 
     with ThreadPoolExecutor(max_workers=min(WARM_WORKERS, len(pairs))) as pool:
-        list(pool.map(one, pairs))
+        list(pool.map(spawn.carry(one), pairs))   # under the request's deadline, if any

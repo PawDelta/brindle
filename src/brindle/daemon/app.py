@@ -43,20 +43,21 @@ ROUTES = [Route("/v1/meta", meta), *routes_read.ROUTES,
 
 
 class Deadlines:
-    """ASGI middleware: each read request (GET, HEAD) gets REQUEST_DEADLINE
-    seconds, under the app's own 60 second limit, through
+    """ASGI middleware: each HTTP request gets REQUEST_DEADLINE seconds,
+    under the app's own 60 second limit, through
     :func:`brindle.spawn.deadline`. The processes its handler starts as reads
-    get only the time left, and are stopped when it runs out or when the
-    client disconnects, so no read outlives the request that asked for it.
-    Other methods are actions and get no deadline: an action is never
-    stopped once it has started (brindle.spawn)."""
+    get only the time left, and are stopped when it runs out, when the client
+    disconnects, or when the request ends or is cancelled, so no read
+    outlives the request that asked for it. An action never starts past the
+    deadline and is never stopped once started (brindle.spawn); a job
+    (routes_actions.start_job) runs on its own thread, with no deadline."""
 
     def __init__(self, app: ASGIApp, seconds: float | None = None) -> None:
         self.app = app
         self.seconds = REQUEST_DEADLINE if seconds is None else seconds
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http" or scope["method"] not in ("GET", "HEAD"):
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         with spawn.deadline(self.seconds) as dl:
@@ -83,7 +84,11 @@ class Deadlines:
             try:
                 await self.app(scope, inbox.get, send)
             finally:
+                # Ended or cancelled: a handler thread asyncio.to_thread left
+                # running must not keep its reads going until the deadline.
+                dl.stop("the request ended")
                 listener.cancel()
+                await asyncio.gather(listener, return_exceptions=True)
 
 
 def build_app(token: str, port: int | None = None, poller=None) -> ASGIApp:
