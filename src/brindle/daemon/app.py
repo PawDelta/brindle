@@ -56,6 +56,11 @@ class Deadlines:
         self.app = app
         self.seconds = REQUEST_DEADLINE if seconds is None else seconds
 
+    @property
+    def state(self):
+        """The wrapped app's state (heavy_read_lane, poller), as if unwrapped."""
+        return self.app.state
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
@@ -97,4 +102,5 @@ def build_app(token: str, port: int | None = None, poller=None) -> ASGIApp:
     status poller whose bar text and notices ``/v1/events`` relays."""
     app = Starlette(routes=ROUTES)
     app.state.poller = poller
+    app.state.heavy_read_lane = routes_read.HeavyReadLane()
     return Guard(Deadlines(app), token, port)
