@@ -295,7 +295,13 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
         .finally(() => void waiting--);
     };
     const send = (data: string) => (waiting ? queued(() => void (gone || pty.write(data))) : pty.write(data));
-    const typed = term.onData(send);
+    // A dead key can finish through keypress or IME input. Retain it across
+    // keyup until xterm delivers the completed input through onData.
+    let deadKey = false;
+    const typed = term.onData((data) => {
+      deadKey = false;
+      send(data);
+    });
     const binary = term.onBinary(send);
     // The wheel's reports as a native terminal sends them (terminalScroll.ts), not xterm.js's one an event.
     const wheel = scrollByWheel(term, send);
@@ -390,7 +396,9 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
       if (e.type === "keyup") capsLetter = false;
       if (e.type !== "keydown") return true;
       capsLetter = false;
+      if (e.key === "Dead") deadKey = true;
       if (
+        !deadKey &&
         e.getModifierState("CapsLock") &&
         !e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey &&
         !e.isComposing && e.keyCode !== 229 &&
