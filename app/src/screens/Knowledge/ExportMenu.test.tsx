@@ -7,7 +7,7 @@ import type { ExportSession } from "./ExportSession";
 afterEach(cleanup);
 
 const ALL: ExportDestination[] = ["download", "google_docs", "sharepoint"];
-const BOTH: DocExportConfig = { google_client_id: "g", microsoft_client_id: "m" };
+const BOTH: DocExportConfig = { google_client_id: "g", google_client_secret: null, microsoft_client_id: "m" };
 
 function menu(export_destinations: ExportDestination[], config: DocExportConfig) {
   const client = { exportDoc: vi.fn(), docPolicy: vi.fn().mockResolvedValue({ export_destinations }), docExportConfig: vi.fn().mockResolvedValue(config) };
@@ -45,7 +45,7 @@ describe("ExportMenu", () => {
   });
 
   it("hides the button of a provider whose client id is null", async () => {
-    menu(ALL, { google_client_id: "g", microsoft_client_id: null });
+    menu(ALL, { google_client_id: "g", google_client_secret: null, microsoft_client_id: null });
     expect(await screen.findByRole("button", { name: "Google Docs" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "SharePoint" })).toBeNull();
   });

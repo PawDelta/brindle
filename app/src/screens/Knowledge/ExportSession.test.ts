@@ -39,6 +39,26 @@ describe("ExportSession", () => {
     expect(session.signedIn("google")).toBe(false);
   });
 
+  it("sends the Google client secret in the token request only when export-config gave one", async () => {
+    let opened = new URL("https://x.test");
+    const bodies: URLSearchParams[] = [];
+    const deps: ExportDeps = {
+      openUrl: async (u) => void (opened = new URL(u)),
+      listen: async () => 5151,
+      wait: async () => `code=abc&state=${opened.searchParams.get("state")}`,
+      cancel: vi.fn(),
+      fetch: async (_input, init) => {
+        bodies.push(init?.body as URLSearchParams);
+        return new Response(JSON.stringify({ access_token: "ACCESS" }), { status: 200 });
+      },
+    };
+    const session = new ExportSession(deps);
+    await session.signIn("google", "client-1", "SECRET");
+    await session.signIn("google", "client-1", null);
+    expect(bodies[0].get("client_secret")).toBe("SECRET");
+    expect(bodies[1].has("client_secret")).toBe(false);
+  });
+
   it("ignores an answer whose state isn't the one it sent", async () => {
     const deps: ExportDeps = {
       openUrl: async () => undefined,

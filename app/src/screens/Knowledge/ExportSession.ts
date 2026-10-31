@@ -111,7 +111,7 @@ export class ExportSession {
   }
 
   /* Opens the provider's sign-in in the system browser and waits for it to come back. */
-  async signIn(p: ExportProvider, clientId: string): Promise<void> {
+  async signIn(p: ExportProvider, clientId: string, clientSecret?: string | null): Promise<void> {
     const cfg = PROVIDERS[p];
     const port = await this.deps.listen();
     const redirect = `http://${cfg.host}:${port}/callback`;
@@ -144,7 +144,15 @@ export class ExportSession {
       const res = await this.deps.fetch(cfg.token, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ client_id: clientId, grant_type: "authorization_code", code, redirect_uri: redirect, code_verifier: verifier }),
+        body: new URLSearchParams({
+          client_id: clientId,
+          // Google's installed-app flow wants the secret too; it isn't confidential for desktop clients.
+          ...(p === "google" && clientSecret ? { client_secret: clientSecret } : {}),
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: redirect,
+          code_verifier: verifier,
+        }),
       });
       const got = (await res.json()) as { access_token?: string; refresh_token?: string; error_description?: string; error?: string };
       if (!res.ok || !got.access_token) throw new Error(got.error_description ?? got.error ?? `Sign-in failed (${res.status}).`);
