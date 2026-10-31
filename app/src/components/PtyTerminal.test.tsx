@@ -43,7 +43,7 @@ function mount(paste?: () => Promise<string>, write: (text: string) => Promise<v
 
 const parsed = (term: import("@xterm/xterm").Terminal) => act(() => new Promise<void>((r) => term.write("", r)));
 
-it("sends Caps Lock letters on keydown exactly once without invoking clipboard shortcuts", () => {
+it("sends Caps Lock letters on keydown exactly once without invoking clipboard shortcuts", async () => {
   const { written, copied, term } = mount();
   const textarea = term().textarea!;
   const press = (type: string, key: string, keyCode = key.charCodeAt(0)) => {
@@ -65,11 +65,14 @@ it("sends Caps Lock letters on keydown exactly once without invoking clipboard s
   // and clear its pending dead key before the following navigation key.
   press("keydown", "Dead", 222);
   press("keyup", "Dead", 222);
+  // Protocol replies use onData too, but do not complete the pending dead key.
+  act(() => term().write("\x1b[6n"));
+  await parsed(term());
   press("keydown", "A");
   press("keypress", "Á");
   press("keyup", "A");
   press("keydown", "ArrowLeft", 37);
-  expect(written).toEqual(["A", "C", "V", "Á", "\x1b[D"]);
+  expect(written).toEqual(["A", "C", "V", "\x1b[1;1R", "Á", "\x1b[D"]);
   press("keydown", "B");
   expect(written.at(-1)).toBe("B");
 });
