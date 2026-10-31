@@ -9,6 +9,16 @@ from brindle.daemon.auth import WS_UNAUTHORIZED
 TOKEN = "t" * 43
 
 
+def _open_readiness_prs(db, count):
+    from brindle.db import Agent, Workspace
+    for n in range(count):
+        key = str(n)
+        db.add_workspace(Workspace(key, "/repo", key, "worktree", key, "main", "/repo", None, key, 0))
+        db.add_agent(Agent(key, key, "supervisor", "claude", None, "interactive", "idle", "", None, 0))
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES (?, ?, ?, 0)",
+                        (key, key, f"https://github.com/o/r/pull/{n}"))
+
+
 def test_readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch):
     from types import SimpleNamespace
     from brindle import git, spawn
@@ -19,25 +29,32 @@ def test_readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch):
     (private / "HEAD").write_text("ref: refs/heads/s")
     (private / "refs/heads/s").write_text("a" * 40)
     (private / "refs/heads/main").write_text("b" * 40)
+    tracked = tmp_path / "src" / "file.py"
+    tracked.parent.mkdir()
+    tracked.write_text("original")
     db.add_workspace(Workspace("w", str(tmp_path), "s", "worktree", "s", "main", str(tmp_path), None, "s", 0))
     db.add_agent(Agent("s", "w", "supervisor", "claude", None, "interactive", "idle", "", None, 0))
     db.add_autopilot("s")
     db.update_autopilot("s", state="done")
-    reads, prepared = [], []
+    reads = []
     monkeypatch.setattr(spawn, "room", lambda: 1)
-    monkeypatch.setattr(git, "run", lambda *a, **kw: reads.append(a) or SimpleNamespace(stdout="s", returncode=0))
-    monkeypatch.setattr(git, "dirty_files", lambda *a, **kw: reads.append("dirty") or [])
+    monkeypatch.setattr(git, "run", lambda args, *a, **kw: reads.append(args) or SimpleNamespace(
+        stdout="src/file.py\0" if args[0] == "ls-files" else "s", returncode=0))
+    monkeypatch.setattr(git, "dirty_files", lambda *a, **kw: reads.append("dirty") or (
+        [] if tracked.read_text() == "original" else ["src/file.py"]))
     monkeypatch.setattr(git, "base_ref", lambda *a: "main")
     monkeypatch.setattr(git, "ahead_behind", lambda *a: (0, 1))
-    monkeypatch.setattr(routes_actions, "prepare_pr", lambda *a: prepared.append(a[-1]))
+    monkeypatch.setattr(routes_actions, "prepare_pr", lambda *a: None)
     watch = review.ReadinessWatch()
     watch.sweep(db)
     reads.clear()
     watch.sweep(db)
-    assert reads == [] and prepared == []
-    (private / "refs/heads/s").write_text("c" * 40)
+    assert reads == []
+    tracked.write_text("unstaged")
     watch.sweep(db)
-    assert reads and prepared == ["s"]
+    assert watch.ready == {"s": False}
+    tracked.write_text("original")
+    assert watch.sweep(db) == ["s"]
     reads.clear()
     db.set_status("s", "waiting")
     watch.sweep(db)
@@ -54,13 +71,8 @@ def test_readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     import threading
     from brindle import spawn, workspaces
     from brindle.daemon import session_review as review
-    from brindle.db import Agent, DB, Workspace
-    for n in range(2):
-        key = str(n)
-        db.add_workspace(Workspace(key, "/repo", key, "worktree", key, "main", "/repo", None, key, 0))
-        db.add_agent(Agent(key, key, "supervisor", "claude", None, "interactive", "idle", "", None, 0))
-        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES (?, ?, ?, ?)",
-                        (key, key, f"https://github.com/o/r/pull/{n}", 0))
+    from brindle.db import DB
+    _open_readiness_prs(db, 2)
     release, both, finished = threading.Event(), threading.Event(), threading.Event()
     started, lock = [], threading.Lock()
     def slow(*args, **kwargs):
@@ -95,6 +107,37 @@ def test_readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     finally:
         release.set()
         worker.join(1)
+
+
+def test_readiness_deferred_prs_get_a_turn(db, monkeypatch):
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+    from brindle.daemon import session_review as review
+    _open_readiness_prs(db, 5)
+    seen, scheduled = [], []
+    def submit(check, url, cwd):
+        future = Future()
+        if len(scheduled) < 4:
+            future.set_running_or_notify_cancel()
+            check(url, cwd)
+        scheduled.append(future)
+        return future
+    def end_round(futures, **kw):
+        for future in futures:
+            if future.running():
+                future.set_result(False)
+            else:
+                future.cancel()
+        scheduled.clear()
+    monkeypatch.setattr(review.workspaces, "pull_request_merged", lambda url, cwd: seen.append(url) or False)
+    monkeypatch.setattr(review, "_merge_pool", SimpleNamespace(submit=submit))
+    monkeypatch.setattr(review, "wait", end_round)
+    monkeypatch.setattr(review, "_merge_checks", {})
+    monkeypatch.setattr(review, "_merge_deferred", {}, raising=False)
+    for _ in range(2):
+        monkeypatch.setattr(review, "_merge_polled", 0)
+        review.poll_merged(db)
+    assert {url.rsplit("/", 1)[1] for url in seen} == {str(n) for n in range(5)}
 
 
 @pytest.mark.parametrize("memory", [False, True])
