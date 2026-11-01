@@ -2693,7 +2693,7 @@ def admission(profile: str, repo_root: str) -> str | None:
     from brindle import spawn as gate
     from brindle.providers import PROVIDERS
 
-    busy = gate.no_room()
+    busy = gate.no_room(repo_root)
     if busy is None:
         return None
     try:

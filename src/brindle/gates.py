@@ -356,10 +356,12 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
         watch = _watch_slow(db, ws, cmd, last, timeout) if last is not None else None
         started = time.monotonic()
         try:
-            if cancel is None:
-                ok, out = autopilot.run_check(cmd, ws.path, env, timeout)
-            else:
-                ok, out = autopilot.run_check(cmd, ws.path, env, timeout, cancel=cancel)
+            from brindle import tasks
+
+            extra = {} if cancel is None else {"cancel": cancel}
+            if tasks.forced_start(db, ws):   # the worker was started despite the load: its checks yield
+                extra["background"] = True
+            ok, out = autopilot.run_check(cmd, ws.path, env, timeout, **extra)
         finally:
             if watch:
                 watch.cancel()
@@ -378,10 +380,10 @@ def _room_for_check(ws: Workspace, cancel=None):
     (``Abandoned``)."""
     from brindle import spawn
 
-    if spawn.no_room() is not None:
+    if spawn.no_room(ws.repo_root) is not None:
         pause = threading.Event()
         with marker("checks-room", ws.id):
-            while spawn.no_room() is not None:
+            while spawn.no_room(ws.repo_root) is not None:
                 if cancel is not None and cancel():
                     raise Abandoned("room")
                 pause.wait(SLOT_POLL)

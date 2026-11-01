@@ -1225,12 +1225,13 @@ CANCEL_POLL = 1.0  # seconds between looks at ``cancel`` while a check runs
 
 
 def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,
-              cancel=None) -> tuple[bool, str]:
+              cancel=None, background: bool = False) -> tuple[bool, str]:
     """Run one check command. Returns (passed, the tail of its output).
     ``cancel``, if given, is polled while the command runs; when it turns
-    true the command is killed and ``CheckCancelled`` is raised."""
+    true the command is killed and ``CheckCancelled`` is raised.
+    ``background``: at background priority (``spawn._background``)."""
     proc = spawn.start(
-        cmd, shell=True, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
+        spawn._background(["/bin/sh", "-c", cmd], force=True) if background else cmd, shell=not background, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True,
     )
     if cancel is None:
@@ -2104,10 +2105,19 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
         return None  # their results arrive as messages and wake it up
     from brindle import tasks
 
-    if tasks.waiting_for_room(db, agent.id):
-        # Workers queued until the machine has room: they start on their own
-        # (spawn.START_WAIT at the latest) and the start message wakes it. Not a stall.
-        return None
+    if waiting := tasks.waiting_for_room(db, agent.id):
+        # Workers queued until the machine has room start on their own, and the
+        # start message wakes the supervisor. Not a stall, so no nudge is counted;
+        # but once per step it is told which wait on it, so it decides rather than forgets.
+        now = time.time()
+        if ap.nudged_at == ap.progress and ap.nudged_time is not None and now - ap.nudged_time < NUDGE_BACKOFF:
+            return None
+        db.update_autopilot(agent.id, nudged_at=ap.progress, nudged_time=now)
+        listing = "\n".join(f"- {t.id}: {t.task_text[:80]}" for t in waiting)
+        return {"decision": "block", "reason": (
+            f"{NUDGE_HEAD}\nThese workers are waiting for room on the machine "
+            f"({tasks.load_note(db)}):\n{listing}\nThey start on their own when there's room. "
+            "Wait, call start_now(task_id) to start one despite the load, or cancel_task to give it up.")}
     if (db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD)
             or db.outstanding(agent.id, QUESTION_REMINDER_HEAD)):
         return None  # (#209) the last reminder is still queued or unread: never pile up another

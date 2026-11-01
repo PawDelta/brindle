@@ -333,7 +333,8 @@ def _deadline_row(provider, stopped):
 
 
 @pytest.mark.parametrize("scenario, params", [
-    pytest.param(_token_cache_runs_gcloud_once_until_near_expiry, {}, id="token_cache-expiry"),
+    pytest.param(_token_cache_runs_gcloud_once_until_near_expiry, {}, id="token_cache-expiry",
+                 marks=pytest.mark.variant("a cached token is reused until near expiry, then gcloud is asked again")),
     pytest.param(_subprocess_probe_that_exits_leaves_nothing_of_its_own_running, {}, id="subprocess-probe"),
     _deadline_row("vertex", False),
     _deadline_row("foundry", True),
