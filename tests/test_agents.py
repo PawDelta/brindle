@@ -1,5 +1,6 @@
 import os
 import shutil
+import sys
 import time
 from pathlib import Path
 from unittest.mock import Mock
@@ -413,9 +414,12 @@ def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
     assert capsys.readouterr().err.count("/no/such/cache") == 1
 
 
-@pytest.mark.parametrize("tool, reports", [("assign", "later"), ("handoff", "later"),
-                                           ("handoff", "while it starts")])
-def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo, monkeypatch, tool, reports):
+@pytest.mark.parametrize("tool, reports, ends", [
+    ("assign", "later", "load falls"), ("handoff", "later", "load falls"),
+    ("handoff", "while it starts", "load falls"),
+    ("assign", "later", "start now"), ("assign", "later", "forced in flight"),
+    ("assign", "later", "wait off")])
+def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo, monkeypatch, tool, reports, ends):
     """Plan 3.5: on a machine with no room an assign (or handoff) queues the
     task with the reason, list_tasks shows it, autopilot doesn't count it as
     a stall, a paused session starts nothing even once the load falls, and
@@ -442,18 +446,91 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     monkeypatch.setattr(spawn, "_load", lambda: load[0])
     monkeypatch.setattr(spawn, "_cores", lambda: 10)
 
+    if ends == "wait off":   # configured from the outset: the real dispatch starts a worker at once
+        (repo / ".brindle" / "config.json").write_text('{"pipeline": false, "wait_for_room": false}')
+        out = asyncio.run(getattr(mcp_server, tool)("developer", "do A", branch="feat-a"))
+        assert not out.startswith("Queued") and not db.list_tasks(str(repo), state="pending")
+        assert len(db.list_agents()) == 2
+        return
     out = asyncio.run(getattr(mcp_server, tool)("developer", "do A", branch="feat-a"))
     busy = "the machine is busy (load 14.0 on 10 cores"
     assert out.startswith("Queued task") and busy in out, out
     [t] = db.list_tasks(str(repo), state="pending")
     assert f"waiting for room: {busy}" in tasks.list_text(db, str(repo))
     assert [a.id for a in db.list_agents()] == ["boss"]                  # nothing started
-    assert autopilot.on_stop(db, boss, {}) is None                       # waiting, not stalled
+    # Waiting is not a stall (no nudge), but the supervisor is reminded which task waits.
+    reminder = autopilot.on_stop(db, boss, {})
+    assert t.id in reminder["reason"]
     assert db.get_autopilot("boss").nudges == 0
     # However long the machine stays full, the task waits rather than overload it.
     db.update_task(t.id, waiting_since=time.time() - 86400)
     tasks.sweep(db)
     assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
+
+    if ends == "forced in flight":   # a competing force while the first is really starting is refused
+        asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b"))
+        [b] = [x for x in db.list_tasks(str(repo), state="pending") if x.id != t.id]
+        from dataclasses import replace
+
+        from brindle.db import DB
+
+        other = DB()   # a second process: its own connection to the same database
+        stale = db.get_task(t.id)   # what its sweep and helper read before the claim
+        real_start, seen, helpers = tasks.start_queued, {}, []
+        monkeypatch.setattr(tasks, "_wait_in_background", helpers.append)
+
+        def competing(db_, task):   # at the claim boundary: the first is claimed, not yet launched
+            try:
+                tasks.start_now(other, boss, b.id)
+            except ValueError:
+                seen["refused"] = other.get_task(b.id).state
+            seen["swept"] = tasks._start_if_ready(other, stale, "room on the machine", check_room=False)
+            tasks.wait_for_room(other, replace(stale, waiting_since=None), "busy again")   # stale sweep
+            other.set_task_waiting(t.id, "busy again", time.time())                       # stale helper
+            seen["in_flight"] = other.get_task(t.id)
+            return real_start(db_, task)
+
+        monkeypatch.setattr(tasks, "start_queued", competing)
+        tasks.start_now(db, boss, t.id)
+        mid = seen["in_flight"]
+        assert seen["refused"] == "pending" and not seen["swept"] and not helpers
+        assert mid.state == "starting" and mid.forced == 1 and mid.waiting != "busy again"
+        assert db.get_task(t.id).state == "started" and db.get_task(t.id).forced == 1
+        assert db.get_task(b.id).state == "pending" and len(db.list_agents()) == 2   # one launch
+        assert spawn.stats()["forced"] == 1
+        return
+    if ends == "start now":
+        from brindle import gates
+
+        assert tasks.load_counts(db) == (0, 0)          # the processing supervisor is no worker
+        forced = spawn.stats()["forced"]
+        tasks.start_now(db, boss, t.id)
+        assert db.get_task(t.id).state == "started" and db.get_task(t.id).forced == 1
+        assert spawn.stats()["forced"] == forced + 1
+        worker = db.get_agent(db.get_task(t.id).agent_id)
+        wws = db.get_workspace(worker.workspace_id)
+        assert tasks.load_counts(db) == (1, 0)
+        # A check run on its branch still waits for room under the same load, then runs in the background.
+        ran, seen, wrapped = Path(wws.path) / "ran.txt", [], []
+
+        def cancel():   # polled while the run waits for a slot or room, and again while it runs
+            if gates.marked("checks-room", wws.id):
+                seen.append(ran.exists())
+                load[0] = 2.0   # admitted after a look at the full machine
+            return False
+
+        real_start = spawn.start   # the admission gate is off here, as in a plain MCP process
+        monkeypatch.setattr(spawn, "start", lambda argv, **kw: wrapped.append(argv) or real_start(argv, **kw))
+        monkeypatch.setattr(gates, "SLOT_POLL", 0)
+        ok, _ = gates.run_checked(db, wws, "touch ran.txt", {}, 60, cancel=cancel, full=True)
+        assert ok and seen and not any(seen) and ran.exists()
+        [argv] = wrapped
+        assert Path(argv[0]).name == ("taskpolicy" if sys.platform == "darwin" else "nice")
+        assert argv[-3:] == ["/bin/sh", "-c", "touch ran.txt"]
+        db.set_status(worker.id, "idle")                # reported, but its check run is still going
+        with gates.marker("checks-running", wws.id):
+            assert tasks.load_counts(db) == (0, 1)
+        return
 
     db.set_status("boss", "paused")
     load[0] = 2.0

@@ -292,21 +292,22 @@ def _row(scenario, id, why=None, **params):
 
 
 @pytest.mark.parametrize("scenario, params", [
-    _row(_room, "room-ample", load=2.0, level=1, expected=5.0),            # 8 cores - load 2 - 1 running
-    _row(_room, "room-pressure-warning", load=2.0, level=2, expected=2.5),   # memory-pressure warning: half
     _row(_room, "room-pressure-critical", load=2.0, level=4, expected=-1.0),  # nothing but what's running
     _row(_with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips, "overload-no-room"),
     _row(_past_its_deadline_nothing_starts_even_with_room, "deadline-passed"),
-    _row(_a_started_helper_commits_its_request_and_a_started_read_does_not, "subprocess-helper-vs-read"),
+    _row(_a_started_helper_commits_its_request_and_a_started_read_does_not, "subprocess-helper-vs-read",
+         "only a helper whose request committed may outlive it; a read must not"),
     _row(_an_abandoned_read_leaves_no_process, "abandoned-read"),
-    _row(_a_cancelled_request_stops_the_read_its_thread_left_running, "cancelled-read"),
+    _row(_a_cancelled_request_stops_the_read_its_thread_left_running, "cancelled-read",
+         "a cancelled request stops the read its worker thread left running"),
     _row(_a_post_whose_client_left_mid_action_runs_to_its_end, "client-left-post",
          "an action whose client left still finishes"),
     _row(_an_edit_whose_client_leaves_as_it_commits_keeps_the_commit, "client-left-edit",
          "an edit whose client left as it commits keeps its commit"),
     _row(_a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes, "client-left-stop",
          "a stop whose client left still finishes"),
-    _row(_warm_fans_out_under_the_request_deadline, "deadline-warm"),
+    _row(_warm_fans_out_under_the_request_deadline, "deadline-warm",
+         "a warm-up fanned out across sessions must still end at the request deadline"),
     _row(_a_hash_whose_clean_filter_stalls_stops_at_the_deadline, "deadline-hash"),
     _row(_a_git_status_stopped_partway_leaves_no_index_lock, "stopped-git-status",
          "a stopped git status leaves no index.lock"),

@@ -998,6 +998,7 @@ class Task:
     waiting: str | None = None         # pending only for room on the machine: why (brindle.tasks.wait_for_room)
     waiting_since: float | None = None
     pipeline: str | None = None        # the pipeline state its worker starts in (brindle.pipeline)
+    forced: int | None = None          # 1: a supervisor started it despite the load (brindle.tasks.start_now)
 
 
 def _load(cls, row):
@@ -1142,6 +1143,8 @@ class DB:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN waiting_since REAL")
         if "pipeline" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN pipeline TEXT")
+        if "forced" not in task_cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN forced INTEGER")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(autopilot)")}
         if "checking_since" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN checking_since REAL")
@@ -2478,6 +2481,39 @@ class DB:
         with self.tx() as c:
             return c.execute(
                 "UPDATE tasks SET state='starting' WHERE id=? AND state='pending'", (task_id,)
+            ).rowcount == 1
+
+    def claim_forced_task(self, task_id: str) -> bool:
+        """Move a pending task to 'starting' and mark it ``forced`` (a
+        supervisor starts it despite the load), unless another forced task is
+        'starting': one statement, so of two processes racing for the single
+        forced-start slot only one wins. ``forced`` is its own column: no
+        write of the waiting reason can erase it."""
+        with self.tx() as c:
+            return c.execute(
+                "UPDATE tasks SET state='starting', forced=1 WHERE id=? AND state='pending' "
+                "AND NOT EXISTS (SELECT 1 FROM tasks WHERE state='starting' AND forced=1)",
+                (task_id,),
+            ).rowcount == 1
+
+    def release_forced_task(self, task_id: str) -> None:
+        """A forced start failed: back to pending, slot freed."""
+        with self.tx() as c:
+            c.execute("UPDATE tasks SET state='pending', forced=NULL WHERE id=? AND state='starting'", (task_id,))
+
+    def count_forced_tasks(self) -> int:
+        """How many workers a supervisor started despite the load."""
+        return self.conn.execute("SELECT COUNT(*) FROM tasks WHERE forced=1").fetchone()[0]
+
+    def set_task_waiting(self, task_id: str, why: str, since: float) -> bool:
+        """Record why pending task ``task_id`` waits for room (and when it
+        began, kept once set), only while it is still pending: False when it
+        was claimed, cancelled or started meanwhile, so a stale writer changes
+        nothing."""
+        with self.tx() as c:
+            return c.execute(
+                "UPDATE tasks SET waiting=?, waiting_since=COALESCE(waiting_since, ?) "
+                "WHERE id=? AND state='pending'", (why, since, task_id),
             ).rowcount == 1
 
     def get_reported_spend(self, agent_id: str) -> float:
