@@ -57,9 +57,10 @@ const view = (d: (typeof DOCS)[number], extra: object = {}) => {
 };
 
 describe("docs view", () => {
-  it("lists one session's docs as cards, narrows them by kind and search, and opens one in the reader", async () => {
-    render(<DocsView client={client((id) => view(DOCS.find((d) => d.doc_id === id)!))} repo="/r" session="root1" />);
-    await waitFor(() => expect(shown()).toEqual(["d1", "d2", "d4"]));
+  it("lists one session's docs as cards, narrows them by category and search, and opens one in the reader", async () => {
+    const docs = DOCS.map((d) => ({ ...d, category: d.doc_id === "d2" ? "Fees" : "Checkout" }));
+    render(<DocsView client={client((id) => view(DOCS.find((d) => d.doc_id === id)!), RESULTS, docs)} repo="/r" session="root1" />);
+    await waitFor(() => expect(shown()).toEqual(["d1", "d4", "d2"]));
     const first = screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!;
     for (const text of ["Checkout drop after pricing change", "Investigation", "Mine", "v3", "2 findings · 1 open question", "used in 6 briefs"]) expect(first.textContent).toContain(text);
     // A team's doc carries the team's name; a team with no docs still gets its chip.
@@ -67,11 +68,11 @@ describe("docs view", () => {
     await waitFor(() => expect(within(screen.getByRole("group", { name: "Scope" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["All", "Mine", "Payments team", "Platform"]));
     const rail = screen.getByRole("navigation", { name: "Topics and kinds" });
     expect(within(rail).getByRole("button", { name: /checkout/ }).textContent).toBe("checkout3");
-    fireEvent.click(within(rail).getByRole("button", { name: /Comparison/ }));
+    fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
     expect(shown()).toEqual(["d2"]);
     fireEvent.change(screen.getByRole("searchbox", { name: "Search docs" }), { target: { value: "pricing" } });
     expect(screen.getByText("No doc matches.")).toBeTruthy();
-    fireEvent.click(within(rail).getByRole("button", { name: /Comparison/ }));
+    fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
     fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!).getByRole("button"));
     const body = await screen.findByTestId("doc-body");
     expect(body.textContent).toContain("Body.");
@@ -93,6 +94,11 @@ describe("docs view", () => {
     cleanup();
     open();
     await waitFor(() => expect(shown()).toEqual(["d4", "d2"]));
+    // The rail lists the categories with their counts; picking one filters to it, collapsed or not.
+    const rail = screen.getByRole("navigation", { name: "Topics and kinds" });
+    expect(within(rail).getAllByRole("button").slice(0, 3).map((b) => b.textContent)).toEqual(["Security2", "Desktop updates1", "Uncategorised1"]);
+    fireEvent.click(within(rail).getByRole("button", { name: /^Security/ }));
+    expect(shown()).toEqual(["d1", "d3"]);
     localStorage.clear();
   });
 
