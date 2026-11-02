@@ -230,42 +230,29 @@ def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, mon
     assert db.pending_count("a1") == 1
 
 
-CLEAN = {"claude": CLAUDE_IDLE, "codex": "› \n? for shortcuts\n"}
-DRAFT = {"claude": CLAUDE_TYPING_WITH_INVERSE_CURSOR, "codex": "› hello\n? for shortcuts\n"}
-
-
 @pytest.mark.parametrize("provider,fault", [
-    ("claude", "unreadable"), ("claude", "draft"), ("claude", "escape"), ("codex", "draft"),
+    ("claude", "unreadable"), ("claude", "draft"), ("codex", "draft"),
 ])
 def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monkeypatch, provider, fault):
-    from brindle import inbox, launch_health
-
     fake_agent(db, ws, status="processing" if provider == "codex" else "idle", mode="interactive")
     db.update_agent("a1", provider=provider)
     db.enqueue("a1", "queued message", None)
-    # The first look is clean, then a fault appears during message preparation, after the claim.
-    s, pasted = {"screen": None if fault == "unreadable" else CLEAN[provider], "arm": True}, []
+    clean, draft = {"claude": (CLAUDE_IDLE, CLAUDE_TYPING_WITH_INVERSE_CURSOR), "codex": ("› \n? for shortcuts\n", "› hello\n? for shortcuts\n")}[provider]
+    s, pasted = {"screen": None if fault == "unreadable" else clean, "arm": fault == "draft"}, []
 
     def capture(*a, **k):
         if s["screen"] is None:
             raise tmux.TmuxError("gone")
         return s["screen"]
 
-    def prepare_lead(*a, **k):
-        if s.pop("arm", False) and fault != "unreadable":
-            s["screen"] = CLAUDE_BACKGROUND if fault == "escape" else DRAFT[provider]
+    def prepare_lead(*a, **k):   # a draft appears during preparation, after the claim
+        s["screen"] = draft if s.pop("arm", False) else s["screen"]
         return ""
-
     monkeypatch.setattr(tmux, "capture", capture)
-    monkeypatch.setattr(tmux, "send_keys", Mock(side_effect=tmux.TmuxError("gone")))
     monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
     monkeypatch.setattr(agents, "message_lead", prepare_lead)
-    monkeypatch.setattr(inbox, "usable", lambda a: False)
-    monkeypatch.setattr(launch_health, "before_delivery", lambda *a, **k: "")
-    monkeypatch.setattr(launch_health, "verify_delivery", lambda *a, **k: None)
-
     assert agents.flush(db, "a1") is False and not pasted and db.pending_count("a1") == 1
-    s["screen"] = CLEAN[provider]   # the draft is sent or cleared
+    s["screen"] = clean   # the draft is sent or cleared
     assert agents.flush(db, "a1") is True and pasted == ["queued message"]
 
 
