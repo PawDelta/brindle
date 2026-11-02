@@ -2205,10 +2205,10 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
     if not msg:
         return False
     try:
+        lead = message_lead(db, agent, msg.sender_id)
         if _paste_blocked(agent):  # last look before pasting: a draft may have appeared
             raise _PasteBlocked
-        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
-                   server=server_of(agent))
+        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
     except BaseException as exc:
         db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
         if isinstance(exc, _PasteBlocked):
