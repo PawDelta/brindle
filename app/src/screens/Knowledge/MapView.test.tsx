@@ -34,13 +34,15 @@ it.each(["user", "group"])("filters local items by applied paths and library sco
     String(input).includes("/scopes") ? { scopes: [{ kind, id: "s" }] }
       : { nodes: [{ id: "doc", kind: "doc", title: "Mixed paths", paths: ["src/cache/index.ts", "src/other/index.ts", "src/**"] }], edges: [] },
   )) });
-  render(<MapView client={client} repo="/repo" decisions={[decision, { ...decision, id: "other", topic: "Unrelated decision", scope: ["src/other/**"] }]}
+  const wildcards = ["**/*.ts", "*.ts"];
+  const { container } = render(<MapView client={client} repo="/repo" decisions={[decision, { ...decision, id: "other", topic: "Unrelated decision", scope: ["src/other/**"] }, ...wildcards.map((pattern) => ({ ...decision, id: pattern, topic: pattern, scope: [pattern] }))]}
     sources={[{ id: "cache", kind: "folder", scope: "/repo/src/cache" }, { id: "other", kind: "folder", scope: "/repo/src/other" }]} />);
   await screen.findByRole("option");
   fireEvent.change(screen.getByLabelText("Code paths"), { target: { value: "src/cache" } });
   fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
   await screen.findByRole("button", { name: /Mixed paths/ });
   expect(screen.queryByRole("button", { name: /Storage policy/ }) !== null).toBe(kind === "user");
+  for (const pattern of wildcards) expect(container.querySelector(`[data-node="local:decision:${pattern}"]`) !== null).toBe(kind === "user");
   expect(screen.queryByRole("button", { name: /Imported.*cache/ }) !== null).toBe(kind === "user");
   expect(screen.queryAllByRole("button", { name: /Unrelated decision|Imported.*other/ })).toHaveLength(0);
 });

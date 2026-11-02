@@ -109,10 +109,13 @@ export function joinLocal(
   ];
   for (const { node, paths } of local) {
     const scopes = paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
-    // A broad server glob must not bridge a decision outside the selected area.
-    // Check both sides against the same area before joining their shared path.
+    // A concrete path inside the area is a witness even for wildcard decisions.
+    // A broad server glob still needs the local scope to intersect that area.
     const matches = map.nodes.filter((n) => selected.some((area) => scopes.some((scope) =>
-      touchesArea(scope, area) && filteredPaths(n, [area]).some((path) => decisionMatches(scope, path)),
+      filteredPaths(n, [area]).some((path) => {
+        const concrete = !/[*?\[]/.test(path);
+        return (concrete || touchesArea(scope, area)) && decisionMatches(scope, path);
+      }),
     )));
     if (!matches.length) continue;
     nodes.push(node);
