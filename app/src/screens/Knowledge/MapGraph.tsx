@@ -1,5 +1,5 @@
 import type { DecisionDTO } from "../../api/schema";
-import type { KbSource, KnowledgeMap, MapEdge, MapNode } from "../../api/client";
+import type { DocScope, KbSource, KnowledgeMap, MapEdge, MapNode } from "../../api/client";
 import { card } from "../../components/ui";
 
 export type LocalNode = { id: string; kind: "decision"; title: string; decision: DecisionDTO } | { id: string; kind: "imported"; title: string; source: KbSource; path: string };
@@ -86,18 +86,29 @@ function containsPath(folder: string, path: string): boolean {
   return !folder || folder === path || path.startsWith(`${folder}/`);
 }
 
-export function joinLocal(map: KnowledgeMap, decisions: DecisionDTO[], sources: KbSource[], repo: string): { nodes: GraphNode[]; edges: MapEdge[] } {
+export function joinLocal(
+  map: KnowledgeMap,
+  decisions: DecisionDTO[],
+  sources: KbSource[],
+  repo: string,
+  filter: { scope: DocScope; paths: string[] },
+): { nodes: GraphNode[]; edges: MapEdge[] } {
   const nodes: GraphNode[] = [...map.nodes];
   const edges = [...map.edges];
+  // Local records have no team or organization membership.
+  if (filter.scope.kind !== "user") return { nodes, edges };
+  const selected = filter.paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
+  // A document in the neighbourhood may mention paths outside the chosen area.
+  // Only paths inside that area may connect a local record to the document.
+  const filteredPaths = (node: MapNode) => [...(node.paths ?? []), ...(node.path ? [node.path] : [])]
+    .map((p) => relative(p, repo))
+    .filter((p): p is string => p !== null && selected.some((area) => containsPath(area, p) || decisionMatches(area, p)));
   const local: { node: LocalNode; paths: string[] }[] = [
     ...decisions.map((d) => ({ node: { id: `local:decision:${d.id}`, kind: "decision" as const, title: d.topic, decision: d }, paths: d.scope })),
   ];
   for (const { node, paths } of local) {
     const scopes = paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
-    const matches = map.nodes.filter((n) => [...(n.paths ?? []), ...(n.path ? [n.path] : [])].some((p) => {
-      const path = relative(p, repo);
-      return path !== null && scopes.some((scope) => decisionMatches(scope, path));
-    }));
+    const matches = map.nodes.filter((n) => filteredPaths(n).some((path) => scopes.some((scope) => decisionMatches(scope, path))));
     if (!matches.length) continue;
     nodes.push(node);
     for (const match of matches) edges.push({ source: node.id, target: match.id, kind: "shared_path" });
@@ -111,11 +122,7 @@ export function joinLocal(map: KnowledgeMap, decisions: DecisionDTO[], sources: 
     const node: LocalNode = { id: `local:source:${source.id}`, kind: "imported", title: source.scope.replace(/\/+$/, "").split("/").at(-1) || source.scope, source, path: source.scope };
     let joined = false;
     for (const server of map.nodes) {
-      const paths = new Set([...(server.paths ?? []), ...(server.path ? [server.path] : [])]);
-      const matches = [...paths].some((raw) => {
-        const path = relative(raw, repo);
-        return path !== null && containsPath(scope, path);
-      });
+      const matches = filteredPaths(server).some((path) => containsPath(scope, path));
       if (!matches) continue;
       if (!joined) { nodes.push(node); joined = true; }
       edges.push({ source: node.id, target: server.id, kind: "shared_path" });
