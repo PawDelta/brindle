@@ -16,6 +16,7 @@ interface MapViewProps {
 }
 
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
+type MapAreaFilter = { paths: string[]; scope: DocScope };
 
 export function MapView(props: MapViewProps) {
   return <MapArea key={props.repo} {...props} />;
@@ -25,14 +26,16 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
   const [scopes, setScopes] = useState<DocScope[]>([]);
   const [scopeKey, setScopeKey] = useState("");
   const [input, setInput] = useState("");
-  const [area, setArea] = useState<{ paths: string[]; scope: DocScope } | null>(null);
-  const [map, setMap] = useState<KnowledgeMap | null>(null);
+  const [area, setArea] = useState<MapAreaFilter | null>(null);
+  const [result, setResult] = useState<{ request: MapAreaFilter; map: KnowledgeMap } | null>(null);
+  // A result belongs to the exact applied filter, including while effects settle.
+  const map = result?.request === area ? result?.map ?? null : null;
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<GraphNode | null>(null);
   const [doc, setDoc] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
-    setScopes([]); setScopeKey(""); setArea(null); setMap(null); setOpen(null); setDoc(null); setError(null);
+    setScopes([]); setScopeKey(""); setArea(null); setResult(null); setOpen(null); setDoc(null); setError(null);
     if (repo) client.docScopes(repo).then((got) => {
       if (active) { setScopes(got.scopes); setScopeKey(got.scopes[0] ? `${got.scopes[0].kind}:${got.scopes[0].id}` : ""); }
     }, (e: unknown) => { if (active) setError(message(e)); });
@@ -40,17 +43,31 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
   }, [client, repo]);
   useEffect(() => {
     let active = true;
-    setMap(null); setOpen(null); setDoc(null); setError(null);
-    if (repo && area) client.knowledgeMap(repo, area.scope, area.paths).then(
-      (got) => { if (active) setMap(got); },
+    const request = area;
+    setResult(null); setOpen(null); setDoc(null); setError(null);
+    if (repo && request) client.knowledgeMap(repo, request.scope, request.paths).then(
+      (got) => { if (active) setResult({ request, map: got }); },
       (e: unknown) => { if (active) setError(message(e)); },
     );
     return () => { active = false; };
   }, [client, repo, area]);
-  const graph = useMemo(() => map && repo ? joinLocal(map, decisions, sources, repo) : null, [map, decisions, sources, repo]);
+  const graph = useMemo(
+    () => map && repo && area ? joinLocal(map, decisions, sources, repo, area) : null,
+    [map, decisions, sources, repo, area],
+  );
   const titles = useMemo(() => new Map((map?.nodes ?? []).filter((n) => n.kind === "doc").map((n) => [n.doc_id ?? n.id, n.title ?? n.id])), [map]);
   const learn = useCallback(() => {}, []);
   const close = () => setDoc(null);
+  const changeScope = (key: string) => {
+    const scope = scopes.find((s) => `${s.kind}:${s.id}` === key);
+    setScopeKey(key);
+    // Keep the applied paths; unsubmitted path edits stay in the input.
+    if (scope) setArea((current) => {
+      if (!current) return null;
+      const sameScope = current.scope.kind === scope.kind && current.scope.id === scope.id;
+      return sameScope ? current : { ...current, scope };
+    });
+  };
   const submit = (e: FormEvent) => {
     e.preventDefault();
     const scope = scopes.find((s) => `${s.kind}:${s.id}` === scopeKey);
@@ -70,7 +87,7 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
   return <section className="flex flex-col gap-s2" aria-label="Map" data-testid="map">
     <header><h2 className={h2}>Knowledge map</h2><p className="text-sm text-ink-2">Explore the docs and decisions around a code area. Decisions and imported folders are connected on this device by shared paths.</p></header>
     {!repo ? <p className="text-ink-3">Choose a repo to explore its knowledge.</p> : <form onSubmit={submit} className={`${card} flex flex-wrap items-end gap-s1 p-s2`}>
-      <label className="flex flex-col gap-1 text-xs text-ink-2">Library scope<select className={field} value={scopeKey} onChange={(e) => setScopeKey(e.target.value)}>{scopes.map((s) => <option key={`${s.kind}:${s.id}`} value={`${s.kind}:${s.id}`}>{scopeName(s)}</option>)}</select></label>
+      <label className="flex flex-col gap-1 text-xs text-ink-2">Library scope<select className={field} value={scopeKey} onChange={(e) => changeScope(e.target.value)}>{scopes.map((s) => <option key={`${s.kind}:${s.id}`} value={`${s.kind}:${s.id}`}>{scopeName(s)}</option>)}</select></label>
       <label className="flex min-w-48 flex-1 flex-col gap-1 text-xs text-ink-2">Code paths<input className={field} value={input} onChange={(e) => setInput(e.target.value)} placeholder="src/cache, src/db" /></label>
       <button type="submit" className={button} disabled={!scopeKey || !input.trim()}>Explore area</button>
     </form>}
