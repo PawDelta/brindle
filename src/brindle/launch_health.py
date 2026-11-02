@@ -595,6 +595,20 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
                                 outcome=refused)
     detail = (cause.line() if cause else
               "the worker exited before launch health could be established. Check its pane and CLI installation/login, then retry.")
+    if not alive and "current directory no longer exists" in screen.lower():
+        # The tmux server's own directory may be gone: the next launch moves to a fresh server.
+        try:
+            tmux.leave_dead_server()
+        except tmux.TmuxError:
+            pass
+    from brindle import secrets
+
+    dropped = secrets.dropped_for(agent.id) if not alive else []
+    if dropped:
+        # Names only: agent_env_mode "enforce" kept these out of its pane.
+        detail += (f" Its environment went without {', '.join(dropped)} (not on the allowlist, "
+                   "agent_env_mode enforce); if it needs any of them, add them to agent_env "
+                   "in .brindle/config.json.")
     # Never forward provider output, which can contain URLs, keys or prompt text.
     body = f"Worker {agent.id} launch health: {detail}"
     try:

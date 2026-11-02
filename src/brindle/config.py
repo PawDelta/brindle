@@ -235,6 +235,14 @@ class RepoConfig:
     # Dollar budgets (brindle Pro; see brindle.budget): {"task_usd", "goal_usd", "month_usd", "stop"?},
     # merged per key: user, then repo, then config.local.json.
     budget: dict = field(default_factory=dict)
+    # Environment variables (names or globs) an agent's pane may inherit on top of
+    # brindle's built-in allowlist (secrets.env_allowed), from the person's file,
+    # the repo's and config.local.json, all kept. A secret-looking name never passes.
+    agent_env: list[str] = field(default_factory=list)
+    # "report": a pane keeps the variables off the allowlist, and each launch logs
+    # their names (see agent_env_report, `brindle doctor`); "enforce": they're dropped.
+    # Secret-looking names are dropped in either mode.
+    agent_env_mode: str = "report"
 
 
 def _merge_commands(shared: list[str], local: object) -> list[str]:
@@ -390,7 +398,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
                 "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks", "scoped_checks",
-                "scoped_checks_max_files"):
+                "scoped_checks_max_files", "agent_env_mode"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])
@@ -402,6 +410,12 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             if isinstance(rule, str) and rule.strip() and rule.strip() not in rules:
                 rules.append(rule.strip())
     cfg.rules = rules
+    cfg.agent_env = []
+    for source in (user, shared, local):
+        found = source.get("agent_env")
+        for name in found if isinstance(found, list) else []:
+            if isinstance(name, str) and name.strip() and name.strip() not in cfg.agent_env:
+                cfg.agent_env.append(name.strip())
     if not any("check_concurrency" in source for source in (local, shared, user)):
         cfg.check_concurrency = host_check_concurrency()
     if not any("permission_policy" in source for source in (local, shared, user)):

@@ -395,6 +395,7 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
     out.extend(override_checks())
     out.extend(quota_checks(repo_root))
     out.extend(airgap_checks(repo_root))
+    out.extend(agent_env_checks(repo_root))
     update = updates.notice(refresh=True)
     if update:
         out.append(Check(OK, "brindle update", update))
@@ -678,6 +679,28 @@ def airgap_checks(repo_root: str | None) -> list[Check]:
                              f"none at {path}: with a Team license, delegations and merges are "
                              "refused until the org's policy is put there"))
     return out
+
+
+def agent_env_checks(repo_root: str | None) -> list[Check]:
+    """What the agent environment allowlist took out of this repo's last
+    agent launch (agent_env_mode "enforce") or would have ("report"):
+    names only (see secrets.record_env)."""
+    from brindle import secrets
+
+    found = secrets.env_report()["repos"].get(str(repo_root)) if repo_root else None
+    if not found:
+        return []
+    names = found.get("names") or []
+    if found.get("mode") == "enforce":
+        return [Check(OK, "agent environment",
+                      f"enforced: the last launch dropped {', '.join(names)}; add any an agent needs to "
+                      "agent_env in .brindle/config.json" if names else "enforced: nothing dropped")]
+    if not names:
+        return [Check(OK, "agent environment", "report mode: the allowlist would drop nothing")]
+    return [Check(WARN, "agent environment",
+                  f"report mode: enforcing the allowlist would drop {', '.join(names)} from the last "
+                  "agent launch. Add any an agent needs to agent_env in .brindle/config.json, then set "
+                  "agent_env_mode to \"enforce\"")]
 
 
 def codex_hook_checks(repo_root: str) -> list[Check]:
