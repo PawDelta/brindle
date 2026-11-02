@@ -136,6 +136,38 @@ def test_an_idle_server_reloads_once_its_install_changes(monkeypatch):
     assert json.loads(handover.initialize)["method"] == "initialize" and handover.initialized
 
 
+def test_an_update_that_completes_during_a_failed_reload_is_reloaded_onto(monkeypatch):
+    """The first attempt found the install half-written; by the time its
+    check failed the update had finished. That finished install is tried
+    next, with no further request or install change needed."""
+    old, update, _, (from_client, from_server), _ = _wire(monkeypatch)
+    attempts = []
+
+    def replace():
+        attempts.append(update.installed)
+        if update.installed == "half-written":
+            update.installed = "complete"   # lands while the check runs
+            return False
+        return True
+
+    old._replace = replace
+
+    async def scenario():
+        async with anyio.create_task_group() as tg:
+            async def client():
+                await _answers(from_server, 0)
+                update.installed = "half-written"
+                _send(from_client, {"id": 1, "method": "ping"})
+                await _answers(from_server, 1)      # served here, since the reload failed
+
+            tg.start_soon(client)
+            with anyio.fail_after(30):
+                await old.serve(mcp_server._run_server)
+
+    anyio.run(scenario)
+    assert attempts == ["half-written", "complete"] and old.replaced
+
+
 def test_a_reload_never_execs_an_install_whose_brindle_is_missing(monkeypatch):
     """Mid-update the interpreter can be there while its brindle isn't yet:
     exec'ing it would kill the server, so it isn't exec'd and the server

@@ -143,9 +143,13 @@ class Connection:
                 if held is None and self._should_reload():
                     held = []
             if held is not None and self._idle.is_set():
+                attempted = upgrade.stamp()     # what the readiness check is about to look at
                 if self._hand_over(b"".join(held)):
                     return
-                self._failed_on = upgrade.stamp()
+                self._failed_on = attempted
+                if upgrade.stamp() != attempted:
+                    self.wake()     # the update went on during the attempt: look at what it left
+                    # (the loop tries again once the held requests are answered)
                 for line in held:
                     await self._dispatch(send, line)
                 held = None
