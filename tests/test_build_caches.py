@@ -9,7 +9,7 @@ from conftest import sh
 from brindle import agents, build_caches, gates, workspaces
 from brindle.config import RepoConfig
 from brindle.profiles import load_profile
-from brindle.providers import ClaudeCode, LaunchContext
+from brindle.providers import ClaudeCode, Codex, LaunchContext
 
 
 @pytest.fixture(autouse=True)
@@ -19,7 +19,8 @@ def global_caches(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
 
 
-@pytest.mark.parametrize("who, shared_target", [("worker", True), ("check", True), ("check", False)])
+@pytest.mark.parametrize("who, shared_target", [("worker", True), ("codex", True), ("check", True),
+                                                ("check", False)])
 def test_worker_and_check_env_share_build_caches(db, repo, tmp_path, monkeypatch, who, shared_target):
     ws = workspaces.create(db, str(repo), "feat/caches").workspace
     cfg = RepoConfig(checks=["cargo test"], shared_cargo_target=shared_target)
@@ -28,6 +29,14 @@ def test_worker_and_check_env_share_build_caches(db, repo, tmp_path, monkeypatch
         argv = ClaudeCode().command(LaunchContext("w1", load_profile("developer"), None, cwd=ws.path))
         settings = json.loads(argv[argv.index("--settings") + 1])
         env = {**agents.agent_env(ws, "w1"), **settings["env"]}
+    elif who == "codex":
+        # A Codex worker's shell env, and the sandbox may write the shared caches.
+        argv = Codex().command(LaunchContext("w1", load_profile("developer"), None, cwd=ws.path))
+        sets = dict(a.removeprefix("shell_environment_policy.set.").split("=", 1) for a in argv
+                    if a.startswith("shell_environment_policy.set."))
+        env = {**agents.agent_env(ws, "w1"), **{k: json.loads(v) for k, v in sets.items()}}
+        [roots] = [a.split("=", 1)[1] for a in argv if a.startswith("sandbox_workspace_write.writable_roots=")]
+        assert set(json.loads(roots)) == {env["UV_CACHE_DIR"], env["CARGO_TARGET_DIR"]}
     else:
         seen = []
         monkeypatch.setattr(gates, "_run_queued", lambda db, ws, cmd, env, *a, **kw: (seen.append(env), (True, "ok"))[1])
