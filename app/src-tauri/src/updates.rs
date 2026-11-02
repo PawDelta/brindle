@@ -548,7 +548,8 @@ async fn may_check<R: Runtime>(app: &AppHandle<R>, brindle_home: &Path) -> Resul
 /// What `app-update.json` in the app's data directory keeps across launches:
 /// the version last run, when this machine last checked (seconds since
 /// the epoch), the update the person last set aside ("Later"), and whether
-/// the engine last said updates are off, and versions already announced.
+/// the engine last said updates are off. Notification claims live beside it
+/// in `app-update.notifications`, independently of record replacements.
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Record {
     last_version: Option<String>,
@@ -558,7 +559,7 @@ struct Record {
     /// The engine's last word was Off, until it says On (`engine_allows`).
     #[serde(default)]
     engine_off: bool,
-    /// Keep every announcement, including versions a rollback may offer again.
+    /// Legacy history, migrated to exclusive per-version claims at launch.
     #[serde(default)]
     notified_versions: Vec<String>,
 }
@@ -606,6 +607,21 @@ pub struct Offer {
 impl Seen {
     fn state(&self) -> std::sync::MutexGuard<'_, SeenState> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn notify_available(
+        &self,
+        looked: &Result<Option<Offer>, String>,
+        shown: impl FnOnce() -> bool,
+        notify: impl FnOnce(&Offer),
+    ) {
+        // Window queries can wait on synchronous commands which also need Seen.
+        let shown = shown();
+        let claimed = self.state().claim_notification(looked, shown);
+        // Drop the state guard before calling into the platform again.
+        if let Some(found) = claimed {
+            notify(&found);
+        }
     }
 
     /// Run a look (`run`) as the only one, recording its outcome: what it
@@ -659,35 +675,56 @@ impl SeenState {
         let updated = updated_to(record.last_version.as_deref(), current)
             .filter(|_| checks_at_launch(&current.to_string()));
         let mut seen = Self { record, path, updated, ..Self::default() };
+        // Preserve history written before per-version claims were introduced.
+        for version in &seen.record.notified_versions {
+            seen.claim_version(version);
+        }
         seen.record.last_version = Some(current.to_string());
         seen.save();
         seen
     }
 
-    fn notify_available(
-        &mut self,
+    fn claim_notification(
+        &self,
         looked: &Result<Option<Offer>, String>,
         shown: bool,
-        notify: impl FnOnce(&Offer),
-    ) {
+    ) -> Option<Offer> {
         if let Ok(Some(found)) = looked {
             if !shown && !self.record.notified_versions.contains(&found.version) {
-                self.record.notified_versions.push(found.version.clone());
-                // Commit before sending: an interrupted launch mustn't announce it again.
-                // If it can't be saved, leave the banner as the way to offer the update.
-                if !self.save() {
-                    self.record.notified_versions.pop();
-                    return;
+                if self.claim_version(&found.version) {
+                    return Some(found.clone());
                 }
-                notify(found);
+            }
+        }
+        None
+    }
+
+    /// An exclusive persistent claim, independent of cached records and their saves.
+    /// A crash after claiming may omit one notification, but cannot repeat it.
+    fn claim_version(&self, version: &str) -> bool {
+        let Some(path) = &self.path else { return false };
+        let dir = path.with_extension("notifications");
+        // Encode the full version as a portable filename, including build metadata.
+        let name: String = version.bytes().map(|b| format!("{b:02x}")).collect();
+        let claimed = (|| -> std::io::Result<()> {
+            std::fs::create_dir_all(&dir)?;
+            std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(name))?;
+            Ok(())
+        })();
+        match claimed {
+            Ok(()) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(e) => {
+                eprintln!("brindle: couldn't claim an update notification in {}: {e}", dir.display());
+                false
             }
         }
     }
 
     /// Write the record: to a file of this process's own beside it, then
     /// renamed over it, so a reader never sees half of one.
-    fn save(&self) -> bool {
-        let Some(path) = &self.path else { return false };
+    fn save(&self) {
+        let Some(path) = &self.path else { return };
         let part = path.with_extension(format!("json.{}.part", std::process::id()));
         let written = (|| -> std::io::Result<()> {
             if let Some(dir) = path.parent() {
@@ -699,9 +736,7 @@ impl SeenState {
         if let Err(e) = written {
             let _ = std::fs::remove_file(&part);
             eprintln!("brindle: couldn't save {}: {e}", path.display());
-            return false;
         }
-        true
     }
 }
 
@@ -839,7 +874,7 @@ pub fn check_in_background<R: Runtime>(app: &AppHandle<R>, brindle_home: &Path) 
             }
             let looked = check(&app, &brindle_home).await;
             next = Some(now_secs() + wait_after(&looked, &mut failed_wait).as_secs());
-            app.state::<Seen>().state().notify_available(&looked, window_shown(&app), |found| {
+            app.state::<Seen>().notify_available(&looked, || window_shown(&app), |found| {
                 let _ = app
                     .notification()
                     .builder()
@@ -1793,6 +1828,27 @@ mod tests {
     }
 
     #[test]
+    fn notification_platform_calls_leave_the_seen_mutex_free() {
+        let seen = Seen::default();
+        let dir = std::env::temp_dir().join(format!("update-lock-order-{}", std::process::id()));
+        seen.state().path = Some(dir.join("app-update.json"));
+        let sent = Cell::new(false);
+        seen.notify_available(
+            &Ok(Some(Offer { version: "0.2.11".into(), notes: None, rollback: false })),
+            || {
+                assert!(seen.0.try_lock().is_ok(), "window queries must allow synchronous update commands");
+                false
+            },
+            |_| {
+                assert!(seen.0.try_lock().is_ok(), "platform notifications must allow synchronous update commands");
+                sent.set(true);
+            },
+        );
+        assert!(sent.get());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn an_available_version_notifies_once_across_launches_and_keeps_its_banner() {
         let dir = std::env::temp_dir().join(format!("update-notifications-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1817,18 +1873,38 @@ mod tests {
                 || look("0.2.10", || std::future::ready(Ok(())), &mut feed, FEED_LIMIT),
                 || {},
             ));
-            seen.state().notify_available(&looked, shown, |_| notifications.set(notifications.get() + 1));
+            seen.notify_available(&looked, || shown, |_| notifications.set(notifications.get() + 1));
             assert_eq!(notifications.get(), total, "{version} {reach:?} {shown}");
             assert_eq!(seen.state().available, looked.ok().flatten());
         }
-        // A failed record write mustn't allow an announcement on every launch.
-        let mut unsaved = SeenState { path: Some(path.join("blocked")), ..SeenState::default() };
+        // A failed claim write mustn't allow an announcement on every launch.
+        let unsaved = Seen::default();
+        unsaved.state().path = Some(path.join("blocked"));
         let offer = Ok(Some(Offer { version: "0.2.13".into(), notes: None, rollback: false }));
-        unsaved.notify_available(&offer, false, |_| notifications.set(notifications.get() + 1));
+        unsaved.notify_available(&offer, || false, |_| notifications.set(notifications.get() + 1));
         assert_eq!(notifications.get(), 2);
-        unsaved.path = Some(path);
-        unsaved.notify_available(&offer, false, |_| notifications.set(notifications.get() + 1));
+        unsaved.state().path = Some(path.clone());
+        unsaved.notify_available(&offer, || false, |_| notifications.set(notifications.get() + 1));
         assert_eq!(notifications.get(), 3);
+        unsaved.state().record.notified_versions.push("0.2.15".into());
+        unsaved.state().save();
+        // Both launches read the record before either claims a newly available version.
+        let first = Seen::default();
+        let second = Seen::default();
+        *first.state() = SeenState::load(Some(path.clone()), &current);
+        *second.state() = SeenState::load(Some(path.clone()), &current);
+        let offer = Ok(Some(Offer { version: "0.2.14".into(), notes: None, rollback: false }));
+        first.notify_available(&offer, || false, |_| notifications.set(notifications.get() + 1));
+        second.state().record.notified_versions.clear();
+        second.state().save();
+        let relaunched = Seen::default();
+        *relaunched.state() = SeenState::load(Some(path), &current);
+        second.notify_available(&offer, || false, |_| notifications.set(notifications.get() + 1));
+        assert_eq!(notifications.get(), 4);
+        relaunched.notify_available(&offer, || false, |_| notifications.set(notifications.get() + 1));
+        let legacy = Ok(Some(Offer { version: "0.2.15".into(), notes: None, rollback: false }));
+        relaunched.notify_available(&legacy, || false, |_| notifications.set(notifications.get() + 1));
+        assert_eq!(notifications.get(), 4);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
