@@ -356,11 +356,7 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
         watch = _watch_slow(db, ws, cmd, last, timeout) if last is not None else None
         started = time.monotonic()
         try:
-            from brindle import tasks
-
             extra = {} if cancel is None else {"cancel": cancel}
-            if tasks.forced_start(db, ws):   # the worker was started despite the load: its checks yield
-                extra["background"] = True
             ok, out = autopilot.run_check(cmd, ws.path, env, timeout, **extra)
         finally:
             if watch:
@@ -524,7 +520,9 @@ def rule_summary(db: DB, ws: Workspace) -> str:
 
 def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     """Run the worker's rule packs and each of ``cfg.checks`` (cached by sha)
-    and produce a short pass/fail summary for a reviewer, with output only
+    in configured order, stopping at the first failed command. Later commands
+    are reported as skipped without running or caching them. Produce a short
+    pass/fail summary for a reviewer, with output only
     for the ones that failed, capped so one big failure can't blow up the
     reviewer's prompt."""
     rules = rule_summary(db, ws)
@@ -533,8 +531,12 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     env = workspaces.workspace_env(ws, cfg)
     lines = [rules] if rules else []
     budget = MAX_FAILURE_CHARS
+    failed = False
     with queue_place(time.time()):   # one place in the check queue for all its commands
         for cmd in cfg.checks:
+            if failed:
+                lines.append(f"SKIP `{cmd}` (skipped: earlier check failed)")
+                continue
             if cancel is None:
                 ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
             else:
@@ -542,13 +544,10 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
             if ok:
                 lines.append(f"PASS `{cmd}` ({out})" if out.startswith(check_scope.SKIPPED) else f"PASS `{cmd}`")
                 continue
-            if budget <= 0:
-                lines.append(f"FAIL `{cmd}` (output omitted; failure budget spent)")
-                continue
+            failed = True
             # Keep the tail, not the head: run_check's own exit-code marker is the
             # last line, and that's the part a reviewer needs most.
             shown = out if len(out) <= budget else "... (truncated)\n" + out[-budget:]
-            budget -= len(shown)
             lines.append(f"FAIL `{cmd}`\n{shown}")
     return "\n".join(lines)
 

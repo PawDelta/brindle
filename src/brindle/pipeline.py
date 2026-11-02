@@ -9,9 +9,10 @@ With ``pipeline`` on (the default), brindle runs those stages itself:
 
 1. A worker reports (``report_result``). brindle gets the branch reviewed at
    once (``agents.start_review``): with ``checks`` configured, a detached
-   ``_review-after-checks`` process runs them first and then starts the
-   reviewer with their results in its prompt; with none, the reviewer starts
-   right away.
+   ``_review-after-checks`` process starts the reviewer and runs them beside
+   it, and a verdict waits for them, so failing checks and review findings
+   reach the worker in one message; with none, the reviewer starts right
+   away.
 2. The reviewer approves: the branch is ready. brindle merges every ready
    branch of the same base (through the same gates ``merge_workspace``
    uses), the one whose hunks overlap the others' least first and the rest
@@ -45,10 +46,12 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import os
 import re
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 
 from brindle import (
@@ -178,6 +181,128 @@ def review_running(ws_id: str) -> bool:
     return gates.marked("review-run", ws_id)
 
 
+# -- the reviewer and the checks run side by side ------------------------------
+#
+# ``agents.review_after_checks`` starts the reviewer first and runs the checks
+# beside it. Whichever finishes second acts, under the branch's merge lock:
+# a verdict that lands while its commit's checks still run is held back
+# (``_hold_verdict``), and the run, once its checks are done, records their
+# summary and hands every held verdict to ``_on_review`` (``checks_finished``),
+# which sends the worker the review's findings and the failing checks in one
+# message. The state lives in a small file per workspace, since the reviewer's
+# verdict and the check run are in separate processes.
+
+
+def _alongside_file(ws_id: str):
+    from brindle.config import brindle_home
+
+    directory = brindle_home() / "locks"
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / ("review-alongside-" + hashlib.sha1(ws_id.encode()).hexdigest()[:16] + ".json")
+
+
+def _alongside(ws_id: str) -> dict:
+    try:
+        state = json.loads(_alongside_file(ws_id).read_text())
+    except (FileNotFoundError, ValueError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _set_alongside(ws_id: str, state: dict) -> None:
+    path = _alongside_file(ws_id)
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}")
+    try:
+        tmp.write_text(json.dumps(state))
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _for_report(db: DB, ws: Workspace, sha: str) -> dict:
+    """The state for ``ws`` at ``sha`` as of its latest report (the piped
+    worker's ``reviewing_since``, whatever stage it has reached since), or a
+    fresh one for a new commit or report."""
+    worker = piped_worker(db, ws)
+    report = worker.reviewing_since if worker is not None else None
+    state = _alongside(ws.id)
+    if state.get("sha") == sha and state.get("report") == report:
+        return state
+    return {"sha": sha, "report": report}
+
+
+def checks_started(db: DB, ws: Workspace, sha: str) -> None:
+    """A run is checking ``ws`` at ``sha`` beside its reviewer: a verdict on
+    ``sha`` waits for it. Another run for the same report (a required second
+    review's, started late) keeps what the first one found and sent, so the
+    worker isn't sent the same failures twice; a new report starts afresh."""
+    with merge_lock(ws.id):
+        _set_alongside(ws.id, _for_report(db, ws, sha))
+
+
+def checks_finished(db: DB, ws: Workspace, sha: str, summary: str | None) -> None:
+    """The checks of ``ws`` at ``sha`` are done (``summary``, None when they
+    told nothing): record them, then act on each verdict that waited for
+    them, as ``on_review`` would have."""
+    ready = False
+    with merge_lock(ws.id):
+        state = _for_report(db, ws, sha)
+        held = state.pop("held", [])
+        state["checks"] = summary
+        _set_alongside(ws.id, state)
+        for reviewer_id in held:
+            reviewer = db.get_agent(reviewer_id)
+            review = next((r for r in reversed(db.workspace_reviews(ws.id))
+                           if r.reviewer_id == reviewer_id), None)
+            if reviewer is None or review is None or review.sha != sha:
+                continue
+            ready = _on_review(db, reviewer, ws, review.approved, review.summary or "")[1] or ready
+    if ready:
+        drain(db, ws.repo_root, ws.base_branch)
+
+
+def release_held(db: DB, ws: Workspace) -> bool:
+    """Verdicts held for a check run that died without finishing (killed
+    outright): act on them without the checks, which the merge gate runs
+    anyway. Returns whether there were any."""
+    state = _alongside(ws.id)
+    if not state.get("held") or "checks" in state or review_running(ws.id):
+        return False
+    checks_finished(db, ws, state["sha"], None)
+    return True
+
+
+def _hold_verdict(ws: Workspace, reviewer: Agent, sha: str) -> bool:
+    """Hold ``reviewer``'s verdict on ``sha`` while that commit's checks are
+    still running beside it. Under the merge lock."""
+    state = _alongside(ws.id)
+    if state.get("sha") != sha or "checks" in state or not review_running(ws.id):
+        return False
+    held = state.setdefault("held", [])
+    if reviewer.id not in held:
+        held.append(reviewer.id)
+    _set_alongside(ws.id, state)
+    return True
+
+
+def _checks_for(ws: Workspace, sha: str) -> tuple[str | None, bool]:
+    """(the failing checks' summary for ``sha``, None when they passed or
+    weren't run beside the review; whether the worker was already sent them).
+    Under the merge lock."""
+    state = _alongside(ws.id)
+    summary = state.get("checks") if state.get("sha") == sha else None
+    if not summary or not gates.summary_failed(summary):
+        return None, False
+    return summary, state.get("sent") == sha
+
+
+def _checks_sent(ws: Workspace, sha: str) -> None:
+    state = _alongside(ws.id)
+    if state.get("sha") == sha:
+        state["sent"] = sha
+        _set_alongside(ws.id, state)
+
+
 def _settled(db: DB, ws: Workspace) -> str | None:
     """Why no gate or merge may run on ``ws`` any more: it is gone (removed,
     or being removed), or its branch already merged at its current commit.
@@ -292,6 +417,7 @@ def on_workspace_cleanup(db: DB, ws: Workspace) -> None:
         cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except Exception:
         cfg = RepoConfig()
+    _alongside_file(ws.id).unlink(missing_ok=True)
     merged = bool(db.merged_sha(ws.id))
     if not merged:
         from brindle.pro import analysis_docs
@@ -883,6 +1009,19 @@ def _actionable_section(rest: str) -> bool:
     return True
 
 
+def _superseded(ws: Workspace, worker: Agent, reviewer: Agent) -> bool:
+    """Whether ``reviewer``'s verdict is for a commit the branch has left
+    and the worker has reported again since the reviewer started: a late
+    verdict that must not touch the newer report's pipeline."""
+    if not reviewer.review_sha or worker.reviewing_since is None \
+            or reviewer.created_at >= worker.reviewing_since:
+        return False
+    try:
+        return gates.head(ws) != reviewer.review_sha
+    except git.GitError:
+        return False
+
+
 def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
                summary: str) -> tuple[bool, bool]:
     """(handled, ready): whether the pipeline took the verdict, and whether
@@ -897,6 +1036,8 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
     worker = piped_worker(db, ws)
     if worker is None:
         return False, False
+    if _superseded(ws, worker, reviewer):
+        return True, False   # the newer report's own review and checks decide
     parent_id = worker.parent_id
     try:
         cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
@@ -931,6 +1072,24 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False
         db.update_agent(worker.id, pipeline="reviewing")
         worker = db.get_agent(worker.id)
+    try:
+        sha = reviewer.review_sha or gates.head(ws)
+    except git.GitError:
+        sha = None
+    if sha and cfg.checks and _hold_verdict(ws, reviewer, sha):
+        return True, False   # its checks still run: both go to the worker together (checks_finished)
+    failed, sent = _checks_for(ws, sha) if sha else (None, False)
+    needs_sup = not approved and has_supervisor_action(summary)
+    asked = "requested changes"
+    if failed and sent:
+        if approved:
+            return True, False   # the worker already has these failures, with another verdict
+        failed = None   # only this review's findings are new to the worker
+    if failed:
+        asked = ("approved it, but the repo's checks failed" if approved
+                 else "requested changes, and the repo's checks failed")
+        summary = (f"{summary}\n\n" if not approved else "") + failed
+        approved = False
     report = worker.result or ""
     if approved:
         if not cfg.auto_merge_default_branch and ws.base_branch \
@@ -975,12 +1134,13 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False   # the other reviewer's verdict decides; both must approve
         db.update_agent(worker.id, pipeline="ready")
         return True, True
-    needs_sup = has_supervisor_action(summary)
+    if failed:
+        _checks_sent(ws, sha)
     rounds = (worker.pipeline_rounds or 0) + 1
     if not needs_sup and rounds <= cfg.review_rounds:
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
-        fix = (f"Review of your branch (round {rounds} of {cfg.review_rounds}) requested "
-               f"changes:\n\n{summary}\n\nFix what's valid, commit, and call report_result "
+        fix = (f"Review of your branch (round {rounds} of {cfg.review_rounds}) {asked}"
+               f":\n\n{summary}\n\nFix what's valid, commit, and call report_result "
                "again; brindle will have it reviewed again.")
         if agents.is_alive(worker):
             try:

@@ -37,7 +37,10 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
     let active = true;
     setScopes([]); setScopeKey(""); setArea(null); setResult(null); setOpen(null); setDoc(null); setError(null);
     if (repo) client.docScopes(repo).then((got) => {
-      if (active) { setScopes(got.scopes); setScopeKey(got.scopes[0] ? `${got.scopes[0].kind}:${got.scopes[0].id}` : ""); }
+      if (active) {
+        setScopes(got.scopes); setScopeKey(got.scopes[0] ? `${got.scopes[0].kind}:${got.scopes[0].id}` : "");
+        if (got.scopes[0]) setArea({ scope: got.scopes[0], paths: [] });
+      }
     }, (e: unknown) => { if (active) setError(message(e)); });
     return () => { active = false; };
   }, [client, repo]);
@@ -72,7 +75,7 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
     e.preventDefault();
     const scope = scopes.find((s) => `${s.kind}:${s.id}` === scopeKey);
     const paths = [...new Set(input.split(/[,\n]/).map((p) => p.trim()).filter(Boolean))];
-    if (scope && paths.length) setArea((current) => {
+    if (scope) setArea((current) => {
       const pending = !map && !error;
       const same = current?.scope.kind === scope.kind && current.scope.id === scope.id && JSON.stringify(current.paths) === JSON.stringify(paths);
       return pending && same ? current : { scope, paths };
@@ -85,17 +88,17 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
     if (node.kind === "path" && node.path && area) { setInput(node.path); setArea({ scope: area.scope, paths: [node.path] }); }
   };
   return <section className="flex flex-col gap-s2" aria-label="Map" data-testid="map">
-    <header><h2 className={h2}>Knowledge map</h2><p className="text-sm text-ink-2">Explore the docs and decisions around a code area. Decisions and imported folders are connected on this device by shared paths.</p></header>
+    <header><h2 className={h2}>Knowledge map</h2><p className="text-sm text-ink-2">All docs in this library scope. Code paths optionally narrow the map. Decisions and imported folders are connected on this device by shared paths.</p></header>
     {!repo ? <p className="text-ink-3">Choose a repo to explore its knowledge.</p> : <form onSubmit={submit} className={`${card} flex flex-wrap items-end gap-s1 p-s2`}>
       <label className="flex flex-col gap-1 text-xs text-ink-2">Library scope<select className={field} value={scopeKey} onChange={(e) => changeScope(e.target.value)}>{scopes.map((s) => <option key={`${s.kind}:${s.id}`} value={`${s.kind}:${s.id}`}>{scopeName(s)}</option>)}</select></label>
       <label className="flex min-w-48 flex-1 flex-col gap-1 text-xs text-ink-2">Code paths<input className={field} value={input} onChange={(e) => setInput(e.target.value)} placeholder="src/cache, src/db" /></label>
-      <button type="submit" className={button} disabled={!scopeKey || !input.trim()}>Explore area</button>
+      <button type="submit" className={button} disabled={!scopeKey}>Explore area</button>
     </form>}
     {error && <p role="alert" className={alert}>{error}</p>}
-    {repo && !area && <p className="text-sm text-ink-3">Choose code paths to load their neighbourhood.</p>}
+    {repo && !area && <p className="text-sm text-ink-3">Choose a library scope to load its map.</p>}
     {area && !map && !error && <p role="status">Loading neighbourhood…</p>}
     {graph && <><div className="flex flex-wrap gap-s2 text-xs text-ink-3"><span>{graph.nodes.length} nodes · {graph.edges.length} connections</span><span>Code areas · Documents · Local decisions and folders</span><span>Dashed: supersedes</span></div>
-      {graph.nodes.length ? <MapGraph {...graph} onOpen={select} /> : <p>No knowledge is linked to these paths yet.</p>}
+      {graph.nodes.length ? <MapGraph {...graph} onOpen={select} /> : <p>No knowledge in this map yet.</p>}
     </>}
     {open?.kind === "decision" && <ul><DecisionCard d={open.decision} /></ul>}
     {doc && <Reader key={doc} client={client} repo={repo} id={doc} targets={scopes} titles={titles} onBack={close} onDeleted={close} onOpen={setDoc} onScopes={learn} />}

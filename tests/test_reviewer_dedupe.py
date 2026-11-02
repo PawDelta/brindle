@@ -228,15 +228,19 @@ def test_queued_reports_only_dispatch_the_latest_review(db, ws, boss, monkeypatc
     assert started == [] and checked == []
     finish(queued[1])
     if supersede == "during checks":
-        assert started == []
+        # Started beside its checks, on the commit the branch then left.
+        assert [a.review_sha for a in started] == [checked[0]]
         finish(queued[2])
-    assert len(started) == 1 and started[0].review_sha == gates.head(ws)
+        assert db.get_agent(started[0].id).status == "done"   # the new commit's reviewer replaced it
+    live = [a for a in started if db.get_agent(a.id).status != "done"]
+    assert len(live) == 1 and live[0].review_sha == gates.head(ws)
     assert len(checked) == (2 if supersede == "during checks" else 1)
     # Repeated reports and delayed helpers must respect the live reviewer.
+    count = len(started)
     report()
     finish(queued[1])
-    assert agents.request_review(db, boss, ws).id == started[0].id
-    assert len(queued) == (3 if supersede == "during checks" else 2) and len(started) == 1
+    assert agents.request_review(db, boss, ws).id == live[0].id
+    assert len(queued) == (3 if supersede == "during checks" else 2) and len(started) == count
 
 
 @pytest.fixture

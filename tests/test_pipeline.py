@@ -237,9 +237,9 @@ def test_a_reported_branch_that_moves_during_its_checks_is_not_dropped(db, repo,
     monkeypatch.setattr(agents, "spawn", lambda db_, ws_, prof, **kw: spawned.append(kw["review_sha"]))
     agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["suite"]))
     if moves == 1:
-        assert spawned == [gates.head(ws)] and db.get_agent("w1").pipeline == "reviewing"
+        assert spawned[-1] == gates.head(ws) and db.get_agent("w1").pipeline == "reviewing"
     else:
-        assert spawned == [] and db.get_agent("w1").pipeline is None
+        assert db.get_agent("w1").pipeline is None
         assert any("needs you" in b and "`feat`" in b for b in drain(db))
 
 
@@ -362,6 +362,41 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_m
     assert pipeline.on_review(db, db.get_agent("rev"), ws, False, summary)
     assert len(launched) == 2 and db.get_agent("w1").pipeline is None
     assert [e["agent_id"] for e in bus.tail(db, kinds=("pipeline.escalated",))] == ["w1"]
+
+
+def test_review_alongside_checks_sends_findings_and_failures_in_one_message(db, repo, monkeypatch):
+    """The reviewer starts before the checks finish, and a verdict that lands
+    while they run waits for them: the worker gets the review's findings and
+    the failing checks in one message, so one fix round covers both. A
+    required second review's run for the same report, started late, doesn't
+    send those failures again."""
+    ws = _reported(db, repo, reviewing_since=time.time())
+    sha, sent, reviewers = gates.head(ws), [], []
+    verdicts = iter([(False, "- blocker: off by one"), (True, "lgtm")])
+
+    def spawn(db_, ws_, prof, **kw):
+        reviewers.append(f"rev{len(reviewers)}")
+        add(db, ws, reviewers[-1], "review", prof, parent="boss", review_sha=kw["review_sha"])
+        return db.get_agent(reviewers[-1])
+
+    def checks(db_, ws_, cfg, cancel=None):
+        reviewer, before = db.get_agent(reviewers[-1]), len(sent)   # already reviewing, mid-run
+        approved, text = next(verdicts)
+        db.add_review(ws.id, sha, reviewer.id, approved, text)
+        assert pipeline.on_review(db, reviewer, ws, approved, text)
+        db.update_agent(reviewer.id, result=text, status="done")
+        assert len(sent) == before
+        return "FAIL `true`\nexit 1: boom"
+
+    monkeypatch.setattr(agents, "spawn", spawn)
+    monkeypatch.setattr(gates, "check_summary", checks)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "w1")
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append((to, body)))
+    agents.review_after_checks(db, "boss", ws)
+    agents.review_after_checks(db, "boss", ws, "reviewer", second=True)
+    assert reviewers == ["rev0", "rev1"] and [to for to, _ in sent] == ["w1"]
+    assert "off by one" in sent[0][1] and "boom" in sent[0][1]
+    assert (db.get_agent("w1").pipeline, db.get_agent("w1").pipeline_rounds) == ("fixing", 1)
 
 
 def test_no_duplicate_reviewer_while_the_first_is_still_starting(db, repo, monkeypatch):

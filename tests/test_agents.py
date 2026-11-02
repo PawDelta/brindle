@@ -1,6 +1,5 @@
 import os
 import shutil
-import sys
 import time
 from pathlib import Path
 from unittest.mock import Mock
@@ -228,6 +227,30 @@ def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, mon
     assert sent and sent[0][1] == "Escape"  # tried backing out before giving up
     assert not pasted
     assert db.pending_count("a1") == 1
+
+
+@pytest.mark.parametrize("provider,fault", [("claude", "unreadable"), ("claude", "draft"), ("codex", "draft")])
+def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monkeypatch, provider, fault):
+    fake_agent(db, ws, status="processing" if provider == "codex" else "idle", mode="interactive")
+    db.update_agent("a1", provider=provider)
+    db.enqueue("a1", "queued message", None)
+    clean, draft = {"claude": (CLAUDE_IDLE, CLAUDE_TYPING_WITH_INVERSE_CURSOR), "codex": ("› \n? for shortcuts\n", "› hello\n? for shortcuts\n")}[provider]
+    s, pasted = {"screen": None if fault == "unreadable" else clean, "arm": fault == "draft"}, []
+
+    def capture(*a, **k):
+        if s["screen"] is None:
+            raise tmux.TmuxError("gone")
+        return s["screen"]
+
+    def prepare_lead(*a, **k):   # a draft appears during preparation, after the claim
+        s["screen"] = draft if s.pop("arm", False) else s["screen"]
+        return ""
+    monkeypatch.setattr(tmux, "capture", capture)
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    monkeypatch.setattr(agents, "message_lead", prepare_lead)
+    assert agents.flush(db, "a1") is False and not pasted and db.pending_count("a1") == 1
+    s["screen"] = clean   # the draft is sent or cleared
+    assert agents.flush(db, "a1") is True and pasted == ["queued message"]
 
 
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):
@@ -510,7 +533,7 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
         worker = db.get_agent(db.get_task(t.id).agent_id)
         wws = db.get_workspace(worker.workspace_id)
         assert tasks.load_counts(db) == (1, 0)
-        # A check run on its branch still waits for room under the same load, then runs in the background.
+        # A check run on its branch still waits for room under the same load, then runs at normal priority.
         ran, seen, wrapped = Path(wws.path) / "ran.txt", [], []
 
         def cancel():   # polled while the run waits for a slot or room, and again while it runs
@@ -525,9 +548,7 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
         monkeypatch.setattr(gates, "SLOT_POLL", 0)
         ok, _ = gates.run_checked(db, wws, "touch ran.txt", {}, 60, cancel=cancel, full=True)
         assert ok and seen and not any(seen) and ran.exists()
-        [argv] = wrapped
-        assert Path(argv[0]).name == ("taskpolicy" if sys.platform == "darwin" else "nice")
-        assert argv[-3:] == ["/bin/sh", "-c", "touch ran.txt"]
+        assert wrapped == ["touch ran.txt"]
         db.set_status(worker.id, "idle")                # reported, but its check run is still going
         with gates.marker("checks-running", wws.id):
             assert tasks.load_counts(db) == (0, 1)
