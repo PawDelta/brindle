@@ -94,62 +94,117 @@ pub enum EngineSays {
 /// Only an explicit `"airgap": true` turns updates off: a repo whose config
 /// can't be read is logged and passed over, since it can't arm the daemon
 /// either, and one such repo mustn't hold back everyone's updates. A daemon
-/// not answering `GET /v1/meta` is no answer at all (`wait_for_engine`).
+/// not answering `GET /v1/meta` is no answer at all (`wait_for_reading`).
 pub fn engine_says(get: impl Fn(&str) -> Result<(u16, String), String>) -> EngineSays {
+    engine_reading(get).0
+}
+
+/// What the engine says (`engine_says`), with the repo roots it listed when
+/// it listed them, for a look the daemon doesn't answer later
+/// (`engine_allows`).
+type Reading = (EngineSays, Option<Vec<String>>);
+
+fn engine_reading(get: impl Fn(&str) -> Result<(u16, String), String>) -> Reading {
     let json = |path: &str| match get(path) {
         Ok((200, body)) => serde_json::from_str::<Value>(&body).ok(),
         _ => None,
     };
     if json("/v1/meta").is_none() {
-        return EngineSays::NoAnswer;
+        return (EngineSays::NoAnswer, None);
     }
-    let repos = json("/v1/repos").and_then(|v| v.as_array().cloned()).unwrap_or_else(|| {
+    let listed = json("/v1/repos").and_then(|v| v.as_array().cloned());
+    let repos = listed.clone().unwrap_or_else(|| {
         eprintln!("brindle: update check: couldn't list the repos to read their air-gap setting");
         vec![]
     });
+    let mut roots = vec![];
     for repo in &repos {
         let Some(root) = repo.get("repo_root").and_then(Value::as_str) else {
             eprintln!("brindle: update check: a repo without a root: {repo}");
             continue;
         };
+        roots.push(root.to_string());
         let config = json(&format!("/v1/config?repo={}", query_value(root)));
         match config.and_then(|c| c.pointer("/repo/airgap").cloned()) {
-            Some(Value::Bool(true)) => return EngineSays::Off,
+            Some(Value::Bool(true)) => return (EngineSays::Off, None),
             Some(Value::Bool(false)) => {}
             _ => eprintln!("brindle: update check: couldn't read {root}'s config; passed over"),
         }
     }
+    let roots = listed.map(|_| roots);
     match json("/v1/meta") {
-        None => EngineSays::NoAnswer,
-        Some(meta) if meta.get("airgap") == Some(&Value::Bool(true)) => EngineSays::Off,
-        Some(_) => EngineSays::On,
+        None => (EngineSays::NoAnswer, None),
+        Some(meta) if meta.get("airgap") == Some(&Value::Bool(true)) => (EngineSays::Off, None),
+        Some(_) => (EngineSays::On, roots),
     }
 }
 
-/// `engine_says`, asked again while the daemon doesn't answer and `again`
+/// `engine_reading`, asked again while the daemon doesn't answer and `again`
 /// (which waits a while first) says there is still time: at launch the app
 /// starts the daemon alongside, and its first start can take a while.
-pub fn wait_for_engine(
-    get: impl Fn(&str) -> Result<(u16, String), String>,
-    mut again: impl FnMut() -> bool,
-) -> EngineSays {
+fn wait_for_reading(get: impl Fn(&str) -> Result<(u16, String), String>, mut again: impl FnMut() -> bool) -> Reading {
     loop {
-        match engine_says(&get) {
-            EngineSays::NoAnswer if again() => {}
-            said => return said,
+        match engine_reading(&get) {
+            (EngineSays::NoAnswer, _) if again() => {}
+            reading => return reading,
         }
     }
 }
 
-/// How long the launch look waits for the daemon to answer, and the pause
-/// between asking it. A daemon already running (the usual case: it outlives
-/// the app) answers the first time, and the feed is read right away; one
-/// still starting gets this long, and past it the look is due again at the
-/// next `TICK` rather than held up.
+/// Whether any of `repos` (their roots) turns air-gap on in its own
+/// `.brindle/config.json` or `config.local.json`, either of which may, as
+/// the engine reads them (brindle/config.py); `read` answers a file's text.
+fn repos_air_gapped(repos: &[String], read: impl Fn(&Path) -> Option<String>) -> bool {
+    repos.iter().any(|root| {
+        let dir = Path::new(root).join(".brindle");
+        ["config.json", "config.local.json"].iter().any(|name| {
+            read(&dir.join(name))
+                .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .is_some_and(|config| config.get("airgap") == Some(&Value::Bool(true)))
+        })
+    })
+}
+
+/// How long a look gives the engine to answer when the repos it last listed
+/// are known (`engine_allows`).
+const ENGINE_LIMIT: Duration = Duration::from_secs(3);
+
+/// Whether the engine's side lets a look read the feed (past the key, the
+/// config and the environment: `may_check`), answering the repos to remember
+/// when the engine listed them. With the repos it last listed (`known`), the
+/// engine is asked once (`ask(false)`) and given `limit`: one that doesn't
+/// answer in time, still starting or stopped, leaves the call to those
+/// repos' own configs, read here (`repos_air_gapped`), so no look waits on
+/// the daemon. With none remembered (the first look ever), only the engine
+/// knows a repo's air-gap: it is waited for (`ask(true)`: `wait_for_reading`)
+/// and no feed is read without its answer.
+async fn engine_allows<F: Future<Output = Reading>>(
+    known: Option<&[String]>,
+    ask: impl FnOnce(bool) -> F,
+    limit: Duration,
+    read: impl Fn(&Path) -> Option<String>,
+) -> Result<Option<Vec<String>>, String> {
+    let (said, listed) = match known {
+        Some(_) => tokio::time::timeout(limit, ask(false)).await.unwrap_or((EngineSays::NoAnswer, None)),
+        None => ask(true).await,
+    };
+    match (said, known) {
+        (EngineSays::On, _) => Ok(listed),
+        (EngineSays::NoAnswer, Some(repos)) if !repos_air_gapped(repos, read) => Ok(None),
+        (EngineSays::NoAnswer, None) => {
+            Err("the brindle engine isn't answering, so whether updates are on isn't known".into())
+        }
+        _ => Err(UPDATES_OFF.into()),
+    }
+}
+
+/// How long the launch look waits for the daemon to answer when the repos it
+/// lists aren't known yet (`engine_allows`), and the pause between asking it.
+/// Past it the look is due again at the next `TICK` rather than held up.
 const LAUNCH_PATIENCE: Duration = Duration::from_secs(20);
 const PAUSE: Duration = Duration::from_secs(2);
 
-/// An `again` for `wait_for_engine`: pause (`PAUSE`, less near the end) and
+/// An `again` for `wait_for_reading`: pause (`PAUSE`, less near the end) and
 /// say whether `limit` from now had time left.
 fn asking_for(limit: Duration) -> impl FnMut() -> bool + Send + 'static {
     let until = Instant::now() + limit;
@@ -467,9 +522,10 @@ async fn exclusive<F: Future<Output = Result<Option<String>, String>>>(
 const UPDATES_OFF: &str = "updates are off on this machine (air-gapped or app_updates off)";
 
 /// Whether this machine lets the app check now, with the reason when not: a
-/// public key, and neither the config, the environment nor the engine (asked
-/// off the async runtime, again while it doesn't answer and `again` says so:
-/// `wait_for_engine`) turning updates off.
+/// public key, and neither the config, the environment nor the engine's side
+/// (`engine_allows`: the engine, asked off the async runtime, or the repos it
+/// last listed; waited for, while `again` says so, only when none are known)
+/// turning updates off. The repos the engine lists are remembered for that.
 async fn may_check<R: Runtime>(
     app: &AppHandle<R>,
     brindle_home: &Path,
@@ -484,14 +540,30 @@ async fn may_check<R: Runtime>(
         return Err(UPDATES_OFF.into());
     }
     let engine = app.state::<Engine>().inner().clone();
-    let said = tauri::async_runtime::spawn_blocking(move || wait_for_engine(|p| engine.get(p), again))
+    let ask = |wait: bool| async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let get = |p: &str| engine.get(p);
+            if wait {
+                wait_for_reading(get, again)
+            } else {
+                engine_reading(get)
+            }
+        })
         .await
-        .map_err(|e| e.to_string())?;
-    match said {
-        EngineSays::On => Ok(()),
-        EngineSays::Off => Err(UPDATES_OFF.into()),
-        EngineSays::NoAnswer => Err("the brindle engine isn't answering, so whether updates are on isn't known".into()),
+        .unwrap_or((EngineSays::NoAnswer, None))
+    };
+    let known = app.state::<Seen>().state().record.repos.clone();
+    let read = |path: &Path| std::fs::read_to_string(path).ok();
+    let listed = engine_allows(known.as_deref(), ask, ENGINE_LIMIT, read).await?;
+    if let Some(repos) = listed {
+        let seen = app.state::<Seen>();
+        let mut seen = seen.state();
+        if seen.record.repos.as_ref() != Some(&repos) {
+            seen.record.repos = Some(repos);
+            seen.save();
+        }
     }
+    Ok(())
 }
 
 /// What `app-update.json` in the app's data directory keeps across launches:
@@ -503,14 +575,19 @@ struct Record {
     last_checked: Option<u64>,
     #[serde(default)]
     later: Option<String>,
+    /// The repo roots the engine last listed, whose own configs decide
+    /// air-gap when it doesn't answer a look (`engine_allows`).
+    #[serde(default)]
+    repos: Option<Vec<String>>,
 }
 
 /// What the app knows of updates beyond the install itself (app state): its
 /// record, where it lives, the version this launch was updated to until
 /// the person dismisses it, the update the last look found until they set it
-/// aside, and whether a look is under way.
+/// aside, and whether a look is under way; and the one look at a time
+/// (`Seen::look_once`).
 #[derive(Default)]
-pub struct Seen(Mutex<SeenState>);
+pub struct Seen(Mutex<SeenState>, tokio::sync::Mutex<()>);
 
 #[derive(Default)]
 struct SeenState {
@@ -519,6 +596,18 @@ struct SeenState {
     updated: Option<String>,
     available: Option<Offer>,
     looking: bool,
+    /// Looks finished this launch, and the last one's outcome.
+    looks: u64,
+    last: Option<Result<Option<Offer>, String>>,
+}
+
+/// A look under way (`SeenState::looking`) until dropped, finished or abandoned.
+struct Looking<'a>(&'a Seen);
+
+impl Drop for Looking<'_> {
+    fn drop(&mut self) {
+        self.0.state().looking = false;
+    }
 }
 
 /// An update a look found, offered to the person ("brindle X is available"):
@@ -532,6 +621,46 @@ pub struct Offer {
 impl Seen {
     fn state(&self) -> std::sync::MutexGuard<'_, SeenState> {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Run a look (`run`) as the only one, recording its outcome: what it
+    /// found is the offer, and one that reached the feed is when this
+    /// machine last checked. A look asked for while another is under way (the
+    /// periodic one and About's Check now, say) waits for it and answers its
+    /// outcome instead of starting another, so two never race to record
+    /// theirs. `changed` is told as a look starts and ends.
+    async fn look_once<F: Future<Output = Result<Option<Offer>, String>>>(
+        &self,
+        run: impl FnOnce() -> F,
+        changed: impl Fn(),
+    ) -> Result<Option<Offer>, String> {
+        let asked = self.state().looks;
+        let _only = self.1.lock().await;
+        {
+            let state = self.state();
+            if state.looks != asked {
+                if let Some(got) = &state.last {
+                    return got.clone();
+                }
+            }
+        }
+        let looking = Looking(self);
+        self.state().looking = true;
+        changed();
+        let got = run().await;
+        {
+            let mut state = self.state();
+            state.looks += 1;
+            state.last = Some(got.clone());
+            if let Ok(found) = &got {
+                state.available = found.clone();
+                state.record.last_checked = Some(now_secs());
+                state.save();
+            }
+        }
+        drop(looking);
+        changed();
+        got
     }
 }
 
@@ -654,38 +783,29 @@ async fn look<G: Future<Output = Result<(), String>>>(
 }
 
 /// Look at this build's feed (`look`, gated by `may_check`) and offer what it
-/// finds, answering it; a look that reached the feed is recorded, and every
-/// change announced.
+/// finds, answering it: one look at a time (`Seen::look_once`), which
+/// records it, and every change announced.
 async fn check<R: Runtime>(
     app: &AppHandle<R>,
     brindle_home: &Path,
     again: impl FnMut() -> bool + Send + 'static,
 ) -> Result<Option<Offer>, String> {
-    app.state::<Seen>().state().looking = true;
-    announce(app);
-    let mut feed = PluginFeed { app: app.clone(), which: Feed::Own, update: None };
-    let got = look(&version(app), || may_check(app, brindle_home, again), &mut feed, FEED_LIMIT).await;
-    {
-        let seen = app.state::<Seen>();
-        let mut seen = seen.state();
-        seen.looking = false;
-        if let Ok(found) = &got {
-            seen.available = found.clone();
-            seen.record.last_checked = Some(now_secs());
-            seen.save();
-        }
-    }
-    announce(app);
-    got
+    let run = || async {
+        let mut feed = PluginFeed { app: app.clone(), which: Feed::Own, update: None };
+        look(&version(app), || may_check(app, brindle_home, again), &mut feed, FEED_LIMIT).await
+    };
+    app.state::<Seen>().look_once(run, || announce(app)).await
 }
 
 /// At launch: remember it (`remember_launch`), then, in the background so the
 /// window opens as ever, look at the feed (`check`) and again whenever one is
-/// `due` while the app stays open. The first look waits briefly for a daemon
-/// that isn't answering yet (`LAUNCH_PATIENCE`): air-gap can be armed by a
-/// repo's config only the engine reads, and no feed is read before it says;
-/// a daemon that doesn't answer in time leaves the look due at the next
-/// `TICK`. The feed itself has `FEED_LIMIT`. An update found
+/// `due` while the app stays open. No look waits on the daemon once the repos
+/// it lists are known: past `ENGINE_LIMIT` their own configs decide air-gap
+/// (`engine_allows`). Only the first look ever, with none known, waits
+/// briefly for a daemon not answering yet (`LAUNCH_PATIENCE`), since only the
+/// engine knows which repos could arm air-gap; one that doesn't answer in
+/// time leaves the look due at the next `TICK`. The feed itself has
+/// `FEED_LIMIT`. An update found
 /// is offered (the `app-update` event: the banner), with a notification once
 /// per version when the window isn't showing; nothing installs or restarts
 /// until the person says. A build that doesn't update by itself makes no
@@ -1300,15 +1420,15 @@ mod tests {
             }
         };
         let waits = Cell::new(0);
-        let said = wait_for_engine(get, || {
+        let (said, listed) = wait_for_reading(get, || {
             waits.set(waits.get() + 1);
             true
         });
-        assert_eq!((said, waits.get()), (EngineSays::On, 2));
+        assert_eq!((said, listed, waits.get()), (EngineSays::On, Some(vec!["/w/open".to_string()]), 2));
         // A daemon that never answers: no check, once the (short) patience is spent.
         let started = Instant::now();
         let limit = Duration::from_millis(30);
-        assert_eq!(wait_for_engine(|_| Err("refused".to_string()), asking_for(limit)), EngineSays::NoAnswer);
+        assert_eq!(wait_for_reading(|_| Err("refused".to_string()), asking_for(limit)), (EngineSays::NoAnswer, None));
         assert!(started.elapsed() < PAUSE, "the launch look waited past its limit on the daemon");
     }
 
@@ -1576,6 +1696,77 @@ mod tests {
         for (last, is_due) in [(None, true), (Some(now - 3600), false), (Some(now - RECHECK.as_secs()), true), (Some(now + 60), true)] {
             assert_eq!(due(last, now), is_due, "{last:?}");
         }
+    }
+
+    #[test]
+    fn a_look_reads_the_feed_at_once_without_the_daemon_once_its_repos_are_known() {
+        let known = ["/w/open".to_string(), "/w/closed".to_string()];
+        let new = || Some(vec!["/w/new".to_string()]);
+        let started = Instant::now();
+        // `engine`: what the daemon answers, None for never. The last columns: whether the
+        // feed was read (and the update offered), and the repos to remember.
+        for (known, gapped, engine, offered, remember) in [
+            // A daemon that never answers: the repos it listed last decide, and the feed is read.
+            (Some(&known[..]), "", None, true, None),
+            // One of them air-gapped by its own config.local.json: no feed read.
+            (Some(&known[..]), "/w/closed/.brindle/config.local.json", None, false, None),
+            // None known yet (the first look ever) and no daemon: no feed read.
+            (None, "", Some((EngineSays::NoAnswer, None)), false, None),
+            // The engine answering: its word, and the repos it lists to remember.
+            (None, "", Some((EngineSays::On, new())), true, new()),
+            (Some(&known[..]), "", Some((EngineSays::Off, None)), false, None),
+        ] {
+            let mut feed = fake_feed(Some("0.2.11"), Reach::Up);
+            let remembered = RefCell::new(None);
+            let read = |p: &Path| (p == Path::new(gapped)).then(|| r#"{"airgap": true}"#.to_string());
+            let ask = |wait: bool| {
+                // Waited for only when no repos are known.
+                assert_eq!(wait, known.is_none());
+                let engine = engine.clone();
+                async move {
+                    match engine {
+                        Some(reading) => reading,
+                        None => std::future::pending().await,
+                    }
+                }
+            };
+            let gate = || async {
+                *remembered.borrow_mut() = engine_allows(known, ask, Duration::from_millis(20), read).await?;
+                Ok::<(), String>(())
+            };
+            let looked = tauri::async_runtime::block_on(look("0.2.10", gate, &mut feed, FEED_LIMIT));
+            let what = format!("{known:?} {gapped} {engine:?}");
+            assert_eq!(looked.is_ok_and(|o| o.is_some()), offered, "{what}");
+            assert_eq!(feed.calls.is_empty(), !offered, "{what}");
+            assert_eq!(remembered.into_inner(), remember, "{what}");
+        }
+        assert!(started.elapsed() < Duration::from_secs(2), "a look waited on a daemon that never answers");
+    }
+
+    #[test]
+    fn a_look_asked_for_during_another_answers_that_one_and_starts_none() {
+        let seen = Seen::default();
+        let offer = Some(Offer { version: "0.2.11".into(), notes: None });
+        let (release, runs, told) = (Cell::new(false), Cell::new(0), Cell::new(0));
+        let slow = || async {
+            runs.set(runs.get() + 1);
+            std::future::poll_fn(|_| if release.get() { Poll::Ready(()) } else { Poll::Pending }).await;
+            Ok(offer.clone())
+        };
+        let (first, second) = tauri::async_runtime::block_on(async {
+            let mut first = std::pin::pin!(seen.look_once(slow, || told.set(told.get() + 1)));
+            std::future::poll_fn(|cx| Poll::Ready(first.as_mut().poll(cx).is_pending())).await;
+            assert!(seen.state().looking);
+            // About's Check now meanwhile, its own look answering nothing found: it never runs.
+            let mut second = std::pin::pin!(seen.look_once(|| async { Ok(None) }, || {}));
+            std::future::poll_fn(|cx| Poll::Ready(second.as_mut().poll(cx).is_pending())).await;
+            release.set(true);
+            (first.await, second.await)
+        });
+        assert_eq!((first, second), (Ok(offer.clone()), Ok(offer.clone())));
+        assert_eq!((runs.get(), told.get()), (1, 2));
+        let state = seen.state();
+        assert_eq!((state.available.clone(), state.looking, state.looks), (offer, false, 1));
     }
 
     #[test]

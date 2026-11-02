@@ -27,6 +27,7 @@ interface Install {
   updates: AppUpdates;
   phase: UpdatePhase;
   start: () => void;
+  later: () => void;
 }
 
 const InstallContext = createContext<Install | null>(null);
@@ -55,7 +56,14 @@ export function AppUpdateProvider({ updates, children }: { updates?: AppUpdates;
         running.current = false;
       });
   }, [updates]);
-  const install = updates ? { updates, phase, start } : null;
+  // Later: the offer set aside, and a failed Update now with it, so the pill shows (never one under way).
+  const later = useCallback(() => {
+    if (!updates || running.current) return;
+    void updates.later().then(() => {
+      if (!running.current) setPhase({ kind: "idle" });
+    });
+  }, [updates]);
+  const install = updates ? { updates, phase, start, later } : null;
   return <InstallContext.Provider value={install}>{children}</InstallContext.Provider>;
 }
 
@@ -118,7 +126,7 @@ export function AppUpdateBanner({ openUrl }: { openUrl: OpenUrl }) {
         <span className="text-[13px] text-ink-2">{detail}</span>
         {busy && (
           <div className="mt-1 h-1 w-80 max-w-full overflow-hidden rounded-sm bg-pass/20" aria-hidden>
-            <div className="h-1 rounded-sm bg-pass" style={{ width: `${bar}%` }} />
+            <div className="h-1 rounded-sm bg-pass" style={{ width: `${bar}%` }} data-testid="app-update-bar" />
           </div>
         )}
       </div>
@@ -127,10 +135,10 @@ export function AppUpdateBanner({ openUrl }: { openUrl: OpenUrl }) {
           <button type="button" className="px-1 text-[13px] text-pass hover:underline" onClick={() => void openUrl(releaseNotesUrl(version))}>
             What's new
           </button>
-          <button type="button" className={`${BUTTON} border border-line-strong text-ink-2 hover:bg-surface-2`} onClick={() => void install.updates.later()}>
+          <button type="button" className={`${BUTTON} border border-line-strong text-ink-2 hover:bg-surface-2`} onClick={install.later} data-testid="app-update-later">
             Later
           </button>
-          <button type="button" className={`${BUTTON} bg-pass font-semibold text-canvas hover:opacity-90`} onClick={install.start}>
+          <button type="button" className={`${BUTTON} bg-pass font-semibold text-canvas hover:opacity-90`} onClick={install.start} data-testid="app-update-now">
             {phase.kind === "failed" ? "Update failed · Try again" : "Update now"}
           </button>
         </div>

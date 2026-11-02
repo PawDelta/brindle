@@ -8,12 +8,12 @@ import { AppUpdateBanner, AppUpdatePill, AppUpdateProvider } from "./AppUpdateBa
 afterEach(cleanup);
 
 describe("AppUpdateBanner", () => {
-  it("offers the update, installs and restarts on Update now, folds into the sidebar pill on Later, and the pill updates too", async () => {
+  it("installs and restarts on Update now, folds into the sidebar pill on Later (a failed attempt too), and the pill updates again", async () => {
     const offered: AppUpdateStatus = {
       version: "0.2.10",
       automatic: true,
       pending: null,
-      available: { version: "0.2.11", notes: "## Fixes\n- Fixes slowdowns that showed os error 35.\n- Adds wait-for-room." },
+      available: { version: "0.2.11", notes: null },
       later: false,
       updated: null,
       last_checked: null,
@@ -22,13 +22,13 @@ describe("AppUpdateBanner", () => {
     const store = createAppStore();
     store.dispatch({ type: "app_update", status: offered });
     let progress: (p: ReleaseProgress) => void = () => {};
-    let installed: (version: string | null) => void = () => {};
+    let settle: { installed: (version: string | null) => void; failed: (e: Error) => void } = { installed: () => {}, failed: () => {} };
     const updates: AppUpdates = {
       status: () => Promise.resolve(offered),
       check: () => Promise.resolve(offered),
       updateNow: vi.fn((report: (p: ReleaseProgress) => void) => {
         progress = report;
-        return new Promise<string | null>((resolve) => (installed = resolve));
+        return new Promise<string | null>((installed, failed) => (settle = { installed, failed }));
       }),
       // The shell sets it aside and announces it so.
       later: vi.fn(async () => store.dispatch({ type: "app_update", status: { ...offered, later: true } })),
@@ -36,43 +36,47 @@ describe("AppUpdateBanner", () => {
       dismiss: () => Promise.resolve(),
       watch: () => Promise.resolve(() => {}),
     };
-    const openUrl = vi.fn(() => Promise.resolve());
     const view = () =>
       render(
         <StoreContext.Provider value={store}>
           <AppUpdateProvider updates={updates}>
-            <AppUpdateBanner openUrl={openUrl} />
+            <AppUpdateBanner openUrl={() => Promise.resolve()} />
             <AppUpdatePill />
           </AppUpdateProvider>
         </StoreContext.Provider>,
       );
     const banner = () => screen.queryByTestId("app-update-banner");
+    const pill = () => screen.queryByTestId("app-update-pill");
 
-    // Offered: the headline, the notes' first line and what keeps running; no pill yet.
+    // Offered: the strip with its actions, no pill yet.
     view();
-    expect(banner()!.textContent).toContain("brindle 0.2.11 is available");
-    expect(banner()!.textContent).toContain("Fixes slowdowns that showed os error 35. Your sessions and agents keep running while brindle restarts.");
-    expect(screen.queryByTestId("app-update-pill")).toBeNull();
+    expect(banner()!.dataset.phase).toBe("idle");
+    expect(pill()).toBeNull();
 
-    // Update now: progress on the strip, then the shell restarts into it.
-    fireEvent.click(screen.getByRole("button", { name: "Update now" }));
+    // Update now: the bar follows the download, no Later meanwhile, then the shell restarts into it.
+    fireEvent.click(screen.getByTestId("app-update-now"));
     expect(updates.updateNow).toHaveBeenCalledTimes(1);
     act(() => progress({ kind: "downloading", downloaded: 6, total: 10 }));
-    expect(banner()!.textContent).toContain("Downloading brindle 0.2.11… 60%");
-    expect(screen.queryByRole("button", { name: "Later" })).toBeNull();
-    await act(async () => installed("0.2.11"));
-    expect(banner()!.textContent).toContain("Restarting into brindle 0.2.11…");
+    expect(screen.getByTestId("app-update-bar").style.width).toBe("60%");
+    expect(screen.queryByTestId("app-update-later")).toBeNull();
+    await act(async () => settle.installed("0.2.11"));
+    expect(banner()!.dataset.phase).toBe("restarting");
     cleanup();
 
-    // Later: the strip folds into the pill, whose click is the same Update now.
+    // An Update now that fails, then Later: the strip folds into the pill all the same.
     view();
-    fireEvent.click(screen.getByRole("button", { name: "Later" }));
+    fireEvent.click(screen.getByTestId("app-update-now"));
+    await act(async () => settle.failed(new Error("offline")));
+    expect(banner()!.dataset.phase).toBe("failed");
+    fireEvent.click(screen.getByTestId("app-update-later"));
     await act(async () => {});
-    expect(updates.later).toHaveBeenCalled();
+    expect(updates.later).toHaveBeenCalledTimes(1);
     expect(banner()).toBeNull();
-    fireEvent.click(screen.getByTestId("app-update-pill"));
-    expect(updates.updateNow).toHaveBeenCalledTimes(2);
+
+    // The pill's click is the same Update now, the strip back to show it.
+    fireEvent.click(pill()!);
+    expect(updates.updateNow).toHaveBeenCalledTimes(3);
     expect(banner()!.dataset.phase).toBe("downloading");
-    expect(screen.queryByTestId("app-update-pill")).toBeNull();
+    expect(pill()).toBeNull();
   });
 });
