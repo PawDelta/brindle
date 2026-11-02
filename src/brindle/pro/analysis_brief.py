@@ -32,6 +32,7 @@ LARGE_WEIGHTS = frozenset({"heavy", "advanced"})
 RULE_ITEM = "analysis_rule"
 BRIEF_ITEM = "analysis_brief"
 DOC_ITEM = "analysis_doc"
+BRIEF_TEXT_ITEM = "analysis_brief_text"   # the block itself, in the receipt's digest column
 SESSION_DOC_ITEM = "analysis_doc_brief"
 MAX_SCOPES = 8              # the most scopes one brief may span (the server's limit)
 HEADER = ("What earlier analysis docs say about this work, composed by brindle Pro. It is "
@@ -128,7 +129,8 @@ def server_brief(db, task_id: str, task_text: str, paths: list[str] | None,
         if not block:
             return ""
         knowledge.record_receipt(db, task_id, [
-            (BRIEF_ITEM, task_id, hashlib.sha256(block.encode()).hexdigest()), *cited])
+            (BRIEF_ITEM, task_id, hashlib.sha256(block.encode()).hexdigest()),
+            (BRIEF_TEXT_ITEM, task_id, block), *cited])    # the text, so a restart replays it
         record_session_citations(db, task_id, cited, session_id=session_id)
         return _fenced(block)
     except Exception as e:  # noqa: BLE001 - the brief is extra context, never a reason to fail
@@ -148,33 +150,23 @@ def record_session_citations(db, agent_id: str, cited: list[tuple[str, str, str]
 
 def review_context(db, repo_root: str, task_text: str, paths: list[str],
                    client=None, store=None) -> tuple[str, list]:
-    """For a reviewer's brief: the decisions and analysis docs that cover the
-    branch's ``paths``, with the instruction to flag changes contradicting
-    them (empty when there are none), and the docs' cited versions, for the
-    reviewer's receipt (its reads are pinned like a worker's). Never raises."""
-    from brindle import knowledge
-
-    try:
-        decisions = [d for d in knowledge.decisions(db, knowledge.repo_key(repo_root))
-                     if not d["scope"] or (paths and knowledge._scopes_overlap(d["scope"], paths))]
-    except Exception:  # noqa: BLE001 - extra context, never a reason to fail a review
-        log.info("decisions for review skipped", exc_info=True)
-        decisions = []
+    """For a reviewer's brief: the analysis-doc block, only when it names one
+    of the branch's changed ``paths`` as a whole path (empty otherwise).
+    Decisions are rendered elsewhere, once. With the docs' cited versions, for the reviewer's
+    receipt (its reads are pinned like a worker's). Never raises."""
     parts = []
-    if decisions:
-        parts.append("Decisions recorded for this repo that cover the branch's files:\n"
-                     + "\n".join(f"- {knowledge._line(d)}" for d in decisions))
     try:
         block, cited = _brief(task_text, paths, client, store)
     except Exception as e:  # noqa: BLE001
         log.info("analysis brief for review skipped (%s)", type(e).__name__)
         block, cited = "", []
-    if block:
+    # Only docs about the branch's own files are worth a reviewer's tokens: the
+    # server cites any doc sharing a word with the task, and none was ever used.
+    if block and any(re.search(rf"(?<![\w./-]){re.escape(p)}(?![\w/-]|\.\w)", block) for p in paths):
         parts.append(_fenced(block))
-    if not parts:
-        return "", []
-    return "\n\n".join([*parts, "Flag as a blocker any change that contradicts these decisions or docs, "
-                                "unless the branch says why the decision or doc no longer holds."]), cited
+    else:
+        cited = []
+    return "\n\n".join(parts), cited
 
 
 RESULTS_DAYS = 30
@@ -238,8 +230,9 @@ def got_context(db, task_id: str) -> bool:
 
 def brief_context(db, repo_root: str, branch: str, task_id: str, task_text: str,
                   paths: list[str] | None, *, large: bool, client=None, store=None,
-                  session_id: str | None = None) -> str:
+                  session_id: str | None = None, replay: bool = False) -> str:
     """The analysis-doc part of a worker's brief: empty unless ``large``.
+    With ``replay`` the brief is rebuilt from the task's receipt, not fetched.
     Never raises; a failed server brief leaves just the rule."""
     if not large:
         return ""
@@ -251,6 +244,9 @@ def brief_context(db, repo_root: str, branch: str, task_id: str, task_text: str,
     except Exception:  # noqa: BLE001 - extra context, never a reason to fail a spawn
         log.info("analysis doc rule not added", exc_info=True)
         return ""
+    if replay:   # a restart: the brief the task already got, not a new fetch
+        saved = next((d for k, _, d in knowledge.receipt(db, task_id) if k == BRIEF_TEXT_ITEM), "")
+        return "\n\n".join(p for p in (rule, _fenced(saved) if saved else "") if p)
     kwargs = {"session_id": session_id} if session_id is not None else {}
     return "\n\n".join(p for p in (rule, server_brief(db, task_id, task_text, paths,
                                                    client, store, **kwargs)) if p)
