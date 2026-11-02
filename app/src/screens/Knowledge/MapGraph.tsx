@@ -184,20 +184,30 @@ function curve(a: Point, b: Point, arrow: boolean): string {
 
 type View = { k: number; x: number; y: number };
 type Gesture = { node: number | null; start: { x: number; y: number }; grab: { x: number; y: number }; moved: boolean };
-const MAX_ZOOM = 4, MIN_ZOOM = 0.2, FIT_PAD = 28, LEGEND_H = 30, PANEL_W = 256, LABEL_ZOOM = 0.65;
+const MAX_ZOOM = 4, MIN_ZOOM = 0.2, FIT_PAD = 0.04, FIT_MAX = 2, LEGEND_H = 30, PANEL_W = 256, LABEL_ZOOM = 0.65;
+/* The page scrolls, so the frame takes most of the window rather than a
+   height from its parent. */
+const FRAME_H = "max(380px, 70vh)";
 const control = "grid h-7 w-7 place-items-center rounded-md border border-line-strong bg-canvas-2 text-sm leading-none text-ink-2 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-branch";
 const halo = { textShadow: "0 0 3px var(--canvas-2), 0 0 2px var(--canvas-2), 0 0 1px var(--canvas-2)" };
 
+/* Fit with about 4% padding on each side, above the legend. */
 function fitView(s: Sim, w: number, h: number): View {
-  const b = bounds(s), bw = Math.max(b.right - b.left, 1), bh = Math.max(b.bottom - b.top, 1), room = h - FIT_PAD - LEGEND_H;
-  const k = Math.min(1.4, (w - 2 * FIT_PAD) / bw, room / bh);
-  return { k, x: (w - bw * k) / 2 - b.left * k, y: FIT_PAD + (room - bh * k) / 2 - b.top * k };
+  const b = bounds(s), bw = Math.max(b.right - b.left, 1), bh = Math.max(b.bottom - b.top, 1);
+  const padX = w * FIT_PAD, padY = h * FIT_PAD, room = h - 2 * padY - LEGEND_H;
+  const k = Math.min(FIT_MAX, (w - 2 * padX) / bw, room / bh);
+  return { k, x: (w - bw * k) / 2 - b.left * k, y: padY + (room - bh * k) / 2 - b.top * k };
 }
 
 export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void }) {
-  /* The settled start is the same for the same graph; dragging moves the
-     nodes in this object from then on, outside React's render. */
-  const sim = useMemo(() => settle(createSim(nodes, edges)), [nodes, edges]);
+  const frame = useRef<HTMLDivElement>(null);
+  const [size, setSize] = useState({ w: 800, h: 480 });
+  /* The picture is drawn about as wide as the frame, in steps of a quarter
+     so that small resizes keep it; a different shape lays it out again. */
+  const shape = Math.round(Math.min(3.5, Math.max(1, size.w / Math.max(size.h - LEGEND_H, 1))) * 4) / 4;
+  /* The settled start is the same for the same graph and shape; dragging
+     moves the nodes in this object from then on, outside React's render. */
+  const sim = useMemo(() => settle(createSim(nodes, edges, shape)), [nodes, edges, shape]);
   const index = useMemo(() => new Map(nodes.map((node, i) => [node.id, i])), [nodes]);
   const lines = useMemo(() => edges.flatMap((edge) => {
     const a = index.get(edge.source), b = index.get(edge.target);
@@ -213,17 +223,14 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
     }
     return m;
   }, [edges]);
-  const height = Math.round(Math.min(680, Math.max(380, 260 + Math.sqrt(nodes.length) * 36)));
-  const frame = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState({ w: 800, h: height });
   /* Until the person pans, zooms or drags, the view follows the fit; a new
-     graph drops their view and their selection. */
+     layout drops their view, and a new graph their selection. */
   const [manual, setManual] = useState<{ sim: Sim; view: View } | null>(null);
-  const [picked, setPicked] = useState<{ sim: Sim; id: string } | null>(null);
+  const [picked, setPicked] = useState<{ nodes: GraphNode[]; id: string } | null>(null);
   const [hover, setHover] = useState<string | null>(null);
   const fitted = fitView(sim, size.w, size.h);
   const view = manual?.sim === sim ? manual.view : fitted;
-  const selected = picked?.sim === sim ? picked.id : null;
+  const selected = picked?.nodes === nodes ? picked.id : null;
   const live = useRef({ view, sim, fitted, size, lines, selected });
   live.current = { view, sim, fitted, size, lines, selected };
   const uid = `kg${useId().replace(/[^\w-]/g, "")}`;
@@ -239,7 +246,7 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
     const observer = new ResizeObserver(measure);
     observer.observe(el);
     return () => observer.disconnect();
-  }, [height]);
+  }, []);
 
   /* Moves nodes and edges in the DOM straight from the simulation. */
   const paint = useCallback(() => {
@@ -376,7 +383,7 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
   const pick = (e: ReactMouseEvent, i: number) => {
     // A drag that ends over its node is not a click; a key press always is.
     if (swallow.current && e.detail !== 0) { swallow.current = false; return; }
-    setPicked({ sim, id: nodes[i].id });
+    setPicked({ nodes, id: nodes[i].id });
     reveal(i, true);
     onOpen(nodes[i]);
   };
@@ -391,7 +398,7 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
       role="group"
       aria-label="Knowledge graph"
       className="relative cursor-grab touch-none select-none overflow-hidden rounded-lg border border-line bg-canvas-2 active:cursor-grabbing"
-      style={{ height }}
+      style={{ height: FRAME_H }}
       onPointerDown={down}
       onPointerMove={move}
       onPointerUp={up}

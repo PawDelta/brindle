@@ -9,9 +9,9 @@ import type { GraphNode } from "./MapGraph";
 export const LABEL_SPACE = 16;
 const LABEL_CHARS = 26, CHAR_W = 6.2, LABEL_PAD = 6;
 /* Ideal edge length, settling steps, pull to the centre (with 1/d repulsion
-   it sets a crowd's spacing to about SPRING·√(π/GRAVITY)), the horizontal
-   stretch that suits wide labels in a wide frame, and the gaps between boxes. */
-const SPRING = 80, STEPS = 300, GRAVITY = 1.5, ASPECT = 1.8, GAP_X = 8, GAP_Y = 6, STEP_SCALE = 0.25;
+   it sets a crowd's spacing to about SPRING·√(π/GRAVITY)), and the gaps
+   between boxes. */
+const SPRING = 80, STEPS = 300, GRAVITY = 1.5, GAP_X = 8, GAP_Y = 6, STEP_SCALE = 0.25;
 
 export interface Sim {
   nodes: GraphNode[];
@@ -19,7 +19,9 @@ export interface Sim {
   /* Dot radius and box width per node. */
   r: Float64Array;
   w: Float64Array;
-  /* Positions: u is x / ASPECT, so the forces see a round crowd. */
+  /* How much wider than tall the picture is drawn, to suit the frame; the
+     forces work on u = x / aspect, so they see a round crowd. */
+  aspect: number;
   u: Float64Array;
   y: Float64Array;
   links: [number, number][];
@@ -44,7 +46,7 @@ function shorten(text: string, tail: boolean): string {
 const RANK = { path: 0, doc: 1, decision: 2, imported: 3 } as const;
 
 /* Nodes start on a golden-angle spiral in (kind, id) order. */
-export function createSim(nodes: GraphNode[], edges: MapEdge[]): Sim {
+export function createSim(nodes: GraphNode[], edges: MapEdge[], aspect = 1.8): Sim {
   const n = nodes.length;
   const labels = nodes.map((node) => {
     const full = fullTitle(node);
@@ -61,7 +63,8 @@ export function createSim(nodes: GraphNode[], edges: MapEdge[]): Sim {
   }
   const degree = new Float64Array(n);
   for (const [a, b] of links) { degree[a]++; degree[b]++; }
-  const r = degree.map((d) => Math.min(13, 4 + 2.2 * Math.sqrt(d)));
+  /* Code areas are the hubs, so they start bigger; every dot grows with its connections. */
+  const r = Float64Array.from(nodes, (node, i) => Math.min(18, (node.kind === "path" ? 8 : 5.5) + 1.5 * Math.sqrt(degree[i])));
   const w = Float64Array.from(labels, ({ label }, i) => Math.max(2 * r[i], Math.ceil(label.length * CHAR_W + LABEL_PAD)));
   /* A node with no edges would drift to the rim of the crowd and shrink the
      rest of the picture when it is fitted; it is pulled in harder. */
@@ -73,16 +76,16 @@ export function createSim(nodes: GraphNode[], edges: MapEdge[]): Sim {
     u[i] = d * Math.cos(angle);
     y[i] = d * Math.sin(angle);
   });
-  return { nodes, labels, r, w, u, y, links, pull, pinned: new Uint8Array(n), dx: new Float64Array(n), dy: new Float64Array(n) };
+  return { nodes, labels, r, w, aspect, u, y, links, pull, pinned: new Uint8Array(n), dx: new Float64Array(n), dy: new Float64Array(n) };
 }
 
 /* Push apart overlapping boxes, by `strength` of each overlap; a pinned
    node stays put and the other takes the whole push. True if any overlapped. */
 function separate(s: Sim, strength: number): boolean {
-  const { u, y, r, w, pinned } = s, n = u.length;
+  const { u, y, r, w, pinned, aspect } = s, n = u.length;
   let any = false;
   for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
-    const ox = (w[i] + w[j]) / 2 + GAP_X - Math.abs(u[i] - u[j]) * ASPECT;
+    const ox = (w[i] + w[j]) / 2 + GAP_X - Math.abs(u[i] - u[j]) * aspect;
     if (ox <= 0) continue;
     const oy = r[i] + r[j] + LABEL_SPACE + GAP_Y - Math.abs(y[i] - y[j]);
     if (oy <= 0) continue;
@@ -90,7 +93,7 @@ function separate(s: Sim, strength: number): boolean {
     if (pinned[i] && pinned[j]) continue;
     const mine = pinned[j] ? 1 : pinned[i] ? 0 : 0.5;
     if (ox < oy) {
-      const sign = u[i] < u[j] || (u[i] === u[j] && i < j) ? -1 : 1, d = (ox * strength + 0.5) / ASPECT;
+      const sign = u[i] < u[j] || (u[i] === u[j] && i < j) ? -1 : 1, d = (ox * strength + 0.5) / aspect;
       u[i] += sign * d * mine; u[j] -= sign * d * (1 - mine);
     } else {
       const sign = y[i] < y[j] || (y[i] === y[j] && i < j) ? -1 : 1, d = oy * strength + 0.5;
@@ -135,11 +138,11 @@ export function settle(s: Sim): Sim {
 }
 
 export function pointOf(s: Sim, i: number): Point {
-  return { x: s.u[i] * ASPECT, y: s.y[i], r: s.r[i], w: s.w[i] };
+  return { x: s.u[i] * s.aspect, y: s.y[i], r: s.r[i], w: s.w[i] };
 }
 
 export function moveTo(s: Sim, i: number, x: number, y: number): void {
-  s.u[i] = x / ASPECT;
+  s.u[i] = x / s.aspect;
   s.y[i] = y;
 }
 
