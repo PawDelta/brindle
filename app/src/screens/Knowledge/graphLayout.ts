@@ -25,6 +25,10 @@ export interface Sim {
   u: Float64Array;
   y: Float64Array;
   links: [number, number][];
+  degree: Float64Array;
+  /* Each node's group (an index into groups), found from the edges. */
+  group: Int32Array;
+  groups: Group[];
   pull: Float64Array;
   pinned: Uint8Array;
   dx: Float64Array;
@@ -32,6 +36,11 @@ export interface Sim {
 }
 
 export interface Point { x: number; y: number; r: number; w: number }
+
+/* A group of connected knowledge, named after its best-connected code area.
+   Its tone is a palette slot (0-9), or null for a node on its own. */
+export interface Group { name: string; size: number; tone: number | null }
+export const TONES = 10;
 
 export function fullTitle(node: GraphNode): string {
   return node.title || (node.kind === "path" ? node.path : undefined) || node.id;
@@ -63,8 +72,10 @@ export function createSim(nodes: GraphNode[], edges: MapEdge[], aspect = 1.8): S
   }
   const degree = new Float64Array(n);
   for (const [a, b] of links) { degree[a]++; degree[b]++; }
-  /* Code areas are the hubs, so they start bigger; every dot grows with its connections. */
-  const r = Float64Array.from(nodes, (node, i) => Math.min(18, (node.kind === "path" ? 8 : 5.5) + 1.5 * Math.sqrt(degree[i])));
+  /* Radius grows with connections on a square-root scale: 5 at one, 16 for
+     the best-connected node in the map. */
+  const top = Math.max(1, ...degree) - 1;
+  const r = degree.map((d) => (d ? 5 + 11 * (top ? Math.sqrt((d - 1) / top) : 0) : 4.5));
   const w = Float64Array.from(labels, ({ label }, i) => Math.max(2 * r[i], Math.ceil(label.length * CHAR_W + LABEL_PAD)));
   /* A node with no edges would drift to the rim of the crowd and shrink the
      rest of the picture when it is fitted; it is pulled in harder. */
@@ -76,7 +87,55 @@ export function createSim(nodes: GraphNode[], edges: MapEdge[], aspect = 1.8): S
     u[i] = d * Math.cos(angle);
     y[i] = d * Math.sin(angle);
   });
-  return { nodes, labels, r, w, aspect, u, y, links, pull, pinned: new Uint8Array(n), dx: new Float64Array(n), dy: new Float64Array(n) };
+  const { group, groups } = communities(nodes, links, degree, order, labels);
+  return { nodes, labels, r, w, aspect, u, y, links, degree, group, groups, pull, pinned: new Uint8Array(n), dx: new Float64Array(n), dy: new Float64Array(n) };
+}
+
+/* Louvain's local-moving phase, with no randomness: nodes are visited in
+   (kind, id) order and each joins the neighbouring group that gains the most
+   modularity, staying put on a tie, else taking the lowest group. Groups
+   are then numbered largest first, ties to the one visited first. */
+export function communities(nodes: GraphNode[], links: [number, number][], degree: Float64Array, order: number[], labels: { full: string }[]) {
+  const n = nodes.length, m2 = links.length * 2;
+  const adj: number[][] = nodes.map(() => []);
+  for (const [a, b] of links) { adj[a].push(b); adj[b].push(a); }
+  const raw = Int32Array.from({ length: n }, (_, i) => i), tot = Float64Array.from(degree);
+  for (let pass = 0; pass < 50 && m2; pass++) {
+    let moved = false;
+    for (const i of order) {
+      const k = degree[i], own = raw[i];
+      if (!k) continue;
+      tot[own] -= k;
+      const into = new Map<number, number>();
+      for (const j of adj[i]) into.set(raw[j], (into.get(raw[j]) ?? 0) + 1);
+      let best = own, gain = (into.get(own) ?? 0) - (tot[own] * k) / m2;
+      for (const c of [...into.keys()].sort((a, b) => a - b)) {
+        const g = into.get(c)! - (tot[c] * k) / m2;
+        if (g > gain + 1e-9) { best = c; gain = g; }
+      }
+      tot[best] += k;
+      if (best !== own) { raw[i] = best; moved = true; }
+    }
+    if (!moved) break;
+  }
+  const rank = new Int32Array(n);
+  order.forEach((i, at) => { rank[i] = at; });
+  const members = new Map<number, number[]>();
+  for (const i of order) {
+    if (!members.has(raw[i])) members.set(raw[i], []);
+    members.get(raw[i])!.push(i);
+  }
+  const sorted = [...members.values()].sort((a, b) => b.length - a.length || rank[a[0]] - rank[b[0]]);
+  const group = new Int32Array(n);
+  let tone = 0;
+  const groups = sorted.map((list, g) => {
+    for (const i of list) group[i] = g;
+    // Named after its best-connected code area, else its best-connected node.
+    const lead = (pool: number[]) => pool.reduce((best, i) => (degree[i] > degree[best] ? i : best), pool[0]);
+    const paths = list.filter((i) => nodes[i].kind === "path");
+    return { name: labels[lead(paths.length ? paths : list)].full, size: list.length, tone: list.length > 1 ? tone++ % TONES : null };
+  });
+  return { group, groups };
 }
 
 /* Push apart overlapping boxes, by `strength` of each overlap; a pinned

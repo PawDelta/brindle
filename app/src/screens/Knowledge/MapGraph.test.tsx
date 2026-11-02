@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { MapEdge } from "../../api/client";
-import { boxOf, layoutGraph } from "./graphLayout";
+import { boxOf, createSim, layoutGraph } from "./graphLayout";
 import { MapGraph, type GraphNode } from "./MapGraph";
 
 afterEach(cleanup);
@@ -26,6 +26,21 @@ it.each([1, 150])("lays out %i nodes the same way every time, with no node's dot
   }
 });
 
+it("finds the same groups every time, one per cluster, named after the cluster's best-connected code area", () => {
+  const star = (hub: string, docs: number): { nodes: GraphNode[]; edges: MapEdge[] } => {
+    const leaves: GraphNode[] = Array.from({ length: docs }, (_, i) => ({ id: `${hub}-d${i}`, kind: "doc", title: `${hub} note ${i}` }));
+    return { nodes: [{ id: hub, kind: "path", path: `src/${hub}` }, ...leaves], edges: leaves.map((leaf) => ({ source: leaf.id, target: hub, kind: "shared_path" })) };
+  };
+  const a = star("cache", 5), b = star("daemon", 3);
+  const nodes = [...b.nodes, ...a.nodes, { id: "lone", kind: "doc", title: "Lone" } as GraphNode], edges = [...a.edges, ...b.edges];
+  const sim = createSim(nodes, edges);
+  expect(createSim(nodes, edges).group).toEqual(sim.group);
+  const groupOf = (prefix: string) => new Set(nodes.flatMap((node, i) => (node.id.startsWith(prefix) ? [sim.group[i]] : [])));
+  const [cache, daemon] = [groupOf("cache"), groupOf("daemon")];
+  expect([cache.size, daemon.size]).toEqual([1, 1]);
+  expect(sim.groups.map(({ name, size, tone }) => [name, size, tone])).toEqual([["src/cache", 6, 0], ["src/daemon", 4, 1], ["Lone", 1, null]]);
+});
+
 it("highlights a hovered node's neighbourhood, selects on click, moves a dragged node without opening it, and zooms and fits", () => {
   const nodes: GraphNode[] = [{ id: "p", kind: "path", path: "src/cache" }, { id: "d", kind: "doc", title: "Cache design" }, { id: "x", kind: "doc", title: "Unrelated" }];
   const onOpen = vi.fn();
@@ -35,6 +50,10 @@ it("highlights a hovered node's neighbourhood, selects on click, moves a dragged
   expect([node("d").style.opacity, node("p").style.opacity, node("x").style.opacity]).toEqual(["1", "1", "0.2"]);
   expect(container.querySelector('[data-source="d"]')!.getAttribute("class")).toBe("text-branch");
   fireEvent.mouseLeave(node("d"));
+  expect(node("x").style.opacity).toBe("1");
+  fireEvent.click(screen.getByRole("checkbox", { name: /src\/cache/ }));
+  expect([node("d").style.opacity, node("p").style.opacity, node("x").style.opacity]).toEqual(["1", "1", "0.2"]);
+  fireEvent.click(screen.getByRole("checkbox", { name: /src\/cache/ }));
   expect(node("x").style.opacity).toBe("1");
 
   fireEvent.click(node("d"));

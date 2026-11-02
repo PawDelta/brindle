@@ -1,7 +1,7 @@
 import type { DecisionDTO } from "../../api/schema";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { DocScope, KbSource, KnowledgeMap, MapEdge, MapNode } from "../../api/client";
-import { bounds, createSim, heatAt, moveTo, pointOf, settle, step, type Point, type Sim } from "./graphLayout";
+import { bounds, createSim, heatAt, moveTo, pointOf, settle, step, type Group, type Point, type Sim } from "./graphLayout";
 
 export type LocalNode = { id: string; kind: "decision"; title: string; decision: DecisionDTO } | { id: string; kind: "imported"; title: string; source: KbSource; path: string };
 export type GraphNode = MapNode | LocalNode;
@@ -161,13 +161,24 @@ function provenance(node: GraphNode): string[] {
   ];
 }
 
-/* Each kind is a dot in its own colour, the same in the legend and the panel. */
+/* Colour says which group a node belongs to; shape says what it is. */
 const KINDS = {
-  path: { label: "Code area", dot: "bg-ink-2" },
-  doc: { label: "Document", dot: "bg-branch" },
-  decision: { label: "Local decision", dot: "bg-fawn" },
-  imported: { label: "Imported folder", dot: "bg-sap" },
+  path: { label: "Code area", diamond: false, hollow: true },
+  doc: { label: "Document", diamond: false, hollow: false },
+  decision: { label: "Local decision", diamond: true, hollow: false },
+  imported: { label: "Imported folder", diamond: true, hollow: true },
 } as const;
+
+const toneOf = (group: Group | undefined) => group?.tone == null ? "var(--ink-3)" : `var(--group-${group.tone + 1})`;
+
+/* A node's mark, `size` across: a ring or a dot, a hollow or a filled diamond. */
+function Mark({ kind, size, colour }: { kind: GraphNode["kind"]; size: number; colour: string }) {
+  const { diamond, hollow } = KINDS[kind], side = diamond ? size * 0.74 : size;
+  const fill = hollow ? { border: `${Math.max(1.5, size * 0.16)}px solid ${colour}`, background: "var(--canvas-2)" } : { background: colour };
+  return <span aria-hidden className="grid shrink-0 place-items-center" style={{ width: size, height: size }}>
+    <span className={diamond ? "rotate-45 rounded-[2px]" : "rounded-full"} style={{ width: side, height: side, ...fill }} />
+  </span>;
+}
 
 /* A gentle curve between dot centres, always bent the same way; an arrow
    stops at the rim of the target's dot. */
@@ -184,7 +195,7 @@ function curve(a: Point, b: Point, arrow: boolean): string {
 
 type View = { k: number; x: number; y: number };
 type Gesture = { node: number | null; start: { x: number; y: number }; grab: { x: number; y: number }; moved: boolean };
-const MAX_ZOOM = 4, MIN_ZOOM = 0.2, FIT_PAD = 0.04, FIT_MAX = 2, LEGEND_H = 30, PANEL_W = 256, LABEL_ZOOM = 0.65;
+const MAX_ZOOM = 4, MIN_ZOOM = 0.2, FIT_PAD = 0.04, FIT_MAX = 2, LEGEND_GROUPS = 8, PANEL_W = 256, LABEL_ZOOM = 0.65;
 /* The page scrolls, so the frame takes most of the window rather than a
    height from its parent. */
 const FRAME_H = "max(380px, 70vh)";
@@ -194,17 +205,19 @@ const halo = { textShadow: "0 0 3px var(--canvas-2), 0 0 2px var(--canvas-2), 0 
 /* Fit with about 4% padding on each side, above the legend. */
 function fitView(s: Sim, w: number, h: number): View {
   const b = bounds(s), bw = Math.max(b.right - b.left, 1), bh = Math.max(b.bottom - b.top, 1);
-  const padX = w * FIT_PAD, padY = h * FIT_PAD, room = h - 2 * padY - LEGEND_H;
+  const padX = w * FIT_PAD, padY = h * FIT_PAD, room = h - 2 * padY;
   const k = Math.min(FIT_MAX, (w - 2 * padX) / bw, room / bh);
   return { k, x: (w - bw * k) / 2 - b.left * k, y: padY + (room - bh * k) / 2 - b.top * k };
 }
 
 export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void }) {
   const frame = useRef<HTMLDivElement>(null);
-  const [size, setSize] = useState({ w: 800, h: 480 });
+  /* The frame's width, and its height above the legend. */
+  const [size, setSize] = useState({ w: 800, h: 420 });
+  const legend = useRef<HTMLDivElement>(null);
   /* The picture is drawn about as wide as the frame, in steps of a quarter
      so that small resizes keep it; a different shape lays it out again. */
-  const shape = Math.round(Math.min(3.5, Math.max(1, size.w / Math.max(size.h - LEGEND_H, 1))) * 4) / 4;
+  const shape = Math.round(Math.min(3.5, Math.max(1, size.w / Math.max(size.h, 1))) * 4) / 4;
   /* The settled start is the same for the same graph and shape; dragging
      moves the nodes in this object from then on, outside React's render. */
   const sim = useMemo(() => settle(createSim(nodes, edges, shape)), [nodes, edges, shape]);
@@ -228,9 +241,12 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
   const [manual, setManual] = useState<{ sim: Sim; view: View } | null>(null);
   const [picked, setPicked] = useState<{ nodes: GraphNode[]; id: string } | null>(null);
   const [hover, setHover] = useState<string | null>(null);
+  /* A group picked in the legend, for the same edges (groups come from them). */
+  const [shown, setShown] = useState<{ lines: typeof lines; group: number } | null>(null);
   const fitted = fitView(sim, size.w, size.h);
   const view = manual?.sim === sim ? manual.view : fitted;
   const selected = picked?.nodes === nodes ? picked.id : null;
+  const focusGroup = shown?.lines === lines ? shown.group : null;
   const live = useRef({ view, sim, fitted, size, lines, selected });
   live.current = { view, sim, fitted, size, lines, selected };
   const uid = `kg${useId().replace(/[^\w-]/g, "")}`;
@@ -240,11 +256,15 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
   useLayoutEffect(() => {
     const el = frame.current;
     if (!el) return;
-    const measure = () => { if (el.clientWidth && el.clientHeight) setSize({ w: el.clientWidth, h: el.clientHeight }); };
+    const measure = () => {
+      const below = legend.current ? legend.current.offsetHeight + 8 : 0;
+      if (el.clientWidth && el.clientHeight) setSize({ w: el.clientWidth, h: Math.max(160, el.clientHeight - below) });
+    };
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(measure);
     observer.observe(el);
+    if (legend.current) observer.observe(legend.current);
     return () => observer.disconnect();
   }, []);
 
@@ -309,7 +329,7 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
     const left = (p.x - p.w / 2) * v.k + v.x, right = (p.x + p.w / 2) * v.k + v.x;
     const top = (p.y - p.r) * v.k + v.y, bottom = (p.y + p.r + 16) * v.k + v.y, edge = s.w - (panel ? PANEL_W : 0) - m;
     const shiftX = left < m ? m - left : right > edge ? edge - right : 0;
-    const shiftY = top < m ? m - top : bottom > s.h - LEGEND_H ? s.h - LEGEND_H - bottom : 0;
+    const shiftY = top < m ? m - top : bottom > s.h ? s.h - bottom : 0;
     if (shiftX || shiftY) apply((c) => ({ ...c, x: c.x + shiftX, y: c.y + shiftY }));
   }, [apply]);
 
@@ -388,10 +408,15 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
     onOpen(nodes[i]);
   };
 
-  const active = hover ?? selected;
-  const lit = active ? near.get(active) ?? new Set<string>() : null;
+  /* What is lit: the hovered node's neighbourhood, else the group picked in
+     the legend, else the selected node's neighbourhood. */
+  const active = hover ?? (focusGroup === null ? selected : null);
+  const inGroup = (i: number) => focusGroup !== null && sim.group[i] === focusGroup;
+  const lit = active ? near.get(active) ?? new Set<string>() : focusGroup !== null ? new Set(nodes.filter((_, i) => inGroup(i)).map((node) => node.id)) : null;
   const chosen = selected === null ? undefined : index.get(selected);
   const kinds = new Set(nodes.map((node) => node.kind));
+  const named = sim.groups.flatMap((group, g) => (group.tone === null ? [] : [{ group, g }]));
+  const alone = sim.groups.length - named.length;
   return (
     <div
       ref={frame}
@@ -417,8 +442,8 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
           </defs>
           {lines.map(({ edge, a, b }, j) => {
             const supersedes = edge.kind === "supersedes";
-            const on = active !== null && (edge.source === active || edge.target === active);
-            return <g key={j} data-source={edge.source} data-target={edge.target} data-kind={edge.kind} className={on ? "text-branch" : "text-ink-3"} style={{ opacity: on ? 0.9 : active ? 0.06 : supersedes ? 0.55 : 0.35, transition: "opacity 150ms" }}>
+            const on = active !== null ? edge.source === active || edge.target === active : inGroup(a) && inGroup(b);
+            return <g key={j} data-source={edge.source} data-target={edge.target} data-kind={edge.kind} className={on ? "text-branch" : "text-ink-3"} style={{ opacity: on ? 0.9 : lit ? 0.06 : supersedes ? 0.55 : 0.35, transition: "opacity 150ms" }}>
               <path ref={(el) => { edgeEls.current[j] = el; }} d={curve(pointOf(sim, a), pointOf(sim, b), supersedes)} fill="none" stroke="currentColor" strokeWidth={on ? 1.5 : 1} vectorEffect="non-scaling-stroke" strokeDasharray={supersedes ? "4 3" : undefined} markerEnd={supersedes ? `url(#${uid}${on ? "-on" : ""})` : undefined} />
               <title>{supersedes ? "supersedes" : edge.kind.replace(/_/g, " ")}</title>
             </g>;
@@ -428,7 +453,7 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
           const kind = KINDS[node.kind], p = pointOf(sim, i), { full, label } = sim.labels[i], about = provenance(node);
           const dim = lit !== null && node.id !== active && !lit.has(node.id), on = node.id === active;
           /* Zoomed out, labels give way to the dots, except around the node in focus. */
-          const named = view.k >= LABEL_ZOOM || on || node.id === selected || (lit !== null && lit.has(node.id));
+          const labelled = view.k >= LABEL_ZOOM || on || node.id === selected || (lit !== null && lit.has(node.id));
           return <button
             key={node.id}
             ref={(el) => { nodeEls.current[i] = el; }}
@@ -445,8 +470,10 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
             style={{ left: p.x - p.w / 2, top: p.y - p.r, width: p.w, opacity: dim ? 0.2 : 1 }}
             className={`group absolute flex cursor-pointer flex-col items-center outline-none transition-opacity duration-150 ${on ? "z-10" : ""}`}
           >
-            <span aria-hidden className={`shrink-0 rounded-full ${kind.dot} ring-branch ring-offset-2 ring-offset-canvas-2 group-hover:ring-2 group-focus-visible:ring-2 ${node.id === selected ? "ring-2" : ""}`} style={{ width: 2 * p.r, height: 2 * p.r }} />
-            <span className={`mt-[3px] text-[11px] leading-[13px] whitespace-nowrap ${on ? "text-ink" : "max-w-full truncate text-ink-2"} ${named ? "" : "invisible"}`} style={halo}>{on ? full : label}</span>
+            <span className={`shrink-0 rounded-full ring-branch ring-offset-2 ring-offset-canvas-2 group-hover:ring-2 group-focus-visible:ring-2 ${node.id === selected ? "ring-2" : ""}`}>
+              <Mark kind={node.kind} size={2 * p.r} colour={toneOf(sim.groups[sim.group[i]])} />
+            </span>
+            <span className={`mt-[3px] text-[11px] leading-[13px] whitespace-nowrap ${on ? "text-ink" : "max-w-full truncate text-ink-2"} ${labelled ? "" : "invisible"}`} style={halo}>{on ? full : label}</span>
             {about.length > 0 && <span id={`${uid}-n${i}`} className="sr-only">{about.join(" · ")}</span>}
           </button>;
         })}
@@ -458,37 +485,53 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
           <svg aria-hidden width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9" /></svg>
         </button>
       </div>
-      <div className="pointer-events-none absolute bottom-2 left-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md bg-canvas-2/90 px-2 py-1 text-[11px] text-ink-3">
-        {(Object.keys(KINDS) as (keyof typeof KINDS)[]).filter((k) => kinds.has(k)).map((k) => (
-          <span key={k} className="inline-flex items-center gap-1.5"><span aria-hidden className={`h-2 w-2 rounded-full ${KINDS[k].dot}`} />{KINDS[k].label}</span>
-        ))}
-        {lines.some(({ edge }) => edge.kind === "supersedes") && <span className="inline-flex items-center gap-1.5">
-          <svg aria-hidden width="22" height="8" viewBox="0 0 22 8"><path d="M1 4H16" stroke="currentColor" strokeDasharray="3 2.5" /><path d="M15 1L21 4L15 7z" fill="currentColor" /></svg>Supersedes
-        </span>}
-        <span>Size: connections</span>
+      <div ref={legend} className="pointer-events-none absolute bottom-2 left-2 flex max-w-[calc(100%-16px)] flex-col gap-1 rounded-md bg-canvas-2/90 px-2 py-1 text-[11px] text-ink-3">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+          {(Object.keys(KINDS) as (keyof typeof KINDS)[]).filter((k) => kinds.has(k)).map((k) => (
+            <span key={k} className="inline-flex items-center gap-1.5"><Mark kind={k} size={9} colour="var(--ink-3)" />{KINDS[k].label}</span>
+          ))}
+          {lines.some(({ edge }) => edge.kind === "supersedes") && <span className="inline-flex items-center gap-1.5">
+            <svg aria-hidden width="22" height="8" viewBox="0 0 22 8"><path d="M1 4H16" stroke="currentColor" strokeDasharray="3 2.5" /><path d="M15 1L21 4L15 7z" fill="currentColor" /></svg>Supersedes
+          </span>}
+          <span>Size: connections</span>
+        </div>
+        {named.length > 0 && <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
+          {named.slice(0, LEGEND_GROUPS).map(({ group, g }) => (
+            <button key={g} type="button" role="checkbox" aria-checked={focusGroup === g} title={`${group.name} · ${group.size}`} onClick={() => setShown(focusGroup === g ? null : { lines, group: g })} className="pointer-events-auto inline-flex max-w-56 items-center gap-1.5 rounded-sm px-1 py-px hover:bg-surface-2 hover:text-ink aria-checked:bg-surface-2 aria-checked:text-ink">
+              <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ background: toneOf(group) }} />
+              <span className="truncate">{group.name}</span><span className="shrink-0">· {group.size}</span>
+            </button>
+          ))}
+          {named.length > LEGEND_GROUPS && <span className="px-1">+{named.length - LEGEND_GROUPS} more</span>}
+          {alone > 0 && <span className="px-1">Unconnected · {alone}</span>}
+        </div>}
       </div>
-      {chosen !== undefined && <Details node={nodes[chosen]} full={sim.labels[chosen].full} neighbours={[...(near.get(nodes[chosen].id) ?? [])].flatMap((id) => {
+      {chosen !== undefined && <Details node={nodes[chosen]} full={sim.labels[chosen].full} group={sim.groups[sim.group[chosen]]} neighbours={[...(near.get(nodes[chosen].id) ?? [])].flatMap((id) => {
         const i = index.get(id);
-        return i === undefined ? [] : [{ node: nodes[i], full: sim.labels[i].full }];
+        return i === undefined ? [] : [{ node: nodes[i], full: sim.labels[i].full, group: sim.groups[sim.group[i]] }];
       })} onClose={() => setPicked(null)} />}
     </div>
   );
 }
 
 /* The selected node's details, beside the graph like an inspector. */
-function Details({ node, full, neighbours, onClose }: { node: GraphNode; full: string; neighbours: { node: GraphNode; full: string }[]; onClose(): void }) {
+function Details({ node, full, group, neighbours, onClose }: { node: GraphNode; full: string; group: Group; neighbours: { node: GraphNode; full: string; group: Group }[]; onClose(): void }) {
   const kind = KINDS[node.kind];
   return <aside aria-label="Node details" className="absolute inset-y-0 right-0 flex max-w-[85%] cursor-auto select-text flex-col gap-2 overflow-auto border-l border-line bg-surface p-3 text-xs" style={{ width: PANEL_W }}>
     <div className="flex items-center justify-between gap-2">
-      <span className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-ink-3"><span aria-hidden className={`h-2 w-2 rounded-full ${kind.dot}`} />{kind.label}</span>
+      <span className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-ink-3"><Mark kind={node.kind} size={10} colour={toneOf(group)} />{kind.label}</span>
       <button type="button" aria-label="Close details" title="Close details" className="rounded-md px-1.5 text-sm leading-none text-ink-3 hover:bg-surface-2 hover:text-ink" onClick={onClose}>×</button>
     </div>
     <p className="break-words text-sm font-medium text-ink">{full}</p>
     {provenance(node).map((line, i) => <p key={i} className="break-words text-ink-3">{line}</p>)}
+    <p className="flex min-w-0 items-center gap-1.5 text-ink-3">
+      <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ background: toneOf(group) }} />
+      <span className="truncate">{group.tone === null ? "Unconnected" : `Group: ${group.name} · ${group.size}`}</span>
+    </p>
     <p className="text-ink-3">{neighbours.length} {neighbours.length === 1 ? "connection" : "connections"}</p>
     {neighbours.length > 0 && <ul className="flex flex-col gap-1">
-      {neighbours.map(({ node: n, full: title }) => <li key={n.id} className="flex min-w-0 items-center gap-1.5 text-ink-2" title={title}>
-        <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${KINDS[n.kind].dot}`} /><span className="truncate">{title}</span>
+      {neighbours.map(({ node: n, full: title, group: g }) => <li key={n.id} className="flex min-w-0 items-center gap-1.5 text-ink-2" title={title}>
+        <Mark kind={n.kind} size={8} colour={toneOf(g)} /><span className="truncate">{title}</span>
       </li>)}
     </ul>}
   </aside>;
