@@ -8,6 +8,48 @@ afterEach(cleanup);
 
 const decision: DecisionDTO = { id: "private-d", repo_key: "r", topic: "Storage policy", body: "Keep private notes here", rationale: "Local reason", scope: ["src/cache/**"], status: "accepted", created_at: 1, author_session: "local-session" };
 
+it.each([false, true])("applies a scope change immediately and discards older responses (pending: %s)", async (pending) => {
+  const finish: { url: URL; resolve: (value: Response) => void }[] = [];
+  const client = new DaemonClient({ baseUrl: "http://localhost", token: "t", fetch: async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/scopes")) return new Response(JSON.stringify({ scopes: [{ kind: "user", id: "u1" }, { kind: "group", id: "g1" }] }));
+    return new Promise<Response>((resolve) => { finish.push({ url, resolve }); });
+  } });
+  const result = (title: string) => new Response(JSON.stringify({ nodes: [{ id: title, kind: "doc", title }], edges: [] }));
+  const areaRequest = () => finish.find((f) => f.url.searchParams.get("paths") === '["src/cache"]');
+  const teamRequest = () => finish.find((f) => f.url.searchParams.get("scope_id") === "g1");
+  render(<MapView client={client} repo="/repo" decisions={[]} sources={[]} />);
+  await screen.findAllByRole("option");
+  fireEvent.change(screen.getByLabelText("Code paths"), { target: { value: "src/cache" } });
+  fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
+  if (!pending) await act(async () => { areaRequest()!.resolve(result("Personal result")); });
+  fireEvent.change(screen.getByLabelText("Library scope"), { target: { value: "group:g1" } });
+  expect(screen.queryByRole("button", { name: /Personal result/ })).toBeNull();
+  expect(teamRequest()).toBeDefined();
+  await act(async () => { teamRequest()!.resolve(result("Team result")); });
+  if (pending) await act(async () => { areaRequest()!.resolve(result("Personal result")); });
+  expect(screen.getByRole("button", { name: /Team result/ })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: /Personal result/ })).toBeNull();
+});
+
+it.each(["user", "group"])("filters local items by applied paths and library scope %s", async (kind) => {
+  const client = new DaemonClient({ baseUrl: "http://localhost", token: "t", fetch: async (input) => new Response(JSON.stringify(
+    String(input).includes("/scopes") ? { scopes: [{ kind, id: "s" }] }
+      : { nodes: [{ id: "doc", kind: "doc", title: "Mixed paths", paths: ["src/cache/index.ts", "src/other/index.ts", "src/**"] }], edges: [] },
+  )) });
+  const wildcards = ["**/*.ts", "*.ts"];
+  const { container } = render(<MapView client={client} repo="/repo" decisions={[decision, { ...decision, id: "other", topic: "Unrelated decision", scope: ["src/other/**"] }, ...wildcards.map((pattern) => ({ ...decision, id: pattern, topic: pattern, scope: [pattern] }))]}
+    sources={[{ id: "cache", kind: "folder", scope: "/repo/src/cache" }, { id: "other", kind: "folder", scope: "/repo/src/other" }]} />);
+  await screen.findByRole("option");
+  fireEvent.change(screen.getByLabelText("Code paths"), { target: { value: "src/cache" } });
+  fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
+  await screen.findByRole("button", { name: /Mixed paths/ });
+  expect(screen.queryByRole("button", { name: /Storage policy/ }) !== null).toBe(kind === "user");
+  for (const pattern of wildcards) expect(container.querySelector(`[data-node="local:decision:${pattern}"]`) !== null).toBe(kind === "user");
+  expect(screen.queryByRole("button", { name: /Imported.*cache/ }) !== null).toBe(kind === "user");
+  expect(screen.queryAllByRole("button", { name: /Unrelated decision|Imported.*other/ })).toHaveLength(0);
+});
+
 it("loads all docs automatically with sources, filters by path, and opens each node's target", async () => {
   const requests: { path: string; query: Record<string, string>; method?: string }[] = [];
   const scopes = [{ kind: "user", id: "u1" }, { kind: "group", id: "team-1" }, { kind: "org", id: "org-1" }];

@@ -1626,7 +1626,7 @@ def _fresh_start_prompt(db: DB, a: Agent, ws: Workspace, provider, note: str) ->
             chunks=knowledge.replay_chunks(db, a.id),
             analysis=analysis_brief.brief_context(
                 db, ws.repo_root, ws.branch, a.id, a.task, None,
-                large=analysis_brief.got_context(db, a.id))) + note
+                large=analysis_brief.got_context(db, a.id), replay=True)) + note
     return (a.task + note) if a.task else None
 
 
@@ -3304,7 +3304,9 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
                 if not worker_done_when and t.done_when:
                     worker_done_when = t.done_when
     if worker and worker.task:
-        task += f"\n\nThe worker's original task:\n{worker.task.strip()}"
+        task += (f"\n\nThe worker's original task:\n{worker.task.strip()}\n\n"
+                 "Supervisor messages and spec amendments supersede this original task text. "
+                 "A deviation from it that such a message justifies needs no recorded decision.")
     if worker:
         task += f"\n\nWorker profile: {worker.profile} (provider: {worker.provider})"
         try:
@@ -3333,16 +3335,16 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         task += f"\n\nDeclared files: {', '.join(worker_files)}"
     if worker_done_when:
         task += f"\n\nIts finish line: {worker_done_when.strip()}"
-    task += _review_context(db, ws, worker, worker_files)
-
     from brindle.pro import analysis_brief
 
     try:
         changed = git.paths(["diff", "--name-only", f"{ws.base_branch}...HEAD"], ws.path) if ws.base_branch else []
     except git.GitError:
         changed = []
+    # Decisions cover declared and changed files; docs gate on the diff alone.
+    task += _review_context(db, ws, worker, list(dict.fromkeys([*worker_files, *changed])))
     covering, cited = analysis_brief.review_context(db, ws.repo_root, (worker.task or "") if worker else "",
-                                                    list(dict.fromkeys([*worker_files, *changed])))
+                                                    changed)   # docs gate on the diff, not declared files
     if covering:
         task += f"\n\n{covering}"
 
