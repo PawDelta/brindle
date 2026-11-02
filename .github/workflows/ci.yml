@@ -52,7 +52,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - run: python3 scripts/bump_version.py --check
+      - run: python3 scripts/bump_version.py --check --allow-legacy   # drop --allow-legacy once the first release has used the bump script
 
   # The deployment templates under deploy/, checked with their own linters
   # (the pytest checks need none of these). Runs only when deploy/ changes.

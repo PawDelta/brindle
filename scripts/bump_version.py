@@ -66,10 +66,20 @@ def bump(version: str, root: Path = ROOT, dry_run: bool = False) -> list[str]:
     return changed
 
 
-def check(root: Path = ROOT) -> str | None:
-    """None when the app and the engine agree, else what differs."""
+# The separate numbers brindle had before it moved to one version; the first
+# bump retires this pair (and this allowance).
+LEGACY_PAIR = {"engine": "0.5.5", "app": "0.2.8"}
+
+
+def check(root: Path = ROOT, allow_legacy: bool = False) -> str | None:
+    """None when the app and the engine agree, else what differs.
+
+    allow_legacy lets CI pass the old separate numbers until the first bump;
+    any other mismatch still fails."""
     engine = versions(root)["pyproject.toml"]
     app = versions(root)["app/package.json"]
+    if allow_legacy and (engine, app) == (LEGACY_PAIR["engine"], LEGACY_PAIR["app"]):
+        return None
     if app != engine:
         return f"app/package.json is {app} but pyproject.toml is {engine}: brindle ships one version (scripts/bump_version.py)"
     return None
@@ -80,9 +90,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("version", nargs="?")
     ap.add_argument("--dry-run", action="store_true", help="say what would change, write nothing")
     ap.add_argument("--check", action="store_true", help="fail if the app and engine versions differ")
+    ap.add_argument("--allow-legacy", action="store_true", help="with --check, accept the pre-unification numbers")
     args = ap.parse_args(argv)
     if args.check:
-        problem = check()
+        problem = check(allow_legacy=args.allow_legacy)
         if problem:
             print(problem, file=sys.stderr)
             return 1

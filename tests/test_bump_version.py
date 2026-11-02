@@ -37,3 +37,10 @@ def test_check_fails_on_a_mismatch_and_passes_on_a_match(tree):
     pkg = tree / "app/package.json"
     pkg.write_text(pkg.read_text().replace('"version": "1.2.3"', '"version": "1.2.4"'))
     assert "1.2.4" in bump_version.check(tree)
+    assert "1.2.4" in bump_version.check(tree, allow_legacy=True)  # only the old pair is tolerated
+
+    # The old separate numbers: strict check fails, CI's legacy allowance passes.
+    py = tree / "pyproject.toml"
+    py.write_text(py.read_text().replace('version = "1.2.3"', f'version = "{bump_version.LEGACY_PAIR["engine"]}"'))
+    pkg.write_text(pkg.read_text().replace('"version": "1.2.4"', f'"version": "{bump_version.LEGACY_PAIR["app"]}"'))
+    assert bump_version.check(tree) and bump_version.check(tree, allow_legacy=True) is None
