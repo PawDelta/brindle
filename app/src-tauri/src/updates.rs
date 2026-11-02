@@ -139,6 +139,12 @@ const NO_ENGINE: &str = "the brindle engine didn't answer, so whether updates ar
 /// either, and the look is skipped (`NO_ENGINE`), due again soon
 /// (`wait_after`). Answers the verdict and, when the engine gave one, the
 /// denial to remember (`Record::engine_off`).
+///
+/// No feed is read before the engine answers, by design (decision 6a5a5476,
+/// "desktop app update check and air-gap"): air-gap lives in the engine (any
+/// repo's config, armed process-wide, or its own environment), and fallbacks
+/// read on the host (cached or database repo lists) bypassed it. The launch
+/// never waits on this: the look runs in the background.
 async fn engine_allows(
     ask: impl Future<Output = EngineSays>,
     limit: Duration,
@@ -1607,10 +1613,14 @@ mod tests {
         // One machine, look after look, the engine's denial carried from one to the next.
         // `engine`: what the daemon answers, None for never. The last columns: whether
         // the feed was read (the update offered), the denial remembered after it, and
-        // when the next look is due.
+        // when the next look is due; `bound`: the most the look may take (the engine's
+        // limit here is 20 ms), so the launch look, run off the window's path
+        // (`check_in_background`), never blocks the app opening.
         let mut denied = false;
+        let bound = Duration::from_millis(500);
         for (engine, offered, denied_after, next) in [
-            // At launch, the daemon not answering yet: no feed read, the look due again a minute on.
+            // At launch, the daemon not answering yet: the look ends within the engine's
+            // limit, no feed read, and it is due again a minute on.
             (None, false, false, TICK),
             (Some(EngineSays::NoAnswer), false, false, TICK),
             // On: the feed read, and the next look RECHECK on.
@@ -1622,6 +1632,7 @@ mod tests {
             // Until it says On again.
             (Some(EngineSays::On), true, false, RECHECK),
         ] {
+            let began = Instant::now();
             let mut feed = fake_feed(Some("0.2.11"), Reach::Up);
             let ask = async move {
                 match engine {
@@ -1637,6 +1648,7 @@ mod tests {
             };
             let looked = tauri::async_runtime::block_on(look("0.2.10", gate, &mut feed, FEED_LIMIT));
             let what = format!("{engine:?} {denied}");
+            assert!(began.elapsed() < bound, "{what}: the look held up past the engine's limit");
             assert_eq!(looked.as_ref().is_ok_and(|o| o.is_some()), offered, "{what}");
             assert_eq!(feed.calls.is_empty(), !offered, "{what}");
             assert_eq!(wait_after(&looked), next, "{what}");
