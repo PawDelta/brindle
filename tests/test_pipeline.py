@@ -481,6 +481,8 @@ def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypat
     ("other.py", True),          # disjoint from the branch's files
     ("shared.py", False),        # the branch changed it too (a clean merge all the same)
     ("pyproject.toml", False),   # a check input, disjoint or not
+    pytest.param("web/npm-shrinkwrap.json", False, marks=pytest.mark.variant(
+        "review finding: a nested lockfile not named *.lock / *-lock.*")),
 ])
 def test_merge_reuses_checks_only_when_the_base_brought_in_disjoint_files(db, repo, base_file, reused):
     """A clean sync with the base keeps the branch's passing checks when the
@@ -496,6 +498,7 @@ def test_merge_reuses_checks_only_when_the_base_brought_in_disjoint_files(db, re
     sh("git commit -qam work", path)
     db.set_check(ws.id, gates.head(ws), "false", True, "1 passed")
     target = repo / base_file
+    target.parent.mkdir(exist_ok=True)
     target.write_text("".join(f"line{i}\n" for i in range(9)) + "base\n" if base_file == "shared.py" else "x = 1\n")
     sh(f"git add {base_file} && git commit -qm base", repo)
 

@@ -1440,7 +1440,8 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
 # the branch's own changes are: a sync that brings one in always re-runs.
 CHECK_INPUT_NAMES = frozenset({
     "conftest.py", "pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "pytest.ini",
-    "noxfile.py", "Makefile", "package.json", "tsconfig.json", ".pre-commit-config.yaml",
+    "noxfile.py", "Makefile", "package.json", "npm-shrinkwrap.json", "tsconfig.json",
+    ".pre-commit-config.yaml",
     "go.mod", "go.sum", "Cargo.toml", "Gemfile", ".python-version", ".nvmrc", ".tool-versions",
 })
 CHECK_INPUT_PATTERNS = (
