@@ -98,7 +98,7 @@ signed in. Claude Code is the default for the supervisor, workers and reviewer
 There's also a free brindle desktop app for macOS and Linux (on Windows, use the CLI inside WSL2). It's a download from the brindle website and runs on the same engine; the CLI keeps working alongside it. `brindle app` opens the app, or prints the download link if it isn't installed. `brindle daemon` runs the local API the app talks to: over a Unix socket by default, or on `--tcp` at 127.0.0.1 for WSL. Over `--tcp` the daemon can't check whether a caller is an agent, so its token is the only gate: keep TCP for the WSL client.
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.5.10`). A session started before an upgrade keeps
+session shows it too (`brindle 0.5.11`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -2358,11 +2358,20 @@ The pre-push hook that ran these before every push is off for now
 
 ### Releasing
 
-1. Bump `version` in `pyproject.toml`, commit, and push.
+brindle and its desktop app share one version number: the app bundles its
+engine, so they always ship together.
+
+1. Run `scripts/bump_version.py X.Y.Z` (`--dry-run` shows what changes). It sets the
+   version in `pyproject.toml`, `uv.lock`, the status-bar example above,
+   `app/package.json` and `app/package-lock.json`. Commit and push. CI fails a pull
+   request where the app's version differs from `pyproject.toml`
+   (`scripts/bump_version.py --check`).
 2. Write the release notes, run `scripts/release_footer.py NOTES.md` to add the docs link,
    and create a GitHub release tagged `v<version>` (e.g.
    `gh release create v0.1.1 --notes-file NOTES.md`).
 3. The Publish workflow tests, builds, and uploads to PyPI via Trusted Publishing.
+4. Tag the same commit `app-v<version>` for the desktop app. Both tags (`vX.Y.Z` and
+   `app-vX.Y.Z`) use the same number.
 
 
 ## License

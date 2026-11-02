@@ -1,0 +1,172 @@
+# Roll the desktop app's stable feed back to an already-published release,
+# without a rebuild: the stable latest.json
+# (pawdelta.com/brindle/downloads/desktop/latest.json) is rewritten to name
+# that release's own updater bundles and signatures, as app-release.yml
+# published them under <version>/, marked "rollback": true with the notes
+# "Rolled back to <version>". Installed apps newer than it then offer it
+# through the update banner ("brindle X.Y.Z is available (rollback)") and
+# install it like any update: the same signature check against the
+# production key, the same air-gap and engine gates
+# (app/src-tauri/src/updates.rs `update_wanted`). Without that mark an app
+# never offers an older build.
+#
+# Run it by hand (Actions › App feed rollback › Run workflow) with "Use
+# workflow from" set to a release tag (app-v*): the job runs in the
+# `desktop-release` environment, which admits only app-v* tags and needs the
+# owner's approval, like the stable publish. The tag's commit must be on main
+# (as for stable-gate in app-release.yml), so the code that runs with the
+# release role is code main has.
+#
+# Before anything is written, app/scripts/feed_rollback.mjs checks both
+# bundles, as the site serves them, against their signatures and the
+# production updater key in tauri.conf.json, so a rollback never publishes a
+# feed installed apps would refuse. Only latest.json changes: the per-version
+# files are immutable, and the stable DMG, AppImage, .deb and installer names
+# keep pointing at the latest release. The next stable release's publish
+# overwrites latest.json as ever, which ends the rollback. app/README.md,
+# "Rolling back a release", has the procedure.
+name: App feed rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "The published stable release to roll the stable feed back to (X.Y.Z)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# One feed rewrite at a time.
+concurrency:
+  group: app-feed-rollback
+  cancel-in-progress: false
+
+env:
+  SITE_DOWNLOADS: https://pawdelta.com/brindle/downloads/desktop
+  S3_PREFIX: brindle/downloads/desktop
+  # The AWS CLI's own attempts (sts, s3 cp), with backoff, for the publish
+  # step. Nothing else is repeated in place: every step only reads or
+  # overwrites latest.json with the same content, so a failed run is safe to
+  # run again.
+  AWS_MAX_ATTEMPTS: "8"
+
+jobs:
+  rollback:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'app-v')
+    runs-on: ubuntu-latest
+    environment: desktop-release
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read     # this run's approvals, for the summary
+      id-token: write   # the downloads bucket's role, through GitHub's OIDC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # origin/main, to check the commit is on it
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+
+      - name: On main, approved, a stable version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::\"$VERSION\" is not a stable release version (X.Y.Z)"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA ($GITHUB_REF_NAME) is not on main: run this from a release tag main has"
+            exit 1
+          fi
+          approvers="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            --jq '[.[] | select(.state == "approved") | .user.login] | join(", ")' || echo "unknown")"
+          echo "Rollback to $VERSION from $GITHUB_REF_NAME at $GITHUB_SHA; approved by ${approvers:-nobody recorded}" >> "$GITHUB_STEP_SUMMARY"
+
+      # The release's updater bundles and signatures, as installed apps will
+      # download them, and the feed as it is now (for the summary).
+      - name: Fetch the release's updater bundles
+        id: fetch
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          dir="$RUNNER_TEMP/rollback"
+          mkdir -p "$dir"
+          for arch in aarch64 x86_64; do
+            for file in "brindle_${VERSION}_${arch}.app.tar.gz" "brindle_${VERSION}_${arch}.app.tar.gz.sig"; do
+              curl -fsSL -o "$dir/$file" "$SITE_DOWNLOADS/$VERSION/$file" \
+                || { echo "::error::$SITE_DOWNLOADS/$VERSION/$file is not published"; exit 1; }
+            done
+          done
+          was="$(curl -fsSL "$SITE_DOWNLOADS/latest.json" | jq -r '.version // "none"' || echo unknown)"
+          { echo "dir=$dir"; echo "was=$was"; } >> "$GITHUB_OUTPUT"
+
+      - name: Rollback manifest (latest.json)
+        env:
+          VERSION: ${{ inputs.version }}
+          DIR: ${{ steps.fetch.outputs.dir }}
+        run: node app/scripts/feed_rollback.mjs "$VERSION" "$SITE_DOWNLOADS" "$DIR"
+
+      - name: Publish?
+        env:
+          ROLE: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          BUCKET: ${{ vars.DESKTOP_DOWNLOADS_BUCKET }}
+        run: |
+          if [ -z "$ROLE" ] || [ -z "$BUCKET" ]; then
+            echo "::error::the release role secret or DESKTOP_DOWNLOADS_BUCKET variable not set: cannot publish"
+            exit 1
+          fi
+
+      - name: AWS credentials
+        env:
+          ROLE_ARN: ${{ secrets.AWS_DESKTOP_RELEASE_ROLE_ARN }}
+          REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+        # GitHub's OIDC token exchanged for the release role's session (no
+        # third-party credentials action), as app-release.yml's macos-publish
+        # does. The token is never printed.
+        run: |
+          set -euo pipefail
+          token="$(curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | jq -r '.value // empty')"
+          if [ -z "$token" ]; then
+            echo "::error::no OIDC token from GitHub (does the job have id-token: write?)"
+            exit 1
+          fi
+          echo "::add-mask::$token"
+          creds="$(AWS_REGION="$REGION" aws sts assume-role-with-web-identity \
+            --role-arn "$ROLE_ARN" \
+            --role-session-name "desktop-rollback-${GITHUB_RUN_ID}" \
+            --web-identity-token "$token" \
+            --duration-seconds 3600 \
+            --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+            --output text)"
+          unset token
+          read -r key secret session <<<"$creds"
+          if [ -z "$key" ] || [ -z "$secret" ] || [ -z "$session" ]; then
+            echo "::error::assume-role-with-web-identity returned no credentials"
+            exit 1
+          fi
+          for v in "$key" "$secret" "$session"; do echo "::add-mask::$v"; done
+          {
+            echo "AWS_ACCESS_KEY_ID=$key"
+            echo "AWS_SECRET_ACCESS_KEY=$secret"
+            echo "AWS_SESSION_TOKEN=$session"
+            echo "AWS_REGION=$REGION"
+            echo "AWS_DEFAULT_REGION=$REGION"
+          } >> "$GITHUB_ENV"
+
+      - name: Publish latest.json to pawdelta.com/brindle/downloads/desktop/
+        env:
+          VERSION: ${{ inputs.version }}
+          DIR: ${{ steps.fetch.outputs.dir }}
+          WAS: ${{ steps.fetch.outputs.was }}
+          BUCKET: ${{ vars.DESKTOP_DOWNLOADS_BUCKET }}
+        run: |
+          aws s3 cp "$DIR/latest.json" "s3://$BUCKET/$S3_PREFIX/latest.json" \
+            --cache-control no-cache --content-type application/json
+          echo "Rolled the stable feed back to brindle desktop $VERSION (it named $WAS): $SITE_DOWNLOADS/latest.json" >> "$GITHUB_STEP_SUMMARY"

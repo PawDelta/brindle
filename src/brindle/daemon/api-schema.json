@@ -1877,6 +1877,18 @@
     },
     "DecisionDTO": {
       "properties": {
+        "author_session": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Author Session"
+        },
         "body": {
           "title": "Body",
           "type": "string"

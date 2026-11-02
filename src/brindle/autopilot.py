@@ -1225,13 +1225,13 @@ CANCEL_POLL = 1.0  # seconds between looks at ``cancel`` while a check runs
 
 
 def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,
-              cancel=None, background: bool = False) -> tuple[bool, str]:
-    """Run one check command. Returns (passed, the tail of its output).
-    ``cancel``, if given, is polled while the command runs; when it turns
-    true the command is killed and ``CheckCancelled`` is raised.
-    ``background``: at background priority (``spawn._background``)."""
+              cancel=None) -> tuple[bool, str]:
+    """Run one check command, at normal priority (a throttled check only makes
+    everything behind it wait longer). Returns (passed, the tail of its
+    output). ``cancel``, if given, is polled while the command runs; when it
+    turns true the command is killed and ``CheckCancelled`` is raised."""
     proc = spawn.start(
-        spawn._background(["/bin/sh", "-c", cmd], force=True) if background else cmd, shell=not background, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
+        cmd, shell=True, cwd=cwd, env={**os.environ, **env}, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, stdin=subprocess.DEVNULL, start_new_session=True,
     )
     if cancel is None:

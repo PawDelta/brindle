@@ -24,11 +24,11 @@ const agentOf = (s: AppState, id: string) => s.workspaces.flatMap((ws) => ws.age
 describe("reduce: stream messages", () => {
   it.each<[string, StreamMessage, (s: AppState) => void]>([
     [
-      "agent.status patches the agent in place",
+      "agent.status patches the agent and invalidates its inbox cards",
       event("agent.status", { agent_id: "w1", payload: { status: "waiting" } }),
       (s) => {
         expect(agentOf(s, "w1")).toMatchObject({ status: "waiting", status_since: 200 });
-        expect(s.stale).toBe(false);
+        expect(s.stale).toBe(true);
       },
     ],
     [

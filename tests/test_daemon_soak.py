@@ -189,6 +189,8 @@ def test_session_diff_overload(db, repo, monkeypatch):
                        "idle", "", None, 1000.0))
     db.conn.close()
     local, started, completed, stopped = threading.local(), [], [], []
+    # Heavy diffs hold their worker until the sampler has seen the lane busy, so overlap is forced.
+    heavy_busy, gate_armed = threading.Event(), threading.Event()
     real_git, real_diff = git.run, session_review.diff
 
     def counted(*args, **kwargs):
@@ -197,6 +199,8 @@ def test_session_diff_overload(db, repo, monkeypatch):
         return real_git(*args, **kwargs)
 
     def measured(*args):
+        if gate_armed.is_set():
+            heavy_busy.wait()       # hold the heavy lane until a cheap read has seen it busy
         start, local.count = time.monotonic(), 0
         started.append(start)
         try:
@@ -266,9 +270,12 @@ def test_session_diff_overload(db, repo, monkeypatch):
                             # Busy if the heavy lane held a worker when the request began or ended.
                             during.append((time.monotonic() - start,
                                            busy or lane.workers.borrowed_tokens > 0))
+                            if during[-1][1]:
+                                heavy_busy.set()
 
                 # Drop the cached diff: the first poll recomputes the full history.
                 session_review._forget()
+                gate_armed.set()
                 pollers_done, during = asyncio.Event(), []
                 sampler = asyncio.ensure_future(sample_cheap())
                 outcomes = await asyncio.gather(*(poll() for _ in range(8)), return_exceptions=True)

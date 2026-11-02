@@ -10,6 +10,7 @@
 import { createRoot } from "react-dom/client";
 import App from "../src/App";
 import { PtyViewsProvider, wsPtyView, type PtyViews } from "../src/api/ptyView";
+import type { AppUpdateStatus, AppUpdates } from "../src/api/tauri";
 import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
 import type { Route } from "../src/routes";
 import { createAppStore } from "../src/store/store";
@@ -78,6 +79,11 @@ const SCENES: Record<string, Route> = {
   pty:{ screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "session-paused": { screen: "session", root: "sup-39", repo: REPO },
   "session-done": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
+  // The app's own update offered (the strip on every screen), Update now under way, set aside into the sidebar's pill.
+  "update-inbox": { screen: "inbox" },
+  "update-downloading": { screen: "inbox" },
+  "update-later": { screen: "inbox" },
+  "update-session": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
 };
 
 const daemon = new FakeDaemon(structuredClone(data));
@@ -140,6 +146,34 @@ if (scene === "pty") {
 // The fake daemon on the page, for e2e/flows.e2e.ts: what a view wrote to its pane (`views`), and `print` into one.
 Object.assign(window, { fake: daemon });
 const store = createAppStore();
+/* The update scenes: the shell's app updates as a release build sees one on offer (updates.rs), its
+   Update now downloading and never done, Later setting it aside. */
+let appUpdates: AppUpdates | undefined;
+if (scene.startsWith("update-")) {
+  const offered: AppUpdateStatus = {
+    version: "0.2.10",
+    automatic: true,
+    pending: null,
+    available: { version: "0.2.11", notes: "## Fixes\n- Fixes slowdowns that showed os error 35 under load.\n- Adds wait-for-room for forced starts." },
+    later: scene === "update-later",
+    updated: null,
+    last_checked: Math.floor(Date.now() / 1000) - 120,
+    checking: false,
+  };
+  store.dispatch({ type: "app_update", status: offered });
+  appUpdates = {
+    status: () => Promise.resolve(offered),
+    check: () => Promise.resolve(offered),
+    updateNow: (progress) => {
+      progress({ kind: "downloading", downloaded: 23_400_000, total: 37_800_000 });
+      return new Promise(() => {});
+    },
+    later: () => Promise.resolve(store.dispatch({ type: "app_update", status: { ...offered, later: true } })),
+    restart: () => Promise.resolve(),
+    dismiss: () => Promise.resolve(),
+    watch: () => Promise.resolve(() => {}),
+  };
+}
 const client = daemon.client();
 const sync = startSync({ client, store, connect: daemon.connect });
 
@@ -149,7 +183,7 @@ const sync = startSync({ client, store, connect: daemon.connect });
 const pickFolder = () => Promise.resolve("/home/sam/Notes/runbooks");
 createRoot(document.getElementById("root")!).render(
   <PtyViewsProvider value={views}>
-    <App store={store} client={client} refresh={sync.refresh} initialRoute={SCENES[scene] ?? SCENES.new} pickFolder={pickFolder} />
+    <App store={store} client={client} refresh={sync.refresh} initialRoute={SCENES[scene] ?? SCENES.new} pickFolder={pickFolder} appUpdates={appUpdates} />
   </PtyViewsProvider>,
 );
 
@@ -162,6 +196,7 @@ const OPENS: Record<string, string> = {
   "agents-make": 'css:button[aria-label="Medium runs on"]',
   "knowledge-record": "Record a decision",
   "knowledge-add": "Add folder",
+  "update-downloading": 'css:[data-testid="app-update-now"]',
 };
 
 const press = (label: string) => {

@@ -29,6 +29,9 @@ REPAINT = 12  # Ctrl-L: redraw everything; the follow hook sends it after a sess
 # (see brindle.cull), on a thread of its own so the screen never waits on it.
 CULL_SECONDS = 60.0
 HOME_SECONDS = 3.0       # how often a sidebar checks it isn't stranded (agents.sidebar_come_home)
+# While nothing changes (no key, no database commit) a tick does no work; the tmux
+# side (pane liveness, who is attached, "ago" ages) is re-read this often instead.
+IDLE_SECONDS = 10.0
 
 
 def _cull_in_background() -> None:
@@ -855,6 +858,8 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
     spend_at = 0.0
     poller, bar, delivered_at = _start_status(), None, 0.0
     scoped_at = 0.0
+    seen_version, refreshed_at, quiet, last_clock = None, 0.0, False, ""
+    last_frame: tuple | None = None  # what is on screen; None forces a repaint
     if poller is not None and os.environ.get("TMUX_PANE"):
         from brindle.pro import status as org_status
 
@@ -892,7 +897,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
         if time.time() - culled_at >= CULL_SECONDS:
             culled_at = time.time()
             _cull_in_background()
-        if own_root and time.time() - homed_at >= HOME_SECONDS:
+        if own_root and time.time() - homed_at >= (IDLE_SECONDS if quiet else HOME_SECONDS):
             homed_at = time.time()
             try:
                 agents.sidebar_come_home(db, own_root, os.environ.get("TMUX_PANE"))
@@ -902,12 +907,12 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
         # first attach) gets a blank pane from iTerm2 until it's all redrawn.
         # Once per refresh, not per key: each look is a tmux call, and a mouse
         # wheel sends a burst of keys.
-        if time.time() - viewed_at >= REFRESH_SECONDS:
+        if time.time() - viewed_at >= (IDLE_SECONDS if quiet else REFRESH_SECONDS):
             viewed_at = time.time()
             if (viewer := sidebar_logo.viewer()) != seen_by:
                 seen_by = viewer
                 stdscr.clear()
-                shown = None
+                shown = last_frame = None
                 if logo is not None:
                     logo.recheck()
         h, w = stdscr.getmaxyx()
@@ -926,6 +931,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
                 snap = view.snapshot(db, repo_root, panes=panes)
                 pilot = view.autopilot_entry(db, repo_root, panes=panes, root_id=own_root)
             stale = False
+            seen_version, refreshed_at = db.data_version(), time.time()
         # Re-rendered every pass: folding, filtering and `?` change it between refreshes.
         if state.help:
             lines = help_lines(width, bool(os.environ.get("TMUX")), sidebar)
@@ -959,13 +965,20 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
         content_top = top + (1 if show_above else 0)
         if stdscr.getmaxyx() != (h, w):
             continue  # resized while this frame was laid out: lay it out again
+        page = lines[offset:offset + visible]
+        last_clock = time.strftime("%H:%M")  # the header's clock: a new minute is a new frame
+        frame = (last_clock, h, w, braid[1], offset, selected, top, content_top, visible, show_above,
+                 show_below, tuple((ln.text, ln.style) for ln in page),
+                 tuple((ln.text, ln.style) for ln in bottom))
         try:
-            _paint(stdscr, h, w, styles, braid[1], lines[offset:offset + visible], offset,
-                   selected, top, content_top, visible, show_above, show_below, bottom)
+            if frame != last_frame:  # an unchanged frame is not redrawn
+                _paint(stdscr, h, w, styles, braid[1], page, offset,
+                       selected, top, content_top, visible, show_above, show_below, bottom)
+                last_frame = frame
         except curses.error:
             # The pane changed size under the frame (curses refuses a cell past
             # its edge): skip it, the next tick repaints at the new size.
-            shown = None
+            shown = last_frame = None
         else:
             # The image goes over the cells _draw_logo left blank, once: again only
             # when something may have written over them (a resize, a clear, a peek).
@@ -975,8 +988,20 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
             shown = image
 
         key = stdscr.getch()
+        # A complete frame, nothing typed, nothing committed, no notice to expire and
+        # the slow tmux refresh not yet due: this tick has nothing to do.
+        # Waiting here, not looping back, keeps a quiet tick from re-rendering or
+        # re-totalling spend; it ends on a key, a commit, or the slow refresh being due.
+        quiet = False
+        while (key == -1 and last_frame is not None and not stale
+               and not (notice and time.time() < notice_until)
+               and db.data_version() == seen_version
+               and time.time() - refreshed_at < IDLE_SECONDS
+               and time.strftime("%H:%M") == last_clock):
+            quiet = True
+            key = stdscr.getch()
         if key == curses.KEY_RESIZE:
-            shown = None
+            shown = last_frame = None
         if key != -1 or any(a["status"] in ("processing", "starting") for ws in snap
                             for a in ws["agents"]):
             from brindle.pro import status as org_status
@@ -984,7 +1009,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
             org_status.touch()          # keeps the org status poll at its 60s pace
         if key == REPAINT:
             stdscr.clear()
-            shown = None
+            shown = last_frame = None
             continue
         if key == curses.KEY_MOUSE:
             try:
@@ -1017,10 +1042,10 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
         elif action == "attach" and selected is not None:
             _attach(lines[selected].agent, lines[selected].workspace, db)
             stdscr.clear()
-            stale, shown = True, None
+            stale, shown, last_frame = True, None, None
         elif action == "peek" and selected is not None:
             _peek(stdscr, lines[selected].agent, styles)
-            stale, shown = True, None
+            stale, shown, last_frame = True, None, None
         elif action == "close" and selected is not None:
             agent = lines[selected].agent
             now = time.time()
@@ -1042,7 +1067,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
                 stale = True
       except Exception:  # noqa: BLE001 - one bad pass never ends the sidebar
         _log_error("sidebar pass failed")
-        stale, shown = True, None
+        stale, shown, last_frame = True, None, None
         # Wait out the refresh (a pass that fails every time mustn't spin), still
         # honouring a quit typed meanwhile.
         if stdscr.getch() in quit_keys(sidebar):

@@ -1,7 +1,9 @@
 /* The app's own Inbox card, not the engine's (store/appUpdates.ts): an update
-   the shell installed by itself waits for a restart ("brindle X is installed ·
-   Restart to update · What's new") until the app restarts on it; then, once,
-   "Updated to brindle X" until dismissed. The app never restarts by itself. */
+   installed and not yet restarted into (Update now restarts at once, so this
+   is one whose restart didn't happen) waits for a restart ("brindle X is
+   installed · Restart to update · What's new"); then, once, "Updated to
+   brindle X" until dismissed. An update found and not installed is the
+   strip's (components/AppUpdateBanner.tsx). The app never restarts unasked. */
 
 import { useState } from "react";
 import type { OpenUrl } from "../../api/open";

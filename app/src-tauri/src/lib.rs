@@ -233,6 +233,8 @@ pub fn run() {
             updates::app_update_status,
             updates::app_update_check,
             updates::app_update_dismiss,
+            updates::app_update_later,
+            updates::app_update_now,
             about::about_read,
         ])
         .setup(|app| {
