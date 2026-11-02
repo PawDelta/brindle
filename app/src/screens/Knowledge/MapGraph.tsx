@@ -98,12 +98,16 @@ export function joinLocal(
   // Local records have no team or organization membership.
   if (filter.scope.kind !== "user") return { nodes, edges };
   const selected = filter.paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
+  const nodePaths = (node: MapNode) => [...(node.paths ?? []), ...(node.path ? [node.path] : [])]
+    .map((p) => relative(p, repo))
+    .filter((p): p is string => p !== null);
+  // An empty filter is the whole scope: every concrete path in the map is its own area.
+  const areas = selected.length ? selected : map.nodes.flatMap(nodePaths);
   const touchesArea = (path: string, area: string) => containsPath(area, path) || decisionMatches(area, path) || decisionMatches(`${area}/**`, path);
   // A document in the neighbourhood may mention paths outside the chosen area.
   // Only paths inside that area may connect a local record to the document.
-  const filteredPaths = (node: MapNode, areas = selected) => [...(node.paths ?? []), ...(node.path ? [node.path] : [])]
-    .map((p) => relative(p, repo))
-    .filter((p): p is string => p !== null && areas.some((area) => touchesArea(p, area)));
+  const filteredPaths = (node: MapNode, scoped = areas) => nodePaths(node)
+    .filter((p) => scoped.some((area) => touchesArea(p, area)));
   const local: { node: LocalNode; paths: string[] }[] = [
     ...decisions.map((d) => ({ node: { id: `local:decision:${d.id}`, kind: "decision" as const, title: d.topic, decision: d }, paths: d.scope })),
   ];
@@ -111,7 +115,7 @@ export function joinLocal(
     const scopes = paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
     // A concrete path inside the area is a witness even for wildcard decisions.
     // A broad server glob still needs the local scope to intersect that area.
-    const matches = map.nodes.filter((n) => selected.some((area) => scopes.some((scope) =>
+    const matches = map.nodes.filter((n) => areas.some((area) => scopes.some((scope) =>
       filteredPaths(n, [area]).some((path) => {
         const concrete = !/[*?\[]/.test(path);
         return (concrete || touchesArea(scope, area)) && decisionMatches(scope, path);

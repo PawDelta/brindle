@@ -70,11 +70,15 @@ it("loads all docs automatically with sources, filters by path, and opens each n
     decisions: [decision, ...["src/*", "src/cache/index.?s", "src/cache/[ij]ndex.ts", "src/cache/[!a-h]ndex.ts", "cache/**", "./src//cache/../cache/index.ts"].map((pattern, i) => ({ ...decision, id: `pattern-${i}`, topic: pattern, scope: [pattern] })), { ...decision, id: "unrelated", topic: "Other rule", scope: ["src/cache-other/**", "src/cache/index.?x", "src/cache/[!ij]ndex.ts", "src/cache"] }, { ...decision, id: "global", topic: "Repo rule", scope: [] }],
     sources: [{ id: "s", kind: "folder", scope: "/repo/src/cache", docs: 1, added_at: 1793610000, visibility: "team" }, { id: "empty", kind: "folder", scope: "/repo", docs: 0 }, { id: "literal", kind: "folder", scope: "/repo/src/*", docs: 1 }, { id: "outside", kind: "folder", scope: "/outside/src/cache" }],
   };
-  const { container, rerender } = render(<MapView {...props} decisions={[]} sources={[]} />);
+  const { container, rerender } = render(<MapView {...props} />);
   await screen.findByRole("option", { name: "Mine" });
   const initialDoc = await screen.findByRole("button", { name: /Cache design/ });
   expect(requests.at(-1)?.query.paths).toBe("[]");
   expect(initialDoc.textContent).toMatch(/feat\/cache.*session-1.*user-hannah.*Personal.*2026-11-02/);
+  // The automatic whole-scope map still joins local records to the documents they share a path with.
+  expect(screen.getByRole("button", { name: /Storage policy/ })).toBeTruthy();
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="p"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:source:s"][data-target="p"]')).not.toBeNull();
   fireEvent.change(screen.getByLabelText("Code paths"), { target: { value: "src/cache" } });
   fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
   await screen.findByRole("button", { name: /Cache design/ });
@@ -106,6 +110,12 @@ it("loads all docs automatically with sources, filters by path, and opens each n
   fireEvent.click(screen.getByRole("button", { name: /Code area.*src\/cache\/index.ts/ }));
   await waitFor(() => expect(requests.filter((r) => r.path.endsWith("/map"))).toHaveLength(3));
   expect(requests.at(-1)?.query.paths).toBe('["src/cache/index.ts"]');
+  // Clearing the paths returns to the whole scope, which keeps the local records joined.
+  fireEvent.change(screen.getByLabelText("Code paths"), { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
+  await waitFor(() => expect(requests.at(-1)?.query.paths).toBe("[]"));
+  await screen.findByRole("button", { name: /Storage policy/ });
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="p"]')).not.toBeNull();
   fireEvent.change(screen.getByLabelText("Code paths"), { target: { value: "" } });
   fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
   await waitFor(() => expect(requests.at(-1)?.query.paths).toBe("[]"));
