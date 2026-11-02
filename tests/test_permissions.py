@@ -94,3 +94,65 @@ def test_shell_forms(tmp_path, command, expected):
     req = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
     decision = permissions.decide(req)
     assert decision.decision == expected, decision.reason
+
+
+def _bypass(command):
+    return pytest.param(command, "deny", marks=pytest.mark.variant("bypass attempt"))
+
+
+@pytest.mark.parametrize("command, expected", [
+    ("env", "deny"),
+    ("printenv GITHUB_TOKEN", "deny"),
+    ("set", "deny"),
+    ("export -p", "deny"),
+    ("declare -px", "deny"),
+    ("typeset -x", "deny"),
+    ("tmux show-environment -g", "deny"),
+    ("tmux show -g", "deny"),
+    ("cat /proc/self/environ", "deny"),
+    ("ps eww", "deny"),
+    ("ps -E -o pid,user", "deny"),
+    ("security find-generic-password -s gh -w", "deny"),
+    ("cat ~/.netrc", "deny"),
+    ("grep secret ~/.aws/credentials", "deny"),
+    ("rg token ~/.config", "deny"),
+    ("cat ../other/.env", "deny"),
+    ("gh auth token", "deny"),
+    ("gcloud --project p auth print-access-token", "deny"),
+    ("aws configure export-credentials", "deny"),
+    ("echo $GITHUB_TOKEN", "deny"),
+    ('printf "%s" "${API_KEY}"', "deny"),
+    _bypass("git status | env"),
+    _bypass('echo "$(printenv)"'),
+    _bypass("bash -c 'printenv HOME'"),
+    _bypass("tmux -L other show-environment"),
+    _bypass("tmux -L other ls \\; showenv"),
+    _bypass("for v in a; do /usr/bin/env; done"),
+    _bypass("sudo -u root env -u X printenv"),
+    _bypass("security find-internet-password -gs github.com"),
+    _bypass("cat ~/.aws/cred*"),
+    _bypass("cd .. && cat other/.env"),
+    _bypass("cd /proc/self; cat environ"),
+    _bypass("(e''nv) > out"),
+    ("env -u FOO git status", "allow"),
+    ("git status", "allow"),
+    ("cat .env", "allow"),
+    ("ps -ef", "allow"),
+    ("echo $PATH '$GH_TOKEN'", "allow"),
+    ("set -e", "allow"),
+    ("command -v env", "allow"),
+])
+def test_credential_dumps_are_denied(tmp_path, command, expected):
+    """A command that would print credentials is a hard deny, part by part,
+    whatever a learned grant or the unmatched setting would allow."""
+    from brindle import permissions
+
+    permissions.set_unmatched("allow")
+    permissions.add_rule("bash", "*", "allow", "glob", source="learned")
+    here = tmp_path / "wt"
+    here.mkdir()
+    (tmp_path / "other").mkdir()
+    req = permissions.Request("claude", "bash", "Bash", str(here), str(here), str(here), command=command)
+    decision = permissions.decide(req)
+    assert decision.decision == expected, decision.reason
+    assert (decision.rule is None) == (expected == "deny") or expected == "allow"
