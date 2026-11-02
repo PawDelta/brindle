@@ -51,12 +51,12 @@ DESTRUCTIVE_DENIED = {"shell": {"baseline": "allow", "subcategories": {"destruct
      [("shell", "readonly"), ("files", "write-worktree")]),
     ("permissive", {}, lambda ws: bash(ws, "mkdir -p src/x && curl -sS https://example.com"), "ask",
      [("files", "write-worktree"), ("network", "fetch")]),                # the strictest part
-    # What brindle can't verify: every preset asks the person (shell/unchecked).
-    ("autonomous", {}, lambda ws: bash(ws, "echo `whoami`"), "ask",
+    # Escapes inside backticks remain unverified: every preset asks (shell/unchecked).
+    ("autonomous", {}, lambda ws: bash(ws, "echo `\\whoami`"), "ask",
      [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),   # unreadable: other, and its parts
-    ("autonomous", {"shell": {"subcategories": {"unchecked": "deny"}}}, lambda ws: bash(ws, "echo `whoami`"), "deny",
+    ("autonomous", {"shell": {"subcategories": {"unchecked": "deny"}}}, lambda ws: bash(ws, "echo `\\whoami`"), "deny",
      [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),
-    ("standard", {}, lambda ws: bash(ws, "echo `whoami`"), "ask",
+    ("standard", {}, lambda ws: bash(ws, "echo `\\whoami`"), "ask",
      [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),
     ("autonomous", {}, lambda ws: bash(ws, "rm -rf $DIR"), "ask", [("shell", "destructive")]),   # $DIR may be ~
     ("permissive", {}, lambda ws: bash(ws, "python3 - <<'EOF'\nprint(1)\nEOF"), "ask", [("shell", "other")] * 5),
@@ -125,7 +125,7 @@ def test_a_table_stored_before_unverifiable_existed_gets_its_presets_answer_and_
     data["groups"]["shell"]["subcategories"]["unverifiable"] = "deny"
     del data["groups"]["shell"]["subcategories"]["unchecked"]
     path.write_text(json.dumps(data))
-    unverifiable = bash(ws, "echo `whoami`")
+    unverifiable = bash(ws, "echo `\\whoami`")
     assert decide(unverifiable).decision == "ask"
     # With no table at all, where unmatched actions run; an eval of what only the run knows
     # is unverifiable even with no rule that could have asked.

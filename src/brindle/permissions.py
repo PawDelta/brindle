@@ -1629,8 +1629,10 @@ SED_SCRIPT_OPTIONS = ("-e", "--expression")
 
 
 def _sed_readonly(args: list[str]) -> bool:
-    """``sed -n`` printing only: every script (``-e``, ``--expression=`` or the
-    first operand) must be a print command; no in-place edit, no script file."""
+    """Inline scripts that only transform their input; no file writes,
+    command execution, in-place edits or scripts loaded from a file."""
+    from brindle.permission_groups import _sed_edits_only
+
     scripts, operands, i = [], [], 0
     while i < len(args):
         a = args[i]
@@ -1652,13 +1654,43 @@ def _sed_readonly(args: list[str]) -> bool:
         else:
             operands.append(a)
         i += 1
-    if not any(a in ("-n", "--quiet", "--silent") for a in args):
-        return False
     if not scripts:
         if not operands:
             return False
         scripts, operands = operands[:1], operands[1:]
-    return all(SED_PRINT.fullmatch(s.strip()) for s in scripts)
+    return all(SED_PRINT.fullmatch(s.strip()) or _sed_edits_only(s) for s in scripts)
+
+
+def _awk_readonly(args: list[str]) -> bool:
+    """An inline awk filter with no execution, redirects or indirect input.
+
+    Only -F and -v options are understood; -f, implementation-specific
+    options and extension directives can load code we have not checked.
+    getline and ARGV/ARGC can read files absent from the command's operands.
+    Reject them even when their names occur in a string or comment.
+    """
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            i += 1
+            break
+        if arg in ("-F", "-v"):
+            if i + 1 >= len(args):
+                return False
+            i += 2
+        elif arg.startswith(("-F", "-v")):
+            i += 1
+        elif arg.startswith("-"):
+            return False
+        else:
+            break
+    if i >= len(args):
+        return False
+    # awk joins continued source lines before recognizing identifiers.
+    script = args[i].replace("\\\n", "")
+    return not (any(c in script for c in "|>@")
+                or re.search(r"\b(system|getline|ARGV|ARGC)\b", script))
 
 
 def _readonly_part(req: Request, words: list[str]) -> bool:
@@ -1678,6 +1710,8 @@ def _readonly_part(req: Request, words: list[str]) -> bool:
         return not any(a in FIND_WRITING for a in args)
     if program == "sed":
         return _sed_readonly(args)
+    if program == "awk":
+        return _awk_readonly(args)
     if program == "tee":
         return not any(not a.startswith("-") for a in args)   # tee with no file only echoes
     if program == "hostname":
@@ -2701,7 +2735,10 @@ def _script_word(command: str, i: int) -> tuple[str, list, list, int] | None:
             end = _substitution_end(command, i)
             if end is None:
                 return None
-            subs.append(command[i + (1 if c == "`" else 2):end - 1])
+            inner = command[i + (1 if c == "`" else 2):end - 1]
+            if c == "`" and "\\" in inner:
+                return None    # backticks remove an escape layer before the inner shell reads it
+            subs.append(inner)
             i = end
         elif c == "$":
             found = _REFERENCE.match(command, i)
@@ -3116,7 +3153,7 @@ def _flat_script(command: str, cwd: str) -> str | None:
 # A command no simpler reading covers (a pattern, a tilde, a variable, a
 # redirection, a loop) is read as the simple commands it runs (ShellPart),
 # each judged on its own (read_parts; brindle.permission_groups decides the
-# whole from them). What can't be verified gives None: a backtick, eval or
+# whole from them). What can't be verified gives None: a dynamic eval or
 # source, a heredoc a program may run as code, a program only the run knows,
 # or a word only the run knows where a deny rule could match it.
 
@@ -3171,8 +3208,6 @@ class _PartReader:
         """``command``'s parts; ``definite``: whether it surely runs in this
         shell (an eval's words inside an if or a pipeline may not); ``chains``:
         whether a cd's && chain is followed in it (not in an eval's words)."""
-        if "`" in command:
-            raise ValueError("a backtick")
         if "<<" in command and any(os.path.basename(w) in _CODE_RUNNERS
                                    for w in re.split(r"[\s;&|()<>`\"'$=]+", command)):
             raise ValueError("a heredoc a program may run as code")
@@ -3222,8 +3257,9 @@ class _PartReader:
                 part.assigned = True
                 i += 1
                 continue
-            data = (len(part.words) >= 3 and len(word.substitutions) == 1 and word.raw.startswith('"$(')
-                    and word.raw.endswith(')"') and not word.refs
+            data = (len(part.words) >= 3 and len(word.substitutions) == 1
+                    and (word.raw.startswith('"$(') and word.raw.endswith(')"')
+                         or word.raw.startswith('"`') and word.raw.endswith('`"')) and not word.refs
                     and part.words[-1] in SUBSTITUTION_DATA_OPTIONS.get((part.words[0], part.words[1]), ()))
             names, known, written = self.word(word)
             if data:
@@ -3270,7 +3306,7 @@ class _PartReader:
             self.inner(inner)
         raw = word.raw
         text = re.sub(r"\\.", "", _unquoted(raw))
-        if re.search(r"\$[\w{(@*#?!$-]", text):    # "^$": a $ before a quote is literal
+        if word.substitutions or re.search(r"\$[\w{(@*#?!$-]", text):    # "^$": a $ before a quote is literal
             return [raw], False, None
         bare = re.sub(r'"(?:[^"\\]|\\.)*"', "", text).replace("'", "")
         try:
@@ -3355,7 +3391,7 @@ _GIT_UNFORCED = frozenset({*READONLY_GIT, "rev-parse", "merge-base", "rev-list",
 
 def _unread(word: str) -> bool:
     """Whether a ShellPart word is one only the run knows (kept as written)."""
-    return bool(re.search(r"\$[\w{(@*#?!$-]|[*?]|\[.+\]|\{[^}\s]*,", word))
+    return bool(re.search(r"`|\$[\w{(@*#?!$-]|[*?]|\[.+\]|\{[^}\s]*,", word))
 
 
 def _wild_match(rule: Rule, part: ShellPart) -> bool:
