@@ -490,8 +490,41 @@ def keep_out_of_spotlight(*dirs: Path) -> None:
 
 
 def _repos(db, here: str | None) -> list[str]:
+    """Every repo brindle knows: its workspaces', and any its history names
+    (a repo whose workspace rows are all gone still has worktrees on disk)."""
     roots = {ws.repo_root for ws in db.find_workspaces()} | ({here} if here else set())
-    return sorted(r for r in roots if os.path.isdir(r))
+    roots |= {r[0] for r in db.conn.execute("SELECT DISTINCT repo_root FROM history")}
+    return sorted(r for r in roots if r and os.path.isdir(os.path.join(r, ".git")))
+
+
+UPGRADE_SWEPT = ".disk-swept"   # in brindle's home: the one-time sweep below has run
+
+
+def upgrade_sweep(db) -> list[Cleaned] | None:
+    """Once per machine (recorded in ``UPGRADE_SWEPT``), the first time the
+    daemon starts after the upgrade that added this: the build dirs of every
+    worktree whose branch merged before then (``finished_worktrees``: squash
+    merges too), under ``clean_worktree``'s rules. None when it has run
+    already. Never raises."""
+    marker = config.brindle_home() / UPGRADE_SWEPT
+    if marker.exists():
+        return None
+    done: list[Cleaned] = []
+    try:
+        for root in _repos(db, None):
+            try:
+                for path, _branch in finished_worktrees(db, root):
+                    c = clean_worktree(db, path)
+                    if c.removed:
+                        done.append(c)
+                        log.info("brindle: freed %s of build dirs in %s", human(c.freed), path)
+            except git.GitError as e:
+                log.warning("brindle: couldn't sweep %s: %s", root, e)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{time.time()}\n")
+    except Exception:  # noqa: BLE001 - the daemon must start whatever happens here
+        log.exception("brindle: the one-time disk sweep failed")
+    return done
 
 
 @dataclass

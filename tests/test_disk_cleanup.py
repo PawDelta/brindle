@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from brindle import agents, config, disk, doctor, spawn, tasks, workspaces
+from brindle import agents, config, disk, doctor, history, spawn, tasks, workspaces
 from brindle.cli import app
 from brindle.db import Agent
 
@@ -28,8 +28,9 @@ def _merged_worktree(repo: Path, branch: str = "feat") -> Path:
     wt = repo.parent / f"wt-{branch}"
     sh(f"git worktree add -q -b {branch} {wt}", repo)
     (wt / ".gitignore").write_text(".env\ntarget/\nnode_modules/\n")
-    (wt / "lib" / "target").mkdir(parents=True)
+    (wt / "lib" / "target").mkdir(parents=True, exist_ok=True)
     (wt / "lib" / "target" / "main.rs").write_text("fn main() {}\n")
+    (wt / f"{branch}.txt").write_text("work\n")
     sh("git add -A && git add -f lib/target/main.rs && git commit -qm feat", wt)
     sh(f"git merge -q {branch}", repo)
     (wt / "target" / "debug").mkdir(parents=True)
@@ -66,6 +67,18 @@ def test_dirty_or_live_worktree_is_untouched(db, repo, monkeypatch, state):
     assert cleaned.removed == [] and cleaned.kept
     assert (wt / "target" / "debug" / "app").is_file()
     assert (wt / "app" / "node_modules" / "pkg" / "index.js").is_file()
+
+
+def test_upgrade_sweep_cleans_pre_existing_merged_worktrees_once(db, repo):
+    clean, dirty = _merged_worktree(repo, "old-done"), _merged_worktree(repo, "old-wip")
+    (dirty / "wip.txt").write_text("not committed\n")
+    history.record(db, str(repo), "merge", branch="old-done")   # known only from its history
+
+    assert [c.path for c in disk.upgrade_sweep(db)] == [str(clean)]
+
+    assert not (clean / "target").exists() and (clean / "lib" / "target" / "main.rs").is_file()
+    assert (dirty / "target" / "debug" / "app").is_file() and (dirty / "wip.txt").is_file()
+    assert disk.upgrade_sweep(db) is None   # recorded: it runs once
 
 
 def test_retention_caps_backups_archive_and_logs(brindle_home, monkeypatch):
