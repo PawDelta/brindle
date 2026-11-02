@@ -787,6 +787,10 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
         if m is not None:
             profile = managed_models.apply_profile(m, profile)
     _airgap_check(profile, ws.repo_root)
+    from brindle.local_setup import memory_problem
+
+    if problem := memory_problem(profile):
+        return problem
     if not get_provider(profile.provider).launches_process:
         return None
     agent = agent or Agent("preflight", ws.id, profile_name, profile.provider, None,

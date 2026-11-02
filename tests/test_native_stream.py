@@ -76,7 +76,8 @@ class FakeEndpoint:
 
 
 @pytest.fixture
-def fake():
+def fake(monkeypatch):
+    monkeypatch.setattr("brindle.native.runner.is_ollama", lambda endpoint: False)
     ep = FakeEndpoint()
     yield ep
     ep.close()

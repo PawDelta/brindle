@@ -80,6 +80,64 @@ def machine_memory_gb() -> float:
     return (os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")) / (1024 ** 3)
 
 
+def free_memory_gb() -> float:
+    """Currently available RAM, without counting swap, in GiB."""
+    if sys.platform == "darwin":
+        import ctypes
+
+        libc = ctypes.CDLL(None)
+        stats = (ctypes.c_uint32 * 38)()
+        count = ctypes.c_uint32(len(stats))
+        libc.mach_host_self.restype = ctypes.c_uint32
+        if libc.host_statistics64(libc.mach_host_self(), 4, ctypes.byref(stats),
+                                  ctypes.byref(count)) != 0:
+            raise OSError("cannot read free RAM")
+        # Free and speculative pages are immediately available; avoid counting
+        # compressed or inactive application pages as room for a new model.
+        return (stats[0] + stats[23]) * os.sysconf("SC_PAGE_SIZE") / 2**30
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) * 1024 / 2**30
+    raise OSError("cannot read free RAM")
+
+
+def memory_problem(profile) -> str | None:
+    """A fresh memory check for local native profiles; unknown size fails closed."""
+    if profile.provider != "native" or not serve.is_local(profile.base_url or ""):
+        return None
+    host = profile.base_url.rstrip("/").removesuffix("/v1")
+    try:
+        free = free_memory_gb()
+        margin = float(os.environ.get("BRINDLE_LOCAL_MEMORY_MARGIN_GB", "4"))
+        if margin < 0 or not margin < float("inf"):
+            raise ValueError("invalid margin")
+        sizes = []
+        resident = 0.0
+        for path in ("/api/ps", "/api/tags"):
+            with urllib.request.urlopen(host + path, timeout=TAGS_TIMEOUT) as response:
+                data = json.load(response)
+            for model in data.get("models", []):
+                name = model.get("name") or model.get("model")
+                wanted = profile.model or ""
+                if name not in (wanted, wanted + ":latest"):
+                    continue
+                size = float(model["size"]) / 2**30
+                if not 0 < size < float("inf"):
+                    raise ValueError("invalid model size")
+                sizes.append(size)
+                if path == "/api/ps":
+                    resident = size
+        if not sizes:
+            return f"cannot determine local model size for {profile.model}"
+        size = max(sizes)
+        if free + resident < size + margin:
+            return (f"insufficient free memory for {profile.model}: {free:.1f} GiB free, "
+                    f"{size:.1f} GiB model ({resident:.1f} GiB resident) + {margin:g} GiB margin")
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return f"cannot verify free memory and local model size for {profile.model}"
+    return None
+
+
 def is_tty() -> bool:
     """Whether standard input is an interactive terminal."""
     return sys.stdin.isatty()

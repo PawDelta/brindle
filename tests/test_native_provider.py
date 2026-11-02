@@ -16,7 +16,8 @@ from test_native_loop import FakeEndpoint, anthropic_reply, openai_reply
 
 
 @pytest.fixture
-def fake():
+def fake(monkeypatch):
+    monkeypatch.setattr("brindle.native.runner.is_ollama", lambda endpoint, *a: False)
     ep = FakeEndpoint()
     yield ep
     ep.close()
@@ -28,7 +29,8 @@ def ws(db, repo):
 
 
 @pytest.fixture
-def local_profile(repo, fake):
+def local_profile(repo, fake, monkeypatch):
+    monkeypatch.setattr("brindle.local_setup.memory_problem", lambda profile: None)
     d = repo / ".brindle" / "agents"
     d.mkdir(parents=True, exist_ok=True)
     (d / "local.md").write_text(

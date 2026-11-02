@@ -135,6 +135,10 @@ def refusal_fallback(endpoint: Endpoint, repo_root: str | None = None) -> Endpoi
         return None
     if local.provider != "native" or not (local.local or airgap.is_local_url(local.base_url)):
         return None
+    from brindle.local_setup import memory_problem
+
+    if memory_problem(local):
+        return None
     if not served(local):
         return None
     fallback = endpoint_for(local)
