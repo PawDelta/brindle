@@ -484,7 +484,7 @@ def checkout_for(db: DB, repo_path: str, *, branch: str | None = None,
         from brindle import session_sync
 
         # A new session branch: from origin's default branch as just fetched.
-        git.add_worktree(repo_root, path, branch, session_sync.fresh_start(repo_root)[0])
+        git.add_worktree(repo_root, path, branch, session_sync.fresh_start(repo_root))
         ws = adopt_root(db, str(path))
         from brindle import codemap
         codemap.seed_session(ws.path, ws.repo_root)
@@ -500,7 +500,7 @@ def checkout_for(db: DB, repo_path: str, *, branch: str | None = None,
         # A new session branch starts from origin's default branch as just fetched.
         new = not git.branch_exists(repo_root, branch) and not git.remote_branch_exists(repo_root, branch)
         ws = create(db, repo_path, branch, apply_prefix=False,
-                    start=session_sync.fresh_start(repo_root)[0] if new else None).workspace
+                    start=session_sync.fresh_start(repo_root) if new else None).workspace
     from brindle import codemap
     codemap.seed_session(ws.path, ws.repo_root)
     return ws

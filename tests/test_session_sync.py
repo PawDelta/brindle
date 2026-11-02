@@ -148,23 +148,31 @@ def test_a_squashed_session_pr_syncs_back_once_its_landing_is_known(db, repo, se
     commit(path, "app.py", "v2\n")          # the session carries on editing the same line
     db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, ?, ?)",
                     ("lead", "sess", url, pushed, time.time()))
-    lookups = [None, squash]                # the forge doesn't say at first
+    # The forge doesn't say at first, past the point where the sync stops waiting on it.
+    lookups = [None] * (session_sync.MAX_LANDING_LOOKUPS + 1) + [squash]
     monkeypatch.setattr(workspaces, "pull_request_merged", lambda u, cwd: True)
     monkeypatch.setattr(workspaces, "pull_request_merge_commit", lambda u, cwd: lookups.pop(0))
     monkeypatch.setattr(session_review, "MERGE_POLL_SECONDS", 0.0)
 
     session_review.poll_merged(db)          # merged; how it landed isn't known: nothing merged yet
     assert not contains(path, main) and session_sync.conflict(db, sess.repo_root, "sess") is None
-    session_review.poll_merged(db)
+    for _ in range(session_sync.MAX_LANDING_LOOKUPS + 1):
+        session_review.poll_merged(db)
 
     assert lookups == [] and session_sync.unlanded(db) == []
     assert contains(path, main) and (path / "app.py").read_text() == "v2\n"
 
 
-def test_a_new_session_branch_starts_at_origin_main_not_a_local_main_ahead_of_it(db, repo):
+@pytest.mark.parametrize("reachable", [True, False], ids=["local-main-ahead", "origin-unreachable"])
+def test_a_new_session_branch_starts_only_at_origin_main_as_just_fetched(db, repo, reachable):
     origin = sh("git rev-parse origin/main", repo)
     commit(repo, "local.py", "unpushed\n")   # local main has a commit of its own
+    if not reachable:
+        sh(f"git remote set-url origin {repo.parent / 'gone.git'}", repo)
 
-    created, notes = svc.session_worktree(db, workspaces.adopt_root(db, str(repo)))
-
-    assert sh("git rev-parse HEAD", Path(created.path)) == origin and notes == []
+    if not reachable:
+        with pytest.raises(workspaces.WorkspaceError, match="couldn't fetch origin/main"):
+            svc.session_worktree(db, workspaces.adopt_root(db, str(repo)))
+        return
+    created = svc.session_worktree(db, workspaces.adopt_root(db, str(repo)))
+    assert sh("git rev-parse HEAD", Path(created.path)) == origin

@@ -278,7 +278,7 @@ def _sync_after_merge(db: DB, root_id: str, branch: str | None = None, url: str 
         return
     try:
         if url is None:
-            session_sync.sync(db, ws)
+            session_sync.resume_landing(db, ws)
             return
         row = db.conn.execute("SELECT pushed_sha FROM session_prs WHERE root_id = ? AND branch = ?",
                               (root_id, branch)).fetchone()
