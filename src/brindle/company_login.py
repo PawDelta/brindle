@@ -52,7 +52,8 @@ INSTALL_LINUX = {
     "gcloud": "Linux: `sudo snap install google-cloud-cli --classic` (or https://cloud.google.com/sdk/docs/install)",
     "az": "Linux: `curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash` "
           "(https://learn.microsoft.com/cli/azure/install-azure-cli-linux)",
-    "claude": "with npm on Linux, if that fails with EACCES: `npm config set prefix ~/.local`, then retry (no sudo)",
+    "claude": "with npm on Linux, if that fails with EACCES: `npm config set prefix ~/.local`, "
+              "then run the install command again (no sudo)",
     "codex": NPM_PREFIX_NOTE,
 }
 

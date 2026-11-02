@@ -20,7 +20,9 @@
    progress card (components/EngineUpgrade.tsx); the one terminal that is the
    person's own is the Terminal docked under the main column, a plain shell
    in the open repo (components/TerminalPanel.tsx, shown from the sidebar's
-   status line or ⌃`). The engine banner sits above
+   status line or ⌃`). The app's own update, when one is offered, is a strip
+   at the top of the main column (components/AppUpdateBanner.tsx), set aside
+   into a pill in the sidebar's foot. The engine banner sits above
    the screen when the engine isn't one the app can simply use, or its
    event stream is down (components/EngineBanner.tsx). Before all of it, on
    a first launch, the full-window flow that connects the first provider
@@ -34,6 +36,7 @@ import { checkEngine, type EngineStatus } from "./api/engine";
 import { openExternal, pickFolder as nativePicker, type OpenUrl, type PickFolder } from "./api/open";
 import type { SessionDTO } from "./api/schema";
 import type { About, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from "./api/tauri";
+import { AppUpdateBanner, AppUpdateProvider } from "./components/AppUpdateBanner";
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
 import { Sidebar } from "./components/Sidebar";
@@ -244,9 +247,11 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   const here = useMemo(() => shellPlace(shown, repos ?? [], workspaces, shown.screen === "session" ? sessions[shown.repo]?.find((s) => s.id === shown.root) : null), [shown, repos, workspaces, sessions]);
   return (
     <TerminalProvider client={client} here={here}>
+      <AppUpdateProvider updates={appUpdates}>
       <div className="flex h-full bg-canvas text-ink">
         <Sidebar route={shown} navigate={navigate} refresh={refresh ?? noop} openUrl={openUrl} />
         <div className="relative flex min-w-0 flex-1 flex-col">
+          <AppUpdateBanner openUrl={openUrl} />
           {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have. */}
           {client ? <Banner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} client={client} store={store} /> : <EngineBanner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} />}
           <main className={`relative flex min-h-0 flex-1 flex-col ${fills ? "overflow-hidden" : "gap-s2 overflow-auto p-s3"}`}>
@@ -275,6 +280,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
           <TerminalPanel />
         </div>
       </div>
+      </AppUpdateProvider>
     </TerminalProvider>
   );
 }

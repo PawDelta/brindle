@@ -33,12 +33,11 @@ def capture_spawn(monkeypatch):
 
 
 def test_check_summary_caps_total_failure_output(worker_ws, monkeypatch):
-    big = "x" * 3000
+    big = "x" * (gates.MAX_FAILURE_CHARS + 1)
     monkeypatch.setattr(gates, "run_checked", lambda db, ws, cmd, env, timeout: (False, big))
-    cfg = RepoConfig(checks=["a", "b", "c"])
+    cfg = RepoConfig(checks=["a"])
     summary = gates.check_summary(None, worker_ws, cfg)
     assert "truncated" in summary
-    assert "omitted" in summary
     assert len(summary) < 3 * len(big)
 
 

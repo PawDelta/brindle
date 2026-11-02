@@ -132,3 +132,43 @@ def test_light_background_picks_the_light_palette(monkeypatch):
     pairs.clear()
     watch._styles(None)
     assert pairs[0] == watch.PALETTE_256["accent"]
+
+
+def test_idle_sidebar_ticks_do_no_work(brindle_home, monkeypatch):
+    """An idle minute (30 ticks 2 s apart, a minute rollover, one outside commit) skips quiet ticks."""
+    import collections
+    import time as t
+    from types import SimpleNamespace
+
+    from brindle import watch_costs
+    n, now, seen, db = collections.Counter(), [1_700_000_000 - 1_700_000_000 % 60 + 31.0], [], DB()
+    hit = lambda name, result=None: lambda *a, **k: (n.update([name]), result and result())[1]  # noqa: E731
+    class Scr:
+        timeout = clear = lambda *a: None
+        getmaxyx = lambda self: (30, 60)  # noqa: E731
+
+        def getch(self):
+            seen.append(n["snapshot"])
+            now[0] += watch.REFRESH_SECONDS
+            if len(seen) == 3:  # another process commits
+                with sqlite3.connect(db.path) as other:
+                    other.execute("CREATE TABLE poke (x)")
+            return ord("q") if len(seen) > 30 else -1
+
+    for target, value in {
+        "curses.curs_set": hit("x"), "curses.mousemask": hit("x"), "brindle.watch._styles": lambda bg=None: {},
+        "brindle.watch._start_status": lambda: None, "brindle.watch._cull_in_background": hit("x"),
+        "brindle.watch.DB": hit("db", lambda: db), "brindle.watch.render": hit("render", list),
+        "brindle.watch_costs.local": hit("spend", watch_costs.Local),
+        "brindle.upgrade.InstallWatch": lambda: SimpleNamespace(changed=lambda: False),
+        "brindle.tmux.list_panes": hit("panes", dict), "brindle.view.snapshot": hit("snapshot", list),
+        "brindle.view.autopilot_entry": hit("x"), "brindle.sidebar_logo.viewer": hit("viewer", str),
+        "brindle.watch._paint": hit("paint"),
+        "brindle.watch.time": SimpleNamespace(time=lambda: now[0], localtime=t.localtime,
+                                              strftime=lambda f, s=None: t.strftime(f, s or t.localtime(now[0]))),
+    }.items():
+        monkeypatch.setattr(target, value)
+    watch._loop(Scr(), None)
+    assert n["db"] == 1 and n["paint"] == 2  # one open; first frame + minute rollover
+    assert max(n["snapshot"], n["spend"], n["render"], n["viewer"]) <= 8  # each was 31 before
+    assert seen[2] == seen[1] and seen[3] == seen[2] + 1  # idle: nothing; the commit: a refresh

@@ -237,9 +237,9 @@ def test_a_reported_branch_that_moves_during_its_checks_is_not_dropped(db, repo,
     monkeypatch.setattr(agents, "spawn", lambda db_, ws_, prof, **kw: spawned.append(kw["review_sha"]))
     agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["suite"]))
     if moves == 1:
-        assert spawned == [gates.head(ws)] and db.get_agent("w1").pipeline == "reviewing"
+        assert spawned[-1] == gates.head(ws) and db.get_agent("w1").pipeline == "reviewing"
     else:
-        assert spawned == [] and db.get_agent("w1").pipeline is None
+        assert db.get_agent("w1").pipeline is None
         assert any("needs you" in b and "`feat`" in b for b in drain(db))
 
 
@@ -364,6 +364,41 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_m
     assert [e["agent_id"] for e in bus.tail(db, kinds=("pipeline.escalated",))] == ["w1"]
 
 
+def test_review_alongside_checks_sends_findings_and_failures_in_one_message(db, repo, monkeypatch):
+    """The reviewer starts before the checks finish, and a verdict that lands
+    while they run waits for them: the worker gets the review's findings and
+    the failing checks in one message, so one fix round covers both. A
+    required second review's run for the same report, started late, doesn't
+    send those failures again."""
+    ws = _reported(db, repo, reviewing_since=time.time())
+    sha, sent, reviewers = gates.head(ws), [], []
+    verdicts = iter([(False, "- blocker: off by one"), (True, "lgtm")])
+
+    def spawn(db_, ws_, prof, **kw):
+        reviewers.append(f"rev{len(reviewers)}")
+        add(db, ws, reviewers[-1], "review", prof, parent="boss", review_sha=kw["review_sha"])
+        return db.get_agent(reviewers[-1])
+
+    def checks(db_, ws_, cfg, cancel=None):
+        reviewer, before = db.get_agent(reviewers[-1]), len(sent)   # already reviewing, mid-run
+        approved, text = next(verdicts)
+        db.add_review(ws.id, sha, reviewer.id, approved, text)
+        assert pipeline.on_review(db, reviewer, ws, approved, text)
+        db.update_agent(reviewer.id, result=text, status="done")
+        assert len(sent) == before
+        return "FAIL `true`\nexit 1: boom"
+
+    monkeypatch.setattr(agents, "spawn", spawn)
+    monkeypatch.setattr(gates, "check_summary", checks)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "w1")
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append((to, body)))
+    agents.review_after_checks(db, "boss", ws)
+    agents.review_after_checks(db, "boss", ws, "reviewer", second=True)
+    assert reviewers == ["rev0", "rev1"] and [to for to, _ in sent] == ["w1"]
+    assert "off by one" in sent[0][1] and "boom" in sent[0][1]
+    assert (db.get_agent("w1").pipeline, db.get_agent("w1").pipeline_rounds) == ("fixing", 1)
+
+
 def test_no_duplicate_reviewer_while_the_first_is_still_starting(db, repo, monkeypatch):
     """Live incident: three reviewers on one branch. Check runs for a branch
     don't wait on each other (pipeline.review_run), so a second one reached
@@ -475,3 +510,32 @@ def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypat
     assert entry["review_state"] == state
     [w1] = [a for a in entry["agents"] if a["id"] == "w1"]
     assert watch.awaiting_review(w1, entry) == state
+
+
+@pytest.mark.parametrize("base_file, reused", [
+    ("other.py", True),          # disjoint from the branch's files
+    ("shared.py", False),        # the branch changed it too (a clean merge all the same)
+    ("pyproject.toml", False),   # a check input, disjoint or not
+    pytest.param("web/npm-shrinkwrap.json", False, marks=pytest.mark.variant(
+        "review finding: a nested lockfile not named *.lock / *-lock.*")),
+])
+def test_merge_reuses_checks_only_when_the_base_brought_in_disjoint_files(db, repo, base_file, reused):
+    """A clean sync with the base keeps the branch's passing checks when the
+    base touched none of its files; the check here fails whenever it runs."""
+    (repo / "shared.py").write_text("".join(f"line{i}\n" for i in range(10)))
+    sh("git add shared.py && git commit -qm shared", repo)
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"checks": ["false"]}))
+    workspaces.adopt_root(db, str(repo))
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    path = Path(ws.path)
+    (path / "shared.py").write_text("changed\n" + "".join(f"line{i}\n" for i in range(1, 10)))
+    sh("git commit -qam work", path)
+    db.set_check(ws.id, gates.head(ws), "false", True, "1 passed")
+    target = repo / base_file
+    target.parent.mkdir(exist_ok=True)
+    target.write_text("".join(f"line{i}\n" for i in range(9)) + "base\n" if base_file == "shared.py" else "x = 1\n")
+    sh(f"git add {base_file} && git commit -qm base", repo)
+
+    out = pipeline.merge(db, None, ws)
+    assert out.startswith("Merged") is reused, out

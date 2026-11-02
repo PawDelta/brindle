@@ -17,6 +17,7 @@ from brindle.daemon.app import Deadlines
 from brindle.db import Agent, Workspace
 
 REAL_PROBE = providers._auth_probe      # conftest stubs it for every test
+REAL_LOAD = spawn._load                 # and this one
 
 
 @pytest.fixture
@@ -42,6 +43,56 @@ def _room(monkeypatch, load, level, expected):
     monkeypatch.setattr(spawn, "pressure", lambda: level)
     monkeypatch.setattr(spawn, "_running", 1)
     assert spawn.room() == expected
+
+
+def _a_high_load_average_with_idle_cpus_leaves_room(monkeypatch):
+    """macOS counts throttled runnable threads in the load average: 96 with
+    the CPUs 63% idle once held every check run back."""
+    ticks = iter([(0, 0), (37, 100)])        # (busy, total) ticks: 63% idle between the samples
+    monkeypatch.setattr(spawn, "_load", REAL_LOAD)
+    monkeypatch.setattr(spawn, "_cpu_ticks", lambda: next(ticks))
+    monkeypatch.setattr(spawn, "_sample", None)
+    monkeypatch.setattr(spawn, "WINDOW", 0)
+    monkeypatch.setattr(spawn.os, "getloadavg", lambda: (96.0, 96.0, 96.0))
+    monkeypatch.setattr(spawn, "_cores", lambda: 10)
+    monkeypatch.setattr(spawn, "_running", 1)
+    assert spawn.room() == pytest.approx(10 - 3.7 - 1)
+    assert spawn.no_room() is None
+
+
+def _a_start_whose_room_sample_outlasts_its_deadline_is_refused(monkeypatch):
+    """Sampling the CPU can take a moment; a start admitted after it once ran
+    past its request's deadline (or its stop) and committed the request."""
+    clock = [100.0]
+    monkeypatch.setattr(spawn, "time", type("Clock", (), {"monotonic": staticmethod(lambda: clock[0])}))
+
+    def sample() -> float:              # idle CPUs, but the sample takes 0.2 s
+        clock[0] += 0.2
+        return 0.0
+
+    monkeypatch.setattr(spawn, "_load", sample)
+    monkeypatch.setattr(spawn, "_gated", True)
+    monkeypatch.setattr(spawn, "_running", 1)
+    started: list = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: started.append(argv))
+    with spawn.waits_for_room(), spawn.deadline(0.1) as dl, pytest.raises(spawn.Busy):
+        spawn.action(["true"])
+    assert not started and not dl.committed and spawn.running() == 1
+
+
+def _checks_and_setup_run_at_normal_priority(monkeypatch, tmp_path):
+    """Under the daemon's gate a check run (a forced worker's too) and a
+    setup command once ran under ``taskpolicy -b``: on macOS a vitest check
+    sat runnable at priority 4 with 0% CPU on a mostly idle machine."""
+    from brindle import autopilot, workspaces
+
+    monkeypatch.setattr(spawn, "_gated", True)
+    real = subprocess.Popen
+    started: list = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: started.append(argv) or real(argv, **kw))
+    assert autopilot.run_check("true", str(tmp_path), {}, 30)[0]
+    assert workspaces.run_commands(["true"], str(tmp_path), {}).ok
+    assert started == ["true", ["/bin/sh", "-c", "true"]]
 
 
 def _with_no_room_only_waiting_work_waits_and_a_request_read_starts_at_once(overloaded, repo):
@@ -307,6 +358,9 @@ def _row(scenario, id, why=None, **params):
 
 @pytest.mark.parametrize("scenario, params", [
     _row(_room, "room-pressure-critical", load=2.0, level=4, expected=-1.0),  # nothing but what's running
+    _row(_a_high_load_average_with_idle_cpus_leaves_room, "room-idle-cpu-high-loadavg"),
+    _row(_a_start_whose_room_sample_outlasts_its_deadline_is_refused, "room-sample-past-deadline"),
+    _row(_checks_and_setup_run_at_normal_priority, "normal-priority-checks"),
     _row(_with_no_room_only_waiting_work_waits_and_a_request_read_starts_at_once, "overload-no-room"),
     _row(_past_its_deadline_nothing_starts_even_with_room, "deadline-passed"),
     _row(_a_started_helper_commits_its_request_and_a_started_read_does_not, "subprocess-helper-vs-read",

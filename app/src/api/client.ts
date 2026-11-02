@@ -422,7 +422,13 @@ export interface DocScope {
   can_share?: boolean;
 }
 
-/* A bounded server neighbourhood. Paths are repo-relative code paths. */
+export interface DocSource {
+  kind?: string;
+  ref?: string;
+  session?: string;
+}
+
+/* A library graph or a path neighbourhood. Paths are repo-relative. */
 export interface MapNode {
   id: string;
   kind: "doc" | "path";
@@ -430,6 +436,10 @@ export interface MapNode {
   doc_id?: string;
   path?: string;
   paths?: string[];
+  source?: DocSource;
+  created_by?: string;
+  scope?: DocScope;
+  created_at?: number;
 }
 
 export interface MapEdge {
@@ -1368,7 +1378,7 @@ export class DaemonClient {
     return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
   }
 
-  knowledgeMap(repo: string, scope: DocScope, paths: string[]) {
+  knowledgeMap(repo: string, scope: DocScope, paths: string[] = []) {
     return this.get<KnowledgeMap>("/analysis-docs/map", { repo, scope_kind: scope.kind, scope_id: scope.id, paths: JSON.stringify(paths), depth: 1 });
   }
 

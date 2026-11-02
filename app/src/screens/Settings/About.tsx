@@ -28,7 +28,7 @@ function ago(at: number): string {
 }
 
 /* `status`: the shell's, as the store keeps it (store/appUpdates.ts). */
-export function About({ read, updates, status = null }: { read?: () => Promise<AboutInfo>; updates?: AppUpdates; status?: AppUpdateStatus | null }) {
+export function About({ read, updates, status = null, engine }: { read?: () => Promise<AboutInfo>; updates?: AppUpdates; status?: AppUpdateStatus | null; engine?: string }) {
   const [about, setAbout] = useState<AboutInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(null);
@@ -49,7 +49,7 @@ export function About({ read, updates, status = null }: { read?: () => Promise<A
     run("checking", async () => {
       // The shell announces the status too, which the store keeps.
       const s = await u.check();
-      if (!s.pending) setChecked("This is the latest version.");
+      if (!s.pending && !s.available) setChecked("This is the latest version.");
     });
   useEffect(() => {
     if (!read) return;
@@ -75,15 +75,22 @@ export function About({ read, updates, status = null }: { read?: () => Promise<A
         <span className="text-xs text-ink-3">{about || status ? `brindle ${about?.version ?? status?.version}` : "brindle"}</span>
       </header>
       <div className={`${card} flex flex-col divide-y divide-line`}>
+        {about && engine && (
+          <p className="px-s2 py-s2 text-xs text-ink-3" data-testid="about-build">
+            Build: app {about.version}, engine {engine}
+          </p>
+        )}
         {updates && status?.automatic && (
           <div className="flex flex-col gap-1 px-s2 py-s2" data-testid="about-update">
             <div className="flex flex-wrap items-center gap-s2">
               <span className="flex flex-col">
-                <span className="text-sm font-medium">{status.pending ? `brindle ${status.pending} is installed` : `Version ${status.version}`}</span>
+                <span className="text-sm font-medium">{status.pending ? `brindle ${status.pending} is installed` : `brindle ${status.version}`}</span>
                 <span className="text-xs text-ink-3">
                   {status.pending
                     ? "It starts the next time brindle opens."
-                    : status.last_checked
+                    : status.available
+                      ? `brindle ${status.available.version} is available: Update now from the banner or the sidebar.`
+                      : status.last_checked
                       ? `Last checked ${ago(status.last_checked)}`
                       : "Not checked yet"}
                 </span>

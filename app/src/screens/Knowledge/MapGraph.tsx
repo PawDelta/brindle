@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { DecisionDTO } from "../../api/schema";
-import type { KbSource, KnowledgeMap, MapEdge, MapNode } from "../../api/client";
+import type { DocScope, KbSource, KnowledgeMap, MapEdge, MapNode } from "../../api/client";
 
 export type LocalNode = { id: string; kind: "decision"; title: string; decision: DecisionDTO } | { id: string; kind: "imported"; title: string; source: KbSource; path: string };
 export type GraphNode = MapNode | LocalNode;
@@ -86,18 +86,41 @@ function containsPath(folder: string, path: string): boolean {
   return !folder || folder === path || path.startsWith(`${folder}/`);
 }
 
-export function joinLocal(map: KnowledgeMap, decisions: DecisionDTO[], sources: KbSource[], repo: string): { nodes: GraphNode[]; edges: MapEdge[] } {
+export function joinLocal(
+  map: KnowledgeMap,
+  decisions: DecisionDTO[],
+  sources: KbSource[],
+  repo: string,
+  filter: { scope: DocScope; paths: string[] },
+): { nodes: GraphNode[]; edges: MapEdge[] } {
   const nodes: GraphNode[] = [...map.nodes];
   const edges = [...map.edges];
+  // Local records have no team or organization membership.
+  if (filter.scope.kind !== "user") return { nodes, edges };
+  const selected = filter.paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
+  const nodePaths = (node: MapNode) => [...(node.paths ?? []), ...(node.path ? [node.path] : [])]
+    .map((p) => relative(p, repo))
+    .filter((p): p is string => p !== null);
+  // An empty filter is the whole scope: every concrete path in the map is its own area.
+  const areas = selected.length ? selected : map.nodes.flatMap(nodePaths);
+  const touchesArea = (path: string, area: string) => containsPath(area, path) || decisionMatches(area, path) || decisionMatches(`${area}/**`, path);
+  // A document in the neighbourhood may mention paths outside the chosen area.
+  // Only paths inside that area may connect a local record to the document.
+  const filteredPaths = (node: MapNode, scoped = areas) => nodePaths(node)
+    .filter((p) => scoped.some((area) => touchesArea(p, area)));
   const local: { node: LocalNode; paths: string[] }[] = [
     ...decisions.map((d) => ({ node: { id: `local:decision:${d.id}`, kind: "decision" as const, title: d.topic, decision: d }, paths: d.scope })),
   ];
   for (const { node, paths } of local) {
     const scopes = paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
-    const matches = map.nodes.filter((n) => [...(n.paths ?? []), ...(n.path ? [n.path] : [])].some((p) => {
-      const path = relative(p, repo);
-      return path !== null && scopes.some((scope) => decisionMatches(scope, path));
-    }));
+    // A concrete path inside the area is a witness even for wildcard decisions.
+    // A broad server glob still needs the local scope to intersect that area.
+    const matches = map.nodes.filter((n) => areas.some((area) => scopes.some((scope) =>
+      filteredPaths(n, [area]).some((path) => {
+        const concrete = !/[*?\[]/.test(path);
+        return (concrete || touchesArea(scope, area)) && decisionMatches(scope, path);
+      }),
+    )));
     if (!matches.length) continue;
     nodes.push(node);
     for (const match of matches) edges.push({ source: node.id, target: match.id, kind: "shared_path" });
@@ -111,11 +134,7 @@ export function joinLocal(map: KnowledgeMap, decisions: DecisionDTO[], sources: 
     const node: LocalNode = { id: `local:source:${source.id}`, kind: "imported", title: source.scope.replace(/\/+$/, "").split("/").at(-1) || source.scope, source, path: source.scope };
     let joined = false;
     for (const server of map.nodes) {
-      const paths = new Set([...(server.paths ?? []), ...(server.path ? [server.path] : [])]);
-      const matches = [...paths].some((raw) => {
-        const path = relative(raw, repo);
-        return path !== null && containsPath(scope, path);
-      });
+      const matches = filteredPaths(server).some((path) => containsPath(scope, path));
       if (!matches) continue;
       if (!joined) { nodes.push(node); joined = true; }
       edges.push({ source: node.id, target: server.id, kind: "shared_path" });
@@ -356,6 +375,7 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
   };
 
   const lit = active ? near.get(active) ?? new Set<string>() : null;
+  const shown = active ? at.get(active) : undefined;
   return (
     <div
       ref={frame}
@@ -389,15 +409,17 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
             </g>;
           })}
         </svg>
-        {layout.nodes.map((p) => {
+        {layout.nodes.map((p, i) => {
           const kind = KINDS[p.node.kind];
           const dim = lit !== null && p.node.id !== active && !lit.has(p.node.id);
+          const about = provenance(p.node);
           return <button
             key={p.node.id}
             type="button"
             data-node={p.node.id}
             aria-label={`${kind.label}: ${p.full}`}
-            title={p.full}
+            aria-describedby={about.length ? `${marker}-n${i}` : undefined}
+            title={[p.full, ...about].join("\n")}
             onClick={() => onOpen(p.node)}
             onMouseEnter={() => setActive(p.node.id)}
             onMouseLeave={() => setActive((a) => (a === p.node.id ? null : a))}
@@ -408,9 +430,15 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
           >
             <span aria-hidden className={`shrink-0 ${kind.mark}`} />
             <span className="min-w-0 truncate">{p.label}</span>
+            {about.length > 0 && <span id={`${marker}-n${i}`} className="sr-only">{about.join(" · ")}</span>}
           </button>;
         })}
       </div>
+      {shown && <div className="pointer-events-none absolute left-2 top-2 flex max-w-[min(360px,calc(100%-64px))] flex-col gap-0.5 rounded-md border border-line bg-canvas-2/95 px-2.5 py-1.5 text-xs">
+        <span className="break-words font-medium text-ink">{shown.full}</span>
+        <span className="text-ink-3">{KINDS[shown.node.kind].label}</span>
+        {provenance(shown.node).map((line, i) => <span key={i} className="break-words text-ink-3">{line}</span>)}
+      </div>}
       <div className="absolute right-2 top-2 flex flex-col gap-1">
         <button type="button" aria-label="Zoom in" title="Zoom in" className={control} onClick={() => zoomAt(1.25, size.w / 2, size.h / 2)}>+</button>
         <button type="button" aria-label="Zoom out" title="Zoom out" className={control} onClick={() => zoomAt(0.8, size.w / 2, size.h / 2)}>−</button>
@@ -428,4 +456,22 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
       </div>
     </div>
   );
+}
+
+/* Where a node came from: shown in the detail card, and read out after its name. */
+function provenance(node: GraphNode): string[] {
+  const date = (seconds?: number) => {
+    const value = seconds === undefined ? null : new Date(seconds * 1000);
+    return value && Number.isFinite(value.getTime()) ? value.toISOString().slice(0, 10) : "Date unrecorded";
+  };
+  const scope = (kind?: string) => kind === "user" || kind === "personal" ? "Personal" : kind === "group" || kind === "team" ? "Team" : kind === "org" ? "Org" : kind || "Scope unrecorded";
+  if (node.kind === "path") return [];
+  if (node.kind === "decision") return [node.decision.author_session ? `Session ${node.decision.author_session}` : "Session/author unrecorded", `Local decision · ${date(node.decision.created_at)}`];
+  if (node.kind === "imported") return [node.path, `Imported on this device · ${scope(node.source.visibility)} · ${date(node.source.added_at)}`];
+  const source = node.source;
+  return [
+    [source?.ref, source?.session && `Session ${source.session}`].filter(Boolean).join(" · ") || "Session/branch unrecorded",
+    node.created_by || "Author/agent unrecorded",
+    `${scope(node.scope?.kind)}${node.scope && node.scope.kind !== "user" ? ` ${node.scope.name || node.scope.id}` : ""} · ${date(node.created_at)}`,
+  ];
 }

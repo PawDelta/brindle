@@ -1,15 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createAppStore } from "./store";
 import { startSync } from "./sync";
 import { FakeDaemon, flush } from "../test/fakeDaemon";
-import { question, REPO, root, worker } from "../test/fixtures";
+import { question, waiting, REPO, root, worker } from "../test/fixtures";
 
 function setup() {
   const daemon = new FakeDaemon({ workspaces: [root, worker], inbox: [question] });
   const store = createAppStore();
-  const sync = startSync({ client: daemon.client(), store, repo: REPO, connect: daemon.connect, backoff: () => 0 });
+  const client = daemon.client();
+  const sync = startSync({ client, store, repo: REPO, connect: daemon.connect, backoff: () => 0 });
   const snapshots = () => daemon.requests.filter((r) => r.path === "/snapshot").length;
-  return { daemon, store, sync, snapshots };
+  return { daemon, client, store, sync, snapshots };
 }
 
 describe("startSync", () => {
@@ -26,17 +27,36 @@ describe("startSync", () => {
     const { daemon, store, sync, snapshots } = setup();
     await flush();
     await sync.idle();
-    daemon.publish("agent.status", { repo_root: REPO, agent_id: "w1", payload: { status: "waiting" } });
+    store.dispatch({ type: "snapshot", workspaces: [root, worker], inbox: [waiting] });
+    daemon.data.inbox = [];
+    daemon.publish("agent.status", { repo_root: REPO, agent_id: "w1", payload: { status: "processing" } });
     await flush();
-    expect(snapshots()).toBe(1);
-    expect(store.getState().workspaces[1].agents?.[0].status).toBe("waiting");
+    await sync.idle();
+    expect(store.getState().inbox).toEqual([]);
+    expect(snapshots()).toBe(2);
 
     daemon.data.inbox = [];
     daemon.publish("agent.reported", { repo_root: REPO, agent_id: "w1" });
     await flush();
     await sync.idle();
-    expect(snapshots()).toBe(2);
+    expect(snapshots()).toBe(3);
     expect(store.getState()).toMatchObject({ stale: false, inbox: [], lastEventId: 2 });
+  });
+
+  it("runs a refresh requested during a fetch after that fetch ends", async () => {
+    const { daemon, client, store, sync } = setup();
+    await flush();
+    await sync.idle();
+    let finish!: (items: typeof daemon.data.inbox) => void;
+    vi.spyOn(client, "inbox").mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const first = sync.refresh();
+    daemon.data.inbox = [];
+    void sync.refresh();
+    finish([question]);
+    await first;
+    await sync.idle();
+    expect(store.getState().inbox).toEqual([]);
+    sync.stop();
   });
 
   it("after a drop, resumes from the last event and takes a fresh snapshot", async () => {
@@ -49,7 +69,7 @@ describe("startSync", () => {
     await flush();
     await sync.idle();
     expect(daemon.sockets.map((s) => s.since)).toEqual([0, 1]);
-    expect(snapshots()).toBe(2);
+    expect(snapshots()).toBe(3);
     expect(store.getState().connection).toBe("open");
     sync.stop();
     expect(store.getState().connection).toBe("closed");
