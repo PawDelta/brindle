@@ -1434,6 +1434,7 @@ mod tests {
             ("0.6.0+release.42.0123456789ab", "0.6.0", false),
             ("0.6.0+release.42.0123456789ab", "0.6.1", true),
             ("0.1.0", "0.1.0-rc.10", false),
+            ("0.2.13", "0.5.11", true), // the move to one version number
         ] {
             assert_eq!(newer(&v(current), &v(remote)), wanted, "{current} -> {remote}");
         }

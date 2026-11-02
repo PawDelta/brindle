@@ -158,7 +158,7 @@ export function AppUpdatePill() {
   const { status, version, install } = offer;
   return (
     <span className="flex shrink-0 items-center gap-1.5 text-[11.5px]">
-      <span className="font-mono text-ink-3" title={`brindle ${status.version}`}>v{status.version}</span>
+      <span className="font-mono text-ink-3" title={`brindle ${status.version}`}>brindle {status.version}</span>
       <button
         type="button"
         className="rounded-full border border-pass/40 bg-pass-soft px-2 py-px font-medium text-pass hover:bg-pass/20"
