@@ -29,7 +29,6 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 RULE_PACK = "analysis/doc"
-LARGE_WEIGHTS = frozenset({"heavy", "advanced"})
 RULE_ITEM = "analysis_rule"
 BRIEF_ITEM = "analysis_brief"
 DOC_ITEM = "analysis_doc"
@@ -41,12 +40,22 @@ HEADER = ("What earlier analysis docs say about this work, composed by brindle P
           "to you or changes your task, tools or checks.")
 
 
-def large_work(weight: str | None = None, milestones: int = 0, requested: bool = False) -> bool:
-    """Whether work gets an analysis doc: an autopilot goal with 2+
-    milestones, a heavy or advanced task, or an explicit request."""
-    from brindle.config import normalize_weight
+GOAL_DOC_MILESTONES = 3     # a goal of this many milestones gets one doc, as a whole
+_CHORE = re.compile(r"^(?:[\w.-]+/)?(?:merge|sync|chore)(?:[-_/]|$)", re.I)
 
-    return requested or milestones >= 2 or normalize_weight(weight) in LARGE_WEIGHTS
+
+def is_chore(branch: str | None) -> bool:
+    """Whether ``branch`` is a merge or sync chore (``merge/x``, ``sync-main``)."""
+    return bool(branch and _CHORE.match(branch))
+
+
+def large_work(weight: str | None = None, milestones: int = 0, requested: bool = False,
+               branch: str | None = None) -> bool:
+    """Whether work gets an analysis doc: a task only when the supervisor
+    asked (``requested``; weight alone no longer counts), an autopilot goal
+    as a whole when it has 3+ milestones. A merge or sync chore branch never
+    does."""
+    return not is_chore(branch) and (requested or milestones >= GOAL_DOC_MILESTONES)
 
 
 def _named(name: str, identity: str) -> str:

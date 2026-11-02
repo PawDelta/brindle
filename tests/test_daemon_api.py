@@ -946,7 +946,7 @@ def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, m
     monkeypatch.setattr(agents, "_launch", lambda *a, **kw: None)
     monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
     worker = agents.spawn(db, db.get_workspace(seeded["ws"]), "developer", prompt="task", mode="assign",
-                          parent_id="r1", weight="heavy")
+                          parent_id="r1", weight="heavy", analysis_doc=True)
     assert (analysis_brief.DOC_ITEM, "worker-cited", "4") in knowledge.receipt(db, worker.id)
     knowledge.record_receipt(db, "other-session", [(analysis_brief.DOC_ITEM, "other-doc", "1")])
 

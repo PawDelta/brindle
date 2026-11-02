@@ -396,8 +396,8 @@ def spawn(
     as, kept on the agent so the owner's per-kind effort and instructions apply
     from the first launch. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``; their brief carries the
-    accepted decisions covering ``files``, and for large work (heavy/advanced,
-    or ``analysis_doc`` asked for) the analysis-doc rule and brief. An
+    accepted decisions covering ``files``, and when ``analysis_doc`` is asked
+    for (never on a merge or sync chore branch) the analysis-doc rule and brief. An
     interactive root always drives toward a goal (see brindle.autopilot);
     with ``claim_goals`` it claims a hand-written ``.brindle/goals.md``."""
     from brindle import autopilot as pilot
@@ -432,7 +432,7 @@ def spawn(
 
         analysis = analysis_brief.brief_context(
             db, ws.repo_root, ws.branch, agent_id, prompt or "", files,
-            large=analysis_brief.large_work(weight, requested=analysis_doc),
+            large=analysis_brief.large_work(requested=analysis_doc, branch=ws.branch),
             **({"session_id": session_root} if session_root else {}))
     if not provider.launches_process:
         if mode not in ("handoff", "assign"):
