@@ -8,6 +8,7 @@ import dataclasses
 import json
 import logging
 import os
+import posixpath
 import time
 from collections.abc import Awaitable, Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -776,15 +777,36 @@ def analysis_doc_map(db: DB, request: Request) -> Any:
     listed = docs_api("GET", "/analysis-docs", repo=_repo(request), query=query)
     docs = {d["doc_id"]: {**d, "scope": d.get("scope") or scope}
             for d in listed.get("docs") or [] if isinstance(d, dict) and isinstance(d.get("doc_id"), str)}
+
+    def doc_paths(doc: dict) -> list[str]:
+        declared = doc.get("paths") or []
+        mentioned = (doc.get("mentions") or {}).get("files") or []
+        return list(dict.fromkeys(posixpath.normpath(p.strip()) for p in [*declared, *mentioned]
+                                  if isinstance(p, str) and p.strip()))
+
     if paths:
         got = docs_api("GET", "/analysis-docs/map", repo=_repo(request),
                        query={**query, "paths": ",".join(paths), "depth": "1"})
-        return {**got, "nodes": [{**docs.get(n.get("doc_id", n["id"]), {}), **n}
-                                  if n.get("kind") == "doc" else n for n in got.get("nodes") or []]}
+        nodes = []
+        for node in got.get("nodes") or []:
+            if node.get("type") == "doc":
+                doc_id = node.get("doc_id", node["id"])
+                doc = docs.get(doc_id, {})
+                nodes.append({**node, **doc, "id": node["id"], "doc_id": doc_id,
+                              "kind": "doc", "title": node.get("label") or doc.get("title"),
+                              "paths": doc_paths(doc)})
+            elif node.get("type") == "path":
+                path = posixpath.normpath(node["label"].strip())
+                nodes.append({**node, "kind": "path", "title": path, "path": path})
+        # Topics are not displayed by MapGraph; omit their edges as well.
+        ids = {n["id"] for n in nodes}
+        edges = [{"source": e["from"], "target": e["to"], "kind": e["kind"]}
+                 for e in got.get("edges") or [] if e.get("from") in ids and e.get("to") in ids]
+        return {"nodes": nodes, "edges": edges}
     nodes, edges = [], []
     seen_paths = set()
     for doc_id, doc in docs.items():
-        files = list(dict.fromkeys((doc.get("mentions") or {}).get("files") or []))
+        files = doc_paths(doc)
         nodes.append({**doc, "id": doc_id, "kind": "doc", "paths": files})
         for path in files:
             path_id = f"path:{path}"

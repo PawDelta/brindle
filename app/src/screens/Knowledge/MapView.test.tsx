@@ -16,7 +16,7 @@ it("loads all docs automatically with sources, filters by path, and opens each n
     const path = url.pathname.replace(/^\/v1/, "");
     requests.push({ path, query: Object.fromEntries(url.searchParams), method: init?.method });
     const body = path === "/analysis-docs/scopes" ? { scopes }
-      : path === "/analysis-docs/map" ? { nodes: [{ id: "p", kind: "path", path: "src/cache/index.ts" }, { id: "d", kind: "doc", doc_id: "doc1", title: "Cache design", paths: ["src/cache/index.ts"], source: { kind: "task", ref: "feat/cache", session: "session-1", agent: "agent-1" }, author: "Hannah", scope: scopes.find((s) => s.id === url.searchParams.get("scope_id")), created_at: 1793610000 }, { id: "old", kind: "doc", title: "Old design" }], edges: [{ source: "d", target: "old", kind: "supersedes" }] }
+      : path === "/analysis-docs/map" ? { nodes: [{ id: "p", kind: "path", path: "src/cache/index.ts" }, { id: "d", kind: "doc", doc_id: "doc1", title: "Cache design", paths: ["src/cache/index.ts"], source: { kind: "task", ref: "feat/cache", session: "session-1" }, created_by: "user-hannah", scope: scopes.find((s) => s.id === url.searchParams.get("scope_id")), created_at: 1793610000 }, { id: "old", kind: "doc", title: "Old design" }], edges: [{ source: "d", target: "old", kind: "supersedes" }] }
       : path === "/analysis-docs/doc1" ? { id: "doc1", title: "Cache design", files: [{ name: "design.md", md: "# Durable cache" }] } : null;
     if (!body) throw new Error(`Unexpected request: ${path}`);
     return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
@@ -32,7 +32,7 @@ it("loads all docs automatically with sources, filters by path, and opens each n
   await screen.findByRole("option", { name: "Mine" });
   const initialDoc = await screen.findByRole("button", { name: /Cache design/ });
   expect(requests.at(-1)?.query.paths).toBe("[]");
-  expect(initialDoc.textContent).toMatch(/feat\/cache.*session-1.*Hannah.*agent-1.*Personal.*2026-11-02/);
+  expect(initialDoc.textContent).toMatch(/feat\/cache.*session-1.*user-hannah.*Personal.*2026-11-02/);
   fireEvent.change(screen.getByLabelText("Code paths"), { target: { value: "src/cache" } });
   fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
   await screen.findByRole("button", { name: /Cache design/ });

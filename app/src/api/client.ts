@@ -426,9 +426,6 @@ export interface DocSource {
   kind?: string;
   ref?: string;
   session?: string;
-  branch?: string;
-  author?: string;
-  agent?: string;
 }
 
 /* A library graph or a path neighbourhood. Paths are repo-relative. */
@@ -440,7 +437,7 @@ export interface MapNode {
   path?: string;
   paths?: string[];
   source?: DocSource;
-  author?: string;
+  created_by?: string;
   scope?: DocScope;
   created_at?: number;
 }

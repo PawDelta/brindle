@@ -135,8 +135,8 @@ function provenance(node: GraphNode): string[] {
   if (node.kind === "imported") return [node.path, `Imported on this device · ${scope(node.source.visibility)} · ${date(node.source.added_at)}`];
   const source = node.source;
   return [
-    [source?.branch || source?.ref, source?.session && `Session ${source.session}`].filter(Boolean).join(" · ") || "Session/branch unrecorded",
-    [node.author || source?.author, source?.agent].filter(Boolean).join(" · ") || "Author/agent unrecorded",
+    [source?.ref, source?.session && `Session ${source.session}`].filter(Boolean).join(" · ") || "Session/branch unrecorded",
+    node.created_by || "Author/agent unrecorded",
     `${scope(node.scope?.kind)}${node.scope && node.scope.kind !== "user" ? ` ${node.scope.name || node.scope.id}` : ""} · ${date(node.created_at)}`,
   ];
 }

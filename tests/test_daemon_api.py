@@ -827,9 +827,13 @@ def test_doc_map_proxies_only_a_neighbourhood_without_caching(brindle_home, monk
         url = urlsplit(path)
         calls.append((method, url.path, parse_qs(url.query), body))
         if url.path == "/analysis-docs":
-            return {"docs": [{"doc_id": "d", "source": {"ref": "feat/cache"}}]}
-        return {"nodes": [{"id": str(len(calls) // 2), "kind": "path", "path": "src/cache"},
-                          {"id": "d", "kind": "doc"}], "edges": []}
+            return {"docs": [{"doc_id": "d", "source": {"kind": "task", "ref": "feat/cache"},
+                              "created_by": "u1", "paths": ["src/cache"]}]}
+        return {"nodes": [{"id": str(len(calls) // 2), "type": "path", "label": "src/cache"},
+                          {"id": "d", "type": "doc", "kind": "feature", "label": "Cache design"},
+                          {"id": "topic:cache", "type": "topic", "label": "cache"}],
+                "edges": [{"from": "d", "to": str(len(calls) // 2), "kind": "mentions"},
+                          {"from": "d", "to": "topic:cache", "kind": "topic"}]}
 
     monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(sub="u1"))
     monkeypatch.setattr(analysis_docs, "api", api)
@@ -840,7 +844,11 @@ def test_doc_map_proxies_only_a_neighbourhood_without_caching(brindle_home, monk
     for version in ("1", "2"):
         code, body = _get("/v1/analysis-docs/map", AUTH, urlencode(query | {"local_decisions": "private"}))
         assert code == 200 and body["nodes"][0]["id"] == version
-        assert body["nodes"][1]["source"] == {"ref": "feat/cache"}
+        assert [(n["kind"], n["title"]) for n in body["nodes"]] == [("path", "src/cache"), ("doc", "Cache design")]
+        assert body["nodes"][0]["path"] == "src/cache"
+        assert body["nodes"][1]["source"] == {"kind": "task", "ref": "feat/cache"}
+        assert body["nodes"][1]["created_by"] == "u1"
+        assert body["edges"] == [{"source": "d", "target": version, "kind": "mentions"}]
     upstream = query | {"paths": "src/cache,src/db"}       # the server splits its list on commas
     assert calls == [("GET", "/analysis-docs", {k: [query[k]] for k in ("scope_kind", "scope_id")}, None),
                      ("GET", "/analysis-docs/map", {k: [v] for k, v in upstream.items()}, None)] * 2
@@ -855,9 +863,10 @@ def test_doc_map_whole_scope_uses_list_with_provenance_and_connections(brindle_h
     from brindle.pro import analysis_docs
 
     calls = []
-    source = {"kind": "task", "ref": "feat/cache", "session": "session-1", "agent": "agent-1"}
-    doc = {"doc_id": "d1", "title": "Cache", "source": source, "author": "Hannah",
+    source = {"kind": "task", "ref": "feat/cache", "session": "session-1"}
+    doc = {"doc_id": "d1", "title": "Cache", "source": source, "created_by": "u1",
            "created_at": 123, "scope": {"kind": "group", "id": "t1"},
+           "paths": ["./src/cache.py", "src/declared.py"],
            "mentions": {"files": ["src/cache.py"]}, "supersedes": ["d2"], "related": ["absent"]}
 
     def api(method, path, body=None, **kw):
@@ -872,10 +881,10 @@ def test_doc_map_whole_scope_uses_list_with_provenance_and_connections(brindle_h
     code, body = _get("/v1/analysis-docs/map", AUTH, urlencode(query))
     assert code == 200
     nodes = {n["id"]: n for n in body["nodes"]}
-    assert nodes["d1"] == {**doc, "id": "d1", "kind": "doc", "paths": ["src/cache.py"]}
+    assert nodes["d1"] == {**doc, "id": "d1", "kind": "doc", "paths": ["src/cache.py", "src/declared.py"]}
     assert nodes["d2"]["scope"] == {"kind": "group", "id": "t1"}
     assert {tuple(e.values()) for e in body["edges"]} == {
-        ("d1", "path:src/cache.py", "mentions"), ("d1", "d2", "supersedes")}
+        ("d1", "path:src/cache.py", "mentions"), ("d1", "path:src/declared.py", "mentions"), ("d1", "d2", "supersedes")}
     assert calls == [("/analysis-docs", {k: [v] for k, v in query.items()})]
     monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: (_ for _ in ()).throw(RuntimeError("no plan")))
     assert _get("/v1/analysis-docs/map", AUTH, urlencode(query))[0] == 402
