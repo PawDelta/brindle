@@ -40,6 +40,7 @@ def test_brief_only_for_large_work(weight, plan, db, backend, tmp_path):
     # Longer than any cap, with the usual fence markers inside: it must arrive whole and as is.
     block = "\n".join([*knowledge._FENCE, "x" * 20000, "final qualification "])
     backend.routes["POST /analysis-docs/brief"] = [(200, {"block": block, "cited": [{"doc_id": "d1", "version": 3}]})]
+    backend.routes["GET /me/analysis-docs/settings"] = [(200, {"switches": {}})]   # assist on by default
     login_as(backend, credentials.default_store(),
              features=("analysis_docs",) if plan == "pro" else ("learning",))
     repo = str(tmp_path / "repo")
@@ -89,6 +90,7 @@ def test_fresh_resume_gives_the_rule_again(db, boss, monkeypatch, tmp_path):
 def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, boss, backend, monkeypatch):
     monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
     backend.routes["POST /analysis-docs/brief"] = [(200, {"block": "known: the cache", "cited": []})]
+    backend.routes["GET /me/analysis-docs/settings"] = [(200, {"switches": {}})]
     monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, *a: backend.request(*a))
     login_as(backend, credentials.default_store(), features=("analysis_docs",))
     db.add_autopilot("boss")
@@ -100,3 +102,24 @@ def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, bo
     db.update_autopilot("boss", audit_sha="abc123")
     out = autopilot.record_audit(db, "boss", True, "all there")
     assert f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in out
+
+
+@pytest.mark.parametrize("entry, airgapped", [("task", False), ("goal", False), ("review", False), ("task", True)])
+def test_nothing_is_sent_while_assist_is_off_or_air_gapped(entry, airgapped, db, boss, backend, monkeypatch):
+    from brindle import airgap
+
+    backend.routes["POST /analysis-docs/brief"] = [(200, {"block": "known: the cache", "cited": []})]
+    backend.routes["GET /me/analysis-docs/settings"] = [(200, {"switches": {} if airgapped else {"assist": "off"}})]
+    monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, *a: backend.request(*a))
+    monkeypatch.setattr(airgap, "enabled", lambda cfg=None: airgapped)
+    login_as(backend, credentials.default_store(), features=("analysis_docs",))
+    client = auth.Client(None, backend)
+    if entry == "task":
+        out = ab.brief_context(db, boss.repo_root, "feat/x", "a1", "speed up the cache", [], large=True, client=client)
+        assert FOLDER in out and "known: the cache" not in out
+    elif entry == "goal":
+        db.add_autopilot("boss")
+        autopilot.set_goal(db, "boss", "Settings page", [("API", "true", None), ("UI", "true", None)])
+    else:
+        assert ab.review_context(db, boss.repo_root, "speed up the cache", ["a.py"], client=client) == ("", [])
+    assert "POST /analysis-docs/brief" not in backend.paths()

@@ -7,7 +7,8 @@ a goal's supervisor gets it when the completion audit approves
 (:func:`doc_rule`). With the ``analysis_docs`` entitlement the brief also
 gains the server's finished ``POST /analysis-docs/brief`` block
 (:func:`server_brief`), inserted verbatim and fenced as untrusted reference
-data. Without it (or in air-gap mode) nothing is sent, and the repo's docs
+data. Without it, in air-gap mode, or with the ``assist`` switch off
+(``brindle docs off --switch assist``; on by default) nothing is sent, and the repo's docs
 folder is added as a Knowledge folder source so the local search finds the
 docs. A task's context receipt records what its brief got: the rule
 (RULE_ITEM, so a fresh restart gives it again), the server's brief and the
@@ -102,7 +103,14 @@ def _brief(task_text: str, paths: list[str] | None, client=None, store=None) -> 
     ent = _entitled(store)
     if ent is None:
         return "", []
-    scopes = [{"kind": "user", "id": ent.sub}]
+    try:       # the person's ``assist`` switch (org policy included); unreadable counts as off
+        assist = analysis_docs.resolve_switch(
+            "assist", analysis_docs.fetch_switches(client, store), store=store)
+    except Exception:  # noqa: BLE001 - fail closed: send nothing
+        assist = False
+    if not assist:
+        return "", []
+    scopes =[{"kind": "user", "id": ent.sub}]
     if "analysis_docs_team" in ent.features:        # and every group or org scope the person reads
         listed = analysis_docs.api("GET", "/analysis-docs/scopes", client=client, store=store).get("scopes")
         scopes += [{"kind": s["kind"], "id": s["id"]} for s in listed or []
