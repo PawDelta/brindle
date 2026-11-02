@@ -155,7 +155,7 @@ export async function startRig(origin: string, cols = 120, rows = 36): Promise<R
   execFileSync("cargo", ["build", "--quiet", "--example", "pty_ws", "--manifest-path", MANIFEST], { stdio: "inherit" });
   // In the app's environment: launchd starts it with no locale (no LANG, no LC_*), and so its tmux commands and client.
   const appEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "LANG" && !k.startsWith("LC_")));
-  const bridge: ChildProcess = spawn(join(DESKTOP, "src-tauri/target/debug/examples/pty_ws"), [origin, server], { stdio: ["ignore", "pipe", "inherit"], env: { ...appEnv, TMUX: "" } });
+  const bridge: ChildProcess = spawn(join(process.env.CARGO_TARGET_DIR ?? join(DESKTOP, "src-tauri/target"), "debug/examples/pty_ws"), [origin, server], { stdio: ["ignore", "pipe", "inherit"], env: { ...appEnv, TMUX: "" } });
   const listening = await new Promise<string>((ok, fail) => {
     const lines = createInterface({ input: bridge.stdout! });
     lines.on("line", (line) => line.startsWith("pty_ws listening") && ok(line));

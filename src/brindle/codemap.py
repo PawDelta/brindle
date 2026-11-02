@@ -247,13 +247,39 @@ def seed_session(checkout: str | Path, repo_root: str | None = None) -> bool:
     with _refresh_lock:
         if path.is_file():
             return False
-        path.parent.mkdir(parents=True, exist_ok=True)
+        out = path.parent
+        if out.is_symlink() and not out.exists():
+            out.unlink()   # the shared folder went away (pruned): link afresh
+        # One graph per repo: a session checkout's graphify-out is a link to
+        # the repo's shared one rather than a copy of the graph and its cache.
+        # A checkout that already has a folder of its own keeps it.
+        if not os.path.lexists(out) and os.path.realpath(checkout_str) != os.path.realpath(repo_root):
+            out = shared_out(repo_root)
+        out.mkdir(parents=True, exist_ok=True)
         cache = Path(repo_root) / GRAPH.parent / "cache"
-        if cache.is_dir() and cache.resolve() != (path.parent / "cache").resolve():
-            shutil.copytree(cache, path.parent / "cache", dirs_exist_ok=True)
-        shutil.copy2(stored, path)
+        if cache.is_dir() and cache.resolve() != (out / "cache").resolve() and not (out / "cache").exists():
+            shutil.copytree(cache, out / "cache", dirs_exist_ok=True)
+        if not (out / GRAPH.name).is_file():
+            shutil.copy2(stored, out / GRAPH.name)
+        if out != path.parent:
+            from brindle import git
+
+            os.symlink(out, path.parent, target_is_directory=True)
+            # graphify-out/ in a .gitignore matches folders only, not a link.
+            if (Path(checkout_str) / ".git").exists():
+                try:
+                    git.exclude_name(checkout_str, GRAPH.parent.as_posix())
+                except git.GitError:
+                    pass
         refresh_later(checkout_str, repo_root)
     return True
+
+
+def shared_out(repo_root: str | Path) -> Path:
+    """The repo's one graphify-out folder its session checkouts link to."""
+    from brindle import build_caches
+
+    return build_caches.repo_cache_dir(repo_root) / GRAPH.parent
 
 
 def carry_community_names(old_graph: dict | None, new_graph_path: Path) -> dict | None:
@@ -370,7 +396,7 @@ def _request_refresh(checkout: str, repo_root: str | None, *, background: bool) 
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             lock.close()
-            pending.touch()
+            pending.write_text(checkout, encoding="utf-8")   # the follow-up rebuilds from here
             return
         pending.unlink(missing_ok=True)
         try:
@@ -405,7 +431,8 @@ def _refresh_files(checkout: str) -> tuple[Path, Path, Path]:
 
     root = brindle_home() / "graphify-locks"
     root.mkdir(parents=True, exist_ok=True)
-    key = hashlib.sha256(checkout.encode()).hexdigest()
+    # Keyed by the graph folder, so checkouts sharing one (shared_out) take turns.
+    key = hashlib.sha256(os.path.realpath(Path(checkout) / GRAPH.parent).encode()).hexdigest()
     return root / (key + ".lock"), root / (key + ".pending"), root / (key + ".guard")
 
 
@@ -423,6 +450,7 @@ def _run_refresh(checkout: str, repo_root: str | None, fd: int) -> None:
                     # Serialize release with callers' lock check and marker write.
                     lock.close()
                     return
+                checkout = pending.read_text(encoding="utf-8").strip() or checkout
                 pending.unlink()
 
 
@@ -476,7 +504,9 @@ def _start_refresh(checkout: str, repo_root: str | None, lock_fd: int) -> Callab
 def remove_session_graph(checkout: str | Path) -> None:
     """Remove a session checkout's graphify-out graph when its worktree is removed."""
     out = Path(checkout) / GRAPH.parent
-    if out.is_dir():
+    if out.is_symlink():
+        out.unlink()   # the repo's shared graph stays for its other checkouts
+    elif out.is_dir():
         shutil.rmtree(out, ignore_errors=True)
     elif out.is_file():
         out.unlink(missing_ok=True)
