@@ -453,7 +453,12 @@ not copied into `/Applications`.
 ## Releases
 
 The version lives in `package.json` (`tauri.conf.json` reads it from there).
-Bump it, merge, then push a tag `app-v<version>`:
+Bump it, merge, then push an annotated tag `app-v<version>` whose message is a
+one-line summary: `git tag -a app-v<version> -m "<one-line summary>"`. The
+update banner shows it as the release's note: `scripts/release_notes.mjs` takes
+the message's first paragraph, on one line, capped at 200 characters on a word
+boundary. A lightweight tag, a manual run or a release candidate gets
+"brindle desktop <version>" instead.
 `.github/workflows/app-release.yml` checks the tag matches and builds
 twice, each on a runner of that architecture, since the bundled engine is
 built for the runner's own architecture only

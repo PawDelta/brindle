@@ -123,7 +123,7 @@ export function AppUpdateBanner({ openUrl }: { openUrl: OpenUrl }) {
       </svg>
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <strong className="font-semibold text-ink">{headline}</strong>
-        <span className="text-[13px] text-ink-2">{detail}</span>
+        <span className="truncate text-[13px] text-ink-2" title={detail}>{detail}</span>
         {busy && (
           <div className="mt-1 h-1 w-80 max-w-full overflow-hidden rounded-sm bg-pass/20" aria-hidden>
             <div className="h-1 rounded-sm bg-pass" style={{ width: `${bar}%` }} data-testid="app-update-bar" />
