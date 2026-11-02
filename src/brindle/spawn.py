@@ -348,11 +348,15 @@ _prefix: list[str] | None = None
 
 
 def _background(argv: list[str], force: bool = False) -> list[str]:
-    """``argv`` at background priority, when the gate is on, or always with
-    ``force``. Both prefixes exec the command, so the child keeps the pid it
-    was started with."""
+    """``argv`` at background priority for work that waits for room (the
+    heavy read lane, background sweeps: :func:`waits_for_room`) when the gate
+    is on, or always with ``force``. A request's own processes keep normal
+    priority: at background priority macOS starves them on a busy machine (a
+    `ps` 0.03 s → 0.8 s at load 12), and every request waited on its caller
+    check (0.5.9). Both prefixes exec the command, so the child keeps the pid
+    it was started with."""
     global _prefix
-    if not _gated and not force:
+    if not force and not (_gated and _waits.get()):
         return argv
     if _prefix is None:
         if sys.platform == "darwin":
