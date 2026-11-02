@@ -250,7 +250,12 @@ export function MapGraph({ nodes: given, edges: givenEdges, onOpen }: { nodes: G
      layout drops their view, and a new graph their selection. */
   const [manual, setManual] = useState<{ sim: Sim; view: View } | null>(null);
   const [picked, setPicked] = useState<{ nodes: GraphNode[]; id: string } | null>(null);
+  /* The node under the pointer and the node with keyboard focus, apart, so
+     the pointer passing over the graph doesn't drop a focused node's light. */
   const [hover, setHover] = useState<string | null>(null);
+  const [focused, setFocused] = useState<string | null>(null);
+  /* Whether the legend lists every group or just the largest. */
+  const [allGroups, setAllGroups] = useState(false);
   /* A group picked in the legend, for the same edges (groups come from them). */
   const [shown, setShown] = useState<{ lines: typeof lines; group: number } | null>(null);
   const fitted = fitView(sim, size.w, size.h);
@@ -325,6 +330,8 @@ export function MapGraph({ nodes: given, edges: givenEdges, onOpen }: { nodes: G
     const el = frame.current;
     if (!el) return;
     const wheel = (e: WheelEvent) => {
+      // The details panel and the legend scroll their own lists.
+      if ((e.target as Element).closest("aside, [data-legend]")) return;
       e.preventDefault();
       const r = el.getBoundingClientRect(), delta = e.deltaY * (e.deltaMode === 1 ? 16 : 1);
       zoomAt(Math.exp(-delta * (e.ctrlKey ? 0.01 : 0.0015)), e.clientX - r.left, e.clientY - r.top);
@@ -422,7 +429,7 @@ export function MapGraph({ nodes: given, edges: givenEdges, onOpen }: { nodes: G
 
   /* What is lit: the hovered node's neighbourhood, else the group picked in
      the legend, else the selected node's neighbourhood. */
-  const active = hover ?? (focusGroup === null ? selected : null);
+  const active = hover ?? focused ?? (focusGroup === null ? selected : null);
   const inGroup = (i: number) => focusGroup !== null && sim.group[i] === focusGroup;
   const lit = active ? near.get(active) ?? new Set<string>() : focusGroup !== null ? new Set(nodes.filter((_, i) => inGroup(i)).map((node) => node.id)) : null;
   const chosen = selected === null ? undefined : index.get(selected);
@@ -477,8 +484,8 @@ export function MapGraph({ nodes: given, edges: givenEdges, onOpen }: { nodes: G
             onClick={(e) => pick(e, i)}
             onMouseEnter={() => setHover(node.id)}
             onMouseLeave={() => setHover((h) => (h === node.id ? null : h))}
-            onFocus={() => { setHover(node.id); reveal(i, chosen !== undefined); }}
-            onBlur={() => setHover((h) => (h === node.id ? null : h))}
+            onFocus={() => { setFocused(node.id); reveal(i, chosen !== undefined); }}
+            onBlur={() => setFocused((f) => (f === node.id ? null : f))}
             style={{ left: p.x - p.w / 2, top: p.y - p.r, width: p.w, opacity: dim ? 0.2 : 1 }}
             className={`group absolute flex cursor-pointer flex-col items-center outline-none transition-opacity duration-150 ${on ? "z-10" : ""}`}
           >
@@ -507,14 +514,16 @@ export function MapGraph({ nodes: given, edges: givenEdges, onOpen }: { nodes: G
           </span>}
           <span>Size: connections</span>
         </div>
-        {named.length > 0 && <div className="flex flex-wrap items-center gap-x-1 gap-y-0.5">
-          {named.slice(0, LEGEND_GROUPS).map(({ group, g }) => (
+        {named.length > 0 && <div data-legend className={`flex flex-wrap items-center gap-x-1 gap-y-0.5 ${allGroups ? "pointer-events-auto max-h-28 overflow-y-auto" : ""}`}>
+          {(allGroups ? named : named.slice(0, LEGEND_GROUPS)).map(({ group, g }) => (
             <button key={g} type="button" role="checkbox" aria-checked={focusGroup === g} title={`${group.name} · ${group.size}`} onClick={() => setShown(focusGroup === g ? null : { lines, group: g })} className="pointer-events-auto inline-flex max-w-56 items-center gap-1.5 rounded-sm px-1 py-px hover:bg-surface-2 hover:text-ink aria-checked:bg-surface-2 aria-checked:text-ink">
               <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ background: toneOf(group) }} />
               <span className="truncate">{group.name}</span><span className="shrink-0">· {group.size}</span>
             </button>
           ))}
-          {named.length > LEGEND_GROUPS && <span className="px-1">+{named.length - LEGEND_GROUPS} more</span>}
+          {named.length > LEGEND_GROUPS && <button type="button" aria-expanded={allGroups} onClick={() => setAllGroups(!allGroups)} className="pointer-events-auto rounded-sm px-1 py-px underline decoration-dotted underline-offset-2 hover:bg-surface-2 hover:text-ink">
+            {allGroups ? "Fewer groups" : `+${named.length - LEGEND_GROUPS} more`}
+          </button>}
           {alone > 0 && <span className="px-1">Unconnected · {alone}</span>}
         </div>}
       </div>
@@ -535,7 +544,7 @@ function Details({ node, full, group, paths, onPath, neighbours, onClose }: { no
       <button type="button" aria-label="Close details" title="Close details" className="rounded-md px-1.5 text-sm leading-none text-ink-3 hover:bg-surface-2 hover:text-ink" onClick={onClose}>×</button>
     </div>
     <p className="break-words text-sm font-medium text-ink">{full}</p>
-    {provenance(node, false).map((line, i) => <p key={i} className="break-words text-ink-3">{line}</p>)}
+    {provenance(node, false).map((line, i) => <p key={i} data-provenance className="break-words text-ink-3">{line}</p>)}
     <p className="flex min-w-0 items-center gap-1.5 text-ink-3">
       <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ background: toneOf(group) }} />
       <span className="truncate">{group.tone === null ? "Unconnected" : `Group: ${group.name} · ${group.size}`}</span>

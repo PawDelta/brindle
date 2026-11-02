@@ -61,8 +61,7 @@ const topicsOf = (node: GraphNode) => {
    that share paths or topics get one link, weighted by how many they share,
    and explicit document-to-document relations stay. Local records keep the
    documents they reach directly or through a path, and are dropped if they
-   reach none. A path or topic held by very many documents says little, so
-   it links none of them. */
+   reach none. */
 export function docGraph(nodes: GraphNode[], edges: MapEdge[]): DocGraph {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const docs = nodes.filter((node) => node.kind === "doc");
@@ -86,10 +85,9 @@ export function docGraph(nodes: GraphNode[], edges: MapEdge[]): DocGraph {
       if (list.at(-1) !== doc.id) list.push(doc.id);
     }
   }
-  const limit = Math.max(12, Math.ceil(docs.length / 4));
   const pairs = new Map<string, DocEdge>();
   for (const [key, list] of holders) {
-    if (list.length < 2 || list.length > limit) continue;
+    if (list.length < 2) continue;
     for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
       const id = `${list[i]}\0${list[j]}`, pair = pairs.get(id);
       if (pair) { pair.weight = (pair.weight ?? 0) + 1; pair.shared?.push(key); }
