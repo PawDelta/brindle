@@ -12,11 +12,11 @@ from brindle.service import inbox
 from brindle.service.errors import ServiceError
 
 
-@pytest.mark.parametrize("handled", ["terminal", "closed", "checks"])
+@pytest.mark.parametrize("handled", ["terminal", "closed", "checks", "killed"])
 @pytest.mark.variant("0.2.13 stale Inbox: handling an item without an agent status transition")
 def test_handling_inbox_items_notifies_connected_apps(db, tmp_path, monkeypatch, handled):
     from brindle import procs
-    from brindle.daemon.routes_actions import inbox_action
+    from brindle.daemon.routes_actions import inbox_action, kill_agent
 
     repo = str(tmp_path)
     ws = Workspace("w", repo, "handled", "worktree", "feat/handled", "main", repo, None, "s", time.time())
@@ -29,6 +29,9 @@ def test_handling_inbox_items_notifies_connected_apps(db, tmp_path, monkeypatch,
     if handled == "checks":
         db.add_autopilot(a.id)
         db.update_autopilot(a.id, proposal=json.dumps({"checks": ["true"], "at": time.time()}))
+    if handled == "killed":
+        db.add_agent(Agent("root", ws.id, "supervisor", "claude", None, "interactive", "idle", "@0", None, time.time()))
+        db.update_agent(a.id, status="waiting", parent_id="root")
     before = db.conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0]
     if handled == "terminal":
         agents.note_permission_outcome(db, a, {"tool_name": "Bash", "tool_input": {"command": "git status"}})
@@ -37,10 +40,18 @@ def test_handling_inbox_items_notifies_connected_apps(db, tmp_path, monkeypatch,
         monkeypatch.setattr(procs, "stop", lambda ids: None)
         agents.close(db, a.id, panes={})
         assert db.get_agent(a.id).dismissed_at is not None
+    elif handled == "killed":
+        monkeypatch.setattr(agents, "_stop", lambda db, agent: None)
+        kill_agent(db, {"id": a.id}, {})
+        assert db.get_agent(a.id) is None
     else:
         inbox_action(db, {"id": a.id, "action": "decline"}, {})
         assert db.get_autopilot(a.id).proposal is None
-    assert bus.tail(db, before, repo_root=str(repo))
+    events = bus.tail(db, before, repo_root=repo)
+    assert events
+    if handled == "killed":
+        assert (events[-1]["kind"], events[-1]["agent_id"], events[-1]["workspace_id"], events[-1]["root_id"]) == (
+            "agent.closed", a.id, ws.id, "root")
 
 
 @pytest.mark.parametrize("claimed, registered_digest, listed", [

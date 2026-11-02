@@ -2654,9 +2654,14 @@ def _note_reviewer_end(db: DB, agent: Agent, ws: Workspace | None = None) -> Non
 
 def kill(db: DB, agent_id: str) -> None:
     agent = get(db, agent_id)
+    # Deletion removes the row publish_agent uses to resolve its context.
+    ws = db.get_workspace(agent.workspace_id)
+    session_root = root_of(db, agent.id)
     _note_reviewer_end(db, agent)
     _stop(db, agent)
     db.delete_agent(agent.id)
+    bus.publish(db, "agent.closed", agent_id=agent.id, workspace_id=agent.workspace_id,
+                repo_root=ws.repo_root if ws else None, root_id=session_root)
     forget_files(agent)
 
 
