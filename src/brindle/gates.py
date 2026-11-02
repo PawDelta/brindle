@@ -665,14 +665,11 @@ def standing_reviews(db: DB, ws_id: str, sha: str) -> list:
     review), whatever its profile, after that verdict was recorded, that has
     given its own since. A reviewer with no recorded slot supersedes nothing."""
     reviews = db.reviews_at(ws_id, sha)
-    reviewers = {r.reviewer_id: a for r in reviews
-                 if r.reviewer_id and (a := db.get_agent(r.reviewer_id)) is not None}
 
     def supersedes(s, r) -> bool:
-        new, old = reviewers.get(s.reviewer_id), reviewers.get(r.reviewer_id)
-        return (new is not None and old is not None and new.review_slot is not None
-                and new.review_slot == old.review_slot
-                and new.created_at > r.created_at and s.created_at > r.created_at)
+        return (s.review_slot is not None and s.review_slot == r.review_slot
+                and s.reviewer_created_at is not None
+                and s.reviewer_created_at > r.created_at and s.created_at > r.created_at)
 
     return [r for r in reviews if not any(supersedes(s, r) for s in reviews)]
 

@@ -164,6 +164,8 @@ CREATE TABLE IF NOT EXISTS reviews (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     sha TEXT NOT NULL,
     reviewer_id TEXT,
+    review_slot TEXT,
+    reviewer_created_at REAL,
     approved INTEGER NOT NULL,
     summary TEXT,
     created_at REAL NOT NULL
@@ -879,6 +881,8 @@ class Review:
     approved: int
     summary: str | None
     created_at: float
+    review_slot: str | None = None
+    reviewer_created_at: float | None = None
 
 
 @dataclass
@@ -1088,6 +1092,10 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
+        for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
+            if col not in review_cols:
+                self.conn.execute(f"ALTER TABLE reviews ADD COLUMN {col} {kind}")
         workspace_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(workspaces)")}
         if "session_root" not in workspace_cols:
             self.conn.execute("ALTER TABLE workspaces ADD COLUMN session_root TEXT")
@@ -1131,6 +1139,12 @@ class DB:
             # couldn't deliver is known; the rest stay unknown (service.inbox).
             self.conn.execute("UPDATE agents SET failed_why='delivery' WHERE status='failed' AND id IN "
                               "(SELECT agent_id FROM launch_health WHERE outcome='delivery-failed')")
+        if "review_slot" not in review_cols:
+            # Preserve supersession metadata while the old reviewer still exists.
+            self.conn.execute(
+                "UPDATE reviews SET review_slot=(SELECT review_slot FROM agents WHERE id=reviewer_id), "
+                "reviewer_created_at=(SELECT created_at FROM agents WHERE id=reviewer_id)"
+            )
         task_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tasks)")}
         if "plan_first" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN plan_first INTEGER")
@@ -1944,11 +1958,18 @@ class DB:
 
     def add_review(self, workspace_id: str, sha: str, reviewer_id: str | None,
                    approved: bool, summary: str) -> None:
+        """Save the verdict and its review slot/start time together, so agent
+        cleanup cannot change which earlier verdicts it supersedes.
+        Missing reviewers leave the supersession metadata unknown."""
         with self.tx() as c:
+            reviewer = c.execute("SELECT review_slot, created_at FROM agents WHERE id=?",
+                                 (reviewer_id,)).fetchone()
             c.execute(
-                "INSERT INTO reviews (workspace_id, sha, reviewer_id, approved, summary, created_at) "
-                "VALUES (?,?,?,?,?,?)",
-                (workspace_id, sha, reviewer_id, int(approved), summary, time.time()),
+                "INSERT INTO reviews (workspace_id, sha, reviewer_id, approved, summary, created_at, "
+                "review_slot, reviewer_created_at) VALUES (?,?,?,?,?,?,?,?)",
+                (workspace_id, sha, reviewer_id, int(approved), summary, time.time(),
+                 reviewer["review_slot"] if reviewer else None,
+                 reviewer["created_at"] if reviewer else None),
             )
 
     def latest_review(self, workspace_id: str, sha: str) -> Review | None:
