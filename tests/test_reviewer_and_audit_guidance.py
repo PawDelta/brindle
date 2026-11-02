@@ -86,8 +86,19 @@ def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_fu
     knowledge.record_decision(db, "different-repo", "Auth", "Another repository decision")
     knowledge.propose_decision(db, key, "Proposal", "Unaccepted proposal")
 
+    from brindle import git
+    from brindle.pro import analysis_brief
+
+    # The diff touches src/cache.py, which is not declared and has its own decision;
+    # the brief names only src/auth.py, declared but untouched.
+    knowledge.record_decision(db, key, "Cache", "Keep the cache small", paths=["src/cache.py"])
+    monkeypatch.setattr(git, "paths", lambda *a, **kw: ["src/cache.py"])
+    monkeypatch.setattr(analysis_brief, "_brief", lambda *a, **kw: (
+        "auth design in src/auth.py", [(analysis_brief.DOC_ITEM, "auth-doc", "1")]))
     agents.request_review(db, other, ws)
     [prompt] = prompts
+    assert prompt.count("Keep the cache small") == 1
+    assert "auth design in src/auth.py" not in prompt and "analysis_doc" not in str(knowledge.receipt(db, "rev1"))
     assert "Owner changed scope: export CSV only" in prompt
     assert prompt.index("Export CSV and JSON") < prompt.index("Owner changed scope: export CSV only")
     for content in ("Private sibling task", "Peer suggestion", "Other session spec",

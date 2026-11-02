@@ -3335,14 +3335,14 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         task += f"\n\nDeclared files: {', '.join(worker_files)}"
     if worker_done_when:
         task += f"\n\nIts finish line: {worker_done_when.strip()}"
-    task += _review_context(db, ws, worker, worker_files)
-
     from brindle.pro import analysis_brief
 
     try:
         changed = git.paths(["diff", "--name-only", f"{ws.base_branch}...HEAD"], ws.path) if ws.base_branch else []
     except git.GitError:
         changed = []
+    # Decisions cover declared and changed files; docs gate on the diff alone.
+    task += _review_context(db, ws, worker, list(dict.fromkeys([*worker_files, *changed])))
     covering, cited = analysis_brief.review_context(db, ws.repo_root, (worker.task or "") if worker else "",
                                                     changed)   # docs gate on the diff, not declared files
     if covering:
