@@ -2657,9 +2657,14 @@ def _note_reviewer_end(db: DB, agent: Agent, ws: Workspace | None = None) -> Non
 
 def kill(db: DB, agent_id: str) -> None:
     agent = get(db, agent_id)
+    # Deletion removes the row publish_agent uses to resolve its context.
+    ws = db.get_workspace(agent.workspace_id)
+    session_root = root_of(db, agent.id)
     _note_reviewer_end(db, agent)
     _stop(db, agent)
     db.delete_agent(agent.id)
+    bus.publish(db, "agent.closed", agent_id=agent.id, workspace_id=agent.workspace_id,
+                repo_root=ws.repo_root if ws else None, root_id=session_root)
     forget_files(agent)
 
 
@@ -2687,6 +2692,7 @@ def close(db: DB, agent_id: str, panes: dict[str, bool] | None = None) -> Agent:
 
         procs.stop([agent.id])  # anything left running after its window went
     db.update_agent(agent.id, dismissed_at=time.time())
+    bus.publish_agent(db, "agent.closed", agent.id)
     return agent
 
 
@@ -3931,6 +3937,10 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     # take the pairing meant for the same command asked again (note_permission_outcome).
     if not keep or answer in ("deny", "supervisor_deny"):
         db.pop_permission_request(agent.id, lambda r: r["tool_use_id"] == request_id)
+    if held:
+        # A terminal denial has no PostToolUse. Announce the completed hold
+        # after its cleanup so clients see its new prompt/answered state.
+        bus.publish_agent(db, "permission.changed", agent.id, request_id=request_id)
     return answer
 
 
@@ -4047,6 +4057,10 @@ def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
             from brindle import permission_asks
 
             permission_asks.resolve_at_prompt(db, agent.id, row["tool_use_id"])
+            # Also when policy was off (no learning reason): other clients
+            # still need to forget the request answered in this terminal.
+            bus.publish_agent(db, "permission.answered", agent.id,
+                              request_id=row["tool_use_id"], via="prompt", cleared=True)
         if row is None or not row["reason"]:
             return   # none, or recorded for the inbox with the policy off: nothing to learn
         req = permissions.Request.from_dict(json.loads(row["request"]))

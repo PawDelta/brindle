@@ -72,16 +72,29 @@ export function groupItem(reason: string | undefined): { group: string; sub: str
 export function usePermissionAsks(client: DaemonClient, inbox: InboxItemDTO[]) {
   const [groups, setGroups] = useState<AskGroupDTO[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const current = useRef({ client, active: false, generation: 0 });
+  current.current.client = client;
   const reload = useCallback(
-    () =>
-      client.permissionAsks().then((g) => {
+    () => {
+      if (!current.current.active || current.current.client !== client) return Promise.resolve();
+      const generation = ++current.current.generation;
+      return client.permissionAsks().then((g) => {
+        // A decision, new inbox or daemon can start another read while this
+        // one is pending. Only the newest live request can replace the cards.
+        if (!current.current.active || current.current.client !== client || current.current.generation !== generation) return;
         setGroups(g);
         setLoaded(true);
-      }, () => undefined),
+      }, () => undefined);
+    },
     [client],
   );
   useEffect(() => {
+    current.current.active = true;
     void reload();
+    return () => {
+      current.current.active = false;
+      current.current.generation++;
+    };
   }, [reload, inbox]);
   /* An /inbox card for a request one of these items holds. */
   const held = useCallback(

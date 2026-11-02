@@ -1753,6 +1753,7 @@ def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, a
     [post.join(5) for post in posts]
     assert _verdict(out) == ("deny" if deny else None) and seen == looks
     assert [i for i in inbox.items(db, str(repo), panes={"%2": True}) if i.agent_id == "wk"] == []
+    assert bus.tail(db, kinds=("permission.changed",), repo_root=str(repo))
 
 
 @pytest.fixture

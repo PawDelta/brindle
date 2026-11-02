@@ -1877,6 +1877,9 @@ class DB:
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
             c.execute(f"UPDATE autopilot SET {cols} WHERE root_id=?", (*fields.values(), root_id))
+        if "proposal" in fields:
+            # Both the app and the terminal can settle proposed checks.
+            bus.publish_agent(self, "checks.changed", root_id)
 
     def set_external_wait(self, root_id: str, wait: str) -> None:
         """A repeated declaration must leave the existing wait intact."""

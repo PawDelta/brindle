@@ -115,6 +115,9 @@ function applyEvent(state: AppState, e: BusEvent): AppState {
       if (!state.workspaces.some((ws) => ws.agents?.some((a) => a.id === e.agent_id))) return { ...state, stale: true };
       return {
         ...state,
+        // Status determines waiting/failed cards as well as the agent row.
+        // Keep the row responsive while fetching the authoritative inbox.
+        stale: true,
         workspaces: state.workspaces.map((ws) => ({
           ...ws,
           agents: ws.agents?.map((a) => (a.id === e.agent_id ? { ...a, status, status_since: e.ts } : a)),

@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../../api/client";
 import { DaemonContext } from "../../api/context";
@@ -15,6 +15,7 @@ import { watchAppUpdates } from "../../store/appUpdates";
 import { Permissions } from "../Settings/Permissions";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
 import { watchInbox } from "./notify";
+import { usePermissionAsks } from "./PermissionAsks";
 
 afterEach(cleanup);
 
@@ -59,6 +60,34 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
+  it.each(["reload", "inbox", "client"])("discards older permission groups after a newer %s response", async (trigger) => {
+    const client = new FakeDaemon().client();
+    const other = new FakeDaemon().client();
+    const answers: ((groups: AskGroupDTO[]) => void)[] = [];
+    const request = () => new Promise<AskGroupDTO[]>((resolve) => answers.push(resolve));
+    vi.spyOn(client, "permissionAsks").mockImplementation(request);
+    vi.spyOn(other, "permissionAsks").mockImplementation(request);
+    const { result, rerender } = renderHook(({ client, inbox }) => usePermissionAsks(client, inbox), {
+      initialProps: { client, inbox: [permission] },
+    });
+    await act(async () => answers[0]([pushes]));
+    expect(result.current.groups).toEqual([pushes]);
+    let older!: Promise<void>;
+    act(() => { older = result.current.reload(); });
+    let newer: Promise<void> | undefined;
+    if (trigger === "reload") act(() => { newer = result.current.reload(); });
+    else {
+      const previousReload = result.current.reload;
+      rerender({ client: trigger === "client" ? other : client, inbox: [] });
+      // A decision started on the old daemon can finish after switching.
+      if (trigger === "client") act(() => { void previousReload(); });
+    }
+    await act(async () => { answers[2]([]); await newer; });
+    expect(result.current.groups).toEqual([]);
+    await act(async () => { answers[1]([pushes]); await older; });
+    expect(result.current.groups).toEqual([]);
+  });
+
   it.each([42, "d1"])("opens requested document %s at its section, replies in the session and dismisses the request", async (reference) => {
     const doc: InboxItemDTO = { kind: "doc", reason: "Check the storage design.", agent_id: "w1", workspace_id: "proj/feat-ls", root_id: "sup1", request_id: "dr1", doc: reference, section: "Storage" };
     // A paused session remains in the sessions feed after all its agents leave the snapshot.

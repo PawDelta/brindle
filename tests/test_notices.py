@@ -6,7 +6,7 @@ import pytest
 from org_status_fixtures import ORG, control, notice, org, poller, rollout_on  # noqa: F401
 from typer.testing import CliRunner
 
-from brindle import agents, tmux, watch, workspaces
+from brindle import agents, bus, tmux, watch, workspaces
 from brindle.cli import app
 from brindle.db import Agent
 from brindle.pro import status
@@ -103,7 +103,7 @@ def test_notice_text_cannot_carry_terminal_escapes_or_line_breaks(org):
 # -- brindle org messages ---------------------------------------------------------------------------------
 
 
-def test_org_messages_lists_and_marks_read(org):
+def test_org_messages_lists_and_marks_read(org, db, boss, repo):
     org.body = {"policy_version": 1, "notices": [notice("n1", "Hello team", "org"),
                                                    notice("n2", "Just you")]}
     r = CliRunner().invoke(app, ["org", "messages"])
@@ -112,6 +112,7 @@ def test_org_messages_lists_and_marks_read(org):
     reads = [p for m, p, _ in org.calls if m == "POST"]
     assert sorted(reads) == [f"/orgs/{ORG}/notices/n1/read", f"/orgs/{ORG}/notices/n2/read"]
     assert status.load(ORG).status.notices == []
+    assert bus.tail(db, kinds=("notices.read",), repo_root=str(repo))
 
 
 def test_org_messages_when_there_are_none(org):
