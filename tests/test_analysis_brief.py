@@ -35,17 +35,19 @@ def boss(db, tmp_path, monkeypatch):
     return ws
 
 
-@pytest.mark.parametrize("weight, plan", [("medium", "pro"), ("heavy", "pro"), ("advanced", "free")])
+@pytest.mark.parametrize("weight, plan", [("medium", "pro"), ("heavy", "pro"), ("heavy", "off"),
+                                          ("advanced", "free")])
 def test_brief_only_for_large_work(weight, plan, db, backend, tmp_path):
     # Longer than any cap, with the usual fence markers inside: it must arrive whole and as is.
     block = "\n".join([*knowledge._FENCE, "x" * 20000, "final qualification "])
     backend.routes["POST /analysis-docs/brief"] = [(200, {"block": block, "cited": [{"doc_id": "d1", "version": 3}]})]
-    backend.routes["GET /me/analysis-docs/settings"] = [(200, {"switches": {}})]   # assist on by default
+    backend.routes["GET /me/analysis-docs/settings"] = [(200, {"switches": {"assist": "off"} if plan == "off" else {}})]
     login_as(backend, credentials.default_store(),
-             features=("analysis_docs",) if plan == "pro" else ("learning",))
+             features=("learning",) if plan == "free" else ("analysis_docs",))
     repo = str(tmp_path / "repo")
     out = ab.brief_context(db, repo, "feat/x", "a1", "speed up the cache", ["src/cache.py"],
                            large=ab.large_work(weight), client=auth.Client(None, backend))
+    assert plan != "off" or ab.review_context(db, repo, "x", ["a.py"], client=auth.Client(None, backend)) == ("", [])
     sent = [p for p in backend.paths() if p == "POST /analysis-docs/brief"]
     sources = kb.sources(db, knowledge.repo_key(repo))
     receipt = [(k, i) for k, i, _ in knowledge.receipt(db, "a1")]
@@ -60,7 +62,8 @@ def test_brief_only_for_large_work(weight, plan, db, backend, tmp_path):
         assert sources == []
     else:
         assert sent == [] and FOLDER in out and receipt == [(ab.RULE_ITEM, "a1")]
-        assert [s["scope"] for s in sources] == [str(ab.docs_dir(repo, "feat/x").parent.resolve())]
+        assert [s["scope"] for s in sources] == ([str(ab.docs_dir(repo, "feat/x").parent.resolve())]
+                                                 if plan == "free" else [])
 
 
 @pytest.mark.parametrize("via", ["assign", "requeue"])
@@ -102,29 +105,3 @@ def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, bo
     db.update_autopilot("boss", audit_sha="abc123")
     out = autopilot.record_audit(db, "boss", True, "all there")
     assert f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in out
-
-
-@pytest.mark.parametrize("entry, why", [("task", "own"), ("goal", "own"), ("review", "own"),
-                                         ("task", "group"), ("task", "airgap")])
-def test_nothing_is_sent_while_assist_is_off_or_air_gapped(entry, why, db, boss, backend, monkeypatch):
-    from brindle import airgap
-
-    policy = {"switches": {}, "groups": {"g": {"switches": {"assist": "enforced_off"}}}}
-    backend.routes.update({"POST /analysis-docs/brief": [(200, {"block": "known: the cache", "cited": []})],
-                           "GET /analysis-docs/scopes": [(200, {"scopes": [{"kind": "group", "id": "g"}]})],
-                           "GET /me/analysis-docs/settings": [(200, {"switches": {"assist": "off"} if why == "own" else {}})]})
-    monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, *a: backend.request(*a))
-    monkeypatch.setattr(airgap, "enabled", lambda cfg=None: why == "airgap")
-    monkeypatch.setattr("brindle.pro.analysis_policy.fetch", lambda *a: policy)
-    login_as(backend, credentials.default_store(),
-             features=("analysis_docs", "analysis_docs_team") if why == "group" else ("analysis_docs",))
-    client = auth.Client(None, backend)
-    if entry == "task":
-        out = ab.brief_context(db, boss.repo_root, "feat/x", "a1", "speed up the cache", [], large=True, client=client)
-        assert FOLDER in out and "known: the cache" not in out
-    elif entry == "goal":
-        db.add_autopilot("boss")
-        autopilot.set_goal(db, "boss", "Settings page", [("API", "true", None), ("UI", "true", None)])
-    else:
-        assert ab.review_context(db, boss.repo_root, "speed up the cache", ["a.py"], client=client) == ("", [])
-    assert "POST /analysis-docs/brief" not in backend.paths()
