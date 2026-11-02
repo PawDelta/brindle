@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import type { MapEdge } from "../../api/client";
-import { boxOf, createSim, layoutGraph } from "./graphLayout";
+import { boxOf, createSim, docGraph, layoutGraph } from "./graphLayout";
 import { MapGraph, type GraphNode } from "./MapGraph";
 
 afterEach(cleanup);
@@ -26,33 +26,36 @@ it.each([1, 150])("lays out %i nodes the same way every time, with no node's dot
   }
 });
 
-it("finds the same groups every time, one per cluster, named after the cluster's best-connected code area", () => {
+it("links documents that share paths or topics, weighted by how much, and finds the same named groups every time", () => {
   const star = (hub: string, docs: number): { nodes: GraphNode[]; edges: MapEdge[] } => {
-    const leaves: GraphNode[] = Array.from({ length: docs }, (_, i) => ({ id: `${hub}-d${i}`, kind: "doc", title: `${hub} note ${i}` }));
-    return { nodes: [{ id: hub, kind: "path", path: `src/${hub}` }, ...leaves], edges: leaves.map((leaf) => ({ source: leaf.id, target: hub, kind: "shared_path" })) };
+    const leaves = Array.from({ length: docs }, (_, i) => ({ id: `${hub}-d${i}`, kind: "doc", title: `${hub} note ${i}`, topics: hub === "cache" && i < 2 ? ["eviction"] : [] }) as GraphNode);
+    return { nodes: [{ id: hub, kind: "path", path: `src/${hub}` }, ...leaves], edges: leaves.map((leaf) => ({ source: leaf.id, target: hub, kind: "mentions" })) };
   };
   const a = star("cache", 5), b = star("daemon", 3);
-  const nodes = [...b.nodes, ...a.nodes, { id: "lone", kind: "doc", title: "Lone" } as GraphNode], edges = [...a.edges, ...b.edges];
-  const sim = createSim(nodes, edges);
-  expect(createSim(nodes, edges).group).toEqual(sim.group);
+  const g = docGraph([...b.nodes, ...a.nodes, { id: "lone", kind: "doc", title: "Lone" }], [...a.edges, ...b.edges]);
+  expect(g.nodes.filter((node) => node.kind === "path")).toEqual([]);
+  expect(g.edges.find((e) => e.source === "cache-d0" && e.target === "cache-d1")).toMatchObject({ weight: 2, shared: ["src/cache", "eviction"] });
+  const nodes = g.nodes, sim = createSim(nodes, g.edges);
+  expect(createSim(nodes, g.edges).group).toEqual(sim.group);
   const groupOf = (prefix: string) => new Set(nodes.flatMap((node, i) => (node.id.startsWith(prefix) ? [sim.group[i]] : [])));
   const [cache, daemon] = [groupOf("cache"), groupOf("daemon")];
   expect([cache.size, daemon.size]).toEqual([1, 1]);
-  expect(sim.groups.map(({ name, size, tone }) => [name, size, tone])).toEqual([["src/cache", 6, 0], ["src/daemon", 4, 1], ["Lone", 1, null]]);
+  expect(sim.groups.map(({ name, size, tone }) => [name, size, tone])).toEqual([["src/cache", 5, 0], ["src/daemon", 3, 1], ["Lone", 1, null]]);
 });
 
 it("highlights a hovered node's neighbourhood, selects on click, moves a dragged node without opening it, and zooms and fits", () => {
-  const nodes: GraphNode[] = [{ id: "p", kind: "path", path: "src/cache" }, { id: "d", kind: "doc", title: "Cache design" }, { id: "x", kind: "doc", title: "Unrelated" }];
+  const nodes: GraphNode[] = [{ id: "p", kind: "path", path: "src/cache" }, { id: "d", kind: "doc", title: "Cache design" }, { id: "e", kind: "doc", title: "Cache notes" }, { id: "x", kind: "doc", title: "Unrelated" }];
   const onOpen = vi.fn();
-  const { container } = render(<MapGraph nodes={nodes} edges={[{ source: "d", target: "p", kind: "shared_path" }]} onOpen={onOpen} />);
+  const { container } = render(<MapGraph nodes={nodes} edges={[{ source: "d", target: "p", kind: "mentions" }, { source: "e", target: "p", kind: "mentions" }]} onOpen={onOpen} />);
   const node = (id: string) => container.querySelector<HTMLElement>(`[data-node="${id}"]`)!;
+  expect(node("p")).toBeNull();
   fireEvent.mouseEnter(node("d"));
-  expect([node("d").style.opacity, node("p").style.opacity, node("x").style.opacity]).toEqual(["1", "1", "0.2"]);
+  expect([node("d").style.opacity, node("e").style.opacity, node("x").style.opacity]).toEqual(["1", "1", "0.2"]);
   expect(container.querySelector('[data-source="d"]')!.getAttribute("class")).toBe("text-branch");
   fireEvent.mouseLeave(node("d"));
   expect(node("x").style.opacity).toBe("1");
   fireEvent.click(screen.getByRole("checkbox", { name: /src\/cache/ }));
-  expect([node("d").style.opacity, node("p").style.opacity, node("x").style.opacity]).toEqual(["1", "1", "0.2"]);
+  expect([node("d").style.opacity, node("e").style.opacity, node("x").style.opacity]).toEqual(["1", "1", "0.2"]);
   fireEvent.click(screen.getByRole("checkbox", { name: /src\/cache/ }));
   expect(node("x").style.opacity).toBe("1");
 
@@ -61,6 +64,9 @@ it("highlights a hovered node's neighbourhood, selects on click, moves a dragged
   const panel = screen.getByRole("complementary", { name: "Node details" }).textContent;
   expect(panel).toContain("src/cache");
   expect(panel).not.toMatch(/unrecorded/);
+  // A path listed in the panel narrows the map, as a path node once did.
+  fireEvent.click(screen.getByRole("button", { name: "Code area: src/cache" }));
+  expect(onOpen).toHaveBeenLastCalledWith({ id: "path:src/cache", kind: "path", path: "src/cache" });
   fireEvent.click(screen.getByRole("button", { name: "Close details" }));
   expect(screen.queryByRole("complementary")).toBeNull();
 
@@ -70,8 +76,9 @@ it("highlights a hovered node's neighbourhood, selects on click, moves a dragged
   fireEvent.pointerUp(node("x"), { pointerId: 1, clientX: 70, clientY: 10 });
   fireEvent.click(node("x"), { detail: 1 });
   expect(parseFloat(node("x").style.left)).toBeGreaterThan(left + 20);
-  expect(onOpen).toHaveBeenCalledTimes(1);
+  expect(onOpen).toHaveBeenCalledTimes(2);
 
+  fireEvent.click(screen.getByRole("button", { name: "Fit graph" }));
   const stage = screen.getByTestId("graph-stage"), fitted = stage.style.transform;
   fireEvent.click(screen.getByRole("button", { name: "Zoom in" }));
   expect(stage.style.transform).not.toBe(fitted);

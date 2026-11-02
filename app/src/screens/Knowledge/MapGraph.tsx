@@ -1,7 +1,7 @@
 import type { DecisionDTO } from "../../api/schema";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { DocScope, KbSource, KnowledgeMap, MapEdge, MapNode } from "../../api/client";
-import { bounds, createSim, heatAt, moveTo, pointOf, settle, step, type Group, type Point, type Sim } from "./graphLayout";
+import { bounds, createSim, docGraph, heatAt, moveTo, pointOf, settle, step, type DocEdge, type Group, type Point, type Sim } from "./graphLayout";
 
 export type LocalNode = { id: string; kind: "decision"; title: string; decision: DecisionDTO } | { id: string; kind: "imported"; title: string; source: KbSource; path: string };
 export type GraphNode = MapNode | LocalNode;
@@ -214,7 +214,11 @@ function fitView(s: Sim, w: number, h: number): View {
   return { k, x: (w - bw * k) / 2 - b.left * k, y: padY + (room - bh * k) / 2 - b.top * k };
 }
 
-export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void }) {
+/* The map as documents and how they connect: code paths are not nodes but
+   what links documents, and a document's paths are listed in its details,
+   where clicking one narrows the map to it. */
+export function MapGraph({ nodes: given, edges: givenEdges, onOpen }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void }) {
+  const { nodes, edges, paths } = useMemo(() => docGraph(given, givenEdges), [given, givenEdges]);
   const frame = useRef<HTMLDivElement>(null);
   /* The frame's width, and its height above the legend. */
   const [size, setSize] = useState({ w: 800, h: 420, frameH: 480 });
@@ -452,8 +456,8 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
             const supersedes = edge.kind === "supersedes";
             const on = active !== null ? edge.source === active || edge.target === active : inGroup(a) && inGroup(b);
             return <g key={j} data-source={edge.source} data-target={edge.target} data-kind={edge.kind} className={on ? "text-branch" : "text-ink-3"} style={{ opacity: on ? 0.9 : lit ? 0.06 : supersedes ? 0.55 : 0.35, transition: "opacity 150ms" }}>
-              <path ref={(el) => { edgeEls.current[j] = el; }} d={curve(pointOf(sim, a), pointOf(sim, b), supersedes)} fill="none" stroke="currentColor" strokeWidth={on ? 1.5 : 1} vectorEffect="non-scaling-stroke" strokeDasharray={supersedes ? "4 3" : undefined} markerEnd={supersedes ? `url(#${uid}${on ? "-on" : ""})` : undefined} />
-              <title>{supersedes ? "supersedes" : edge.kind.replace(/_/g, " ")}</title>
+              <path ref={(el) => { edgeEls.current[j] = el; }} d={curve(pointOf(sim, a), pointOf(sim, b), supersedes)} fill="none" stroke="currentColor" strokeWidth={Math.min(4, 1 + 0.75 * ((edge as DocEdge).weight ?? 1) - 0.75) + (on ? 0.5 : 0)} vectorEffect="non-scaling-stroke" strokeDasharray={supersedes ? "4 3" : undefined} markerEnd={supersedes ? `url(#${uid}${on ? "-on" : ""})` : undefined} />
+              <title>{(edge as DocEdge).shared ? `Shares ${(edge as DocEdge).shared!.join(", ")}` : edge.kind.replace(/_/g, " ")}</title>
             </g>;
           })}
         </svg>
@@ -514,7 +518,7 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
           {alone > 0 && <span className="px-1">Unconnected · {alone}</span>}
         </div>}
       </div>
-      {chosen !== undefined && <Details node={nodes[chosen]} full={sim.labels[chosen].full} group={sim.groups[sim.group[chosen]]} neighbours={[...(near.get(nodes[chosen].id) ?? [])].flatMap((id) => {
+      {chosen !== undefined && <Details node={nodes[chosen]} full={sim.labels[chosen].full} group={sim.groups[sim.group[chosen]]} paths={paths.get(nodes[chosen].id) ?? []} onPath={(path) => onOpen({ id: `path:${path}`, kind: "path", path })} neighbours={[...(near.get(nodes[chosen].id) ?? [])].flatMap((id) => {
         const i = index.get(id);
         return i === undefined ? [] : [{ node: nodes[i], full: sim.labels[i].full, group: sim.groups[sim.group[i]] }];
       })} onClose={() => setPicked(null)} />}
@@ -523,7 +527,7 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
 }
 
 /* The selected node's details, beside the graph like an inspector. */
-function Details({ node, full, group, neighbours, onClose }: { node: GraphNode; full: string; group: Group; neighbours: { node: GraphNode; full: string; group: Group }[]; onClose(): void }) {
+function Details({ node, full, group, paths, onPath, neighbours, onClose }: { node: GraphNode; full: string; group: Group; paths: string[]; onPath(path: string): void; neighbours: { node: GraphNode; full: string; group: Group }[]; onClose(): void }) {
   const kind = KINDS[node.kind];
   return <aside aria-label="Node details" className="absolute inset-y-0 right-0 flex max-w-[85%] cursor-auto select-text flex-col gap-2 overflow-auto border-l border-line bg-surface p-3 text-xs" style={{ width: PANEL_W }}>
     <div className="flex items-center justify-between gap-2">
@@ -536,6 +540,10 @@ function Details({ node, full, group, neighbours, onClose }: { node: GraphNode; 
       <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ background: toneOf(group) }} />
       <span className="truncate">{group.tone === null ? "Unconnected" : `Group: ${group.name} · ${group.size}`}</span>
     </p>
+    {paths.length > 0 && <div className="flex flex-col gap-0.5">
+      <p className="text-ink-3">Code paths</p>
+      {paths.map((path) => <button key={path} type="button" aria-label={`Code area: ${path}`} title={`Narrow the map to ${path}`} onClick={() => onPath(path)} className="truncate rounded-sm px-1 text-left font-mono text-[11px] text-ink-2 hover:bg-surface-2 hover:text-ink">{path}</button>)}
+    </div>}
     <p className="text-ink-3">{neighbours.length} {neighbours.length === 1 ? "connection" : "connections"}</p>
     {neighbours.length > 0 && <ul className="flex flex-col gap-1">
       {neighbours.map(({ node: n, full: title, group: g }) => <li key={n.id} className="flex min-w-0 items-center gap-1.5 text-ink-2" title={title}>

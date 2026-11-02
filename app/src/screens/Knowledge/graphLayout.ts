@@ -24,7 +24,11 @@ export interface Sim {
   aspect: number;
   u: Float64Array;
   y: Float64Array;
+  /* One link per connected pair, with its weight (how much the two share)
+     and what they share. */
   links: [number, number][];
+  weights: Float64Array;
+  shared: string[][];
   degree: Float64Array;
   /* Each node's group (an index into groups), found from the edges. */
   group: Int32Array;
@@ -37,10 +41,84 @@ export interface Sim {
 
 export interface Point { x: number; y: number; r: number; w: number }
 
-/* A group of connected knowledge, named after its best-connected code area.
-   Its tone is a palette slot (0-9), or null for a node on its own. */
+/* A group of connected knowledge, named after what its members most often
+   share. Its tone is a palette slot (0-9), or null for a node on its own. */
 export interface Group { name: string; size: number; tone: number | null }
 export const TONES = 10;
+
+/* A link between two documents (or a local record and a document): an
+   explicit relation, or the paths and topics the two share. */
+export interface DocEdge extends MapEdge { weight?: number; shared?: string[] }
+export interface DocGraph { nodes: GraphNode[]; edges: DocEdge[]; paths: Map<string, string[]> }
+
+const pathOf = (node: GraphNode) => (node.kind === "path" ? node.path || node.title || node.id : null);
+const topicsOf = (node: GraphNode) => {
+  const topics = (node as { topics?: unknown }).topics;
+  return Array.isArray(topics) ? topics.filter((t): t is string => typeof t === "string" && t.trim() !== "") : [];
+};
+
+/* The map as documents only. Code paths stop being nodes: two documents
+   that share paths or topics get one link, weighted by how many they share,
+   and explicit document-to-document relations stay. Local records keep the
+   documents they reach directly or through a path, and are dropped if they
+   reach none. A path or topic held by very many documents says little, so
+   it links none of them. */
+export function docGraph(nodes: GraphNode[], edges: MapEdge[]): DocGraph {
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const docs = nodes.filter((node) => node.kind === "doc");
+  const paths = new Map(docs.map((doc) => [doc.id, new Set(doc.kind === "doc" ? doc.paths ?? [] : [])]));
+  const reach = new Map<string, Set<string>>();
+  for (const edge of edges) {
+    const a = byId.get(edge.source), b = byId.get(edge.target);
+    if (!a || !b) continue;
+    for (const [one, other] of [[a, b], [b, a]]) {
+      const path = pathOf(other);
+      if (path === null) continue;
+      if (one.kind === "doc") paths.get(one.id)!.add(path);
+      else if (one.kind !== "path") { if (!reach.has(one.id)) reach.set(one.id, new Set()); reach.get(one.id)!.add(path); }
+    }
+  }
+  const holders = new Map<string, string[]>();
+  for (const doc of docs) {
+    for (const key of [...paths.get(doc.id)!, ...topicsOf(doc)]) {
+      if (!holders.has(key)) holders.set(key, []);
+      const list = holders.get(key)!;
+      if (list.at(-1) !== doc.id) list.push(doc.id);
+    }
+  }
+  const limit = Math.max(12, Math.ceil(docs.length / 4));
+  const pairs = new Map<string, DocEdge>();
+  for (const [key, list] of holders) {
+    if (list.length < 2 || list.length > limit) continue;
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      const id = `${list[i]}\0${list[j]}`, pair = pairs.get(id);
+      if (pair) { pair.weight = (pair.weight ?? 0) + 1; pair.shared?.push(key); }
+      else pairs.set(id, { source: list[i], target: list[j], kind: "shares", weight: 1, shared: [key] });
+    }
+  }
+  const out: DocEdge[] = [...pairs.values()];
+  const local = new Map<string, Set<string>>();
+  const link = (from: string, to: string, kind: string) => {
+    if (!local.has(from)) local.set(from, new Set());
+    if (local.get(from)!.has(to)) return;
+    local.get(from)!.add(to);
+    out.push({ source: from, target: to, kind });
+  };
+  for (const edge of edges) {
+    const a = byId.get(edge.source), b = byId.get(edge.target);
+    if (!a || !b || a.kind === "path" || b.kind === "path") continue;
+    if (a.kind === "doc" && b.kind === "doc") out.push(edge);
+    else if (a.kind === "doc" || b.kind === "doc") link(a.kind === "doc" ? b.id : a.id, a.kind === "doc" ? a.id : b.id, edge.kind);
+  }
+  for (const [id, held] of reach) for (const doc of docs) {
+    if ([...held].some((path) => paths.get(doc.id)!.has(path))) link(id, doc.id, "shared_path");
+  }
+  return {
+    nodes: nodes.filter((node) => node.kind === "doc" || (node.kind !== "path" && local.has(node.id))),
+    edges: out,
+    paths: new Map([...paths].map(([id, held]) => [id, [...held].sort()])),
+  };
+}
 
 export function fullTitle(node: GraphNode): string {
   return node.title || (node.kind === "path" ? node.path : undefined) || node.id;
@@ -62,14 +140,17 @@ export function createSim(nodes: GraphNode[], edges: MapEdge[], aspect = 1.8): S
     return { full, label: shorten(full, node.kind === "path" && !node.title) };
   });
   const index = new Map(nodes.map((node, i) => [node.id, i]));
-  const links: [number, number][] = [];
-  const linked = new Set<string>();
-  for (const edge of edges) {
+  const linked = new Map<string, { a: number; b: number; weight: number; shared: string[] }>();
+  for (const edge of edges as DocEdge[]) {
     const a = index.get(edge.source), b = index.get(edge.target);
     if (a === undefined || b === undefined || a === b) continue;
-    const key = a < b ? `${a} ${b}` : `${b} ${a}`;
-    if (!linked.has(key)) { linked.add(key); links.push([a, b]); }
+    const key = a < b ? `${a} ${b}` : `${b} ${a}`, held = linked.get(key);
+    if (held) { held.weight += edge.weight ?? 1; held.shared.push(...(edge.shared ?? [])); }
+    else linked.set(key, { a, b, weight: edge.weight ?? 1, shared: [...(edge.shared ?? [])] });
   }
+  const links = [...linked.values()].map(({ a, b }): [number, number] => [a, b]);
+  const weights = Float64Array.from(linked.values(), ({ weight }) => weight);
+  const shared = [...linked.values()].map((link) => link.shared);
   const degree = new Float64Array(n);
   for (const [a, b] of links) { degree[a]++; degree[b]++; }
   /* Radius grows with connections on a square-root scale: 5 at one, 16 for
@@ -87,27 +168,29 @@ export function createSim(nodes: GraphNode[], edges: MapEdge[], aspect = 1.8): S
     u[i] = d * Math.cos(angle);
     y[i] = d * Math.sin(angle);
   });
-  const { group, groups } = communities(nodes, links, degree, order, labels);
-  return { nodes, labels, r, w, aspect, u, y, links, degree, group, groups, pull, pinned: new Uint8Array(n), dx: new Float64Array(n), dy: new Float64Array(n) };
+  const { group, groups } = communities(nodes.length, links, weights, shared, degree, order, labels);
+  return { nodes, labels, r, w, aspect, u, y, links, weights, shared, degree, group, groups, pull, pinned: new Uint8Array(n), dx: new Float64Array(n), dy: new Float64Array(n) };
 }
 
-/* Louvain's local-moving phase, with no randomness: nodes are visited in
-   (kind, id) order and each joins the neighbouring group that gains the most
-   modularity, staying put on a tie, else taking the lowest group. Groups
-   are then numbered largest first, ties to the one visited first. */
-export function communities(nodes: GraphNode[], links: [number, number][], degree: Float64Array, order: number[], labels: { full: string }[]) {
-  const n = nodes.length, m2 = links.length * 2;
-  const adj: number[][] = nodes.map(() => []);
-  for (const [a, b] of links) { adj[a].push(b); adj[b].push(a); }
-  const raw = Int32Array.from({ length: n }, (_, i) => i), tot = Float64Array.from(degree);
+/* Louvain's local-moving phase over the weighted links, with no randomness:
+   nodes are visited in (kind, id) order and each joins the neighbouring group
+   that gains the most modularity, staying put on a tie, else taking the
+   lowest group. Groups are numbered largest first, ties to the one visited
+   first, and named after the path or topic their members share most, else
+   their best-connected member. */
+function communities(n: number, links: [number, number][], weights: Float64Array, shared: string[][], degree: Float64Array, order: number[], labels: { full: string }[]) {
+  const strength = new Float64Array(n), adj: [number, number][][] = Array.from({ length: n }, () => []);
+  links.forEach(([a, b], l) => { strength[a] += weights[l]; strength[b] += weights[l]; adj[a].push([b, weights[l]]); adj[b].push([a, weights[l]]); });
+  const m2 = strength.reduce((sum, k) => sum + k, 0);
+  const raw = Int32Array.from({ length: n }, (_, i) => i), tot = Float64Array.from(strength);
   for (let pass = 0; pass < 50 && m2; pass++) {
     let moved = false;
     for (const i of order) {
-      const k = degree[i], own = raw[i];
+      const k = strength[i], own = raw[i];
       if (!k) continue;
       tot[own] -= k;
       const into = new Map<number, number>();
-      for (const j of adj[i]) into.set(raw[j], (into.get(raw[j]) ?? 0) + 1);
+      for (const [j, wt] of adj[i]) into.set(raw[j], (into.get(raw[j]) ?? 0) + wt);
       let best = own, gain = (into.get(own) ?? 0) - (tot[own] * k) / m2;
       for (const c of [...into.keys()].sort((a, b) => a - b)) {
         const g = into.get(c)! - (tot[c] * k) / m2;
@@ -127,13 +210,17 @@ export function communities(nodes: GraphNode[], links: [number, number][], degre
   }
   const sorted = [...members.values()].sort((a, b) => b.length - a.length || rank[a[0]] - rank[b[0]]);
   const group = new Int32Array(n);
+  sorted.forEach((list, g) => { for (const i of list) group[i] = g; });
+  const counts = sorted.map(() => new Map<string, number>());
+  links.forEach(([a, b], l) => {
+    if (group[a] !== group[b]) return;
+    for (const key of shared[l]) counts[group[a]].set(key, (counts[group[a]].get(key) ?? 0) + 1);
+  });
   let tone = 0;
   const groups = sorted.map((list, g) => {
-    for (const i of list) group[i] = g;
-    // Named after its best-connected code area, else its best-connected node.
-    const lead = (pool: number[]) => pool.reduce((best, i) => (degree[i] > degree[best] ? i : best), pool[0]);
-    const paths = list.filter((i) => nodes[i].kind === "path");
-    return { name: labels[lead(paths.length ? paths : list)].full, size: list.length, tone: list.length > 1 ? tone++ % TONES : null };
+    const top = [...counts[g]].sort(([a, x], [b, y]) => y - x || (a < b ? -1 : a > b ? 1 : 0))[0]?.[0];
+    const lead = list.reduce((best, i) => (degree[i] > degree[best] ? i : best), list[0]);
+    return { name: top ?? labels[lead].full, size: list.length, tone: list.length > 1 ? tone++ % TONES : null };
   });
   return { group, groups };
 }
@@ -173,8 +260,9 @@ export function step(s: Sim, heat: number, collide: boolean): void {
     const f = (SPRING * SPRING) / d2;
     dx[i] += ex * f; dy[i] += ey * f; dx[j] -= ex * f; dy[j] -= ey * f;
   }
-  for (const [a, b] of s.links) {
-    const ex = u[a] - u[b], ey = y[a] - y[b], f = Math.hypot(ex, ey) / SPRING;
+  for (const [l, [a, b]] of s.links.entries()) {
+    // Documents that share more pull closer.
+    const ex = u[a] - u[b], ey = y[a] - y[b], f = (Math.hypot(ex, ey) / SPRING) * (1 + 0.25 * (s.weights[l] - 1));
     dx[a] -= ex * f; dy[a] -= ey * f; dx[b] += ex * f; dy[b] += ey * f;
   }
   for (let i = 0; i < n; i++) {
