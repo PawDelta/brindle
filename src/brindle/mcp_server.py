@@ -1664,10 +1664,53 @@ def _report_server_exit(error: Exception | None = None) -> None:
         logger.exception("Could not deliver the MCP recovery notice")
 
 
+def _wants_reload(reloaded: bool) -> bool:
+    """Whether to exec the installed brindle in place before serving the next
+    request: the install changed under this server, or a newer brindle
+    migrated the database. A server that a reload started and still finds
+    the database newer than its code gets nothing from another one."""
+    return upgrade.install.changed() or (not reloaded and migrated_by_newer())
+
+
+async def _run_server(read_stream, write_stream) -> None:
+    server = mcp._lowlevel_server
+    await server.run(read_stream, write_stream, server.create_initialization_options())
+
+
+async def _serve_stdio(handover) -> None:
+    from brindle import mcp_stdio
+
+    in_fd, out_fd = mcp_stdio.claim_stdio()
+    await _serve(mcp_stdio.Connection(in_fd, out_fd, handover, wants_reload=_wants_reload,
+                                      replace=mcp_stdio.replace, std=True))
+
+
+async def _serve(conn) -> None:
+    """Serve the client on ``conn`` (an mcp_stdio.Connection), woken to look
+    for a reload whenever a newly started daemon signals the live servers."""
+    import anyio
+
+    async with anyio.create_task_group() as tg:
+        with anyio.open_signal_receiver(upgrade.MCP_RELOAD_SIGNAL) as signals:
+            async def wake_on_signal():
+                async for _ in signals:
+                    conn.wake()
+
+            tg.start_soon(wake_on_signal)
+            upgrade.register_mcp_server()   # only once the signal can't kill this process
+            await conn.serve(_run_server)
+            tg.cancel_scope.cancel()
+
+
 def main() -> None:
+    import anyio
+
+    from brindle import mcp_stdio
+
+    handover = mcp_stdio.take_handover()    # before anything this process starts inherits it
     refresher = start_azure_refresher()
     try:
-        mcp.run()
+        anyio.run(_serve_stdio, handover)
     except Exception as error:
         _report_server_exit(error)
         raise

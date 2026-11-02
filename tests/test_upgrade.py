@@ -1,16 +1,14 @@
 import asyncio
+import os
 import shutil
 import sqlite3
 import subprocess
 import sys
-from io import StringIO
 from types import SimpleNamespace
 
-import anyio
 import pytest
 from mcp import Client
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.server.stdio import stdio_server
 
 import brindle
 from brindle import agents, mcp_server, profiles, upgrade, watch
@@ -32,16 +30,17 @@ def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch, ex
     notification_db = mcp_server.DB()
     monkeypatch.setattr(mcp_server, "DB", lambda: notification_db)
 
-    def disconnect():
+    async def disconnect(handover):
         raise BrokenPipeError("client pipe closed")
 
     if exit_kind == "broken_pipe":
-        monkeypatch.setattr(mcp_server.mcp, "run", disconnect)
+        monkeypatch.setattr(mcp_server, "_serve_stdio", disconnect)
         with pytest.raises(BrokenPipeError):
             mcp_server.main()
     else:
-        monkeypatch.setattr("mcp.server.mcpserver.server.stdio_server", lambda: stdio_server(
-            stdin=anyio.wrap_file(StringIO()), stdout=anyio.wrap_file(StringIO())))
+        stdin, client = os.pipe()
+        os.close(client)
+        monkeypatch.setattr("brindle.mcp_stdio.claim_stdio", lambda: (stdin, os.open(os.devnull, os.O_WRONLY)))
         mcp_server.main()
     assert stopped == [True]
     assert db.pop_pending("boss") is not None
