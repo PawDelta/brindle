@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Callable
 
 from brindle.db import DB, HistoryEntry, LearnedRule
+from brindle.redact import mask
 
 log = logging.getLogger(__name__)
 
@@ -185,7 +186,9 @@ New findings:
 def build_prompt(findings: list[Finding], known: list[LearnedRule]) -> str:
     known_text = "\n".join(f"- key {r.key} (profile {r.profile}): {r.title}: {r.rule}" for r in known) or "(none)"
     found_text = "\n\n".join(f"[{f.id}] profile {f.profile}, branch {f.branch}:\n{f.text}" for f in findings)
-    return PROMPT.format(known=known_text, findings=found_text)
+    # The grouping call can leave the machine; findings recorded before
+    # history rows were masked still hold whatever the reviewer quoted.
+    return mask(PROMPT.format(known=known_text, findings=found_text))
 
 
 @dataclass

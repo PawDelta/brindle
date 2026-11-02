@@ -25,16 +25,17 @@ the report, merge or check it describes.
 from __future__ import annotations
 
 import gzip
+import io
 import json
 import logging
 import os
-import shutil
 import time
 from dataclasses import asdict
 from pathlib import Path
 
 from brindle.config import brindle_home
 from brindle.db import DB, Agent, HistoryEntry, Workspace
+from brindle.redact import mask, mask_data
 from brindle.usage import Usage, agent_transcripts, agent_usage, format_tokens
 
 log = logging.getLogger(__name__)
@@ -154,8 +155,10 @@ def _copy_transcripts(db: DB, a: Agent) -> list[str]:
         _private_dir(dest.parent)
         fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb") as gz, \
-                open(src, "rb") as f:
-            shutil.copyfileobj(f, gz)
+                io.TextIOWrapper(gz, encoding="utf-8", errors="surrogateescape", newline="") as copy, \
+                open(src, encoding="utf-8", errors="surrogateescape", newline="") as f:
+            for line in f:              # the copy keeps no secret the conversation quoted
+                copy.write(mask(line))
         out.append(str(dest.relative_to(archive_dir())))
     return out
 
@@ -196,7 +199,7 @@ def archive(db: DB, ws: Workspace | None, members: list[Agent], reason: str) -> 
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a") as f:
             os.fchmod(f.fileno(), 0o600)
-            f.write(json.dumps(entry) + "\n")
+            f.write(json.dumps(mask_data(entry)) + "\n")
     except Exception:
         log.exception("brindle: couldn't archive %s", ws.id if ws else members[0].id)
         return False
