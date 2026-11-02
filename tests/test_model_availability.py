@@ -440,7 +440,8 @@ def test_a_saturated_machine_spends_the_discovery_budget_not_the_request_deadlin
     popen = Mock()
     monkeypatch.setattr(ma.subprocess, "Popen", popen)
     check = ma.ModelAvailabilityChecker(timeout=BUDGET)
-    with spawn.deadline(50):
+    # Work that waits for room (spawn.waits_for_room) spends the discovery budget, not the deadline.
+    with spawn.waits_for_room(), spawn.deadline(50):
         result = check.check(profile(), effective_env={}, cwd=str(tmp_path))
     assert result.status == "unverified" and "timed out" in result.explanation
     # Refused at its own budget, not the request's 50 seconds, and no helper started.

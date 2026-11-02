@@ -133,6 +133,24 @@ def current() -> Deadline | None:
     return _deadline.get()
 
 
+# Only work marked here (the heavy read lane, background sweeps) or asked to
+# `skip` waits for room. A request's own reads, the caller check and actions
+# start at once: on a machine whose load stays above its core count, making
+# them wait starved every request the app made (0.5.8).
+_waits: contextvars.ContextVar[bool] = contextvars.ContextVar("brindle_spawn_waits_for_room", default=False)
+
+
+@contextlib.contextmanager
+def waits_for_room() -> Iterator[None]:
+    """Processes started inside (and in threads that copy this context) wait
+    for room before they start; everything else starts at once."""
+    token = _waits.set(True)
+    try:
+        yield
+    finally:
+        _waits.reset(token)
+
+
 def begin_write() -> None:
     """The request is about to change something itself (a file written from
     Python, say), not through :func:`action`: raise Busy if its deadline has
@@ -274,8 +292,8 @@ def forced_starts() -> int:
         return 0
 
 
-def _has_room() -> bool:
-    return not _gated or _running == 0 or room() >= 1
+def _has_room(waits: bool = True) -> bool:
+    return not _gated or not waits or _running == 0 or room() >= 1
 
 
 def stats() -> dict:
@@ -299,6 +317,7 @@ def _admit(end: float, dl: Deadline | None, skip: bool, what: str, start_anyway:
     Busy (``end`` passed, or ``dl`` stopped) instead; with ``start_anyway``
     it starts at ``end`` instead of failing."""
     global _running, _refused
+    waits = skip or _waits.get()
     with _cond:
         while True:
             if dl is not None and dl.stopped:
@@ -308,8 +327,8 @@ def _admit(end: float, dl: Deadline | None, skip: bool, what: str, start_anyway:
             if left <= 0 and not start_anyway:   # past it: never start, room or not
                 _refused += 1
                 raise Busy(f"{what} was not started: "
-                           + (why() if not _has_room() else "the request's deadline passed"))
-            if left <= 0 or _has_room():
+                           + (why() if not _has_room(waits) else "the request's deadline passed"))
+            if left <= 0 or _has_room(waits):
                 break
             if skip:
                 _refused += 1

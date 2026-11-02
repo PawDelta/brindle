@@ -241,7 +241,8 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
             monitor.tick(activity, due)     # the daemon's own health, into debuglog
         except Exception:  # noqa: BLE001 - health logging must never stop the watch
             log.debug("brindle: couldn't record the daemon's health", exc_info=True)
-        await asyncio.to_thread(ready.sweep_safely)     # session.pr_ready when a session becomes ready
+        with spawn.waits_for_room():                    # background work: it waits for room
+            await asyncio.to_thread(ready.sweep_safely)     # session.pr_ready when a session becomes ready
         if install.changed():
             server.should_exit = True
         elif (idle_exit and activity.open == 0
