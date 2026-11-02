@@ -517,6 +517,9 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
                 continue
             # The spell starts at the report that put it in review, or at a
             # later reviewer's start (a fallback review, say).
+            if pipeline.release_held(db, ws):   # its verdict waited on a check run that died
+                done.append(f"acted on the review of `{ws.branch}`, whose check run died")
+                continue
             reviewers = [r for r in db.list_agents(ws.id) if r.mode == "review"]
             since = max([a.reviewing_since] + [r.created_at for r in reviewers])
             if (now - since < cfg.review_start_delay or db.latest_review(ws.id, head)
