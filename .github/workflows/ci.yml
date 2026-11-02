@@ -44,6 +44,16 @@ jobs:
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "code changed: $code"
 
+  # The desktop app bundles its engine, so app/package.json and pyproject.toml
+  # carry one version (scripts/bump_version.py sets both).
+  version-match:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: python3 scripts/bump_version.py --check --allow-legacy   # drop --allow-legacy once the first release has used the bump script
+
   # The deployment templates under deploy/, checked with their own linters
   # (the pytest checks need none of these). Runs only when deploy/ changes.
   # Off until brindle CI launches; to restore, remove `if: false`.

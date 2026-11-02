@@ -1612,7 +1612,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         </Section>
       )}
 
-      <About read={readAbout} updates={appUpdates} status={updateStatus} />
+      <About read={readAbout} updates={appUpdates} status={updateStatus} engine={meta?.engine_version} />
       </>}
     </section>
   );
