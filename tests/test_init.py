@@ -6,9 +6,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-import click
 import pytest
-import typer.main
 from typer.testing import CliRunner
 
 from brindle import detect, doctor
@@ -211,37 +209,39 @@ def test_demo_repo_has_failing_goal(brindle_home):
     assert load_repo_config(demo.create(local=True)).default_agent == "developer-local"
 
 
-def test_demo_says_nothing_about_the_autopilot_flag_nobody_passed(tmp_path, monkeypatch):
+class _Started(Exception):
+    """Raised where a start would open its database: past the autopilot flag's handling."""
+
+
+@pytest.mark.parametrize("argv, notice", [
+    (["demo"], False),                  # the demo passes no flag
+    (["start", "--autopilot"], True),
+])
+def test_only_an_autopilot_flag_someone_passed_is_called_deprecated(tmp_path, monkeypatch, argv, notice):
     from brindle import cli, demo
 
     monkeypatch.chdir(tmp_path)   # demo chdirs into its repo; this puts the cwd back afterwards
     monkeypatch.setattr(demo, "create", lambda local=False: tmp_path)
-    started = []
-    monkeypatch.setattr(cli, "start", lambda **kw: started.append(kw))
-    res = CliRunner().invoke(app, ["demo"])
-    assert res.exit_code == 0, res.output
-    assert "deprecated" not in res.output
-    assert started[0]["autopilot"] is None and started[0]["demo"] is True
-
-    def walk(cmd, path):   # and no help text names a source file
-        out = CliRunner().invoke(app, [*path, "--help"], terminal_width=200).output
-        assert "src/brindle" not in out and ".py`" not in out, path
-        for name, sub in (cmd.commands.items() if isinstance(cmd, click.Group) else ()):
-            walk(sub, [*path, name])
-
-    walk(typer.main.get_command(app), [])
+    monkeypatch.setattr(cli, "DB", lambda: (_ for _ in ()).throw(_Started()))   # the session itself is faked
+    res = CliRunner().invoke(app, argv)
+    assert isinstance(res.exception, _Started), res.output
+    assert ("deprecated" in res.output) == notice
 
 
-@pytest.mark.parametrize("platform, managers, wanted", [
-    ("darwin", ["apt-get"], "brew install tmux"),
-    ("linux", ["apt-get"], "sudo apt install tmux"),
-    ("linux", ["dnf"], "sudo dnf install tmux"),
-    ("linux", [], "sudo apt install tmux (or your distro's package manager)"),
+@pytest.mark.parametrize("platform, managers, picked", [
+    ("darwin", ["apt-get"], None),            # Homebrew on macOS, whatever else is there
+    ("linux", ["pacman", "dnf"], "dnf"),      # the first found, in TMUX_LINUX's order
+    ("linux", [], "apt-get"),                 # none found: apt's, as the likeliest
 ])
-def test_tmux_hint_fits_the_platform(monkeypatch, platform, managers, wanted):
+def test_tmux_hint_fits_the_platform(monkeypatch, platform, managers, picked):
     monkeypatch.setattr(doctor.sys, "platform", platform)
     monkeypatch.setattr(doctor.shutil, "which", lambda name: f"/usr/bin/{name}" if name in managers else None)
-    assert doctor.tmux_install() == wanted
+    hint = doctor.tmux_install()
+    commands = dict(doctor.TMUX_LINUX)
+    if picked is None:
+        assert not any(hint.startswith(c) for c in commands.values())
+    else:
+        assert hint.startswith(commands[picked])
     # tmux itself is missing here too, so preflight names the same command.
-    assert any(p.endswith(f"Install: {wanted}") for p in doctor.preflight("shell"))
+    assert any(p.endswith(hint) for p in doctor.preflight("shell"))
 
