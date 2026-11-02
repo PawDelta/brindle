@@ -1009,6 +1009,19 @@ def _actionable_section(rest: str) -> bool:
     return True
 
 
+def _superseded(ws: Workspace, worker: Agent, reviewer: Agent) -> bool:
+    """Whether ``reviewer``'s verdict is for a commit the branch has left
+    and the worker has reported again since the reviewer started: a late
+    verdict that must not touch the newer report's pipeline."""
+    if not reviewer.review_sha or worker.reviewing_since is None \
+            or reviewer.created_at >= worker.reviewing_since:
+        return False
+    try:
+        return gates.head(ws) != reviewer.review_sha
+    except git.GitError:
+        return False
+
+
 def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
                summary: str) -> tuple[bool, bool]:
     """(handled, ready): whether the pipeline took the verdict, and whether
@@ -1023,6 +1036,8 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
     worker = piped_worker(db, ws)
     if worker is None:
         return False, False
+    if _superseded(ws, worker, reviewer):
+        return True, False   # the newer report's own review and checks decide
     parent_id = worker.parent_id
     try:
         cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
