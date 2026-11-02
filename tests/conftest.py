@@ -303,9 +303,11 @@ def fake_agent_cli(tmp_path, monkeypatch):
 def machine_has_room(monkeypatch):
     """Workers and check runs start at once, however loaded the machine
     running the tests is (spawn.no_room); a test that wants it busy sets
-    spawn._load itself. No detached helper waits for room either."""
-    from brindle import spawn, tasks
+    spawn._load itself. No detached helper waits for room either, nor for
+    disk (a test that wants it full sets disk.free_bytes)."""
+    from brindle import disk, spawn, tasks
 
+    monkeypatch.setattr(disk, "free_bytes", lambda path: 1 << 50)
     monkeypatch.setattr(spawn, "_load", lambda: 0.0)
     monkeypatch.setattr(spawn, "pressure", lambda: 1)
     monkeypatch.setattr(tasks, "_wait_in_background", lambda task_id: None)
@@ -375,6 +377,7 @@ def provider_http(monkeypatch):
 def brindle_home(tmp_path, monkeypatch):
     home = tmp_path / "brindle-home"
     monkeypatch.setenv("BRINDLE_HOME", str(home))
+    monkeypatch.setenv("BRINDLE_CACHE_DIR", str(tmp_path / "brindle-cache"))   # not ~/Library/Caches
     # A fresh store is a new person's: the Autonomous preset, which runs what no
     # rule covers. The tests' policy is Standard (asks), so a test that wants the
     # default behaviour says so (tests/test_permission_presets.py).

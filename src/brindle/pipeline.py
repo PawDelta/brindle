@@ -55,7 +55,7 @@ import uuid
 from contextlib import contextmanager
 
 from brindle import (
-    agents, autopilot, bus, codemap, codemap_docs, conflicts, events, gates, git, history, learning, policy,
+    agents, autopilot, bus, codemap, codemap_docs, conflicts, disk, events, gates, git, history, learning, policy,
     savings, session_sync, tasks, workspaces,
 )
 from brindle.config import RepoConfig, load_repo_config
@@ -1751,6 +1751,7 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
     )
     _note(db, ws, merged=True, checks_passed=True, actor=caller)
     tasks.on_merged(db, ws)
+    disk.after_merge(db, ws)   # skipped while a worker is still live in it
     codemap.refresh_later(target, repo_root=ws.repo_root)
     doc_note = codemap_docs.docs_refresh_note(ws, target=target)
     if doc_note:

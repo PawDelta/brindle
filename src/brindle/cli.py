@@ -687,6 +687,45 @@ def prune() -> None:
         typer.echo(line)
 
 
+@app.command()
+def clean(
+    dry_run: bool = typer.Option(False, "--dry-run", help="List what would be removed; remove nothing."),
+    branches: bool = typer.Option(False, "--branches", help="Also delete the dead local branches listed "
+                                  "(each tip is kept under refs/brindle-archive/<branch>)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Delete those branches without asking."),
+) -> None:
+    """Give disk space back: build dirs of merged worktrees, old backups, aged archive, big logs.
+
+    Removes only what can be rebuilt (target, node_modules, .venv, graphify-out,
+    .uv-cache, when git ignores them) from merged worktrees with no uncommitted
+    work and no live session, database backups beyond the newest few, archived
+    transcripts past `retention`, and rotates brindle's logs. Never the database
+    itself. Dead branches are listed; --branches deletes them after asking."""
+    from brindle import disk
+
+    db = DB()
+    try:
+        here = git.main_repo_root(os.getcwd())
+    except git.GitError:
+        here = None
+    plan = disk.plan(db, here, dry_run=dry_run)
+    for line in disk.render(plan, dry_run=dry_run):
+        typer.echo(line)
+    if dry_run or not branches or not plan.branches:
+        return
+    count = sum(len(v) for v in plan.branches.values())
+    if not yes and not typer.confirm(f"Delete {count} branch(es)? Each tip is kept under "
+                                     f"{disk.ARCHIVE_REF}<branch>.", default=False):
+        return
+    for root, dead in plan.branches.items():
+        for b in dead:
+            try:
+                disk.delete_branch(root, b)
+                typer.echo(f"deleted {b.name} (restore: git branch {b.name} {disk.ARCHIVE_REF}{b.name})")
+            except git.GitError as e:
+                typer.echo(f"kept {b.name}: {e}")
+
+
 def _here_or_scratch(db: DB, reuse_scratch: bool) -> Workspace:
     """This checkout, or (outside any git repo) a scratch session for this folder."""
     from brindle import scratch
@@ -966,7 +1005,7 @@ def doctor(
         root = git.main_repo_root(os.getcwd())
     except git.GitError:
         pass
-    results = doctor_mod.checks(root)
+    results = doctor_mod.checks(root) + doctor_mod.disk_checks(root)
     typer.echo(doctor_mod.render(results))
     if any(c.level == doctor_mod.FAIL for c in results):
         raise typer.Exit(1)

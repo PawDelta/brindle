@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from contextlib import closing, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -499,6 +500,44 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
                              "uncommitted changes: workers branch from committed work only"))
         else:
             out.append(Check(OK, "working tree", "clean"))
+    return out
+
+
+def disk_checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
+    """brindle's disk use by category, what `brindle clean` reclaims, free
+    space against ``min_free_disk_gb``, and dead branches. Also keeps
+    Spotlight out of brindle's folders on macOS (``disk.keep_out_of_spotlight``).
+    Only `brindle doctor` runs it: measuring walks every worktree, too slow
+    for the daemon's doctor endpoint."""
+    from brindle import config, disk
+
+    try:
+        dirs = [config.brindle_home(), *disk.cache_dirs()]
+        if repo_root:
+            dirs.append(config.worktree_root(repo_root))
+        disk.keep_out_of_spotlight(*dirs)
+        use_db = db if db is not None else DB()
+        with closing(use_db.conn) if db is None else nullcontext():
+            usage = disk.usage(use_db, repo_root)
+            dead = disk.dead_branches(use_db, repo_root) if repo_root else []
+    except Exception as e:  # noqa: BLE001 - a report, never a reason doctor fails
+        return [Check(WARN, "disk", f"couldn't measure brindle's disk use: {e}")]
+    parts = ", ".join(f"{u.name} {disk.human(u.size)} ({u.detail})" for u in usage)
+    reclaim = next(u.size for u in usage if u.name == "build dirs") + \
+        next(u.size for u in usage if u.name == "past retention")
+    out = [Check(WARN if reclaim > disk.GB else OK, "disk use",
+                 f"{parts}. `brindle clean --dry-run` lists what `brindle clean` would reclaim "
+                 f"(~{disk.human(reclaim)})")]
+    low = disk.low_disk(repo_root)
+    if low:
+        out.append(Check(WARN, "free disk", f"{low}: new workers and check runs wait"))
+    if dead:
+        names = ", ".join(f"{b.name} ({'merged' if b.merged else 'unmerged'}, last commit "
+                          f"{time.strftime('%Y-%m-%d', time.localtime(b.last_commit))})" for b in dead[:10])
+        more = f" and {len(dead) - 10} more" if len(dead) > 10 else ""
+        out.append(Check(WARN, "dead branches",
+                         f"{names}{more}: `brindle clean --branches` deletes them, keeping each tip "
+                         f"under {disk.ARCHIVE_REF}<branch>"))
     return out
 
 

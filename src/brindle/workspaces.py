@@ -26,11 +26,12 @@ from pathlib import Path
 # be running from the very worktree ``remove`` deletes (a reviewer's `uv run`
 # in it), and a module first imported after that can't be found, which left
 # the row behind.
-from brindle import git, history, rewind, services, spawn, tmux
+from brindle import disk, git, history, rewind, services, spawn, tmux
 from brindle.config import (
     PORT_BLOCK_SIZE,
     PORT_RANGE_START,
     RepoConfig,
+    brindle_home,
     load_repo_config,
     workspace_config,
     worktree_root,
@@ -147,6 +148,8 @@ def new_worktree_root(repo_root: str, cfg: RepoConfig | None = None) -> Path:
     the repo's ``git status`` when it lies inside the checkout."""
     root = worktree_root(repo_root, cfg)
     git.exclude(repo_root, root)
+    root.mkdir(parents=True, exist_ok=True)   # a worktree is added there next
+    disk.keep_out_of_spotlight(root, brindle_home())
     return root
 
 
@@ -627,6 +630,8 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             return Removed(False, f"existing checkout left untouched; {_UNARCHIVED}", None)
         pipeline.on_workspace_cleanup(db, ws)
         db.delete_workspace(ws.id)
+        if _merged_into_base(ws, db):
+            disk.after_merge(db, ws)   # a session's merged worktree stays: its build dirs needn't
         return Removed(False, "existing checkout left untouched", None)
 
     sharing = db.workspaces_sharing(ws.repo_root, path=ws.path, exclude_id=ws.id)
@@ -645,8 +650,11 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             if not keep_session:
                 _rescue_sidebar(db, ws)
                 tmux.kill_session(ws.tmux_session)
-            return _forget(db, ws, Removed(
+            removed = _forget(db, ws, Removed(
                 False, f"worktree kept (shared with {sharing[0].id})", None))
+            if _merged_into_base(ws, db):
+                disk.after_merge(db, ws)
+            return removed
 
     exists = os.path.isdir(ws.path)
     if exists and not force:
@@ -689,8 +697,10 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
 
     deleted, note = False, None
     if delete_branch is None:
-        if cfg.delete_merged_branches and _merged_into_base(ws):
+        if cfg.delete_merged_branches and _merged_into_base(ws, db):
             try:
+                if not _is_ancestor(ws):   # a squash merge: its own commits stay restorable
+                    disk.archive_tip(ws.repo_root, ws.branch)
                 git.delete_branch(ws.repo_root, ws.branch, force=True)
                 return _forget(db, ws, Removed(True, f"merged branch {ws.branch} deleted", teardown))
             except git.GitError:
@@ -719,11 +729,20 @@ def _forget(db: DB, ws: Workspace, removed: Removed) -> Removed:
     return removed
 
 
-def _merged_into_base(ws: Workspace) -> bool:
-    """Every commit on ``ws.branch`` is already in its base branch."""
+def _is_ancestor(ws: Workspace) -> bool:
     return bool(ws.base_branch) and git.ok(
         ["merge-base", "--is-ancestor", f"refs/heads/{ws.branch}", f"refs/heads/{ws.base_branch}"],
         ws.repo_root)
+
+
+def _merged_into_base(ws: Workspace, db: DB | None = None) -> bool:
+    """Every change on ``ws.branch`` is already in its base branch: merged,
+    squash-merged (``disk.merged``), or landed through a session PR
+    session_review saw merge, unchanged since (``disk.merged_pr``)."""
+    if not ws.base_branch or not git.branch_exists(ws.repo_root, ws.branch):
+        return False
+    return (disk.merged(ws.repo_root, ws.branch, ws.base_branch)
+            or (db is not None and disk.merged_pr(db, ws)))
 
 
 # -- review and integration ------------------------------------------------
