@@ -378,6 +378,7 @@ def _admit(end: float, dl: Deadline | None, skip: bool, what: str, start_anyway:
     global _running, _refused
     with _cond:
         while True:
+            fits = _has_room()   # first: sampling the CPU takes a moment, which counts against the deadline
             if dl is not None and dl.stopped:
                 _refused += 1
                 raise Busy(f"{what} was not started: {dl.reason}")
@@ -385,8 +386,8 @@ def _admit(end: float, dl: Deadline | None, skip: bool, what: str, start_anyway:
             if left <= 0 and not start_anyway:   # past it: never start, room or not
                 _refused += 1
                 raise Busy(f"{what} was not started: "
-                           + (why() if not _has_room() else "the request's deadline passed"))
-            if left <= 0 or _has_room():
+                           + (why() if not fits else "the request's deadline passed"))
+            if left <= 0 or fits:
                 break
             if skip:
                 _refused += 1
