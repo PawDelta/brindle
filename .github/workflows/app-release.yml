@@ -606,9 +606,20 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           RC: ${{ steps.version.outputs.rc }}
           DEST_PATH: ${{ steps.version.outputs.path }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
         run: |
           dir="$RUNNER_TEMP/desktop"
           signed=true notarized=true updater=true
+          # The update banner's note: the annotated tag's one-line summary
+          # (git tag -a app-vX.Y.Z -m "..."); the old text for a lightweight tag,
+          # a manual run or a release candidate. The checkout may have turned the
+          # tag into its commit, so fetch the tag object itself.
+          notes="brindle desktop $VERSION"
+          if [ "$REF_TYPE" = tag ] && [ "$RC" != true ]; then
+            git fetch --force --no-tags origin "refs/tags/$REF_NAME:refs/tags/$REF_NAME" || echo "::warning::could not fetch tag $REF_NAME: generic notes"
+            notes="$(node app/scripts/release_notes.mjs "$REF_NAME" "$notes")"
+          fi
           for arch in aarch64 x86_64; do
             status="$dir/macos-$arch.status.json"
             [ -f "$status" ] || { echo "::error::no $arch build"; exit 1; }
@@ -629,7 +640,7 @@ jobs:
             [ "$RC" != true ] || manifest="$dir/$VERSION/latest.json"
             jq -n --arg version "$VERSION" \
               --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              --arg notes "brindle desktop $VERSION" \
+              --arg notes "$notes" \
               --arg arm_url "$base/brindle_${VERSION}_aarch64.app.tar.gz" \
               --arg arm_sig "$(cat "$dir/$VERSION/brindle_${VERSION}_aarch64.app.tar.gz.sig")" \
               --arg x64_url "$base/brindle_${VERSION}_x86_64.app.tar.gz" \
