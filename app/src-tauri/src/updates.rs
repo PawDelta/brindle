@@ -13,11 +13,17 @@
 //! else's app ever reads that feed. Its bundles are signed with a separate
 //! staff key (`STAFF_UPDATER_KEY`), and only that install trusts it.
 //!
-//! One check a launch, in the background once the daemon answers
-//! (`wait_for_engine`), and Settings' About can check again (`app_update_check`);
-//! an update found is installed and starts with the next launch, which the
-//! Inbox says ("Restart to update", `UpdateStatus`); the app never restarts
-//! by itself. None at all when brindle is air-gapped or the person turned
+//! A build that updates by itself (`checks_at_launch`) looks at its feed as
+//! it launches, in the background so the window never waits on it, and again
+//! every `RECHECK` while it stays open; Settings' About can look now
+//! (`app_update_check`). A look only finds an update and offers it
+//! (`UpdateStatus::available`, the Inbox's banner); it downloads nothing. The
+//! person's "Update now" (`app_update_now`) downloads and installs it, then
+//! restarts the app into it, and "Later" (`app_update_later`) sets the offer
+//! aside until the next look. The app never restarts unasked. Restarting
+//! loses no work: agents run in tmux and the daemon in a process of its own,
+//! neither the app's; the app's exit closes only its own pane views. None at
+//! all when brindle is air-gapped or the person turned
 //! them off: `"app_updates": false` or `"airgap": true` in
 //! `~/.brindle/config.json`, `BRINDLE_AIRGAP` in the environment, or the
 //! engine saying so (`engine_says`). A build without a public key (a local
@@ -136,9 +142,30 @@ pub fn wait_for_engine(
 }
 
 /// How long the launch check waits for the daemon to answer, and the pause
-/// between asking it.
+/// between asking it. A daemon already running (the usual case: it outlives
+/// the app) answers the first time, and the feed is read right away.
 const PATIENCE: Duration = Duration::from_secs(300);
 const PAUSE: Duration = Duration::from_secs(5);
+
+/// How long a look waits on the feed (`look`): an offline or hanging feed
+/// costs that at most, and never holds up the window, which opens regardless.
+const FEED_LIMIT: Duration = Duration::from_secs(15);
+
+/// How often an app left open looks again, by the wall clock (`due`), and how
+/// often it asks whether one is due: a Mac suspended overnight wakes due at once.
+const RECHECK: Duration = Duration::from_secs(6 * 60 * 60);
+const TICK: Duration = Duration::from_secs(10 * 60);
+
+/// Whether a look is due at `now` (seconds since the epoch), the last one
+/// that reached the feed having been at `last`: none yet, `RECHECK` since,
+/// or a clock set back past it.
+fn due(last: Option<u64>, now: u64) -> bool {
+    last.map_or(true, |last| now < last || now - last >= RECHECK.as_secs())
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+}
 
 /// Whether `version` is a release candidate's (`X.Y.Z-rc…`, as
 /// app-release.yml tells them apart).
@@ -345,7 +372,7 @@ pub fn engine_says_staff(get: impl Fn(&str) -> Result<(u16, String), String>) ->
 }
 
 /// What every install shares (app state): one at a time, whichever starts
-/// it (the launch check, Settings' Update or its release-branch install),
+/// it (Update now, Settings' Update or its release-branch install),
 /// and none over one already installed until the app restarts into it.
 #[derive(Default)]
 pub struct Installs(Mutex<Install>);
@@ -455,17 +482,20 @@ async fn may_check<R: Runtime>(
 }
 
 /// What `app-update.json` in the app's data directory keeps across launches:
-/// the version last run, and when this machine last checked (seconds since
-/// the epoch).
+/// the version last run, when this machine last checked (seconds since
+/// the epoch), and the update the person last set aside ("Later").
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Record {
     last_version: Option<String>,
     last_checked: Option<u64>,
+    #[serde(default)]
+    later: Option<String>,
 }
 
 /// What the app knows of updates beyond the install itself (app state): its
-/// record, where it lives, and the version this launch was updated to until
-/// the person dismisses it.
+/// record, where it lives, the version this launch was updated to until
+/// the person dismisses it, the update the last look found until they set it
+/// aside, and whether a look is under way.
 #[derive(Default)]
 pub struct Seen(Mutex<SeenState>);
 
@@ -474,6 +504,16 @@ struct SeenState {
     record: Record,
     path: Option<PathBuf>,
     updated: Option<String>,
+    available: Option<Offer>,
+    looking: bool,
+}
+
+/// An update a look found, offered to the person ("brindle X is available"):
+/// its version and its release notes as the feed gives them.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Offer {
+    version: String,
+    notes: Option<String>,
 }
 
 impl Seen {
@@ -511,6 +551,11 @@ pub struct UpdateStatus {
     automatic: bool,
     /// An update installed, waiting for the restart.
     pending: Option<String>,
+    /// An update found and not yet installed, for "Update now" (`app_update_now`).
+    available: Option<Offer>,
+    /// The person set `available` aside ("Later"): it shows small until a
+    /// look finds a newer one.
+    later: bool,
     /// The version this launch was updated to, until dismissed.
     updated: Option<String>,
     last_checked: Option<u64>,
@@ -531,9 +576,11 @@ fn status<R: Runtime>(app: &AppHandle<R>) -> UpdateStatus {
         version: version(app),
         automatic: checks_at_launch(&version(app)),
         pending,
+        available: seen.available.clone(),
+        later: seen.available.as_ref().is_some_and(|a| seen.record.later.as_ref() == Some(&a.version)),
         updated: seen.updated.clone(),
         last_checked: seen.record.last_checked,
-        checking,
+        checking: checking || seen.looking,
     }
 }
 
@@ -556,7 +603,7 @@ fn remember_launch<R: Runtime>(app: &AppHandle<R>) {
         .filter(|_| checks_at_launch(&current.to_string()));
     let seen = app.state::<Seen>();
     let mut seen = seen.state();
-    *seen = SeenState { record, path, updated };
+    *seen = SeenState { record, path, updated, ..SeenState::default() };
     seen.record.last_version = Some(current.to_string());
     seen.save();
 }
@@ -567,36 +614,67 @@ fn window_shown<R: Runtime>(app: &AppHandle<R>) -> bool {
     })
 }
 
-/// Check this build's feed and install an update found, once `may_check`
-/// allows it, as the only install (`exclusive`), answering its version;
-/// a check that reached the feed is recorded, and every change announced.
+const NOT_AUTOMATIC: &str = "this build doesn't update by itself";
+
+/// One look at this build's own feed for an update to offer (at launch, every
+/// `RECHECK`, and About's Check now): the `newer` build there, or none. It
+/// downloads and installs nothing; "Update now" does (`update_now`). A build
+/// that doesn't update by itself never looks (`checks_at_launch`), nor one
+/// whose `gate` (`may_check`) says no; a feed that hasn't answered within
+/// `limit` has failed.
+async fn look<G: Future<Output = Result<(), String>>>(
+    version: &str,
+    gate: impl FnOnce() -> G,
+    feed: &mut impl ReleaseFeed,
+    limit: Duration,
+) -> Result<Option<Offer>, String> {
+    if !checks_at_launch(version) {
+        return Err(NOT_AUTOMATIC.into());
+    }
+    let current = Version::parse(version).map_err(|e| e.to_string())?;
+    gate().await?;
+    let found = tokio::time::timeout(limit, feed.check())
+        .await
+        .map_err(|_| format!("the update feed didn't answer within {}s", limit.as_secs()))??;
+    let found = found.filter(|v| Version::parse(v).is_ok_and(|v| newer(&current, &v)));
+    Ok(found.map(|version| Offer { version, notes: feed.notes() }))
+}
+
+/// Look at this build's feed (`look`, gated by `may_check`) and offer what it
+/// finds, answering it; a look that reached the feed is recorded, and every
+/// change announced.
 async fn check<R: Runtime>(
     app: &AppHandle<R>,
     brindle_home: &Path,
     again: impl FnMut() -> bool + Send + 'static,
-) -> Result<Option<String>, String> {
-    may_check(app, brindle_home, again).await?;
-    let got = exclusive(&app.state::<Installs>(), || async {
-        announce(app);
-        install(app).await
-    })
-    .await;
-    if got.is_ok() {
+) -> Result<Option<Offer>, String> {
+    app.state::<Seen>().state().looking = true;
+    announce(app);
+    let mut feed = PluginFeed { app: app.clone(), which: Feed::Own, update: None };
+    let got = look(&version(app), || may_check(app, brindle_home, again), &mut feed, FEED_LIMIT).await;
+    {
         let seen = app.state::<Seen>();
         let mut seen = seen.state();
-        seen.record.last_checked = SystemTime::now().duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs());
-        seen.save();
+        seen.looking = false;
+        if let Ok(found) = &got {
+            seen.available = found.clone();
+            seen.record.last_checked = Some(now_secs());
+            seen.save();
+        }
     }
     announce(app);
     got
 }
 
-/// At launch: remember it (`remember_launch`), then check once, in the
-/// background, waiting for the daemon the app starts alongside (`PATIENCE`);
-/// install an update found, which starts with the next launch. The Inbox
-/// says so (the `app-update` event); a notification only when the window
-/// isn't showing. Never restarts the app. A build that doesn't update by
-/// itself makes no check (`checks_at_launch`).
+/// At launch: remember it (`remember_launch`), then, in the background so the
+/// window opens as ever, look at the feed (`check`) and again whenever one is
+/// `due` while the app stays open. The first look waits for a daemon that
+/// isn't answering yet (`PATIENCE`): air-gap can be armed by a repo's config
+/// only the engine reads, and no feed is read before it says. An update found
+/// is offered (the `app-update` event: the banner), with a notification once
+/// per version when the window isn't showing; nothing installs or restarts
+/// until the person says. A build that doesn't update by itself makes no
+/// look (`checks_at_launch`).
 pub fn check_in_background<R: Runtime>(app: &AppHandle<R>, brindle_home: &Path) {
     remember_launch(app);
     if !checks_at_launch(&version(app)) {
@@ -605,22 +683,36 @@ pub fn check_in_background<R: Runtime>(app: &AppHandle<R>, brindle_home: &Path) 
     let (app, brindle_home) = (app.clone(), brindle_home.to_path_buf());
     tauri::async_runtime::spawn(async move {
         let until = Instant::now() + PATIENCE;
-        let again = move || {
+        let mut first: Option<Box<dyn FnMut() -> bool + Send>> = Some(Box::new(move || {
             let left = until.saturating_duration_since(Instant::now());
             std::thread::park_timeout(PAUSE.min(left));
             !left.is_zero()
-        };
-        match check(&app, &brindle_home, again).await {
-            Ok(Some(version)) if !window_shown(&app) => {
-                let _ = app
-                    .notification()
-                    .builder()
-                    .title("brindle updated")
-                    .body(format!("brindle {version} is installed. Restart brindle to update."))
-                    .show();
+        }));
+        let mut ticks = tokio::time::interval(TICK);
+        let (mut last, mut told) = (None, None);
+        loop {
+            ticks.tick().await;
+            if !due(last, now_secs()) {
+                continue;
             }
-            Ok(_) => {}
-            Err(e) => eprintln!("brindle: update check: {e}"),
+            let again = first.take().unwrap_or_else(|| Box::new(|| false));
+            match check(&app, &brindle_home, again).await {
+                Ok(found) => {
+                    last = Some(now_secs());
+                    let Some(found) = found else { continue };
+                    if told.as_ref() != Some(&found.version) && !window_shown(&app) {
+                        let _ = app
+                            .notification()
+                            .builder()
+                            .title("brindle update available")
+                            .body(format!("brindle {} is available. Open brindle to update.", found.version))
+                            .show();
+                    }
+                    told = Some(found.version);
+                }
+                // A failed look (offline, say) is due again at the next tick.
+                Err(e) => eprintln!("brindle: update check: {e}"),
+            }
         }
     });
 }
@@ -631,13 +723,11 @@ pub fn app_update_status<R: Runtime>(app: AppHandle<R>) -> UpdateStatus {
     status(&app)
 }
 
-/// About's Check now: the launch check, now, without waiting for a daemon
-/// that doesn't answer. Only for a build that updates by itself.
+/// About's Check now: the launch check's look, now, without waiting for a
+/// daemon that doesn't answer; an update found is offered, not installed.
+/// Only for a build that updates by itself.
 #[tauri::command]
 pub async fn app_update_check<R: Runtime>(app: AppHandle<R>) -> Result<UpdateStatus, String> {
-    if !checks_at_launch(&version(&app)) {
-        return Err("this build doesn't update by itself".into());
-    }
     check(&app, &crate::daemon::brindle_home(), || false).await?;
     Ok(status(&app))
 }
@@ -647,6 +737,76 @@ pub async fn app_update_check<R: Runtime>(app: AppHandle<R>) -> Result<UpdateSta
 pub fn app_update_dismiss<R: Runtime>(app: AppHandle<R>) {
     app.state::<Seen>().state().updated = None;
     announce(&app);
+}
+
+/// "Later": the update offered shows small until a look finds a newer one,
+/// across launches too.
+#[tauri::command]
+pub fn app_update_later<R: Runtime>(app: AppHandle<R>) {
+    {
+        let seen = app.state::<Seen>();
+        let mut seen = seen.state();
+        seen.record.later = seen.available.as_ref().map(|a| a.version.clone());
+        seen.save();
+    }
+    announce(&app);
+}
+
+/// "Update now": this build's update (`update_now`), reporting how it goes
+/// on `on_progress`, then the app restarts into it, answering its version, or
+/// none (no restart) when there is nothing newer by now. The same gate as a
+/// look (`may_check`, the daemon asked once) before the feed is read and
+/// again before installing; one install at a time; each bundle checked
+/// against the production key. Only for a build that updates by itself: an
+/// rc or staff build updates from Settings. It takes no feed or version from
+/// the webview.
+#[tauri::command]
+pub async fn app_update_now<R: Runtime>(
+    app: AppHandle<R>,
+    on_progress: Channel<ReleaseProgress>,
+) -> Result<Option<String>, String> {
+    if !checks_at_launch(&version(&app)) {
+        return Err(NOT_AUTOMATIC.into());
+    }
+    let home = crate::daemon::brindle_home();
+    let current = app.package_info().version.clone();
+    let mut feed = PluginFeed { app: app.clone(), which: Feed::Own, update: None };
+    let report = |progress| {
+        let _ = on_progress.send(progress);
+    };
+    let installs = app.state::<Installs>();
+    let gate = || may_check(&app, &home, || false);
+    let restart = || {
+        announce(&app);
+        app.request_restart();
+    };
+    let got = update_now(&installs, gate, &current, &mut feed, report, restart).await;
+    announce(&app);
+    got
+}
+
+/// Install this build's update from `feed` (`install_build`: `gate` before
+/// reading it and again before installing, the only install, `report`ing
+/// how it goes) when it is `newer` than `current`, then `restart` into it;
+/// one already installed and waiting restarts at once.
+async fn update_now<G: Future<Output = Result<(), String>>>(
+    installs: &Installs,
+    gate: impl Fn() -> G,
+    current: &Version,
+    feed: &mut impl ReleaseFeed,
+    report: impl FnMut(ReleaseProgress) + Send,
+    restart: impl FnOnce(),
+) -> Result<Option<String>, String> {
+    let wanted = |current: &Version, found: &str| {
+        Version::parse(found)
+            .map(|found| newer(current, &found))
+            .map_err(|_| format!("the update feed names {found:?}, not a version"))
+    };
+    let got = install_build(installs, gate, current, feed, wanted, report).await?;
+    if got.is_some() {
+        restart();
+    }
+    Ok(got)
 }
 
 /// Settings' staff-only Update (owner decision; how an rc build updates):
@@ -727,6 +887,10 @@ trait ReleaseFeed {
     ) -> Result<Vec<u8>, String>;
     /// Install the downloaded bundle (its signature checked again).
     fn install(&mut self, bytes: &[u8]) -> Result<(), String>;
+    /// The release notes of the build `check` found, if the feed gives any.
+    fn notes(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Install the release feed's build when `release_build_wanted` says so over
@@ -780,27 +944,41 @@ async fn install_build<G: Future<Output = Result<(), String>>>(
     .await
 }
 
-/// The release feed through the updater plugin: the compiled stable feed's
-/// `release_endpoint`, with the staff public key (`release_updater`).
+/// A feed through the updater plugin (`PluginFeed`).
+enum Feed {
+    /// The compiled stable feed's `release_endpoint`, with the staff public
+    /// key (`release_updater`).
+    Release,
+    /// The stable feed with the production key ("Return to stable").
+    Stable,
+    /// This build's own (`app_updater`): an update `newer` than it.
+    Own,
+}
+
+/// A feed (`Feed`) through the updater plugin.
 struct PluginFeed<R: Runtime> {
     app: AppHandle<R>,
-    /// Read the stable feed with the production key ("Return to stable")
-    /// instead of the release feed with the staff key.
-    stable: bool,
+    which: Feed,
     update: Option<tauri_plugin_updater::Update>,
 }
 
 impl<R: Runtime> ReleaseFeed for PluginFeed<R> {
     async fn check(&mut self) -> Result<Option<String>, String> {
-        let stable = stable_endpoint(&self.app).ok_or("this build names no update feed")?;
-        let updater = if self.stable {
-            stable_updater(&self.app, &stable)?
-        } else {
-            let feed = release_endpoint(&stable).ok_or("this build's update feed has no release feed")?;
-            release_updater(&self.app, &feed)?
+        let stable = || stable_endpoint(&self.app).ok_or("this build names no update feed");
+        let updater = match self.which {
+            Feed::Own => app_updater(&self.app)?,
+            Feed::Stable => stable_updater(&self.app, &stable()?)?,
+            Feed::Release => {
+                let feed = release_endpoint(&stable()?).ok_or("this build's update feed has no release feed")?;
+                release_updater(&self.app, &feed)?
+            }
         };
         self.update = updater.check().await.map_err(|e| e.to_string())?;
         Ok(self.update.as_ref().map(|update| update.version.clone()))
+    }
+
+    fn notes(&self) -> Option<String> {
+        self.update.as_ref().and_then(|update| update.body.clone())
     }
 
     async fn download(
@@ -831,7 +1009,7 @@ pub async fn app_release_build_install<R: Runtime>(
     on_progress: Channel<ReleaseProgress>,
 ) -> Result<Option<String>, String> {
     let current = app.package_info().version.clone();
-    let mut feed = PluginFeed { app: app.clone(), stable: false, update: None };
+    let mut feed = PluginFeed { app: app.clone(), which: Feed::Release, update: None };
     let report = |progress| {
         let _ = on_progress.send(progress);
     };
@@ -852,7 +1030,7 @@ pub async fn app_return_to_stable<R: Runtime>(
     on_progress: Channel<ReleaseProgress>,
 ) -> Result<Option<String>, String> {
     let current = app.package_info().version.clone();
-    let mut feed = PluginFeed { app: app.clone(), stable: true, update: None };
+    let mut feed = PluginFeed { app: app.clone(), which: Feed::Stable, update: None };
     let report = |progress| {
         let _ = on_progress.send(progress);
     };
@@ -873,7 +1051,7 @@ pub async fn app_return_to_stable<R: Runtime>(
 pub async fn app_stable_check<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
     staff_gate_now(&app).await?;
     let current = app.package_info().version.clone();
-    let mut feed = PluginFeed { app: app.clone(), stable: true, update: None };
+    let mut feed = PluginFeed { app: app.clone(), which: Feed::Stable, update: None };
     let Some(found) = feed.check().await? else { return Ok(None) };
     Ok(stable_return_wanted(&current, &found)?.then_some(found))
 }
@@ -1200,12 +1378,29 @@ mod tests {
         calls: Vec<&'static str>,
         meanwhile: Box<dyn Fn() + 'a>,
         paused: Option<&'a Cell<bool>>,
+        reach: Reach,
+    }
+
+    /// Whether the feed answers: it does, it fails (offline), or it never does.
+    #[derive(Clone, Copy, Debug)]
+    enum Reach {
+        Up,
+        Down,
+        Hung,
+    }
+
+    fn fake_feed(version: Option<&'static str>, reach: Reach) -> FakeFeed<'static> {
+        FakeFeed { version, calls: vec![], meanwhile: Box::new(|| {}), paused: None, reach }
     }
 
     impl ReleaseFeed for FakeFeed<'_> {
         async fn check(&mut self) -> Result<Option<String>, String> {
             self.calls.push("check");
-            Ok(self.version.map(str::to_string))
+            match self.reach {
+                Reach::Up => Ok(self.version.map(str::to_string)),
+                Reach::Down => Err("offline".to_string()),
+                Reach::Hung => std::future::pending().await,
+            }
         }
 
         async fn download(
@@ -1267,6 +1462,7 @@ mod tests {
                 calls: vec![],
                 meanwhile: Box::new(|| meanwhile(&fake, &config)),
                 paused: None,
+                reach: Reach::Up,
             };
             // The gate as the command builds it, on this fake machine.
             let gate = || std::future::ready(staff_gate(|p| fake.get(p), Some(*config.borrow()), None, true));
@@ -1305,7 +1501,7 @@ mod tests {
         let current = Version::parse(THIS).expect("version");
         let installs = Installs::default();
         let paused = Cell::new(true);
-        let feed = |paused| FakeFeed { version: Some(NEXT), calls: vec![], meanwhile: Box::new(|| {}), paused };
+        let feed = |paused| FakeFeed { paused, ..fake_feed(Some(NEXT), Reach::Up) };
         let (mut first, mut second, mut third) = (feed(Some(&paused)), feed(None), feed(None));
         let (got, again, after) = tauri::async_runtime::block_on(async {
             let mut installing =
@@ -1328,6 +1524,73 @@ mod tests {
         assert_eq!(after, Ok(Some(NEXT.to_string())));
         assert!(second.calls.is_empty() && third.calls.is_empty());
         assert!(matches!(installs.begin(), Begin::Installed(v) if v == NEXT));
+    }
+
+    #[test]
+    fn a_look_offers_an_update_installs_nothing_and_never_holds_up_the_launch() {
+        let limit = Duration::from_millis(50);
+        let offer = |v: &str| Some(Offer { version: v.into(), notes: None });
+        let started = Instant::now();
+        // The last columns: what the look answers, and what was asked of the feed.
+        for (version, reach, open, got, calls) in [
+            // A release with a newer build in its feed: offered, and nothing downloads.
+            ("0.2.10", Reach::Up, true, Ok(offer("0.2.11")), &["check"][..]),
+            ("0.2.11", Reach::Up, true, Ok(None), &["check"]),
+            // Offline, or a feed that never answers: no offer, the latter within the limit.
+            ("0.2.10", Reach::Down, true, Err(()), &["check"]),
+            ("0.2.10", Reach::Hung, true, Err(()), &["check"]),
+            // Updates off (air-gapped, say): the feed isn't read.
+            ("0.2.10", Reach::Up, false, Err(()), &[]),
+            // A release candidate or a staff build: no look at all, not even the gate.
+            ("0.2.11-rc.1", Reach::Up, true, Err(()), &[]),
+            ("0.2.10+release.42.0123456789ab", Reach::Up, true, Err(()), &[]),
+        ] {
+            let mut feed = fake_feed(Some("0.2.11"), reach);
+            let gated = Cell::new(0);
+            let gate = || {
+                gated.set(gated.get() + 1);
+                std::future::ready(if open { Ok(()) } else { Err(UPDATES_OFF.to_string()) })
+            };
+            let looked = tauri::async_runtime::block_on(look(version, gate, &mut feed, limit));
+            let what = format!("{version} {reach:?} {open}");
+            assert_eq!(looked.map_err(|_| ()), got, "{what}");
+            assert_eq!(feed.calls, calls, "{what}");
+            assert_eq!(gated.get(), usize::from(checks_at_launch(version)), "{what}");
+        }
+        assert!(started.elapsed() < Duration::from_secs(5), "a hung feed held the look up");
+        // Looked at an hour ago: not due until RECHECK has passed, by the wall clock.
+        let now = 1_000_000;
+        for (last, is_due) in [(None, true), (Some(now - 3600), false), (Some(now - RECHECK.as_secs()), true), (Some(now + 60), true)] {
+            assert_eq!(due(last, now), is_due, "{last:?}");
+        }
+    }
+
+    #[test]
+    fn update_now_installs_the_update_then_restarts_into_it() {
+        let current = Version::parse("0.2.10").expect("version");
+        let all: &[&str] = &["check", "download", "install"];
+        for (names, got, calls, restarts) in [
+            (Some("0.2.11"), Ok(Some("0.2.11".to_string())), all, true),
+            // Nothing newer by now: nothing downloads, and the app keeps running.
+            (Some("0.2.10"), Ok(None), &["check"][..], false),
+            (None, Ok(None), &["check"], false),
+            (Some("not a version"), Err(()), &["check"], false),
+        ] {
+            let mut feed = fake_feed(names, Reach::Up);
+            let restarted = Cell::new(false);
+            let gate = || std::future::ready(Ok(()));
+            let done = tauri::async_runtime::block_on(update_now(
+                &Installs::default(),
+                gate,
+                &current,
+                &mut feed,
+                |_| {},
+                || restarted.set(true),
+            ));
+            assert_eq!(done.map_err(|_| ()), got, "{names:?}");
+            assert_eq!(feed.calls, calls, "{names:?}");
+            assert_eq!(restarted.get(), restarts, "{names:?}");
+        }
     }
 
     #[test]

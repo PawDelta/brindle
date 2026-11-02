@@ -25,6 +25,8 @@ serde_json = "1"
 semver = "1"
 httparse = "1"
 reqwest = "0.13"
+# The update checks' time limit and their periodic tick (updates.rs), on Tauri's own tokio runtime.
+tokio = { version = "1", features = ["time"] }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [dev-dependencies]
