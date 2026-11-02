@@ -2669,6 +2669,7 @@ def close(db: DB, agent_id: str, panes: dict[str, bool] | None = None) -> Agent:
 
         procs.stop([agent.id])  # anything left running after its window went
     db.update_agent(agent.id, dismissed_at=time.time())
+    bus.publish_agent(db, "agent.closed", agent.id)
     return agent
 
 
@@ -3886,6 +3887,10 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     # take the pairing meant for the same command asked again (note_permission_outcome).
     if not keep or answer in ("deny", "supervisor_deny"):
         db.pop_permission_request(agent.id, lambda r: r["tool_use_id"] == request_id)
+    if held:
+        # A terminal denial has no PostToolUse. Announce the completed hold
+        # after its cleanup so clients see its new prompt/answered state.
+        bus.publish_agent(db, "permission.changed", agent.id, request_id=request_id)
     return answer
 
 
@@ -4002,6 +4007,10 @@ def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
             from brindle import permission_asks
 
             permission_asks.resolve_at_prompt(db, agent.id, row["tool_use_id"])
+            # Also when policy was off (no learning reason): other clients
+            # still need to forget the request answered in this terminal.
+            bus.publish_agent(db, "permission.answered", agent.id,
+                              request_id=row["tool_use_id"], via="prompt", cleared=True)
         if row is None or not row["reason"]:
             return   # none, or recorded for the inbox with the policy off: nothing to learn
         req = permissions.Request.from_dict(json.loads(row["request"]))

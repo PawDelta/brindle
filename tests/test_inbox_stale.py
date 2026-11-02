@@ -5,11 +5,40 @@ import time
 
 import pytest
 
-from brindle import agents, permissions, workspaces
+from brindle import agents, bus, permissions, workspaces
 from brindle.daemon.holds import HOLDS
 from brindle.db import Agent
 from brindle.service import inbox
 from brindle.service.errors import ServiceError
+
+
+@pytest.mark.parametrize("handled", ["terminal", "closed", "checks"])
+@pytest.mark.variant("0.2.13 stale Inbox: handling an item without an agent status transition")
+def test_handling_inbox_items_notifies_connected_apps(db, repo, monkeypatch, handled):
+    from brindle import procs
+    from brindle.daemon.routes_actions import inbox_action
+
+    ws = workspaces.create(db, str(repo), "feat/handled").workspace
+    a = Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time())
+    db.add_agent(a)
+    if handled == "terminal":
+        req = permissions.Request("claude", "bash", "Bash", command="git status")
+        db.add_permission_request(a.id, "q1", json.dumps(req.to_dict()), "", None, "prompt")
+    if handled == "checks":
+        db.add_autopilot(a.id)
+        db.update_autopilot(a.id, proposal=json.dumps({"checks": ["true"], "at": time.time()}))
+    before = bus.tail(db)[-1]["id"]
+    if handled == "terminal":
+        agents.note_permission_outcome(db, a, {"tool_name": "Bash", "tool_input": {"command": "git status"}})
+        assert db.permission_requests_of(a.id) == []
+    elif handled == "closed":
+        monkeypatch.setattr(procs, "stop", lambda ids: None)
+        agents.close(db, a.id, panes={})
+        assert db.get_agent(a.id).dismissed_at is not None
+    else:
+        inbox_action(db, {"id": a.id, "action": "decline"}, {})
+        assert db.get_autopilot(a.id).proposal is None
+    assert bus.tail(db, before, repo_root=str(repo))
 
 
 @pytest.mark.parametrize("claimed, registered_digest, listed", [
