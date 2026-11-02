@@ -10,6 +10,8 @@ app/package.json and app/package-lock.json (two spots). --check (run by CI)
 fails when app/package.json and pyproject.toml disagree.
 """
 
+from __future__ import annotations
+
 import argparse
 import re
 import sys
