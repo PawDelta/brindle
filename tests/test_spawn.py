@@ -51,6 +51,11 @@ def _with_no_room_only_waiting_work_waits_and_a_request_read_starts_at_once(over
     with spawn.deadline(0.3):
         git.run(["status"], repo)
     assert time.monotonic() - t0 < 0.3
+    # ...at normal priority: at background priority macOS starved the caller
+    # check's `ps` on a busy machine and every request waited on it (0.5.9).
+    assert spawn._background(["ps"]) == ["ps"]
+    with spawn.waits_for_room():
+        assert spawn._background(["ps"])[-1] == "ps" and len(spawn._background(["ps"])) > 1
 
     # Work marked as waiting (the heavy lane, background sweeps) waits, and is
     # busy at its deadline.
