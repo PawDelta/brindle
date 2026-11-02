@@ -536,6 +536,17 @@ CREATE TABLE IF NOT EXISTS session_squashes (
     recorded_at REAL NOT NULL,
     PRIMARY KEY (repo_root, squash_sha)
 );
+-- A session PR that merged but whose landing commit (merge or squash) isn't
+-- known yet: looked up at each sync until it is (brindle.session_sync).
+CREATE TABLE IF NOT EXISTS session_pr_landings (
+    root_id TEXT NOT NULL,
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    url TEXT NOT NULL,
+    covers_sha TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (repo_root, branch, url)
+);
 -- The one reviewer of a workspace's commit (agents.request_review): only the
 -- dispatcher that inserts or takes over this row starts it. slot is '' for
 -- the commit's review, or the profile of a configured second review.

@@ -40,6 +40,7 @@ from brindle.db import DB, Workspace
 log = logging.getLogger(__name__)
 
 FETCH_SECONDS = 30.0
+MAX_LANDING_LOOKUPS = 5      # events that look up how a merged PR landed before the plain merge decides
 
 
 @dataclass
@@ -64,9 +65,10 @@ def default_branch(repo_root: str) -> str:
 
 
 def upstream(ws: Workspace) -> str | None:
-    """The default branch the checkout ``ws`` keeps up with: when it is on
-    another branch cut from it, and origin exists. None otherwise (on the
-    default branch itself, detached, a worker's branch of a session branch)."""
+    """The default branch the session checkout ``ws`` keeps up with: when it
+    is on another branch, and origin exists (whatever base the branch was
+    once cut from). None otherwise. Callers decide that ``ws`` is a session's
+    checkout (``keeps_up``)."""
     if not ws.branch or ws.branch == "HEAD":
         return None
     try:
@@ -75,19 +77,44 @@ def upstream(ws: Workspace) -> str | None:
         default = default_branch(ws.repo_root)
     except git.GitError:
         return None
-    if ws.branch == default or ws.base_branch not in (None, default):
-        return None
-    return default
+    return None if ws.branch == default else default
 
 
-def fetch(ws: Workspace, default: str) -> None:
-    """Bring ``origin/<default>`` up to date; offline, it stays as it was."""
+def keeps_up(db: DB, ws: Workspace) -> bool:
+    """Whether ``ws`` keeps up with the default branch: a session's checkout
+    (a root agent runs there), or a branch cut from the default branch.
+    Never a worker's branch of a session branch."""
+    if any(a.parent_id is None for a in db.list_agents(ws.id)):
+        return True
+    return ws.base_branch in (None, default_branch(ws.repo_root))
+
+
+def fetch(repo_root: str, default: str) -> bool:
+    """Bring ``origin/<default>`` up to date. False when that failed
+    (offline, no auth): it stays as it was."""
     try:
-        git.run(["fetch", "--quiet", "--no-tags", "origin",
-                 f"+refs/heads/{default}:refs/remotes/origin/{default}"],
-                ws.repo_root, check=False, timeout=FETCH_SECONDS)
+        proc = git.run(["fetch", "--quiet", "--no-tags", "origin",
+                        f"+refs/heads/{default}:refs/remotes/origin/{default}"],
+                       repo_root, check=False, timeout=FETCH_SECONDS)
     except git.GitError:
-        pass
+        return False
+    return proc.returncode == 0
+
+
+def fresh_start(repo_root: str) -> tuple[str, str | None]:
+    """Where a new session branch starts: ``origin/<default>`` as just
+    fetched, never the local default branch (stale, or with commits of its
+    own). (sha, a warning for the person when it couldn't be fetched.)"""
+    default = default_branch(repo_root)
+    remote = git.has_remote(repo_root)
+    fetched = remote and fetch(repo_root, default)
+    if remote and git.remote_branch_exists(repo_root, default):
+        sha = git.out(["rev-parse", f"origin/{default}"], repo_root)
+        return sha, None if fetched else (f"couldn't fetch origin/{default}; the session starts from it "
+                                          f"as last fetched ({sha[:8]})")
+    local = default if git.branch_exists(repo_root, default) else "HEAD"
+    return (git.out(["rev-parse", local], repo_root),
+            f"no origin/{default}; the session starts from {local}" if remote else None)
 
 
 def drift(ws: Workspace, default: str) -> Drift | None:
@@ -158,7 +185,12 @@ def sync(db: DB, ws: Workspace, *, checks: bool = True) -> Outcome | None:
     default = upstream(ws)
     if default is None:
         return None
-    fetch(ws, default)
+    fetch(ws.repo_root, default)
+    _land_merged_prs(db, ws)
+    if _awaiting_landing(db, ws):
+        # A merged PR's landing commit isn't known yet: merging now could
+        # conflict with the session's own squashed work. The next event syncs.
+        return Outcome("pending", f"waiting to learn how {ws.branch}'s merged PR landed on origin/{default}")
     from brindle import pipeline
 
     try:
@@ -193,7 +225,7 @@ def _sync_locked(db: DB, ws: Workspace, default: str) -> Outcome:
     before = git.out(["rev-parse", "HEAD"], ws.path)
     files = _replay_squashes(db, ws, d.ref)
     if not files:
-        _new, files = git.merge_local_base(ws.path, d.ref)
+        _new, files = git.merge_local_base(ws.path, d.ref, no_ff=True)
     if files:
         text = (f"origin/{default} has {d.behind} commit(s) {ws.branch} lacks, and merging it conflicts in: "
                 f"{', '.join(files)}. Merges into {ws.branch} are refused until it is synced: have a worker "
@@ -242,7 +274,7 @@ def _replay_squashes(db: DB, ws: Workspace, ref: str) -> list[str]:
         merged = git.run(["merge-tree", "--write-tree", f"{squash}^1", covers], ws.path, check=False)
         if merged.returncode != 0 or merged.stdout.split()[:1] != [git.out(["rev-parse", f"{squash}^{{tree}}"], ws.path)]:
             continue
-        _new, files = git.merge_local_base(ws.path, f"{squash}^1")
+        _new, files = git.merge_local_base(ws.path, f"{squash}^1", no_ff=True)
         if files:
             return files
         git.run(["merge", "-s", "ours", "--no-edit", "-m",
@@ -309,18 +341,43 @@ def pr_block(ws: Workspace) -> str | None:
 # -- events ------------------------------------------------------------------------
 
 
-def on_pr_merged(db: DB, ws: Workspace, url: str, pushed_sha: str | None) -> Outcome | None:
-    """A session PR from ``ws`` merged on the forge: record a squash, then sync."""
+def on_pr_merged(db: DB, root_id: str, ws: Workspace, url: str, pushed_sha: str | None) -> Outcome | None:
+    """Session ``root_id``'s PR from ``ws`` merged on the forge: keep that
+    (``session_pr_landings``) until how it landed is known, then sync."""
+    if pushed_sha:
+        db.conn.execute("INSERT OR IGNORE INTO session_pr_landings (root_id, repo_root, branch, url, covers_sha)"
+                        " VALUES (?, ?, ?, ?, ?)", (root_id, ws.repo_root, ws.branch, url, pushed_sha))
+    return sync(db, ws)
+
+
+def unlanded(db: DB) -> list[str]:
+    """The sessions with a merged PR whose landing commit isn't known yet."""
+    return [r["root_id"] for r in db.conn.execute("SELECT DISTINCT root_id FROM session_pr_landings")]
+
+
+def _land_merged_prs(db: DB, ws: Workspace) -> None:
+    """Look up how each merged PR of ``ws``'s branch landed (after a fetch,
+    so the commit is here) and record a squash. A lookup that fails stays for
+    the next event, up to MAX_LANDING_LOOKUPS; then the plain merge decides."""
     from brindle import workspaces
 
-    default = upstream(ws)
-    if default is None:
-        return None
-    fetch(ws, default)
-    landed = workspaces.pull_request_merge_commit(url, ws.path)
-    if landed and pushed_sha:
-        record_squash(db, ws, landed, pushed_sha)
-    return sync(db, ws)
+    rows = db.conn.execute("SELECT url, covers_sha, attempts FROM session_pr_landings WHERE repo_root = ?"
+                           " AND branch = ?", (ws.repo_root, ws.branch)).fetchall()
+    for row in rows:
+        key = (ws.repo_root, ws.branch, row["url"])
+        landed = workspaces.pull_request_merge_commit(row["url"], ws.path)
+        if landed and git.ok(["cat-file", "-e", f"{landed}^{{commit}}"], ws.path):
+            record_squash(db, ws, landed, row["covers_sha"])
+        elif row["attempts"] + 1 < MAX_LANDING_LOOKUPS:
+            db.conn.execute("UPDATE session_pr_landings SET attempts = attempts + 1 WHERE repo_root = ?"
+                            " AND branch = ? AND url = ?", key)
+            continue
+        db.conn.execute("DELETE FROM session_pr_landings WHERE repo_root = ? AND branch = ? AND url = ?", key)
+
+
+def _awaiting_landing(db: DB, ws: Workspace) -> bool:
+    return db.conn.execute("SELECT 1 FROM session_pr_landings WHERE repo_root = ? AND branch = ?",
+                           (ws.repo_root, ws.branch)).fetchone() is not None
 
 
 def on_session_start(db: DB, ws: Workspace) -> str | None:

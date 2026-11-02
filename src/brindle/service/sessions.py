@@ -150,21 +150,20 @@ def cull_detached(repo_root: str | None = None) -> None:
 # -- start -------------------------------------------------------------------
 
 
-def session_worktree(db: DB, ws: Workspace) -> Workspace:
+def session_worktree(db: DB, ws: Workspace) -> tuple[Workspace, list[Note]]:
     """A worktree for a second session in this repo: branch brindle/session-N,
-    cut from what this checkout has checked out, so the two sessions never
-    share files or a branch."""
+    cut from origin's default branch as just fetched (session_sync.fresh_start),
+    so the two sessions never share files or a branch."""
     n = 2
     while git.ok(["rev-parse", "--verify", "--quiet", f"refs/heads/brindle/session-{n}"], ws.repo_root):
         n += 1
-    # From a freshly fetched origin/<default>, never a stale local one.
-    default = session_sync.default_branch(ws.repo_root)
-    start = git.resolve_start_point(ws.repo_root, default, fetch=True)
-    created = workspaces.create(db, ws.repo_root, f"brindle/session-{n}", base=default,
-                             start=git.out(["rev-parse", start], ws.repo_root), apply_prefix=False).workspace
+    start, warning = session_sync.fresh_start(ws.repo_root)
+    created = workspaces.create(db, ws.repo_root, f"brindle/session-{n}",
+                                base=session_sync.default_branch(ws.repo_root), start=start,
+                                apply_prefix=False).workspace
     from brindle import codemap
     codemap.seed_session(created.path, created.repo_root)
-    return created
+    return created, [Note(f"! {warning}", "warn")] if warning else []
 
 
 def place(db: DB, ws: Workspace, choice: str | None = None, session_id: str | None = None, *,
@@ -187,8 +186,9 @@ def place(db: DB, ws: Workspace, choice: str | None = None, session_id: str | No
     if choice == "a":
         return Placed(ws)
     if choice == "n":
-        created = session_worktree(db, ws)
-        return Placed(created, [Note(f"✓ new session in its own worktree: {created.path} ({created.branch})")])
+        created, notes = session_worktree(db, ws)
+        return Placed(created, [Note(f"✓ new session in its own worktree: {created.path} ({created.branch})"),
+                                *notes])
     # A session starts here next: keep its local models loaded.
     agents.pause(db, picked.root.id, stop_procs=False, stop_local_models=False)
     return Placed(ws, [Note(f"Paused session {picked.root.id}; `brindle continue {picked.root.id}` brings it back.")])

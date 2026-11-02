@@ -584,7 +584,9 @@ def pr_checked(db: DB, ws: Workspace, progress=None, passed: tuple[str, list[str
     cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     # Fetch origin's default branch and merge it in when that's clean: the
     # checks below run on the result, and a branch still behind is refused.
-    session_sync.sync(db, ws, checks=False)
+    keeps_up = session_sync.keeps_up(db, ws)
+    if keeps_up:
+        session_sync.sync(db, ws, checks=False)
     with ExitStack() as held:
         try:
             held.enter_context(pipeline.base_lock(ws.repo_root, ws.branch, wait=False))
@@ -595,7 +597,7 @@ def pr_checked(db: DB, ws: Workspace, progress=None, passed: tuple[str, list[str
         if dirty := git.dirty_files(ws.path, tracked_only=True):
             raise workspaces.WorkspaceError(
                 f"{ws.branch} has uncommitted changes ({', '.join(dirty[:8])}); commit them first.")
-        if behind := session_sync.pr_block(ws):
+        if keeps_up and (behind := session_sync.pr_block(ws)):
             raise workspaces.WorkspaceError(f"not opening a PR: {behind}.")
         sha = head(ws)
         env = workspaces.workspace_env(ws)

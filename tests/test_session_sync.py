@@ -74,9 +74,10 @@ def test_a_merge_into_the_session_tells_the_supervisor_how_far_behind_main_it_is
     assert not contains(sess.path, main)
 
 
-def test_a_clean_sync_merges_main_in_and_checks_what_it_brought(db, repo, sess, other, told):
+@pytest.mark.parametrize("diverged", [True, False], ids=["diverged", "linear"])
+def test_a_clean_sync_merges_main_in_and_checks_what_it_brought(db, repo, sess, other, told, diverged):
     config.set_local(sess.repo_root, "checks", ["test -f hot.py"])
-    before = commit(Path(sess.path), "a.py", "a\n")
+    before = commit(Path(sess.path), "a.py", "a\n") if diverged else sh("git rev-parse HEAD", Path(sess.path))
     main = commit(other, "hot.py", "fix\n", push=True)
     feat = worker(db, repo, "feat")
 
@@ -122,6 +123,8 @@ def test_a_session_behind_main_gets_no_pr(db, repo, sess, other):
 
 def test_resuming_a_session_merges_origin_main_in_first(db, repo, sess, other, monkeypatch):
     db.set_status("lead", "paused")
+    # Cut, as sessions once were, from another branch: it still keeps up with main.
+    db.conn.execute("UPDATE workspaces SET base_branch = 'feat/old' WHERE id = ?", (sess.id,))
     commit(Path(sess.path), "a.py", "a\n")
     main = commit(other, "hot.py", "fix\n", push=True)
     resumed = []
@@ -134,8 +137,8 @@ def test_resuming_a_session_merges_origin_main_in_first(db, repo, sess, other, m
     assert any(n.text.startswith("brindle merged origin/main into sess") for n in got.notes)
 
 
-def test_a_squashed_session_pr_syncs_back_without_conflicting(db, repo, sess, other, monkeypatch):
-    path = Path(sess.path)
+def test_a_squashed_session_pr_syncs_back_once_its_landing_is_known(db, repo, sess, other, monkeypatch):
+    path, url = Path(sess.path), "https://github.com/o/r/pull/7"
     pushed = commit(path, "app.py", "v1\n")
     sh("git push -q origin sess", path)
     sh("git fetch -q origin sess && git merge -q --squash origin/sess && git commit -qm squash", other)
@@ -143,9 +146,25 @@ def test_a_squashed_session_pr_syncs_back_without_conflicting(db, repo, sess, ot
     squash = sh("git rev-parse HEAD", other)
     main = commit(other, "hot.py", "fix\n", push=True)
     commit(path, "app.py", "v2\n")          # the session carries on editing the same line
-    monkeypatch.setattr(workspaces, "pull_request_merge_commit", lambda url, cwd: squash)
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, ?, ?)",
+                    ("lead", "sess", url, pushed, time.time()))
+    lookups = [None, squash]                # the forge doesn't say at first
+    monkeypatch.setattr(workspaces, "pull_request_merged", lambda u, cwd: True)
+    monkeypatch.setattr(workspaces, "pull_request_merge_commit", lambda u, cwd: lookups.pop(0))
+    monkeypatch.setattr(session_review, "MERGE_POLL_SECONDS", 0.0)
 
-    out = session_sync.on_pr_merged(db, sess, "https://github.com/o/r/pull/7", pushed)
+    session_review.poll_merged(db)          # merged; how it landed isn't known: nothing merged yet
+    assert not contains(path, main) and session_sync.conflict(db, sess.repo_root, "sess") is None
+    session_review.poll_merged(db)
 
-    assert out.state == "synced", out.text
+    assert lookups == [] and session_sync.unlanded(db) == []
     assert contains(path, main) and (path / "app.py").read_text() == "v2\n"
+
+
+def test_a_new_session_branch_starts_at_origin_main_not_a_local_main_ahead_of_it(db, repo):
+    origin = sh("git rev-parse origin/main", repo)
+    commit(repo, "local.py", "unpushed\n")   # local main has a commit of its own
+
+    created, notes = svc.session_worktree(db, workspaces.adopt_root(db, str(repo)))
+
+    assert sh("git rev-parse HEAD", Path(created.path)) == origin and notes == []

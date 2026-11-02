@@ -481,9 +481,10 @@ def checkout_for(db: DB, repo_path: str, *, branch: str | None = None,
             return ws
         if not branch:
             raise WorkspaceError(f"{path} isn't a worktree yet; pass --branch to create one there")
-        cfg = load_repo_config(repo_root)
-        base = cfg.base_branch or git.default_branch(repo_root)
-        git.add_worktree(repo_root, path, branch, git.resolve_start_point(repo_root, base, cfg.fetch))
+        from brindle import session_sync
+
+        # A new session branch: from origin's default branch as just fetched.
+        git.add_worktree(repo_root, path, branch, session_sync.fresh_start(repo_root)[0])
         ws = adopt_root(db, str(path))
         from brindle import codemap
         codemap.seed_session(ws.path, ws.repo_root)
@@ -494,7 +495,12 @@ def checkout_for(db: DB, repo_path: str, *, branch: str | None = None,
     if existing:
         ws = adopt_root(db, existing)
     else:
-        ws = create(db, repo_path, branch, apply_prefix=False).workspace
+        from brindle import session_sync
+
+        # A new session branch starts from origin's default branch as just fetched.
+        new = not git.branch_exists(repo_root, branch) and not git.remote_branch_exists(repo_root, branch)
+        ws = create(db, repo_path, branch, apply_prefix=False,
+                    start=session_sync.fresh_start(repo_root)[0] if new else None).workspace
     from brindle import codemap
     codemap.seed_session(ws.path, ws.repo_root)
     return ws

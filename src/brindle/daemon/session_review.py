@@ -220,6 +220,8 @@ def poll_merged(db: DB) -> None:
         due = time.monotonic() - _merge_polled >= MERGE_POLL_SECONDS
         if due:
             _merge_polled = time.monotonic()
+            for root_id in session_sync.unlanded(db):    # a merge whose landing an earlier round missed
+                _sync_after_merge(db, root_id)
             with spawn.deadline(MERGE_CHECK_SECONDS) as limit:
                 check = spawn.carry(workspaces.pull_request_merged)
                 path = str(db.path)
@@ -266,19 +268,23 @@ def poll_merged(db: DB) -> None:
         _merge_lock.release()
 
 
-def _sync_after_merge(db: DB, root_id: str, branch: str, url: str) -> None:
-    """A session PR merged: record what a squash of it covers, then pull the
-    default branch back into the session (brindle.session_sync)."""
+def _sync_after_merge(db: DB, root_id: str, branch: str | None = None, url: str | None = None) -> None:
+    """A session PR merged (``url``; none: one merged earlier whose landing
+    commit wasn't known yet): note it until how it landed is known, then pull
+    the default branch back into the session (brindle.session_sync)."""
     root = db.get_agent(root_id)
     ws = db.get_workspace(root.workspace_id) if root else None
-    row = db.conn.execute("SELECT pushed_sha FROM session_prs WHERE root_id = ? AND branch = ?",
-                          (root_id, branch)).fetchone()
-    if ws is None or ws.branch != branch:
+    if ws is None or (branch and ws.branch != branch):
         return
     try:
-        session_sync.on_pr_merged(db, ws, url, row["pushed_sha"] if row else None)
+        if url is None:
+            session_sync.sync(db, ws)
+            return
+        row = db.conn.execute("SELECT pushed_sha FROM session_prs WHERE root_id = ? AND branch = ?",
+                              (root_id, branch)).fetchone()
+        session_sync.on_pr_merged(db, root_id, ws, url, row["pushed_sha"] if row else None)
     except Exception:  # noqa: BLE001 - one session's sync never stops the round
-        log.exception("brindle: couldn't sync %s after its PR merged", branch)
+        log.exception("brindle: couldn't sync %s after its PR merged", ws.branch)
 
 
 def require_ready(db: DB, root: Agent, ws: Workspace) -> None:
