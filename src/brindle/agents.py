@@ -2139,6 +2139,10 @@ def _delivery_held(db: DB, agent: Agent | None) -> bool:
             or (wake.enabled(agent) and wake.live(agent)))
 
 
+class _PasteBlocked(Exception):
+    """Raised inside a delivery's protected block when the pane became blocked."""
+
+
 def _flush_pane(db: DB, agent_id: str) -> bool:
     """``flush``'s typed delivery, under its delivery_lock. The queue and the
     agent are read afresh: while it waited, another sender may have delivered,
@@ -2165,12 +2169,16 @@ def _flush_pane(db: DB, agent_id: str) -> bool:
     warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
     try:
         baseline = launch_health.before_delivery(db, agent, msg.body) if not warmup else ""
-        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
-                   server=server_of(agent))
-    except BaseException:
+        lead = message_lead(db, agent, msg.sender_id)
+        if _paste_blocked(agent):  # last look, after preparation: a draft may have appeared
+            raise _PasteBlocked
+        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
+    except BaseException as exc:
         # pop_pending claimed this row before the external send. Release the
-        # same row and our idle claim so the next flush can retry it once.
+        # same row and our idle claim so the next flush can try it once more.
         db.retry_pending(msg.id, agent_id, claimed_at)
+        if isinstance(exc, _PasteBlocked):
+            return False
         raise
     if not warmup:
         launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
@@ -2197,10 +2205,14 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
     if not msg:
         return False
     try:
-        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
-                   server=server_of(agent))
-    except BaseException:
+        lead = message_lead(db, agent, msg.sender_id)
+        if _paste_blocked(agent):  # last look before pasting: a draft may have appeared
+            raise _PasteBlocked
+        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
+    except BaseException as exc:
         db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
+        if isinstance(exc, _PasteBlocked):
+            return False
         raise
     return True
 
@@ -2219,15 +2231,18 @@ def _paste_blocked(agent: Agent) -> bool:
     try:
         screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
     except tmux.TmuxError:
-        return False
+        return True  # an unreadable screen might hold a draft: fail closed, try again later
     reason = provider.paste_blocked(screen, interactive)
     if reason == "background":
-        tmux.send_keys(agent.tmux_window, "Escape", server=server)
+        try:
+            tmux.send_keys(agent.tmux_window, "Escape", server=server)
+        except tmux.TmuxError:
+            return True
         time.sleep(0.3)
         try:
             screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
         except tmux.TmuxError:
-            return False
+            return True
         reason = provider.paste_blocked(screen, interactive)
     return reason is not None
 
@@ -2481,10 +2496,13 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
         close_later(caller_id)
         return gone
     try:
-        sha = gates.head(ws)
+        head = gates.head(ws)
     except git.GitError:   # removed just now
         close_later(caller_id)
         return gone
+    # For the commit it was started on: a branch that moved on since then
+    # needs a review of its own, not this one carried over to its new head.
+    sha = caller.review_sha or head
     db.add_review(ws.id, sha, caller.id, approved, summary)
     bus.publish_agent(db, "review.submitted", caller.id, approved=approved, sha=sha)
     if approved:
@@ -2975,9 +2993,9 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
                  focus: str | None = None, cfg: RepoConfig | None = None,
                  second: bool = False, *, slot: str | None = None) -> Agent | None:
     """Have ``ws`` reviewed. Without checks configured the reviewer starts
-    right away and is returned. With checks, nothing starts yet: a detached
-    ``_review-after-checks`` process runs them and starts the reviewer with
-    their results in its prompt (see ``review_after_checks``), so this returns
+    right away and is returned. With checks, a detached
+    ``_review-after-checks`` process starts the reviewer and runs them beside
+    it (see ``review_after_checks``), so this returns
     at once with None, however long the suite takes. Raises ``AgentError``
     for a reviewer that couldn't start whatever the checks say (the kill
     switch, an unusable profile); a failure after that reaches ``caller``
@@ -3093,10 +3111,12 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
                         focus: str | None = None, cfg: RepoConfig | None = None,
                         request_id: str | None = None, second: bool = False,
                         *, slot: str | None = None) -> Agent | None:
-    """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
-    lock and the by-sha cache, so a result a worker's report already warmed
-    is instant), then start the reviewer with the results in its prompt.
-    Meant to run from a detached process, which outlives the call that
+    """Start the reviewer of ``ws``, then run ``cfg.checks`` beside it
+    (through ``gates.check_summary``: its lock and the by-sha cache, so a
+    result a worker's report already warmed is instant) and hand their
+    summary to ``pipeline.checks_finished``: a verdict that came in while
+    they ran waits for them, so the worker gets the review's findings and
+    the failing checks in one message. Returns the reviewer. Meant to run from a detached process, which outlives the call that
     started it. Gives up quietly when the workspace is gone, a reviewer is
     already at work on this commit, or the branch moves on to a commit a new
     report hands to a run of its own. A request claim also drops superseded
@@ -3115,12 +3135,24 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     profile = _review_profile(db, ws, profile, cfg)
     with _review_request_run(ws.id, profile, request_id), pipeline.review_run(ws.id):
         since = pipeline.review_claim(db, ws)
+        caller = db.get_agent(caller_id) if caller_id else None
+        reviewer = None
         for _attempt in range(MOVED_RETRIES + 1):
             if not _review_requested(ws.id, profile, request_id):
                 return None
             sha = gates.head(ws)
             if _live_reviewer(db, ws, sha, profile):
                 return None
+            # The reviewer starts before the checks, not after them: its
+            # verdict waits for them (pipeline.checks_finished), and the
+            # worker gets both in one message. A newer request cannot slip
+            # between the claim check and spawn.
+            pipeline.checks_started(db, ws, sha)
+            with review_dispatch_lock(ws.id):
+                if not _review_requested(ws.id, profile, request_id):
+                    return None
+                reviewer = request_review(db, caller, ws, profile, focus, cfg, checks_alongside=True,
+                                          second=second, slot=slot)
             try:
                 # In the check queue as of the report (#186): a run restarted
                 # or requested again later doesn't lose its turn.
@@ -3137,18 +3169,22 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
             if gates.head(ws) == sha:
                 break
             if not pipeline.still_claimed(db, ws, since):
+                _drop_reviewer(db, reviewer)
                 return None
         else:
+            _drop_reviewer(db, reviewer)
             pipeline.on_moved_during_checks(db, ws)
             return None
-        caller = db.get_agent(caller_id) if caller_id else None
         text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
-        # A newer request cannot slip between the final claim check and spawn.
-        with review_dispatch_lock(ws.id):
-            if not _review_requested(ws.id, profile, request_id):
-                return None
-            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text,
-                                  second=second, slot=slot)
+        pipeline.checks_finished(db, ws, sha, text)
+        return reviewer
+
+
+def _drop_reviewer(db: DB, reviewer: Agent | None) -> None:
+    """Close the reviewer a check run started beside its checks, once the
+    branch has left the commit it reviews: nobody will act on that verdict."""
+    if reviewer is not None and db.get_agent(reviewer.id) is not None:
+        close(db, reviewer.id)
 
 
 def review_dispatch_lock(workspace_id: str, *, timeout: float | None = None):
@@ -3166,13 +3202,16 @@ def review_dispatch_lock(workspace_id: str, *, timeout: float | None = None):
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None,
                    check_summary: str | None = None, second: bool = False,
-                   *, slot: str | None = None) -> Agent | None:
+                   *, slot: str | None = None, checks_alongside: bool = False) -> Agent | None:
     """Start or reuse a review, replacing an MCP-broken reviewer once. None
-    while another dispatcher is still starting this commit's reviewer."""
+    while another dispatcher is still starting this commit's reviewer.
+    ``checks_alongside``: the repo's checks run beside this review
+    (``review_after_checks``), and its prompt says so."""
     # Serialize hook recovery with explicit requests, including the interval
     # between stopping the broken reviewer and publishing its replacement.
     with review_dispatch_lock(ws.id):
-        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second, slot)
+        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second, slot,
+                               checks_alongside)
 
 
 def _review_claim_slot(profile: str | None, slot: str | None) -> str:
@@ -3238,7 +3277,7 @@ def _review_context(db: DB, ws: Workspace, worker: Agent | None, files: list[str
 def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None,
                     focus: str | None, cfg: RepoConfig | None,
                     check_summary: str | None, second: bool = False,
-                    slot: str | None = None) -> Agent | None:
+                    slot: str | None = None, checks_alongside: bool = False) -> Agent | None:
     """Start a reviewer in a worker's workspace right away. Its verdict is
     recorded for the merge gate and forwarded to ``caller`` as a message.
     ``profile`` picks the reviewer profile; None uses
@@ -3351,6 +3390,10 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     if check_summary:
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
                  "Take these results into account; don't run the whole suite yourself.")
+    elif checks_alongside:
+        task += ("\n\nThe repo's checks are running on this commit beside your review; brindle "
+                 "sends the worker any that fail together with your verdict. Judge the code; "
+                 "don't run the whole suite yourself.")
 
     prev = db.last_review(ws.id)
     if prev and prev.sha != sha:

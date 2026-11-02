@@ -78,6 +78,7 @@ HOST_CPU_LOAD_INFO, CPU_STATES = 3, 4
 
 # kern.memorystatus_vm_pressure_level (macOS): 1 normal, 2 warn, 4 critical.
 PRESSURE_WARN, PRESSURE_CRITICAL = 2, 4
+CHECK_LOAD_FACTOR = 2.0   # a check holding a slot waits only above this load per core
 
 
 class Busy(RuntimeError):
@@ -327,6 +328,22 @@ def no_room(repo_root: str | None = None) -> str | None:
     is room or until it is cancelled (a supervisor can start a waiting worker
     anyway: ``tasks.start_now``), unless the repo's ``wait_for_room`` is false."""
     if room() >= 1:
+        return None
+    if repo_root is not None:
+        from brindle.config import load_repo_config
+
+        if not load_repo_config(repo_root).wait_for_room:
+            return None
+    return why()
+
+
+def check_no_room(repo_root: str | None = None) -> str | None:
+    """Why a check run holding a check slot should still wait, or None. The
+    slots (``check_concurrency``, with the xdist workers split across them)
+    already bound check load, so unlike :func:`no_room` this waits only when
+    the machine is in real trouble: memory pressure, or a load above
+    ``CHECK_LOAD_FACTOR`` times its cores. ``wait_for_room`` false skips it."""
+    if pressure() < PRESSURE_WARN and _load() <= CHECK_LOAD_FACTOR * _cores():
         return None
     if repo_root is not None:
         from brindle.config import load_repo_config
