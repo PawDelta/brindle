@@ -1,0 +1,222 @@
+"""brindle.reap: what outlived its work is found and stopped by the sweep.
+tmux is faked (its session listing, kills); the DB and git are real."""
+
+import os
+import time
+from types import SimpleNamespace
+
+import pytest
+from conftest import sh
+
+from brindle import agents, cull, doctor, procs, reap, tmux, workspaces
+from brindle.config import brindle_home
+from brindle.db import Agent, Task, Workspace
+from brindle.service import inbox
+
+NOW = time.time()
+OLD = NOW - 30 * 24 * 3600
+
+
+@pytest.fixture
+def fake_tmux(monkeypatch):
+    t = SimpleNamespace(sessions=[], panes=tmux.PaneSnapshot(tmux.current_server()), killed=[], stopped=[])
+    monkeypatch.setattr(tmux, "session_infos", lambda prefix="brindle_": t.sessions)
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: t.panes)
+    monkeypatch.setattr(tmux, "kill_session", t.killed.append)
+    monkeypatch.setattr(tmux, "kill_window", lambda *a, **k: None)
+    monkeypatch.setattr(tmux, "window_pids", lambda *a, **k: [])
+    monkeypatch.setattr(procs, "descendants", lambda pids, procs=None: set(pids))
+    monkeypatch.setattr(procs, "terminate", lambda pids, grace=3.0: t.stopped.extend(pids) or len(pids))
+    return t
+
+
+def test_session_listing_reads_a_real_tmux_server(tmp_path):
+    """The one listing every other test fakes, read from the test's own tmux server."""
+    tmux.ensure_session("brindle_proj_listed", str(tmp_path), {"BRINDLE_HOME": "/some/home"})
+    tmux.ensure_session("other_session", str(tmp_path), {})
+
+    found = tmux.session_infos()
+
+    assert [s.name for s in found] == ["brindle_proj_listed"]
+    s = found[0]
+    assert s.home == "/some/home" and not s.attached and s.created > NOW - 600
+    assert len(s.panes) == 1 and s.panes[0].id.startswith("%") and s.panes[0].pid > 0
+
+
+def session(name, *panes, attached=False, home=None, activity=OLD):
+    return tmux.SessionInfo(name, attached, OLD, activity, home or str(brindle_home()), list(panes))
+
+
+def pane(pane_id, path, pid=4242, cmd="zsh"):
+    return tmux.PaneInfo(pane_id, pid, str(path), cmd, False, "", OLD)
+
+
+def add(db, ws, agent_id, **kw):
+    fields = dict(profile="developer", provider="claude", parent_id=None, mode="assign", status="idle",
+                  tmux_window="", result=None, created_at=OLD, status_since=OLD)
+    db.add_agent(Agent(agent_id, ws.id, **{**fields, **kw}))
+
+
+def live(t, *pane_ids):
+    t.panes.update({p: True for p in pane_ids})
+
+
+@pytest.mark.parametrize("case,reaped", [
+    ("no row", True),
+    ("worktree gone, worker left in it", True),
+    ("attached", False),
+    ("uncommitted work in its folder", False),
+    pytest.param("another brindle home", False,
+                 marks=pytest.mark.variant("a feature CLI's temp BRINDLE_HOME shares the tmux server")),
+])
+def test_orphan_sessions_are_reaped_by_the_sweep(db, repo, tmp_path, fake_tmux, case, reaped):
+    folder = tmp_path / "plain"
+    folder.mkdir()
+    name = "brindle_proj_old"
+    if case == "worktree gone, worker left in it":
+        ws = Workspace("proj/old", str(repo), "old", "worktree", "old", "main", str(tmp_path / "gone"),
+                       None, name, OLD)
+        db.add_workspace(ws)
+        add(db, ws, "agy1", provider="antigravity", tmux_window="%7")
+        live(fake_tmux, "%7")
+        folder = tmp_path / "gone"
+    if case == "uncommitted work in its folder":
+        (repo / "wip.py").write_text("x = 1\n")
+        folder = repo
+    fake_tmux.sessions = [session(name, pane("%7", folder), attached=case == "attached",
+                                  home="/elsewhere" if case == "another brindle home" else None)]
+
+    before = doctor.reap_checks(db)
+    lines = cull.sweep(db)
+
+    assert (name in fake_tmux.killed) == reaped
+    assert any(name in line for line in lines) == reaped
+    assert (4242 in fake_tmux.stopped) == reaped   # its processes first
+    if case == "worktree gone, worker left in it":
+        assert db.get_agent("agy1").dismissed_at is not None
+    # doctor: what it would reap before, what it reaped after
+    assert (name in before[1].detail) == reaped
+    assert (name in doctor.reap_checks(db)[0].detail) == reaped
+
+
+@pytest.mark.parametrize("case,killed", [
+    ("merged, worker reported", True),
+    ("merged, worker still working", False),
+    ("closed worker left a shell", True),
+    ("unreported worker with uncommitted work", False),
+])
+def test_finished_workers_sessions_are_reaped(db, repo, fake_tmux, case, killed):
+    ws = workspaces.create(db, str(repo), "feat-done").workspace
+    db.conn.execute("UPDATE workspaces SET created_at=? WHERE id=?", (OLD, ws.id))
+    reported = "did it" if case in ("merged, worker reported", "closed worker left a shell") else None
+    if case == "merged, worker still working":
+        add(db, ws, "w1", tmux_window="%3", status="processing")
+    else:
+        add(db, ws, "w1", tmux_window="%3", result=reported)
+    if case in ("closed worker left a shell", "unreported worker with uncommitted work"):
+        sh("echo more >> app.py && git commit -qam more", ws.path)   # not merged
+        sh("echo wip > wip.py", ws.path)   # uncommitted: only an unfinished worker's keeps its session
+    if case == "closed worker left a shell":
+        db.update_agent("w1", dismissed_at=OLD)
+    else:
+        live(fake_tmux, "%3")
+    fake_tmux.sessions = [session(ws.tmux_session, pane("%3", ws.path, cmd="zsh" if case ==
+                                                         "closed worker left a shell" else "claude"))]
+
+    reap.run(db)
+
+    assert (ws.tmux_session in fake_tmux.killed) == killed
+    if case == "merged, worker reported":
+        assert db.get_agent("w1").dismissed_at is not None
+    assert os.path.isdir(ws.path)   # the worktree itself is never touched here
+
+
+@pytest.mark.parametrize("case", ["idle", "attached", "recent input", "running worker"])
+def test_idle_supervisors_are_stopped_but_resumable(db, repo, fake_tmux, case):
+    ws = workspaces.adopt_root(db, str(repo))
+    add(db, ws, "boss", mode="interactive", profile="supervisor", tmux_window="%1")
+    live(fake_tmux, "%1")
+    if case == "running worker":
+        add(db, ws, "w1", parent_id="boss", status="processing", tmux_window="%2")
+        live(fake_tmux, "%2")
+    fake_tmux.sessions = [session("brindle_proj_main", pane("%1", repo, cmd="claude"),
+                                  attached=case == "attached",
+                                  activity=NOW - 3600 if case == "recent input" else OLD)]
+
+    reap.run(db)
+    reap.run(db)
+
+    stopped = case == "idle"
+    assert (db.get_agent("boss").status == "paused") == stopped
+    assert (agents.latest_paused(db, ws) is not None) == stopped   # `brindle continue` finds it
+    items = inbox._idle_items(db, str(repo))
+    assert [i.root_id for i in items] == (["boss"] if stopped else [])
+    if stopped:
+        db.set_status("boss", "idle")   # continued: the Inbox item goes
+        assert inbox._idle_items(db, str(repo)) == []
+
+
+@pytest.mark.parametrize("case,gone", [
+    ("reviewer with its verdict", True),
+    ("coordinator paused two days", True),
+    ("coordinator paused an hour", False),
+])
+def test_leftover_reviewers_and_coordinator_rows(db, repo, fake_tmux, case, gone):
+    ws = workspaces.adopt_root(db, str(repo))
+    if case.startswith("reviewer"):
+        add(db, ws, "x1", mode="review", result="APPROVED", tmux_window="%5")
+        live(fake_tmux, "%5")
+    else:
+        since = NOW - (2 * 86400 if "two days" in case else 3600)
+        add(db, ws, "x1", mode="coordinator", profile="coordinator", status="paused",
+            created_at=since, status_since=since)
+
+    reap.run(db)
+
+    a = db.get_agent("x1")
+    assert (a is None or a.dismissed_at is not None) == gone
+
+
+def _commit(cwd, text, when=NOW - 2 * 86400, msg="change"):
+    (cwd / "app.py").write_text(text)
+    sh(f"GIT_AUTHOR_DATE='@{int(when)} +0000' GIT_COMMITTER_DATE='@{int(when)} +0000' git commit -qam '{msg}'", cwd)
+
+
+@pytest.mark.parametrize("case", ["contained", "recently active", "uncommitted changes", "similar"])
+def test_superseded_workers(db, repo, fake_tmux, monkeypatch, case):
+    from pathlib import Path
+
+    ws = workspaces.create(db, str(repo), "feat-dup").workspace
+    db.conn.execute("UPDATE workspaces SET created_at=? WHERE id=?", (OLD, ws.id))
+    add(db, ws, "boss", mode="interactive", profile="supervisor", tmux_window="%1", status_since=NOW)
+    add(db, ws, "w1", parent_id="boss", tmux_window="%2", task="Add a greeting function to app.py",
+        status_since=NOW - 3600 if case == "recently active" else OLD)
+    live(fake_tmux, "%1", "%2")
+    fake_tmux.sessions = [session("brindle_proj_main", pane("%1", repo), attached=True)]
+    told = []
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: told.append((to, body)))
+    _commit(Path(ws.path), "def greet():\n    return 'hi'\n")
+    if case == "similar":
+        sh("git checkout -qb feat-other", repo)
+        _commit(repo, "def greeting(name):\n    return name\n", when=NOW)
+        sh("git checkout -q main && git merge -q --no-ff feat-other -m \"Merge branch 'feat-other'\"", repo)
+        db.add_task(Task("t2", str(repo), None, "boss", ws.id, "developer",
+                         "Add greeting function in app.py for users", "assign", 1, "feat-other",
+                         None, None, None, "merged", NOW))
+    else:   # squash-merged into main under another commit
+        _commit(repo, "def greet():\n    return 'hi'\n", when=NOW, msg="squashed feat-dup")
+    if case == "uncommitted changes":
+        (Path(ws.path) / "notes.txt").write_text("todo\n")
+        os.utime(Path(ws.path) / "notes.txt", (OLD, OLD))
+
+    reap.run(db)
+    reap.run(db)
+
+    w = db.get_agent("w1")
+    assert (w.dismissed_at is not None) == (case == "contained")
+    head = sh("git rev-parse main", repo)
+    if case == "contained":
+        assert w.result.startswith("Superseded") and head[:10] in told[0][1]
+    if case == "similar":
+        assert "feat-other" in told[0][1] and "1 of 1" in told[0][1]
+    assert len(told) == (0 if case == "recently active" else 1) and all(to == "boss" for to, _ in told)

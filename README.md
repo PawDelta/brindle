@@ -658,6 +658,8 @@ Goal driving, merge gates and cleanup:
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
 | `graphify_auto_refresh` | `true` | automatically rebuild untracked code maps; `false` disables rebuilds while keeping queries available |
 | `stale_after` | `30` | minutes before a worker that reported and sat idle is closed, or `brindle prune` closes a stale paused/exited agent whose workspace is merged or gone (`0`: never) |
+| `idle_supervisor_days` | `3` | days without input (no client attached, no running workers) before the sweep stops a supervisor; it stays resumable with `brindle continue` and the Inbox says so (`0`: never) |
+| `superseded_after` | `6` | hours without a commit, turn or output before a worker whose branch is already in its base is stopped (its supervisor is told; uncommitted changes only notify), or one whose work closely matches a newly merged branch is reported (`0`: never) |
 | `pipeline` | `true` | brindle reviews and merges reported branches itself; the supervisor gets one message per branch |
 | `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
