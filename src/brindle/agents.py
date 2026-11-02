@@ -1054,7 +1054,7 @@ def consent_identity(db: DB, repo: str, profile: str, provider: str, session: st
             target = None
         if target is None:
             raise AgentError(f"no session {session!r} in {repo}")
-        ws, parent = repos.target_workspace(db, target), root.id
+        ws, parent = repos.target_workspace(db, session, target), root.id
     who = Agent("", ws.id, profile, provider, parent, "assign" if parent else "interactive", "starting", "",
                 None, 0.0)
     return launch_identity(who, ws)[0]

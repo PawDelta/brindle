@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS session_repos (
     alias TEXT NOT NULL,
     repo_root TEXT NOT NULL,
     added_at REAL NOT NULL,
+    branch TEXT,                   -- the session's own branch there, its workers' merge target (NULL: attached before there was one)
     PRIMARY KEY (root_id, alias)
 );
 CREATE TABLE IF NOT EXISTS session_credentials (
@@ -870,6 +871,7 @@ class SessionRepo:
     alias: str
     repo_root: str
     added_at: float
+    branch: str | None = None
 
 
 @dataclass
@@ -1229,6 +1231,8 @@ class DB:
                           ("hold_until", "REAL")):
             if col not in request_cols:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} {kind}")
+        if "branch" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_repos)")}:
+            self.conn.execute("ALTER TABLE session_repos ADD COLUMN branch TEXT")
         if "merged_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_prs)")}:
             self.conn.execute("ALTER TABLE session_prs ADD COLUMN merged_at REAL")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
@@ -1323,10 +1327,10 @@ class DB:
 
     # -- attached repos (brindle.repos) ---------------------------------------
 
-    def add_session_repo(self, root_id: str, alias: str, repo_root: str) -> None:
+    def add_session_repo(self, root_id: str, alias: str, repo_root: str, branch: str | None = None) -> None:
         with self.tx() as c:
-            c.execute("INSERT INTO session_repos (root_id, alias, repo_root, added_at) VALUES (?,?,?,?)",
-                      (root_id, alias, repo_root, time.time()))
+            c.execute("INSERT INTO session_repos (root_id, alias, repo_root, added_at, branch) VALUES (?,?,?,?,?)",
+                      (root_id, alias, repo_root, time.time(), branch))
 
     def remove_session_repo(self, root_id: str, alias: str) -> bool:
         with self.tx() as c:
