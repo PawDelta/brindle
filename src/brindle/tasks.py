@@ -634,6 +634,23 @@ def room_wait(repo_root: str | None = None) -> str | None:
     return spawn.no_room(repo_root)
 
 
+def _room_wait_overrun(t: Task, why: str) -> str | None:
+    """A start's explanation once its persisted room wait exceeds the limit.
+
+    Use the original waiting time, so helper restarts and changing load
+    reasons cannot extend the wait. Dependencies and session pauses are
+    still checked by the caller before the task can be claimed.
+    """
+    from brindle.config import load_repo_config
+
+    if t.waiting_since is None:
+        return None
+    elapsed = time.time() - t.waiting_since
+    if elapsed > load_repo_config(t.repo_root).room_wait_max:
+        return f"started after waiting {elapsed / 60:.0f} min: {why}"
+    return None
+
+
 def load_counts(db: DB) -> tuple[int, int]:
     """(running workers, running check runs): workers are the process-running
     agents of a task (not supervisors or reviewers); check runs are counted
@@ -728,7 +745,8 @@ def _wait_in_background(task_id: str) -> None:
 
 def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
     """The detached helper's loop: start task ``task_id`` once there's room
-    (``_start_if_ready`` looks), telling its caller. Ends when it starts, or
+    or its room wait limit expires (``_start_if_ready`` looks), telling its
+    caller how it was admitted. Ends when it starts, or
     when the task is no longer waiting (cancelled, held, started by a
     sweep) or its session is paused (``on_resumed`` takes over). Returns
     whether it started it."""
@@ -738,9 +756,9 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
         if t is None or t.state != "pending" or t.waiting is None or session_paused(db, t):
             return False
         why = room_wait(t.repo_root)
-        if why is None:
+        if why is None or _room_wait_overrun(t, why):
             # Unless a dependency added since holds it: merging that starts it.
-            return _start_if_ready(db, t, "room on the machine", check_room=False)
+            return _start_if_ready(db, t, "room on the machine", check_room=why is not None)
         if why != t.waiting:
             db.set_task_waiting(t.id, why, time.time())   # list_tasks shows the machine as it is now
         pause.wait(poll)
@@ -775,8 +793,9 @@ def on_resumed(db: DB, root_id: str) -> None:
 
 
 def start_with_room_now(db: DB, t: Task) -> bool:
-    """Start pending task ``t`` now if the machine has room (and its
-    dependencies are merged), telling its caller; else it keeps waiting."""
+    """Start pending task ``t`` now if the machine has room or its room
+    wait limit expires (and its dependencies are merged), telling its
+    caller; else it keeps waiting."""
     return _start_if_ready(db, t, "room on the machine")
 
 
@@ -965,8 +984,9 @@ def on_merged(db: DB, ws: Workspace) -> None:
 
 def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> bool:
     """Start pending task ``t`` if every dependency is merged and the
-    machine has room for it (else it waits for room: ``wait_for_room``), and
-    tell its caller. The task is claimed first, so a second call (a sweep racing a
+    machine has room for it or its room wait limit expires (else it waits
+    for room: ``wait_for_room``), and tell its caller why it started.
+    The task is claimed first, so a second call (a sweep racing a
     merge) finds it taken. A dependency that can never merge cancels it; a
     start that fails cancels it too, with the reason sent to its caller
     (``requeue`` makes a new one). Returns whether it started."""
@@ -981,7 +1001,8 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
         _cancel(db, t.id, str(e))
         return False
     why = room_wait(t.repo_root) if check_room else None
-    if why:
+    overrun = _room_wait_overrun(t, why) if why else None
+    if why and overrun is None:
         wait_for_room(db, t, why)
         return False
     if not db.claim_task(t.id):
@@ -994,8 +1015,11 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
         return False
     if t.caller_id:
         try:
-            text = (f"Started {new_worker.id} for task {t.id} (was waiting for room: {t.waiting})."
-                    if t.waiting else f"Started {new_worker.id} (was waiting on {dep_ref}).")
+            if overrun:
+                text = f"Started {new_worker.id} for task {t.id} ({overrun})."
+            else:
+                text = (f"Started {new_worker.id} for task {t.id} (was waiting for room: {t.waiting})."
+                        if t.waiting else f"Started {new_worker.id} (was waiting on {dep_ref}).")
             new_ws = db.get_workspace(new_worker.workspace_id)
             warning = agents.add_dirs_warning(new_worker, new_ws) if new_ws else None
             if warning:

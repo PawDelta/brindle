@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from conftest import run_scenario, sh
 
-from brindle import agents, git, procs, providers, spawn, status_cache, tmux
+from brindle import agents, git, procs, providers, spawn, status_cache, tasks, tmux
 from brindle.daemon import routes_actions
 from brindle.daemon.app import Deadlines
-from brindle.db import Agent, Workspace
+from brindle.db import Agent, Task, Workspace
 
 REAL_PROBE = providers._auth_probe      # conftest stubs it for every test
 REAL_LOAD = spawn._load                 # and this one
@@ -43,6 +45,39 @@ def _room(monkeypatch, load, level, expected):
     monkeypatch.setattr(spawn, "pressure", lambda: level)
     monkeypatch.setattr(spawn, "_running", 1)
     assert spawn.room() == expected
+    if expected >= 1:
+        assert spawn.no_room() is None
+
+
+def _a_worker_starts_after_its_room_wait_limit(db, tmp_path, monkeypatch, overloaded, maximum):
+    cfg = tmp_path / ".brindle"
+    cfg.mkdir()
+    (cfg / "config.json").write_text(json.dumps({"room_wait_max": maximum} if maximum else {}))
+    limit = maximum or 300
+    clock = [100.0]
+    monkeypatch.setattr(tasks, "time", SimpleNamespace(time=lambda: clock[0]))
+    db.add_workspace(Workspace("w", str(tmp_path), "w", "worktree", "main", "main", str(tmp_path), None, "s", 1.0))
+    db.add_agent(Agent("boss", "w", "supervisor", "claude", None, "interactive", "processing", "@0", None, 1.0))
+    task = Task("t", str(tmp_path), None, "boss", "w", "developer", "do work", "assign", 0,
+                None, None, None, None, "pending", 1.0, waiting=spawn.why(), waiting_since=clock[0])
+    db.add_task(task)
+    db.set_task_waiting(task.id, task.waiting, clock[0])
+    worker = Agent("worker", "w", "developer", "claude", "boss", "assign", "processing", "@1", None, 1.0)
+    launched, sent = [], []
+    monkeypatch.setattr(agents, "delegate", lambda *a, **kw: (launched.append(worker) or worker, db.get_workspace("w")))
+    monkeypatch.setattr(agents, "send_message", lambda db_, recipient, text, **kw: sent.append(text))
+    monkeypatch.setattr(tasks, "_wait_in_background", lambda _: None)
+
+    def advance(_):
+        assert clock[0] == 100.0, "worker stayed queued past the room wait limit"
+        clock[0] += limit + 1
+
+    monkeypatch.setattr(tasks, "threading", SimpleNamespace(Event=lambda: SimpleNamespace(wait=advance)))
+    assert tasks.start_with_room(db) == 0
+    assert tasks.start_when_room(db, task.id)
+    assert db.get_task(task.id).state == "started" and launched == [worker]
+    assert len(sent) == 1 and f"started after waiting {limit / 60:.0f} min: {task.waiting}" in sent[0]
+    assert tasks.start_with_room(db) == 0
 
 
 def _a_high_load_average_with_idle_cpus_leaves_room(monkeypatch):
@@ -344,6 +379,9 @@ def _row(scenario, id, why=None, **params):
 
 @pytest.mark.parametrize("scenario, params", [
     _row(_room, "room-pressure-critical", load=2.0, level=4, expected=-1.0),  # nothing but what's running
+    _row(_room, "room-pressure-warn", load=5.5, level=2, expected=1.5),
+    _row(_a_worker_starts_after_its_room_wait_limit, "room-wait-limit", maximum=None),
+    _row(_a_worker_starts_after_its_room_wait_limit, "room-wait-configured-limit", maximum=60),
     _row(_a_high_load_average_with_idle_cpus_leaves_room, "room-idle-cpu-high-loadavg"),
     _row(_a_start_whose_room_sample_outlasts_its_deadline_is_refused, "room-sample-past-deadline"),
     _row(_checks_and_setup_run_at_normal_priority, "normal-priority-checks"),
