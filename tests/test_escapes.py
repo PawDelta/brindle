@@ -208,6 +208,20 @@ def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped, mo
     assert merged(repo)
 
 
+def test_a_commit_during_review_gets_no_approval(db, repo, piped):
+    setup, _ = piped
+    ws = setup(weight="light")
+    agents.report_result(db, "w1", "added new.py")
+    reviewed = gates.head(ws)
+    db.update_agent("rev0", review_sha=reviewed)
+    (Path(ws.path) / "new.py").write_text("x = 2\n")
+    sh("git commit -qam unreviewed", Path(ws.path))
+    agents.submit_review(db, "rev0", True, "lgtm")
+    assert db.latest_review(ws.id, reviewed).approved
+    assert db.latest_review(ws.id, gates.head(ws)) is None
+    assert not merged(repo)
+
+
 def test_live_reviewer_dedupe_compares_profiles(db, repo, piped):
     setup, _ = piped
     ws = setup()

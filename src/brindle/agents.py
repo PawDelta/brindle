@@ -2481,10 +2481,14 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
         close_later(caller_id)
         return gone
     try:
-        sha = gates.head(ws)
+        head = gates.head(ws)
     except git.GitError:   # removed just now
         close_later(caller_id)
         return gone
+    # The verdict belongs to the commit this reviewer was started on, not to
+    # whatever the branch has reached since: a commit made during the review
+    # gets no approval it wasn't read for, and the pipeline asks for a new one.
+    sha = caller.review_sha or head
     db.add_review(ws.id, sha, caller.id, approved, summary)
     bus.publish_agent(db, "review.submitted", caller.id, approved=approved, sha=sha)
     if approved:
