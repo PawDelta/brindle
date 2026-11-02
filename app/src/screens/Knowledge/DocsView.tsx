@@ -422,12 +422,23 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
      stays while another is picked. */
   const [scopes, setScopes] = useState<DocScope[]>([]);
   const learn = useCallback((more: DocScope[]) => setScopes((had) => withScopes(had, more)), []);
-  const [collapsed, setCollapsed] = useState(() => readCollapsed(repo));
-  const toggle = (name: string) => {
+  /* The collapsed headers belong to the repo they were read for; another
+     repo reads its own. */
+  const [stored, setStored] = useState(() => ({ repo, collapsed: readCollapsed(repo) }));
+  const collapsed = stored.repo === repo ? stored.collapsed : readCollapsed(repo);
+  const setOpenHeader = (name: string, open: boolean) => {
     const next = new Set(collapsed);
-    if (!next.delete(name)) next.add(name);
-    setCollapsed(next);
+    if (open) next.delete(name);
+    else next.add(name);
+    setStored({ repo, collapsed: next });
     writeCollapsed(repo, next);
+  };
+  const toggle = (name: string) => setOpenHeader(name, collapsed.has(name));
+  /* Picking a category in the rail opens its header once; the header then
+     collapses as any other. */
+  const pickCategory = (name: string) => {
+    setCategory(name);
+    if (name && collapsed.has(name)) setOpenHeader(name, true);
   };
 
   useEffect(() => {
@@ -484,7 +495,14 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   const q = query.trim().toLowerCase();
   /* The rail's categories, in the list's order, when the server gave any. */
   const categories = useMemo((): [string, number][] => (docs.some((d) => d.category) ? byCategory(docs).map(([name, list]) => [name, list.length]) : []), [docs]);
-  const shown = docs.filter((d) => (!category || (d.category ?? UNCATEGORISED) === category) && (!q || [d.title, d.summary, ...(d.topics ?? [])].some((t) => t?.toLowerCase().includes(q))));
+  /* A picked category that the listing no longer has filters nothing, and is
+     dropped once that listing has loaded, so no doc is hidden behind a
+     filter the rail can't show. */
+  const picked = categories.some(([name]) => name === category) ? category : "";
+  useEffect(() => {
+    if (listing.state === "loaded" && category && !picked) setCategory("");
+  }, [listing.state, category, picked]);
+  const shown = docs.filter((d) => (!picked || (d.category ?? UNCATEGORISED) === picked) && (!q || [d.title, d.summary, ...(d.topics ?? [])].some((t) => t?.toLowerCase().includes(q))));
   const docCard = (d: AnalysisDoc) => (
     <DocCard key={d.id} d={d} scope={d.scope && (scopes.find((s) => scopeSpec(s) === scopeSpec(d.scope!)) ?? d.scope)} onOpen={() => setOpen(d.id)} />
   );
@@ -579,7 +597,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       {listing.state !== "unavailable" && (
         <div className="grid gap-s2 md:grid-cols-[12rem_minmax(0,1fr)]">
           <nav className="flex flex-col gap-s2" aria-label="Topics and kinds">
-            {categories.length > 0 && rail("Categories", categories, category, setCategory)}
+            {categories.length > 0 && rail("Categories", categories, picked, pickCategory)}
             {rail(
               "Topics",
               topics.map((t) => [t.name, t.count]),
@@ -593,8 +611,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
             {listing.state === "loaded" && docs.length > 0 && shown.length === 0 && <p className="text-sm text-ink-2">No doc matches.</p>}
             {shown.length > 0 && !shown.some((d) => d.category) && <ul className="flex flex-col gap-s1">{shown.map(docCard)}</ul>}
             {shown.some((d) => d.category) && byCategory(shown).map(([name, list]) => {
-              // A category picked in the rail shows its docs even if its header was collapsed.
-              const closed = collapsed.has(name) && category !== name;
+              const closed = collapsed.has(name);
               return (
                 <section key={name} aria-label={name} className="flex flex-col gap-s1">
                   <button type="button" aria-expanded={!closed} onClick={() => toggle(name)} className="flex items-center gap-1.5 border-b border-line pb-1 pt-s2 text-left text-[15px] font-semibold text-ink hover:text-branch">

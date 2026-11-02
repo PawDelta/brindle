@@ -85,20 +85,31 @@ describe("docs view", () => {
     const docs = [
       { ...DOCS[0], category: "Security" }, { ...DOCS[1], category: " " }, { ...DOCS[2], category: "Security" }, { ...DOCS[3], category: "Desktop updates" },
     ];
-    const open = () => render(<DocsView client={client(() => ({}), RESULTS, docs)} repo="/r" />);
+    const at = (repo: string, listed: object[] = docs) => <DocsView client={client(() => ({}), RESULTS, listed)} repo={repo} />;
+    const open = () => render(at("/r"));
     open();
     await waitFor(() => expect(screen.getAllByRole("region").map((r) => r.getAttribute("aria-label")).slice(2)).toEqual(["Security", "Desktop updates", "Uncategorised"]));
     expect([...screen.getByRole("region", { name: "Security" }).querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"))).toEqual(["d1", "d3"]);
     fireEvent.click(within(screen.getByRole("region", { name: "Security" })).getByRole("button", { expanded: true }));
     expect(shown()).toEqual(["d4", "d2"]);
     cleanup();
-    open();
+    const { rerender } = open();
     await waitFor(() => expect(shown()).toEqual(["d4", "d2"]));
-    // The rail lists the categories with their counts; picking one filters to it, collapsed or not.
+    // The rail lists the categories with their counts; picking a collapsed one opens and filters to it, and its header still collapses.
     const rail = screen.getByRole("navigation", { name: "Topics and kinds" });
     expect(within(rail).getAllByRole("button").slice(0, 3).map((b) => b.textContent)).toEqual(["Security2", "Desktop updates1", "Uncategorised1"]);
     fireEvent.click(within(rail).getByRole("button", { name: /^Security/ }));
     expect(shown()).toEqual(["d1", "d3"]);
+    fireEvent.click(within(screen.getByRole("region", { name: "Security" })).getByRole("button", { expanded: true }));
+    expect(shown()).toEqual([]);
+    // A repo without that category drops the filter, so its docs stay reachable.
+    rerender(at("/other", DOCS));
+    await waitFor(() => expect(shown()).toEqual(["d1", "d2", "d3", "d4"]));
+    // Collapsed headers are each repo's own.
+    rerender(at("/third"));
+    await waitFor(() => expect(shown()).toEqual(["d1", "d3", "d4", "d2"]));
+    rerender(at("/r"));
+    await waitFor(() => expect(shown()).toEqual(["d4", "d2"]));
     localStorage.clear();
   });
 
