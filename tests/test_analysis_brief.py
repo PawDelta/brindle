@@ -97,6 +97,7 @@ def test_fresh_resume_replays_the_rule_and_brief_without_fetching(db, boss, monk
 @pytest.mark.parametrize("block, shown", [("the cache design: src/cache.py is hot.", True),
                                           ("unrelated export test doc", False),
                                           ("backup in src/cache.py.bak and old/src/cache.py", False)])
+@pytest.mark.variant("whole-path match: lookalike paths such as cache.py.bak or old/src/cache.py must not count")
 def test_reviewer_gets_the_doc_block_only_when_it_names_a_changed_file(block, shown, db, tmp_path, monkeypatch):
     monkeypatch.setattr(ab, "_brief", lambda *a, **kw: (block, [(ab.DOC_ITEM, "d1", "3")]))
     out, cited = ab.review_context(db, str(tmp_path), "speed up the cache", ["src/cache.py"])
