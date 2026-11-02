@@ -230,50 +230,44 @@ def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, mon
     assert db.pending_count("a1") == 1
 
 
-def _flush_fakes(monkeypatch):
+CLEAN = {"claude": CLAUDE_IDLE, "codex": "› \n? for shortcuts\n"}
+DRAFT = {"claude": CLAUDE_TYPING_WITH_INVERSE_CURSOR, "codex": "› hello\n? for shortcuts\n"}
+
+
+@pytest.mark.parametrize("provider,fault", [
+    ("claude", "unreadable"), ("claude", "escape_fails"), ("claude", "draft"), ("codex", "draft"),
+])
+def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monkeypatch, provider, fault):
     from brindle import inbox, launch_health
 
-    pasted = []
-    monkeypatch.setattr(inbox, "usable", lambda a: False)   # force the typed-paste path
+    fake_agent(db, ws, status="processing" if provider == "codex" else "idle", mode="interactive")
+    db.update_agent("a1", provider=provider)
+    db.enqueue("a1", "queued message", None)
+    s, pasted = {"on": True, "looks": 0}, []   # the fault holds until the first flush has failed
+
+    def capture(*a, **k):
+        s["looks"] += 1
+        if not s["on"] or (fault == "draft" and s["looks"] == 1):   # a draft shows after the first look
+            return CLEAN[provider]
+        if fault == "unreadable":
+            raise tmux.TmuxError("gone")
+        return CLAUDE_BACKGROUND if fault == "escape_fails" else DRAFT[provider]
+
+    def send_keys(*a, **k):
+        raise tmux.TmuxError("gone")
+
+    monkeypatch.setattr(tmux, "capture", capture)
+    monkeypatch.setattr(tmux, "send_keys", send_keys)
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    monkeypatch.setattr(inbox, "usable", lambda a: False)   # the typed-paste path
     monkeypatch.setattr(launch_health, "before_delivery", lambda *a, **k: "")
     monkeypatch.setattr(launch_health, "verify_delivery", lambda *a, **k: None)
-    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
-    return pasted
 
-
-def test_paste_blocked_or_draft_capture_error_leaves_message_queued(db, ws, monkeypatch):
-    fake_agent(db, ws, status="idle", mode="assign")
-    db.enqueue("a1", "queued message", None)
-    pasted = _flush_fakes(monkeypatch)
-
-    def unreadable(*a, **k):
-        raise tmux.TmuxError("no such window")
-
-    monkeypatch.setattr(tmux, "capture", unreadable)
     assert agents.flush(db, "a1") is False
-    assert not pasted
-    assert db.pending_count("a1") == 1
-
-
-def test_paste_blocked_or_draft_appearing_before_paste_leaves_message_queued(db, ws, monkeypatch):
-    fake_agent(db, ws, status="idle", mode="interactive")   # typed drafts only count for interactive chats
-    db.enqueue("a1", "queued message", None)
-    pasted = _flush_fakes(monkeypatch)
-    screens = iter([CLAUDE_IDLE])   # the first check sees an empty box...
-    monkeypatch.setattr(tmux, "capture",
-                        lambda *a, **k: next(screens, CLAUDE_TYPING_WITH_INVERSE_CURSOR))  # ...then a draft
-    assert agents.flush(db, "a1") is False
-    assert not pasted
-    assert db.pending_count("a1") == 1
-
-
-def test_paste_blocked_or_draft_empty_box_still_delivers(db, ws, monkeypatch):
-    fake_agent(db, ws, status="idle", mode="assign")
-    db.enqueue("a1", "queued message", None)
-    pasted = _flush_fakes(monkeypatch)
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
+    assert not pasted and db.pending_count("a1") == 1
+    s["on"] = False   # the draft was sent or cleared
     assert agents.flush(db, "a1") is True
-    assert len(pasted) == 1
+    assert pasted == ["queued message"] and db.pending_count("a1") == 0
 
 
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):

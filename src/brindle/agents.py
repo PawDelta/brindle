@@ -2139,6 +2139,10 @@ def _delivery_held(db: DB, agent: Agent | None) -> bool:
             or (wake.enabled(agent) and wake.live(agent)))
 
 
+class _PasteBlocked(Exception):
+    """Raised inside a delivery's protected block when the pane became blocked."""
+
+
 def _flush_pane(db: DB, agent_id: str) -> bool:
     """``flush``'s typed delivery, under its delivery_lock. The queue and the
     agent are read afresh: while it waited, another sender may have delivered,
@@ -2163,18 +2167,18 @@ def _flush_pane(db: DB, agent_id: str) -> bool:
         return False
     from brindle import antigravity
     warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
-    if _paste_blocked(agent):
-        # A draft appeared since the first check: release the claim, don't paste over it.
-        db.retry_pending(msg.id, agent_id, claimed_at)
-        return False
     try:
         baseline = launch_health.before_delivery(db, agent, msg.body) if not warmup else ""
-        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
-                   server=server_of(agent))
-    except BaseException:
+        lead = message_lead(db, agent, msg.sender_id)
+        if _paste_blocked(agent):  # last look, after preparation: a draft may have appeared
+            raise _PasteBlocked
+        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
+    except BaseException as exc:
         # pop_pending claimed this row before the external send. Release the
-        # same row and our idle claim so the next flush can retry it once.
+        # same row and our idle claim so the next flush can try it once more.
         db.retry_pending(msg.id, agent_id, claimed_at)
+        if isinstance(exc, _PasteBlocked):
+            return False
         raise
     if not warmup:
         launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
@@ -2200,14 +2204,15 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
     msg = db.pop_pending(agent_id)
     if not msg:
         return False
-    if _paste_blocked(agent):  # re-check right before pasting: a draft may have appeared
-        db.release_pending(msg.id, agent_id)
-        return False
     try:
+        if _paste_blocked(agent):  # last look before pasting: a draft may have appeared
+            raise _PasteBlocked
         tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
                    server=server_of(agent))
-    except BaseException:
+    except BaseException as exc:
         db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
+        if isinstance(exc, _PasteBlocked):
+            return False
         raise
     return True
 
@@ -2226,16 +2231,18 @@ def _paste_blocked(agent: Agent) -> bool:
     try:
         screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
     except tmux.TmuxError:
-        return True  # an unreadable screen might hold a draft: fail closed, retry later
+        return True  # an unreadable screen might hold a draft: fail closed, try again later
     reason = provider.paste_blocked(screen, interactive)
     if reason == "background":
-        tmux.send_keys(agent.tmux_window, "Escape", server=server)
+        try:
+            tmux.send_keys(agent.tmux_window, "Escape", server=server)
+        except tmux.TmuxError:
+            return True
         time.sleep(0.3)
         try:
             screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
         except tmux.TmuxError:
             return True
-
         reason = provider.paste_blocked(screen, interactive)
     return reason is not None
 
