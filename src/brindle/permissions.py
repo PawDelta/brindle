@@ -3465,7 +3465,9 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                 _pathspecs(part) or _globs_excluded(at, [part.written], restrictions, path_denies, [part.assigned],
                                                     [("<", path) for path in part.reads])))):
             return None    # a pattern a program may take as an option or a subcommand, or a protected file
-        if path_denies and os.path.basename(part.words[0]) in READERS and (
+        # awk reads operands too, but is not a READERS glob proof: a pattern
+        # in its program position could expand to executable awk source.
+        if path_denies and os.path.basename(part.words[0]) in (*READERS, "awk") and (
                 part.cwd is None or not _reads_clear(at, part.written, path_denies)):
             return None    # it may read a file a deny covers, or where brindle can't tell
         # With the files it redirects to too: a deny on a name sees them.

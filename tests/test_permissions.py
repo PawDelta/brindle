@@ -51,6 +51,8 @@ def test_an_agent_cannot_change_the_permission_rules(monkeypatch):
     pytest.param("git status && blocked", "deny", marks=pytest.mark.variant("bypass attempt")),
     pytest.param("git status || blocked", "deny", marks=pytest.mark.variant("bypass attempt")),
     pytest.param("cd . && blocked", "deny", marks=pytest.mark.variant("bypass attempt")),
+    pytest.param('cd "$HOME/.ssh" && awk \'{print}\' id_rsa', "ask", marks=pytest.mark.variant("bypass attempt")),
+    pytest.param("awk *", "ask", marks=pytest.mark.variant("bypass attempt")),
     pytest.param('echo "`git status; blocked`"', "deny", marks=pytest.mark.variant("bypass attempt")),
     pytest.param('echo "$(unapproved)"', "ask", marks=pytest.mark.variant("bypass attempt")),
     pytest.param('echo "`unapproved`"', "ask", marks=pytest.mark.variant("bypass attempt")),
@@ -87,6 +89,7 @@ def test_shell_forms(tmp_path, command, expected):
     permissions.add_rule("bash", "git commit", "allow", "prefix")
     permissions.add_rule("bash", "blocked", "deny", "prefix")
     permissions.add_rule("bash", "test secret", "deny", "prefix")
+    (tmp_path / 'BEGIN{system("id")}').write_text("")
     here = str(tmp_path)
     req = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
     decision = permissions.decide(req)
