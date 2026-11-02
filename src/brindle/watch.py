@@ -988,12 +988,13 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
             shown = image
 
         key = stdscr.getch()
-        # Nothing typed, nothing committed to the database, no notice to expire and
+        # A complete frame, nothing typed, nothing committed, no notice to expire and
         # the slow tmux refresh not yet due: this tick has nothing to do.
         # Waiting here, not looping back, keeps a quiet tick from re-rendering or
         # re-totalling spend; it ends on a key, a commit, or the slow refresh being due.
         quiet = False
-        while (key == -1 and not stale and not (notice and time.time() < notice_until)
+        while (key == -1 and last_frame is not None and not stale
+               and not (notice and time.time() < notice_until)
                and db.data_version() == seen_version
                and time.time() - refreshed_at < IDLE_SECONDS
                and time.strftime("%H:%M") == last_clock):
