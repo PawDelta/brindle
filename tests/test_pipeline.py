@@ -475,3 +475,29 @@ def test_issue186_review_state_tells_silence_apart(db, repo, tmp_path, monkeypat
     assert entry["review_state"] == state
     [w1] = [a for a in entry["agents"] if a["id"] == "w1"]
     assert watch.awaiting_review(w1, entry) == state
+
+
+@pytest.mark.parametrize("base_file, reused", [
+    ("other.py", True),          # disjoint from the branch's files
+    ("shared.py", False),        # the branch changed it too (a clean merge all the same)
+    ("pyproject.toml", False),   # a check input, disjoint or not
+])
+def test_merge_reuses_checks_only_when_the_base_brought_in_disjoint_files(db, repo, base_file, reused):
+    """A clean sync with the base keeps the branch's passing checks when the
+    base touched none of its files; the check here fails whenever it runs."""
+    (repo / "shared.py").write_text("".join(f"line{i}\n" for i in range(10)))
+    sh("git add shared.py && git commit -qm shared", repo)
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"checks": ["false"]}))
+    workspaces.adopt_root(db, str(repo))
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    path = Path(ws.path)
+    (path / "shared.py").write_text("changed\n" + "".join(f"line{i}\n" for i in range(1, 10)))
+    sh("git commit -qam work", path)
+    db.set_check(ws.id, gates.head(ws), "false", True, "1 passed")
+    target = repo / base_file
+    target.write_text("".join(f"line{i}\n" for i in range(9)) + "base\n" if base_file == "shared.py" else "x = 1\n")
+    sh(f"git add {base_file} && git commit -qm base", repo)
+
+    out = pipeline.merge(db, None, ws)
+    assert out.startswith("Merged") is reused, out

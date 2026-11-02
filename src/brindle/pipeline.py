@@ -1436,6 +1436,50 @@ def merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool = False,
         return _merge(db, caller, ws, squash, conflicts_out, waiting_on_checks)
 
 
+# Files whose change in the base can change any check's outcome, wherever
+# the branch's own changes are: a sync that brings one in always re-runs.
+CHECK_INPUT_NAMES = frozenset({
+    "conftest.py", "pyproject.toml", "setup.py", "setup.cfg", "tox.ini", "pytest.ini",
+    "noxfile.py", "Makefile", "package.json", "tsconfig.json", ".pre-commit-config.yaml",
+    "go.mod", "go.sum", "Cargo.toml", "Gemfile", ".python-version", ".nvmrc", ".tool-versions",
+})
+CHECK_INPUT_PATTERNS = (
+    re.compile(r"(^|/)\.brindle/"),
+    re.compile(r"\.lock$|-lock\.(json|yaml)$|\.lockb$"),   # uv.lock, package-lock.json, pnpm-lock.yaml, bun.lockb
+    re.compile(r"(^|/)requirements[^/]*\.(txt|in)$"),
+    re.compile(r"(^|/)(tsconfig[^/]*|vite|vitest|jest|eslint|babel)[^/]*\.(json|[cm]?[jt]s)$"),
+)
+
+
+def _check_input(path: str) -> bool:
+    return (path.rsplit("/", 1)[-1] in CHECK_INPUT_NAMES
+            or any(p.search(path) for p in CHECK_INPUT_PATTERNS))
+
+
+def _reusable_checks(db: DB, ws: Workspace, cfg: RepoConfig, sync) -> list[str]:
+    """The check commands whose passing result at ``sync.old_sha`` still
+    holds for the merge commit ``sync.new_sha``: all of ``cfg.checks`` when
+    every one passed at the old commit and the base brought in no file the
+    branch changes and no file every check depends on (``_check_input``);
+    else none, and the gates run them as usual."""
+    if not cfg.checks or not sync.old_sha or not sync.new_sha:
+        return []
+    if any(not (c := db.get_check(ws.id, sync.old_sha, cmd)) or not c.ok for cmd in cfg.checks):
+        return []
+    try:
+        parents = git.out(["rev-list", "--parents", "-n", "1", sync.new_sha], ws.path).split()[1:]
+        if len(parents) != 2 or parents[0] != sync.old_sha:   # a fast-forward or octopus: no branch of its own
+            return []
+        mb = git.out(["merge-base", sync.old_sha, parents[1]], ws.path)
+        mine = set(git.paths(["diff", "--name-only", "--no-renames", mb, sync.old_sha], ws.path))
+        theirs = set(git.paths(["diff", "--name-only", "--no-renames", mb, parents[1]], ws.path))
+    except git.GitError:
+        return []
+    if not mine or mine & theirs or any(_check_input(p) for p in theirs):
+        return []
+    return list(cfg.checks)
+
+
 def _deliverables(db: DB, ws: Workspace) -> list:
     """The analysis doc written for the branch, read before the merge
     (brindle Pro's doc library); empty on any failure."""
@@ -1501,6 +1545,14 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
             return (f"Not merged: synced {ws.branch} with {ws.base_branch} "
                     f"(new commit {sync_result.new_sha[:8]}); request_review again, then merge.")
 
+    reused = None
+    if sync_result.status == "synced" and (cmds := _reusable_checks(db, ws, cfg, sync_result)):
+        for cmd in cmds:
+            db.set_check(ws.id, sync_result.new_sha, cmd, True,
+                         f"reused from {sync_result.old_sha[:8]}: {ws.base_branch} brought in "
+                         "only files the branch doesn't change")
+        reused = (sync_result.new_sha, cmds)
+
     # A worktree removed while the gates ran in it (remove_workspace doesn't
     # wait for this lock) fails them for no reason of the branch's: that is
     # "gone", not a failed check.
@@ -1509,7 +1561,10 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
             sha = gates.head(ws)
             if any(not (c := db.get_check(ws.id, sha, cmd)) or not c.ok for cmd in cfg.checks):
                 waiting_on_checks(sha)
-        report = gates.run(db, ws, cfg, review_required=review)
+        if reused:
+            report = gates.run(db, ws, cfg, review_required=review, reused=reused)
+        else:
+            report = gates.run(db, ws, cfg, review_required=review)
         if not report.ok:
             return _settled(db, ws) or f"Not merged. {report.problem}"
         if gates.head(ws) != report.sha:
