@@ -63,7 +63,11 @@ scrolled to its foot: the sign-in rows and the engine's health list),
 `account` (signed in on Pro: the plan's card and the spend by model),
 `account-team`, `account-enterprise`, `account-free` (signed in on the
 free plan: the pricing page's plans compared, cost reports locked by the
-engine) and `account-signed-out` (sign-in, the plans compared). Themes
+engine) and `account-signed-out` (sign-in, the plans compared). The app's
+own update, over a fake shell (not in the default list, so pass `--scene`):
+`update-inbox` (offered: the strip over the Inbox), `update-downloading`
+(Update now pressed, downloading), `update-later` (set aside: the sidebar's
+pill) and `update-session` (the strip over a session). Themes
 (`--theme`): `dark`, `light`.
 
 ## Timing the wheel over a live Claude Code

@@ -43,6 +43,7 @@ import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
 import { waitingCount } from "../store/appUpdates";
+import { AppUpdatePill } from "./AppUpdateBanner";
 import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
 import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
@@ -808,6 +809,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
       <div className="flex min-h-4 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
         <UsageReading provider={mostUsed} warning={warning} navigate={navigate} />
         <ProviderProblemLine problems={problems} navigate={navigate} />
+        <AppUpdatePill />
       </div>
       <nav aria-label="Pages" className="flex h-10 shrink-0 flex-nowrap items-center gap-1 whitespace-nowrap px-s1" data-testid="pages">
         <AccountButton route={route} navigate={navigate} />
