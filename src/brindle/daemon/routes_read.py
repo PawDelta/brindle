@@ -94,7 +94,9 @@ class HeavyReadLane:
         try:
             # Keep the slot until the synchronous handler has returned,
             # including its error conversion and closing its thread's DB.
-            return await anyio.to_thread.run_sync(handler, request, limiter=self.workers)
+            # Heavy reads are the work that waits for room (brindle.spawn).
+            with spawn.waits_for_room():
+                return await anyio.to_thread.run_sync(handler, request, limiter=self.workers)
         finally:
             self.admission.release()
 

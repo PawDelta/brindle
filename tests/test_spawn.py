@@ -44,9 +44,18 @@ def _room(monkeypatch, load, level, expected):
     assert spawn.room() == expected
 
 
-def _with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips(overloaded, repo):
+def _with_no_room_only_waiting_work_waits_and_a_request_read_starts_at_once(overloaded, repo):
+    # A request's own read starts at once however busy the machine is: on a
+    # machine above its core count, 0.5.8 made these wait and starved every request.
     t0 = time.monotonic()
-    with spawn.deadline(0.3), pytest.raises(git.GitBusy):     # both a GitError and a Busy
+    with spawn.deadline(0.3):
+        git.run(["status"], repo)
+    assert time.monotonic() - t0 < 0.3
+
+    # Work marked as waiting (the heavy lane, background sweeps) waits, and is
+    # busy at its deadline.
+    t0 = time.monotonic()
+    with spawn.waits_for_room(), spawn.deadline(0.3), pytest.raises(git.GitBusy):  # a GitError and a Busy
         git.run(["status"], repo)
     assert time.monotonic() - t0 >= 0.3
 
@@ -55,8 +64,8 @@ def _with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips(over
         spawn.read(["true"], skip=True)
     assert time.monotonic() - t0 < 0.2
 
-    # An action never starts past its deadline: nothing was done.
-    with spawn.deadline(0.1), pytest.raises(spawn.Busy):
+    # Waiting work never starts an action past its deadline: nothing was done.
+    with spawn.waits_for_room(), spawn.deadline(0.1), pytest.raises(spawn.Busy):
         git.run(["commit", "--allow-empty", "-qm", "x"], repo)
     assert sh("git rev-list --count HEAD", repo) == "1"
     assert spawn.running() == 1
@@ -293,7 +302,7 @@ def _row(scenario, id, why=None, **params):
 
 @pytest.mark.parametrize("scenario, params", [
     _row(_room, "room-pressure-critical", load=2.0, level=4, expected=-1.0),  # nothing but what's running
-    _row(_with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips, "overload-no-room"),
+    _row(_with_no_room_only_waiting_work_waits_and_a_request_read_starts_at_once, "overload-no-room"),
     _row(_past_its_deadline_nothing_starts_even_with_room, "deadline-passed"),
     _row(_a_started_helper_commits_its_request_and_a_started_read_does_not, "subprocess-helper-vs-read",
          "only a helper whose request committed may outlive it; a read must not"),
