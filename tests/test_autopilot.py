@@ -700,16 +700,21 @@ def test_gate_runs_checks_and_refuses_dirty_work(db, worker_ws):
     assert not r.ok and "uncommitted" in r.problem
 
 
-@pytest.mark.parametrize("ends", ["load falls", "wait off"])
-def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch, ends):
-    """Plan 3.5: with its slot, a check run on a machine with no room waits
-    for room, showing "checks waiting for room" and why, for as many polls as
-    the machine stays full, and runs once the load falls (or at once when
-    wait_for_room is off)."""
+@pytest.mark.parametrize("ends,start_load,start_level", [
+    ("load falls", 25.0, 1),          # 2.5x cores: real trouble
+    ("memory pressure", 1.0, 2),      # pressure warn on an idle machine (old room rule: no wait)
+    ("wait off", 25.0, 1),
+    ("busy but starts", 13.0, 1),     # 1.3x cores with a free slot: the slots bound it
+])
+def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch, ends, start_load, start_level):
+    """With its slot, a check run waits for room, showing "checks waiting for
+    room" and why, only on memory pressure or load above twice the cores,
+    for as many polls as that lasts, and runs once it clears (or at once when
+    wait_for_room is off, or when the machine is merely busy)."""
     from brindle import spawn
 
     ran = Path(worker_ws.path) / "ran.txt"
-    seen, load = [], [14.0]
+    seen, load, level = [], [start_load], [start_level]
     if ends == "wait off":
         cfg = Path(worker_ws.repo_root) / ".brindle" / "config.json"
         cfg.parent.mkdir(exist_ok=True)
@@ -719,15 +724,17 @@ def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch
         if gates.marked("checks-room", worker_ws.id):
             seen.append((gates.checks_state(worker_ws), ran.exists()))
             if len(seen) == 2:
-                load[0] = 2.0   # the load falls
+                load[0], level[0] = 2.0, 1   # the load falls
         return False
 
     monkeypatch.setattr(spawn, "_load", lambda: load[0])
+    monkeypatch.setattr(spawn, "pressure", lambda: level[0])
     monkeypatch.setattr(spawn, "_cores", lambda: 10)
     monkeypatch.setattr(gates, "SLOT_POLL", 0)
     ok, _ = gates.run_checked(db, worker_ws, "touch ran.txt", {}, 60, cancel=cancel, full=True)
-    waiting = "checks waiting for room: the machine is busy (load 14.0 on 10 cores"
-    assert len(seen) == (2 if ends == "load falls" else 0) and all(s.startswith(waiting) and not done for s, done in seen), seen
+    waiting = f"checks waiting for room: the machine is busy (load {start_load:.1f} on 10 cores"
+    assert len(seen) == (2 if ends in ("load falls", "memory pressure") else 0)
+    assert all(s.startswith(waiting) and not done for s, done in seen), seen
     assert ok and ran.exists() and gates.checks_state(worker_ws) == "waiting for checks"
 
 

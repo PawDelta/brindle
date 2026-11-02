@@ -373,17 +373,17 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
 @contextmanager
 def _room_for_check(ws: Workspace, cancel=None):
     """With its slot held, wait until the machine has room for the run
-    (``spawn.no_room``): a full suite started on a saturated machine only
-    makes everything slower. While it waits, ``marker("checks-room")`` makes
+    (``spawn.check_no_room``: memory pressure or load far above the cores;
+    the slots already bound check load). While it waits, ``marker("checks-room")`` makes
     the branch read "checks waiting for room: <why>" (``checks_state``), so
     silence isn't taken for a stall. ``cancel`` gives the wait up
     (``Abandoned``)."""
     from brindle import spawn
 
-    if spawn.no_room(ws.repo_root) is not None:
+    if spawn.check_no_room(ws.repo_root) is not None:
         pause = threading.Event()
         with marker("checks-room", ws.id):
-            while spawn.no_room(ws.repo_root) is not None:
+            while spawn.check_no_room(ws.repo_root) is not None:
                 if cancel is not None and cancel():
                     raise Abandoned("room")
                 pause.wait(SLOT_POLL)
