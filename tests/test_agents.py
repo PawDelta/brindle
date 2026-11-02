@@ -230,6 +230,52 @@ def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, mon
     assert db.pending_count("a1") == 1
 
 
+def _flush_fakes(monkeypatch):
+    from brindle import inbox, launch_health
+
+    pasted = []
+    monkeypatch.setattr(inbox, "usable", lambda a: False)   # force the typed-paste path
+    monkeypatch.setattr(launch_health, "before_delivery", lambda *a, **k: "")
+    monkeypatch.setattr(launch_health, "verify_delivery", lambda *a, **k: None)
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    return pasted
+
+
+def test_paste_blocked_or_draft_capture_error_leaves_message_queued(db, ws, monkeypatch):
+    fake_agent(db, ws, status="idle", mode="assign")
+    db.enqueue("a1", "queued message", None)
+    pasted = _flush_fakes(monkeypatch)
+
+    def unreadable(*a, **k):
+        raise tmux.TmuxError("no such window")
+
+    monkeypatch.setattr(tmux, "capture", unreadable)
+    assert agents.flush(db, "a1") is False
+    assert not pasted
+    assert db.pending_count("a1") == 1
+
+
+def test_paste_blocked_or_draft_appearing_before_paste_leaves_message_queued(db, ws, monkeypatch):
+    fake_agent(db, ws, status="idle", mode="interactive")   # typed drafts only count for interactive chats
+    db.enqueue("a1", "queued message", None)
+    pasted = _flush_fakes(monkeypatch)
+    screens = iter([CLAUDE_IDLE])   # the first check sees an empty box...
+    monkeypatch.setattr(tmux, "capture",
+                        lambda *a, **k: next(screens, CLAUDE_TYPING_WITH_INVERSE_CURSOR))  # ...then a draft
+    assert agents.flush(db, "a1") is False
+    assert not pasted
+    assert db.pending_count("a1") == 1
+
+
+def test_paste_blocked_or_draft_empty_box_still_delivers(db, ws, monkeypatch):
+    fake_agent(db, ws, status="idle", mode="assign")
+    db.enqueue("a1", "queued message", None)
+    pasted = _flush_fakes(monkeypatch)
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
+    assert agents.flush(db, "a1") is True
+    assert len(pasted) == 1
+
+
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):
     fake_agent(db, ws, status="processing")
     screens = iter([CLAUDE_IDLE, CLAUDE_BUSY])
