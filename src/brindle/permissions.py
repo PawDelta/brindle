@@ -410,8 +410,8 @@ ROUTINE_ALLOWS: tuple[Rule, ...] = (
           "readonly-pipeline", "allow"),
 )
 DESTRUCTIVE_DENIES: tuple[Rule, ...] = (
-    _seed("d-git-force", "bash", "a git command with a force flag, or a push that forces or deletes a branch",
-          "git-force", "deny"),
+    _seed("d-git-force", "bash", "a git command that discards work (push --force or --delete, branch -D, "
+          "reset --hard, clean -f, checkout -f, worktree remove --force)", "git-force", "deny"),
     _seed("d-rm", "bash", "a recursive rm of the root, a top-level folder or the home directory",
           "rm-destructive", "deny"),
 )
@@ -1883,6 +1883,26 @@ def forced_push(command: str) -> bool:
     return any(p.force or p.delete for p in push_calls(command))
 
 
+# The git commands a force flag makes discard work (git add -f, which only adds an ignored file, isn't one).
+GIT_FORCE_DISCARDS = ("push", "branch", "clean", "checkout", "worktree")
+
+
+def destructive_git(command: str) -> bool:
+    """A git command that discards work: a push that forces or deletes, branch
+    -D (or a forced branch), reset --hard, clean -f, checkout -f, or worktree
+    remove --force."""
+    for sub, args in _git_calls(command):
+        if sub == "reset" and "--hard" in args:
+            return True
+        if sub == "branch" and any(re.fullmatch(r"-[A-Za-z]*D[A-Za-z]*", a) for a in args):
+            return True
+        if sub == "worktree" and (not args or args[0] != "remove"):
+            continue
+        if sub in GIT_FORCE_DISCARDS and any(_is_force(a) for a in args):
+            return True
+    return forced_push(command)
+
+
 def _in_worktree(req: Request) -> bool:
     """A path (resolved) inside a checkout of the session (session_roots), not under .git."""
     if not req.path:
@@ -1913,7 +1933,7 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
     if rule.match_type == "push":
         return push_matches(rule.match, req, loose=rule.decision != "allow")
     if rule.match_type == "git-force":
-        return any(_is_force(a) for _, args in _git_calls(command) for a in args) or forced_push(command)
+        return destructive_git(command)
     if rule.match_type == "rm-destructive":
         return destructive_rm(command)
     if rule.match_type == "readonly-pipeline":
@@ -3384,9 +3404,6 @@ def shell_parts(req: Request, why: list[ValueError] | None = None) -> list[Shell
     return reader.parts or None
 
 
-# git commands that only read: no force flag or push hides in them.
-_GIT_UNFORCED = frozenset({*READONLY_GIT, "rev-parse", "merge-base", "rev-list", "ls-files", "ls-tree", "cat-file",
-                           "describe", "shortlog", "blame", "grep", "for-each-ref", "name-rev", "show-ref"})
 
 
 def _unread(word: str) -> bool:
@@ -3411,7 +3428,7 @@ def _wild_match(rule: Rule, part: ShellPart) -> bool:
             args = args[2:] if args[0] in ("-C", "-c") else args[1:]
         sub = args[0] if args and not _unread(args[0]) else None
         if rule.match_type == "git-force":
-            return sub not in _GIT_UNFORCED    # a force flag means nothing to a command that only reads
+            return sub is None or sub in (*GIT_FORCE_DISCARDS, "reset")    # only these discard work
         return sub in (None, "push")
     if rule.match_type == "rm-destructive":
         return program == "rm"

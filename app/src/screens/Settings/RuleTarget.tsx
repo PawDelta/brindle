@@ -16,7 +16,7 @@ export const NAMED_MATCHERS: Record<string, { kinds: string[]; match: string }> 
   check: { kinds: ["bash"], match: "exactly one of the repo's `checks` commands" },
   "git-readonly": { kinds: ["bash"], match: "git status / diff / log / show" },
   "git-push": { kinds: ["bash"], match: "any git push" },
-  "git-force": { kinds: ["bash"], match: "a git command with a force flag, or a push that forces or deletes a branch" },
+  "git-force": { kinds: ["bash"], match: "a git command that discards work (push --force or --delete, branch -D, reset --hard, clean -f, checkout -f, worktree remove --force)" },
   "readonly-pipeline": { kinds: ["bash"], match: "a pipeline of read-only commands (grep, ls, cat, head, sed -n ...)" },
   "rm-destructive": { kinds: ["bash"], match: "a recursive rm of the root, a top-level folder or the home directory" },
 };
