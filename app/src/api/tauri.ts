@@ -154,7 +154,8 @@ export interface AppUpdateStatus {
   version: string;
   automatic: boolean;
   pending: string | null;
-  available: { version: string; notes: string | null } | null;
+  /* rollback: the feed was rolled back to this older release (app/README.md, "Rolling back"). */
+  available: { version: string; notes: string | null; rollback?: boolean } | null;
   later: boolean;
   updated: string | null;
   last_checked: number | null;

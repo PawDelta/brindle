@@ -112,7 +112,9 @@ export function AppUpdateBanner({ openUrl }: { openUrl: OpenUrl }) {
   const { status, version, install } = offer;
   const { phase } = install;
   if (status.later && phase.kind === "idle") return null;
-  const [headline, detail] = copy(phase, version, status.available?.notes ?? null);
+  // A rollback (an older release the feed was pointed back at) says so: "brindle X.Y.Z is available (rollback)".
+  const shown = status.available?.rollback ? `${version} (rollback)` : version;
+  const [headline, detail] = copy(phase, shown, status.available?.notes ?? null);
   const busy = phase.kind === "downloading" || phase.kind === "installing" || phase.kind === "restarting";
   const bar = phase.kind === "downloading" && phase.pct !== null ? phase.pct : 100;
   return (
