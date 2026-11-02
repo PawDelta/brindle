@@ -77,7 +77,7 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
     {error && <p role="alert" className={alert}>{error}</p>}
     {repo && !area && <p className="text-sm text-ink-3">Choose code paths to load their neighbourhood.</p>}
     {area && !map && !error && <p role="status">Loading neighbourhood…</p>}
-    {graph && <><div className="flex flex-wrap gap-s2 text-xs text-ink-3"><span>{graph.nodes.length} nodes · {graph.edges.length} connections</span><span>Code areas · Documents · Local decisions and folders</span><span>Dashed: supersedes</span></div>
+    {graph && <><p className="text-xs text-ink-3">{graph.nodes.length} nodes · {graph.edges.length} connections · drag to pan, scroll or pinch to zoom</p>
       {graph.nodes.length ? <MapGraph {...graph} onOpen={select} /> : <p>No knowledge is linked to these paths yet.</p>}
     </>}
     {open?.kind === "decision" && <ul><DecisionCard d={open.decision} /></ul>}
