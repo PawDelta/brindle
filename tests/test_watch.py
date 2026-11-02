@@ -132,3 +132,59 @@ def test_light_background_picks_the_light_palette(monkeypatch):
     pairs.clear()
     watch._styles(None)
     assert pairs[0] == watch.PALETTE_256["accent"]
+
+
+def test_idle_sidebar_ticks_do_no_work(brindle_home, monkeypatch):
+    """Timeout ticks with nothing changed skip the tmux/DB scans and the redraw;
+    a commit from another process brings the refresh back."""
+    import curses
+
+    from brindle import sidebar_logo, tmux, view
+
+    calls = {"panes": 0, "snapshot": 0, "paint": 0, "viewer": 0}
+
+    def counted(name, result=None):
+        def fn(*a, **k):
+            calls[name] += 1
+            return result() if callable(result) else result
+        return fn
+
+    db = DB()
+    other = sqlite3.connect(db.path)
+    keys = iter([-1, -1, -1, "commit", -1, -1, ord("q")])
+    seen = []
+
+    class Scr:
+        def timeout(self, ms): pass
+        def getmaxyx(self): return (30, 60)
+        def clear(self): pass
+
+        def getch(self):
+            seen.append(dict(calls))
+            key = next(keys)
+            if key == "commit":
+                other.execute("CREATE TABLE IF NOT EXISTS poke (x)")
+                other.execute("INSERT INTO poke VALUES (1)")
+                other.commit()
+                return -1
+            return key
+
+    monkeypatch.setattr(curses, "curs_set", lambda n: None)
+    monkeypatch.setattr(curses, "mousemask", lambda m: None)
+    monkeypatch.setattr(watch, "_styles", lambda bg=None: {})
+    monkeypatch.setattr(watch, "_start_status", lambda: None)
+    monkeypatch.setattr(watch, "_cull_in_background", lambda: None)
+    monkeypatch.setattr(watch, "DB", lambda: db)
+    monkeypatch.setattr(watch.upgrade, "InstallWatch", lambda: type("W", (), {"changed": lambda s: False})())
+    monkeypatch.setattr(tmux, "list_panes", counted("panes", dict))
+    monkeypatch.setattr(view, "snapshot", counted("snapshot", list))
+    monkeypatch.setattr(view, "autopilot_entry", lambda *a, **k: None)
+    monkeypatch.setattr(sidebar_logo, "viewer", counted("viewer", ""))
+    monkeypatch.setattr(watch, "_paint", counted("paint"))
+
+    watch._loop(Scr(), None)
+    # getch calls 1-4 follow the first pass and three idle ticks: one scan, one paint.
+    assert seen[3] == {"panes": 1, "snapshot": 1, "paint": 1, "viewer": 1}
+    # The commit tick refreshes the snapshot again, but the frame is the same: no repaint.
+    assert seen[5]["snapshot"] == 2 and seen[5]["paint"] == 1
+    assert seen[6]["snapshot"] == 2
