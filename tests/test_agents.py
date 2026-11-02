@@ -230,9 +230,7 @@ def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, mon
     assert db.pending_count("a1") == 1
 
 
-@pytest.mark.parametrize("provider,fault", [
-    ("claude", "unreadable"), ("claude", "draft"), ("codex", "draft"),
-])
+@pytest.mark.parametrize("provider,fault", [("claude", "unreadable"), ("claude", "draft"), ("codex", "draft")])
 def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monkeypatch, provider, fault):
     fake_agent(db, ws, status="processing" if provider == "codex" else "idle", mode="interactive")
     db.update_agent("a1", provider=provider)
