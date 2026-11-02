@@ -36,10 +36,11 @@ def _calling_agent() -> Agent | None:
 
 
 def _migrated_under_us() -> bool:
-    """Whether brindle was upgraded under this server and the new version has
-    migrated the database since: this server's code no longer writes the rows
-    that version expects (see upgrade.py)."""
-    return upgrade.install.changed() and migrated_by_newer()
+    """Whether a newer brindle has migrated the database: this server's code
+    no longer writes the rows that version expects (see upgrade.py). Whether
+    or not this install changed: a reload can land on code that is still
+    older (another install migrated the database), or fail."""
+    return migrated_by_newer()
 
 
 class _Server(MCPServer):
@@ -1685,21 +1686,35 @@ async def _serve_stdio(handover) -> None:
                                       replace=mcp_stdio.replace, std=True))
 
 
-async def _serve(conn) -> None:
-    """Serve the client on ``conn`` (an mcp_stdio.Connection), woken to look
-    for a reload whenever a newly started daemon signals the live servers."""
+INSTALL_WATCH_INTERVAL = 5.0   # seconds between an idle server's looks at its install
+
+
+async def _serve(conn, wait=None) -> None:
+    """Serve the client on ``conn`` (an mcp_stdio.Connection). Every
+    INSTALL_WATCH_INTERVAL it looks at the install, as the daemon does, and
+    wakes ``conn`` when that changed since its last look: an update reloads
+    an idle server too, however it was installed (app, `uv tool upgrade`, by
+    hand) and whether or not a daemon runs. A change mid-update wakes it
+    again on the next look, once the install is complete."""
     import anyio
 
-    async with anyio.create_task_group() as tg:
-        with anyio.open_signal_receiver(upgrade.MCP_RELOAD_SIGNAL) as signals:
-            async def wake_on_signal():
-                async for _ in signals:
-                    conn.wake()
+    from brindle.daemon.lifecycle import _elapse
 
-            tg.start_soon(wake_on_signal)
-            upgrade.register_mcp_server()   # only once the signal can't kill this process
-            await conn.serve(_run_server)
-            tg.cancel_scope.cancel()
+    wait = wait or _elapse
+
+    async def watch_install():
+        seen = upgrade.stamp()
+        while True:
+            await wait(INSTALL_WATCH_INTERVAL)
+            now = upgrade.stamp()
+            if now != seen and upgrade.install.changed():
+                conn.wake()
+            seen = now
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(watch_install)
+        await conn.serve(_run_server)
+        tg.cancel_scope.cancel()
 
 
 def main() -> None:

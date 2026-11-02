@@ -11,23 +11,22 @@ server that exits, so every agent would lose brindle's tools. It loads
 everything it will ever read from the install when it starts (`preload`), so
 it serves one version consistently, and once the install changed or the
 database moved past it, it execs the new install in place on the same stdio,
-between requests (mcp_stdio.py). A newly started daemon wakes every live
-server (`notify_mcp_servers`) so an idle one reloads too. Only when that exec
-fails does the server refuse every tool once the new version has migrated
-the database, and tell its client to reconnect. The sidebar checks between
+between requests (mcp_stdio.py), after `brindle mcp --check` showed that
+install works with the database. It looks at its install while idle too. When
+no reload works, the server refuses every tool once a newer version has
+migrated the database, and tells its client to reconnect. The sidebar checks between
 refreshes whether the install changed and, if it did, execs itself again in
 its pane."""
 
 from __future__ import annotations
 
-import fcntl
 import importlib
 import os
 import pkgutil
 import shutil
-import signal
 import sys
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 
 import brindle
@@ -106,70 +105,12 @@ def check_launch() -> None:
         raise StaleInstall("brindle was updated; it is restarting on the new version, try again in a moment")
 
 
-# Wakes a live `brindle mcp` to check for a reload. Its default action is to
-# ignore it, so a server caught between exec and installing its handler lives.
-MCP_RELOAD_SIGNAL = signal.SIGURG
-
-
-def _mcp_servers_dir():
-    from brindle.config import brindle_home
-
-    return brindle_home() / "mcp-servers"
-
-
-def register_mcp_server() -> int | None:
-    """Record this process as a live MCP server: a file named by its pid,
-    locked for as long as this process (not one exec'd from it) runs. Returns
-    the lock's fd, None when it couldn't be registered."""
-    try:
-        directory = _mcp_servers_dir()
-        directory.mkdir(parents=True, exist_ok=True)
-        fd = os.open(directory / str(os.getpid()), os.O_RDWR | os.O_CREAT | os.O_CLOEXEC, 0o600)
-    except OSError:
-        return None
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        os.close(fd)
-        return None
-    return fd
-
-
-def notify_mcp_servers() -> int:
-    """Wake every live MCP server, so each one that runs an older install
-    reloads now rather than at its client's next call. A pid file nobody
-    holds locked is stale (its server exited, or exec'd and hasn't locked it
-    again): it's removed, and its pid, which may be anyone's now, not
-    signalled. Returns how many were woken."""
-    try:
-        entries = list(_mcp_servers_dir().iterdir())
-    except OSError:
-        return 0
-    woken = 0
-    for path in entries:
-        try:
-            pid = int(path.name)
-            fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
-        except (ValueError, OSError):
-            continue
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:     # held: its server is alive
-            try:
-                os.kill(pid, MCP_RELOAD_SIGNAL)
-                woken += 1
-            except OSError:
-                pass
-        else:
-            path.unlink(missing_ok=True)
-        finally:
-            os.close(fd)
-    return woken
-
-
-def exec_install(args: list[str]) -> bool:
+def exec_install(args: list[str], ready: Callable[[list[str]], bool] | None = None) -> bool:
     """Replace this process with ``brindle <args>`` from the install as it is
     now. False when no install could be exec'd; True only from a fake exec.
+    ``ready(argv)``: exec ``argv`` only if it says the install there works
+    (an exec can't be taken back, so a half-written install would kill this
+    process instead of leaving it serving).
 
     An app replacement can remove the running engine's interpreter entirely,
     and the replacement may be reachable only through the installed CLI at a
@@ -180,21 +121,25 @@ def exec_install(args: list[str]) -> bool:
     sys.stdout.flush()
     sys.stderr.flush()
     argv = [*brindle_invocation(), *args]
+    if _exec(argv, ready):
+        return True     # only a fake returns
+    # sys.executable still names the old engine after it is removed.
+    # Discover the installed launcher again on each pass; never use a
+    # worktree's venv, whose lifetime is shorter than this session's.
+    installed = shutil.which("brindle")
+    if installed and installed != argv[0] and not _in_worktree(installed):
+        return _exec([installed, *args], ready)
+    return False
+
+
+def _exec(argv: list[str], ready: Callable[[list[str]], bool] | None) -> bool:
+    if ready is not None and not ready(argv):
+        return False
     try:
         os.execv(argv[0], argv)
         return True     # only a fake returns
     except OSError:
-        # sys.executable still names the old engine after it is removed.
-        # Discover the installed launcher again on each pass; never use a
-        # worktree's venv, whose lifetime is shorter than this session's.
-        installed = shutil.which("brindle")
-        if installed and installed != argv[0] and not _in_worktree(installed):
-            try:
-                os.execv(installed, [installed, *args])
-                return True     # only a fake returns
-            except OSError:
-                pass
-    return False
+        return False
 
 
 def reexec() -> None:

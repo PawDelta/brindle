@@ -301,9 +301,6 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     activity = Activity(build_app(token, port=info["port"], poller=poller))
     server = make_server(activity)
     upgrade.on_stale_launch = lambda: setattr(server, "should_exit", True)
-    # A daemon starts after every app or engine update: each session's MCP
-    # server still on the old install reloads now, idle or not.
-    upgrade.notify_mcp_servers()
 
     async def run() -> None:
         watcher = asyncio.create_task(_watch(server, activity, idle_exit))

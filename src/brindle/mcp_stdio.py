@@ -256,7 +256,9 @@ class Connection:
         except OSError:
             return False
         os.environ[HANDOVER_ENV] = str(fd)
-        logging.getLogger(__name__).warning("brindle mcp: reloading on the installed brindle (pid %d)", os.getpid())
+        logging.getLogger(__name__).warning(
+            "brindle mcp: brindle or its database changed; reloading if the installed brindle is ready (pid %d)",
+            os.getpid())
         if self.std:
             os.dup2(self.in_fd, 0)
             os.dup2(self.out_fd, 1)
@@ -270,6 +272,8 @@ class Connection:
                     _divert()
         if self.replaced:
             self._buffer = b""
+        else:
+            logging.getLogger(__name__).warning("brindle mcp: no working newer install; not reloaded")
         return self.replaced
 
 
@@ -311,6 +315,25 @@ def claim_stdio() -> tuple[int, int]:
     return in_fd, out_fd
 
 
+PREFLIGHT_SECONDS = 60.0
+
+
+def _ready(argv: list[str]) -> bool:
+    """Whether ``argv`` starts an MCP server that can take over: ``argv
+    --check`` imports its whole server and finds the database no newer than
+    its code. An install that is still being written, an interpreter left
+    without its brindle, or an install as old as this one all fail it."""
+    from brindle import spawn
+
+    env = {k: v for k, v in os.environ.items() if k != HANDOVER_ENV}
+    try:
+        checked = spawn.read([*argv, "--check"], env=env, input="", timeout=PREFLIGHT_SECONDS)
+    except Exception:  # noqa: BLE001 - a launcher that can't run, or hangs, isn't ready
+        return False
+    return checked.returncode == 0
+
+
 def replace() -> bool:
-    """Exec the installed ``brindle mcp`` (the same argv this one was started with)."""
-    return upgrade.exec_install(sys.argv[1:])
+    """Exec the installed ``brindle mcp`` (the same argv this one was started
+    with), once it has shown it works."""
+    return upgrade.exec_install(sys.argv[1:], ready=_ready)
