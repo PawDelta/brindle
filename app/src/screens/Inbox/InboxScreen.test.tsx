@@ -423,13 +423,15 @@ describe("inbox", () => {
   });
 
   it("shows the app's own update until restarted, then once until dismissed, counted on the badge too; a late first status never hides it; nothing for an rc or staff build", async () => {
-    const idle: AppUpdateStatus = { version: "0.6.0", automatic: true, pending: null, updated: null, last_checked: null, checking: false };
+    const idle: AppUpdateStatus = { version: "0.6.0", automatic: true, pending: null, available: null, later: false, updated: null, last_checked: null, checking: false };
     let announce: (s: AppUpdateStatus) => void = () => {};
     let answer: ((s: AppUpdateStatus) => void) | null = null;
     const updates: AppUpdates = {
       // The status now, answered only when the test says: after an announcement it predates.
       status: () => new Promise((resolve) => (answer = resolve)),
       check: () => Promise.resolve(idle),
+      updateNow: () => Promise.resolve(null),
+      later: () => Promise.resolve(),
       restart: vi.fn(() => Promise.resolve()),
       dismiss: vi.fn(() => Promise.resolve(announce({ ...idle, version: "0.7.0" }))),
       watch: (on) => {

@@ -49,7 +49,7 @@ export function About({ read, updates, status = null }: { read?: () => Promise<A
     run("checking", async () => {
       // The shell announces the status too, which the store keeps.
       const s = await u.check();
-      if (!s.pending) setChecked("This is the latest version.");
+      if (!s.pending && !s.available) setChecked("This is the latest version.");
     });
   useEffect(() => {
     if (!read) return;
@@ -83,7 +83,9 @@ export function About({ read, updates, status = null }: { read?: () => Promise<A
                 <span className="text-xs text-ink-3">
                   {status.pending
                     ? "It starts the next time brindle opens."
-                    : status.last_checked
+                    : status.available
+                      ? `brindle ${status.available.version} is available: Update now from the banner or the sidebar.`
+                      : status.last_checked
                       ? `Last checked ${ago(status.last_checked)}`
                       : "Not checked yet"}
                 </span>
