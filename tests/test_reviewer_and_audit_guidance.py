@@ -101,7 +101,7 @@ def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_fu
     assert "SCOPE EXCEPTION: Do not refactor legacy database connector." in prompt   # past 2000 chars
     for content in ("Legacy connector exclusion accepted", "Use token authentication",
                     "Owner approved migration", "Redact credentials in logs"):
-        assert content in prompt
+        assert prompt.count(content) == 1   # each decision once
     for content in ("Unrelated goal exclusion", "Use legacy authentication", "Unrelated UI decision",
                     "Another repository decision", "Unaccepted proposal"):
         assert content not in prompt

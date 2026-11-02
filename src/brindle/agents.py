@@ -3344,7 +3344,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     except git.GitError:
         changed = []
     covering, cited = analysis_brief.review_context(db, ws.repo_root, (worker.task or "") if worker else "",
-                                                    list(dict.fromkeys([*worker_files, *changed])))
+                                                    changed)   # docs gate on the diff, not declared files
     if covering:
         task += f"\n\n{covering}"
 

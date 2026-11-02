@@ -150,22 +150,11 @@ def record_session_citations(db, agent_id: str, cited: list[tuple[str, str, str]
 
 def review_context(db, repo_root: str, task_text: str, paths: list[str],
                    client=None, store=None) -> tuple[str, list]:
-    """For a reviewer's brief: the decisions covering the branch's ``paths``,
-    and the analysis-doc block only when it mentions one of them (empty when
-    there is nothing), with the docs' cited versions, for the reviewer's
+    """For a reviewer's brief: the analysis-doc block, only when it names one
+    of the branch's changed ``paths`` as a whole path (empty otherwise).
+    Decisions are rendered elsewhere, once. With the docs' cited versions, for the reviewer's
     receipt (its reads are pinned like a worker's). Never raises."""
-    from brindle import knowledge
-
-    try:
-        decisions = [d for d in knowledge.decisions(db, knowledge.repo_key(repo_root))
-                     if not d["scope"] or (paths and knowledge._scopes_overlap(d["scope"], paths))]
-    except Exception:  # noqa: BLE001 - extra context, never a reason to fail a review
-        log.info("decisions for review skipped", exc_info=True)
-        decisions = []
     parts = []
-    if decisions:
-        parts.append("Decisions recorded for this repo that cover the branch's files:\n"
-                     + "\n".join(f"- {knowledge._line(d)}" for d in decisions))
     try:
         block, cited = _brief(task_text, paths, client, store)
     except Exception as e:  # noqa: BLE001
@@ -173,7 +162,7 @@ def review_context(db, repo_root: str, task_text: str, paths: list[str],
         block, cited = "", []
     # Only docs about the branch's own files are worth a reviewer's tokens: the
     # server cites any doc sharing a word with the task, and none was ever used.
-    if block and any(p in block for p in paths):
+    if block and any(re.search(rf"(?<![\w./-]){re.escape(p)}(?![\w/-]|\.\w)", block) for p in paths):
         parts.append(_fenced(block))
     else:
         cited = []

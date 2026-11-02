@@ -90,14 +90,14 @@ def test_fresh_resume_replays_the_rule_and_brief_without_fetching(db, boss, monk
     assert fetched == []
 
 
-@pytest.mark.parametrize("block, shown", [("the cache design: src/cache.py is hot", True),
-                                          ("unrelated export test doc", False)])
+@pytest.mark.parametrize("block, shown", [("the cache design: src/cache.py is hot.", True),
+                                          ("unrelated export test doc", False),
+                                          ("backup in src/cache.py.bak and old/src/cache.py", False)])
 def test_reviewer_gets_the_doc_block_only_when_it_names_a_changed_file(block, shown, db, tmp_path, monkeypatch):
     monkeypatch.setattr(ab, "_brief", lambda *a, **kw: (block, [(ab.DOC_ITEM, "d1", "3")]))
-    knowledge.record_decision(db, knowledge.repo_key(str(tmp_path)), "Cache", "Keep it small")
     out, cited = ab.review_context(db, str(tmp_path), "speed up the cache", ["src/cache.py"])
     assert ("\n" + block + "\n" in out, bool(cited)) == (shown, shown)
-    assert "Keep it small" in out and "Flag as a blocker" not in out   # decisions stay, once
+    assert "Flag as a blocker" not in out
 
 
 def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, boss, backend, monkeypatch):
