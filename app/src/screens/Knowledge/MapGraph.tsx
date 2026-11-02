@@ -98,17 +98,22 @@ export function joinLocal(
   // Local records have no team or organization membership.
   if (filter.scope.kind !== "user") return { nodes, edges };
   const selected = filter.paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
+  const touchesArea = (path: string, area: string) => containsPath(area, path) || decisionMatches(area, path) || decisionMatches(`${area}/**`, path);
   // A document in the neighbourhood may mention paths outside the chosen area.
   // Only paths inside that area may connect a local record to the document.
-  const filteredPaths = (node: MapNode) => [...(node.paths ?? []), ...(node.path ? [node.path] : [])]
+  const filteredPaths = (node: MapNode, areas = selected) => [...(node.paths ?? []), ...(node.path ? [node.path] : [])]
     .map((p) => relative(p, repo))
-    .filter((p): p is string => p !== null && selected.some((area) => containsPath(area, p) || decisionMatches(area, p)));
+    .filter((p): p is string => p !== null && areas.some((area) => touchesArea(p, area)));
   const local: { node: LocalNode; paths: string[] }[] = [
     ...decisions.map((d) => ({ node: { id: `local:decision:${d.id}`, kind: "decision" as const, title: d.topic, decision: d }, paths: d.scope })),
   ];
   for (const { node, paths } of local) {
     const scopes = paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
-    const matches = map.nodes.filter((n) => filteredPaths(n).some((path) => scopes.some((scope) => decisionMatches(scope, path))));
+    // A broad server glob must not bridge a decision outside the selected area.
+    // Check both sides against the same area before joining their shared path.
+    const matches = map.nodes.filter((n) => selected.some((area) => scopes.some((scope) =>
+      touchesArea(scope, area) && filteredPaths(n, [area]).some((path) => decisionMatches(scope, path)),
+    )));
     if (!matches.length) continue;
     nodes.push(node);
     for (const match of matches) edges.push({ source: node.id, target: match.id, kind: "shared_path" });

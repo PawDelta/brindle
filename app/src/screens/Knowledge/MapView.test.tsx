@@ -32,7 +32,7 @@ it.each([false, true])("applies a scope change immediately and discards older re
 it.each(["user", "group"])("filters local items by applied paths and library scope %s", async (kind) => {
   const client = new DaemonClient({ baseUrl: "http://localhost", token: "t", fetch: async (input) => new Response(JSON.stringify(
     String(input).includes("/scopes") ? { scopes: [{ kind, id: "s" }] }
-      : { nodes: [{ id: "doc", kind: "doc", title: "Mixed paths", paths: ["src/cache/index.ts", "src/other/index.ts"] }], edges: [] },
+      : { nodes: [{ id: "doc", kind: "doc", title: "Mixed paths", paths: ["src/cache/index.ts", "src/other/index.ts", "src/**"] }], edges: [] },
   )) });
   render(<MapView client={client} repo="/repo" decisions={[decision, { ...decision, id: "other", topic: "Unrelated decision", scope: ["src/other/**"] }]}
     sources={[{ id: "cache", kind: "folder", scope: "/repo/src/cache" }, { id: "other", kind: "folder", scope: "/repo/src/other" }]} />);
