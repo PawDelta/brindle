@@ -44,7 +44,7 @@ from pathlib import Path
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-from brindle import tmux
+from brindle import spawn, tmux
 from brindle.daemon import peer
 
 log = logging.getLogger(__name__)
@@ -240,13 +240,16 @@ def admit(server: str | None) -> list[str]:
 def _tmux(server: list[str], *args: str, input: str | None = None,
           binary: str | None = None) -> subprocess.CompletedProcess:
     """A tmux command on ``server``, run by ``binary`` (the engine's tmux by
-    default; a view's own, client_for). ``-u``: UTF-8 whatever the locale."""
+    default; a view's own, client_for). ``-u``: UTF-8 whatever the locale.
+    One that only asks runs as a brindle.spawn read (stopped at its time
+    limit), anything else as an action, as brindle.tmux runs them."""
+    argv = [binary or tmux._bin(), "-u", *server, *args]
     env = {k: v for k, v in os.environ.items() if k != "TMUX"}
-    io = {"input": input} if input is not None else {"stdin": subprocess.DEVNULL}
     try:
-        return subprocess.run([binary or tmux._bin(), "-u", *server, *args], capture_output=True,
-                              text=True, env=env, timeout=tmux.timeout(), **io)
-    except (OSError, subprocess.TimeoutExpired) as e:
+        if args == ("-V",) or tmux._is_read(args):
+            return spawn.read(argv, env=env, input=input, timeout=tmux.timeout())
+        return spawn.action(argv, env=env, input="" if input is None else input, timeout=tmux.timeout())
+    except (OSError, subprocess.TimeoutExpired, spawn.Busy) as e:
         raise ViewError(f"couldn't run tmux: {e}") from None
 
 
@@ -545,10 +548,11 @@ class PtyView:
             _set_size(slave, (cols, rows), crop)
             env = {k: v for k, v in os.environ.items() if k != "TMUX"} | {"TERM": "xterm-256color"}
             # No controlling terminal: resize() tells the client its size changed itself.
-            proc = subprocess.Popen([binary, *args, *attach_args(view)], stdin=slave, stdout=slave,
-                                    stderr=slave, env=env, start_new_session=True)
+            # The view owns it from here: close() ends it with its session.
+            proc = spawn.start([binary, *args, *attach_args(view)], stdin=slave, stdout=slave,
+                               stderr=slave, env=env, start_new_session=True)
             tty = os.ttyname(slave)
-        except OSError as e:
+        except (OSError, spawn.Busy) as e:
             os.close(master)
             if proc is not None:
                 proc.kill()

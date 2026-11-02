@@ -390,6 +390,7 @@ export interface ConnectionReadyDTO {
  * via the `definition` "DecisionDTO".
  */
 export interface DecisionDTO {
+  author_session?: string | null;
   body: string;
   created_at: number;
   id: string;

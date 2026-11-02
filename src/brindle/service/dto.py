@@ -281,6 +281,7 @@ class DecisionDTO(_DTO):
     scope: list[str]
     status: str
     created_at: float
+    author_session: str | None = None
 
     @classmethod
     def from_row(cls, d: dict[str, Any]) -> DecisionDTO:

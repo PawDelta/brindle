@@ -144,27 +144,38 @@ export const appUpdater: AppUpdater = {
 };
 
 /* App updates as the shell has them (src-tauri/src/updates.rs UpdateStatus):
-   this build's version; whether it installs updates by itself (a release;
-   not an rc or a staff build); an update installed and waiting for the
-   restart; the version this launch was updated to, until dismissed; when
-   this machine last checked (seconds since the epoch); a check under way. */
+   this build's version; whether it updates by itself (a release; not an rc
+   or a staff build); an update installed and waiting for the restart; an
+   update the last look found, not installed (its version and release notes),
+   and whether the person set it aside ("Later"); the version this launch was
+   updated to, until dismissed; when this machine last checked (seconds since
+   the epoch); a check under way. */
 export interface AppUpdateStatus {
   version: string;
   automatic: boolean;
   pending: string | null;
+  /* rollback: the feed was rolled back to this older release (app/README.md, "Rolling back"). */
+  available: { version: string; notes: string | null; rollback?: boolean } | null;
+  later: boolean;
   updated: string | null;
   last_checked: number | null;
   checking: boolean;
 }
 
-/* The shell's own updates, for the Inbox and Settings' About: `status` now,
-   `check` (Check now: check and install, answering the status after),
-   `restart` into an installed update, `dismiss` "Updated to brindle X", and
-   `watch` each change the shell announces (an install in the background),
-   resolving once it listens, to a function that stops watching. */
+/* The shell's own updates, for the update banner, the Inbox and Settings'
+   About: `status` now, `check` (Check now: look for an update and offer it,
+   answering the status after), `updateNow` (install the update, telling
+   `progress` how it goes, then the app restarts into it; answers its
+   version, or null when there is nothing newer), `later` (set the offer
+   aside until a newer one), `restart` into an installed update, `dismiss`
+   "Updated to brindle X", and `watch` each change the shell announces (a
+   look in the background), resolving once it listens, to a function that
+   stops watching. */
 export interface AppUpdates {
   status: () => Promise<AppUpdateStatus>;
   check: () => Promise<AppUpdateStatus>;
+  updateNow: (progress: (p: ReleaseProgress) => void) => Promise<string | null>;
+  later: () => Promise<void>;
   restart: () => Promise<void>;
   dismiss: () => Promise<void>;
   watch: (on: (status: AppUpdateStatus) => void) => Promise<() => void>;
@@ -173,6 +184,8 @@ export interface AppUpdates {
 export const appUpdates: AppUpdates = {
   status: () => invoke<AppUpdateStatus>("app_update_status"),
   check: () => invoke<AppUpdateStatus>("app_update_check"),
+  updateNow: (progress) => release("app_update_now", progress),
+  later: () => invoke<void>("app_update_later"),
   restart: () => invoke<void>("app_restart"),
   dismiss: () => invoke<void>("app_update_dismiss"),
   watch: (on) => listen<AppUpdateStatus>("app-update", (e) => on(e.payload)),

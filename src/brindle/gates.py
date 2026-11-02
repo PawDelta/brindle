@@ -356,11 +356,7 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
         watch = _watch_slow(db, ws, cmd, last, timeout) if last is not None else None
         started = time.monotonic()
         try:
-            from brindle import tasks
-
             extra = {} if cancel is None else {"cancel": cancel}
-            if tasks.forced_start(db, ws):   # the worker was started despite the load: its checks yield
-                extra["background"] = True
             ok, out = autopilot.run_check(cmd, ws.path, env, timeout, **extra)
         finally:
             if watch:
@@ -373,17 +369,17 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
 @contextmanager
 def _room_for_check(ws: Workspace, cancel=None):
     """With its slot held, wait until the machine has room for the run
-    (``spawn.no_room``): a full suite started on a saturated machine only
-    makes everything slower. While it waits, ``marker("checks-room")`` makes
+    (``spawn.check_no_room``: memory pressure or load far above the cores;
+    the slots already bound check load). While it waits, ``marker("checks-room")`` makes
     the branch read "checks waiting for room: <why>" (``checks_state``), so
     silence isn't taken for a stall. ``cancel`` gives the wait up
     (``Abandoned``)."""
     from brindle import spawn
 
-    if spawn.no_room(ws.repo_root) is not None:
+    if spawn.check_no_room(ws.repo_root) is not None:
         pause = threading.Event()
         with marker("checks-room", ws.id):
-            while spawn.no_room(ws.repo_root) is not None:
+            while spawn.check_no_room(ws.repo_root) is not None:
                 if cancel is not None and cancel():
                     raise Abandoned("room")
                 pause.wait(SLOT_POLL)
@@ -524,7 +520,9 @@ def rule_summary(db: DB, ws: Workspace) -> str:
 
 def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     """Run the worker's rule packs and each of ``cfg.checks`` (cached by sha)
-    and produce a short pass/fail summary for a reviewer, with output only
+    in configured order, stopping at the first failed command. Later commands
+    are reported as skipped without running or caching them. Produce a short
+    pass/fail summary for a reviewer, with output only
     for the ones that failed, capped so one big failure can't blow up the
     reviewer's prompt."""
     rules = rule_summary(db, ws)
@@ -533,8 +531,12 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
     env = workspaces.workspace_env(ws, cfg)
     lines = [rules] if rules else []
     budget = MAX_FAILURE_CHARS
+    failed = False
     with queue_place(time.time()):   # one place in the check queue for all its commands
         for cmd in cfg.checks:
+            if failed:
+                lines.append(f"SKIP `{cmd}` (skipped: earlier check failed)")
+                continue
             if cancel is None:
                 ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
             else:
@@ -542,13 +544,10 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
             if ok:
                 lines.append(f"PASS `{cmd}` ({out})" if out.startswith(check_scope.SKIPPED) else f"PASS `{cmd}`")
                 continue
-            if budget <= 0:
-                lines.append(f"FAIL `{cmd}` (output omitted; failure budget spent)")
-                continue
+            failed = True
             # Keep the tail, not the head: run_check's own exit-code marker is the
             # last line, and that's the part a reviewer needs most.
             shown = out if len(out) <= budget else "... (truncated)\n" + out[-budget:]
-            budget -= len(shown)
             lines.append(f"FAIL `{cmd}`\n{shown}")
     return "\n".join(lines)
 
@@ -610,7 +609,11 @@ def pr_checked(db: DB, ws: Workspace, progress=None, passed: tuple[str, list[str
         yield sha
 
 
-def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Report:
+def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool,
+        reused: tuple[str, list[str]] | None = None) -> Report:
+    """``reused``: (sha, commands) whose passing result the caller carried
+    over to ``sha`` (``pipeline._reusable_checks``); they aren't run again
+    while HEAD is still that sha."""
     r = Report()
     dirty = git.dirty_files(ws.path, tracked_only=True)   # untracked scratch files don't travel with the branch
     if dirty:
@@ -637,8 +640,12 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
         r.passed.append("rules passed (" + ", ".join(rules.packs) + ")")
 
     env = workspaces.workspace_env(ws, cfg)
+    skip = set(reused[1]) if reused and reused[0] == sha else set()
     with queue_place(time.time()):
         for cmd in cfg.checks:
+            if cmd in skip:
+                r.passed.append(f"`{cmd}` passed (reused)")
+                continue
             ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
             if not ok:
                 return r.fail(f"Check failed in {ws.branch}:\n{out}\nSend this to the worker to fix.")
@@ -658,14 +665,11 @@ def standing_reviews(db: DB, ws_id: str, sha: str) -> list:
     review), whatever its profile, after that verdict was recorded, that has
     given its own since. A reviewer with no recorded slot supersedes nothing."""
     reviews = db.reviews_at(ws_id, sha)
-    reviewers = {r.reviewer_id: a for r in reviews
-                 if r.reviewer_id and (a := db.get_agent(r.reviewer_id)) is not None}
 
     def supersedes(s, r) -> bool:
-        new, old = reviewers.get(s.reviewer_id), reviewers.get(r.reviewer_id)
-        return (new is not None and old is not None and new.review_slot is not None
-                and new.review_slot == old.review_slot
-                and new.created_at > r.created_at and s.created_at > r.created_at)
+        return (s.review_slot is not None and s.review_slot == r.review_slot
+                and s.reviewer_created_at is not None
+                and s.reviewer_created_at > r.created_at and s.created_at > r.created_at)
 
     return [r for r in reviews if not any(supersedes(s, r) for s in reviews)]
 

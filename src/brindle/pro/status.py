@@ -552,6 +552,23 @@ def mark_read(ids: list[str], client=None, store=None) -> list[str]:
             saved = load(saved.org_id)
             saved.status.notices = [n for n in saved.status.notices if n["id"] not in done]
             save(saved)
+        # The terminal and desktop share this operation. Notify every repo's
+        # inbox, including clients whose status poller has an older copy.
+        from brindle import bus
+        from brindle.db import DB
+
+        try:
+            db = DB()
+            try:
+                # Event feeds are repo-filtered; a global row alone would be
+                # invisible to a desktop connected to a particular repo.
+                roots = {ws.repo_root for ws in db.find_workspaces()}
+                for root in roots or {None}:
+                    bus.publish(db, "notices.read", repo_root=root, notice_ids=done)
+            finally:
+                db.conn.close()
+        except Exception:  # notifications must not fail an acknowledged read
+            log.exception("brindle: couldn't publish read notices")
     return done
 
 

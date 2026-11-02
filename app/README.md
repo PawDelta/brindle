@@ -405,7 +405,9 @@ What's new until then (a notification too, only when the window isn't showing),
 and "Updated to brindle X" once after the restart. Settings › About shows when
 this machine last checked, Check now, and Restart to update once one is
 installed (`app-update.json` in the app's data directory keeps the version last
-run and the last check).
+run and the last check). An update is always newer, except from a feed
+marked `"rollback": true`, which may name an older release (see "Rolling back
+a release" under Releases).
 No check is made when brindle is air-gapped or updates are off:
 `"app_updates": false` or `"airgap": true` in `~/.brindle/config.json`,
 `BRINDLE_AIRGAP=1` in the environment, or the engine: a repo's own
@@ -453,7 +455,15 @@ not copied into `/Applications`.
 ## Releases
 
 The version lives in `package.json` (`tauri.conf.json` reads it from there).
-Bump it, merge, then push a tag `app-v<version>`:
+brindle and the app share one version number (the app bundles its engine):
+bump it with `scripts/bump_version.py X.Y.Z`, which sets `package.json`,
+its lockfile and the engine's files together. Merge, tag the engine `vX.Y.Z`
+at the same commit, then push an annotated tag `app-v<version>` whose message is a
+one-line summary: `git tag -a app-v<version> -m "<one-line summary>"`. The
+update banner shows it as the release's note: `scripts/release_notes.mjs` takes
+the message's first paragraph, on one line, capped at 200 characters on a word
+boundary. A lightweight tag, a manual run or a release candidate gets
+"brindle desktop <version>" instead.
 `.github/workflows/app-release.yml` checks the tag matches and builds
 twice, each on a runner of that architecture, since the bundled engine is
 built for the runner's own architecture only
@@ -525,6 +535,50 @@ and keeps the build they installed. A stable build keeps the automatic
 launch check against the stable feed only, so a release never offers an rc.
 An rc tester moves to a final release by installing its DMG: the rc channel
 names release candidates only.
+
+### Rolling back a release
+
+A bad stable release is reverted by pointing the stable feed back at an
+earlier release's own updater bundles, already published and signed, with
+`.github/workflows/app-feed-rollback.yml`. Nothing is rebuilt or re-signed;
+it takes a few minutes, most of them the approval.
+
+1. In GitHub, Actions › **App feed rollback** › **Run workflow**. Under
+   "Use workflow from", pick a release tag (`app-v*`, usually the bad
+   release's own): the job runs in `desktop-release`, which admits only
+   `app-v*` tags, and the tag's commit must be on `main`. The tag must
+   carry this workflow, so it works from the first release made after it
+   landed.
+2. Enter the version to go back to (`X.Y.Z`, a stable release published under
+   `<X.Y.Z>/`, normally the one before the bad release) and run it.
+3. Approve the run in the `desktop-release` environment, as for a stable
+   publish.
+
+The job downloads `<X.Y.Z>/brindle_<X.Y.Z>_<arch>.app.tar.gz` and its `.sig`
+for both Macs from the site, and `scripts/feed_rollback.mjs` checks each
+bundle against its signature and the production updater key in
+`tauri.conf.json` (refusing a version that isn't published, isn't `X.Y.Z`, or
+doesn't verify). It then writes `latest.json` with the same role and
+credentials as the stable publish (`AWS_DESKTOP_RELEASE_ROLE_ARN`,
+`DESKTOP_DOWNLOADS_BUCKET`): those bundles, `"rollback": true` and the notes
+"Rolled back to X.Y.Z". The run's summary names the version the feed named
+before. A failed run can be run again: it only ever writes that one file.
+
+Installed apps newer than X.Y.Z then see "brindle X.Y.Z is available
+(rollback)" at their next look (at launch, every 6 hours, or About's Check
+now) and install it with Update now, checked against the production key like
+any update and behind the same air-gap, engine and one-install gates
+(`update_wanted` in `src-tauri/src/updates.rs`). An app never offers an older
+build from a manifest without the rollback mark, and apps already on X.Y.Z or
+older see nothing new (older ones get X.Y.Z as an ordinary update).
+
+Only `latest.json` changes. The per-version directories are immutable, and
+the stable download names (`brindle.dmg`, `brindle_<arch>.dmg`, the AppImage,
+`.deb` and Windows installer) still point at the bad release: new installs
+get it until the fix ships, and Linux and Windows have no updater feed to roll
+back. Ship the fix as the next stable release (a higher version, tagged as
+usual); its publish overwrites `latest.json` without the mark, which ends the
+rollback, and every app, the rolled-back ones included, updates to it.
 
 ### Staff builds
 
