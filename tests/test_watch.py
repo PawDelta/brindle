@@ -143,7 +143,6 @@ def test_idle_sidebar_ticks_do_no_work(brindle_home, monkeypatch):
     from brindle import watch_costs
     n, now, seen, db = collections.Counter(), [1_700_000_000 - 1_700_000_000 % 60 + 31.0], [], DB()
     hit = lambda name, result=None: lambda *a, **k: (n.update([name]), result and result())[1]  # noqa: E731
-
     class Scr:
         timeout = clear = lambda *a: None
         getmaxyx = lambda self: (30, 60)  # noqa: E731
@@ -159,7 +158,8 @@ def test_idle_sidebar_ticks_do_no_work(brindle_home, monkeypatch):
     for target, value in {
         "curses.curs_set": hit("x"), "curses.mousemask": hit("x"), "brindle.watch._styles": lambda bg=None: {},
         "brindle.watch._start_status": lambda: None, "brindle.watch._cull_in_background": hit("x"),
-        "brindle.watch.DB": lambda: db, "brindle.watch_costs.local": hit("spend", watch_costs.Local),
+        "brindle.watch.DB": hit("db", lambda: db), "brindle.watch.render": hit("render", list),
+        "brindle.watch_costs.local": hit("spend", watch_costs.Local),
         "brindle.upgrade.InstallWatch": lambda: SimpleNamespace(changed=lambda: False),
         "brindle.tmux.list_panes": hit("panes", dict), "brindle.view.snapshot": hit("snapshot", list),
         "brindle.view.autopilot_entry": hit("x"), "brindle.sidebar_logo.viewer": hit("viewer", str),
@@ -169,6 +169,6 @@ def test_idle_sidebar_ticks_do_no_work(brindle_home, monkeypatch):
     }.items():
         monkeypatch.setattr(target, value)
     watch._loop(Scr(), None)
-    # Counters, not CPU time: each was 31 before; now only the slow refresh runs.
-    assert n["paint"] == 2 and max(n["snapshot"], n["spend"], n["viewer"]) <= 8  # first frame + minute rollover
+    assert n["db"] == 1 and n["paint"] == 2  # one open; first frame + minute rollover
+    assert max(n["snapshot"], n["spend"], n["render"], n["viewer"]) <= 8  # each was 31 before
     assert seen[2] == seen[1] and seen[3] == seen[2] + 1  # idle: nothing; the commit: a refresh
