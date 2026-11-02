@@ -103,9 +103,8 @@ def _brief(task_text: str, paths: list[str] | None, client=None, store=None) -> 
     ent = _entitled(store)
     if ent is None:
         return "", []
-    try:       # the person's ``assist`` switch (org policy included); unreadable counts as off
-        assist = analysis_docs.resolve_switch(
-            "assist", analysis_docs.fetch_switches(client, store), store=store)
+    try:       # the effective ``assist`` switch: own choice, group and org policy; unreadable counts as off
+        assist = next(s["on"] for s in analysis_docs.switch_states(client, store) if s["name"] == "assist")
     except Exception:  # noqa: BLE001 - fail closed: send nothing
         assist = False
     if not assist:

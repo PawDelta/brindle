@@ -104,15 +104,20 @@ def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, bo
     assert f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in out
 
 
-@pytest.mark.parametrize("entry, airgapped", [("task", False), ("goal", False), ("review", False), ("task", True)])
-def test_nothing_is_sent_while_assist_is_off_or_air_gapped(entry, airgapped, db, boss, backend, monkeypatch):
+@pytest.mark.parametrize("entry, why", [("task", "own"), ("goal", "own"), ("review", "own"),
+                                         ("task", "group"), ("task", "airgap")])
+def test_nothing_is_sent_while_assist_is_off_or_air_gapped(entry, why, db, boss, backend, monkeypatch):
     from brindle import airgap
 
-    backend.routes["POST /analysis-docs/brief"] = [(200, {"block": "known: the cache", "cited": []})]
-    backend.routes["GET /me/analysis-docs/settings"] = [(200, {"switches": {} if airgapped else {"assist": "off"}})]
+    policy = {"switches": {}, "groups": {"g": {"switches": {"assist": "enforced_off"}}}}
+    backend.routes.update({"POST /analysis-docs/brief": [(200, {"block": "known: the cache", "cited": []})],
+                           "GET /analysis-docs/scopes": [(200, {"scopes": [{"kind": "group", "id": "g"}]})],
+                           "GET /me/analysis-docs/settings": [(200, {"switches": {"assist": "off"} if why == "own" else {}})]})
     monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, *a: backend.request(*a))
-    monkeypatch.setattr(airgap, "enabled", lambda cfg=None: airgapped)
-    login_as(backend, credentials.default_store(), features=("analysis_docs",))
+    monkeypatch.setattr(airgap, "enabled", lambda cfg=None: why == "airgap")
+    monkeypatch.setattr("brindle.pro.analysis_policy.fetch", lambda *a: policy)
+    login_as(backend, credentials.default_store(),
+             features=("analysis_docs", "analysis_docs_team") if why == "group" else ("analysis_docs",))
     client = auth.Client(None, backend)
     if entry == "task":
         out = ab.brief_context(db, boss.repo_root, "feat/x", "a1", "speed up the cache", [], large=True, client=client)
