@@ -519,6 +519,7 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
                 load[0] = 2.0   # admitted after a look at the full machine
             return False
 
+        load[0] = 25.0   # a check waits only above twice the cores (a worker start, above ~1x)
         real_start = spawn.start   # the admission gate is off here, as in a plain MCP process
         monkeypatch.setattr(spawn, "start", lambda argv, **kw: wrapped.append(argv) or real_start(argv, **kw))
         monkeypatch.setattr(gates, "SLOT_POLL", 0)
