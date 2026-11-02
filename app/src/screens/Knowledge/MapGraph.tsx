@@ -1,5 +1,5 @@
 import type { DecisionDTO } from "../../api/schema";
-import type { KbSource, KnowledgeMap, MapEdge, MapNode } from "../../api/client";
+import type { DocScope, KbSource, KnowledgeMap, MapEdge, MapNode } from "../../api/client";
 import { card } from "../../components/ui";
 
 export type LocalNode = { id: string; kind: "decision"; title: string; decision: DecisionDTO } | { id: string; kind: "imported"; title: string; source: KbSource; path: string };
@@ -86,18 +86,41 @@ function containsPath(folder: string, path: string): boolean {
   return !folder || folder === path || path.startsWith(`${folder}/`);
 }
 
-export function joinLocal(map: KnowledgeMap, decisions: DecisionDTO[], sources: KbSource[], repo: string): { nodes: GraphNode[]; edges: MapEdge[] } {
+export function joinLocal(
+  map: KnowledgeMap,
+  decisions: DecisionDTO[],
+  sources: KbSource[],
+  repo: string,
+  filter: { scope: DocScope; paths: string[] },
+): { nodes: GraphNode[]; edges: MapEdge[] } {
   const nodes: GraphNode[] = [...map.nodes];
   const edges = [...map.edges];
+  // Local records have no team or organization membership.
+  if (filter.scope.kind !== "user") return { nodes, edges };
+  const selected = filter.paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
+  const nodePaths = (node: MapNode) => [...(node.paths ?? []), ...(node.path ? [node.path] : [])]
+    .map((p) => relative(p, repo))
+    .filter((p): p is string => p !== null);
+  // An empty filter is the whole scope: every concrete path in the map is its own area.
+  const areas = selected.length ? selected : map.nodes.flatMap(nodePaths);
+  const touchesArea = (path: string, area: string) => containsPath(area, path) || decisionMatches(area, path) || decisionMatches(`${area}/**`, path);
+  // A document in the neighbourhood may mention paths outside the chosen area.
+  // Only paths inside that area may connect a local record to the document.
+  const filteredPaths = (node: MapNode, scoped = areas) => nodePaths(node)
+    .filter((p) => scoped.some((area) => touchesArea(p, area)));
   const local: { node: LocalNode; paths: string[] }[] = [
     ...decisions.map((d) => ({ node: { id: `local:decision:${d.id}`, kind: "decision" as const, title: d.topic, decision: d }, paths: d.scope })),
   ];
   for (const { node, paths } of local) {
     const scopes = paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
-    const matches = map.nodes.filter((n) => [...(n.paths ?? []), ...(n.path ? [n.path] : [])].some((p) => {
-      const path = relative(p, repo);
-      return path !== null && scopes.some((scope) => decisionMatches(scope, path));
-    }));
+    // A concrete path inside the area is a witness even for wildcard decisions.
+    // A broad server glob still needs the local scope to intersect that area.
+    const matches = map.nodes.filter((n) => areas.some((area) => scopes.some((scope) =>
+      filteredPaths(n, [area]).some((path) => {
+        const concrete = !/[*?\[]/.test(path);
+        return (concrete || touchesArea(scope, area)) && decisionMatches(scope, path);
+      }),
+    )));
     if (!matches.length) continue;
     nodes.push(node);
     for (const match of matches) edges.push({ source: node.id, target: match.id, kind: "shared_path" });
@@ -111,11 +134,7 @@ export function joinLocal(map: KnowledgeMap, decisions: DecisionDTO[], sources: 
     const node: LocalNode = { id: `local:source:${source.id}`, kind: "imported", title: source.scope.replace(/\/+$/, "").split("/").at(-1) || source.scope, source, path: source.scope };
     let joined = false;
     for (const server of map.nodes) {
-      const paths = new Set([...(server.paths ?? []), ...(server.path ? [server.path] : [])]);
-      const matches = [...paths].some((raw) => {
-        const path = relative(raw, repo);
-        return path !== null && containsPath(scope, path);
-      });
+      const matches = filteredPaths(server).some((path) => containsPath(scope, path));
       if (!matches) continue;
       if (!joined) { nodes.push(node); joined = true; }
       edges.push({ source: node.id, target: server.id, kind: "shared_path" });
@@ -124,10 +143,27 @@ export function joinLocal(map: KnowledgeMap, decisions: DecisionDTO[], sources: 
   return { nodes, edges };
 }
 
+function provenance(node: GraphNode): string[] {
+  const date = (seconds?: number) => {
+    const value = seconds === undefined ? null : new Date(seconds * 1000);
+    return value && Number.isFinite(value.getTime()) ? value.toISOString().slice(0, 10) : "Date unrecorded";
+  };
+  const scope = (kind?: string) => kind === "user" || kind === "personal" ? "Personal" : kind === "group" || kind === "team" ? "Team" : kind === "org" ? "Org" : kind || "Scope unrecorded";
+  if (node.kind === "path") return [];
+  if (node.kind === "decision") return [node.decision.author_session ? `Session ${node.decision.author_session}` : "Session/author unrecorded", `Local decision · ${date(node.decision.created_at)}`];
+  if (node.kind === "imported") return [node.path, `Imported on this device · ${scope(node.source.visibility)} · ${date(node.source.added_at)}`];
+  const source = node.source;
+  return [
+    [source?.ref, source?.session && `Session ${source.session}`].filter(Boolean).join(" · ") || "Session/branch unrecorded",
+    node.created_by || "Author/agent unrecorded",
+    `${scope(node.scope?.kind)}${node.scope && node.scope.kind !== "user" ? ` ${node.scope.name || node.scope.id}` : ""} · ${date(node.created_at)}`,
+  ];
+}
+
 export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void }) {
   const columns = [nodes.filter((n) => n.kind === "path"), nodes.filter((n) => n.kind === "doc"), nodes.filter((n) => n.kind === "decision" || n.kind === "imported")];
-  const points = new Map(columns.flatMap((col, x) => col.map((n, y) => [n.id, { x: x * 300 + 140, y: y * 100 + 56 }] as const)));
-  const height = Math.max(320, ...columns.map((c) => c.length * 100 + 24));
+  const points = new Map(columns.flatMap((col, x) => col.map((n, y) => [n.id, { x: x * 300 + 140, y: y * 200 + 96 }] as const)));
+  const height = Math.max(320, ...columns.map((c) => c.length * 200 + 24));
   return (
     <div className="overflow-auto rounded-lg border border-line bg-surface-2" aria-label="Knowledge graph">
       <div className="relative min-w-[900px]" style={{ height }}>
@@ -142,9 +178,10 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
         </svg>
         {nodes.map((node) => {
           const p = points.get(node.id)!;
-          return <button key={node.id} type="button" data-node={node.id} onClick={() => onOpen(node)} style={{ left: p.x - 120, top: p.y - 32 }} className={`${card} absolute flex h-16 w-60 flex-col justify-center gap-1 px-s1 text-left hover:border-branch focus-visible:outline-branch`}>
+          return <button key={node.id} type="button" data-node={node.id} onClick={() => onOpen(node)} style={{ left: p.x - 120, top: p.y - 88 }} className={`${card} absolute flex h-44 w-60 flex-col gap-1 overflow-auto break-words px-s1 py-2 text-left hover:border-branch focus-visible:outline-branch`}>
             <span className={`text-xs ${node.kind === "decision" ? "text-fawn" : node.kind === "doc" ? "text-branch" : "text-ink-3"}`}>{node.kind === "path" ? "Code area" : node.kind === "imported" ? "Imported · local" : node.kind === "decision" ? "Decision · local" : "Document"}</span>
             <span className="w-full truncate text-sm font-medium">{node.title || (node.kind === "path" ? node.path : node.id)}</span>
+            {provenance(node).map((line, i) => <span key={i} className="w-full text-xs text-ink-3"> · {line}</span>)}
           </button>;
         })}
       </div>

@@ -1626,7 +1626,7 @@ def _fresh_start_prompt(db: DB, a: Agent, ws: Workspace, provider, note: str) ->
             chunks=knowledge.replay_chunks(db, a.id),
             analysis=analysis_brief.brief_context(
                 db, ws.repo_root, ws.branch, a.id, a.task, None,
-                large=analysis_brief.got_context(db, a.id))) + note
+                large=analysis_brief.got_context(db, a.id), replay=True)) + note
     return (a.task + note) if a.task else None
 
 
@@ -2139,6 +2139,10 @@ def _delivery_held(db: DB, agent: Agent | None) -> bool:
             or (wake.enabled(agent) and wake.live(agent)))
 
 
+class _PasteBlocked(Exception):
+    """Raised inside a delivery's protected block when the pane became blocked."""
+
+
 def _flush_pane(db: DB, agent_id: str) -> bool:
     """``flush``'s typed delivery, under its delivery_lock. The queue and the
     agent are read afresh: while it waited, another sender may have delivered,
@@ -2165,12 +2169,16 @@ def _flush_pane(db: DB, agent_id: str) -> bool:
     warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
     try:
         baseline = launch_health.before_delivery(db, agent, msg.body) if not warmup else ""
-        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
-                   server=server_of(agent))
-    except BaseException:
+        lead = message_lead(db, agent, msg.sender_id)
+        if _paste_blocked(agent):  # last look, after preparation: a draft may have appeared
+            raise _PasteBlocked
+        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
+    except BaseException as exc:
         # pop_pending claimed this row before the external send. Release the
-        # same row and our idle claim so the next flush can retry it once.
+        # same row and our idle claim so the next flush can try it once more.
         db.retry_pending(msg.id, agent_id, claimed_at)
+        if isinstance(exc, _PasteBlocked):
+            return False
         raise
     if not warmup:
         launch_health.verify_delivery(db, agent, msg.body, baseline, message_lead(db, agent, msg.sender_id))
@@ -2197,10 +2205,14 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
     if not msg:
         return False
     try:
-        tmux.paste(agent.tmux_window, msg.body, lead=message_lead(db, agent, msg.sender_id),
-                   server=server_of(agent))
-    except BaseException:
+        lead = message_lead(db, agent, msg.sender_id)
+        if _paste_blocked(agent):  # last look before pasting: a draft may have appeared
+            raise _PasteBlocked
+        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
+    except BaseException as exc:
         db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
+        if isinstance(exc, _PasteBlocked):
+            return False
         raise
     return True
 
@@ -2219,15 +2231,18 @@ def _paste_blocked(agent: Agent) -> bool:
     try:
         screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
     except tmux.TmuxError:
-        return False
+        return True  # an unreadable screen might hold a draft: fail closed, try again later
     reason = provider.paste_blocked(screen, interactive)
     if reason == "background":
-        tmux.send_keys(agent.tmux_window, "Escape", server=server)
+        try:
+            tmux.send_keys(agent.tmux_window, "Escape", server=server)
+        except tmux.TmuxError:
+            return True
         time.sleep(0.3)
         try:
             screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
         except tmux.TmuxError:
-            return False
+            return True
         reason = provider.paste_blocked(screen, interactive)
     return reason is not None
 
@@ -3328,7 +3343,9 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
                 if not worker_done_when and t.done_when:
                     worker_done_when = t.done_when
     if worker and worker.task:
-        task += f"\n\nThe worker's original task:\n{worker.task.strip()}"
+        task += (f"\n\nThe worker's original task:\n{worker.task.strip()}\n\n"
+                 "Supervisor messages and spec amendments supersede this original task text. "
+                 "A deviation from it that such a message justifies needs no recorded decision.")
     if worker:
         task += f"\n\nWorker profile: {worker.profile} (provider: {worker.provider})"
         try:
@@ -3357,16 +3374,16 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         task += f"\n\nDeclared files: {', '.join(worker_files)}"
     if worker_done_when:
         task += f"\n\nIts finish line: {worker_done_when.strip()}"
-    task += _review_context(db, ws, worker, worker_files)
-
     from brindle.pro import analysis_brief
 
     try:
         changed = git.paths(["diff", "--name-only", f"{ws.base_branch}...HEAD"], ws.path) if ws.base_branch else []
     except git.GitError:
         changed = []
+    # Decisions cover declared and changed files; docs gate on the diff alone.
+    task += _review_context(db, ws, worker, list(dict.fromkeys([*worker_files, *changed])))
     covering, cited = analysis_brief.review_context(db, ws.repo_root, (worker.task or "") if worker else "",
-                                                    list(dict.fromkeys([*worker_files, *changed])))
+                                                    changed)   # docs gate on the diff, not declared files
     if covering:
         task += f"\n\n{covering}"
 
