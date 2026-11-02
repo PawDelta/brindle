@@ -756,20 +756,47 @@ def analysis_doc_session_summary(db: DB, request: Request) -> Any:
 
 @_json
 def analysis_doc_map(db: DB, request: Request) -> Any:
-    """Proxy one path neighbourhood without storing its response locally."""
+    """Build a whole-scope graph from the library list, or proxy a path map.
+
+    Use the existing scoped list contract for pathless maps: it also includes
+    unlinked docs and supplies provenance for either view. Nothing is cached.
+    """
     q = request.query_params
     try:
         paths = json.loads(q.get("paths", "[]"))
     except (ValueError, TypeError) as e:
         raise ServiceError("bad_request", "paths must be a JSON array", 400) from e
-    if (not isinstance(paths, list) or not paths
+    if (not isinstance(paths, list)
             or any(not isinstance(p, str) or not p.strip() for p in paths)
             or q.get("depth", "1") != "1"
             or q.get("scope_kind") not in ("user", "group", "org") or not q.get("scope_id")):
-        raise ServiceError("bad_request", "choose a scope and code paths at depth 1", 400)
-    return docs_api("GET", "/analysis-docs/map", repo=_repo(request),
-                    query={"scope_kind": q["scope_kind"], "scope_id": q["scope_id"],
-                           "paths": ",".join(paths), "depth": "1"})    # the server's list is comma-separated
+        raise ServiceError("bad_request", "choose a scope and optional code paths at depth 1", 400)
+    scope = {"kind": q["scope_kind"], "id": q["scope_id"]}
+    query = {"scope_kind": scope["kind"], "scope_id": scope["id"]}
+    listed = docs_api("GET", "/analysis-docs", repo=_repo(request), query=query)
+    docs = {d["doc_id"]: {**d, "scope": d.get("scope") or scope}
+            for d in listed.get("docs") or [] if isinstance(d, dict) and isinstance(d.get("doc_id"), str)}
+    if paths:
+        got = docs_api("GET", "/analysis-docs/map", repo=_repo(request),
+                       query={**query, "paths": ",".join(paths), "depth": "1"})
+        return {**got, "nodes": [{**docs.get(n.get("doc_id", n["id"]), {}), **n}
+                                  if n.get("kind") == "doc" else n for n in got.get("nodes") or []]}
+    nodes, edges = [], []
+    seen_paths = set()
+    for doc_id, doc in docs.items():
+        files = list(dict.fromkeys((doc.get("mentions") or {}).get("files") or []))
+        nodes.append({**doc, "id": doc_id, "kind": "doc", "paths": files})
+        for path in files:
+            path_id = f"path:{path}"
+            if path not in seen_paths:
+                nodes.append({"id": path_id, "kind": "path", "path": path})
+                seen_paths.add(path)
+            edges.append({"source": doc_id, "target": path_id, "kind": "mentions"})
+        for relation in ("related", "supersedes"):
+            for target in doc.get(relation) or []:
+                if target in docs:
+                    edges.append({"source": doc_id, "target": target, "kind": relation})
+    return {"nodes": nodes, "edges": edges}
 
 
 @_json

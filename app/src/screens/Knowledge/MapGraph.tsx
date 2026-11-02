@@ -124,10 +124,27 @@ export function joinLocal(map: KnowledgeMap, decisions: DecisionDTO[], sources: 
   return { nodes, edges };
 }
 
+function provenance(node: GraphNode): string[] {
+  const date = (seconds?: number) => {
+    const value = seconds === undefined ? null : new Date(seconds * 1000);
+    return value && Number.isFinite(value.getTime()) ? value.toISOString().slice(0, 10) : "Date unrecorded";
+  };
+  const scope = (kind?: string) => kind === "user" || kind === "personal" ? "Personal" : kind === "group" || kind === "team" ? "Team" : kind === "org" ? "Org" : kind || "Scope unrecorded";
+  if (node.kind === "path") return [];
+  if (node.kind === "decision") return [node.decision.author_session ? `Session ${node.decision.author_session}` : "Session/author unrecorded", `Local decision · ${date(node.decision.created_at)}`];
+  if (node.kind === "imported") return [node.path, `Imported on this device · ${scope(node.source.visibility)} · ${date(node.source.added_at)}`];
+  const source = node.source;
+  return [
+    [source?.branch || source?.ref, source?.session && `Session ${source.session}`].filter(Boolean).join(" · ") || "Session/branch unrecorded",
+    [node.author || source?.author, source?.agent].filter(Boolean).join(" · ") || "Author/agent unrecorded",
+    `${scope(node.scope?.kind)}${node.scope && node.scope.kind !== "user" ? ` ${node.scope.name || node.scope.id}` : ""} · ${date(node.created_at)}`,
+  ];
+}
+
 export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void }) {
   const columns = [nodes.filter((n) => n.kind === "path"), nodes.filter((n) => n.kind === "doc"), nodes.filter((n) => n.kind === "decision" || n.kind === "imported")];
-  const points = new Map(columns.flatMap((col, x) => col.map((n, y) => [n.id, { x: x * 300 + 140, y: y * 100 + 56 }] as const)));
-  const height = Math.max(320, ...columns.map((c) => c.length * 100 + 24));
+  const points = new Map(columns.flatMap((col, x) => col.map((n, y) => [n.id, { x: x * 300 + 140, y: y * 200 + 96 }] as const)));
+  const height = Math.max(320, ...columns.map((c) => c.length * 200 + 24));
   return (
     <div className="overflow-auto rounded-lg border border-line bg-surface-2" aria-label="Knowledge graph">
       <div className="relative min-w-[900px]" style={{ height }}>
@@ -142,9 +159,10 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
         </svg>
         {nodes.map((node) => {
           const p = points.get(node.id)!;
-          return <button key={node.id} type="button" data-node={node.id} onClick={() => onOpen(node)} style={{ left: p.x - 120, top: p.y - 32 }} className={`${card} absolute flex h-16 w-60 flex-col justify-center gap-1 px-s1 text-left hover:border-branch focus-visible:outline-branch`}>
+          return <button key={node.id} type="button" data-node={node.id} onClick={() => onOpen(node)} style={{ left: p.x - 120, top: p.y - 88 }} className={`${card} absolute flex h-44 w-60 flex-col gap-1 overflow-auto break-words px-s1 py-2 text-left hover:border-branch focus-visible:outline-branch`}>
             <span className={`text-xs ${node.kind === "decision" ? "text-fawn" : node.kind === "doc" ? "text-branch" : "text-ink-3"}`}>{node.kind === "path" ? "Code area" : node.kind === "imported" ? "Imported · local" : node.kind === "decision" ? "Decision · local" : "Document"}</span>
             <span className="w-full truncate text-sm font-medium">{node.title || (node.kind === "path" ? node.path : node.id)}</span>
+            {provenance(node).map((line, i) => <span key={i} className="w-full text-xs text-ink-3"> · {line}</span>)}
           </button>;
         })}
       </div>
