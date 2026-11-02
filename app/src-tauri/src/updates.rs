@@ -141,11 +141,24 @@ pub fn wait_for_engine(
     }
 }
 
-/// How long the launch check waits for the daemon to answer, and the pause
+/// How long the launch look waits for the daemon to answer, and the pause
 /// between asking it. A daemon already running (the usual case: it outlives
-/// the app) answers the first time, and the feed is read right away.
-const PATIENCE: Duration = Duration::from_secs(300);
-const PAUSE: Duration = Duration::from_secs(5);
+/// the app) answers the first time, and the feed is read right away; one
+/// still starting gets this long, and past it the look is due again at the
+/// next `TICK` rather than held up.
+const LAUNCH_PATIENCE: Duration = Duration::from_secs(20);
+const PAUSE: Duration = Duration::from_secs(2);
+
+/// An `again` for `wait_for_engine`: pause (`PAUSE`, less near the end) and
+/// say whether `limit` from now had time left.
+fn asking_for(limit: Duration) -> impl FnMut() -> bool + Send + 'static {
+    let until = Instant::now() + limit;
+    move || {
+        let left = until.saturating_duration_since(Instant::now());
+        std::thread::park_timeout(PAUSE.min(left));
+        !left.is_zero()
+    }
+}
 
 /// How long a look waits on the feed (`look`): an offline or hanging feed
 /// costs that at most, and never holds up the window, which opens regardless.
@@ -668,9 +681,11 @@ async fn check<R: Runtime>(
 
 /// At launch: remember it (`remember_launch`), then, in the background so the
 /// window opens as ever, look at the feed (`check`) and again whenever one is
-/// `due` while the app stays open. The first look waits for a daemon that
-/// isn't answering yet (`PATIENCE`): air-gap can be armed by a repo's config
-/// only the engine reads, and no feed is read before it says. An update found
+/// `due` while the app stays open. The first look waits briefly for a daemon
+/// that isn't answering yet (`LAUNCH_PATIENCE`): air-gap can be armed by a
+/// repo's config only the engine reads, and no feed is read before it says;
+/// a daemon that doesn't answer in time leaves the look due at the next
+/// `TICK`. The feed itself has `FEED_LIMIT`. An update found
 /// is offered (the `app-update` event: the banner), with a notification once
 /// per version when the window isn't showing; nothing installs or restarts
 /// until the person says. A build that doesn't update by itself makes no
@@ -682,12 +697,7 @@ pub fn check_in_background<R: Runtime>(app: &AppHandle<R>, brindle_home: &Path) 
     }
     let (app, brindle_home) = (app.clone(), brindle_home.to_path_buf());
     tauri::async_runtime::spawn(async move {
-        let until = Instant::now() + PATIENCE;
-        let mut first: Option<Box<dyn FnMut() -> bool + Send>> = Some(Box::new(move || {
-            let left = until.saturating_duration_since(Instant::now());
-            std::thread::park_timeout(PAUSE.min(left));
-            !left.is_zero()
-        }));
+        let mut first: Option<Box<dyn FnMut() -> bool + Send>> = Some(Box::new(asking_for(LAUNCH_PATIENCE)));
         let mut ticks = tokio::time::interval(TICK);
         let (mut last, mut told) = (None, None);
         loop {
@@ -1295,8 +1305,11 @@ mod tests {
             true
         });
         assert_eq!((said, waits.get()), (EngineSays::On, 2));
-        // A daemon that never answers: no check, once the patience is spent.
-        assert_eq!(wait_for_engine(|_| Err("refused".to_string()), || false), EngineSays::NoAnswer);
+        // A daemon that never answers: no check, once the (short) patience is spent.
+        let started = Instant::now();
+        let limit = Duration::from_millis(30);
+        assert_eq!(wait_for_engine(|_| Err("refused".to_string()), asking_for(limit)), EngineSays::NoAnswer);
+        assert!(started.elapsed() < PAUSE, "the launch look waited past its limit on the daemon");
     }
 
     #[test]
