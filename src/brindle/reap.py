@@ -30,7 +30,12 @@ Never touched: a session with a client attached, one created in the last
 SESSION_GRACE seconds, a session of another brindle home (BRINDLE_HOME) or
 on another tmux server, a session holding a live agent or a live
 supervisor's sidebar, and a worktree with uncommitted changes whose work
-isn't finished (an orphan's folder with uncommitted changes is kept).
+isn't finished (an orphan's folder with uncommitted changes is kept). An
+agent is only stopped from a session the listing shows on this server, of
+this home, with nobody attached (``_quiet_session``); a supervisor is kept
+while its worktree, or an unreported worker's, has uncommitted changes; and
+a git status that fails counts as uncommitted work. One reaper runs at a
+time per brindle home (a lock); a sweep that finds it held skips its turn.
 
 Everything done is logged in the ``reaped`` table; ``brindle doctor`` lists
 recent entries and what a sweep would reap now (``run(dry_run=True)``).
@@ -38,6 +43,7 @@ recent entries and what a sweep would reap now (``run(dry_run=True)``).
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import re
@@ -89,10 +95,28 @@ def _ours(s: tmux.SessionInfo) -> bool:
 
 
 def _dirty(path: str) -> bool:
+    """Whether ``path`` may hold uncommitted work: True when it has some, and
+    when git couldn't say (a failed or refused status is no proof it's clean).
+    Only a folder git confirms is no repository at all is clean."""
     try:
+        inside = git.run(["rev-parse", "--is-inside-work-tree"], path, check=False)
+        if inside.returncode != 0:
+            return "not a git repository" not in (inside.stderr or "")
         return bool(git.dirty_files(path))
-    except git.GitError:
-        return False
+    except Exception:  # noqa: BLE001 - unknown is never clean
+        return True
+
+
+def _quiet_session(a: Agent, panes, session_of: dict[str, tmux.SessionInfo]) -> tmux.SessionInfo | None:
+    """The session ``a``'s pane is in, if brindle may stop ``a`` there: on
+    this tmux server, this brindle home's, nobody attached. None when it
+    isn't, or when the listing doesn't show where ``a`` runs."""
+    if not agents.same_server(a, panes):
+        return None
+    s = session_of.get(a.tmux_window)
+    if s is None or s.attached or not _ours(s):
+        return None
+    return s
 
 
 def _finished(a: Agent) -> bool:
@@ -189,12 +213,14 @@ def _finished_workers(db: DB, s: tmux.SessionInfo, ws: Workspace | None, live: s
     return []
 
 
-def _reviewers(db: DB, now: float, live: set[str], panes) -> list[Reap]:
+def _reviewers(db: DB, now: float, live: set[str], panes,
+               session_of: dict[str, tmux.SessionInfo]) -> list[Reap]:
     out = []
     for a in db.list_agents():
         if (a.mode == "review" and a.result is not None and a.dismissed_at is None
                 and a.id in live and a.status == "idle"
-                and now - max(a.created_at, a.status_since or 0) > REVIEW_LINGER):
+                and now - max(a.created_at, a.status_since or 0) > REVIEW_LINGER
+                and _quiet_session(a, panes, session_of) is not None):
             out.append(Reap("reviewer", a.id, f"closed reviewer {a.id}: its verdict is in",
                             lambda aid=a.id: _close_all(db, [aid], panes)))
     return out
@@ -212,19 +238,28 @@ def _config(ws: Workspace | None, cache: dict, key: str) -> float:
     return float(getattr(cfg, key) or 0) if cfg is not None else 0.0
 
 
+def _unfinished_dirty(db: DB, tree: list[Agent]) -> bool:
+    """Whether a pause of ``tree`` would leave uncommitted work it hasn't
+    finished: the supervisor's own worktree, or an unreported worker's."""
+    paths = set()
+    for m in tree:
+        ws = db.get_workspace(m.workspace_id)
+        if ws is not None and os.path.isdir(ws.path) and (m is tree[0] or not _finished(m)):
+            paths.add(ws.path)
+    return any(_dirty(p) for p in paths)
+
+
 def _idle_supervisors(db: DB, now: float, live: set[str], panes,
-                      sessions: list[tmux.SessionInfo], cache: dict) -> list[Reap]:
+                      session_of: dict[str, tmux.SessionInfo], cache: dict) -> list[Reap]:
     out = []
-    session_of = {p.id: s for s in sessions for p in s.panes}
     for a in db.list_agents():
         if (a.mode != "interactive" or a.parent_id is not None or a.dismissed_at is not None
-                or a.status in ("paused", "done") or a.id not in live
-                or not agents.same_server(a, panes)):
+                or a.status in ("paused", "done") or a.id not in live):
             continue
         ws = db.get_workspace(a.workspace_id)
         days = _config(ws, cache, "idle_supervisor_days")
-        s = session_of.get(a.tmux_window)
-        if days <= 0 or s is None or s.attached or not _ours(s):
+        s = _quiet_session(a, panes, session_of)
+        if days <= 0 or s is None:
             continue   # no session to look at means no telling whether someone's attached
         last = max(a.created_at, a.status_since or 0, s.activity)
         if now - last < days * DAY:
@@ -236,6 +271,8 @@ def _idle_supervisors(db: DB, now: float, live: set[str], panes,
         ids = {m.id for m in tree}
         if any(t.caller_id in ids for t in db.list_tasks(ws.repo_root if ws else None, state="pending")):
             continue    # it is waiting for work it queued
+        if _unfinished_dirty(db, tree):
+            continue    # uncommitted work nobody finished: left for the person
         idle_days = int((now - last) // DAY)
 
         def act(aid=a.id) -> None:
@@ -389,16 +426,19 @@ def _tell(db: DB, a: Agent, body: str) -> None:
     agents.send_message(db, a.parent_id, body, sender_id=a.id)
 
 
-def _superseded(db: DB, now: float, live: set[str], panes, sessions: list[tmux.SessionInfo],
+def _superseded(db: DB, now: float, live: set[str], panes, session_of: dict[str, tmux.SessionInfo],
                 cache: dict) -> list[Reap]:
     from brindle import cull
 
     out = []
-    activity = {p.id: p.activity for s in sessions for p in s.panes}
     for a in db.list_agents():
         if (a.mode not in WORKER_MODES or not a.parent_id or a.dismissed_at is not None
                 or a.status in ("paused", "done") or a.id not in live):
             continue
+        s = _quiet_session(a, panes, session_of)
+        if s is None:
+            continue    # someone is looking at it, or it runs where this listing can't judge it
+        activity = {p.id: p.activity for p in s.panes}
         ws = db.get_workspace(a.workspace_id)
         if (ws is None or ws.kind != "worktree" or not ws.base_branch
                 or not os.path.isdir(ws.path) or not os.path.isdir(ws.repo_root)):
@@ -457,12 +497,13 @@ def plan(db: DB, now: float, panes, sessions: list[tmux.SessionInfo]) -> list[Re
     from brindle import view
 
     live = view.live_agents(db, panes)
+    session_of = {p.id: s for s in sessions for p in s.panes}
     cache: dict = {}
     steps = [lambda: _sessions(db, now, panes, live, sessions),
-             lambda: _reviewers(db, now, live, panes),
-             lambda: _idle_supervisors(db, now, live, panes, sessions, cache),
+             lambda: _reviewers(db, now, live, panes, session_of),
+             lambda: _idle_supervisors(db, now, live, panes, session_of, cache),
              lambda: _coordinators(db, now, live),
-             lambda: _superseded(db, now, live, panes, sessions, cache)]
+             lambda: _superseded(db, now, live, panes, session_of, cache)]
     out: list[Reap] = []
     for step in steps:
         try:
@@ -477,14 +518,26 @@ def run(db: DB, now: float | None = None, *, dry_run: bool = False) -> list[str]
     one line each. A session-wide tmux hang raises TmuxTimeout, as the
     sweep's pane list does: no answer is not the same as no sessions."""
     now = time.time() if now is None else now
-    panes = tmux.list_panes()
-    sessions = tmux.session_infos()
+    if dry_run:
+        return [f"would have {r.detail}" for r in plan(db, now, tmux.list_panes(), tmux.session_infos())
+                if not r.notice]
+    # One reaper at a time per brindle home: every sidebar runs a sweep, and two
+    # planning at once would both send a once-only notice, or act on a stale
+    # plan. Planned only once the lock is held, so it sees the last run's work;
+    # a run that finds it held leaves this round to that one.
+    path = brindle_home() / "locks" / "reap.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as lock:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return []
+        return _apply(db, now, plan(db, now, tmux.list_panes(), tmux.session_infos()))
+
+
+def _apply(db: DB, now: float, reaps: list[Reap]) -> list[str]:
     done = []
-    for r in plan(db, now, panes, sessions):
-        if dry_run:
-            if not r.notice:
-                done.append(f"would have {r.detail}")
-            continue
+    for r in reaps:
         # Recorded first: stopping a supervisor can stop the process running this
         # (a sweep in its sidebar), and the Inbox item must outlive that.
         with db.tx() as c:
@@ -499,9 +552,8 @@ def run(db: DB, now: float | None = None, *, dry_run: bool = False) -> list[str]
             done.append(f"couldn't reap {r.target}: {e}")
             continue
         done.append(r.detail)
-    if not dry_run:
-        with db.tx() as c:
-            c.execute("DELETE FROM reaped WHERE at < ?", (now - LOG_KEEP,))
+    with db.tx() as c:
+        c.execute("DELETE FROM reaped WHERE at < ?", (now - LOG_KEEP,))
     return done
 
 

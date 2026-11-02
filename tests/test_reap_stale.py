@@ -1,6 +1,7 @@
 """brindle.reap: what outlived its work is found and stopped by the sweep.
 tmux is faked (its session listing, kills); the DB and git are real."""
 
+import fcntl
 import os
 import time
 from types import SimpleNamespace
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from conftest import sh
 
-from brindle import agents, cull, doctor, procs, reap, tmux, workspaces
+from brindle import agents, cull, doctor, git, procs, reap, tmux, workspaces
 from brindle.config import brindle_home
 from brindle.db import Agent, Task, Workspace
 from brindle.service import inbox
@@ -30,17 +31,18 @@ def fake_tmux(monkeypatch):
     return t
 
 
-def test_session_listing_reads_a_real_tmux_server(tmp_path):
-    """The one listing every other test fakes, read from the test's own tmux server."""
-    tmux.ensure_session("brindle_proj_listed", str(tmp_path), {"BRINDLE_HOME": "/some/home"})
-    tmux.ensure_session("other_session", str(tmp_path), {})
+def test_session_listing_is_parsed(monkeypatch):
+    """The one listing every other test fakes, from tmux's own output."""
+    rows = ["brindle_p_a\t1\t100\t200\t%1\t11\t0\t300\tzsh\t/w/a\t", "other\t0\t1\t1\t%2\t12\t0\t1\tzsh\t/x\t",
+            "brindle_p_a\t1\t100\t200\t%3\t13\t1\t300\tclaude\t\tclaude --resume"]
+    out = {"list-panes": "\n".join(rows) + "\n", "show-environment": "BRINDLE_HOME=/some/home\n"}
+    monkeypatch.setattr(tmux, "_tmux", lambda *args, **k: SimpleNamespace(returncode=0, stdout=out[args[0]]))
 
-    found = tmux.session_infos()
+    [s] = tmux.session_infos()
 
-    assert [s.name for s in found] == ["brindle_proj_listed"]
-    s = found[0]
-    assert s.home == "/some/home" and not s.attached and s.created > NOW - 600
-    assert len(s.panes) == 1 and s.panes[0].id.startswith("%") and s.panes[0].pid > 0
+    assert (s.name, s.attached, s.created, s.activity, s.home) == ("brindle_p_a", True, 100, 200, "/some/home")
+    assert [(p.id, p.pid, p.path, p.dead, p.idle()) for p in s.panes] == [
+        ("%1", 11, "/w/a", False, True), ("%3", 13, "", True, True)]
 
 
 def session(name, *panes, attached=False, home=None, activity=OLD):
@@ -66,10 +68,11 @@ def live(t, *pane_ids):
     ("worktree gone, worker left in it", True),
     ("attached", False),
     ("uncommitted work in its folder", False),
+    ("git status fails", False),   # unknown is never clean
     pytest.param("another brindle home", False,
                  marks=pytest.mark.variant("a feature CLI's temp BRINDLE_HOME shares the tmux server")),
 ])
-def test_orphan_sessions_are_reaped_by_the_sweep(db, repo, tmp_path, fake_tmux, case, reaped):
+def test_orphan_sessions_are_reaped_by_the_sweep(db, repo, tmp_path, fake_tmux, monkeypatch, case, reaped):
     folder = tmp_path / "plain"
     folder.mkdir()
     name = "brindle_proj_old"
@@ -82,6 +85,11 @@ def test_orphan_sessions_are_reaped_by_the_sweep(db, repo, tmp_path, fake_tmux, 
         folder = tmp_path / "gone"
     if case == "uncommitted work in its folder":
         (repo / "wip.py").write_text("x = 1\n")
+        folder = repo
+    if case == "git status fails":
+        def refused(path, tracked_only=False):
+            raise git.GitBusy("git status: no room")
+        monkeypatch.setattr(git, "dirty_files", refused)
         folder = repo
     fake_tmux.sessions = [session(name, pane("%7", folder), attached=case == "attached",
                                   home="/elsewhere" if case == "another brindle home" else None)]
@@ -131,11 +139,13 @@ def test_finished_workers_sessions_are_reaped(db, repo, fake_tmux, case, killed)
     assert os.path.isdir(ws.path)   # the worktree itself is never touched here
 
 
-@pytest.mark.parametrize("case", ["idle", "attached", "recent input", "running worker"])
+@pytest.mark.parametrize("case", ["idle", "attached", "recent input", "running worker", "uncommitted work"])
 def test_idle_supervisors_are_stopped_but_resumable(db, repo, fake_tmux, case):
     ws = workspaces.adopt_root(db, str(repo))
     add(db, ws, "boss", mode="interactive", profile="supervisor", tmux_window="%1")
     live(fake_tmux, "%1")
+    if case == "uncommitted work":
+        (repo / "wip.py").write_text("x = 1\n")
     if case == "running worker":
         add(db, ws, "w1", parent_id="boss", status="processing", tmux_window="%2")
         live(fake_tmux, "%2")
@@ -158,6 +168,7 @@ def test_idle_supervisors_are_stopped_but_resumable(db, repo, fake_tmux, case):
 
 @pytest.mark.parametrize("case,gone", [
     ("reviewer with its verdict", True),
+    ("reviewer in an attached session", False),
     ("coordinator paused two days", True),
     ("coordinator paused an hour", False),
 ])
@@ -166,6 +177,8 @@ def test_leftover_reviewers_and_coordinator_rows(db, repo, fake_tmux, case, gone
     if case.startswith("reviewer"):
         add(db, ws, "x1", mode="review", result="APPROVED", tmux_window="%5")
         live(fake_tmux, "%5")
+        fake_tmux.sessions = [session("brindle_proj_rev", pane("%5", repo, cmd="claude"),
+                                      attached="attached" in case)]
     else:
         since = NOW - (2 * 86400 if "two days" in case else 3600)
         add(db, ws, "x1", mode="coordinator", profile="coordinator", status="paused",
@@ -182,7 +195,11 @@ def _commit(cwd, text, when=NOW - 2 * 86400, msg="change"):
     sh(f"GIT_AUTHOR_DATE='@{int(when)} +0000' GIT_COMMITTER_DATE='@{int(when)} +0000' git commit -qam '{msg}'", cwd)
 
 
-@pytest.mark.parametrize("case", ["contained", "recently active", "uncommitted changes", "similar"])
+@pytest.mark.parametrize("case", [
+    "contained", "recently active", "uncommitted changes", "similar", "worker in an attached session",
+    pytest.param("worker on another tmux server", marks=pytest.mark.variant(
+        "its pane id names some other pane in this server's listing")),
+])
 def test_superseded_workers(db, repo, fake_tmux, monkeypatch, case):
     from pathlib import Path
 
@@ -190,9 +207,13 @@ def test_superseded_workers(db, repo, fake_tmux, monkeypatch, case):
     db.conn.execute("UPDATE workspaces SET created_at=? WHERE id=?", (OLD, ws.id))
     add(db, ws, "boss", mode="interactive", profile="supervisor", tmux_window="%1", status_since=NOW)
     add(db, ws, "w1", parent_id="boss", tmux_window="%2", task="Add a greeting function to app.py",
-        status_since=NOW - 3600 if case == "recently active" else OLD)
+        status_since=NOW - 3600 if case == "recently active" else OLD,
+        tmux_server="brindle-elsewhere" if "another tmux server" in case else None)
     live(fake_tmux, "%1", "%2")
-    fake_tmux.sessions = [session("brindle_proj_main", pane("%1", repo), attached=True)]
+    monkeypatch.setattr(tmux, "window_alive", lambda *a, **k: True)   # alive on its own server
+    fake_tmux.sessions = [session("brindle_proj_main", pane("%1", repo), attached=True),
+                          session(ws.tmux_session, pane("%2", ws.path, cmd="claude"),
+                                  attached="attached session" in case)]
     told = []
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: told.append((to, body)))
     _commit(Path(ws.path), "def greet():\n    return 'hi'\n")
@@ -219,4 +240,17 @@ def test_superseded_workers(db, repo, fake_tmux, monkeypatch, case):
         assert w.result.startswith("Superseded") and head[:10] in told[0][1]
     if case == "similar":
         assert "feat-other" in told[0][1] and "1 of 1" in told[0][1]
-    assert len(told) == (0 if case == "recently active" else 1) and all(to == "boss" for to, _ in told)
+    quiet = case in ("recently active", "worker in an attached session", "worker on another tmux server")
+    assert len(told) == (0 if quiet else 1) and all(to == "boss" for to, _ in told)
+
+
+def test_a_sweep_already_reaping_is_left_to_it(db, tmp_path, fake_tmux):
+    """Every sidebar sweeps: a second reaper waits its turn instead of acting on
+    the same plan (a once-only notice sent twice, a stop made twice)."""
+    fake_tmux.sessions = [session("brindle_proj_old", pane("%7", tmp_path))]
+    lock = brindle_home() / "locks" / "reap.lock"
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock, "a") as held:
+        fcntl.flock(held.fileno(), fcntl.LOCK_EX)   # another sweep mid-reap
+        assert reap.run(db) == [] and fake_tmux.killed == []
+    assert reap.run(db) and fake_tmux.killed == ["brindle_proj_old"]
