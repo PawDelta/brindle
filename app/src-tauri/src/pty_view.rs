@@ -49,10 +49,11 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::ipc::Channel;
 use tauri::State;
 
+#[cfg(unix)]
 use crate::daemon::base64;
 
 /// What tmux is told xterm.js can do (`terminal-features`): it can't ask, as
@@ -375,7 +376,7 @@ pub const SIDEBAR_OPTION: &str = "@brindle_sidebar";
 /// narrower than the view, and a sidebar at its right then sits inside the
 /// view: the webview masks every column past them. The client's size, and
 /// so who has the window, is as it was.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Crop {
     pub cols: u16,
     pub left: u16,
@@ -632,7 +633,12 @@ fn write_input(writer: &mut impl Write, data: &[u8], last: &mut Option<std::time
     Ok(())
 }
 
+/// On Windows a view is the engine's, in WSL, over its daemon's WebSocket.
+#[cfg(windows)]
+pub use crate::pty_bridge::{PtyView, WindowTaker};
+
 /// One open view: a tmux client on a pty of its own.
+#[cfg(unix)]
 pub struct PtyView {
     tmux: PathBuf,
     server: Vec<String>,
@@ -649,6 +655,7 @@ pub struct PtyView {
 
 /// What giving the view the window takes (`PtyView::take_window`), apart
 /// from the view: run off the views' lock, which keys wait on.
+#[cfg(unix)]
 pub struct WindowTaker {
     tmux: PathBuf,
     server: Vec<String>,
@@ -657,6 +664,7 @@ pub struct WindowTaker {
     client_tty: Arc<OnceLock<String>>,
 }
 
+#[cfg(unix)]
 impl PtyView {
     /// Make the view session and attach a client to it. `cols` x `rows` is
     /// the view's size. `on_crop` gets the window's `Crop` before any of the
@@ -806,21 +814,6 @@ impl PtyView {
         Ok(PtyView { tmux: tmux_bin.to_path_buf(), server, view, master, size, input, client, client_tty: Arc::default() })
     }
 
-    #[cfg(not(unix))]
-    #[allow(clippy::too_many_arguments)]
-    pub fn open(
-        _tmux: &Path,
-        _server: Option<&str>,
-        _target: &str,
-        _cols: u16,
-        _rows: u16,
-        _on_data: impl Fn(&[u8]) + Send + 'static,
-        _on_crop: impl Fn(Crop) + Send + 'static,
-        _on_exit: impl FnOnce(i32) + Send + 'static,
-    ) -> Result<PtyView, String> {
-        Err("the pty view is macOS and Linux only for now (Windows: the engine's WSL bridge)".into())
-    }
-
     /// What the person typed (keys, a paste, mouse reports), as xterm.js says it.
     pub fn write(&self, data: &[u8]) {
         let _ = self.input.send(data.to_vec());
@@ -830,10 +823,7 @@ impl PtyView {
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
         let mut size = self.size.lock().unwrap_or_else(|e| e.into_inner());
         size.0 = (clamp(cols), clamp(rows));
-        #[cfg(unix)]
-        return set_size(&self.master, size.0, size.1);
-        #[cfg(not(unix))]
-        Ok(())
+        set_size(&self.master, size.0, size.1)
     }
 
     /// The columns of the window cropped off the view, as last told (`on_crop`).
@@ -869,6 +859,7 @@ impl PtyView {
     }
 }
 
+#[cfg(unix)]
 impl WindowTaker {
     /// `PtyView::take_window`.
     pub fn take(&self) -> Result<(), String> {
@@ -911,6 +902,7 @@ impl WindowTaker {
     }
 }
 
+#[cfg(unix)]
 impl Drop for PtyView {
     /// The view session goes, which detaches its client (it exits, and the
     /// reader with it). The agent's window stays in the agent's session.
@@ -1021,26 +1013,80 @@ pub enum PtyViewEvent {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PtyStatus {
     Ready { tmux: String },
-    /// The pty view can't work here (tmux too old, or missing; Windows, until its bridge): the message says so.
+    /// The pty view can't work here (tmux too old, or missing; on Windows, an
+    /// engine in WSL without the bridge): the message says so.
     Unusable { message: String },
 }
 
-/// What a Windows build says until the engine's WSL bridge carries its views.
-pub const NOT_ON_WINDOWS: &str = "Sessions can't be shown in the app on Windows yet.";
-
 pub fn status(tmux_bin: &Path) -> PtyStatus {
-    if cfg!(not(unix)) {
-        return PtyStatus::Unusable { message: NOT_ON_WINDOWS.into() };
-    }
     match client_version(tmux_bin).and_then(|v| check_version(&v, "The app's tmux").map(|()| v)) {
         Ok(tmux) => PtyStatus::Ready { tmux },
         Err(message) => PtyStatus::Unusable { message },
     }
 }
 
+/// `status` of the app's tmux.
+#[cfg(unix)]
+fn status_here(_app: &tauri::AppHandle) -> PtyStatus {
+    status(&tmux_binary())
+}
+
+/// On Windows: whether the engine in WSL serves views (`pty_bridge`).
+#[cfg(windows)]
+fn status_here(app: &tauri::AppHandle) -> PtyStatus {
+    use tauri::Manager;
+    crate::pty_bridge::status(app.state::<crate::daemon::Engine>().inner())
+}
+
 #[tauri::command]
-pub async fn pty_view_status() -> Result<PtyStatus, String> {
-    tauri::async_runtime::spawn_blocking(|| status(&tmux_binary())).await.map_err(|e| e.to_string())
+pub async fn pty_view_status(app: tauri::AppHandle) -> Result<PtyStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || status_here(&app)).await.map_err(|e| e.to_string())
+}
+
+/// A view of `target` on the app's tmux, what it says sent on `channel`.
+#[cfg(unix)]
+fn open_view(
+    _app: &tauri::AppHandle,
+    server: Option<&str>,
+    target: &str,
+    cols: u16,
+    rows: u16,
+    channel: Channel<PtyViewEvent>,
+) -> Result<PtyView, String> {
+    let (data, cropped, exit) = (channel.clone(), channel.clone(), channel);
+    PtyView::open(
+        &tmux_binary(),
+        server,
+        target,
+        cols,
+        rows,
+        move |bytes| {
+            let _ = data.send(PtyViewEvent::Data { data: base64(bytes) });
+        },
+        move |Crop { cols, left, width }| {
+            let _ = cropped.send(PtyViewEvent::Crop { cols, left, width });
+        },
+        move |code| {
+            let _ = exit.send(PtyViewEvent::Exit { code });
+        },
+    )
+}
+
+/// On Windows: the engine's view, through its daemon in WSL (`pty_bridge`).
+#[cfg(windows)]
+fn open_view(
+    app: &tauri::AppHandle,
+    server: Option<&str>,
+    target: &str,
+    cols: u16,
+    rows: u16,
+    channel: Channel<PtyViewEvent>,
+) -> Result<PtyView, String> {
+    use tauri::Manager;
+    let engine = app.state::<crate::daemon::Engine>();
+    crate::pty_bridge::open(engine.inner(), server, target, cols, rows, move |event| {
+        let _ = channel.send(event);
+    })
 }
 
 /// Attach a view to a pane (`server`, `target`: an agent's `tmux_server` and
@@ -1067,23 +1113,7 @@ pub fn pty_view_open(
     use tauri::Manager;
     let claim = views.claim();
     std::thread::spawn(move || {
-        let (data, cropped, exit) = (channel.clone(), channel.clone(), channel.clone());
-        let opened = PtyView::open(
-            &tmux_binary(),
-            server.as_deref(),
-            &target,
-            cols,
-            rows,
-            move |bytes| {
-                let _ = data.send(PtyViewEvent::Data { data: base64(bytes) });
-            },
-            move |Crop { cols, left, width }| {
-                let _ = cropped.send(PtyViewEvent::Crop { cols, left, width });
-            },
-            move |code| {
-                let _ = exit.send(PtyViewEvent::Exit { code });
-            },
-        );
+        let opened = open_view(&app, server.as_deref(), &target, cols, rows, channel.clone());
         let views = app.state::<PtyViews>();
         match opened {
             Ok(view) => match views.register(claim, view) {

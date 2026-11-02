@@ -289,4 +289,4 @@ further.
 
 ## Bound for shared CI runners
 
-GitHub's macOS runner saw one 146 ms cheap read during a real 49-process recompute (the bound was 100 ms, the local worst 78 ms) while all structural guarantees held (AnyIO 1/40, no waiters, 32 shed, 6 stopped). The bound is now 1 s, about 7x above that read and 5x below the 5,044 ms starvation.
+On GitHub's macOS runner (PR #328) one cheap read during a real 49-process recompute took 146 ms, over the 100 ms bound tuned on a local Mac (worst 78 ms), while every structural guarantee held: the default AnyIO pool at 1 of 40 with no waiters, 32 diffs shed as busy, 6 stopped cleanly, loaded probes 3-7 ms. The wall-clock bound is now 1 s: about 7x above the worst CI sample and 5x below the 5,044 ms starvation it exists to catch. The pool-occupancy and accounting assertions remain the precise check.

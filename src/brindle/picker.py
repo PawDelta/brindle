@@ -332,7 +332,9 @@ def sign_in(provider: str, *, run=None, confirm: Callable[..., bool] = typer.con
             return False
         if not confirm(f"{name} isn't installed. Install it now (`{cmd}`)?", default=True):
             return False
-        code, _ = run(shlex.split(cmd), timeout=LOGIN_TIMEOUT, interactive=True)
+        # An installer piped from curl needs a shell; anything else runs as is.
+        argv = ["sh", "-c", cmd] if "|" in cmd else shlex.split(cmd)
+        code, _ = run(argv, timeout=LOGIN_TIMEOUT, interactive=True)
         if code != 0:
             echo(f"✗ installing {name} failed; run `{cmd}` yourself, then pick it again.")
             return False

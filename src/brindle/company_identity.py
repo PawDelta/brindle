@@ -590,7 +590,7 @@ def checks() -> list:
         if i.problem:
             out.append(Check(WARN, f"{i.provider} identity",
                              i.problem + ("; this org refuses to start the agent until then" if enforce else "")))
-        elif not i.determined:
+        elif not i.determined or i.signed_out:   # signed out is never a green check, problem or not
             out.append(Check(WARN, f"{i.provider} identity", i.line))
         else:
             out.append(Check(OK, f"{i.provider} identity", i.line))

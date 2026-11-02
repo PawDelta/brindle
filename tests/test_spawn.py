@@ -75,7 +75,7 @@ def _a_start_whose_room_sample_outlasts_its_deadline_is_refused(monkeypatch):
     monkeypatch.setattr(spawn, "_running", 1)
     started: list = []
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: started.append(argv))
-    with spawn.deadline(0.1) as dl, pytest.raises(spawn.Busy):
+    with spawn.waits_for_room(), spawn.deadline(0.1) as dl, pytest.raises(spawn.Busy):
         spawn.action(["true"])
     assert not started and not dl.committed and spawn.running() == 1
 
@@ -95,9 +95,23 @@ def _checks_and_setup_run_at_normal_priority(monkeypatch, tmp_path):
     assert started == ["true", ["/bin/sh", "-c", "true"]]
 
 
-def _with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips(overloaded, repo):
+def _with_no_room_only_waiting_work_waits_and_a_request_read_starts_at_once(overloaded, repo):
+    # A request's own read starts at once however busy the machine is: on a
+    # machine above its core count, 0.5.8 made these wait and starved every request.
     t0 = time.monotonic()
-    with spawn.deadline(0.3), pytest.raises(git.GitBusy):     # both a GitError and a Busy
+    with spawn.deadline(0.3):
+        git.run(["status"], repo)
+    assert time.monotonic() - t0 < 0.3
+    # ...at normal priority: at background priority macOS starved the caller
+    # check's `ps` on a busy machine and every request waited on it (0.5.9).
+    assert spawn._background(["ps"]) == ["ps"]
+    with spawn.waits_for_room():
+        assert spawn._background(["ps"])[-1] == "ps" and len(spawn._background(["ps"])) > 1
+
+    # Work marked as waiting (the heavy lane, background sweeps) waits, and is
+    # busy at its deadline.
+    t0 = time.monotonic()
+    with spawn.waits_for_room(), spawn.deadline(0.3), pytest.raises(git.GitBusy):  # a GitError and a Busy
         git.run(["status"], repo)
     assert time.monotonic() - t0 >= 0.3
 
@@ -106,8 +120,8 @@ def _with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips(over
         spawn.read(["true"], skip=True)
     assert time.monotonic() - t0 < 0.2
 
-    # An action never starts past its deadline: nothing was done.
-    with spawn.deadline(0.1), pytest.raises(spawn.Busy):
+    # Waiting work never starts an action past its deadline: nothing was done.
+    with spawn.waits_for_room(), spawn.deadline(0.1), pytest.raises(spawn.Busy):
         git.run(["commit", "--allow-empty", "-qm", "x"], repo)
     assert sh("git rev-list --count HEAD", repo) == "1"
     assert spawn.running() == 1
@@ -347,7 +361,7 @@ def _row(scenario, id, why=None, **params):
     _row(_a_high_load_average_with_idle_cpus_leaves_room, "room-idle-cpu-high-loadavg"),
     _row(_a_start_whose_room_sample_outlasts_its_deadline_is_refused, "room-sample-past-deadline"),
     _row(_checks_and_setup_run_at_normal_priority, "normal-priority-checks"),
-    _row(_with_no_room_a_read_is_busy_at_its_deadline_and_a_background_one_skips, "overload-no-room"),
+    _row(_with_no_room_only_waiting_work_waits_and_a_request_read_starts_at_once, "overload-no-room"),
     _row(_past_its_deadline_nothing_starts_even_with_room, "deadline-passed"),
     _row(_a_started_helper_commits_its_request_and_a_started_read_does_not, "subprocess-helper-vs-read",
          "only a helper whose request committed may outlive it; a read must not"),

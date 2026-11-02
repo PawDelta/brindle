@@ -18,17 +18,21 @@ view can run (`pty_view_status`: ready, or unusable with why).
   back; a row drawn to its last column runs on, so a long link reads
   whole). tmux's "Pane is dead" on that screen, or the client exiting, is
   the CLI's end. "Show details" is a `PtyTerminal` on the same pane.
-- **No pane to show.** In a browser tab (no shell), on Windows (until the
-  WSL bridge), with a tmux too old, or for an agent the engine names no
+- **No pane to show.** In a browser tab (no shell), on Windows with an
+  engine in WSL that has no `/v1/pty_view` (its `/v1/meta` doesn't say
+  `pty_view`), with a tmux too old, or for an agent the engine names no
   `window` for, the surface's card says why, with "Check again".
 - **Dead panes.** Nothing streams "no pane" any more: the liveness sweep
   (`liveness` on the event stream) is what turns a dead agent's surface
   into its card.
 - **The seam** (`api/ptyView.ts`): `PtyViewOpener` (open, write, resize, and
-  bytes, exit and error back, then close). It has one implementation per
-  platform: the shell's `pty_view_*` commands on macOS and Linux, and next the
-  engine's WSL bridge on Windows. The e2e tests reach the same Rust through
-  `examples/pty_ws.rs`.
+  bytes, exit and error back, then close). The webview has one
+  implementation, the shell's `pty_view_*` commands. On macOS and Linux the
+  shell runs the tmux client itself; on Windows (`src/pty_bridge.rs`) the
+  engine's daemon in WSL runs it and the shell relays its WebSocket
+  `/v1/pty_view` (the daemon token first, then `{"server", "target", "cols",
+  "rows"}`, then `examples/pty_ws.rs`'s frames) onto the same events. The
+  e2e tests reach the same Rust through `examples/pty_ws.rs`.
 - **tmux 3.2 or newer.** Both the tmux the view runs (the bundled one, else
   PATH in a dev build) and the server it attaches to must be 3.2 or newer.
   An older one shows "<provider> can't be shown" on the surface's card,

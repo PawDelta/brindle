@@ -64,6 +64,12 @@ def test_supervisor_sign_in_installs_opens_login_and_verifies(monkeypatch):
     ok = picker.sign_in("codex", run=lambda argv, **kw: ran.append(argv[:2]) or (0, ""),
                         confirm=lambda *a, **kw: True, echo=lambda s: None)
     assert ok and ran == [["npm", "install"], [ran[1][0], "login"]]
+    # Claude Code's official installer is a pipe, so it runs through a shell.
+    ran, asked = [], []
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: ["claude"])
+    picker.sign_in("claude", run=lambda argv, **kw: ran.append(argv) or (0, ""),
+                   confirm=lambda q, **kw: asked.append(q) or True, echo=lambda s: None)
+    assert ran[0] == ["sh", "-c", "curl -fsSL https://claude.ai/install.sh | bash"] and "npm" not in asked[0]
 
 
 @pytest.mark.parametrize("opener, shown", [("wslview", {"BROWSER": "wslview"}), (None, None)])
@@ -254,3 +260,4 @@ def test_workers_launch_falls_back_when_a_pick_is_not_ready(db, repo, monkeypatc
     assert ("isn't ready for light tasks" in capsys.readouterr().err) is (light is None)
     assert len(probes) == (0 if pick != "local-qwen3-coder" else 1 if light else 2)
     assert len(signin_probes) == 1
+

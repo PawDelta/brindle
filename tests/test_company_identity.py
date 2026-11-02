@@ -94,9 +94,12 @@ def test_gateway_line_is_the_url_and_runs_nothing(monkeypatch):
 
 
 def test_codex_and_antigravity_are_informational(monkeypatch):
-    Fake(monkeypatch, {("codex", "login", "status"): (0, "Logged in using ChatGPT\n")})
+    Fake(monkeypatch, {("codex", "login", "status"): (0, "Logged in using ChatGPT\n"),
+                       ("claude", "auth", "status"): (1, '{"loggedIn": false}')})
     policy(monkeypatch, codex=CodexSetup("chatgpt"))
     found = by_name()
+    # Claude signed out with no company route: a warning, never a green check
+    assert found["claude identity"].level == doctor.WARN and "signed out" in found["claude identity"].detail
     assert found["codex identity"].level == doctor.OK
     assert "Logged in using ChatGPT" in found["codex identity"].detail
     assert "can't be checked" in found["codex identity"].detail

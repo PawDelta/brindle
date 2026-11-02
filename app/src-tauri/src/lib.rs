@@ -11,7 +11,8 @@
 //! `install_cli` links that brindle onto PATH). App updates come from the
 //! updater plugin (see `updates`). When there is no daemon to find or start, the first run's
 //! setup checks what brindle needs and installs it (see `setup`). On Windows
-//! the engine runs inside WSL and the app is its thin client (see `wsl`).
+//! the engine runs inside WSL and the app is its thin client (see `wsl`; its
+//! panes come over the daemon's WebSocket, see `pty_bridge`).
 //!
 //! `brindle --version` prints the app's version and exits without a window;
 //! `brindle --headless-check` connects to the daemon (starting one) and exits
@@ -22,6 +23,7 @@ mod about;
 mod daemon;
 mod engine;
 mod oauth;
+mod pty_bridge;
 /// Every pane the webview shows, through a real tmux client on a pty.
 pub mod pty_view;
 mod setup;

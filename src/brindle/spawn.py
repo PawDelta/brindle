@@ -31,12 +31,15 @@ cores, minus the cores' worth of CPU busy right now (sampled CPU idle time,
 not the load average, which on macOS counts throttled threads too), minus
 this process's own running children, shrunk when the kernel reports memory
 pressure. A start needs at least one unit of room, except that one process
-of ours may always run, so the daemon never stalls entirely. Reads, which
-nothing waits on but a screen and which are stopped freely, start at
-background priority (``taskpolicy -b`` on macOS, ``nice`` elsewhere);
-everything else (actions such as setup commands, merges and their hooks,
-check runs, agents) runs at normal priority: a throttled check run on an
-idle machine only makes everything behind it wait longer.
+of ours may always run, so the daemon never stalls entirely. Only work
+marked with :func:`waits_for_room` (the heavy read lane, background sweeps)
+waits for room; a request's own reads and actions start at once. Reads of
+that waiting work start at background priority (``taskpolicy -b`` on
+macOS, ``nice`` elsewhere); everything else (a request's own reads, actions
+such as setup commands, merges and their hooks, check runs, agents) runs at
+normal priority: at background priority macOS starves a request's ``ps``
+on a busy machine, and a throttled check run on an idle machine only makes
+everything behind it wait longer.
 
 The gate (waiting for room, background reads) is on only in the daemon
 (:func:`enable`); in the CLI, MCP server and hooks, reads and actions start
@@ -145,6 +148,24 @@ def deadline(seconds: float) -> Iterator[Deadline]:
 
 def current() -> Deadline | None:
     return _deadline.get()
+
+
+# Only work marked here (the heavy read lane, background sweeps) or asked to
+# `skip` waits for room. A request's own reads, the caller check and actions
+# start at once: on a machine whose load stays above its core count, making
+# them wait starved every request the app made (0.5.8).
+_waits: contextvars.ContextVar[bool] = contextvars.ContextVar("brindle_spawn_waits_for_room", default=False)
+
+
+@contextlib.contextmanager
+def waits_for_room() -> Iterator[None]:
+    """Processes started inside (and in threads that copy this context) wait
+    for room before they start; everything else starts at once."""
+    token = _waits.set(True)
+    try:
+        yield
+    finally:
+        _waits.reset(token)
 
 
 def begin_write() -> None:
@@ -368,8 +389,8 @@ def forced_starts() -> int:
         return 0
 
 
-def _has_room() -> bool:
-    return not _gated or _running == 0 or room() >= 1
+def _has_room(waits: bool = True) -> bool:
+    return not _gated or not waits or _running == 0 or room() >= 1
 
 
 def stats() -> dict:
@@ -393,9 +414,10 @@ def _admit(end: float, dl: Deadline | None, skip: bool, what: str, start_anyway:
     Busy (``end`` passed, or ``dl`` stopped) instead; with ``start_anyway``
     it starts at ``end`` instead of failing."""
     global _running, _refused
+    waits = skip or _waits.get()
     with _cond:
         while True:
-            fits = _has_room()   # first: sampling the CPU takes a moment, which counts against the deadline
+            fits = _has_room(waits)   # first: sampling the CPU takes a moment, which counts against the deadline
             if dl is not None and dl.stopped:
                 _refused += 1
                 raise Busy(f"{what} was not started: {dl.reason}")
@@ -424,12 +446,16 @@ _prefix: list[str] | None = None
 
 
 def _background(argv: list[str]) -> list[str]:
-    """``argv`` at background priority, when the gate is on. Only for work
-    nothing waits on but a screen (a read): on macOS a background process
-    can sit runnable with no CPU on an idle machine. Both prefixes exec the
-    command, so the child keeps the pid it was started with."""
+    """``argv`` at background priority, for a read of work that waits for
+    room (the heavy read lane, background sweeps: :func:`waits_for_room`)
+    when the gate is on. A request's own reads keep normal priority: at
+    background priority macOS starves them on a busy machine (a `ps` 0.03 s
+    → 0.8 s at load 12), and every request waited on its caller check
+    (0.5.9). Actions never use it: on macOS a background process can sit
+    runnable with no CPU on an idle machine. Both prefixes exec the command,
+    so the child keeps the pid it was started with."""
     global _prefix
-    if not _gated:
+    if not (_gated and _waits.get()):
         return argv
     if _prefix is None:
         if sys.platform == "darwin":
