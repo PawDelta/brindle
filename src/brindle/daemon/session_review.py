@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from brindle import agents, autopilot, bus, git, knowledge, pipeline, spawn, tasks, workspaces
+from brindle import agents, autopilot, bus, git, knowledge, pipeline, session_sync, spawn, tasks, workspaces
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
@@ -123,6 +123,8 @@ def reasons(db: DB, root: Agent, ws: Workspace) -> list[str]:
         out.append("the session's checkout has uncommitted changes")
     elif not git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1]:
         out.append(f"the session's branch has no commits ahead of {ws.base_branch}")
+    elif behind := session_sync.pr_block(ws):
+        out.append(behind)
     return out
 
 
@@ -150,6 +152,8 @@ def needs_you(db: DB, root: Agent, ap) -> list[str]:
         out.append("proposed checks are waiting on your answer")
     if (login := db.get_login_state(root.id)) and login.state == "auth_paused":
         out.append("the session's cloud login has expired")
+    if (home := db.get_workspace(root.workspace_id)) and (stuck := session_sync.needs_you(db, home)):
+        out.append(stuck)
     return out
 
 
@@ -257,8 +261,24 @@ def poll_merged(db: DB) -> None:
                 " AND url = ? AND merged_at IS NULL", (time.time(), root_id, branch, url)
             ).rowcount:
                 bus.publish_agent(db, "session.pr_merged", root_id, url=url)
+                _sync_after_merge(db, root_id, branch, url)
     finally:
         _merge_lock.release()
+
+
+def _sync_after_merge(db: DB, root_id: str, branch: str, url: str) -> None:
+    """A session PR merged: record what a squash of it covers, then pull the
+    default branch back into the session (brindle.session_sync)."""
+    root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    row = db.conn.execute("SELECT pushed_sha FROM session_prs WHERE root_id = ? AND branch = ?",
+                          (root_id, branch)).fetchone()
+    if ws is None or ws.branch != branch:
+        return
+    try:
+        session_sync.on_pr_merged(db, ws, url, row["pushed_sha"] if row else None)
+    except Exception:  # noqa: BLE001 - one session's sync never stops the round
+        log.exception("brindle: couldn't sync %s after its PR merged", branch)
 
 
 def require_ready(db: DB, root: Agent, ws: Workspace) -> None:

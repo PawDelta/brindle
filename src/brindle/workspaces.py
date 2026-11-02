@@ -800,6 +800,18 @@ def pull_request_merged(url: str, cwd: str) -> bool:
     return out.returncode == 0 and out.stdout.strip() == "MERGED"
 
 
+def pull_request_merge_commit(url: str, cwd: str) -> str | None:
+    """The commit a merged PR landed as on its base (``gh``'s mergeCommit), or None."""
+    if not shutil.which("gh"):
+        return None
+    try:
+        out = spawn.read(["gh", "pr", "view", url, "--json", "mergeCommit", "-q", ".mergeCommit.oid"],
+                         cwd=cwd, text=True, timeout=PR_STATE_SECONDS)
+    except (OSError, subprocess.SubprocessError, spawn.Busy):
+        return None
+    return out.stdout.strip() or None if out.returncode == 0 else None
+
+
 def compare_url(ws: Workspace) -> str:
     """The browser page for opening ``ws``'s PR by hand."""
     web = git.remote_web_url(ws.repo_root)
