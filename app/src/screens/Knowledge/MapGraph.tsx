@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import type { DecisionDTO } from "../../api/schema";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from "react";
 import type { DocScope, KbSource, KnowledgeMap, MapEdge, MapNode } from "../../api/client";
+import { bounds, createSim, heatAt, moveTo, pointOf, settle, step, type Point, type Sim } from "./graphLayout";
 
 export type LocalNode = { id: string; kind: "decision"; title: string; decision: DecisionDTO } | { id: string; kind: "imported"; title: string; source: KbSource; path: string };
 export type GraphNode = MapNode | LocalNode;
@@ -143,148 +144,65 @@ export function joinLocal(
   return { nodes, edges };
 }
 
-/* Each kind is a coloured mark (shape as well as colour, so the kinds stay
-   apart without colour) at the front of a pill holding the title. */
+function provenance(node: GraphNode): string[] {
+  const date = (seconds?: number) => {
+    const value = seconds === undefined ? null : new Date(seconds * 1000);
+    return value && Number.isFinite(value.getTime()) ? value.toISOString().slice(0, 10) : "Date unrecorded";
+  };
+  const scope = (kind?: string) => kind === "user" || kind === "personal" ? "Personal" : kind === "group" || kind === "team" ? "Team" : kind === "org" ? "Org" : kind || "Scope unrecorded";
+  if (node.kind === "path") return [];
+  if (node.kind === "decision") return [node.decision.author_session ? `Session ${node.decision.author_session}` : "Session/author unrecorded", `Local decision · ${date(node.decision.created_at)}`];
+  if (node.kind === "imported") return [node.path, `Imported on this device · ${scope(node.source.visibility)} · ${date(node.source.added_at)}`];
+  const source = node.source;
+  return [
+    [source?.ref, source?.session && `Session ${source.session}`].filter(Boolean).join(" · ") || "Session/branch unrecorded",
+    node.created_by || "Author/agent unrecorded",
+    `${scope(node.scope?.kind)}${node.scope && node.scope.kind !== "user" ? ` ${node.scope.name || node.scope.id}` : ""} · ${date(node.created_at)}`,
+  ];
+}
+
+/* Each kind is a dot in its own colour, the same in the legend and the panel. */
 const KINDS = {
-  path: { label: "Code area", rank: 0, mark: "h-2.5 w-2.5 rounded-[2px] bg-ink-3" },
-  doc: { label: "Document", rank: 1, mark: "h-2.5 w-2.5 rounded-full bg-branch" },
-  decision: { label: "Local decision", rank: 2, mark: "mx-px h-2 w-2 rotate-45 rounded-[1px] bg-fawn" },
-  imported: { label: "Imported folder", rank: 3, mark: "h-2.5 w-2.5 rounded-full border-2 border-ink-2" },
+  path: { label: "Code area", dot: "bg-ink-2" },
+  doc: { label: "Document", dot: "bg-branch" },
+  decision: { label: "Local decision", dot: "bg-fawn" },
+  imported: { label: "Imported folder", dot: "bg-sap" },
 } as const;
 
-/* Pill geometry, in graph units: the layout sizes each pill from its label,
-   and the label is clipped to that size, so pills it keeps apart stay apart. */
-export const NODE_H = 22;
-const LABEL_CHARS = 28, CHAR_W = 7, PILL_PAD = 40;
-/* Force layout: ideal edge length, steps, pull to the centre (with 1/d
-   repulsion, it sets the spacing of a crowd to about SPRING·√(π/GRAVITY)),
-   and the horizontal stretch that suits wide pills in a wide frame. */
-const SPRING = 80, STEPS = 300, GRAVITY = 1.5, ASPECT = 2.2, GAP_X = 10, GAP_Y = 8;
-
-export interface Placed { node: GraphNode; x: number; y: number; w: number; label: string; full: string }
-export interface Layout { nodes: Placed[]; width: number; height: number }
-
-function fullTitle(node: GraphNode): string {
-  return node.title || (node.kind === "path" ? node.path : undefined) || node.id;
-}
-
-/* A long path keeps its tail (the file), a long title its head. */
-function shorten(text: string, tail: boolean): string {
-  if (text.length <= LABEL_CHARS) return text;
-  return tail ? `…${text.slice(-(LABEL_CHARS - 1))}` : `${text.slice(0, LABEL_CHARS - 1).trimEnd()}…`;
-}
-
-/* Deterministic: nodes start on a golden-angle spiral in (kind, id) order,
-   a Fruchterman-Reingold simulation with no randomness settles them, and a
-   final pass pushes apart any pills that still overlap. Positions are pill
-   centres, shifted so the whole graph starts at (0, 0). */
-export function layoutGraph(nodes: GraphNode[], edges: MapEdge[]): Layout {
-  const n = nodes.length;
-  const labels = nodes.map((node) => {
-    const full = fullTitle(node);
-    return { full, label: shorten(full, node.kind === "path" && !node.title) };
-  });
-  const w = labels.map(({ label }) => Math.ceil(PILL_PAD + label.length * CHAR_W));
-  const x = new Float64Array(n), y = new Float64Array(n);
-  const order = nodes.map((_, i) => i).sort((a, b) => KINDS[nodes[a].kind].rank - KINDS[nodes[b].kind].rank || (nodes[a].id < nodes[b].id ? -1 : nodes[a].id > nodes[b].id ? 1 : a - b));
-  order.forEach((i, r) => {
-    const angle = r * 2.399963229728653, d = SPRING * 0.6 * Math.sqrt(r + 0.5);
-    x[i] = d * Math.cos(angle);
-    y[i] = d * Math.sin(angle);
-  });
-  const index = new Map(nodes.map((node, i) => [node.id, i]));
-  const links: [number, number][] = [];
-  const linked = new Set<string>();
-  for (const edge of edges) {
-    const a = index.get(edge.source), b = index.get(edge.target);
-    if (a === undefined || b === undefined || a === b) continue;
-    const key = a < b ? `${a} ${b}` : `${b} ${a}`;
-    if (!linked.has(key)) { linked.add(key); links.push([a, b]); }
-  }
-  /* A node with no edges would drift to the rim of the crowd and shrink the
-     rest of the picture when it is fitted; it is pulled in harder. */
-  const pull = new Float64Array(n).fill(GRAVITY * 4);
-  for (const [a, b] of links) pull[a] = pull[b] = GRAVITY;
-  const dx = new Float64Array(n), dy = new Float64Array(n);
-  for (let step = 0; step < STEPS; step++) {
-    const heat = SPRING * 0.5 * (1 - step / STEPS) + 0.5;
-    dx.fill(0); dy.fill(0);
-    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
-      let ex = x[i] - x[j], ey = y[i] - y[j], d2 = ex * ex + ey * ey;
-      if (d2 < 0.01) { ex = j - i; ey = 1; d2 = ex * ex + 1; }
-      const f = (SPRING * SPRING) / d2;
-      dx[i] += ex * f; dy[i] += ey * f; dx[j] -= ex * f; dy[j] -= ey * f;
-    }
-    for (const [a, b] of links) {
-      const ex = x[a] - x[b], ey = y[a] - y[b], f = Math.hypot(ex, ey) / SPRING;
-      dx[a] -= ex * f; dy[a] -= ey * f; dx[b] += ex * f; dy[b] += ey * f;
-    }
-    for (let i = 0; i < n; i++) {
-      dx[i] -= x[i] * pull[i]; dy[i] -= y[i] * pull[i];
-      const len = Math.hypot(dx[i], dy[i]), move = len > heat ? heat / len : 1;
-      x[i] += dx[i] * move; y[i] += dy[i] * move;
-    }
-  }
-  for (let i = 0; i < n; i++) x[i] *= ASPECT;
-  for (let pass = 0; pass < 1000; pass++) {
-    let moved = false;
-    for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) {
-      const ox = (w[i] + w[j]) / 2 + GAP_X - Math.abs(x[i] - x[j]), oy = NODE_H + GAP_Y - Math.abs(y[i] - y[j]);
-      if (ox <= 0 || oy <= 0) continue;
-      moved = true;
-      if (ox < oy) {
-        const s = x[i] < x[j] || (x[i] === x[j] && i < j) ? -1 : 1;
-        x[i] += (s * ox) / 2 + s * 0.25; x[j] -= (s * ox) / 2 + s * 0.25;
-      } else {
-        const s = y[i] < y[j] || (y[i] === y[j] && i < j) ? -1 : 1;
-        y[i] += (s * oy) / 2 + s * 0.25; y[j] -= (s * oy) / 2 + s * 0.25;
-      }
-    }
-    if (!moved) break;
-  }
-  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
-  for (let i = 0; i < n; i++) {
-    left = Math.min(left, x[i] - w[i] / 2); right = Math.max(right, x[i] + w[i] / 2);
-    top = Math.min(top, y[i] - NODE_H / 2); bottom = Math.max(bottom, y[i] + NODE_H / 2);
-  }
-  if (!n) left = top = right = bottom = 0;
-  return {
-    nodes: nodes.map((node, i) => ({ node, x: x[i] - left, y: y[i] - top, w: w[i], ...labels[i] })),
-    width: right - left,
-    height: bottom - top,
-  };
-}
-
-/* Where the curve from (cx, cy) into a pill's centre crosses its edge, so an
-   arrowhead lands on the pill instead of under it. */
-function border(p: Placed, cx: number, cy: number, gap: number): [number, number] {
-  const vx = cx - p.x, vy = cy - p.y, len = Math.hypot(vx, vy) || 1;
-  const s = Math.min(vx ? (p.w / 2) / Math.abs(vx) : Infinity, vy ? (NODE_H / 2) / Math.abs(vy) : Infinity, 1);
-  return [p.x + vx * s + (vx / len) * gap, p.y + vy * s + (vy / len) * gap];
-}
-
-/* A gentle quadratic curve, always bent the same way, so parallel straight
-   lines fan out and the picture stays the same for the same input. */
-function curve(a: Placed, b: Placed, arrow: boolean): string {
-  const ex = b.x - a.x, ey = b.y - a.y, len = Math.hypot(ex, ey) || 1, bend = Math.min(48, len * 0.18);
+/* A gentle curve between dot centres, always bent the same way; an arrow
+   stops at the rim of the target's dot. */
+function curve(a: Point, b: Point, arrow: boolean): string {
+  const ex = b.x - a.x, ey = b.y - a.y, len = Math.hypot(ex, ey) || 1, bend = Math.min(28, len * 0.12);
   const cx = (a.x + b.x) / 2 - (ey / len) * bend, cy = (a.y + b.y) / 2 + (ex / len) * bend;
-  const [tx, ty] = arrow ? border(b, cx, cy, 2) : [b.x, b.y];
+  let tx = b.x, ty = b.y;
+  if (arrow) {
+    const ux = b.x - cx, uy = b.y - cy, ul = Math.hypot(ux, uy) || 1;
+    tx -= (ux / ul) * (b.r + 2); ty -= (uy / ul) * (b.r + 2);
+  }
   return `M${a.x.toFixed(1)} ${a.y.toFixed(1)}Q${cx.toFixed(1)} ${cy.toFixed(1)} ${tx.toFixed(1)} ${ty.toFixed(1)}`;
 }
 
 type View = { k: number; x: number; y: number };
-const MAX_ZOOM = 3, MIN_ZOOM = 0.2, FIT_PAD = 24, LEGEND_H = 34;
+type Gesture = { node: number | null; start: { x: number; y: number }; grab: { x: number; y: number }; moved: boolean };
+const MAX_ZOOM = 4, MIN_ZOOM = 0.2, FIT_PAD = 28, LEGEND_H = 30, PANEL_W = 256, LABEL_ZOOM = 0.65;
 const control = "grid h-7 w-7 place-items-center rounded-md border border-line-strong bg-canvas-2 text-sm leading-none text-ink-2 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-branch";
+const halo = { textShadow: "0 0 3px var(--canvas-2), 0 0 2px var(--canvas-2), 0 0 1px var(--canvas-2)" };
 
-function fitView(layout: Layout, w: number, h: number): View {
-  const room = h - FIT_PAD - LEGEND_H;
-  const k = Math.min(1, (w - 2 * FIT_PAD) / Math.max(layout.width, 1), room / Math.max(layout.height, 1));
-  return { k, x: (w - layout.width * k) / 2, y: FIT_PAD + (room - layout.height * k) / 2 };
+function fitView(s: Sim, w: number, h: number): View {
+  const b = bounds(s), bw = Math.max(b.right - b.left, 1), bh = Math.max(b.bottom - b.top, 1), room = h - FIT_PAD - LEGEND_H;
+  const k = Math.min(1.4, (w - 2 * FIT_PAD) / bw, room / bh);
+  return { k, x: (w - bw * k) / 2 - b.left * k, y: FIT_PAD + (room - bh * k) / 2 - b.top * k };
 }
 
 export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void }) {
-  const layout = useMemo(() => layoutGraph(nodes, edges), [nodes, edges]);
-  const at = useMemo(() => new Map(layout.nodes.map((p) => [p.node.id, p])), [layout]);
+  /* The settled start is the same for the same graph; dragging moves the
+     nodes in this object from then on, outside React's render. */
+  const sim = useMemo(() => settle(createSim(nodes, edges)), [nodes, edges]);
+  const index = useMemo(() => new Map(nodes.map((node, i) => [node.id, i])), [nodes]);
+  const lines = useMemo(() => edges.flatMap((edge) => {
+    const a = index.get(edge.source), b = index.get(edge.target);
+    return a === undefined || b === undefined || a === b ? [] : [{ edge, a, b }];
+  }), [edges, index]);
   const near = useMemo(() => {
     const m = new Map<string, Set<string>>();
     for (const { source, target } of edges) {
@@ -295,19 +213,22 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
     }
     return m;
   }, [edges]);
-  const height = Math.round(Math.min(620, Math.max(300, 220 + Math.sqrt(nodes.length) * 34)));
+  const height = Math.round(Math.min(680, Math.max(380, 260 + Math.sqrt(nodes.length) * 36)));
   const frame = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState({ w: 800, h: height });
-  /* Until the person pans or zooms, the view follows the fit; a new graph
-     drops their view and fits again. */
-  const [manual, setManual] = useState<{ layout: Layout; view: View } | null>(null);
-  const fitted = fitView(layout, size.w, size.h);
-  const view = manual?.layout === layout ? manual.view : fitted;
-  const live = useRef({ view, layout, fitted, size });
-  live.current = { view, layout, fitted, size };
-  const [active, setActive] = useState<string | null>(null);
-  const marker = `kg${useId().replace(/[^\w-]/g, "")}`;
-  const kinds = new Set(nodes.map((node) => node.kind));
+  /* Until the person pans, zooms or drags, the view follows the fit; a new
+     graph drops their view and their selection. */
+  const [manual, setManual] = useState<{ sim: Sim; view: View } | null>(null);
+  const [picked, setPicked] = useState<{ sim: Sim; id: string } | null>(null);
+  const [hover, setHover] = useState<string | null>(null);
+  const fitted = fitView(sim, size.w, size.h);
+  const view = manual?.sim === sim ? manual.view : fitted;
+  const selected = picked?.sim === sim ? picked.id : null;
+  const live = useRef({ view, sim, fitted, size, lines, selected });
+  live.current = { view, sim, fitted, size, lines, selected };
+  const uid = `kg${useId().replace(/[^\w-]/g, "")}`;
+  const nodeEls = useRef<(HTMLButtonElement | null)[]>([]);
+  const edgeEls = useRef<(SVGPathElement | null)[]>([]);
 
   useLayoutEffect(() => {
     const el = frame.current;
@@ -320,10 +241,42 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
     return () => observer.disconnect();
   }, [height]);
 
+  /* Moves nodes and edges in the DOM straight from the simulation. */
+  const paint = useCallback(() => {
+    const { sim: s, lines: ls } = live.current;
+    nodeEls.current.forEach((el, i) => {
+      if (!el || i >= s.nodes.length) return;
+      const p = pointOf(s, i);
+      el.style.left = `${p.x - p.w / 2}px`;
+      el.style.top = `${p.y - p.r}px`;
+    });
+    ls.forEach(({ edge, a, b }, j) => edgeEls.current[j]?.setAttribute("d", curve(pointOf(s, a), pointOf(s, b), edge.kind === "supersedes")));
+  }, []);
+
+  /* The live simulation: reheated by a drag, held warm while it lasts, then
+     cooling until it stops. */
+  const motion = useRef({ alpha: 0, frame: 0, dragging: false });
+  const run = useCallback(() => {
+    const m = motion.current;
+    if (m.frame || typeof requestAnimationFrame !== "function") return;
+    const tick = () => {
+      step(live.current.sim, heatAt(m.alpha), true);
+      paint();
+      m.alpha = m.dragging ? Math.max(m.alpha * 0.98, 0.3) : m.alpha * 0.985;
+      m.frame = m.alpha > 0.02 ? requestAnimationFrame(tick) : 0;
+    };
+    m.frame = requestAnimationFrame(tick);
+  }, [paint]);
+  useEffect(() => () => {
+    const m = motion.current;
+    if (m.frame) cancelAnimationFrame(m.frame);
+    m.frame = 0;
+  }, []);
+
   const apply = useCallback((next: (v: View) => View) => {
     const v = next(live.current.view);
     live.current.view = v;
-    setManual({ layout: live.current.layout, view: v });
+    setManual({ sim: live.current.sim, view: v });
   }, []);
   const zoomAt = useCallback((factor: number, px: number, py: number) => apply((v) => {
     const k = Math.min(MAX_ZOOM, Math.max(Math.min(MIN_ZOOM, live.current.fitted.k), v.k * factor));
@@ -343,17 +296,64 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
     return () => el.removeEventListener("wheel", wheel);
   }, [zoomAt]);
 
-  /* One pointer on the background pans; two pinch. */
+  /* A node or the person's selection, brought into view (left of the panel). */
+  const reveal = useCallback((i: number, panel: boolean) => {
+    const { view: v, size: s, sim: sm } = live.current, p = pointOf(sm, i), m = 12;
+    const left = (p.x - p.w / 2) * v.k + v.x, right = (p.x + p.w / 2) * v.k + v.x;
+    const top = (p.y - p.r) * v.k + v.y, bottom = (p.y + p.r + 16) * v.k + v.y, edge = s.w - (panel ? PANEL_W : 0) - m;
+    const shiftX = left < m ? m - left : right > edge ? edge - right : 0;
+    const shiftY = top < m ? m - top : bottom > s.h - LEGEND_H ? s.h - LEGEND_H - bottom : 0;
+    if (shiftX || shiftY) apply((c) => ({ ...c, x: c.x + shiftX, y: c.y + shiftY }));
+  }, [apply]);
+
+  /* Drag a node to move it (the rest settle around it, and it stays where
+     it is dropped); drag the background to pan, or pinch with two pointers. */
+  const gesture = useRef<Gesture | null>(null);
   const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const swallow = useRef(false);
+  const toGraph = (clientX: number, clientY: number) => {
+    const r = frame.current!.getBoundingClientRect(), v = live.current.view;
+    return { x: (clientX - r.left - v.x) / v.k, y: (clientY - r.top - v.y) / v.k };
+  };
   const down = (e: ReactPointerEvent<HTMLDivElement>) => {
-    if ((e.target as Element).closest("button")) return;
+    swallow.current = false;
+    const target = e.target as Element, start = { x: e.clientX, y: e.clientY };
+    const node = target.closest<HTMLElement>("[data-node]");
+    if (node) {
+      const i = index.get(node.dataset.node!);
+      gesture.current = i === undefined ? null : { node: i, start, grab: { x: 0, y: 0 }, moved: false };
+      return;
+    }
+    if (target.closest("button, aside")) return;
     e.currentTarget.setPointerCapture?.(e.pointerId);
-    pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    pointers.current.set(e.pointerId, start);
+    gesture.current = { node: null, start, grab: { x: 0, y: 0 }, moved: false };
   };
   const move = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const g = gesture.current;
+    if (g?.node != null) {
+      const s = live.current.sim;
+      if (!g.moved) {
+        if (Math.hypot(e.clientX - g.start.x, e.clientY - g.start.y) < 4) return;
+        g.moved = true;
+        e.currentTarget.setPointerCapture?.(e.pointerId);
+        const p = toGraph(g.start.x, g.start.y), at = pointOf(s, g.node);
+        g.grab = { x: at.x - p.x, y: at.y - p.y };
+        s.pinned[g.node] = 1;
+        setManual({ sim: s, view: live.current.view });
+        motion.current.dragging = true;
+        motion.current.alpha = Math.max(motion.current.alpha, 0.3);
+        run();
+      }
+      const p = toGraph(e.clientX, e.clientY);
+      moveTo(s, g.node, p.x + g.grab.x, p.y + g.grab.y);
+      paint();
+      return;
+    }
     const map = pointers.current, prev = map.get(e.pointerId);
-    if (!prev) return;
+    if (!prev || !g) return;
     const next = { x: e.clientX, y: e.clientY };
+    if (Math.hypot(next.x - g.start.x, next.y - g.start.y) > 3) g.moved = true;
     const other = [...map].find(([id]) => id !== e.pointerId)?.[1];
     map.set(e.pointerId, next);
     if (!other) { apply((v) => ({ ...v, x: v.x + next.x - prev.x, y: v.y + next.y - prev.y })); return; }
@@ -362,20 +362,29 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
     apply((v) => ({ ...v, x: v.x + (next.x - prev.x) / 2, y: v.y + (next.y - prev.y) / 2 }));
     zoomAt(after / before, (next.x + other.x) / 2 - r.left, (next.y + other.y) / 2 - r.top);
   };
-  const up = (e: ReactPointerEvent<HTMLDivElement>) => { pointers.current.delete(e.pointerId); };
-
-  /* Tabbing to a node off screen brings it into view. */
-  const reveal = (p: Placed) => {
-    const { view: v, size: s } = live.current, m = 12;
-    const left = (p.x - p.w / 2) * v.k + v.x, right = (p.x + p.w / 2) * v.k + v.x;
-    const top = (p.y - NODE_H / 2) * v.k + v.y, bottom = (p.y + NODE_H / 2) * v.k + v.y;
-    const shiftX = left < m ? m - left : right > s.w - m ? s.w - m - right : 0;
-    const shiftY = top < m ? m - top : bottom > s.h - LEGEND_H ? s.h - LEGEND_H - bottom : 0;
-    if (shiftX || shiftY) apply((c) => ({ ...c, x: c.x + shiftX, y: c.y + shiftY }));
+  const up = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const g = gesture.current;
+    pointers.current.delete(e.pointerId);
+    if (g?.node != null) {
+      if (g.moved) { swallow.current = true; motion.current.dragging = false; }
+      gesture.current = null;
+      return;
+    }
+    if (g && !g.moved && !pointers.current.size) setPicked(null);
+    if (!pointers.current.size) gesture.current = null;
+  };
+  const pick = (e: ReactMouseEvent, i: number) => {
+    // A drag that ends over its node is not a click; a key press always is.
+    if (swallow.current && e.detail !== 0) { swallow.current = false; return; }
+    setPicked({ sim, id: nodes[i].id });
+    reveal(i, true);
+    onOpen(nodes[i]);
   };
 
+  const active = hover ?? selected;
   const lit = active ? near.get(active) ?? new Set<string>() : null;
-  const shown = active ? at.get(active) : undefined;
+  const chosen = selected === null ? undefined : index.get(selected);
+  const kinds = new Set(nodes.map((node) => node.kind));
   return (
     <div
       ref={frame}
@@ -387,59 +396,55 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
       onPointerMove={move}
       onPointerUp={up}
       onPointerCancel={up}
+      onKeyDown={(e) => { if (e.key === "Escape") setPicked(null); }}
       onScroll={(e) => { e.currentTarget.scrollTop = 0; e.currentTarget.scrollLeft = 0; }}
     >
       <div data-testid="graph-stage" className="absolute left-0 top-0 origin-top-left" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})` }}>
-        <svg className="pointer-events-none absolute left-0 top-0 overflow-visible" width={Math.max(layout.width, 1)} height={Math.max(layout.height, 1)} aria-label="Connections">
+        <svg className="pointer-events-none absolute left-0 top-0 overflow-visible" width="1" height="1" aria-label="Connections">
           <defs>
             {[["", "text-ink-3"], ["-on", "text-branch"]].map(([suffix, tone]) => (
-              <marker key={suffix} id={`${marker}${suffix}`} className={tone} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
+              <marker key={suffix} id={`${uid}${suffix}`} className={tone} viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" markerUnits="userSpaceOnUse" orient="auto-start-reverse">
                 <path d="M0 1L10 5L0 9z" fill="currentColor" />
               </marker>
             ))}
           </defs>
-          {edges.map((edge, i) => {
-            const a = at.get(edge.source), b = at.get(edge.target);
-            if (!a || !b || a === b) return null;
+          {lines.map(({ edge, a, b }, j) => {
             const supersedes = edge.kind === "supersedes";
             const on = active !== null && (edge.source === active || edge.target === active);
-            return <g key={i} data-source={edge.source} data-target={edge.target} data-kind={edge.kind} className={on ? "text-branch" : "text-ink-3"} style={{ opacity: on ? 0.95 : active ? 0.08 : supersedes ? 0.6 : 0.4, transition: "opacity 150ms" }}>
-              <path d={curve(a, b, supersedes)} fill="none" stroke="currentColor" strokeWidth={on ? 1.75 : 1.25} vectorEffect="non-scaling-stroke" strokeDasharray={supersedes ? "5 4" : undefined} markerEnd={supersedes ? `url(#${marker}${on ? "-on" : ""})` : undefined} />
+            return <g key={j} data-source={edge.source} data-target={edge.target} data-kind={edge.kind} className={on ? "text-branch" : "text-ink-3"} style={{ opacity: on ? 0.9 : active ? 0.06 : supersedes ? 0.55 : 0.35, transition: "opacity 150ms" }}>
+              <path ref={(el) => { edgeEls.current[j] = el; }} d={curve(pointOf(sim, a), pointOf(sim, b), supersedes)} fill="none" stroke="currentColor" strokeWidth={on ? 1.5 : 1} vectorEffect="non-scaling-stroke" strokeDasharray={supersedes ? "4 3" : undefined} markerEnd={supersedes ? `url(#${uid}${on ? "-on" : ""})` : undefined} />
               <title>{supersedes ? "supersedes" : edge.kind.replace(/_/g, " ")}</title>
             </g>;
           })}
         </svg>
-        {layout.nodes.map((p, i) => {
-          const kind = KINDS[p.node.kind];
-          const dim = lit !== null && p.node.id !== active && !lit.has(p.node.id);
-          const about = provenance(p.node);
+        {nodes.map((node, i) => {
+          const kind = KINDS[node.kind], p = pointOf(sim, i), { full, label } = sim.labels[i], about = provenance(node);
+          const dim = lit !== null && node.id !== active && !lit.has(node.id), on = node.id === active;
+          /* Zoomed out, labels give way to the dots, except around the node in focus. */
+          const named = view.k >= LABEL_ZOOM || on || node.id === selected || (lit !== null && lit.has(node.id));
           return <button
-            key={p.node.id}
+            key={node.id}
+            ref={(el) => { nodeEls.current[i] = el; }}
             type="button"
-            data-node={p.node.id}
-            aria-label={`${kind.label}: ${p.full}`}
-            aria-describedby={about.length ? `${marker}-n${i}` : undefined}
-            title={[p.full, ...about].join("\n")}
-            onClick={() => onOpen(p.node)}
-            onMouseEnter={() => setActive(p.node.id)}
-            onMouseLeave={() => setActive((a) => (a === p.node.id ? null : a))}
-            onFocus={() => { setActive(p.node.id); reveal(p); }}
-            onBlur={() => setActive((a) => (a === p.node.id ? null : a))}
-            style={{ left: p.x - p.w / 2, top: p.y - NODE_H / 2, width: p.w, height: NODE_H, opacity: dim ? 0.3 : 1 }}
-            className={`absolute flex cursor-pointer items-center gap-1.5 rounded-full border bg-surface-2 pl-2 pr-2.5 text-left text-xs leading-none whitespace-nowrap text-ink transition-[opacity,border-color] duration-150 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-branch ${p.node.id === active ? "border-branch" : "border-line-strong"}`}
+            data-node={node.id}
+            aria-label={`${kind.label}: ${full}`}
+            aria-describedby={about.length ? `${uid}-n${i}` : undefined}
+            title={[full, ...about].join("\n")}
+            onClick={(e) => pick(e, i)}
+            onMouseEnter={() => setHover(node.id)}
+            onMouseLeave={() => setHover((h) => (h === node.id ? null : h))}
+            onFocus={() => { setHover(node.id); reveal(i, chosen !== undefined); }}
+            onBlur={() => setHover((h) => (h === node.id ? null : h))}
+            style={{ left: p.x - p.w / 2, top: p.y - p.r, width: p.w, opacity: dim ? 0.2 : 1 }}
+            className={`group absolute flex cursor-pointer flex-col items-center outline-none transition-opacity duration-150 ${on ? "z-10" : ""}`}
           >
-            <span aria-hidden className={`shrink-0 ${kind.mark}`} />
-            <span className="min-w-0 truncate">{p.label}</span>
-            {about.length > 0 && <span id={`${marker}-n${i}`} className="sr-only">{about.join(" · ")}</span>}
+            <span aria-hidden className={`shrink-0 rounded-full ${kind.dot} ring-branch ring-offset-2 ring-offset-canvas-2 group-hover:ring-2 group-focus-visible:ring-2 ${node.id === selected ? "ring-2" : ""}`} style={{ width: 2 * p.r, height: 2 * p.r }} />
+            <span className={`mt-[3px] text-[11px] leading-[13px] whitespace-nowrap ${on ? "text-ink" : "max-w-full truncate text-ink-2"} ${named ? "" : "invisible"}`} style={halo}>{on ? full : label}</span>
+            {about.length > 0 && <span id={`${uid}-n${i}`} className="sr-only">{about.join(" · ")}</span>}
           </button>;
         })}
       </div>
-      {shown && <div className="pointer-events-none absolute left-2 top-2 flex max-w-[min(360px,calc(100%-64px))] flex-col gap-0.5 rounded-md border border-line bg-canvas-2/95 px-2.5 py-1.5 text-xs">
-        <span className="break-words font-medium text-ink">{shown.full}</span>
-        <span className="text-ink-3">{KINDS[shown.node.kind].label}</span>
-        {provenance(shown.node).map((line, i) => <span key={i} className="break-words text-ink-3">{line}</span>)}
-      </div>}
-      <div className="absolute right-2 top-2 flex flex-col gap-1">
+      <div className="absolute left-2 top-2 flex flex-col gap-1">
         <button type="button" aria-label="Zoom in" title="Zoom in" className={control} onClick={() => zoomAt(1.25, size.w / 2, size.h / 2)}>+</button>
         <button type="button" aria-label="Zoom out" title="Zoom out" className={control} onClick={() => zoomAt(0.8, size.w / 2, size.h / 2)}>−</button>
         <button type="button" aria-label="Fit graph" title="Fit graph" className={control} onClick={() => setManual(null)}>
@@ -448,30 +453,36 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
       </div>
       <div className="pointer-events-none absolute bottom-2 left-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md bg-canvas-2/90 px-2 py-1 text-[11px] text-ink-3">
         {(Object.keys(KINDS) as (keyof typeof KINDS)[]).filter((k) => kinds.has(k)).map((k) => (
-          <span key={k} className="inline-flex items-center gap-1.5"><span aria-hidden className={KINDS[k].mark} />{KINDS[k].label}</span>
+          <span key={k} className="inline-flex items-center gap-1.5"><span aria-hidden className={`h-2 w-2 rounded-full ${KINDS[k].dot}`} />{KINDS[k].label}</span>
         ))}
-        {edges.some((e) => e.kind === "supersedes") && <span className="inline-flex items-center gap-1.5">
-          <svg aria-hidden width="22" height="8" viewBox="0 0 22 8" className="text-ink-3"><path d="M1 4H16" stroke="currentColor" strokeDasharray="3 2.5" /><path d="M15 1L21 4L15 7z" fill="currentColor" /></svg>Supersedes
+        {lines.some(({ edge }) => edge.kind === "supersedes") && <span className="inline-flex items-center gap-1.5">
+          <svg aria-hidden width="22" height="8" viewBox="0 0 22 8"><path d="M1 4H16" stroke="currentColor" strokeDasharray="3 2.5" /><path d="M15 1L21 4L15 7z" fill="currentColor" /></svg>Supersedes
         </span>}
+        <span>Size: connections</span>
       </div>
+      {chosen !== undefined && <Details node={nodes[chosen]} full={sim.labels[chosen].full} neighbours={[...(near.get(nodes[chosen].id) ?? [])].flatMap((id) => {
+        const i = index.get(id);
+        return i === undefined ? [] : [{ node: nodes[i], full: sim.labels[i].full }];
+      })} onClose={() => setPicked(null)} />}
     </div>
   );
 }
 
-/* Where a node came from: shown in the detail card, and read out after its name. */
-function provenance(node: GraphNode): string[] {
-  const date = (seconds?: number) => {
-    const value = seconds === undefined ? null : new Date(seconds * 1000);
-    return value && Number.isFinite(value.getTime()) ? value.toISOString().slice(0, 10) : "Date unrecorded";
-  };
-  const scope = (kind?: string) => kind === "user" || kind === "personal" ? "Personal" : kind === "group" || kind === "team" ? "Team" : kind === "org" ? "Org" : kind || "Scope unrecorded";
-  if (node.kind === "path") return [];
-  if (node.kind === "decision") return [node.decision.author_session ? `Session ${node.decision.author_session}` : "Session/author unrecorded", `Local decision · ${date(node.decision.created_at)}`];
-  if (node.kind === "imported") return [node.path, `Imported on this device · ${scope(node.source.visibility)} · ${date(node.source.added_at)}`];
-  const source = node.source;
-  return [
-    [source?.ref, source?.session && `Session ${source.session}`].filter(Boolean).join(" · ") || "Session/branch unrecorded",
-    node.created_by || "Author/agent unrecorded",
-    `${scope(node.scope?.kind)}${node.scope && node.scope.kind !== "user" ? ` ${node.scope.name || node.scope.id}` : ""} · ${date(node.created_at)}`,
-  ];
+/* The selected node's details, beside the graph like an inspector. */
+function Details({ node, full, neighbours, onClose }: { node: GraphNode; full: string; neighbours: { node: GraphNode; full: string }[]; onClose(): void }) {
+  const kind = KINDS[node.kind];
+  return <aside aria-label="Node details" className="absolute inset-y-0 right-0 flex max-w-[85%] cursor-auto select-text flex-col gap-2 overflow-auto border-l border-line bg-surface p-3 text-xs" style={{ width: PANEL_W }}>
+    <div className="flex items-center justify-between gap-2">
+      <span className="inline-flex items-center gap-1.5 text-[11px] uppercase tracking-wider text-ink-3"><span aria-hidden className={`h-2 w-2 rounded-full ${kind.dot}`} />{kind.label}</span>
+      <button type="button" aria-label="Close details" title="Close details" className="rounded-md px-1.5 text-sm leading-none text-ink-3 hover:bg-surface-2 hover:text-ink" onClick={onClose}>×</button>
+    </div>
+    <p className="break-words text-sm font-medium text-ink">{full}</p>
+    {provenance(node).map((line, i) => <p key={i} className="break-words text-ink-3">{line}</p>)}
+    <p className="text-ink-3">{neighbours.length} {neighbours.length === 1 ? "connection" : "connections"}</p>
+    {neighbours.length > 0 && <ul className="flex flex-col gap-1">
+      {neighbours.map(({ node: n, full: title }) => <li key={n.id} className="flex min-w-0 items-center gap-1.5 text-ink-2" title={title}>
+        <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${KINDS[n.kind].dot}`} /><span className="truncate">{title}</span>
+      </li>)}
+    </ul>}
+  </aside>;
 }

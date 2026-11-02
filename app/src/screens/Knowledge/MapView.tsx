@@ -97,7 +97,7 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
     {error && <p role="alert" className={alert}>{error}</p>}
     {repo && !area && <p className="text-sm text-ink-3">Choose a library scope to load its map.</p>}
     {area && !map && !error && <p role="status">Loading neighbourhood…</p>}
-    {graph && <><p className="text-xs text-ink-3">{graph.nodes.length} nodes · {graph.edges.length} connections · drag to pan, scroll or pinch to zoom</p>
+    {graph && <><p className="text-xs text-ink-3">{graph.nodes.length} nodes · {graph.edges.length} connections · drag nodes or the background, scroll to zoom, click a node for details</p>
       {graph.nodes.length ? <MapGraph {...graph} onOpen={select} /> : <p>No knowledge in this map yet.</p>}
     </>}
     {open?.kind === "decision" && <ul><DecisionCard d={open.decision} /></ul>}
