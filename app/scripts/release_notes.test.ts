@@ -16,28 +16,24 @@ describe("summarize", () => {
   it("cuts an unbroken run at the cap", () => {
     expect(summarize("x".repeat(500))).toBe(`${"x".repeat(199)}…`);
   });
-
-  it("is empty for nothing", () => {
-    expect(summarize("  \n\n ")).toBe("");
-  });
 });
 
 describe("notesFor", () => {
+  const push = { event: "push", refType: "tag", rc: "false", tag: "app-v1.2.3" };
   const fake = (type: string, message: string) => (args: string[]) => (args[0] === "cat-file" ? `${type}\n` : message);
 
   it("uses an annotated tag's message", () => {
-    expect(notesFor("app-v1.2.3", "fallback", fake("tag", "Adds the update banner.\n\nDetails."))).toBe("Adds the update banner.");
+    expect(notesFor(push, "fallback", fake("tag", "Adds the update banner.\n\nDetails."))).toBe("Adds the update banner.");
   });
 
   it.each([
-    ["a lightweight tag", fake("commit", "Merge branch x")],
-    ["an empty message", fake("tag", "\n")],
-    ["no such tag", () => ""],
-  ])("falls back for %s", (_, git) => {
-    expect(notesFor("app-v1.2.3", "fallback", git)).toBe("fallback");
-  });
-
-  it("falls back with no tag (dispatch)", () => {
-    expect(notesFor("", "fallback", fake("tag", "x"))).toBe("fallback");
+    ["a lightweight tag", push, fake("commit", "Merge branch x")],
+    ["an empty message", push, fake("tag", " \n\n ")],
+    ["no such tag", push, () => ""],
+    ["a manual run of an annotated tag", { ...push, event: "workflow_dispatch" }, fake("tag", "Adds x.")],
+    ["a release candidate", { ...push, rc: "true" }, fake("tag", "Adds x.")],
+    ["a branch run", { ...push, refType: "branch", tag: "main" }, fake("tag", "Adds x.")],
+  ])("falls back for %s", (_, run, git) => {
+    expect(notesFor(run, "fallback", git)).toBe("fallback");
   });
 });
