@@ -105,3 +105,30 @@ def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, bo
     db.update_autopilot("boss", audit_sha="abc123")
     out = autopilot.record_audit(db, "boss", True, "all there")
     assert f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in out
+
+
+@pytest.mark.parametrize("entry, why", [("goal", "own"), ("review", "own"), ("task", "group"),
+                                         ("goal", "airgap"), ("review", "airgap")])
+def test_no_brief_request_when_assist_is_off_by_policy_or_air_gap(entry, why, db, boss, backend, monkeypatch):
+    from brindle import airgap
+
+    policy = {"switches": {}, "groups": {"g": {"switches": {"assist": "enforced_off"}}}}
+    backend.routes.update({"POST /analysis-docs/brief": [(200, {"block": "known: the cache", "cited": []})],
+                           "GET /analysis-docs/scopes": [(200, {"scopes": [{"kind": "group", "id": "g"}]})],
+                           "GET /me/analysis-docs/settings": [(200, {"switches": {"assist": "off"} if why == "own" else {}})]})
+    monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, *a: backend.request(*a))
+    monkeypatch.setattr("brindle.pro.analysis_policy.fetch", lambda *a: policy)
+    login_as(backend, credentials.default_store(),
+             features=("analysis_docs", "analysis_docs_team") if why == "group" else ("analysis_docs",))
+    monkeypatch.setattr(airgap, "enabled", lambda cfg=None: why == "airgap")
+    backend.calls.clear()
+    client = auth.Client(None, backend)
+    if entry == "goal":
+        db.add_autopilot("boss")
+        autopilot.set_goal(db, "boss", "Settings page", [("API", "true", None), ("UI", "true", None)])
+    elif entry == "review":
+        assert ab.review_context(db, boss.repo_root, "speed up the cache", ["a.py"], client=client) == ("", [])
+    else:
+        ab.brief_context(db, boss.repo_root, "feat/x", "a1", "speed up the cache", [], large=True, client=client)
+    assert "POST /analysis-docs/brief" not in backend.paths()
+    assert backend.calls == [] if why == "airgap" else True
