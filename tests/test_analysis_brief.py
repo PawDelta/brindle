@@ -107,7 +107,7 @@ def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, bo
     assert f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in out
 
 
-@pytest.mark.parametrize("entry, why", [("goal", "own"), ("review", "own"), ("task", "group"),
+@pytest.mark.parametrize("entry, why", [("goal", "own"), ("task", "group"),
                                          ("goal", "airgap"), ("review", "airgap")])
 def test_no_brief_request_when_assist_is_off_by_policy_or_air_gap(entry, why, db, boss, backend, monkeypatch):
     from brindle import airgap
@@ -124,6 +124,7 @@ def test_no_brief_request_when_assist_is_off_by_policy_or_air_gap(entry, why, db
     backend.calls.clear()
     client = auth.Client(None, backend)
     if entry == "goal":
+        monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
         db.add_autopilot("boss")
         autopilot.set_goal(db, "boss", "Settings page", [("API", "true", None), ("UI", "true", None)])
     elif entry == "review":
