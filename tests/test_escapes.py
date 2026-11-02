@@ -208,6 +208,7 @@ def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped, mo
     assert merged(repo)
 
 
+@pytest.mark.variant("race: a commit pushed while the reviewer is reading must not inherit its approval")
 def test_a_commit_during_review_gets_no_approval(db, repo, piped):
     setup, _ = piped
     ws = setup(weight="light")
