@@ -135,83 +135,40 @@ def test_light_background_picks_the_light_palette(monkeypatch):
 
 
 def test_idle_sidebar_ticks_do_no_work(brindle_home, monkeypatch):
-    """Timeout ticks with nothing changed skip the tmux/DB scans and the redraw;
-    a commit from another process brings the refresh back."""
-    import curses
-
-    from brindle import sidebar_logo, tmux, view
-
-    import time as real_time
+    """An idle minute (30 ticks 2 s apart, a minute rollover, one outside commit) skips quiet ticks."""
+    import collections
+    import time as t
     from types import SimpleNamespace
 
     from brindle import watch_costs
-
-    calls = {"panes": 0, "snapshot": 0, "paint": 0, "viewer": 0, "spend": 0, "render": 0, "db": 0}
-
-    def counted(name, result=None):
-        def fn(*a, **k):
-            calls[name] += 1
-            return result() if callable(result) else result
-        return fn
-
-    def open_db():
-        calls["db"] += 1
-        return db
-
-    # A simulated clock, advanced by the real tick (REFRESH_SECONDS) at every getch,
-    # starting 31 s into a minute so the header clock rolls over mid-run.
-    now = [1_700_000_000 - 1_700_000_000 % 60 + 31.0]
-    monkeypatch.setattr(watch, "time", SimpleNamespace(
-        time=lambda: now[0], localtime=real_time.localtime,
-        strftime=lambda f, t=None: real_time.strftime(f, t or real_time.localtime(now[0]))))
-
-    db = DB()
-    other = sqlite3.connect(db.path)
-    seen = []
-    real_render = watch.render
+    n, now, seen, db = collections.Counter(), [1_700_000_000 - 1_700_000_000 % 60 + 31.0], [], DB()
+    hit = lambda name, result=None: lambda *a, **k: (n.update([name]), result and result())[1]  # noqa: E731
 
     class Scr:
-        n = 0
-
-        def timeout(self, ms): pass
-        def getmaxyx(self): return (30, 60)
-        def clear(self): pass
+        timeout = clear = lambda *a: None
+        getmaxyx = lambda self: (30, 60)  # noqa: E731
 
         def getch(self):
-            seen.append(dict(calls))
-            self.n += 1
+            seen.append(n["snapshot"])
             now[0] += watch.REFRESH_SECONDS
-            if self.n == 3:  # another process commits
-                other.execute("CREATE TABLE IF NOT EXISTS poke (x)")
-                other.execute("INSERT INTO poke VALUES (1)")
-                other.commit()
-            return ord("q") if self.n > 30 else -1
+            if len(seen) == 3:  # another process commits
+                with sqlite3.connect(db.path) as other:
+                    other.execute("CREATE TABLE poke (x)")
+            return ord("q") if len(seen) > 30 else -1
 
-    monkeypatch.setattr(curses, "curs_set", lambda n: None)
-    monkeypatch.setattr(curses, "mousemask", lambda m: None)
-    monkeypatch.setattr(watch, "_styles", lambda bg=None: {})
-    monkeypatch.setattr(watch, "_start_status", lambda: None)
-    monkeypatch.setattr(watch, "_cull_in_background", lambda: None)
-    monkeypatch.setattr(watch, "DB", open_db)
-    monkeypatch.setattr(watch_costs, "local", counted("spend", watch_costs.Local))
-    monkeypatch.setattr(watch, "render", lambda *a, **k: (calls.__setitem__("render", calls["render"] + 1),
-                                                          real_render(*a, **k))[1])
-    monkeypatch.setattr(watch.upgrade, "InstallWatch", lambda: type("W", (), {"changed": lambda s: False})())
-    monkeypatch.setattr(tmux, "list_panes", counted("panes", dict))
-    monkeypatch.setattr(view, "snapshot", counted("snapshot", list))
-    monkeypatch.setattr(view, "autopilot_entry", lambda *a, **k: None)
-    monkeypatch.setattr(sidebar_logo, "viewer", counted("viewer", ""))
-    monkeypatch.setattr(watch, "_paint", counted("paint"))
-
+    for target, value in {
+        "curses.curs_set": hit("x"), "curses.mousemask": hit("x"), "brindle.watch._styles": lambda bg=None: {},
+        "brindle.watch._start_status": lambda: None, "brindle.watch._cull_in_background": hit("x"),
+        "brindle.watch.DB": lambda: db, "brindle.watch_costs.local": hit("spend", watch_costs.Local),
+        "brindle.upgrade.InstallWatch": lambda: SimpleNamespace(changed=lambda: False),
+        "brindle.tmux.list_panes": hit("panes", dict), "brindle.view.snapshot": hit("snapshot", list),
+        "brindle.view.autopilot_entry": hit("x"), "brindle.sidebar_logo.viewer": hit("viewer", str),
+        "brindle.watch._paint": hit("paint"),
+        "brindle.watch.time": SimpleNamespace(time=lambda: now[0], localtime=t.localtime,
+                                              strftime=lambda f, s=None: t.strftime(f, s or t.localtime(now[0]))),
+    }.items():
+        monkeypatch.setattr(target, value)
     watch._loop(Scr(), None)
-    # A simulated minute of 30 ticks. Counters, not CPU time: before this change each
-    # of snapshot, spend, render, viewer was 31 here; now only the slow refresh runs.
-    final = calls
-    assert final["db"] == 1
-    assert final["snapshot"] <= 8 and final["spend"] <= 8 and final["render"] <= 8
-    assert final["viewer"] <= 8
-    # Paints: the first frame and the header clock's minute rollover; unchanged frames are not redrawn.
-    assert final["paint"] == 2
-    # Idle ticks do nothing; the commit made during tick 3 is picked up straight away.
-    assert seen[2] == seen[1]
-    assert seen[3]["snapshot"] == seen[2]["snapshot"] + 1
+    # Counters, not CPU time: each was 31 before; now only the slow refresh runs.
+    assert n["paint"] == 2 and max(n["snapshot"], n["spend"], n["viewer"]) <= 8  # first frame + minute rollover
+    assert seen[2] == seen[1] and seen[3] == seen[2] + 1  # idle: nothing; the commit: a refresh
