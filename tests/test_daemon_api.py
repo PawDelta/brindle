@@ -309,7 +309,7 @@ def seeded(db, repo, monkeypatch):
     db.add_autopilot("r1")
     db.update_autopilot("r1", goal="ship the thing")
     key = knowledge.repo_key(str(repo))
-    knowledge.record_decision(db, key, "storage", "use sqlite", "simple")
+    knowledge.record_decision(db, key, "storage", "use sqlite", "simple", session="r1")
     kb_mod.add_source(db, key, "folder", str(repo))
     monkeypatch.setattr(identity_lock, "locked_by", lambda a: "other@example.com" if a == "w2" else None)
     monkeypatch.setattr(doctor, "checks", lambda r, db=None: [doctor.Check("ok", "python", "3.12")])
@@ -336,7 +336,7 @@ def seeded(db, repo, monkeypatch):
     ("/v1/agents/w2", lambda b, s: b["locked"] == "other@example.com" and b["tokens"] is None),
     ("/v1/agents/nope", lambda b, s: b["error"]["code"] == "not_found"),
     ("/v1/workspaces/{ws}/diff", lambda b, s: b["base"] == "main" and b["diff"] == ""),
-    ("/v1/decisions", lambda b, s: [d["topic"] for d in b] == ["storage"]),
+    ("/v1/decisions", lambda b, s: [(d["topic"], d["author_session"]) for d in b] == [("storage", "r1")]),
     ("/v1/kb/sources", lambda b, s: [x["kind"] for x in b] == ["folder"]),
     ("/v1/profiles", lambda b, s: "developer" in [p["name"] for p in b] and "env" not in b[0]),
     ("/v1/config", lambda b, s: "repo" in b and b["repo"]["default_agent"] == "developer"),
@@ -826,22 +826,68 @@ def test_doc_map_proxies_only_a_neighbourhood_without_caching(brindle_home, monk
     def api(method, path, body=None, **kw):
         url = urlsplit(path)
         calls.append((method, url.path, parse_qs(url.query), body))
-        return {"nodes": [{"id": str(len(calls)), "kind": "path", "path": "src/cache"}], "edges": []}
+        if url.path == "/analysis-docs":
+            return {"docs": [{"doc_id": "d", "source": {"kind": "task", "ref": "feat/cache"},
+                              "created_by": "u1", "paths": ["src/cache"]}]}
+        return {"nodes": [{"id": str(len(calls) // 2), "type": "path", "label": "src/cache"},
+                          {"id": "d", "type": "doc", "kind": "feature", "label": "Cache design"},
+                          {"id": "topic:cache", "type": "topic", "label": "cache"}],
+                "edges": [{"from": "d", "to": str(len(calls) // 2), "kind": "mentions"},
+                          {"from": "d", "to": "topic:cache", "kind": "topic"}]}
 
     monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(sub="u1"))
     monkeypatch.setattr(analysis_docs, "api", api)
     query = {"scope_kind": "group", "scope_id": "t1", "paths": json.dumps(["src/cache", "src/db"]), "depth": "1"}
-    for extra in ({"paths": "[]"}, {"paths": "broken"}, {"depth": "2"}, {"scope_id": ""}):
+    for extra in ({"paths": "broken"}, {"depth": "2"}, {"scope_id": ""}):
         assert _get("/v1/analysis-docs/map", AUTH, urlencode(query | extra))[0] == 400
     assert calls == []
     for version in ("1", "2"):
         code, body = _get("/v1/analysis-docs/map", AUTH, urlencode(query | {"local_decisions": "private"}))
         assert code == 200 and body["nodes"][0]["id"] == version
+        assert [(n["kind"], n["title"]) for n in body["nodes"]] == [("path", "src/cache"), ("doc", "Cache design")]
+        assert body["nodes"][0]["path"] == "src/cache"
+        assert body["nodes"][1]["source"] == {"kind": "task", "ref": "feat/cache"}
+        assert body["nodes"][1]["created_by"] == "u1"
+        assert body["edges"] == [{"source": "d", "target": version, "kind": "mentions"}]
     upstream = query | {"paths": "src/cache,src/db"}       # the server splits its list on commas
-    assert calls == [("GET", "/analysis-docs/map", {k: [v] for k, v in upstream.items()}, None)] * 2
+    assert calls == [("GET", "/analysis-docs", {k: [query[k]] for k in ("scope_kind", "scope_id")}, None),
+                     ("GET", "/analysis-docs/map", {k: [v] for k, v in upstream.items()}, None)] * 2
     monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: (_ for _ in ()).throw(RuntimeError("no plan")))
     assert _get("/v1/analysis-docs/map", AUTH, urlencode(query))[0] == 402
-    assert len(calls) == 2
+    assert len(calls) == 4
+
+
+def test_doc_map_whole_scope_uses_list_with_provenance_and_connections(brindle_home, monkeypatch):
+    from urllib.parse import parse_qs, urlencode, urlsplit
+
+    from brindle.pro import analysis_docs
+
+    calls = []
+    source = {"kind": "task", "ref": "feat/cache", "session": "session-1"}
+    doc = {"doc_id": "d1", "title": "Cache", "source": source, "created_by": "u1",
+           "created_at": 123, "scope": {"kind": "group", "id": "t1"},
+           "paths": ["./src/cache.py", "src/declared.py"],
+           "mentions": {"files": ["src/cache.py"]}, "supersedes": ["d2"], "related": ["absent"]}
+
+    def api(method, path, body=None, **kw):
+        url = urlsplit(path)
+        calls.append((url.path, parse_qs(url.query)))
+        assert url.path == "/analysis-docs"
+        return {"docs": [doc, {"doc_id": "d2", "title": "Earlier cache"}]}
+
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(sub="u1"))
+    monkeypatch.setattr(analysis_docs, "api", api)
+    query = {"scope_kind": "group", "scope_id": "t1"}
+    code, body = _get("/v1/analysis-docs/map", AUTH, urlencode(query))
+    assert code == 200
+    nodes = {n["id"]: n for n in body["nodes"]}
+    assert nodes["d1"] == {**doc, "id": "d1", "kind": "doc", "paths": ["src/cache.py", "src/declared.py"]}
+    assert nodes["d2"]["scope"] == {"kind": "group", "id": "t1"}
+    assert {tuple(e.values()) for e in body["edges"]} == {
+        ("d1", "path:src/cache.py", "mentions"), ("d1", "path:src/declared.py", "mentions"), ("d1", "d2", "supersedes")}
+    assert calls == [("/analysis-docs", {k: [v] for k, v in query.items()})]
+    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: (_ for _ in ()).throw(RuntimeError("no plan")))
+    assert _get("/v1/analysis-docs/map", AUTH, urlencode(query))[0] == 402
 
 
 def test_docs_with_no_scope_lists_each_readable_scope_once_per_doc(brindle_home, monkeypatch):
