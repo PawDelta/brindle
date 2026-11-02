@@ -858,7 +858,7 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
     spend_at = 0.0
     poller, bar, delivered_at = _start_status(), None, 0.0
     scoped_at = 0.0
-    seen_version, refreshed_at, quiet = None, 0.0, False
+    seen_version, refreshed_at, quiet, last_clock = None, 0.0, False, ""
     last_frame: tuple | None = None  # what is on screen; None forces a repaint
     if poller is not None and os.environ.get("TMUX_PANE"):
         from brindle.pro import status as org_status
@@ -966,7 +966,8 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
         if stdscr.getmaxyx() != (h, w):
             continue  # resized while this frame was laid out: lay it out again
         page = lines[offset:offset + visible]
-        frame = (h, w, braid[1], offset, selected, top, content_top, visible, show_above,
+        last_clock = time.strftime("%H:%M")  # the header's clock: a new minute is a new frame
+        frame = (last_clock, h, w, braid[1], offset, selected, top, content_top, visible, show_above,
                  show_below, tuple((ln.text, ln.style) for ln in page),
                  tuple((ln.text, ln.style) for ln in bottom))
         try:
@@ -989,11 +990,15 @@ def _loop(stdscr, repo_root: str | None, sidebar: bool = False,
         key = stdscr.getch()
         # Nothing typed, nothing committed to the database, no notice to expire and
         # the slow tmux refresh not yet due: this tick has nothing to do.
-        quiet = (key == -1 and not (notice and time.time() < notice_until)
-                 and not stale and db.data_version() == seen_version
-                 and time.time() - refreshed_at < IDLE_SECONDS)
-        if quiet:
-            continue
+        # Waiting here, not looping back, keeps a quiet tick from re-rendering or
+        # re-totalling spend; it ends on a key, a commit, or the slow refresh being due.
+        quiet = False
+        while (key == -1 and not stale and not (notice and time.time() < notice_until)
+               and db.data_version() == seen_version
+               and time.time() - refreshed_at < IDLE_SECONDS
+               and time.strftime("%H:%M") == last_clock):
+            quiet = True
+            key = stdscr.getch()
         if key == curses.KEY_RESIZE:
             shown = last_frame = None
         if key != -1 or any(a["status"] in ("processing", "starting") for ws in snap
