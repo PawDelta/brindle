@@ -87,7 +87,9 @@ function firstLine(notes: string | null): string | null {
 
 const KEEPS = "Your sessions and agents keep running while brindle restarts.";
 
-function copy(phase: UpdatePhase, version: string, notes: string | null): [string, string] {
+/* `rollback`: the feed was pointed back at this older release, which the headline says. */
+function copy(phase: UpdatePhase, version: string, notes: string | null, rollback: boolean): [string, string] {
+  const available = `brindle ${version} is available${rollback ? " (rollback)" : ""}`;
   switch (phase.kind) {
     case "downloading":
       return [`Downloading brindle ${version}…${phase.pct === null ? "" : ` ${phase.pct}%`}`, "You can keep working. brindle restarts when the update is installed."];
@@ -96,9 +98,9 @@ function copy(phase: UpdatePhase, version: string, notes: string | null): [strin
     case "restarting":
       return [`Restarting into brindle ${version}…`, "The app reopens in a moment, right where you left it."];
     case "failed":
-      return [`brindle ${version} is available`, `The update didn't install: ${phase.message}`];
+      return [available, `The update didn't install: ${phase.message}`];
     case "idle":
-      return [`brindle ${version} is available`, [firstLine(notes), KEEPS].filter(Boolean).join(" ")];
+      return [available, [firstLine(notes), KEEPS].filter(Boolean).join(" ")];
   }
 }
 
@@ -112,9 +114,7 @@ export function AppUpdateBanner({ openUrl }: { openUrl: OpenUrl }) {
   const { status, version, install } = offer;
   const { phase } = install;
   if (status.later && phase.kind === "idle") return null;
-  // A rollback (an older release the feed was pointed back at) says so: "brindle X.Y.Z is available (rollback)".
-  const shown = status.available?.rollback ? `${version} (rollback)` : version;
-  const [headline, detail] = copy(phase, shown, status.available?.notes ?? null);
+  const [headline, detail] = copy(phase, version, status.available?.notes ?? null, status.available?.rollback ?? false);
   const busy = phase.kind === "downloading" || phase.kind === "installing" || phase.kind === "restarting";
   const bar = phase.kind === "downloading" && phase.pct !== null ? phase.pct : 100;
   return (
