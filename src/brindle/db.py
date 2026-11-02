@@ -1475,6 +1475,11 @@ class DB:
                  a.tmux_server, a.config_home),
             )
 
+    def data_version(self) -> int:
+        """Changes whenever another connection commits to the database: a
+        constant-time way to ask "did anything change since I last looked"."""
+        return self.conn.execute("PRAGMA data_version").fetchone()[0]
+
     def get_agent(self, agent_id: str) -> Agent | None:
         row = self.conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()
         return _load(Agent, row) if row else None

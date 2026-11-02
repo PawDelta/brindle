@@ -8,6 +8,7 @@ import pytest
 
 from brindle import agents, knowledge, pipeline
 from brindle.db import Agent, Task, Workspace
+from conftest import sh
 from brindle.pro import analysis_docs as ad
 from brindle.pro import auth, credentials
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
@@ -184,8 +185,11 @@ def test_reviewer_brief_has_the_docs_and_decisions_and_a_stale_doc_holds_the_ver
     key = knowledge.repo_key(str(repo))
     knowledge.record_decision(db, key, "Cache TTL", "Keep the TTL at 60s", paths=["src/auth.py"])
     knowledge.record_decision(db, key, "Docs style", "Plain prose", paths=["docs/**"])
-    remote.routes["POST /analysis-docs/brief"] = [(200, {"block": "The cache design doc says TTL 60s.",
+    remote.routes["POST /analysis-docs/brief"] = [(200, {"block": "The cache design doc for src/auth.py says TTL 60s.",
                                                         "cited": [{"doc_id": "d1", "version": 1}]})]
+    (repo / "src").mkdir()                          # the branch's diff names the doc's file
+    (repo / "src/auth.py").write_text("TTL = 60\n")
+    sh("git checkout -qb feat/rev && git add -A && git commit -qm auth", repo)
     ws = Workspace("ws-rev", str(repo), "feat/rev", "branch", "feat/rev", "main", str(repo), None, "t", 0.0)
     db.add_workspace(ws)
     worker = add(db, ws, "w1")
@@ -201,7 +205,7 @@ def test_reviewer_brief_has_the_docs_and_decisions_and_a_stale_doc_holds_the_ver
     agents.request_review(db, None, ws)
     [prompt] = prompts
     assert "Keep the TTL at 60s" in prompt and "Plain prose" not in prompt
-    assert "The cache design doc says TTL 60s." in prompt
+    assert "The cache design doc for src/auth.py says TTL 60s." in prompt
     assert calls(remote, "POST /analysis-docs/brief")[0]["paths"] == ["src/auth.py"]
     remote.version = 2                              # d1 changes before the verdict
     remote.routes["POST /analysis-docs/versions"] = lambda f, h: (200, {"versions": {"d1": remote.version}})
