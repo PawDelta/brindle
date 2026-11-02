@@ -52,6 +52,7 @@ from typing import Callable, Mapping, MutableMapping
 
 from brindle import airgap, ci_adapters, ci_federation, git, model_access
 from brindle.pro import auth, license
+from brindle.redact import mask, mask_data
 from brindle.secrets import SECRET_ENV, SECRET_PREFIXES, is_job_secret, scrub_secrets  # noqa: F401
 
 log = logging.getLogger(__name__)
@@ -686,16 +687,16 @@ class Client:
 
     def events(self, run_token: str, run_id: str, event: dict) -> dict:
         status, body = self._call("POST", f"/ci/runs/{urllib.parse.quote(run_id, safe='')}/events",
-                                  auth.JSONBody(event), run_token)
+                                  auth.JSONBody(mask_data(event)), run_token)
         if status != 200:
             raise _error(status, body)
         return body
 
     def put_result(self, run_token: str, run_id: str, evidence: dict, bundle: bytes | None) -> dict:
         fields = []
-        if bundle is not None:
+        if bundle is not None:      # the code: sent as it is
             fields.append(("bundle", "run.bundle", bundle, "application/octet-stream"))
-        fields.append(("evidence", "evidence.json", json.dumps(evidence, separators=(",", ":")).encode(),
+        fields.append(("evidence", "evidence.json", json.dumps(mask_data(evidence), separators=(",", ":")).encode(),
                        "application/json"))
         status, body = self._call("PUT", f"/ci/runs/{urllib.parse.quote(run_id, safe='')}/result",
                                   multipart(fields), run_token, client=self._uploads)
@@ -720,7 +721,7 @@ class Client:
 
     def put_evidence(self, run_token: str, validation_id: str, evidence: dict) -> dict:
         status, body = self._call("PUT", f"/ci/validations/{urllib.parse.quote(validation_id, safe='')}/evidence",
-                                  auth.JSONBody(evidence), run_token, client=self._uploads)
+                                  auth.JSONBody(mask_data(evidence)), run_token, client=self._uploads)
         if status != 200:
             raise _error(status, body)
         return body
@@ -1015,9 +1016,9 @@ def session_event(db, root_id: str, adapter: ci_adapters.Adapter, *, cwd: str | 
              "commits": count_commits(cwd, base_sha, branch) if cwd and base_sha and branch else 0,
              "provider_error": adapter.provider_error(db, root_id)}
     if question:
-        event["question"] = tail(question, NOTE_MAX)
+        event["question"] = tail(mask(question), NOTE_MAX)     # masked whole, then cut
     if note:
-        event["note"] = tail(note, NOTE_MAX)
+        event["note"] = tail(mask(note), NOTE_MAX)
     return event
 
 
@@ -1295,7 +1296,7 @@ def _run_session(plan: dict, run_token: str, *, repo: str, cwd: str, env: Mutabl
     evidence = {"final_state": final, "milestones": event["milestones"], "usage": event["usage"],
                 "providers": providers_used, "commits": commits}
     if event.get("question"):
-        evidence["question"] = tail(event["question"], NOTE_MAX)
+        evidence["question"] = tail(mask(event["question"]), NOTE_MAX)
     if why and commits:
         log.warning("brindle ci: uploading without a bundle: %s", why)
     result = client.put_result(run_token, run_id, evidence, bundle)
@@ -1342,7 +1343,7 @@ def run_check(check: dict, cwd: str, env: Mapping[str, str], *, popen=subprocess
         output = (out or b"").decode("utf-8", "replace")
         if code == 124:
             output += f"\n(timed out after {timeout}s)"
-    return {"id": check["id"], "exit": code, "output_excerpt": tail(output, OUTPUT_EXCERPT),
+    return {"id": check["id"], "exit": code, "output_excerpt": tail(mask(output), OUTPUT_EXCERPT),
             "duration_s": round(time.monotonic() - t0, 1)}
 
 
@@ -1388,7 +1389,7 @@ def ask_reviewer(reviewer: dict, cwd: str, env: Mapping[str, str],
         return row, {}
     row["model"] = rev.model
     if rev.exit in (None, 0):
-        row["reply"] = tail(rev.reply, REPLY_MAX)
+        row["reply"] = tail(mask(rev.reply), REPLY_MAX)    # masked whole, then cut
     else:
         log.warning("brindle ci: reviewer %s exited %s", reviewer["id"], rev.exit)
     return row, rev.usage

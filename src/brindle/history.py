@@ -141,6 +141,18 @@ def _private_dir(d: Path) -> Path:
     return d
 
 
+def _masked_record(line: str) -> str:
+    """One transcript line with the secrets in its text masked. A JSON record
+    is parsed first, so a value JSON escapes (a quote, a line break) is
+    matched as written; a line that isn't JSON is masked as text."""
+    end = "\n" if line.endswith("\n") else ""
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return mask(line)
+    return json.dumps(mask_data(record), ensure_ascii=False) + end
+
+
 def _copy_transcripts(db: DB, a: Agent) -> list[str]:
     """Gzipped copies of ``a``'s transcripts (and its subagents') under
     ``archive/transcripts/<id>/``, so the conversation outlives the CLI's own
@@ -158,7 +170,7 @@ def _copy_transcripts(db: DB, a: Agent) -> list[str]:
                 io.TextIOWrapper(gz, encoding="utf-8", errors="surrogateescape", newline="") as copy, \
                 open(src, encoding="utf-8", errors="surrogateescape", newline="") as f:
             for line in f:              # the copy keeps no secret the conversation quoted
-                copy.write(mask(line))
+                copy.write(_masked_record(line))
         out.append(str(dest.relative_to(archive_dir())))
     return out
 

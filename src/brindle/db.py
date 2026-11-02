@@ -2139,7 +2139,7 @@ class DB:
                 "INSERT INTO check_cache (workspace_id, sha, command, ok, output, created_at) "
                 "VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id, sha, command) DO UPDATE SET "
                 "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
-                (workspace_id, sha, command, int(ok), output, time.time()),
+                (workspace_id, sha, command, int(ok), mask(output), time.time()),
             )
 
     def get_tree_check(self, repo_root: str, tree: str, command: str):
@@ -2154,7 +2154,7 @@ class DB:
                 "INSERT INTO check_tree_cache (repo_root, tree, command, ok, output, created_at) "
                 "VALUES (?,?,?,?,?,?) ON CONFLICT(repo_root, tree, command) DO UPDATE SET "
                 "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
-                (repo_root, tree, command, int(ok), output, time.time()),
+                (repo_root, tree, command, int(ok), mask(output), time.time()),
             )
 
     def check_duration(self, repo_root: str, command: str) -> float | None:
@@ -2352,7 +2352,7 @@ class DB:
             c.execute(
                 "INSERT OR REPLACE INTO learned_rules (repo_root, key, profile, title, rule, checks, "
                 "findings, branches, status, created_at, decided_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (r.repo_root, r.key, r.profile, r.title, r.rule, r.checks, r.findings, r.branches,
+                (r.repo_root, r.key, r.profile, mask(r.title), mask(r.rule), r.checks, r.findings, r.branches,
                  r.status, r.created_at, r.decided_at))
 
     def learned_rules_mark(self, repo_root: str) -> int:
