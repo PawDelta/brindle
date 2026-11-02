@@ -144,21 +144,25 @@ export function joinLocal(
   return { nodes, edges };
 }
 
-function provenance(node: GraphNode): string[] {
+/* Where a node came from. With `unrecorded` false (the details panel), a
+   missing field is left out instead of named. */
+function provenance(node: GraphNode, unrecorded = true): string[] {
+  const missing = (text: string) => (unrecorded ? text : "");
+  const line = (...parts: (string | false | undefined)[]) => parts.filter(Boolean).join(" · ");
   const date = (seconds?: number) => {
     const value = seconds === undefined ? null : new Date(seconds * 1000);
-    return value && Number.isFinite(value.getTime()) ? value.toISOString().slice(0, 10) : "Date unrecorded";
+    return value && Number.isFinite(value.getTime()) ? value.toISOString().slice(0, 10) : missing("Date unrecorded");
   };
-  const scope = (kind?: string) => kind === "user" || kind === "personal" ? "Personal" : kind === "group" || kind === "team" ? "Team" : kind === "org" ? "Org" : kind || "Scope unrecorded";
+  const scope = (kind?: string) => kind === "user" || kind === "personal" ? "Personal" : kind === "group" || kind === "team" ? "Team" : kind === "org" ? "Org" : kind || missing("Scope unrecorded");
   if (node.kind === "path") return [];
-  if (node.kind === "decision") return [node.decision.author_session ? `Session ${node.decision.author_session}` : "Session/author unrecorded", `Local decision · ${date(node.decision.created_at)}`];
-  if (node.kind === "imported") return [node.path, `Imported on this device · ${scope(node.source.visibility)} · ${date(node.source.added_at)}`];
+  if (node.kind === "decision") return [node.decision.author_session ? `Session ${node.decision.author_session}` : missing("Session/author unrecorded"), line("Local decision", date(node.decision.created_at))].filter(Boolean);
+  if (node.kind === "imported") return [node.path, line("Imported on this device", scope(node.source.visibility), date(node.source.added_at))];
   const source = node.source;
   return [
-    [source?.ref, source?.session && `Session ${source.session}`].filter(Boolean).join(" · ") || "Session/branch unrecorded",
-    node.created_by || "Author/agent unrecorded",
-    `${scope(node.scope?.kind)}${node.scope && node.scope.kind !== "user" ? ` ${node.scope.name || node.scope.id}` : ""} · ${date(node.created_at)}`,
-  ];
+    line(source?.ref, source?.session && `Session ${source.session}`) || missing("Session/branch unrecorded"),
+    node.created_by || missing("Author/agent unrecorded"),
+    line(`${scope(node.scope?.kind)}${node.scope && node.scope.kind !== "user" ? ` ${node.scope.name || node.scope.id}` : ""}`, date(node.created_at)),
+  ].filter(Boolean);
 }
 
 /* Colour says which group a node belongs to; shape says what it is. */
@@ -196,8 +200,8 @@ function curve(a: Point, b: Point, arrow: boolean): string {
 type View = { k: number; x: number; y: number };
 type Gesture = { node: number | null; start: { x: number; y: number }; grab: { x: number; y: number }; moved: boolean };
 const MAX_ZOOM = 4, MIN_ZOOM = 0.2, FIT_PAD = 0.04, FIT_MAX = 2, LEGEND_GROUPS = 8, PANEL_W = 256, LABEL_ZOOM = 0.65;
-/* The page scrolls, so the frame takes most of the window rather than a
-   height from its parent. */
+/* The frame fills a parent that has a height, and otherwise (the Knowledge
+   page scrolls) takes most of the window. */
 const FRAME_H = "max(380px, 70vh)";
 const control = "grid h-7 w-7 place-items-center rounded-md border border-line-strong bg-canvas-2 text-sm leading-none text-ink-2 hover:bg-surface-2 hover:text-ink focus-visible:outline-2 focus-visible:outline-branch";
 const halo = { textShadow: "0 0 3px var(--canvas-2), 0 0 2px var(--canvas-2), 0 0 1px var(--canvas-2)" };
@@ -213,11 +217,13 @@ function fitView(s: Sim, w: number, h: number): View {
 export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void }) {
   const frame = useRef<HTMLDivElement>(null);
   /* The frame's width, and its height above the legend. */
-  const [size, setSize] = useState({ w: 800, h: 420 });
+  const [size, setSize] = useState({ w: 800, h: 420, frameH: 480 });
   const legend = useRef<HTMLDivElement>(null);
   /* The picture is drawn about as wide as the frame, in steps of a quarter
      so that small resizes keep it; a different shape lays it out again. */
-  const shape = Math.round(Math.min(3.5, Math.max(1, size.w / Math.max(size.h, 1))) * 4) / 4;
+  /* From the whole frame, so the legend re-wrapping (when the panel opens)
+     doesn't lay the graph out again. */
+  const shape = Math.round(Math.min(3.5, Math.max(1, size.w / Math.max(size.frameH - 56, 1))) * 4) / 4;
   /* The settled start is the same for the same graph and shape; dragging
      moves the nodes in this object from then on, outside React's render. */
   const sim = useMemo(() => settle(createSim(nodes, edges, shape)), [nodes, edges, shape]);
@@ -258,7 +264,7 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
     if (!el) return;
     const measure = () => {
       const below = legend.current ? legend.current.offsetHeight + 8 : 0;
-      if (el.clientWidth && el.clientHeight) setSize({ w: el.clientWidth, h: Math.max(160, el.clientHeight - below) });
+      if (el.clientWidth && el.clientHeight) setSize({ w: el.clientWidth, h: Math.max(160, el.clientHeight - below), frameH: el.clientHeight });
     };
     measure();
     if (typeof ResizeObserver === "undefined") return;
@@ -404,6 +410,8 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
     // A drag that ends over its node is not a click; a key press always is.
     if (swallow.current && e.detail !== 0) { swallow.current = false; return; }
     setPicked({ nodes, id: nodes[i].id });
+    // Hold the view still while the panel opens and the legend re-wraps.
+    setManual({ sim, view: live.current.view });
     reveal(i, true);
     onOpen(nodes[i]);
   };
@@ -423,7 +431,7 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
       role="group"
       aria-label="Knowledge graph"
       className="relative cursor-grab touch-none select-none overflow-hidden rounded-lg border border-line bg-canvas-2 active:cursor-grabbing"
-      style={{ height: FRAME_H }}
+      style={{ height: "100%", minHeight: FRAME_H }}
       onPointerDown={down}
       onPointerMove={move}
       onPointerUp={up}
@@ -485,7 +493,7 @@ export function MapGraph({ nodes, edges, onOpen }: { nodes: GraphNode[]; edges: 
           <svg aria-hidden width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9" /></svg>
         </button>
       </div>
-      <div ref={legend} className="pointer-events-none absolute bottom-2 left-2 flex max-w-[calc(100%-16px)] flex-col gap-1 rounded-md bg-canvas-2/90 px-2 py-1 text-[11px] text-ink-3">
+      <div ref={legend} className="pointer-events-none absolute bottom-2 left-2 flex flex-col gap-1 rounded-md bg-canvas-2/90 px-2 py-1 text-[11px] text-ink-3" style={{ maxWidth: chosen === undefined ? "calc(100% - 16px)" : `max(160px, calc(100% - ${PANEL_W + 16}px))` }}>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           {(Object.keys(KINDS) as (keyof typeof KINDS)[]).filter((k) => kinds.has(k)).map((k) => (
             <span key={k} className="inline-flex items-center gap-1.5"><Mark kind={k} size={9} colour="var(--ink-3)" />{KINDS[k].label}</span>
@@ -523,7 +531,7 @@ function Details({ node, full, group, neighbours, onClose }: { node: GraphNode; 
       <button type="button" aria-label="Close details" title="Close details" className="rounded-md px-1.5 text-sm leading-none text-ink-3 hover:bg-surface-2 hover:text-ink" onClick={onClose}>×</button>
     </div>
     <p className="break-words text-sm font-medium text-ink">{full}</p>
-    {provenance(node).map((line, i) => <p key={i} className="break-words text-ink-3">{line}</p>)}
+    {provenance(node, false).map((line, i) => <p key={i} className="break-words text-ink-3">{line}</p>)}
     <p className="flex min-w-0 items-center gap-1.5 text-ink-3">
       <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ background: toneOf(group) }} />
       <span className="truncate">{group.tone === null ? "Unconnected" : `Group: ${group.name} · ${group.size}`}</span>

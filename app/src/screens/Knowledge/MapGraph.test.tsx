@@ -58,7 +58,9 @@ it("highlights a hovered node's neighbourhood, selects on click, moves a dragged
 
   fireEvent.click(node("d"));
   expect(onOpen).toHaveBeenCalledWith(nodes[1]);
-  expect(screen.getByRole("complementary", { name: "Node details" }).textContent).toContain("src/cache");
+  const panel = screen.getByRole("complementary", { name: "Node details" }).textContent;
+  expect(panel).toContain("src/cache");
+  expect(panel).not.toMatch(/unrecorded/);
   fireEvent.click(screen.getByRole("button", { name: "Close details" }));
   expect(screen.queryByRole("complementary")).toBeNull();
 
