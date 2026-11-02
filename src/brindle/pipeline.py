@@ -219,17 +219,25 @@ def _set_alongside(ws_id: str, state: dict) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def checks_started(ws: Workspace, sha: str) -> None:
+def _for_report(db: DB, ws: Workspace, sha: str) -> dict:
+    """The state for ``ws`` at ``sha`` as of its latest report (the piped
+    worker's ``reviewing_since``, whatever stage it has reached since), or a
+    fresh one for a new commit or report."""
+    worker = piped_worker(db, ws)
+    report = worker.reviewing_since if worker is not None else None
+    state = _alongside(ws.id)
+    if state.get("sha") == sha and state.get("report") == report:
+        return state
+    return {"sha": sha, "report": report}
+
+
+def checks_started(db: DB, ws: Workspace, sha: str) -> None:
     """A run is checking ``ws`` at ``sha`` beside its reviewer: a verdict on
-    ``sha`` waits for it. Held verdicts for ``sha`` are kept (a second run of
-    the same commit takes over a superseded one's)."""
+    ``sha`` waits for it. Another run for the same report (a required second
+    review's, started late) keeps what the first one found and sent, so the
+    worker isn't sent the same failures twice; a new report starts afresh."""
     with merge_lock(ws.id):
-        state = _alongside(ws.id)
-        if state.get("sha") != sha:
-            state = {"sha": sha}
-        state.pop("checks", None)
-        state.pop("sent", None)
-        _set_alongside(ws.id, state)
+        _set_alongside(ws.id, _for_report(db, ws, sha))
 
 
 def checks_finished(db: DB, ws: Workspace, sha: str, summary: str | None) -> None:
@@ -238,9 +246,7 @@ def checks_finished(db: DB, ws: Workspace, sha: str, summary: str | None) -> Non
     them, as ``on_review`` would have."""
     ready = False
     with merge_lock(ws.id):
-        state = _alongside(ws.id)
-        if state.get("sha") != sha:
-            state = {"sha": sha}
+        state = _for_report(db, ws, sha)
         held = state.pop("held", [])
         state["checks"] = summary
         _set_alongside(ws.id, state)
@@ -1060,9 +1066,11 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
     failed, sent = _checks_for(ws, sha) if sha else (None, False)
     needs_sup = not approved and has_supervisor_action(summary)
     asked = "requested changes"
-    if failed:
-        if approved and sent:
+    if failed and sent:
+        if approved:
             return True, False   # the worker already has these failures, with another verdict
+        failed = None   # only this review's findings are new to the worker
+    if failed:
         asked = ("approved it, but the repo's checks failed" if approved
                  else "requested changes, and the repo's checks failed")
         summary = (f"{summary}\n\n" if not approved else "") + failed

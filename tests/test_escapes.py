@@ -127,12 +127,20 @@ def merged(repo):
     return "new.py" in sh("git ls-tree --name-only HEAD", repo)
 
 
-def test_a_weight_without_a_second_reviewer_gets_one_review(db, repo, piped):
+@pytest.mark.parametrize("moved", [False, True])
+def test_a_weight_without_a_second_reviewer_gets_one_review(db, repo, piped, moved):
     setup, started = piped
-    setup(second={"heavy": "reviewer-codex"}, weight="light")
+    ws = setup(second={"heavy": "reviewer-codex"}, weight="light")
     agents.report_result(db, "w1", "added new.py")
     assert started == [None]
+    if moved:   # the branch moves on between the reviewer's start and its verdict
+        db.update_agent("rev0", review_sha=gates.head(ws))
+        (Path(ws.path) / "later.py").write_text("y = 2\n")
+        sh("git add later.py && git commit -qm later", Path(ws.path))
     agents.submit_review(db, "rev0", True, "lgtm")
+    if moved:   # the new head needs a review of its own
+        assert not merged(repo) and gates.verdict(db, ws.id, gates.head(ws)) is None
+        return
     assert merged(repo)
     assert [(e["kind"], e["agent_id"]) for e in bus.tail(db, kinds=(
         "agent.reported", "review.submitted", "pipeline.merged"))] == [

@@ -2481,10 +2481,13 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
         close_later(caller_id)
         return gone
     try:
-        sha = gates.head(ws)
+        head = gates.head(ws)
     except git.GitError:   # removed just now
         close_later(caller_id)
         return gone
+    # For the commit it was started on: a branch that moved on since then
+    # needs a review of its own, not this one carried over to its new head.
+    sha = caller.review_sha or head
     db.add_review(ws.id, sha, caller.id, approved, summary)
     bus.publish_agent(db, "review.submitted", caller.id, approved=approved, sha=sha)
     if approved:
@@ -3129,7 +3132,7 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
             # verdict waits for them (pipeline.checks_finished), and the
             # worker gets both in one message. A newer request cannot slip
             # between the claim check and spawn.
-            pipeline.checks_started(ws, sha)
+            pipeline.checks_started(db, ws, sha)
             with review_dispatch_lock(ws.id):
                 if not _review_requested(ws.id, profile, request_id):
                     return None
