@@ -396,6 +396,7 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
     out.extend(quota_checks(repo_root))
     out.extend(airgap_checks(repo_root))
     out.extend(agent_env_checks(repo_root))
+    out.extend(tmux_cwd_checks())
     update = updates.notice(refresh=True)
     if update:
         out.append(Check(OK, "brindle update", update))
@@ -679,6 +680,23 @@ def airgap_checks(repo_root: str | None) -> list[Check]:
                              f"none at {path}: with a Team license, delegations and merges are "
                              "refused until the org's policy is put there"))
     return out
+
+
+def tmux_cwd_checks() -> list[Check]:
+    """Whether the tmux server brindle uses sits in a deleted directory (see
+    tmux.cwd_gone). brindle's own panes change directory themselves, but any
+    other new window on that server starts in the dead copy."""
+    from brindle import tmux
+
+    try:
+        gone = tmux.cwd_gone(tmux.current_server())
+    except tmux.TmuxError:
+        return []
+    if not gone:
+        return []
+    return [Check(WARN, "tmux server directory",
+                  "the tmux server's working directory was deleted, so new windows outside brindle start in "
+                  "a directory that no longer exists. Restart the server (`tmux kill-server`) when no agents run.")]
 
 
 def agent_env_checks(repo_root: str | None) -> list[Check]:

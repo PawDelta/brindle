@@ -14,7 +14,12 @@ from brindle import agents, doctor, secrets, tmux
 
 PERSONS = {"SLACK_BOT_TOKEN": "xoxb-secret", "JIRA_API_TOKEN": "jira-secret",
            "HTTPS_PROXY": "http://proxy.corp:3128", "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock",
-           "MY_TOOL_HOME": "/opt/tool", "STRAY_SETTING": "x"}
+           "MY_TOOL_HOME": "/opt/tool", "STRAY_SETTING": "x",
+           # secret-looking, but where Claude Code's cloud backends find their identity
+           "AWS_SHARED_CREDENTIALS_FILE": "/c/aws", "AWS_CONTAINER_CREDENTIALS_FULL_URI": "http://169.254.170.23/v1",
+           "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT": "sa@p.iam"}
+CLOUD = ("AWS_SHARED_CREDENTIALS_FILE", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+         "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT")
 
 
 def run_pane(session, cwd, out, **kw):
@@ -24,7 +29,9 @@ def run_pane(session, cwd, out, **kw):
     channel = f"brindle-env-{out.name}"
     tmux.new_window(session, out.name, str(cwd),
                     ["/bin/sh", "-c", f'env > "$0"; {t} wait-for -S {channel}', str(out)],
-                    {"BRINDLE_AGENT_ID": "a1"}, keep=secrets.provider_credentials("claude"), **kw)
+                    # a profile's env.TEAM_SLACK_TOKEN: set by the launch, not inherited
+                    {"BRINDLE_AGENT_ID": "a1", "TEAM_SLACK_TOKEN": "from-profile"},
+                    keep=secrets.provider_credentials("claude"), **kw)
     tmux._tmux("wait-for", channel)
     return dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
 
@@ -47,6 +54,8 @@ def test_an_agent_pane_never_sees_the_persons_secrets(tmp_path, monkeypatch, mod
     assert not {"SLACK_BOT_TOKEN", "JIRA_API_TOKEN"} & set(got)
     assert got["HTTPS_PROXY"] == PERSONS["HTTPS_PROXY"] and got["SSH_AUTH_SOCK"] == PERSONS["SSH_AUTH_SOCK"]
     assert got["MY_TOOL_HOME"] == "/opt/tool" and got["BRINDLE_AGENT_ID"] == "a1"
+    assert "TEAM_SLACK_TOKEN" not in got
+    assert {k: got.get(k) for k in CLOUD} == {k: PERSONS[k] for k in CLOUD}
     assert ("STRAY_SETTING" in got) == (mode == "report")
     # The person's own server keeps their variables for their own windows.
     shown = tmux._tmux("show-environment", "-g").stdout

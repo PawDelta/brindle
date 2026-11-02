@@ -11,8 +11,7 @@ An agent's pane gets an allowlisted environment (env_allowed, plus a repo's
 unless it is its own provider's credential, and with ``agent_env_mode:
 enforce`` nothing else off the allowlist does either (report mode, the
 default, only logs those names: record_env). The person's own tmux server is
-never changed; a server brindle starts itself starts without secrets
-(server_environ).
+never changed.
 """
 
 from __future__ import annotations
@@ -65,6 +64,15 @@ CLAUDE_CLOUD_CREDENTIALS = (
     "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_AUTH_TOKEN", "ANTHROPIC_FOUNDRY_RESOURCE",
     "ANTHROPIC_FOUNDRY_BASE_URL", "AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_CLIENT_SECRET",
     "AZURE_FEDERATED_TOKEN_FILE",
+    # where the cloud SDKs find (or are handed) an identity: secret-looking names, but
+    # dropping one changes which identity a pane signs in as (see cloud_login.IDENTITY_ENV)
+    "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE", "AWS_DEFAULT_PROFILE",
+    "AWS_CONTAINER_CREDENTIALS_FULL_URI", "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+    "AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "AWS_CA_BUNDLE",
+    "CLOUDSDK_CONFIG", "CLOUDSDK_CORE_PROJECT", "CLOUDSDK_CORE_ACCOUNT",
+    "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT", "CLOUDSDK_AUTH_ACCESS_TOKEN_FILE",
+    "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE", "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES",
+    "AZURE_CONFIG_DIR", "AZURE_CLIENT_CERTIFICATE_PATH", "AZURE_AUTHORITY_HOST",
 )
 CODEX_CREDENTIALS = ("OPENAI_API_KEY", "CODEX_API_KEY")
 ANTIGRAVITY_CREDENTIALS = ("GEMINI_API_KEY",)
@@ -96,6 +104,17 @@ def scrub_secrets(env: MutableMapping[str, str]) -> list[str]:
     return sorted(gone + ci_adapters.drop_empty_keys(env))
 
 
+# Providers that reach a model through a cloud (Bedrock, Vertex, Foundry): their
+# panes keep every setting that picks the cloud identity (cloud_login.IDENTITY_ENV).
+_CLOUD_PROVIDERS = ("claude", "opencode")
+
+
+def _cloud_identity() -> frozenset[str]:
+    from brindle.cloud_login import IDENTITY_ENV   # here: cloud_login imports more of brindle
+
+    return frozenset(n for n in IDENTITY_ENV if not is_job_secret(n))
+
+
 def provider_credentials(provider: str, api_key_env: str | None = None) -> frozenset[str]:
     """The variables ``provider``'s agents sign in with, which a scrub must
     let through: Claude Code's keys, login token and cloud backends (and
@@ -104,6 +123,8 @@ def provider_credentials(provider: str, api_key_env: str | None = None) -> froze
     no profile can claim: see pane_unset). A CLI's own login (a file under
     its home) needs nothing from the environment."""
     names = set(_CREDENTIALS.get(provider, ()))
+    if provider in _CLOUD_PROVIDERS:
+        names |= _cloud_identity()
     if api_key_env and not is_job_secret(api_key_env):
         names.add(api_key_env)
     return frozenset(names)
@@ -145,7 +166,7 @@ _PROVIDER_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "AWS_", "CLOUDSDK_", "GOOGLE
 
 
 def _provider_names() -> frozenset[str]:
-    return frozenset(n for names in _CREDENTIALS.values() for n in names)
+    return frozenset(n for names in _CREDENTIALS.values() for n in names) | _cloud_identity()
 
 
 def env_allowed(name: str, allow: Iterable[str]) -> bool:
@@ -186,17 +207,6 @@ def secret_looking(name: str) -> bool:
 
 
 AGENT_ENV_MODES = ("report", "enforce")
-
-
-def server_environ(environ: Mapping[str, str]) -> dict[str, str]:
-    """``environ`` without its secrets, for a tmux server brindle itself
-    starts (see tmux.ensure_session): no job secret and no secret-looking
-    name but the providers' credentials, which later launches (from a process
-    that doesn't hold them, like the MCP server inside a pane) still hand to
-    their own provider's panes."""
-    providers = _provider_names()
-    return {k: v for k, v in environ.items()
-            if not is_job_secret(k) and (k in providers or not secret_looking(k))}
 
 
 # A person's own model credentials: what an org with ``deny_personal_keys``
@@ -379,6 +389,15 @@ def dropped_for(agent_id: str) -> list[str]:
     return list(found.get("names") or []) if found.get("mode") == "enforce" else []
 
 
+def launch_keep(keep: Iterable[str], env: Mapping[str, str]) -> list[str]:
+    """pane_unset's ``keep`` for a launch that sets ``env`` itself: the
+    provider's credentials (``keep``) and the ordinary settings ``env`` names,
+    but not a secret-looking one that isn't a credential (a profile's
+    ``env.SLACK_BOT_TOKEN`` is dropped like an inherited one)."""
+    keep = set(keep)
+    return sorted(keep | {n for n in env if not secret_looking(n)})
+
+
 def allowlist_drops(names: Iterable[str], keep: Iterable[str] = (), allow: Iterable[str] | None = None,
                     deny: Iterable[str] = (), agent_env: Iterable[str] = ()) -> list[str]:
     """The names of ``names`` that enforce mode takes out of a pane and
@@ -392,4 +411,4 @@ __all__ = ["SECRET_ENV", "SECRET_PREFIXES", "is_job_secret", "scrub_secrets",
            "provider_credentials", "agent_credentials", "pane_unset", "BASE_ENV", "env_allowed",
            "PERSONAL_KEYS", "register_proxy", "clear_proxy", "proxy_exempt", "pane_deny",
            "org_key", "org_key_exempt", "secret_looking", "NOT_SECRET", "AGENT_ENV_MODES",
-           "server_environ", "allowlist_drops", "record_env", "env_report", "dropped_for"]
+           "allowlist_drops", "record_env", "env_report", "dropped_for", "launch_keep"]

@@ -63,56 +63,11 @@ def _hung(base: list[str], args: tuple[str, ...]) -> TmuxTimeout:
 
 def current_server() -> str | None:
     """The private tmux server brindle is using (BRINDLE_TMUX_SOCKET: the
-    test suite's, or a demo recording's), or None for the default server;
-    or the fresh server brindle moved to from that one when its working
-    directory was deleted (see leave_dead_server). Recorded on each agent at
-    launch (agents.tmux_server): pane ids are only meaningful on the server
-    that issued them, so nothing may judge an agent by another server's panes."""
-    base = os.environ.get("BRINDLE_TMUX_SOCKET") or None
-    return _fallbacks().get(base or "") or base
-
-
-# Where the fresh servers brindle moved to are recorded (see
-# leave_dead_server): {"<BRINDLE_TMUX_SOCKET, or "" for the default
-# server>": "<fresh server's socket name>"}, so every brindle process uses it.
-FALLBACKS_FILE = "tmux-fallback.json"
-
-
-def _fallbacks_path() -> Path:
-    from brindle.config import brindle_home
-
-    return brindle_home() / FALLBACKS_FILE
-
-
-def _fallbacks() -> dict[str, str]:
-    import json
-
-    try:
-        found = json.loads(_fallbacks_path().read_text())
-    except (OSError, ValueError):
-        return {}
-    return {k: v for k, v in found.items() if isinstance(k, str) and isinstance(v, str) and v} \
-        if isinstance(found, dict) else {}
-
-
-def _record_fallback(base: str | None, server: str) -> None:
-    """Record ``server`` as the one to use instead of ``base``: written to a
-    unique temporary file beside the record and moved into place, so a
-    reader never sees half of it."""
-    import json
-    import tempfile
-
-    path = _fallbacks_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    found = {**_fallbacks(), base or "": server}
-    fd, tmp = tempfile.mkstemp(prefix=".tmux-fallback-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(found, f)
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
+    test suite's, or a demo recording's), or None for the default server.
+    Recorded on each agent at launch (agents.tmux_server): pane ids are only
+    meaningful on the server that issued them, so nothing may judge an agent
+    by another server's panes."""
+    return os.environ.get("BRINDLE_TMUX_SOCKET") or None
 
 
 def _server_pid(server: str | None) -> int | None:
@@ -126,8 +81,10 @@ def cwd_gone(server: str | None) -> bool:
     (and maybe recreated at the same path: a new directory, a different
     inode). Every window such a server opens then starts in the dead
     directory, whatever ``-c`` says (tmux 3.8), and Claude Code exits at once
-    with "The current directory no longer exists". False when the server
-    isn't running or its directory can't be read."""
+    with "The current directory no longer exists" unless the pane changes
+    directory itself (in_dir, which every pane brindle starts does).
+    `brindle doctor` warns about it. False when the server isn't running or
+    its directory can't be read."""
     pid = _server_pid(server)
     if pid is None:
         return False
@@ -151,52 +108,6 @@ def cwd_gone(server: str | None) -> bool:
         return True
 
 
-def leave_dead_server() -> str | None:
-    """Move brindle to a fresh tmux server when the one it is using sits in
-    a deleted directory (see cwd_gone). The old server is never stopped:
-    the windows already on it keep running, and each agent there is still
-    asked of its own server (agents.tmux_server). The fresh server is
-    brindle's own, so it starts in the home directory from an environment
-    without secrets (see ensure_session). Returns its name, or None when
-    nothing changed."""
-    server = current_server()
-    if not cwd_gone(server):
-        return None
-    return switch_server()
-
-
-def switch_server() -> str:
-    """Record a fresh server for brindle to use from now on (started by the
-    next ensure_session), in place of the current one."""
-    base = os.environ.get("BRINDLE_TMUX_SOCKET") or None
-    name = f"{base or 'brindle'}-fresh-{uuid.uuid4().hex[:8]}"
-    _record_fallback(base, name)
-    return name
-
-
-def _start_environ() -> tuple[dict[str, str], str] | None:
-    """The environment and directory to start the current server from when
-    it is a fresh one brindle moved to (see leave_dead_server), or None for
-    any other server (the person's own, or a test's), which starts as
-    before. The fresh one gets the variables the old server's panes had and
-    this process's, less every secret (secrets.server_environ), so its
-    global environment has none for a pane to read."""
-    from brindle import secrets
-
-    base = os.environ.get("BRINDLE_TMUX_SOCKET") or None
-    if current_server() == base:
-        return None
-    old: dict[str, str] = {}
-    proc = _tmux("show-environment", "-g", check=False, server=base)
-    if proc.returncode == 0:
-        for line in proc.stdout.splitlines():
-            name, eq, value = line.partition("=")
-            if eq and not name.startswith("-"):
-                old[name] = value
-    env = secrets.server_environ({**old, **os.environ})
-    for name in ("TMUX", "TMUX_PANE"):     # the old server's: tmux sets its own for each pane
-        env.pop(name, None)
-    return env, str(Path.home())
 
 
 def _bin() -> str:
@@ -235,17 +146,15 @@ def _is_read(args: tuple[str, ...]) -> bool:
     return args[0] in _READS or (args[0] == "display-message" and "-p" in args)
 
 
-def _start(base: list[str], args: tuple[str, ...], input: str | None = None,
-           start: tuple[dict[str, str], str] | None = None) -> subprocess.CompletedProcess:
+def _start(base: list[str], args: tuple[str, ...], input: str | None = None) -> subprocess.CompletedProcess:
     try:
         if _is_read(args):
             return spawn.read([*base, *args], input=input, timeout=timeout())
         # A change: refused past the request's deadline, else the request runs to its end
         # (brindle.spawn.begin_write). At tmux's normal priority, not through spawn.action.
         spawn.begin_write()
-        env, cwd = start if start else (None, None)
         return subprocess.run([*base, *args], capture_output=True, text=True, input=input,
-                              timeout=timeout(), env=env, cwd=cwd)
+                              timeout=timeout())
     except spawn.Busy as e:
         raise TmuxBusy(f"tmux {args[0] if args else ''}: {e}") from None
     except subprocess.TimeoutExpired:
@@ -253,14 +162,11 @@ def _start(base: list[str], args: tuple[str, ...], input: str | None = None,
 
 
 def _tmux(*args: str, input: str | None = None, check: bool = True,
-          server: object = _THIS_SERVER,
-          start: tuple[dict[str, str], str] | None = None) -> subprocess.CompletedProcess:
-    """``start``: the environment and directory to run the command from (a
-    command that may start the server: see _start_environ)."""
+          server: object = _THIS_SERVER) -> subprocess.CompletedProcess:
     if not shutil.which(_bin()):
         raise TmuxError("tmux is not installed (macOS: `brew install tmux`)")
     base = _base() if server is _THIS_SERVER else _argv(server)  # type: ignore[arg-type]
-    proc = _start(base, args, input, start) if start else _start(base, args, input)
+    proc = _start(base, args, input)
     if check and proc.returncode != 0:
         raise TmuxError(f"tmux {' '.join(args)}: {proc.stderr.strip()}")
     return proc
@@ -314,23 +220,15 @@ def ensure_session(session: str, cwd: str, env: dict[str, str]) -> None:
     windows start at the size that terminal shows them at, its rows less
     the session's status line, so a chat draws once at the size it's seen
     at. Detached sessions are otherwise 80x24, and attaching resized a chat
-    that had already drawn: Claude Code resuming a conversation went blank.
-
-    A server sitting in a deleted directory is left for a fresh one first
-    (leave_dead_server), which starts in the home directory without the
-    secrets in its environment."""
-    exists = has_session(session)   # first: a hung server fails here (see TmuxTimeout)
-    if leave_dead_server():
-        exists = has_session(session)
-    if exists:
+    that had already drawn: Claude Code resuming a conversation went blank."""
+    if has_session(session):
         for k, v in env.items():
             _tmux("set-environment", "-t", f"={session}", k, v, check=False)
         return
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     size = terminal_size()
     size_args = ["-x", str(size[0]), "-y", str(size[1])] if size else []
-    _tmux("new-session", "-d", "-s", session, "-n", "shell", "-c", cwd, *size_args, *env_args,
-          start=_start_environ())
+    _tmux("new-session", "-d", "-s", session, "-n", "shell", "-c", cwd, *size_args, *env_args)
     if size:
         # Known only now: the server (and the person's config) may have just started.
         rows = max(size[1] - status_lines(session), 1)
@@ -465,12 +363,14 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
         env = {**env, **exempt}
     deny = secrets.pane_deny(deny, env)
     names = inherited_names(session)
-    kept = (*keep, *env)
     if not tag or tag[0] != TERMINAL_TAG:
-        unset = secrets.pane_unset(names, keep=kept, allow=allow, deny=deny, agent_env=agent_env,
-                                   enforce=enforce)
+        # What the launch sets itself is filtered too: a secret-looking name in a
+        # profile's env passes only as the provider's credential.
+        unset = secrets.pane_unset({*names, *env}, keep=secrets.launch_keep(keep, env), allow=allow,
+                                   deny=deny, agent_env=agent_env, enforce=enforce)
+        env = {k: v for k, v in env.items() if k not in unset}
     else:
-        unset = secrets.pane_unset([n for n in names if secrets.is_job_secret(n)], keep=kept,
+        unset = secrets.pane_unset([n for n in names if secrets.is_job_secret(n)], keep=(*keep, *env),
                                    allow=allow, deny=deny)
     proc = _tmux(
         "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:",
@@ -612,7 +512,7 @@ def split_left(target: str, cwd: str, command: list[str], env: dict[str, str],
     geometry, axis = _sidebar_geometry(position, columns)
     proc = _tmux(
         "split-window", "-d", *geometry, "-P", "-F", "#{pane_id}",
-        "-t", target, "-c", cwd, *env_args, "--", *command,
+        "-t", target, "-c", cwd, *env_args, "--", *in_dir(cwd, command),
     )
     pane = proc.stdout.strip()
     # tmux grows every pane proportionally when a client attaches at a bigger
@@ -684,7 +584,7 @@ def start_sidebar(pane: str, cwd: str, command: list[str], env: dict[str, str], 
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     _tmux_batch([["set-option", "-p", "-t", pane, "remain-on-exit", "failed"],
                  ["set-hook", "-p", "-t", pane, "pane-died", f"run-shell -b {shlex.quote(shell)}"],
-                 ["respawn-pane", "-k", "-t", pane, "-c", cwd, *env_args, "--", *command]])
+                 ["respawn-pane", "-k", "-t", pane, "-c", cwd, *env_args, "--", *in_dir(cwd, command)]])
 
 
 def window_alive(target: str, server: object = _THIS_SERVER) -> bool:
@@ -1104,14 +1004,12 @@ def remove_socket(name: str) -> None:
 
 def other_servers(prefix: str = "brindle-") -> list[str]:
     """Names of the named tmux servers (sockets) starting with ``prefix``,
-    other than the one brindle is using and the fresh ones it moved to (see
-    leave_dead_server), live or not."""
+    other than the one brindle is using, live or not."""
     try:
         names = [p.name for p in socket_dir().iterdir() if p.name.startswith(prefix)]
     except OSError:
         return []
-    ours = {os.environ.get("BRINDLE_TMUX_SOCKET"), *_fallbacks().values()}
-    return sorted(n for n in names if n not in ours)
+    return sorted(n for n in names if n != os.environ.get("BRINDLE_TMUX_SOCKET"))
 
 
 def _on(server: str, *args: str) -> subprocess.CompletedProcess:

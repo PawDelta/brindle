@@ -595,12 +595,6 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
                                 outcome=refused)
     detail = (cause.line() if cause else
               "the worker exited before launch health could be established. Check its pane and CLI installation/login, then retry.")
-    if not alive and "current directory no longer exists" in screen.lower():
-        # The tmux server's own directory may be gone: the next launch moves to a fresh server.
-        try:
-            tmux.leave_dead_server()
-        except tmux.TmuxError:
-            pass
     from brindle import secrets
 
     dropped = secrets.dropped_for(agent.id) if not alive else []

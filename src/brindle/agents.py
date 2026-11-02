@@ -725,8 +725,8 @@ def _record_env_drops(agent: Agent, ws: Workspace, env, credentials, allow, deny
     """Log the names the allowlist took out of ``agent``'s pane (enforce) or
     would have (report): names only. Never fails the launch."""
     try:
-        kept = (*credentials, *env)
-        names = secrets.allowlist_drops(tmux.inherited_names(ws.tmux_session), kept, allow,
+        kept = secrets.launch_keep(credentials, env)
+        names = secrets.allowlist_drops({*tmux.inherited_names(ws.tmux_session), *env}, kept, allow,
                                         secrets.pane_deny(deny, env), agent_env)
         secrets.record_env(ws.repo_root, agent.id, "enforce" if enforce else "report", names)
         if names:
@@ -790,7 +790,7 @@ def _effective_window_env(agent: Agent, ws: Workspace, m=_UNREAD) -> dict[str, s
     inherited = tmux.inherited_env(ws.tmux_session)
     with secrets.org_key(org_env):
         env = {**env, **secrets.proxy_exempt(env)}
-        unset = secrets.pane_unset(inherited, keep=(*keep, *env), allow=allow,
+        unset = secrets.pane_unset({*inherited, *env}, keep=secrets.launch_keep(keep, env), allow=allow,
                                    deny=secrets.pane_deny(deny, env), agent_env=agent_env,
                                    enforce=enforce)
     return {k: v for k, v in {**inherited, **env}.items() if k not in unset}
