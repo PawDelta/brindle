@@ -27,8 +27,9 @@ against the URL; mcp/other against the tool name. A few named matchers
 ``@default`` is the repo's default branch), matched against every ``git push``
 in the command.
 
-Nothing is built in: every rule in force lives in the person's store, where
-it can be edited or removed, the ones a preset seeded included (see
+Shell commands that print credentials are always denied. Otherwise every
+rule in force lives in the person's store, where it can be edited or
+removed, the ones a preset seeded included (see
 ``PRESETS``: Autonomous, the default for a new store, Permissive, Standard
 and Secure; ``apply_preset`` seeds the store and records the choice). A
 rule's ``decision`` is allow, deny or ask: an ask rule names what a person
@@ -2050,6 +2051,129 @@ def _rule_decision(req: Request, rules: list[Rule], checks: list[str] | None) ->
     return None
 
 
+_SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|(?:^|_)PAT(?:_|$)|AUTH|CREDENTIAL|PRIVATE", re.I)
+
+
+def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
+    """Recognizable credential stores, including patterns and uncertain cwd reads."""
+    name = os.path.expanduser(name)
+    path = os.path.normpath(os.path.join(part.cwd or "", name))
+    home = os.path.expanduser("~")
+    if fnmatch.fnmatch(path, "/proc/*/environ") or part.cwd is None and name == "environ":
+        return True
+    if path == f"{home}/.netrc" or path.startswith(f"{home}/.config/") or path == f"{home}/.config":
+        return True
+    if path.startswith(f"{home}/.aws/") and fnmatch.fnmatch("credentials", os.path.basename(path)):
+        return True
+    return (os.path.basename(path) == ".env"
+            and (part.cwd is None or not req.worktree or _inside(path, req.worktree) is None))
+
+
+def _credential_words(req: Request, part: ShellPart, words: list[str], depth: int) -> bool:
+    """Classify output, unwrapping only commands that actually execute their operands."""
+    if not words or depth > 30:
+        return False
+    program, args = os.path.basename(words[0]), words[1:]
+    if program in ("command", "builtin", "exec", "sudo", "doas", "env", "nohup"):
+        index = 0
+        valued = {"-u", "--unset", "-C", "--chdir"} if program == "env" else {
+            "-u", "-g", "-h", "-p", "-C", "-T", "--user", "--group", "--host", "--prompt"}
+        if program in ("command", "builtin", "nohup"):
+            valued = set()
+        while index < len(args):
+            arg = args[index]
+            if arg == "--":
+                index += 1
+                break
+            if (program == "env" and arg in ("--help", "--version")
+                    or program == "command" and arg.startswith("-") and re.search("[vV]", arg[1:])):
+                return False
+            if program == "env" and arg in ("-S", "--split-string") and index + 1 < len(args):
+                try:
+                    split = shlex.split(args[index + 1])
+                except ValueError:
+                    return False
+                return _credential_words(req, part, ["env", *split, *args[index + 2:]], depth + 1)
+            if arg in valued:
+                index += 2
+            elif arg.startswith("-") or program == "env" and _ASSIGNMENT.match(arg):
+                index += 1
+            else:
+                break
+        return (program == "env" and index >= len(args)
+                or _credential_words(req, part, args[index:], depth + 1))
+    if program in ("sh", "bash", "zsh", "dash", "ksh"):
+        for index, arg in enumerate(args):
+            if arg.startswith("-") and "c" in arg[1:] and index + 1 < len(args):
+                return prints_credentials(replace(req, command=args[index + 1], cwd=part.cwd or ""), depth + 1)
+        return False
+    if program == "printenv":
+        if any(a in ("--help", "--version") for a in args):
+            return False
+        names = [a for a in args if not a.startswith("-")]
+        return not names or any(_SECRET_NAME.search(a) for a in names)
+    if program in ("echo", "printf"):
+        if program == "printf" and args and args[0] == "-v":
+            return False
+        # References retain their quote context: '$TOKEN' and \$TOKEN print literal text.
+        tokens = _script_tokens(part.line) or []
+        return any(_SECRET_NAME.search(ref[2]) for token in tokens if token[0] == "word"
+                   for ref in token[1].refs)
+    if program in ("set", "export", "declare", "typeset"):
+        options = "".join(a[1:] for a in args if a.startswith("-"))
+        operands = [a for a in args if not a.startswith("-")]
+        return not args or (not operands and ("p" in options or "x" in options))
+    if program == "tmux":
+        index = 0
+        while index < len(args) and args[index].startswith("-"):
+            index += 2 if args[index] in ("-L", "-S", "-f", "-c", "-T") else 1
+        # tmux also accepts multiple commands separated by a literal semicolon.
+        commands = [args[index:]]
+        commands += [args[i + 1:] for i, a in enumerate(args) if a == ";"]
+        return any(c and (c[0] in ("showenv", "show-environment", "show-env")
+                          or "show-environment".startswith(c[0]) and c[0].startswith("show"))
+                   for c in commands)
+    if program == "ps":
+        # BSD e prints the environment; POSIX -e only selects all processes.
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg in ("-o", "-O", "-p", "-t", "-u", "-U", "-G", "--format", "--pid", "--user"):
+                index += 2
+                continue
+            if (not arg.startswith("-") and re.fullmatch(r"[a-zA-Z]+", arg) and "e" in arg
+                    or arg.startswith("-") and "E" in arg):
+                return True
+            index += 1
+        return False
+    if program in ("gh", "gcloud", "aws"):
+        target = {"gh": ("auth", "token"), "gcloud": ("auth", "print-access-token"),
+                  "aws": ("configure", "export-credentials")}[program]
+        return any(tuple(args[i:i + 2]) == target for i in range(len(args) - 1))
+    if program == "security":
+        return (bool(args) and args[0] in ("find-generic-password", "find-internet-password")
+                and any(a.startswith("-") and re.search("[wg]", a[1:]) for a in args[1:]))
+    if program in (*READERS, "awk", "less", "more", "strings", "od", "xxd"):
+        return any(_credential_file(req, part, name) for name in [*words[1:], *part.written[1:], *part.reads])
+    return False
+
+
+def prints_credentials(req: Request, depth: int = 0) -> bool:
+    """A non-overridable output restriction, independent of grants and policy.
+
+    Keep already read parts when later syntax is unknown: an unreadable tail
+    cannot make an earlier credential dump safe.
+    """
+    if req.kind != "bash" or not req.command or depth > 30:
+        return False
+    reader = _PartReader(req, credential_scan=True)
+    try:
+        reader.read(req.command)
+    except ValueError:
+        pass
+    return any(_credential_words(req, part, part.words, depth) for part in reader.parts)
+
+
 def decide(req: Request | None, *, checks: list[str] | None = None,
            rules: list[Rule] | None = None, unmatched: str | None = None,
            session: str | None = None, saved: list[SavedAction] | None = None,
@@ -2061,6 +2185,9 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     settled only by a saved approval within the org's limits."""
     if req is None or req.kind not in KINDS:
         return Decision("ask", "brindle couldn't read the request")
+    if prints_credentials(req):
+        return Decision("deny", 'would print credentials; check a variable with [ -n "$VAR" ] '
+                                'or print a non-secret one')
     from brindle import permission_grants
 
     rules = all_rules(req.repo_root or None) if rules is None else rules
@@ -2776,7 +2903,7 @@ def _script_word(command: str, i: int) -> tuple[str, list, list, int] | None:
     return command[start:i], refs, subs, i
 
 
-def _script_tokens(command: str) -> list[tuple] | None:
+def _script_tokens(command: str, *, subshells: bool = False) -> list[tuple] | None:
     """``("word", _Word)``, ``("op", text, spaced)`` and ``("heredoc", body,
     expands, spaced)`` for each word, operator and heredoc of ``command``,
     or None for what _flat_script doesn't read: a comment, a subshell,
@@ -2811,7 +2938,8 @@ def _script_tokens(command: str) -> list[tuple] | None:
             return None
         if c in ";&|<>()":
             op = next(o for o in _SCRIPT_OPERATORS if command.startswith(o, i))
-            if op in ("(", ")", ";;") or op in ("<", ">") and command.startswith("(", i + 1):
+            if (op == ";;" or op in ("(", ")") and not subshells
+                    or op in ("<", ">") and command.startswith("(", i + 1)):
                 return None
             i += len(op)
             if op in ("<<", "<<-"):
@@ -2848,14 +2976,28 @@ def _script_items(tokens: list[tuple]) -> list[tuple]:
     commands: list[tuple[list, str, str]] = []
     current: list[tuple] = []
     before = ""
+    after_subshell = False
     for token in [*tokens, ("op", "", False)]:
+        if token[:2] == ("op", "("):
+            if current:
+                raise ValueError("a subshell after words")
+            commands.append(([("word", _Word("{", True, [], []))], "|", ""))
+            continue
+        if token[:2] == ("op", ")"):
+            if current:
+                commands.append((current, before, ""))
+            commands.append(([("word", _Word("}", True, [], []))], "", "|"))
+            current, before = [], ""
+            after_subshell = True
+            continue
         if token[0] != "op" or token[1] not in (*_SCRIPT_SEPARATORS, ""):
             current.append(token)
         elif current:
             commands.append((current, before, token[1]))
             current, before = [], token[1]
-        elif token[1] not in ("\n", ""):
+        elif token[1] not in ("\n", "") and not after_subshell:
             raise ValueError("an empty command")
+        after_subshell = False
     items: list[tuple] = []
     negated = False    # a ! before a { on a line of its own marks the group's first command
     for toks, before, after in commands:
@@ -2979,8 +3121,9 @@ class _Flattener:
     pattern)`` for a for loop's pattern word), and collects the simple
     commands it runs."""
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, *, subshells: bool = False):
         self.cwd = cwd
+        self.subshells = subshells
         self.out: list[str] = []
         # Whether each runs in this shell whenever the script does (not in an if, a loop,
         # after && or ||, in a pipeline, or a substitution's subshell).
@@ -3001,7 +3144,7 @@ class _Flattener:
             raise ValueError("too many commands")
 
     def script(self, command: str, env: dict) -> None:
-        tokens = _script_tokens(command)
+        tokens = _script_tokens(command, subshells=self.subshells)
         if tokens is None:
             raise ValueError("unreadable syntax")
         if any(t[0] == "heredoc" for t in tokens) and any(
@@ -3064,7 +3207,7 @@ class _Flattener:
         return values
 
     def substitution(self, inner: str, env: dict) -> None:
-        sub = _Flattener(self.cwd)
+        sub = _Flattener(self.cwd, subshells=self.subshells)
         sub.script(inner, dict(env))
         for command in sub.out:
             self.emit(command)
@@ -3216,8 +3359,9 @@ class _Unverifiable(ValueError):
 
 
 class _PartReader:
-    def __init__(self, req: Request):
+    def __init__(self, req: Request, *, credential_scan: bool = False):
         self.req = req
+        self.credential_scan = credential_scan
         self.cwd: str | None = req.cwd or req.worktree or None
         self.settled = self.cwd    # where the shell is once a cd's && chain ends, whether the cd ran or not
         self.parts: list[ShellPart] = []
@@ -3231,7 +3375,7 @@ class _PartReader:
         if "<<" in command and any(os.path.basename(w) in _CODE_RUNNERS
                                    for w in re.split(r"[\s;&|()<>`\"'$=]+", command)):
             raise ValueError("a heredoc a program may run as code")
-        flattener = _Flattener(self.cwd or "")
+        flattener = _Flattener(self.cwd or "", subshells=self.credential_scan)
         flattener.script(command, {})
         for line, sure, (chained, leads) in zip(flattener.out, flattener.definite, flattener.chained):
             self.part(line, definite and sure, chains and chained, chains and leads)
@@ -3305,7 +3449,7 @@ class _PartReader:
             return
         if program == "eval":
             raise _Unverifiable("eval runs what only the run knows")
-        if program in ("source", ".") or program in _WRAPPERS and part.unknown:
+        if program in ("source", ".") or program in _WRAPPERS and part.unknown and not self.credential_scan:
             raise ValueError(f"{program} runs what only the run knows")
         self.parts.append(part)
         if program in ("cd", "pushd"):

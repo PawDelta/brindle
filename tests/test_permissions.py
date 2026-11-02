@@ -102,6 +102,7 @@ def _bypass(command):
 
 @pytest.mark.parametrize("command, expected", [
     ("env", "deny"),
+    ("printenv", "deny"),
     ("printenv GITHUB_TOKEN", "deny"),
     ("set", "deny"),
     ("export -p", "deny"),
@@ -124,7 +125,12 @@ def _bypass(command):
     ('printf "%s" "${API_KEY}"', "deny"),
     _bypass("git status | env"),
     _bypass('echo "$(printenv)"'),
-    _bypass("bash -c 'printenv HOME'"),
+    _bypass("bash -c 'printenv GITHUB_TOKEN'"),
+    _bypass('sudo -u root echo "$PRIVATE_KEY"'),
+    _bypass("env -S 'printenv AUTH_TOKEN'"),
+    _bypass('env echo "$TOKEN" --help'),
+    _bypass('command echo -v "$TOKEN"'),
+    _bypass("tmux show-env"),
     _bypass("tmux -L other show-environment"),
     _bypass("tmux -L other ls \\; showenv"),
     _bypass("for v in a; do /usr/bin/env; done"),
@@ -135,6 +141,19 @@ def _bypass(command):
     _bypass("cd /proc/self; cat environ"),
     _bypass("(e''nv) > out"),
     ("env -u FOO git status", "allow"),
+    ("env VAR=1 git status", "allow"),
+    ("printenv PATH", "allow"),
+    ("bash -c 'printenv HOME'", "allow"),
+    ("printenv --help", "allow"),
+    ("env --help", "allow"),
+    ("echo $HOME", "allow"),
+    ('printf -v value "%s" "$TOKEN"', "allow"),
+    pytest.param('[ -n "$TOKEN" ]', "allow", marks=pytest.mark.variant("safe presence check")),
+    ("set -euo pipefail", "allow"),
+    ("ps aux", "allow"),
+    ("ps -o euser", "allow"),
+    ("gh auth status", "allow"),
+    ("git add -f file", "allow"),
     ("git status", "allow"),
     ("cat .env", "allow"),
     ("ps -ef", "allow"),
@@ -153,6 +172,7 @@ def test_credential_dumps_are_denied(tmp_path, command, expected):
     here.mkdir()
     (tmp_path / "other").mkdir()
     req = permissions.Request("claude", "bash", "Bash", str(here), str(here), str(here), command=command)
-    decision = permissions.decide(req)
+    saved = permissions.SavedAction("grant", "bash", command, "allow")
+    decision = permissions.decide(req, saved=[saved])
     assert decision.decision == expected, decision.reason
     assert (decision.rule is None) == (expected == "deny") or expected == "allow"
