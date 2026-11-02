@@ -654,14 +654,6 @@ def load_note(db: DB) -> str:
     return f"{spawn.why()}; brindle has {workers} workers and {checks} check runs running"
 
 
-def forced_start(db: DB, ws: Workspace) -> bool:
-    """Whether the worker of ``ws`` was started despite the load (its
-    branch's check runs then run at background priority)."""
-    worker = agents.workspace_worker(db, ws)
-    return worker is not None and any(
-        t.agent_id == worker.id and t.forced for t in db.list_tasks(ws.repo_root, state="started"))
-
-
 def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
     """Start task ``task_id``, waiting for room, now despite the load, on
     behalf of ``caller`` (its caller or session root). Only a worker start can
