@@ -455,7 +455,10 @@ not copied into `/Applications`.
 ## Releases
 
 The version lives in `package.json` (`tauri.conf.json` reads it from there).
-Bump it, merge, then push an annotated tag `app-v<version>` whose message is a
+brindle and the app share one version number (the app bundles its engine):
+bump it with `scripts/bump_version.py X.Y.Z`, which sets `package.json`,
+its lockfile and the engine's files together. Merge, tag the engine `vX.Y.Z`
+at the same commit, then push an annotated tag `app-v<version>` whose message is a
 one-line summary: `git tag -a app-v<version> -m "<one-line summary>"`. The
 update banner shows it as the release's note: `scripts/release_notes.mjs` takes
 the message's first paragraph, on one line, capped at 200 characters on a word

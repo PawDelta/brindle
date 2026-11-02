@@ -14,9 +14,12 @@ it("shows the version and a license file's text from the shell, and offers nothi
       ],
     }),
   );
-  render(<About read={read} />);
+  render(<About read={read} engine="0.5.11" />);
   const license = await screen.findByTestId("about-LICENSE");
   expect(screen.getByTestId("about").textContent).toContain("brindle 0.1.0-rc.9");
+  const build = within(screen.getByTestId("about")).getByTestId("about-build").textContent ?? "";
+  expect(build).toContain("0.1.0-rc.9");
+  expect(build).toContain("0.5.11");
   fireEvent.click(within(license).getByRole("button", { name: "Show" }));
   expect(screen.getByTestId("about-LICENSE-text").textContent).toBe("Brindle License 1.0\n\nRequired Notice: Copyright PawDelta");
   expect(within(screen.getByTestId("about-THIRD_PARTY_NOTICES.txt")).queryByRole("button")).toBeNull();
