@@ -93,6 +93,7 @@ def test_request_review_prompt_carries_files_finish_line_restrictions_and_the_fu
     for content in ("Private sibling task", "Peer suggestion", "Other session spec",
                     "Worker self-reported waiver", "Internal notice"):
         assert content not in prompt
+    assert "Supervisor messages and spec amendments supersede this original task text" in prompt
     assert "Declared files: src/auth.py, tests/test_auth.py" in prompt
     assert "finish line: pytest tests/test_auth.py passes" in prompt.lower()
     assert "Worker profile: restricted" in prompt

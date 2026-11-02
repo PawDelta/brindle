@@ -1626,7 +1626,7 @@ def _fresh_start_prompt(db: DB, a: Agent, ws: Workspace, provider, note: str) ->
             chunks=knowledge.replay_chunks(db, a.id),
             analysis=analysis_brief.brief_context(
                 db, ws.repo_root, ws.branch, a.id, a.task, None,
-                large=analysis_brief.got_context(db, a.id))) + note
+                large=analysis_brief.got_context(db, a.id), replay=True)) + note
     return (a.task + note) if a.task else None
 
 
@@ -3304,7 +3304,9 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
                 if not worker_done_when and t.done_when:
                     worker_done_when = t.done_when
     if worker and worker.task:
-        task += f"\n\nThe worker's original task:\n{worker.task.strip()}"
+        task += (f"\n\nThe worker's original task:\n{worker.task.strip()}\n\n"
+                 "Supervisor messages and spec amendments supersede this original task text. "
+                 "A deviation from it that such a message justifies needs no recorded decision.")
     if worker:
         task += f"\n\nWorker profile: {worker.profile} (provider: {worker.provider})"
         try:

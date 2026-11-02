@@ -54,7 +54,8 @@ def test_brief_only_for_large_work(weight, plan, db, backend, tmp_path):
         assert f"\n{block}\n" in out and FOLDER in out
         assert [f["scopes"] for k, f, _ in backend.calls if k == "POST /analysis-docs/brief"] == [
             [{"kind": "user", "id": "user_1"}]]                     # scopes as the server takes them
-        assert receipt == [(ab.RULE_ITEM, "a1"), (ab.BRIEF_ITEM, "a1"), (ab.DOC_ITEM, "d1"),
+        assert receipt == [(ab.RULE_ITEM, "a1"), (ab.BRIEF_ITEM, "a1"), (ab.BRIEF_TEXT_ITEM, "a1"),
+                           (ab.DOC_ITEM, "d1"),
                            (ab.SESSION_DOC_ITEM, "d1")]
         assert sources == []
     else:
@@ -75,15 +76,28 @@ def test_explicitly_requested_subagent_task_gets_the_rule(via, db, boss):
     assert f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in worker.task
 
 
-def test_fresh_resume_gives_the_rule_again(db, boss, monkeypatch, tmp_path):
+def test_fresh_resume_replays_the_rule_and_brief_without_fetching(db, boss, monkeypatch, tmp_path):
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))  # no saved session
     db.add_agent(Agent("w1", boss.id, "developer", "claude", "boss", "assign", "paused", "", None,
                        time.time(), time.time(), "Add input validation.", "sess-w1"))
-    knowledge.record_receipt(db, "w1", [(ab.RULE_ITEM, "w1", "")])
+    knowledge.record_receipt(db, "w1", [(ab.RULE_ITEM, "w1", ""), (ab.BRIEF_TEXT_ITEM, "w1", "known: the cache")])
+    fetched = []
+    monkeypatch.setattr(ab, "_brief", lambda *a, **kw: fetched.append(a) or ("new brief", []))
     launched = []
     monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append(kw))
     agents.resume(db, "w1")
-    assert FOLDER in launched[0]["prompt"]
+    assert FOLDER in launched[0]["prompt"] and "\nknown: the cache\n" in launched[0]["prompt"]
+    assert fetched == []
+
+
+@pytest.mark.parametrize("block, shown", [("the cache design: src/cache.py is hot", True),
+                                          ("unrelated export test doc", False)])
+def test_reviewer_gets_the_doc_block_only_when_it_names_a_changed_file(block, shown, db, tmp_path, monkeypatch):
+    monkeypatch.setattr(ab, "_brief", lambda *a, **kw: (block, [(ab.DOC_ITEM, "d1", "3")]))
+    knowledge.record_decision(db, knowledge.repo_key(str(tmp_path)), "Cache", "Keep it small")
+    out, cited = ab.review_context(db, str(tmp_path), "speed up the cache", ["src/cache.py"])
+    assert ("\n" + block + "\n" in out, bool(cited)) == (shown, shown)
+    assert "Keep it small" in out and "Flag as a blocker" not in out   # decisions stay, once
 
 
 def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, boss, backend, monkeypatch):
