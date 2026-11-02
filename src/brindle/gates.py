@@ -609,7 +609,11 @@ def pr_checked(db: DB, ws: Workspace, progress=None, passed: tuple[str, list[str
         yield sha
 
 
-def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Report:
+def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool,
+        reused: tuple[str, list[str]] | None = None) -> Report:
+    """``reused``: (sha, commands) whose passing result the caller carried
+    over to ``sha`` (``pipeline._reusable_checks``); they aren't run again
+    while HEAD is still that sha."""
     r = Report()
     dirty = git.dirty_files(ws.path, tracked_only=True)   # untracked scratch files don't travel with the branch
     if dirty:
@@ -636,8 +640,12 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool) -> Rep
         r.passed.append("rules passed (" + ", ".join(rules.packs) + ")")
 
     env = workspaces.workspace_env(ws, cfg)
+    skip = set(reused[1]) if reused and reused[0] == sha else set()
     with queue_place(time.time()):
         for cmd in cfg.checks:
+            if cmd in skip:
+                r.passed.append(f"`{cmd}` passed (reused)")
+                continue
             ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
             if not ok:
                 return r.fail(f"Check failed in {ws.branch}:\n{out}\nSend this to the worker to fix.")
