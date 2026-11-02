@@ -518,22 +518,30 @@ def disk_checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
         disk.keep_out_of_spotlight(*dirs)
         use_db = db if db is not None else DB()
         with closing(use_db.conn) if db is None else nullcontext():
-            usage = disk.usage(use_db, repo_root)
-            dead = disk.dead_branches(use_db, repo_root) if repo_root else []
+            report = disk.storage_report(use_db, repo_root)
     except Exception as e:  # noqa: BLE001 - a report, never a reason doctor fails
         return [Check(WARN, "disk", f"couldn't measure brindle's disk use: {e}")]
-    parts = ", ".join(f"{u.name} {disk.human(u.size)} ({u.detail})" for u in usage)
-    reclaim = next(u.size for u in usage if u.name == "build dirs") + \
-        next(u.size for u in usage if u.name == "past retention")
+    parts = ", ".join(f"{c['name']} {disk.human(c['size'])}" for c in report["categories"])
+    reclaim = report["reclaimable"]
     out = [Check(WARN if reclaim > disk.GB else OK, "disk use",
                  f"{parts}. `brindle clean --dry-run` lists what `brindle clean` would reclaim "
                  f"(~{disk.human(reclaim)})")]
-    low = disk.low_disk(repo_root)
-    if low:
-        out.append(Check(WARN, "free disk", f"{low}: new workers and check runs wait"))
+    if report["low_disk"]:
+        out.append(Check(WARN, "free disk", f"{report['low_disk']}: new workers and check runs wait"))
+    for state, how in ((disk.MERGED, "`brindle clean` removes them"),
+                       (disk.ABANDONED, "`brindle clean --abandoned` (or --worktree PATH) removes them")):
+        found = [t for t in report["worktrees"] if t["state"] == state]
+        if found:
+            shown = "; ".join(f"{t['path']} {disk.human(t['size'])}, last activity "
+                              f"{time.strftime('%Y-%m-%d', time.localtime(t['last_activity']))}"
+                              + (f" (kept: {t['reason']})" if t["reason"] else "") for t in found[:10])
+            more = f" and {len(found) - 10} more" if len(found) > 10 else ""
+            out.append(Check(WARN, f"{state} worktrees", f"{shown}{more}: {how}, archiving each branch tip "
+                             f"under {disk.ARCHIVE_REF}<branch>"))
+    dead = report["dead_branches"]
     if dead:
-        names = ", ".join(f"{b.name} ({'merged' if b.merged else 'unmerged'}, last commit "
-                          f"{time.strftime('%Y-%m-%d', time.localtime(b.last_commit))})" for b in dead[:10])
+        names = ", ".join(f"{b['name']} ({'merged' if b['merged'] else 'unmerged'}, last commit "
+                          f"{time.strftime('%Y-%m-%d', time.localtime(b['last_commit']))})" for b in dead[:10])
         more = f" and {len(dead) - 10} more" if len(dead) > 10 else ""
         out.append(Check(WARN, "dead branches",
                          f"{names}{more}: `brindle clean --branches` deletes them, keeping each tip "

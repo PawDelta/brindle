@@ -630,8 +630,6 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             return Removed(False, f"existing checkout left untouched; {_UNARCHIVED}", None)
         pipeline.on_workspace_cleanup(db, ws)
         db.delete_workspace(ws.id)
-        if _merged_into_base(ws, db):
-            disk.after_merge(db, ws)   # a session's merged worktree stays: its build dirs needn't
         return Removed(False, "existing checkout left untouched", None)
 
     sharing = db.workspaces_sharing(ws.repo_root, path=ws.path, exclude_id=ws.id)
@@ -650,11 +648,8 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             if not keep_session:
                 _rescue_sidebar(db, ws)
                 tmux.kill_session(ws.tmux_session)
-            removed = _forget(db, ws, Removed(
+            return _forget(db, ws, Removed(
                 False, f"worktree kept (shared with {sharing[0].id})", None))
-            if _merged_into_base(ws, db):
-                disk.after_merge(db, ws)
-            return removed
 
     exists = os.path.isdir(ws.path)
     if exists and not force:
@@ -699,8 +694,7 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
     if delete_branch is None:
         if cfg.delete_merged_branches and _merged_into_base(ws, db):
             try:
-                if not _is_ancestor(ws):   # a squash merge: its own commits stay restorable
-                    disk.archive_tip(ws.repo_root, ws.branch)
+                disk.archive_tip(ws.repo_root, ws.branch)   # restorable from refs/brindle-archive/
                 git.delete_branch(ws.repo_root, ws.branch, force=True)
                 return _forget(db, ws, Removed(True, f"merged branch {ws.branch} deleted", teardown))
             except git.GitError:
@@ -727,12 +721,6 @@ def _forget(db: DB, ws: Workspace, removed: Removed) -> Removed:
     pipeline.on_workspace_cleanup(db, ws)
     db.delete_workspace(ws.id)
     return removed
-
-
-def _is_ancestor(ws: Workspace) -> bool:
-    return bool(ws.base_branch) and git.ok(
-        ["merge-base", "--is-ancestor", f"refs/heads/{ws.branch}", f"refs/heads/{ws.base_branch}"],
-        ws.repo_root)
 
 
 def _merged_into_base(ws: Workspace, db: DB | None = None) -> bool:

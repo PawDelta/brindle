@@ -1,5 +1,6 @@
-"""Giving disk space back (brindle.disk): build dirs of merged worktrees,
-retention of brindle's own files, the free-disk guard, and dead branches."""
+"""Giving disk space back (brindle.disk): merged worktrees removed whole,
+abandoned ones reported, retention of brindle's own files, the free-disk
+guard, and dead branches."""
 
 import json
 import os
@@ -11,9 +12,12 @@ from typer.testing import CliRunner
 
 from brindle import agents, config, disk, doctor, history, spawn, tasks, workspaces
 from brindle.cli import app
+from brindle.daemon import routes_actions
 from brindle.db import Agent
 
 from conftest import sh
+
+DAY = 86400
 
 
 def _settings(values: dict) -> None:
@@ -22,66 +26,85 @@ def _settings(values: dict) -> None:
     path.write_text(json.dumps(values))
 
 
-def _merged_worktree(repo: Path, branch: str = "feat") -> Path:
-    """A linked worktree of ``repo`` whose branch merged into main, with a
-    tracked file under a folder named like a build dir, and real build dirs."""
-    wt = repo.parent / f"wt-{branch}"
+def _worktree(repo: Path, branch: str, merge: str | None = None, days_old: float = 1) -> Path:
+    """A worktree of ``repo`` where brindle puts them, one commit on ``branch``
+    made ``days_old`` days ago, merged into main (``merge``: "merge" or
+    "squash") or not, with a Rust target dir."""
+    wt = workspaces.new_worktree_root(str(repo)) / branch
     sh(f"git worktree add -q -b {branch} {wt}", repo)
-    (wt / ".gitignore").write_text(".env\ntarget/\nnode_modules/\n")
-    (wt / "lib" / "target").mkdir(parents=True, exist_ok=True)
-    (wt / "lib" / "target" / "main.rs").write_text("fn main() {}\n")
+    (wt / ".gitignore").write_text(".env\ntarget/\n")
     (wt / f"{branch}.txt").write_text("work\n")
-    sh("git add -A && git add -f lib/target/main.rs && git commit -qm feat", wt)
-    sh(f"git merge -q {branch}", repo)
+    when = f"{int(time.time() - days_old * DAY)} +0000"
+    sh(f"git add -A && GIT_AUTHOR_DATE='{when}' GIT_COMMITTER_DATE='{when}' git commit -qm {branch}", wt)
+    if merge == "merge":
+        sh(f"git merge -q --no-ff -m m {branch}", repo)
+    elif merge == "squash":
+        sh(f"git merge -q --squash {branch} && git commit -qm 'Squash merge {branch}'", repo)
     (wt / "target" / "debug").mkdir(parents=True)
     (wt / "target" / "debug" / "app").write_bytes(b"x" * 4096)
-    (wt / "app" / "node_modules" / "pkg").mkdir(parents=True)
-    (wt / "app" / "node_modules" / "pkg" / "index.js").write_text("1\n")
+    reflog = disk._gitdir(str(wt)) / "logs" / "HEAD"
+    os.utime(reflog, (time.time() - days_old * DAY,) * 2)
     return wt
 
 
-def test_merged_worktree_loses_build_dirs_but_keeps_source(db, repo):
-    wt = _merged_worktree(repo)
-    ws = workspaces.adopt_root(db, str(wt))
+def _archived(repo: Path, branch: str) -> str:
+    return sh(f"git rev-parse {disk.ARCHIVE_REF}{branch}", repo).strip()
 
-    workspaces.remove(db, ws)
 
-    assert not (wt / "target").exists() and not (wt / "app" / "node_modules").exists()
-    assert (wt / "lib" / "target" / "main.rs").read_text() == "fn main() {}\n"
-    assert (wt / ".gitignore").is_file()
+def test_upgrade_sweep_removes_merged_worktrees_whole_once_and_never_a_dirty_one(db, repo):
+    done = _worktree(repo, "old-done", merge="squash")
+    tip = sh("git rev-parse old-done", repo).strip()
+    dirty = _worktree(repo, "old-wip", merge="merge")
+    (dirty / "wip.txt").write_text("not committed\n")
+    history.record(db, str(repo), "merge", branch="old-done")   # known only from its history
+
+    assert [r["path"] for r in disk.upgrade_sweep(db)] == [str(done)]
+
+    assert not done.exists() and _archived(repo, "old-done") == tip
+    assert sh("git branch --list old-done", repo).strip() == ""
+    assert (dirty / "wip.txt").is_file() and (dirty / "target" / "debug" / "app").is_file()
+    assert disk.clean(db, path=str(dirty))["kept"][0]["reason"].endswith("uncommitted changes")
+    assert dirty.is_dir()
+    assert disk.upgrade_sweep(db) is None   # recorded: it runs once
 
 
 @pytest.mark.parametrize("state", ["dirty", "live"])
-def test_dirty_or_live_worktree_is_untouched(db, repo, monkeypatch, state):
-    wt = _merged_worktree(repo)
-    ws = workspaces.adopt_root(db, str(wt))
+def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, monkeypatch, state):
+    wt = _worktree(repo, "idea", days_old=30)
     if state == "dirty":
         (wt / "notes.txt").write_text("unsaved thought\n")
     else:
+        ws = workspaces.adopt_root(db, str(wt))
         db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "processing",
                            "%1", None, time.time()))
         monkeypatch.setattr(agents, "is_alive", lambda a, *rest, **kw: True)
 
-    cleaned = disk.clean_worktree(db, str(wt))
+    out = disk.clean(db, abandoned=True)
 
-    assert cleaned.removed == [] and cleaned.kept
-    assert (wt / "target" / "debug" / "app").is_file()
-    assert (wt / "app" / "node_modules" / "pkg" / "index.js").is_file()
-
-
-def test_upgrade_sweep_cleans_pre_existing_merged_worktrees_once(db, repo):
-    clean, dirty = _merged_worktree(repo, "old-done"), _merged_worktree(repo, "old-wip")
-    (dirty / "wip.txt").write_text("not committed\n")
-    history.record(db, str(repo), "merge", branch="old-done")   # known only from its history
-
-    assert [c.path for c in disk.upgrade_sweep(db)] == [str(clean)]
-
-    assert not (clean / "target").exists() and (clean / "lib" / "target" / "main.rs").is_file()
-    assert (dirty / "target" / "debug" / "app").is_file() and (dirty / "wip.txt").is_file()
-    assert disk.upgrade_sweep(db) is None   # recorded: it runs once
+    assert out["removed"] == [] and wt.is_dir() and (wt / "target" / "debug" / "app").is_file()
+    [listed] = disk.storage_report(db, str(repo))["worktrees"]
+    assert listed["removable"] is False and listed["reason"]
 
 
-def test_retention_caps_backups_archive_and_logs(brindle_home, monkeypatch):
+def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, monkeypatch):
+    wt = _worktree(repo, "stalled", days_old=30)
+    tip = sh("git rev-parse stalled", repo).strip()
+    monkeypatch.chdir(repo)
+
+    assert CliRunner().invoke(app, ["clean"]).exit_code == 0
+    [listed] = disk.storage_report(db, str(repo))["worktrees"]
+    assert listed["path"] == str(wt) and listed["state"] == "abandoned" and listed["removable"]
+    assert listed["size"] >= listed["build_size"] >= 4096
+    assert wt.is_dir() and "stalled" in sh("git branch --list stalled", repo)
+
+    out = routes_actions.clean_storage(db, {}, {"path": str(wt)})
+
+    assert [r["archived"] for r in out["removed"]] == [f"{disk.ARCHIVE_REF}stalled"]
+    assert not wt.exists() and _archived(repo, "stalled") == tip
+    assert sh("git branch --list stalled", repo).strip() == ""
+
+
+def test_retention_caps_backups_archive_and_logs(brindle_home):
     home = config.brindle_home()
     home.mkdir(parents=True, exist_ok=True)
     (home / "brindle.db").write_text("live")
@@ -96,7 +119,7 @@ def test_retention_caps_backups_archive_and_logs(brindle_home, monkeypatch):
     for d, age in ((old, 40), (new, 1)):
         d.mkdir(parents=True)
         (d / "t.jsonl.gz").write_text("t")
-        os.utime(d, (time.time() - age * 86400,) * 2)
+        os.utime(d, (time.time() - age * DAY,) * 2)
     (home / "archive" / "brindle.jsonl").write_text("{}\n")
     _settings({"retention": {"log_mb": 1}})
 
@@ -138,11 +161,11 @@ def test_merged_and_squash_merged_branches_go_with_their_workspace(db, repo):
         assert workspaces.remove(db, ws).branch_deleted
 
     assert sh("git branch --list plain squashed", repo).strip() == ""
-    assert sh("git rev-parse refs/brindle-archive/squashed", repo).strip() == tip
+    assert _archived(repo, "squashed") == tip and _archived(repo, "plain")
 
 
-def test_clean_lists_then_reclaims_and_archives_stale_branches(db, repo, monkeypatch):
-    wt = _merged_worktree(repo)
+def test_clean_lists_then_removes_merged_and_archives_stale_branches(db, repo, monkeypatch):
+    wt = _worktree(repo, "feat", merge="merge")
     sh("git checkout -q -b old-idea && git commit -q --allow-empty -m idea && git checkout -q main", repo)
     tip = sh("git rev-parse old-idea", repo).strip()
     _settings({"retention": {"stale_branch_days": 0}})
@@ -152,22 +175,21 @@ def test_clean_lists_then_reclaims_and_archives_stale_branches(db, repo, monkeyp
     dry = runner.invoke(app, ["clean", "--dry-run"])
     assert dry.exit_code == 0, dry.output
     assert "old-idea" in dry.output and str(wt) in dry.output
-    assert sh("git branch --list old-idea", repo).strip() == "old-idea"
-    assert (wt / "target").is_dir()
+    assert wt.is_dir() and sh("git branch --list old-idea", repo).strip() == "old-idea"
     report = {c.name: c.detail for c in doctor.disk_checks(str(repo))}
-    assert "old-idea" in report["dead branches"] and "disk use" in report
-    sh("git worktree add -q ../noise -b noise", repo)   # a fresh branch with a worktree is not stale
+    assert "old-idea" in report["dead branches"] and str(wt) in report["merged worktrees"]
+    sh("git worktree add -q ../noise -b noise", repo)   # not made by brindle: never removed
 
     done = runner.invoke(app, ["clean", "--branches", "--yes"])
 
     assert done.exit_code == 0, done.output
-    assert not (wt / "target").exists() and (wt / "lib" / "target" / "main.rs").is_file()
+    assert not wt.exists() and _archived(repo, "feat")
     assert sh("git branch --list old-idea", repo).strip() == ""
-    assert sh("git rev-parse refs/brindle-archive/old-idea", repo).strip() == tip
+    assert _archived(repo, "old-idea") == tip
     assert "noise" in sh("git branch --list noise", repo)
 
 
-def test_pushed_branch_is_deleted_on_origin_once_its_pr_merged(repo, monkeypatch):
+def test_pushed_branch_is_deleted_on_origin_once_its_pr_merged(repo):
     sh("git checkout -q -b brindle/session-1 && git commit -q --allow-empty -m s"
        " && git push -q origin brindle/session-1 && git checkout -q main", repo)
     sha = sh("git rev-parse brindle/session-1", repo).strip()

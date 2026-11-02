@@ -1,11 +1,20 @@
 """Giving disk space back.
 
 brindle's worktrees, archive, backups and logs only ever grew. This module
-takes back what can be rebuilt or has aged out, and nothing else:
+takes back what is finished or has aged out, and nothing else:
 
-- a merged branch's worktree that stays on disk loses its regenerable build
-  dirs (``BUILD_DIRS``: git-ignored, untracked, never a symlink), unless it
-  has uncommitted work or a live session (``clean_worktree``);
+- worktrees (``trees``, ``storage_report``). Each linked worktree of a repo
+  brindle knows is *merged* (its branch is merged or squash-merged into its
+  base or the default branch, see ``merged``), *abandoned* (unmerged, no
+  commit or checkout in ``stale_branch_days``), or *active*. A merged one
+  that brindle made, with no uncommitted changes and no live or paused
+  session, is removed whole with its local branch, whose tip is kept under
+  ``refs/brindle-archive/<branch>`` first (``remove_tree``). This happens
+  hourly from the sweep, once on the first daemon start after the upgrade
+  (``upgrade_sweep``) and on ``brindle clean``. An abandoned one is only
+  listed, with its size, until someone cleans it (``clean``: one, or every
+  abandoned one). A worktree with uncommitted changes is never removed by
+  any path, only flagged;
 - ``retain`` keeps the newest ``db_backups`` ``brindle.db.before-*`` copies,
   ages and caps ``archive/transcripts``, and rotates brindle's own top-level
   ``*.log`` files past ``log_mb`` (settings: ``retention`` in
@@ -13,15 +22,14 @@ takes back what can be rebuilt or has aged out, and nothing else:
   touched;
 - ``low_disk`` holds a new worker or check run while free space is under the
   repo's ``min_free_disk_gb`` (see ``spawn.no_room``);
-- local branches: merged ones (squash merges too, ``merged``) go with their
-  workspace (``workspaces.remove``); unmerged ones nothing uses are only
-  listed (``stale_branches``) until ``brindle clean --branches``, which keeps
-  each tip under ``refs/brindle-archive/<branch>`` first;
+- local branches with no worktree: merged ones go with their workspace
+  (``workspaces.remove``, tip archived); others nothing uses are only listed
+  (``dead_branches``) until ``brindle clean --branches``;
 - remote branches are left alone unless ``delete_pushed_branches`` is on
   (``delete_pushed_remote``).
 
-``brindle doctor`` reports the space by category (``usage``) and ``brindle
-clean`` reclaims it (``--dry-run`` lists it)."""
+``brindle doctor`` and ``brindle clean --dry-run`` show the report; the
+daemon serves it at ``GET /v1/storage`` and cleans at ``POST /v1/storage/clean``."""
 
 from __future__ import annotations
 
@@ -30,7 +38,7 @@ import os
 import shutil
 import sys
 import time
-from dataclasses import dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from brindle import config, git
@@ -40,12 +48,18 @@ log = logging.getLogger(__name__)
 GB = 1024 ** 3
 MB = 1024 ** 2
 DAY = 86400.0
+# Folders of a worktree that rebuild themselves: reported apart in its size.
 BUILD_DIRS = frozenset({"target", "node_modules", ".venv", "graphify-out", ".uv-cache"})
 BACKUP_GLOB = "brindle.db.before-*"
 ARCHIVE_REF = "refs/brindle-archive/"
+POOL_PREFIX = "brindle-pool/"           # warm pool worktrees (brindle.pool): never classified
 NEVER_INDEX = ".metadata_never_index"   # Spotlight skips a folder holding this file
-RETAIN_EVERY = 3600.0                    # the automatic sweep runs retention at most this often
-_RETAINED = ".retained"                  # its marker in brindle's home
+RETAIN_EVERY = 3600.0                    # the automatic sweep runs at most this often
+FRESH = 3600.0                           # a worktree touched this recently is never removed on its own
+_RETAINED = ".retained"                  # the sweep's marker in brindle's home
+UPGRADE_SWEPT = ".disk-swept"            # the one-time upgrade sweep has run
+
+MERGED, ABANDONED, ACTIVE = "merged", "abandoned", "active"
 
 
 # -- settings ---------------------------------------------------------------------------
@@ -58,7 +72,7 @@ class Retention:
     archive_days: float = 30.0      # archived transcripts older than this go
     archive_gb: float = 1.0         # and the oldest go while the archive is bigger
     log_mb: float = 10.0            # a log past this is rotated to <name>.1
-    stale_branch_days: float = 14.0  # an unmerged branch with no commit this long is listed
+    stale_branch_days: float = 14.0  # unmerged with no commit this long: abandoned
 
 
 def retention() -> Retention:
@@ -146,31 +160,20 @@ def low_disk(repo_root: str | None = None) -> str | None:
             "`brindle clean` gives space back)")
 
 
-# -- build dirs of finished worktrees ---------------------------------------------------
-
-
-@dataclass
-class Cleaned:
-    path: str
-    removed: list[str] = field(default_factory=list)   # relative to path
-    freed: int = 0
-    kept: str | None = None                            # why nothing was removed
+# -- worktrees --------------------------------------------------------------------------
 
 
 def regenerable(path: str | Path) -> list[Path]:
-    """The build dirs in worktree ``path`` brindle may delete: folders named
-    in ``BUILD_DIRS`` that git ignores and that hold no tracked file (git
-    lists only wholly untracked folders as such), never a symlink."""
+    """The build dirs in worktree ``path``: folders named in ``BUILD_DIRS``
+    that git ignores and that hold no tracked file, never a symlink."""
     proc = git.run(["ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
                    path, check=False)
     if proc.returncode != 0:
         return []
     found = []
     for entry in proc.stdout.split("\0"):
-        if not entry.endswith("/"):
-            continue
         p = Path(path) / entry.rstrip("/")
-        if p.name in BUILD_DIRS and not p.is_symlink() and p.is_dir():
+        if entry.endswith("/") and p.name in BUILD_DIRS and not p.is_symlink() and p.is_dir():
             found.append(p)
     return found
 
@@ -181,10 +184,16 @@ def _inside(child: str, parent: str) -> bool:
 
 def live_in(db, path: str | Path) -> bool:
     """Whether a session is live in ``path``: a running agent of a workspace
-    there, or any tmux pane sitting in it. Unknown counts as live."""
+    there, any tmux pane sitting in it, or this very process. Unknown counts
+    as live."""
     from brindle import tmux, workspaces
 
     real = os.path.realpath(path)
+    try:
+        if _inside(os.path.realpath(os.getcwd()), real):
+            return True
+    except OSError:
+        pass
     for ws in db.find_workspaces():
         if _inside(os.path.realpath(ws.path), real) and workspaces.live_workers(db, ws):
             return True
@@ -197,65 +206,226 @@ def live_in(db, path: str | Path) -> bool:
     return False
 
 
-def clean_worktree(db, path: str | Path, *, dry_run: bool = False) -> Cleaned:
-    """Delete linked worktree ``path``'s regenerable build dirs (``regenerable``).
-    Never the person's own checkout, one with uncommitted changes (untracked
-    files count), or one with a live session (``live_in``)."""
-    c = Cleaned(str(path))
-    p = Path(path)
-    if not p.is_dir():
-        return c
-    if not (p / ".git").is_file():
-        c.kept = "not a linked worktree"
-        return c
+@dataclass
+class Tree:
+    """One linked worktree in the storage report."""
+    path: str
+    repo_root: str
+    branch: str
+    state: str                  # MERGED, ABANDONED or ACTIVE
+    last_activity: float        # its last commit, checkout or creation
+    dirty: bool                 # uncommitted changes (untracked files count)
+    live: bool                  # a live session or pane, or a paused session that can resume there
+    owned: bool                 # brindle made it (a workspace row, or under brindle's worktree roots)
+    size: int = 0               # everything under it, build dirs included
+    build_size: int = 0         # of which build dirs (BUILD_DIRS)
+    workspace_id: str | None = None
+
+    @property
+    def reason(self) -> str | None:
+        """Why it can't be cleaned, or None."""
+        if self.dirty:
+            return "it has uncommitted changes"
+        if self.live:
+            return "a session is live or paused in it"
+        if not self.owned:
+            return "brindle didn't make it"
+        if self.state == ACTIVE:
+            return "it is still in use (unmerged, with recent activity)"
+        return None
+
+    def to_json(self) -> dict:
+        return {**asdict(self), "removable": self.reason is None, "reason": self.reason}
+
+
+def _gitdir(path: str) -> Path | None:
     try:
-        if git.dirty_files(p):
-            c.kept = "it has uncommitted changes"
-            return c
-    except git.GitError as e:
-        c.kept = f"git can't read it ({e})"
-        return c
-    if live_in(db, p):
-        c.kept = "a session is live in it"
-        return c
-    for d in regenerable(p):
-        size = size_of(d)
-        if not dry_run:
-            shutil.rmtree(d, ignore_errors=True)
-            if d.exists():
-                continue
-        c.removed.append(str(d.relative_to(p)))
-        c.freed += size
-    return c
+        text = (Path(path) / ".git").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return Path(text.removeprefix("gitdir:").strip()) if text.startswith("gitdir:") else None
 
 
-def after_merge(db, ws) -> Cleaned | None:
-    """A merged branch's worktree that stays on disk loses its build dirs.
-    Never raises: cleaning up must not fail a merge or a removal."""
+def _last_activity(repo_root: str, path: str, branch: str, rows: list) -> float:
+    """The newest of the branch's last commit, the worktree's last checkout
+    or commit (its HEAD reflog) and its workspace rows' creation."""
+    tip = git.run(["log", "-1", "--format=%ct", f"refs/heads/{branch}"], repo_root, check=False).stdout.strip()
+    last = float(tip) if tip.isdigit() else 0.0
+    last = max([last, *(w.created_at for w in rows)])
+    gitdir = _gitdir(path)
+    reflog = gitdir / "logs" / "HEAD" if gitdir else None
+    if reflog is not None and reflog.is_file():
+        last = max(last, reflog.stat().st_mtime)
+    return last
+
+
+def _owned(repo_root: str, path: str) -> bool:
     try:
-        if ws.path != ws.repo_root and os.path.isdir(ws.path):
-            return clean_worktree(db, ws.path)
-    except Exception:  # noqa: BLE001
-        log.exception("brindle: couldn't clean the build dirs of %s", ws.path)
-    return None
+        roots = [config.worktree_root(repo_root), config.worktrees_dir()]
+    except ValueError:
+        roots = [config.worktrees_dir()]
+    real = os.path.realpath(path)
+    return any(_inside(real, os.path.realpath(r)) for r in roots)
 
 
-def finished_worktrees(db, repo_root: str) -> list[tuple[str, str]]:
-    """``(path, branch)`` of ``repo_root``'s linked worktrees whose branch is
-    merged into its base (or the default branch)."""
-    known = {os.path.realpath(ws.path): ws for ws in db.find_workspaces(repo_root)}
+def trees(db, repo_root: str, now: float | None = None, *, sizes: bool = True,
+          only: str | None = None) -> list[Tree]:
+    """``repo_root``'s linked worktrees on a branch (not the pool's), classified;
+    ``only``: just the one at that path. ``sizes``: measure them (slow)."""
+    now = time.time() if now is None else now
+    days = retention().stale_branch_days
     default = git.default_branch(repo_root)
+    rows: dict[str, list] = {}
+    for ws in db.find_workspaces(repo_root):
+        rows.setdefault(os.path.realpath(ws.path), []).append(ws)
     out = []
     for wt in git.list_worktrees(repo_root)[1:]:   # the first is the main checkout
         path, ref = wt.get("worktree", ""), wt.get("branch", "")
         if not path or not ref.startswith("refs/heads/") or not os.path.isdir(path):
             continue
+        if only is not None and os.path.realpath(path) != os.path.realpath(only):
+            continue
         branch = ref.removeprefix("refs/heads/")
-        ws = known.get(os.path.realpath(path))
-        base = (ws.base_branch if ws else None) or default
-        if branch != base and (ws and db.merged_sha(ws.id) or merged(repo_root, branch, base)):
-            out.append((path, branch))
+        here = rows.get(os.path.realpath(path), [])
+        base = next((w.base_branch for w in here if w.base_branch), None) or default
+        if branch.startswith(POOL_PREFIX) or branch in (base, default):
+            continue
+        last = _last_activity(repo_root, path, branch, here)
+        recorded = any(db.merged_sha(w.id) for w in here)
+        is_merged = (recorded or merged(repo_root, branch, base)
+                     or (base != default and merged(repo_root, branch, default))
+                     or any(merged_pr(db, w) for w in here))
+        if is_merged and (recorded or now - last >= FRESH):
+            state = MERGED   # (a branch made a moment ago looks merged too: it has nothing of its own yet)
+        elif not is_merged and now - last >= days * DAY:
+            state = ABANDONED
+        else:
+            state = ACTIVE
+        try:
+            dirty = bool(git.dirty_files(path))
+        except git.GitError:
+            dirty = True
+        paused = any(a.status == "paused" for w in here for a in db.list_agents(w.id))
+        t = Tree(path, repo_root, branch, state, last, dirty, paused or live_in(db, path),
+                 bool(here) or _owned(repo_root, path), workspace_id=here[0].id if here else None)
+        if sizes:
+            t.size = size_of(path)
+            t.build_size = sum(size_of(d) for d in regenerable(path))
+        out.append(t)
     return out
+
+
+def _repos(db, here: str | None) -> list[str]:
+    """Every repo brindle knows: its workspaces', and any its history names
+    (a repo whose workspace rows are all gone still has worktrees on disk)."""
+    roots = {ws.repo_root for ws in db.find_workspaces()} | ({here} if here else set())
+    roots |= {r[0] for r in db.conn.execute("SELECT DISTINCT repo_root FROM history")}
+    return sorted(r for r in roots if r and os.path.isdir(os.path.join(r, ".git")))
+
+
+def all_trees(db, here: str | None = None, now: float | None = None, *, sizes: bool = True) -> list[Tree]:
+    """Every known repo's worktrees, biggest first."""
+    out = []
+    for root in _repos(db, here):
+        try:
+            out += trees(db, root, now, sizes=sizes)
+        except git.GitError as e:
+            log.warning("brindle: couldn't look at %s: %s", root, e)
+    return sorted(out, key=lambda t: t.size, reverse=True)
+
+
+class CantClean(ValueError):
+    """A worktree that must stay (the message says why)."""
+
+
+def remove_tree(db, path: str, *, states: tuple[str, ...] = (MERGED, ABANDONED),
+                now: float | None = None) -> dict:
+    """Remove the worktree at ``path`` whole, and its local branch, keeping the
+    branch's tip under ``refs/brindle-archive/<branch>`` first. Its state is
+    looked at again here, so a worktree that changed since a report was
+    taken is kept: only one in ``states`` that ``Tree.reason`` lets go.
+    Raises ``CantClean`` otherwise. What was removed, as for the route."""
+    from brindle import workspaces
+
+    try:
+        root = git.main_repo_root(path)
+        found = trees(db, root, now, only=path)
+    except git.GitError as e:
+        raise CantClean(f"{path} isn't a worktree: {e}") from e
+    if not found:
+        raise CantClean(f"{path} isn't a worktree brindle can clean (none on a branch there)")
+    t = found[0]
+    if t.reason:
+        raise CantClean(f"kept {path}: {t.reason}")
+    if t.state not in states:
+        raise CantClean(f"kept {path}: it is {t.state}")
+    sha = archive_tip(root, t.branch)
+    for ws in db.find_workspaces(root):
+        if os.path.realpath(ws.path) == os.path.realpath(path):
+            try:
+                workspaces.remove(db, ws, delete_branch=False)
+            except workspaces.WorkspaceError as e:
+                raise CantClean(f"kept {path}: {e}") from e
+    if os.path.isdir(path):
+        git.remove_worktree(root, path)   # never forced: git refuses a dirty one too
+    git.run(["worktree", "prune"], root, check=False)
+    if sha and git.branch_exists(root, t.branch):
+        git.delete_branch(root, t.branch, force=True)
+    return {"path": t.path, "repo_root": root, "branch": t.branch, "state": t.state, "size": t.size,
+            "archived": f"{ARCHIVE_REF}{t.branch}" if sha else None}
+
+
+def clean(db, *, path: str | None = None, abandoned: bool = False, here: str | None = None) -> dict:
+    """The one-step cleanups the app and ``brindle clean`` offer: the
+    worktree at ``path`` (merged or abandoned), or every abandoned one.
+    ``{"removed": [...], "kept": [{"path", "reason"}]}``."""
+    if path:
+        targets = [path]
+    elif abandoned:
+        targets = [t.path for t in all_trees(db, here, sizes=False) if t.state == ABANDONED]
+    else:
+        raise CantClean("say which worktree (path) or all abandoned ones (abandoned)")
+    removed, kept = [], []
+    for p in targets:
+        try:
+            removed.append(remove_tree(db, p))
+        except (CantClean, git.GitError) as e:
+            kept.append({"path": p, "reason": str(e)})
+    return {"removed": removed, "kept": kept}
+
+
+def sweep_merged(db, now: float | None = None) -> list[dict]:
+    """Remove every merged worktree that can go (``remove_tree``), quietly:
+    what the hourly sweep and the upgrade sweep do."""
+    now = time.time() if now is None else now
+    done = []
+    for t in all_trees(db, None, now, sizes=False):
+        if t.state != MERGED or t.reason or now - t.last_activity < FRESH:
+            continue   # (the pipeline removes what it merges itself: this is for what it left)
+        try:
+            done.append(remove_tree(db, t.path, states=(MERGED,), now=now))
+            log.info("brindle: removed merged worktree %s (%s)", t.path, t.branch)
+        except (CantClean, git.GitError) as e:
+            log.info("brindle: %s", e)
+    return done
+
+
+def upgrade_sweep(db, now: float | None = None) -> list[dict] | None:
+    """Once per machine (recorded in ``UPGRADE_SWEPT``), the first time the
+    daemon starts after the upgrade that added this: every worktree whose
+    branch merged before then goes (``sweep_merged``: squash merges too).
+    None when it has run already. Never raises."""
+    marker = config.brindle_home() / UPGRADE_SWEPT
+    if marker.exists():
+        return None
+    done: list[dict] = []
+    try:
+        done = sweep_merged(db, now)
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(f"{time.time()}\n")
+    except Exception:  # noqa: BLE001 - the daemon must start whatever happens here
+        log.exception("brindle: the one-time disk sweep failed")
+    return done
 
 
 # -- branches ---------------------------------------------------------------------------
@@ -446,9 +616,9 @@ def retain(dry_run: bool = False) -> list[Item]:
     return done
 
 
-def retain_now_and_then(now: float | None = None) -> None:
-    """``retain`` from the automatic sweep, at most every ``RETAIN_EVERY``
-    seconds. Never raises."""
+def now_and_then(db, now: float | None = None) -> None:
+    """From the automatic sweep, at most every ``RETAIN_EVERY`` seconds:
+    ``retain`` and ``sweep_merged``. Never raises."""
     now = time.time() if now is None else now
     marker = config.brindle_home() / _RETAINED
     try:
@@ -457,8 +627,9 @@ def retain_now_and_then(now: float | None = None) -> None:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
         retain()
+        sweep_merged(db, now)
     except Exception:  # noqa: BLE001
-        log.exception("brindle: retention failed")
+        log.exception("brindle: the hourly disk cleanup failed")
 
 
 # -- Spotlight --------------------------------------------------------------------------
@@ -486,131 +657,56 @@ def keep_out_of_spotlight(*dirs: Path) -> None:
             pass
 
 
-# -- reporting and `brindle clean` ------------------------------------------------------
+# -- the storage report and `brindle clean` ---------------------------------------------
 
 
-def _repos(db, here: str | None) -> list[str]:
-    """Every repo brindle knows: its workspaces', and any its history names
-    (a repo whose workspace rows are all gone still has worktrees on disk)."""
-    roots = {ws.repo_root for ws in db.find_workspaces()} | ({here} if here else set())
-    roots |= {r[0] for r in db.conn.execute("SELECT DISTINCT repo_root FROM history")}
-    return sorted(r for r in roots if r and os.path.isdir(os.path.join(r, ".git")))
-
-
-UPGRADE_SWEPT = ".disk-swept"   # in brindle's home: the one-time sweep below has run
-
-
-def upgrade_sweep(db) -> list[Cleaned] | None:
-    """Once per machine (recorded in ``UPGRADE_SWEPT``), the first time the
-    daemon starts after the upgrade that added this: the build dirs of every
-    worktree whose branch merged before then (``finished_worktrees``: squash
-    merges too), under ``clean_worktree``'s rules. None when it has run
-    already. Never raises."""
-    marker = config.brindle_home() / UPGRADE_SWEPT
-    if marker.exists():
-        return None
-    done: list[Cleaned] = []
-    try:
-        for root in _repos(db, None):
-            try:
-                for path, _branch in finished_worktrees(db, root):
-                    c = clean_worktree(db, path)
-                    if c.removed:
-                        done.append(c)
-                        log.info("brindle: freed %s of build dirs in %s", human(c.freed), path)
-            except git.GitError as e:
-                log.warning("brindle: couldn't sweep %s: %s", root, e)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(f"{time.time()}\n")
-    except Exception:  # noqa: BLE001 - the daemon must start whatever happens here
-        log.exception("brindle: the one-time disk sweep failed")
-    return done
-
-
-@dataclass
-class Plan:
-    worktrees: list[Cleaned] = field(default_factory=list)
-    aged: list[Item] = field(default_factory=list)
-    branches: dict[str, list[Branch]] = field(default_factory=dict)
-
-
-def plan(db, here: str | None, *, dry_run: bool) -> Plan:
-    """What ``brindle clean`` removes (``dry_run``: would remove): the build
-    dirs of finished worktrees in every known repo and retention. Branches
-    are only listed; ``delete_branches`` deletes them."""
-    p = Plan()
-    for root in _repos(db, here):
-        try:
-            for path, _branch in finished_worktrees(db, root):
-                c = clean_worktree(db, path, dry_run=dry_run)
-                if c.removed:
-                    p.worktrees.append(c)
-            if not dry_run:
-                git.run(["worktree", "prune"], root, check=False)   # stale registrations
-            dead = dead_branches(db, root)
-        except git.GitError as e:
-            log.warning("brindle: couldn't look at %s: %s", root, e)
-            continue
-        if dead:
-            p.branches[root] = dead
-    p.aged = retain(dry_run=dry_run)
-    return p
-
-
-def render(p: Plan, *, dry_run: bool) -> list[str]:
-    verb = "would remove" if dry_run else "removed"
-    lines = []
-    for c in p.worktrees:
-        lines.append(f"{verb} {human(c.freed)} of build dirs in {c.path}: {', '.join(c.removed)}")
-    for it in p.aged:
-        action = ("would rotate" if dry_run else "rotated") if it.why == "log to rotate" else verb
-        lines.append(f"{action} {it.path} ({human(it.size)}, {it.why})")
-    for root, dead in p.branches.items():
-        for b in dead:
-            when = time.strftime("%Y-%m-%d", time.localtime(b.last_commit))
-            state = "merged" if b.merged else "unmerged, no workspace"
-            lines.append(f"branch {b.name} in {root}: {state}, last commit {when}")
-    if p.branches:
-        lines.append("`brindle clean --branches` deletes those branches, keeping each tip under "
-                     f"{ARCHIVE_REF}<branch>")
-    return lines or ["nothing to clean"]
-
-
-@dataclass
-class Usage:
-    name: str
-    size: int
-    detail: str
-
-
-def usage(db, here: str | None) -> list[Usage]:
-    """brindle's disk use by category, with what ``brindle clean`` would reclaim."""
+def storage_report(db, here: str | None = None, now: float | None = None) -> dict:
+    """What the daemon's ``GET /v1/storage``, ``brindle doctor`` and ``brindle
+    clean --dry-run`` show: every worktree (``Tree.to_json``) biggest first,
+    brindle's disk use by category, free space, and dead branches."""
     from brindle import history
 
-    home = config.brindle_home()
-    out = []
-    build = 0
-    roots = _repos(db, here)
-    trees = 0
-    for root in roots:
+    items = all_trees(db, here, now)
+    backups, logs, past = _backups(), _logs(), aged(now)
+    categories = [
+        {"name": "worktrees", "size": sum(t.size for t in items), "detail": f"{len(items)} worktree(s)"},
+        {"name": "build dirs", "size": sum(t.build_size for t in items),
+         "detail": "of the worktrees: " + ", ".join(sorted(BUILD_DIRS))},
+        {"name": "archive", "size": size_of(history.archive_dir()), "detail": str(history.archive_dir())},
+        {"name": "database backups", "size": sum(p.stat().st_size for p in backups),
+         "detail": f"{len(backups)} {BACKUP_GLOB}"},
+        {"name": "logs", "size": sum(p.stat().st_size for p in logs),
+         "detail": f"{config.brindle_home()}/*.log"},
+        {"name": "past retention", "size": sum(i.size for i in past), "detail": f"{len(past)} item(s)"},
+    ]
+    branches = []
+    for root in _repos(db, here):
         try:
-            for path, _branch in finished_worktrees(db, root):
-                trees += 1
-                build += sum(size_of(d) for d in regenerable(path))
+            branches += [{"repo_root": root, "name": b.name, "last_commit": b.last_commit, "merged": b.merged}
+                         for b in dead_branches(db, root, now)]
         except git.GitError:
             continue
-    out.append(Usage("build dirs", build, f"in {trees} merged worktree(s)"))
-    worktrees = 0
-    for root in roots:
-        try:
-            worktrees += size_of(config.worktree_root(root))
-        except ValueError:
-            continue
-    out.append(Usage("worktrees", worktrees, f"under {len(roots)} repo(s)' worktree roots"))
-    out.append(Usage("archive", size_of(history.archive_dir()), str(history.archive_dir())))
-    out.append(Usage("database backups", sum(p.stat().st_size for p in _backups()),
-                     f"{len(_backups())} {BACKUP_GLOB}"))
-    out.append(Usage("logs", sum(p.stat().st_size for p in _logs()), f"{home}/*.log"))
-    aged_items = aged()
-    out.append(Usage("past retention", sum(i.size for i in aged_items), f"{len(aged_items)} item(s)"))
-    return out
+    try:
+        free = free_bytes(here or config.brindle_home())
+    except OSError:
+        free = None
+    return {"worktrees": [t.to_json() for t in items], "categories": categories,
+            "reclaimable": sum(t.size for t in items if t.reason is None) + sum(i.size for i in past),
+            "free_bytes": free, "low_disk": low_disk(here), "dead_branches": branches}
+
+
+def report_lines(report: dict) -> list[str]:
+    """``storage_report`` as lines for the terminal."""
+    lines = [", ".join(f"{c['name']} {human(c['size'])}" for c in report["categories"])]
+    for t in report["worktrees"]:
+        when = time.strftime("%Y-%m-%d", time.localtime(t["last_activity"]))
+        flag = f"; kept: {t['reason']}" if t["reason"] else ""
+        lines.append(f"{t['state']:9} {human(t['size']):>8} (build {human(t['build_size'])}) {t['path']} "
+                     f"[{t['branch']}, last activity {when}{flag}]")
+    for b in report["dead_branches"]:
+        when = time.strftime("%Y-%m-%d", time.localtime(b["last_commit"]))
+        lines.append(f"branch {b['name']} in {b['repo_root']}: "
+                     f"{'merged' if b['merged'] else 'unmerged, no worktree'}, last commit {when}")
+    if report["low_disk"]:
+        lines.append(report["low_disk"])
+    return lines

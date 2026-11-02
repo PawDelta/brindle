@@ -692,15 +692,22 @@ def clean(
     dry_run: bool = typer.Option(False, "--dry-run", help="List what would be removed; remove nothing."),
     branches: bool = typer.Option(False, "--branches", help="Also delete the dead local branches listed "
                                   "(each tip is kept under refs/brindle-archive/<branch>)."),
-    yes: bool = typer.Option(False, "--yes", "-y", help="Delete those branches without asking."),
+    abandoned: bool = typer.Option(False, "--abandoned", help="Also remove every abandoned worktree "
+                                   "and its branch (asks first)."),
+    worktree: Optional[str] = typer.Option(None, "--worktree", help="Remove just this worktree, merged "
+                                           "or abandoned, and its branch (asks first)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask before removing."),
 ) -> None:
-    """Give disk space back: build dirs of merged worktrees, old backups, aged archive, big logs.
+    """Give disk space back: merged worktrees, old backups, aged archive, big logs.
 
-    Removes only what can be rebuilt (target, node_modules, .venv, graphify-out,
-    .uv-cache, when git ignores them) from merged worktrees with no uncommitted
-    work and no live session, database backups beyond the newest few, archived
-    transcripts past `retention`, and rotates brindle's logs. Never the database
-    itself. Dead branches are listed; --branches deletes them after asking."""
+    Removes the worktrees brindle made whose branch is merged (squash merges
+    too), with their local branch, keeping each tip under
+    refs/brindle-archive/<branch>; database backups beyond the newest few;
+    archived transcripts past `retention`; and rotates brindle's logs. Abandoned
+    worktrees (unmerged, untouched for `stale_branch_days`) are only listed,
+    with their size: --abandoned or --worktree removes them after asking. A
+    worktree with uncommitted changes or a live session is never removed, and
+    the database itself never is."""
     from brindle import disk
 
     db = DB()
@@ -708,17 +715,53 @@ def clean(
         here = git.main_repo_root(os.getcwd())
     except git.GitError:
         here = None
-    plan = disk.plan(db, here, dry_run=dry_run)
-    for line in disk.render(plan, dry_run=dry_run):
-        typer.echo(line)
-    if dry_run or not branches or not plan.branches:
+    if dry_run:
+        for line in disk.report_lines(disk.storage_report(db, here)):
+            typer.echo(line)
+        for it in disk.retain(dry_run=True):
+            typer.echo(f"would {'rotate' if it.why == 'log to rotate' else 'remove'} {it.path} "
+                       f"({disk.human(it.size)}, {it.why})")
         return
-    count = sum(len(v) for v in plan.branches.values())
-    if not yes and not typer.confirm(f"Delete {count} branch(es)? Each tip is kept under "
+
+    def removed(r: dict) -> None:
+        typer.echo(f"removed {r['state']} worktree {r['path']} ({disk.human(r['size'])}); branch {r['branch']} "
+                   f"deleted, restore with: git branch {r['branch']} {r['archived']}")
+
+    if worktree or abandoned:
+        what = worktree or "every abandoned worktree"
+        if not yes and not typer.confirm(f"Remove {what} and its branch? Each tip is kept under "
+                                         f"{disk.ARCHIVE_REF}<branch>.", default=False):
+            return
+        done = disk.clean(db, path=os.path.abspath(worktree) if worktree else None,
+                          abandoned=not worktree, here=here)
+        for r in done["removed"]:
+            removed(r)
+        for k in done["kept"]:
+            typer.echo(k["reason"])
+    for t in disk.all_trees(db, here, sizes=False):
+        if t.state == disk.MERGED and t.reason is None:
+            try:
+                removed(disk.remove_tree(db, t.path, states=(disk.MERGED,)))
+            except (disk.CantClean, git.GitError) as e:
+                typer.echo(str(e))
+    for it in disk.retain():
+        typer.echo(f"{'rotated' if it.why == 'log to rotate' else 'removed'} {it.path} ({disk.human(it.size)})")
+    left = disk.storage_report(db, here)
+    for t in left["worktrees"]:
+        if t["state"] == disk.ABANDONED or t["dirty"]:
+            typer.echo(f"kept {t['state']} worktree {t['path']} ({disk.human(t['size'])})"
+                       + (f": {t['reason']}" if t["reason"] else ": `brindle clean --abandoned` removes it"))
+    dead = left["dead_branches"]
+    for b in dead:
+        typer.echo(f"branch {b['name']} in {b['repo_root']}: {'merged' if b['merged'] else 'unmerged'}, "
+                   "no worktree")
+    if not dead or not branches:
+        return
+    if not yes and not typer.confirm(f"Delete {len(dead)} branch(es)? Each tip is kept under "
                                      f"{disk.ARCHIVE_REF}<branch>.", default=False):
         return
-    for root, dead in plan.branches.items():
-        for b in dead:
+    for root in {b["repo_root"] for b in dead}:
+        for b in disk.dead_branches(db, root):
             try:
                 disk.delete_branch(root, b)
                 typer.echo(f"deleted {b.name} (restore: git branch {b.name} {disk.ARCHIVE_REF}{b.name})")

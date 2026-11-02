@@ -983,4 +983,4 @@ def sweep_quietly(db: DB) -> None:
             pass
     from brindle import disk
 
-    disk.retain_now_and_then()   # old backups, aged archive, big logs: at most hourly
+    disk.now_and_then(db)   # old backups, aged archive, big logs, merged worktrees: at most hourly
