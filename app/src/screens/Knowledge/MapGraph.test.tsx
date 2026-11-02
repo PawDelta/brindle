@@ -47,6 +47,14 @@ it("links documents that share paths or topics, weighted by how much, and finds 
   expect(sim.groups.map(({ name, size, tone }) => [name, size, tone])).toEqual([["src/cache", 5, 0], ["src/daemon", 3, 1], ["Lone", 1, null]]);
 });
 
+it("groups documents by their category, and the rest by community as uncategorised", () => {
+  const doc = (id: string, category?: string) => ({ id, kind: "doc", title: id, paths: ["src/x"], ...(category ? { category } : {}) }) as GraphNode;
+  const g = docGraph([doc("s0", "Security"), doc("d0", "Daemon & performance"), doc("s1", "Security"), doc("u0"), doc("d1", "Daemon & performance"), doc("s2", "Security"), doc("u1")], []);
+  const sim = createSim(g.nodes, g.edges);
+  expect(sim.groups.map(({ name, size, tone }) => [name, size, tone])).toEqual([["Security", 3, 0], ["Daemon & performance", 2, 1], ["Uncategorised: src/x", 2, 2]]);
+  expect(g.nodes.map((node, i) => `${node.id}:${sim.group[i]}`)).toEqual(["s0:0", "d0:1", "s1:0", "u0:2", "d1:1", "s2:0", "u1:2"]);
+});
+
 it("lets the legend reach every group past the first eight", () => {
   const nodes = Array.from({ length: 18 }, (_, i) => ({ id: `d${i}`, kind: "doc", title: `Doc ${i}`, paths: [`src/area${Math.floor(i / 2)}`] }) as GraphNode);
   render(<MapGraph nodes={nodes} edges={[]} onOpen={() => {}} />);

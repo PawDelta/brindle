@@ -5,7 +5,9 @@
    of tasks whose brief drew on the docs against similar tasks without one,
    or "not enough data yet". Below it, scope chips and a search box, a rail
    of topics (the server's, filtered there) and kinds (filtered here), and a
-   card per doc. A card opens the reader: the doc exactly as written
+   card per doc, under collapsible category headers when the server gave
+   categories (the largest first, uncategorised last; which are collapsed
+   is remembered on this device, per repo). A card opens the reader: the doc exactly as written
    (Markdown, rendered safely) beside what the server read from it, with
    Share, Export and Delete. `session` narrows the list to the docs one
    session wrote or used (the session goal panel links here with it). */
@@ -33,6 +35,42 @@ export interface DocsViewProps {
 }
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
+
+const UNCATEGORISED = "Uncategorised";
+const COLLAPSED_KEY = "brindle.docs.collapsed";
+
+/* Docs under their categories: the largest first, then by name, and the
+   docs without one last. */
+export function byCategory(docs: AnalysisDoc[]): [string, AnalysisDoc[]][] {
+  const groups = new Map<string, AnalysisDoc[]>();
+  for (const d of docs) {
+    const name = d.category ?? UNCATEGORISED;
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name)!.push(d);
+  }
+  return [...groups].sort(([a, x], [b, y]) => Number(a === UNCATEGORISED) - Number(b === UNCATEGORISED) || y.length - x.length || a.localeCompare(b));
+}
+
+/* The categories collapsed in a repo's list, kept in this device's storage. */
+function readCollapsed(repo = ""): Set<string> {
+  try {
+    const got: unknown = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "{}");
+    const list: unknown = got && typeof got === "object" ? (got as Record<string, unknown>)[repo] : null;
+    return new Set(Array.isArray(list) ? list.filter((s): s is string => typeof s === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeCollapsed(repo = "", collapsed: Set<string>): void {
+  try {
+    const got: unknown = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "{}");
+    const all = got && typeof got === "object" ? (got as Record<string, unknown>) : {};
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify({ ...all, [repo]: [...collapsed] }));
+  } catch {
+    // No storage: the headers stay as they are for this window.
+  }
+}
 
 /* A doc's scope as the daemon's filter takes it: user, team:<id> or org:<id>. */
 export function scopeSpec(s: DocScope): string {
@@ -383,6 +421,13 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
      stays while another is picked. */
   const [scopes, setScopes] = useState<DocScope[]>([]);
   const learn = useCallback((more: DocScope[]) => setScopes((had) => withScopes(had, more)), []);
+  const [collapsed, setCollapsed] = useState(() => readCollapsed(repo));
+  const toggle = (name: string) => {
+    const next = new Set(collapsed);
+    if (!next.delete(name)) next.add(name);
+    setCollapsed(next);
+    writeCollapsed(repo, next);
+  };
 
   useEffect(() => {
     client.docScopes(repo).then(
@@ -442,6 +487,9 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   }, [docs]);
   const q = query.trim().toLowerCase();
   const shown = docs.filter((d) => (!kind || d.kind === kind) && (!q || [d.title, d.summary, ...(d.topics ?? [])].some((t) => t?.toLowerCase().includes(q))));
+  const docCard = (d: AnalysisDoc) => (
+    <DocCard key={d.id} d={d} scope={d.scope && (scopes.find((s) => scopeSpec(s) === scopeSpec(d.scope!)) ?? d.scope)} onOpen={() => setOpen(d.id)} />
+  );
   const chips: [string, string][] = [["", "All"], ["user", "Mine"], ...scopes.filter((s) => s.kind !== "user").map((s): [string, string] => [scopeSpec(s), scopeName(s)])];
 
   if (open) {
@@ -545,13 +593,20 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
             {listing.state === "loading" && <p className="text-sm text-ink-3">Loading…</p>}
             {listing.state === "loaded" && docs.length === 0 && <p className="text-sm text-ink-2">No docs here yet. Large work (a goal with several milestones, or a heavy task) leaves one when its branch merges.</p>}
             {listing.state === "loaded" && docs.length > 0 && shown.length === 0 && <p className="text-sm text-ink-2">No doc matches.</p>}
-            {shown.length > 0 && (
-              <ul className="flex flex-col gap-s1">
-                {shown.map((d) => (
-                  <DocCard key={d.id} d={d} scope={d.scope && (scopes.find((s) => scopeSpec(s) === scopeSpec(d.scope!)) ?? d.scope)} onOpen={() => setOpen(d.id)} />
-                ))}
-              </ul>
-            )}
+            {shown.length > 0 && !shown.some((d) => d.category) && <ul className="flex flex-col gap-s1">{shown.map(docCard)}</ul>}
+            {shown.some((d) => d.category) && byCategory(shown).map(([name, list]) => {
+              const closed = collapsed.has(name);
+              return (
+                <section key={name} aria-label={name} className="flex flex-col gap-s1">
+                  <button type="button" aria-expanded={!closed} onClick={() => toggle(name)} className={`${label} flex items-center gap-1.5 pt-s1 text-left hover:text-ink`}>
+                    <span aria-hidden className={`inline-block transition-transform ${closed ? "" : "rotate-90"}`}>›</span>
+                    {name}
+                    <span className="font-normal normal-case tracking-normal">· {list.length}</span>
+                  </button>
+                  {!closed && <ul className="flex flex-col gap-s1">{list.map(docCard)}</ul>}
+                </section>
+              );
+            })}
           </div>
         </div>
       )}

@@ -440,6 +440,8 @@ export interface MapNode {
   created_by?: string;
   scope?: DocScope;
   created_at?: number;
+  /* A doc's category (see AnalysisDoc.category). */
+  category?: string;
 }
 
 export interface MapEdge {
@@ -468,6 +470,7 @@ interface WireListedDoc {
   findings?: string[];
   open_questions?: string[];
   topics?: string[];
+  category?: string;
   mentions?: WireMentions;
   related?: string[];
   supersedes?: string[];
@@ -492,6 +495,10 @@ export interface AnalysisDoc {
   scope?: DocScope;
   summary?: string;
   topics?: string[];
+  /* A short label ("Security", "Desktop updates") the server's reader model
+     picks when the doc is created and reuses across the scope; absent when
+     the server gave none. */
+  category?: string;
   version?: number;
   created_at?: number;
   used_in_briefs?: number;
@@ -520,13 +527,19 @@ export interface DocTopic {
 
 const sameScope = (a: DocScope, b: DocScope) => a.kind === b.kind && a.id === b.id;
 
-export function listedDoc({ doc_id, mentions: _, ...rest }: WireListedDoc): AnalysisDoc {
-  return { ...rest, id: doc_id };
+/* A blank or non-text category is no category. */
+export function categoryOf(raw: unknown): { category?: string } {
+  return typeof raw === "string" && raw.trim() ? { category: raw.trim() } : {};
 }
 
-export function docDetail({ mentions, scopes, files, ...rest }: WireDoc): AnalysisDocDetail {
+export function listedDoc({ doc_id, mentions: _, category, ...rest }: WireListedDoc): AnalysisDoc {
+  return { ...rest, id: doc_id, ...categoryOf(category) };
+}
+
+export function docDetail({ mentions, scopes, files, category, ...rest }: WireDoc): AnalysisDocDetail {
   return {
     ...rest,
+    ...categoryOf(category),
     files: files ?? [],
     mentions: [...(mentions?.files ?? []), ...(mentions?.symbols ?? []), ...(mentions?.services ?? [])],
     shared_with: (scopes ?? []).filter((s) => !rest.scope || !sameScope(s, rest.scope)),
@@ -1378,8 +1391,9 @@ export class DaemonClient {
     return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
   }
 
-  knowledgeMap(repo: string, scope: DocScope, paths: string[] = []) {
-    return this.get<KnowledgeMap>("/analysis-docs/map", { repo, scope_kind: scope.kind, scope_id: scope.id, paths: JSON.stringify(paths), depth: 1 });
+  async knowledgeMap(repo: string, scope: DocScope, paths: string[] = []): Promise<KnowledgeMap> {
+    const got = await this.get<KnowledgeMap>("/analysis-docs/map", { repo, scope_kind: scope.kind, scope_id: scope.id, paths: JSON.stringify(paths), depth: 1 });
+    return { ...got, nodes: got.nodes.map(({ category, ...node }) => ({ ...node, ...categoryOf(category) })) };
   }
 
   async doc(id: string, repo?: string): Promise<AnalysisDocDetail> {

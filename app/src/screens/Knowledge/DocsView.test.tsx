@@ -29,14 +29,14 @@ const SCOPES = [
 
 const RESULTS: DocResults = { days: 30, minimum: 5, enough: true, briefed: 6, large: 9, compared: 6, similar: 7, with_brief: 1.2, without_brief: 2.0 };
 
-function client(detail: (id: string) => object, results: DocResults = RESULTS) {
+function client(detail: (id: string) => object, results: DocResults = RESULTS, docs: object[] = DOCS) {
   const fetch: typeof globalThis.fetch = (input) => {
     const url = new URL(String(input));
     const path = url.pathname.replace(/^\/v1/, "");
     const session = url.searchParams.get("session");
     const body =
       path === "/analysis-docs"
-        ? { scope: { kind: "user", id: "u1" }, docs: DOCS.filter((d) => !session || d.source.session === session) }
+        ? { scope: { kind: "user", id: "u1" }, docs: (docs as typeof DOCS).filter((d) => !session || d.source.session === session) }
         : path === "/analysis-docs/topics"
           ? { topics: [{ topic: "checkout", count: 3, stale: 0, latest: "d1" }] }
           : path === "/analysis-docs/scopes"
@@ -78,6 +78,22 @@ describe("docs view", () => {
     // A connected doc is named by its title and opens in turn.
     fireEvent.click(screen.getByRole("button", { name: "Stripe vs Adyen fees" }));
     await waitFor(() => expect(screen.getByTestId("doc-body").textContent).toContain("Stripe vs Adyen fees"));
+  });
+
+  it("groups docs under their categories, largest first and uncategorised last, and remembers a collapsed one", async () => {
+    const docs = [
+      { ...DOCS[0], category: "Security" }, { ...DOCS[1], category: " " }, { ...DOCS[2], category: "Security" }, { ...DOCS[3], category: "Desktop updates" },
+    ];
+    const open = () => render(<DocsView client={client(() => ({}), RESULTS, docs)} repo="/r" />);
+    open();
+    await waitFor(() => expect(screen.getAllByRole("region").map((r) => r.getAttribute("aria-label")).slice(2)).toEqual(["Security", "Desktop updates", "Uncategorised"]));
+    expect([...screen.getByRole("region", { name: "Security" }).querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"))).toEqual(["d1", "d3"]);
+    fireEvent.click(within(screen.getByRole("region", { name: "Security" })).getByRole("button", { expanded: true }));
+    expect(shown()).toEqual(["d4", "d2"]);
+    cleanup();
+    open();
+    await waitFor(() => expect(shown()).toEqual(["d4", "d2"]));
+    localStorage.clear();
   });
 
   it("reads a real doc: raw HTML and images stay text, mentions are listed, and Share offers every team of the person's", async () => {

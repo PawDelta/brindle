@@ -166,17 +166,21 @@ export function createSim(nodes: GraphNode[], edges: MapEdge[], aspect = 1.8): S
     u[i] = d * Math.cos(angle);
     y[i] = d * Math.sin(angle);
   });
-  const { group, groups } = communities(nodes.length, links, weights, shared, degree, order, labels);
+  const categories = nodes.map((node) => (node.kind === "doc" ? node.category : undefined));
+  const { group, groups } = communities(categories, links, weights, shared, degree, order, labels);
   return { nodes, labels, r, w, aspect, u, y, links, weights, shared, degree, group, groups, pull, pinned: new Uint8Array(n), dx: new Float64Array(n), dy: new Float64Array(n) };
 }
 
-/* Louvain's local-moving phase over the weighted links, with no randomness:
-   nodes are visited in (kind, id) order and each joins the neighbouring group
-   that gains the most modularity, staying put on a tie, else taking the
-   lowest group. Groups are numbered largest first, ties to the one visited
-   first, and named after the path or topic their members share most, else
-   their best-connected member. */
-function communities(n: number, links: [number, number][], weights: Float64Array, shared: string[][], degree: Float64Array, order: number[], labels: { full: string }[]) {
+/* A doc's group is its category, when the server gave it one. Without one
+   it falls back to its community: Louvain's local-moving phase over the
+   weighted links, with no randomness (nodes are visited in (kind, id) order
+   and each joins the neighbouring group that gains the most modularity,
+   staying put on a tie, else taking the lowest group). Groups are numbered
+   largest first, ties to the one visited first; a community is named after
+   the path or topic its members share most, else its best-connected member,
+   and marked uncategorised when the map has categories at all. */
+function communities(categories: (string | undefined)[], links: [number, number][], weights: Float64Array, shared: string[][], degree: Float64Array, order: number[], labels: { full: string }[]) {
+  const n = categories.length;
   const strength = new Float64Array(n), adj: [number, number][][] = Array.from({ length: n }, () => []);
   links.forEach(([a, b], l) => { strength[a] += weights[l]; strength[b] += weights[l]; adj[a].push([b, weights[l]]); adj[b].push([a, weights[l]]); });
   const m2 = strength.reduce((sum, k) => sum + k, 0);
@@ -201,11 +205,13 @@ function communities(n: number, links: [number, number][], weights: Float64Array
   }
   const rank = new Int32Array(n);
   order.forEach((i, at) => { rank[i] = at; });
-  const members = new Map<number, number[]>();
+  const members = new Map<string, number[]>();
   for (const i of order) {
-    if (!members.has(raw[i])) members.set(raw[i], []);
-    members.get(raw[i])!.push(i);
+    const key = categories[i] ? `c\0${categories[i]}` : `m\0${raw[i]}`;
+    if (!members.has(key)) members.set(key, []);
+    members.get(key)!.push(i);
   }
+  const categorised = categories.some(Boolean);
   const sorted = [...members.values()].sort((a, b) => b.length - a.length || rank[a[0]] - rank[b[0]]);
   const group = new Int32Array(n);
   sorted.forEach((list, g) => { for (const i of list) group[i] = g; });
@@ -216,9 +222,12 @@ function communities(n: number, links: [number, number][], weights: Float64Array
   });
   let tone = 0;
   const groups = sorted.map((list, g) => {
+    const category = categories[list[0]];
+    if (category) return { name: category, size: list.length, tone: tone++ % TONES };
     const top = [...counts[g]].sort(([a, x], [b, y]) => y - x || (a < b ? -1 : a > b ? 1 : 0))[0]?.[0];
     const lead = list.reduce((best, i) => (degree[i] > degree[best] ? i : best), list[0]);
-    return { name: top ?? labels[lead].full, size: list.length, tone: list.length > 1 ? tone++ % TONES : null };
+    const name = top ?? labels[lead].full;
+    return { name: categorised ? `Uncategorised: ${name}` : name, size: list.length, tone: list.length > 1 ? tone++ % TONES : null };
   });
   return { group, groups };
 }
