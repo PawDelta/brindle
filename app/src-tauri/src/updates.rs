@@ -175,13 +175,19 @@ const TICK: Duration = Duration::from_secs(60);
 
 /// How long after a look the next is due: `RECHECK` after one that reached
 /// the feed, a `TICK` after one skipped for the daemon not answering (at
-/// launch, a daemon still starting), ten minutes after any other failure
-/// (offline, say).
-fn wait_after(looked: &Result<Option<Offer>, String>) -> Duration {
+/// launch, a daemon still starting). Other failures start at ten minutes,
+/// doubling up to `RECHECK`; a successful look clears that backoff.
+fn wait_after(looked: &Result<Option<Offer>, String>, failed_wait: &mut Duration) -> Duration {
     match looked {
-        Ok(_) => RECHECK,
+        Ok(_) => {
+            *failed_wait = Duration::ZERO;
+            RECHECK
+        }
         Err(e) if e == NO_ENGINE => TICK,
-        Err(_) => Duration::from_secs(10 * 60),
+        Err(_) => {
+            *failed_wait = failed_wait.saturating_mul(2).max(Duration::from_secs(10 * 60)).min(RECHECK);
+            *failed_wait
+        }
     }
 }
 
@@ -542,7 +548,7 @@ async fn may_check<R: Runtime>(app: &AppHandle<R>, brindle_home: &Path) -> Resul
 /// What `app-update.json` in the app's data directory keeps across launches:
 /// the version last run, when this machine last checked (seconds since
 /// the epoch), the update the person last set aside ("Later"), and whether
-/// the engine last said updates are off.
+/// the engine last said updates are off, and versions already announced.
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct Record {
     last_version: Option<String>,
@@ -552,6 +558,9 @@ struct Record {
     /// The engine's last word was Off, until it says On (`engine_allows`).
     #[serde(default)]
     engine_off: bool,
+    /// Keep every announcement, including versions a rollback may offer again.
+    #[serde(default)]
+    notified_versions: Vec<String>,
 }
 
 /// What the app knows of updates beyond the install itself (app state): its
@@ -641,10 +650,44 @@ impl Seen {
 }
 
 impl SeenState {
+    fn load(path: Option<PathBuf>, current: &Version) -> Self {
+        let record: Record = path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        let updated = updated_to(record.last_version.as_deref(), current)
+            .filter(|_| checks_at_launch(&current.to_string()));
+        let mut seen = Self { record, path, updated, ..Self::default() };
+        seen.record.last_version = Some(current.to_string());
+        seen.save();
+        seen
+    }
+
+    fn notify_available(
+        &mut self,
+        looked: &Result<Option<Offer>, String>,
+        shown: bool,
+        notify: impl FnOnce(&Offer),
+    ) {
+        if let Ok(Some(found)) = looked {
+            if !shown && !self.record.notified_versions.contains(&found.version) {
+                self.record.notified_versions.push(found.version.clone());
+                // Commit before sending: an interrupted launch mustn't announce it again.
+                // If it can't be saved, leave the banner as the way to offer the update.
+                if !self.save() {
+                    self.record.notified_versions.pop();
+                    return;
+                }
+                notify(found);
+            }
+        }
+    }
+
     /// Write the record: to a file of this process's own beside it, then
     /// renamed over it, so a reader never sees half of one.
-    fn save(&self) {
-        let Some(path) = &self.path else { return };
+    fn save(&self) -> bool {
+        let Some(path) = &self.path else { return false };
         let part = path.with_extension(format!("json.{}.part", std::process::id()));
         let written = (|| -> std::io::Result<()> {
             if let Some(dir) = path.parent() {
@@ -656,7 +699,9 @@ impl SeenState {
         if let Err(e) = written {
             let _ = std::fs::remove_file(&part);
             eprintln!("brindle: couldn't save {}: {e}", path.display());
+            return false;
         }
+        true
     }
 }
 
@@ -711,19 +756,9 @@ fn announce<R: Runtime>(app: &AppHandle<R>) {
 /// this version as the last run.
 fn remember_launch<R: Runtime>(app: &AppHandle<R>) {
     let path = app.path().app_data_dir().ok().map(|dir| dir.join("app-update.json"));
-    let record: Record = path
-        .as_ref()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
     let current = app.package_info().version.clone();
-    let updated = updated_to(record.last_version.as_deref(), &current)
-        .filter(|_| checks_at_launch(&current.to_string()));
     let seen = app.state::<Seen>();
-    let mut seen = seen.state();
-    *seen = SeenState { record, path, updated, ..SeenState::default() };
-    seen.record.last_version = Some(current.to_string());
-    seen.save();
+    *seen.state() = SeenState::load(path, &current);
 }
 
 fn window_shown<R: Runtime>(app: &AppHandle<R>) -> bool {
@@ -795,29 +830,25 @@ pub fn check_in_background<R: Runtime>(app: &AppHandle<R>, brindle_home: &Path) 
     let (app, brindle_home) = (app.clone(), brindle_home.to_path_buf());
     tauri::async_runtime::spawn(async move {
         let mut ticks = tokio::time::interval(TICK);
-        let (mut next, mut told) = (None, None);
+        let mut next = None;
+        let mut failed_wait = Duration::ZERO;
         loop {
             ticks.tick().await;
             if !due(next, now_secs()) {
                 continue;
             }
             let looked = check(&app, &brindle_home).await;
-            next = Some(now_secs() + wait_after(&looked).as_secs());
-            match looked {
-                Ok(found) => {
-                    let Some(found) = found else { continue };
-                    if told.as_ref() != Some(&found.version) && !window_shown(&app) {
-                        let _ = app
-                            .notification()
-                            .builder()
-                            .title("brindle update available")
-                            .body(format!("brindle {} is available. Open brindle to update.", found.version))
-                            .show();
-                    }
-                    told = Some(found.version);
-                }
-                // A look skipped or failed is due again soon (`wait_after`).
-                Err(e) => eprintln!("brindle: update check: {e}"),
+            next = Some(now_secs() + wait_after(&looked, &mut failed_wait).as_secs());
+            app.state::<Seen>().state().notify_available(&looked, window_shown(&app), |found| {
+                let _ = app
+                    .notification()
+                    .builder()
+                    .title("brindle update available")
+                    .body(format!("brindle {} is available. Open brindle to update.", found.version))
+                    .show();
+            });
+            if let Err(e) = looked {
+                eprintln!("brindle: update check: {e}");
             }
         }
     });
@@ -1704,6 +1735,7 @@ mod tests {
         // limit here is 20 ms), so the launch look, run off the window's path
         // (`check_in_background`), never blocks the app opening.
         let mut denied = false;
+        let mut failed_wait = Duration::ZERO;
         let bound = Duration::from_millis(500);
         for (engine, offered, denied_after, next) in [
             // At launch, the daemon not answering yet: the look ends within the engine's
@@ -1738,11 +1770,66 @@ mod tests {
             assert!(began.elapsed() < bound, "{what}: the look held up past the engine's limit");
             assert_eq!(looked.as_ref().is_ok_and(|o| o.is_some()), offered, "{what}");
             assert_eq!(feed.calls.is_empty(), !offered, "{what}");
-            assert_eq!(wait_after(&looked), next, "{what}");
+            assert_eq!(wait_after(&looked, &mut failed_wait), next, "{what}");
             denied = remembered.get().unwrap_or(denied);
             assert_eq!(denied, denied_after, "{what}");
         }
         assert!(started.elapsed() < Duration::from_secs(2), "a look waited on a daemon that never answers");
+    }
+
+    #[test]
+    fn consecutive_feed_failures_back_off_and_a_success_starts_over() {
+        let mut failed_wait = Duration::ZERO;
+        for minutes in [10, 20, 40, 80, 160, 320, 360, 360] {
+            assert_eq!(wait_after(&Err("offline".into()), &mut failed_wait), Duration::from_secs(minutes * 60));
+        }
+        assert_eq!(wait_after(&Ok(None), &mut failed_wait), RECHECK);
+        assert_eq!(wait_after(&Err("offline".into()), &mut failed_wait), Duration::from_secs(600));
+        assert_eq!(wait_after(&Err(NO_ENGINE.into()), &mut failed_wait), TICK);
+        assert_eq!(wait_after(&Err("offline".into()), &mut failed_wait), Duration::from_secs(1200));
+        let offer = Some(Offer { version: "0.2.11".into(), notes: None, rollback: false });
+        assert_eq!(wait_after(&Ok(offer), &mut failed_wait), RECHECK);
+        assert_eq!(wait_after(&Err("offline".into()), &mut failed_wait), Duration::from_secs(600));
+    }
+
+    #[test]
+    fn an_available_version_notifies_once_across_launches_and_keeps_its_banner() {
+        let dir = std::env::temp_dir().join(format!("update-notifications-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app-update.json");
+        // A record written by an older app still loads.
+        std::fs::write(&path, r#"{"last_version":"0.2.10","last_checked":null}"#).unwrap();
+        let current = Version::parse("0.2.10").unwrap();
+        let notifications = Cell::new(0);
+        for (version, reach, shown, total) in [
+            ("0.2.11", Reach::Down, false, 0),
+            ("0.2.11", Reach::Up, false, 1),
+            ("0.2.11", Reach::Up, false, 1),
+            ("0.2.12", Reach::Up, true, 1),
+            ("0.2.12", Reach::Up, false, 2),
+            // A feed returning to an earlier offer mustn't announce it again either.
+            ("0.2.11", Reach::Up, false, 2),
+        ] {
+            let seen = Seen::default();
+            *seen.state() = SeenState::load(Some(path.clone()), &current);
+            let mut feed = fake_feed(Some(version), reach);
+            let looked = tauri::async_runtime::block_on(seen.look_once(
+                || look("0.2.10", || std::future::ready(Ok(())), &mut feed, FEED_LIMIT),
+                || {},
+            ));
+            seen.state().notify_available(&looked, shown, |_| notifications.set(notifications.get() + 1));
+            assert_eq!(notifications.get(), total, "{version} {reach:?} {shown}");
+            assert_eq!(seen.state().available, looked.ok().flatten());
+        }
+        // A failed record write mustn't allow an announcement on every launch.
+        let mut unsaved = SeenState { path: Some(path.join("blocked")), ..SeenState::default() };
+        let offer = Ok(Some(Offer { version: "0.2.13".into(), notes: None, rollback: false }));
+        unsaved.notify_available(&offer, false, |_| notifications.set(notifications.get() + 1));
+        assert_eq!(notifications.get(), 2);
+        unsaved.path = Some(path);
+        unsaved.notify_available(&offer, false, |_| notifications.set(notifications.get() + 1));
+        assert_eq!(notifications.get(), 3);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
