@@ -356,11 +356,7 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
         watch = _watch_slow(db, ws, cmd, last, timeout) if last is not None else None
         started = time.monotonic()
         try:
-            from brindle import tasks
-
             extra = {} if cancel is None else {"cancel": cancel}
-            if tasks.forced_start(db, ws):   # the worker was started despite the load: its checks yield
-                extra["background"] = True
             ok, out = autopilot.run_check(cmd, ws.path, env, timeout, **extra)
         finally:
             if watch:

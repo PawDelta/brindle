@@ -27,13 +27,18 @@ else (``direct_spawn_allowed`` in ``.brindle/rules/learned.md`` lists the
 CLI-only, interactive and tmux-server files that may).
 
 Room (:func:`room`) is how many more processes the machine can take: its
-cores, minus the current one-minute load, minus this process's own running
-children, shrunk when the kernel reports memory pressure. A start needs at
-least one unit of room, except that one process of ours may always run, so
-the daemon never stalls entirely. Children start at background priority
-(``taskpolicy -b`` on macOS, ``nice`` elsewhere).
+cores, minus the cores' worth of CPU busy right now (sampled CPU idle time,
+not the load average, which on macOS counts throttled threads too), minus
+this process's own running children, shrunk when the kernel reports memory
+pressure. A start needs at least one unit of room, except that one process
+of ours may always run, so the daemon never stalls entirely. Reads, which
+nothing waits on but a screen and which are stopped freely, start at
+background priority (``taskpolicy -b`` on macOS, ``nice`` elsewhere);
+everything else (actions such as setup commands, merges and their hooks,
+check runs, agents) runs at normal priority: a throttled check run on an
+idle machine only makes everything behind it wait longer.
 
-The gate (waiting for room, background priority) is on only in the daemon
+The gate (waiting for room, background reads) is on only in the daemon
 (:func:`enable`); in the CLI, MCP server and hooks, reads and actions start
 at once, as they always have. Deadlines and the read's clean stop apply
 everywhere.
@@ -62,6 +67,14 @@ GRACE = 2.0          # seconds a stopped read has between SIGTERM and SIGKILL
 POLL = 0.25          # seconds between checks while a read runs or a start waits
 ACTION_WAIT = 30.0   # seconds an action with no deadline waits for room before starting anyway
 NICE = 10            # the niceness of background children where taskpolicy doesn't exist
+SAMPLE = 1.0         # seconds a CPU-busy sample stays current
+# Past this, a new sample measures afresh over WINDOW (blocking that long) instead
+# of averaging since the last one. The daemon's 5 s health tick keeps it fresh.
+SAMPLE_STALE = 30.0
+WINDOW = 0.2         # seconds a fresh CPU-busy sample measures over
+
+# host_statistics (macOS): the HOST_CPU_LOAD_INFO flavor, CPU_STATE_MAX ticks.
+HOST_CPU_LOAD_INFO, CPU_STATES = 3, 4
 
 # kern.memorystatus_vm_pressure_level (macOS): 1 normal, 2 warn, 4 critical.
 PRESSURE_WARN, PRESSURE_CRITICAL = 2, 4
@@ -193,14 +206,77 @@ def _cores() -> int:
     return os.cpu_count() or 1
 
 
-def _load() -> float:
+_libc: Any = None
+_host: Any = None
+_sample: tuple[float, tuple[int, int], float] | None = None   # (when, ticks, busy cores then)
+_sample_lock = threading.Lock()
+
+
+def _cpu_ticks() -> tuple[int, int] | None:
+    """The CPUs' (busy, total) ticks since boot, summed over every core, or
+    None where they can't be read."""
+    global _libc, _host
+    if sys.platform == "darwin":
+        try:
+            if _libc is None:
+                _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+            if _host is None:
+                _libc.mach_host_self.restype = ctypes.c_uint32
+                _host = _libc.mach_host_self()   # once: each call takes another port right
+            info = (ctypes.c_uint32 * CPU_STATES)()      # user, system, idle, nice
+            count = ctypes.c_uint32(CPU_STATES)
+            if _libc.host_statistics(ctypes.c_uint32(_host), HOST_CPU_LOAD_INFO, info,
+                                     ctypes.byref(count)) != 0:
+                return None
+            return info[0] + info[1] + info[3], sum(info)
+        except (OSError, AttributeError):
+            return None
     try:
-        return os.getloadavg()[0]
+        with open("/proc/stat") as f:
+            fields = [int(x) for x in f.readline().split()[1:]]
+    except (OSError, ValueError):
+        return None
+    if len(fields) < 4:
+        return None
+    total = sum(fields[:8])                  # guest time is counted in user already
+    return total - fields[3] - (fields[4] if len(fields) > 4 else 0), total   # idle + iowait
+
+
+def _load() -> float:
+    """How many cores' worth of CPU is busy now, from the CPUs' idle time
+    over the last second or so (at most :func:`_cores`). Not the load
+    average: on macOS that counts throttled runnable threads too, and read 96
+    on a machine whose CPUs were 63% idle. Where the CPU time can't be read,
+    the one-minute load average, capped at the core count."""
+    global _sample
+    with _sample_lock:
+        now = time.monotonic()
+        if _sample is not None and now - _sample[0] < SAMPLE:
+            return _sample[2]
+        if _sample is None or now - _sample[0] > SAMPLE_STALE:
+            base = _cpu_ticks()                 # the last sample says nothing about now
+            if base is None:
+                return _loadavg()
+            threading.Event().wait(WINDOW)
+            now = time.monotonic()
+        else:
+            base = _sample[1]
+        ticks = _cpu_ticks()
+        if ticks is None:
+            return _loadavg()
+        busy, total = ((t - b) % 2 ** 32 if sys.platform == "darwin" else t - b
+                       for t, b in zip(ticks, base))   # mach's tick counters wrap at 32 bits
+        cores = _cores()
+        used = cores * busy / total if total > 0 else (_sample[2] if _sample else 0.0)
+        _sample = (now, ticks, used)
+        return used
+
+
+def _loadavg() -> float:
+    try:
+        return min(os.getloadavg()[0], float(_cores()))
     except OSError:
         return 0.0
-
-
-_libc: Any = None
 
 
 def pressure() -> int:
@@ -224,7 +300,8 @@ def pressure() -> int:
 
 def room() -> float:
     """How many more processes the machine can take now: cores minus the
-    one-minute load minus this process's running children, halved under
+    cores' worth of CPU busy (:func:`_load`) minus this process's running
+    children, halved under
     memory-pressure warnings and nothing at all when it's critical. May be
     zero or negative; a start needs at least 1 (see :func:`read`)."""
     level = pressure()
@@ -328,12 +405,13 @@ def _release() -> None:
 _prefix: list[str] | None = None
 
 
-def _background(argv: list[str], force: bool = False) -> list[str]:
-    """``argv`` at background priority, when the gate is on, or always with
-    ``force``. Both prefixes exec the command, so the child keeps the pid it
-    was started with."""
+def _background(argv: list[str]) -> list[str]:
+    """``argv`` at background priority, when the gate is on. Only for work
+    nothing waits on but a screen (a read): on macOS a background process
+    can sit runnable with no CPU on an idle machine. Both prefixes exec the
+    command, so the child keeps the pid it was started with."""
     global _prefix
-    if not _gated and not force:
+    if not _gated:
         return argv
     if _prefix is None:
         if sys.platform == "darwin":
@@ -507,7 +585,8 @@ def action(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = Non
     or with no deadline up to ``wait`` seconds (ACTION_WAIT), after which it
     starts regardless. Once started, no deadline stops it, nor anything else
     the request starts after it (Deadline.committed); ``timeout`` is the
-    caller's own hard limit, as with ``subprocess.run``."""
+    caller's own hard limit, as with ``subprocess.run``. It runs at normal
+    priority: someone waits on it (a setup command, a merge and its hooks)."""
     dl = _live()
     if dl is not None:
         _admit(dl.at, dl, False, _name(argv))
@@ -516,9 +595,7 @@ def action(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = Non
         _admit(time.monotonic() + (ACTION_WAIT if wait is None else wait), None, False,
                _name(argv), start_anyway=True)
     try:
-        proc = subprocess.run(_background(argv), cwd=cwd, env=env, text=text, input=input,
+        return subprocess.run(argv, cwd=cwd, env=env, text=text, input=input,
                               capture_output=True, timeout=timeout)
-        proc.args = argv
-        return proc
     finally:
         _release()
