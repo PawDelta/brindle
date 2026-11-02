@@ -28,6 +28,13 @@
 //! `~/.brindle/config.json`, `BRINDLE_AIRGAP` in the environment, or the
 //! engine saying so (`engine_says`). A build without a public key (a local
 //! `tauri build`) never checks.
+//!
+//! An update is always newer, with one exception: a stable feed whose manifest
+//! says `"rollback": true` (app-feed-rollback.yml writes one, pointing the feed
+//! back at a published release's own signed bundles) may name an older
+//! release, which is then offered and installed like any update
+//! (`update_wanted`): same signature check, same gates, one install at a time.
+//! Without that mark nothing older is ever offered.
 
 use std::cmp::Ordering;
 use std::future::Future;
@@ -241,6 +248,29 @@ pub fn newer(current: &Version, remote: &Version) -> bool {
     remote.cmp_precedence(current) == Ordering::Greater
 }
 
+/// Whether a feed's manifest marks itself a rollback (`"rollback": true`,
+/// exactly; app-feed-rollback.yml writes it).
+fn marks_rollback(manifest: &Value) -> bool {
+    manifest.get("rollback").and_then(Value::as_bool) == Some(true)
+}
+
+/// Whether this build's own feed's `remote` is a rollback for this build at
+/// `current`: the manifest is marked one (`rollback`) and names a plain
+/// release (no pre-release, no build metadata) older than this build.
+pub fn rolls_back(current: &Version, remote: &Version, rollback: bool) -> bool {
+    rollback
+        && remote.pre.is_empty()
+        && remote.build.is_empty()
+        && remote.cmp_precedence(current) == Ordering::Less
+}
+
+/// Whether this build's own feed's `remote` is one to offer and install over
+/// this build at `current`: `newer`, or a rollback (`rolls_back`). Never an
+/// older build without the manifest's rollback mark.
+pub fn update_wanted(current: &Version, remote: &Version, rollback: bool) -> bool {
+    newer(current, remote) || rolls_back(current, remote, rollback)
+}
+
 /// A release-branch build's run number, from its version's build metadata
 /// `release.<run>.<sha>` (the release/desktop pipeline's contract: the CI
 /// run that built it, then 12 hex digits of its commit); none for any other
@@ -345,12 +375,15 @@ fn stable_updater<R: Runtime>(
         .map_err(|e| e.to_string())
 }
 
-/// This build's own updater: its feed (`endpoint`), an update being `newer`,
-/// each bundle checked against the configured (production) key.
+/// This build's own updater: its feed (`endpoint`), each bundle checked
+/// against the configured (production) key. Any other version than this
+/// build's comes back: the plugin's comparator can't see the manifest's
+/// rollback mark, so the caller decides with `update_wanted` (and
+/// `marks_rollback` on the update's `raw_json`).
 fn app_updater<R: Runtime>(app: &AppHandle<R>) -> Result<tauri_plugin_updater::Updater, String> {
     let mut builder = app
         .updater_builder()
-        .version_comparator(|current, release| newer(&current, &release.version));
+        .version_comparator(|current, release| release.version.cmp_precedence(&current) != Ordering::Equal);
     if let Some(stable) = stable_endpoint(app) {
         let feed = endpoint(&stable, &version(app));
         if feed != stable {
@@ -551,11 +584,14 @@ impl Drop for Looking<'_> {
 }
 
 /// An update a look found, offered to the person ("brindle X is available"):
-/// its version and its release notes as the feed gives them.
+/// its version, its release notes as the feed gives them, and whether it is
+/// a rollback to an older release (`rolls_back`: "brindle X is available
+/// (rollback)").
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Offer {
     version: String,
     notes: Option<String>,
+    rollback: bool,
 }
 
 impl Seen {
@@ -699,7 +735,8 @@ fn window_shown<R: Runtime>(app: &AppHandle<R>) -> bool {
 const NOT_AUTOMATIC: &str = "this build doesn't update by itself";
 
 /// One look at this build's own feed for an update to offer (at launch, every
-/// `RECHECK`, and About's Check now): the `newer` build there, or none. It
+/// `RECHECK`, and About's Check now): the build there `update_wanted` (newer,
+/// or a marked rollback), or none. It
 /// downloads and installs nothing; "Update now" does (`update_now`). A build
 /// that doesn't update by itself never looks (`checks_at_launch`), nor one
 /// whose `gate` (`may_check`) says no; a feed that hasn't answered within
@@ -718,8 +755,15 @@ async fn look<G: Future<Output = Result<(), String>>>(
     let found = tokio::time::timeout(limit, feed.check())
         .await
         .map_err(|_| format!("the update feed didn't answer within {}s", limit.as_secs()))??;
-    let found = found.filter(|v| Version::parse(v).is_ok_and(|v| newer(&current, &v)));
-    Ok(found.map(|version| Offer { version, notes: feed.notes() }))
+    let marked = feed.rollback();
+    let Some((version, remote)) = found.and_then(|v| Version::parse(&v).ok().map(|parsed| (v, parsed))) else {
+        return Ok(None);
+    };
+    if !update_wanted(&current, &remote, marked) {
+        return Ok(None);
+    }
+    let rollback = rolls_back(&current, &remote, marked);
+    Ok(Some(Offer { version, notes: feed.notes(), rollback }))
 }
 
 /// Look at this build's feed (`look`, gated by `may_check`) and offer what it
@@ -849,8 +893,9 @@ pub async fn app_update_now<R: Runtime>(
 
 /// Install this build's update from `feed` (`install_build`: `gate` before
 /// reading it and again before installing, the only install, `report`ing
-/// how it goes) when it is `newer` than `current`, then `restart` into it;
-/// one already installed and waiting restarts at once.
+/// how it goes) when `update_wanted` over `current` (newer, or a marked
+/// rollback), then `restart` into it; one already installed and waiting
+/// restarts at once.
 async fn update_now<G: Future<Output = Result<(), String>>>(
     installs: &Installs,
     gate: impl Fn() -> G,
@@ -859,9 +904,9 @@ async fn update_now<G: Future<Output = Result<(), String>>>(
     report: impl FnMut(ReleaseProgress) + Send,
     restart: impl FnOnce(),
 ) -> Result<Option<String>, String> {
-    let wanted = |current: &Version, found: &str| {
+    let wanted = |current: &Version, found: &str, rollback: bool| {
         Version::parse(found)
-            .map(|found| newer(current, &found))
+            .map(|found| update_wanted(current, &found, rollback))
             .map_err(|_| format!("the update feed names {found:?}, not a version"))
     };
     let got = install_build(installs, gate, current, feed, wanted, report).await?;
@@ -953,6 +998,11 @@ trait ReleaseFeed {
     fn notes(&self) -> Option<String> {
         None
     }
+    /// Whether the manifest `check` read marks itself a rollback
+    /// (`marks_rollback`).
+    fn rollback(&self) -> bool {
+        false
+    }
 }
 
 /// Install the release feed's build when `release_build_wanted` says so over
@@ -968,18 +1018,19 @@ async fn install_release_build<G: Future<Output = Result<(), String>>>(
     feed: &mut impl ReleaseFeed,
     report: impl FnMut(ReleaseProgress) + Send,
 ) -> Result<Option<String>, String> {
-    install_build(installs, gate, current, feed, release_build_wanted, report).await
+    install_build(installs, gate, current, feed, |c, v, _| release_build_wanted(c, v), report).await
 }
 
-/// `install_release_build` with the decision (`wanted`, given this build and
-/// the feed's version) left to the caller: "Return to stable" uses
-/// `stable_return_wanted`.
+/// `install_release_build` with the decision (`wanted`, given this build,
+/// the feed's version and whether its manifest marks a rollback) left to the
+/// caller: "Return to stable" uses `stable_return_wanted`, "Update now"
+/// `update_wanted`.
 async fn install_build<G: Future<Output = Result<(), String>>>(
     installs: &Installs,
     gate: impl Fn() -> G,
     current: &Version,
     feed: &mut impl ReleaseFeed,
-    wanted: impl Fn(&Version, &str) -> Result<bool, String>,
+    wanted: impl Fn(&Version, &str, bool) -> Result<bool, String>,
     mut report: impl FnMut(ReleaseProgress) + Send,
 ) -> Result<Option<String>, String> {
     gate().await?;
@@ -987,7 +1038,7 @@ async fn install_build<G: Future<Output = Result<(), String>>>(
         let Some(version) = feed.check().await? else {
             return Ok(None);
         };
-        if !wanted(current, &version)? {
+        if !wanted(current, &version, feed.rollback())? {
             return Ok(None);
         }
         report(ReleaseProgress::Found { version: version.clone() });
@@ -1041,6 +1092,10 @@ impl<R: Runtime> ReleaseFeed for PluginFeed<R> {
 
     fn notes(&self) -> Option<String> {
         self.update.as_ref().and_then(|update| update.body.clone())
+    }
+
+    fn rollback(&self) -> bool {
+        self.update.as_ref().is_some_and(|update| marks_rollback(&update.raw_json))
     }
 
     async fn download(
@@ -1097,7 +1152,7 @@ pub async fn app_return_to_stable<R: Runtime>(
         let _ = on_progress.send(progress);
     };
     let installs = app.state::<Installs>();
-    let wanted = |current: &Version, found: &str| {
+    let wanted = |current: &Version, found: &str, _rollback: bool| {
         if found != version {
             return Err(format!("the stable release is now {found}, not {version}; check again"));
         }
@@ -1119,13 +1174,17 @@ pub async fn app_stable_check<R: Runtime>(app: AppHandle<R>) -> Result<Option<St
 }
 
 /// Check this build's feed (`endpoint`) and install an update found
-/// (`newer`), answering its version.
+/// (`update_wanted`: newer, or a marked rollback), answering its version.
 async fn install<R: Runtime>(app: &AppHandle<R>) -> Result<Option<String>, String> {
     let found = app_updater(app)?
         .check()
         .await
         .map_err(|e| e.to_string())?;
     let Some(update) = found else { return Ok(None) };
+    let remote = Version::parse(&update.version).map_err(|e| e.to_string())?;
+    if !update_wanted(&app.package_info().version, &remote, marks_rollback(&update.raw_json)) {
+        return Ok(None);
+    }
     update
         .download_and_install(|_, _| {}, || {})
         .await
@@ -1254,19 +1313,30 @@ mod tests {
         assert_ne!(production, staff);
         let release = release_updater(app.handle(), "https://example.invalid/latest.json").unwrap();
         let update = app_updater(app.handle()).unwrap();
-        for (what, updater, trusted) in [("release build", &release, staff), ("update", &update, production)] {
+        // A rollback manifest naming an older release than this build comes back from
+        // this build's own updater too, its bundle checked against the same key.
+        for (what, updater, trusted, version, rollback) in [
+            ("release build", &release, staff, "999.0.0", false),
+            ("update", &update, production, "999.0.0", false),
+            ("rollback", &update, production, "0.0.1", true),
+        ] {
             for key in [staff, production] {
                 let manifest = serde_json::json!({
-                    "version": "999.0.0",
+                    "version": version,
+                    "rollback": rollback,
                     "url": "https://example.invalid/bundle.app.tar.gz",
                     "signature": signature_by(key),
                 });
                 let found = updater.restore_update(manifest).unwrap().expect(what);
+                assert_eq!(marks_rollback(&found.raw_json), rollback, "{what}");
+                let verified = found.verify(b"bundle");
                 let wrong_key = matches!(
-                    found.verify(b"bundle"),
+                    verified,
                     Err(tauri_plugin_updater::Error::Minisign(minisign_verify::Error::UnexpectedKeyId))
                 );
                 assert_eq!(wrong_key, key != trusted, "{what}");
+                // The trusted key's ID on a signature of other bytes: refused all the same.
+                assert!(verified.is_err(), "{what}: a bad signature verified");
             }
         }
     }
@@ -1421,6 +1491,8 @@ mod tests {
         meanwhile: Box<dyn Fn() + 'a>,
         paused: Option<&'a Cell<bool>>,
         reach: Reach,
+        /// Whether its manifest says `"rollback": true`.
+        rollback: bool,
     }
 
     /// Whether the feed answers: it does, it fails (offline), or it never does.
@@ -1432,7 +1504,7 @@ mod tests {
     }
 
     fn fake_feed(version: Option<&'static str>, reach: Reach) -> FakeFeed<'static> {
-        FakeFeed { version, calls: vec![], meanwhile: Box::new(|| {}), paused: None, reach }
+        FakeFeed { version, calls: vec![], meanwhile: Box::new(|| {}), paused: None, reach, rollback: false }
     }
 
     impl ReleaseFeed for FakeFeed<'_> {
@@ -1465,6 +1537,10 @@ mod tests {
         fn install(&mut self, _: &[u8]) -> Result<(), String> {
             self.calls.push("install");
             Ok(())
+        }
+
+        fn rollback(&self) -> bool {
+            self.rollback
         }
     }
 
@@ -1505,6 +1581,7 @@ mod tests {
                 meanwhile: Box::new(|| meanwhile(&fake, &config)),
                 paused: None,
                 reach: Reach::Up,
+                rollback: false,
             };
             // The gate as the command builds it, on this fake machine.
             let gate = || std::future::ready(staff_gate(|p| fake.get(p), Some(*config.borrow()), None, true));
@@ -1571,30 +1648,39 @@ mod tests {
     #[test]
     fn a_look_offers_an_update_installs_nothing_and_never_holds_up_the_launch() {
         let limit = Duration::from_millis(50);
-        let offer = |v: &str| Some(Offer { version: v.into(), notes: None });
+        let offer = |v: &str| Some(Offer { version: v.into(), notes: None, rollback: false });
+        let rollback = Some(Offer { version: "0.2.11".into(), notes: None, rollback: true });
         let started = Instant::now();
-        // The last columns: what the look answers, and what was asked of the feed.
-        for (version, reach, open, got, calls) in [
+        // The feed names 0.2.11; `marked`: its manifest says "rollback": true. The last
+        // columns: what the look answers, and what was asked of the feed.
+        for (version, marked, reach, open, got, calls) in [
             // A release with a newer build in its feed: offered, and nothing downloads.
-            ("0.2.10", Reach::Up, true, Ok(offer("0.2.11")), &["check"][..]),
-            ("0.2.11", Reach::Up, true, Ok(None), &["check"]),
+            ("0.2.10", false, Reach::Up, true, Ok(offer("0.2.11")), &["check"][..]),
+            ("0.2.11", false, Reach::Up, true, Ok(None), &["check"]),
+            // Newer than the feed: a rollback manifest offers its older release, marked so;
+            // without the mark nothing older is offered, and a rollback to itself is none.
+            ("0.2.12", true, Reach::Up, true, Ok(rollback.clone()), &["check"]),
+            ("0.2.12", false, Reach::Up, true, Ok(None), &["check"]),
+            ("0.2.11", true, Reach::Up, true, Ok(None), &["check"]),
+            // A rollback is still gated like any look: air-gapped, the feed isn't read.
+            ("0.2.12", true, Reach::Up, false, Err(()), &[]),
             // Offline, or a feed that never answers: no offer, the latter within the limit.
-            ("0.2.10", Reach::Down, true, Err(()), &["check"]),
-            ("0.2.10", Reach::Hung, true, Err(()), &["check"]),
+            ("0.2.10", false, Reach::Down, true, Err(()), &["check"]),
+            ("0.2.10", false, Reach::Hung, true, Err(()), &["check"]),
             // Updates off (air-gapped, say): the feed isn't read.
-            ("0.2.10", Reach::Up, false, Err(()), &[]),
+            ("0.2.10", false, Reach::Up, false, Err(()), &[]),
             // A release candidate or a staff build: no look at all, not even the gate.
-            ("0.2.11-rc.1", Reach::Up, true, Err(()), &[]),
-            ("0.2.10+release.42.0123456789ab", Reach::Up, true, Err(()), &[]),
+            ("0.2.11-rc.1", false, Reach::Up, true, Err(()), &[]),
+            ("0.2.10+release.42.0123456789ab", false, Reach::Up, true, Err(()), &[]),
         ] {
-            let mut feed = fake_feed(Some("0.2.11"), reach);
+            let mut feed = FakeFeed { rollback: marked, ..fake_feed(Some("0.2.11"), reach) };
             let gated = Cell::new(0);
             let gate = || {
                 gated.set(gated.get() + 1);
                 std::future::ready(if open { Ok(()) } else { Err(UPDATES_OFF.to_string()) })
             };
             let looked = tauri::async_runtime::block_on(look(version, gate, &mut feed, limit));
-            let what = format!("{version} {reach:?} {open}");
+            let what = format!("{version} {marked} {reach:?} {open}");
             assert_eq!(looked.map_err(|_| ()), got, "{what}");
             assert_eq!(feed.calls, calls, "{what}");
             assert_eq!(gated.get(), usize::from(checks_at_launch(version)), "{what}");
@@ -1661,7 +1747,7 @@ mod tests {
     #[test]
     fn a_look_asked_for_during_another_answers_that_one_and_starts_none() {
         let seen = Seen::default();
-        let offer = Some(Offer { version: "0.2.11".into(), notes: None });
+        let offer = Some(Offer { version: "0.2.11".into(), notes: None, rollback: false });
         let (release, runs, told) = (Cell::new(false), Cell::new(0), Cell::new(0));
         let slow = || async {
             runs.set(runs.get() + 1);
@@ -1688,14 +1774,19 @@ mod tests {
     fn update_now_installs_the_update_then_restarts_into_it() {
         let current = Version::parse("0.2.10").expect("version");
         let all: &[&str] = &["check", "download", "install"];
-        for (names, got, calls, restarts) in [
-            (Some("0.2.11"), Ok(Some("0.2.11".to_string())), all, true),
+        // `marked`: the feed's manifest says "rollback": true.
+        for (names, marked, got, calls, restarts) in [
+            (Some("0.2.11"), false, Ok(Some("0.2.11".to_string())), all, true),
+            // A rollback manifest's older release installs like any update; without the
+            // mark nothing older is installed.
+            (Some("0.2.9"), true, Ok(Some("0.2.9".to_string())), all, true),
+            (Some("0.2.9"), false, Ok(None), &["check"][..], false),
             // Nothing newer by now: nothing downloads, and the app keeps running.
-            (Some("0.2.10"), Ok(None), &["check"][..], false),
-            (None, Ok(None), &["check"], false),
-            (Some("not a version"), Err(()), &["check"], false),
+            (Some("0.2.10"), false, Ok(None), &["check"][..], false),
+            (None, false, Ok(None), &["check"], false),
+            (Some("not a version"), false, Err(()), &["check"], false),
         ] {
-            let mut feed = fake_feed(names, Reach::Up);
+            let mut feed = FakeFeed { rollback: marked, ..fake_feed(names, Reach::Up) };
             let restarted = Cell::new(false);
             let gate = || std::future::ready(Ok(()));
             let done = tauri::async_runtime::block_on(update_now(
@@ -1706,7 +1797,7 @@ mod tests {
                 |_| {},
                 || restarted.set(true),
             ));
-            assert_eq!(done.map_err(|_| ()), got, "{names:?}");
+            assert_eq!(done.map_err(|_| ()), got, "{names:?} {marked}");
             assert_eq!(feed.calls, calls, "{names:?}");
             assert_eq!(restarted.get(), restarts, "{names:?}");
         }
