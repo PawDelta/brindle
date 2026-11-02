@@ -886,11 +886,13 @@ def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, m
     def docs_api(method, path, body=None, **kw):
         if path == "/analysis-docs/manual-only":
             return {"doc_id": "manual-only", "version": 3}
+        if path == "/me/analysis-docs/settings":
+            return {"switches": {}}
         assert path == "/analysis-docs/brief"
         return {"block": "A brief", "cited": [{"doc_id": "worker-cited", "version": 4}]}
 
     monkeypatch.setattr(analysis_docs, "require_entitlement",
-                        lambda store=None: SimpleNamespace(sub="u1", features=()))
+                        lambda store=None: SimpleNamespace(sub="u1", features=(), org_id="o1", plan="pro"))
     monkeypatch.setattr(analysis_docs, "api", docs_api)
     analysis_docs.read_doc(db, "r1", "manual-only")
     knowledge.record_receipt(db, "r1", [(analysis_docs.UPDATED_ITEM, "overlap-doc", "published")])
