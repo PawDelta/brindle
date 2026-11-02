@@ -25,6 +25,7 @@ def remote(backend, monkeypatch):
         "PUT /analysis-docs/d1/draft": [(200, {})],
         "POST /analysis-docs/d1/draft/publish": [(200, {"version": 2})],
         DROP: [(200, {})],
+        "GET /me/analysis-docs/settings": [(200, {"switches": {}})],     # assist on by default
     })
     backend.version = 1
     monkeypatch.setattr(auth.UrllibTransport, "request",
