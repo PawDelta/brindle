@@ -2069,10 +2069,63 @@ def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
             and (part.cwd is None or not req.worktree or _inside(path, req.worktree) is None))
 
 
-def _credential_words(req: Request, part: ShellPart, words: list[str], depth: int) -> bool:
+def _credential_options(args: list[str], valued: set[str]) -> tuple[list[str], set[str]]:
+    """CLI operands and option names, excluding the values options consume."""
+    operands, options = [], set()
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if arg == "--":
+            operands.extend(args[index:])
+            break
+        if arg.startswith("--"):
+            name, equals, _ = arg.partition("=")
+            options.add(name)
+            index += name in valued and not equals
+        elif arg.startswith("-") and arg != "-":
+            for pos, char in enumerate(arg[1:], 2):
+                name = "-" + char
+                options.add(name)
+                if name in valued:
+                    index += pos == len(arg)
+                    break
+        else:
+            operands.append(arg)
+    return operands, options
+
+
+def _credential_shell(req: Request, part: ShellPart, args: list[str], depth: int) -> bool:
+    """Find a shell's command string after actual options, never inside --norc."""
+    index, command_string = 0, False
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            index += 1
+            break
+        if arg.startswith("--"):
+            name, equals, _ = arg.partition("=")
+            index += 2 if name in ("--rcfile", "--init-file") and not equals else 1
+        elif arg.startswith(("-", "+")) and len(arg) > 1:
+            for pos, char in enumerate(arg[1:], 2):
+                command_string |= arg[0] == "-" and char == "c"
+                if char in "oO":
+                    index += pos == len(arg)
+                    break
+            index += 1
+        else:
+            break
+    return (command_string and index < len(args)
+            and prints_credentials(replace(req, command=args[index], cwd=part.cwd or ""), depth + 1))
+
+
+def _credential_words(req: Request, part: ShellPart, words: list[str], depth: int,
+                      references: list[tuple[str, ...]] | None = None) -> bool:
     """Classify output, unwrapping only commands that actually execute their operands."""
     if not words or depth > 30:
         return False
+    if references is None:
+        references = part.references
     program, args = os.path.basename(words[0]), words[1:]
     if program in ("command", "builtin", "exec", "sudo", "doas", "env", "nohup"):
         index = 0
@@ -2093,7 +2146,10 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
                     split = shlex.split(args[index + 1])
                 except ValueError:
                     return False
-                return _credential_words(req, part, ["env", *split, *args[index + 2:]], depth + 1)
+                tokens = _script_tokens(args[index + 1], credential_scan=True) or []
+                refs = [tuple(ref[2] for ref in t[1].refs) for t in tokens if t[0] == "word"]
+                return _credential_words(req, part, ["env", *split, *args[index + 2:]], depth + 1,
+                                         [(), *refs, *references[index + 3:]])
             if arg in valued:
                 index += 2
             elif arg.startswith("-") or program == "env" and _ASSIGNMENT.match(arg):
@@ -2101,12 +2157,9 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
             else:
                 break
         return (program == "env" and index >= len(args)
-                or _credential_words(req, part, args[index:], depth + 1))
+                or _credential_words(req, part, args[index:], depth + 1, references[index + 1:]))
     if program in ("sh", "bash", "zsh", "dash", "ksh"):
-        for index, arg in enumerate(args):
-            if arg.startswith("-") and "c" in arg[1:] and index + 1 < len(args):
-                return prints_credentials(replace(req, command=args[index + 1], cwd=part.cwd or ""), depth + 1)
-        return False
+        return _credential_shell(req, part, args, depth)
     if program == "printenv":
         if any(a in ("--help", "--version") for a in args):
             return False
@@ -2115,10 +2168,8 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
     if program in ("echo", "printf"):
         if program == "printf" and args and args[0] == "-v":
             return False
-        # References retain their quote context: '$TOKEN' and \$TOKEN print literal text.
-        tokens = _script_tokens(part.line) or []
-        return any(_SECRET_NAME.search(ref[2]) for token in tokens if token[0] == "word"
-                   for ref in token[1].refs)
+        # Only output arguments count; assignments and wrapper operands don't print.
+        return any(_SECRET_NAME.search(name) for refs in references[1:] for name in refs)
     if program in ("set", "export", "declare", "typeset"):
         options = "".join(a[1:] for a in args if a.startswith("-"))
         operands = [a for a in args if not a.startswith("-")]
@@ -2149,10 +2200,17 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
     if program in ("gh", "gcloud", "aws"):
         target = {"gh": ("auth", "token"), "gcloud": ("auth", "print-access-token"),
                   "aws": ("configure", "export-credentials")}[program]
-        return any(tuple(args[i:i + 2]) == target for i in range(len(args) - 1))
+        operands, _ = _credential_options(args, {"--project", "--account", "--configuration", "--billing-project",
+                                                "--impersonate-service-account", "--profile", "--region",
+                                                "--endpoint-url", "--hostname", "-h", "--format", "--verbosity",
+                                                "--flags-file", "--access-token-file", "--output", "--query"})
+        return tuple(operands[:2]) == target
     if program == "security":
-        return (bool(args) and args[0] in ("find-generic-password", "find-internet-password")
-                and any(a.startswith("-") and re.search("[wg]", a[1:]) for a in args[1:]))
+        operands, options = _credential_options(args, {"-a", "-c", "-C", "-d", "-D", "-j", "-l", "-p", "-s", "-t"})
+        return (bool(operands) and operands[0] in ("find-generic-password", "find-internet-password")
+                and bool(options & {"-w", "-g"}))
+    if program == "dd":
+        return any(_credential_file(req, part, arg[3:]) for arg in args if arg.startswith("if="))
     if program in (*READERS, "awk", "less", "more", "strings", "od", "xxd"):
         return any(_credential_file(req, part, name) for name in [*words[1:], *part.written[1:], *part.reads])
     return False
@@ -2170,7 +2228,9 @@ def prints_credentials(req: Request, depth: int = 0) -> bool:
     try:
         reader.read(req.command)
     except ValueError:
-        pass
+        fallback = _PartReader(req, credential_scan=True)
+        fallback.scan(req.command)
+        reader.parts.extend(fallback.parts)
     return any(_credential_words(req, part, part.words, depth) for part in reader.parts)
 
 
@@ -2860,7 +2920,49 @@ class _Word:
         return self.raw if re.fullmatch(r"[A-Za-z0-9_\-./:=@%+,{}!\[\]]+", self.raw) else None
 
 
-def _script_word(command: str, i: int) -> tuple[str, list, list, int] | None:
+def _parameter_word(command: str, start: int, quoted: bool) -> tuple[int, list, list] | None:
+    """Read a ${...} for credential inspection without evaluating its operators."""
+    base = re.match(r"\$\{([!#]?)([A-Za-z_]\w*)", command[start:])
+    i = start + base.end() if base else start + 2
+    refs, subs, quote = [], [], ""
+    while i < len(command):
+        char = command[i]
+        if char == "\\":
+            i += 2
+        elif char == "'" and not quote:
+            end = command.find("'", i + 1)
+            if end < 0:
+                return None
+            i = end + 1
+        elif char == '"':
+            quote = "" if quote else char
+            i += 1
+        elif char == "}" and not quote:
+            if base and base.group(1) != "#":
+                refs.insert(0, (start, i + 1, base.group(2), quoted))
+            return i + 1, refs, subs
+        elif char == "`" or command.startswith("$(", i):
+            end = _substitution_end(command, i)
+            if end is None:
+                return None
+            subs.append(command[i + (1 if char == "`" else 2):end - 1])
+            i = end
+        elif command.startswith("${", i):
+            nested = _parameter_word(command, i, quoted or bool(quote))
+            if nested is None:
+                return None
+            i, inner_refs, inner_subs = nested
+            refs.extend(inner_refs)
+            subs.extend(inner_subs)
+        elif char == "$" and (found := _REFERENCE.match(command, i)):
+            refs.append((i, found.end(), found.group(1) or found.group(2), quoted or bool(quote)))
+            i = found.end()
+        else:
+            i += 1
+    return None
+
+
+def _script_word(command: str, i: int, *, credential_scan: bool = False) -> tuple[str, list, list, int] | None:
     """The word starting at ``i``: (raw text, references, substitutions,
     end), or None for quoting or an expansion it doesn't read (``$'...'``,
     ``${x:-y}``) or an unclosed quote or substitution."""
@@ -2892,6 +2994,13 @@ def _script_word(command: str, i: int) -> tuple[str, list, list, int] | None:
             if found:
                 refs.append((i - start, found.end() - start, found.group(1) or found.group(2), quoted))
                 i = found.end()
+            elif credential_scan and command.startswith("${", i):
+                parameter = _parameter_word(command, i, quoted)
+                if parameter is None:
+                    return None
+                i, inner_refs, inner_subs = parameter
+                refs.extend((s - start, e - start, name, q) for s, e, name, q in inner_refs)
+                subs.extend(inner_subs)
             elif command.startswith("${", i) or not quoted and command.startswith("$'", i):
                 return None
             else:
@@ -2903,14 +3012,15 @@ def _script_word(command: str, i: int) -> tuple[str, list, list, int] | None:
     return command[start:i], refs, subs, i
 
 
-def _script_tokens(command: str, *, subshells: bool = False) -> list[tuple] | None:
+def _script_tokens(command: str, *, credential_scan: bool = False,
+                   partial: list[tuple] | None = None) -> list[tuple] | None:
     """``("word", _Word)``, ``("op", text, spaced)`` and ``("heredoc", body,
     expands, spaced)`` for each word, operator and heredoc of ``command``,
     or None for what _flat_script doesn't read: a comment, a subshell,
     process substitution, ``;;`` or an unclosed heredoc."""
     from brindle.native.permissions import _tokens
 
-    out: list[tuple] = []
+    out: list[tuple] = [] if partial is None else partial
     pending: list[tuple[str, bool, list]] = []   # heredocs whose body starts after the next newline
     i, n, spaced = 0, len(command), True
     while i < n:
@@ -2935,11 +3045,15 @@ def _script_tokens(command: str, *, subshells: bool = False) -> list[tuple] | No
             pending = []
             continue
         if c == "#":
-            return None
+            if not credential_scan:
+                return None
+            end = command.find("\n", i)
+            i = n if end < 0 else end
+            continue
         if c in ";&|<>()":
             op = next(o for o in _SCRIPT_OPERATORS if command.startswith(o, i))
-            if (op == ";;" or op in ("(", ")") and not subshells
-                    or op in ("<", ">") and command.startswith("(", i + 1)):
+            if not credential_scan and (op in (";;", "(", ")")
+                                        or op in ("<", ">") and command.startswith("(", i + 1)):
                 return None
             i += len(op)
             if op in ("<<", "<<-"):
@@ -2957,7 +3071,7 @@ def _script_tokens(command: str, *, subshells: bool = False) -> list[tuple] | No
                 out.append(("op", op, spaced))
             spaced = False
             continue
-        word = _script_word(command, i)
+        word = _script_word(command, i, credential_scan=credential_scan)
         if word is None:
             return None
         raw, refs, subs, i = word
@@ -3121,9 +3235,9 @@ class _Flattener:
     pattern)`` for a for loop's pattern word), and collects the simple
     commands it runs."""
 
-    def __init__(self, cwd: str, *, subshells: bool = False):
+    def __init__(self, cwd: str, *, credential_scan: bool = False):
         self.cwd = cwd
-        self.subshells = subshells
+        self.credential_scan = credential_scan
         self.out: list[str] = []
         # Whether each runs in this shell whenever the script does (not in an if, a loop,
         # after && or ||, in a pipeline, or a substitution's subshell).
@@ -3144,7 +3258,7 @@ class _Flattener:
             raise ValueError("too many commands")
 
     def script(self, command: str, env: dict) -> None:
-        tokens = _script_tokens(command, subshells=self.subshells)
+        tokens = _script_tokens(command, credential_scan=self.credential_scan)
         if tokens is None:
             raise ValueError("unreadable syntax")
         if any(t[0] == "heredoc" for t in tokens) and any(
@@ -3207,7 +3321,7 @@ class _Flattener:
         return values
 
     def substitution(self, inner: str, env: dict) -> None:
-        sub = _Flattener(self.cwd, subshells=self.subshells)
+        sub = _Flattener(self.cwd, credential_scan=self.credential_scan)
         sub.script(inner, dict(env))
         for command in sub.out:
             self.emit(command)
@@ -3217,6 +3331,8 @@ class _Flattener:
         replaced by text the shell reads as the same words; any other stays."""
         out, last = [], 0
         for start, end, name, quoted in word.refs:
+            if _REFERENCE.fullmatch(word.raw[start:end]) is None:
+                continue    # a parameter operator isn't a plain variable substitution
             value = env.get(name)
             replacement = None
             if value is not None and value[0] == "glob":
@@ -3351,6 +3467,7 @@ class ShellPart:
     tilde: bool = False
     assigned: bool = False
     redirect_glob: bool = False
+    references: list[tuple[str, ...]] = field(default_factory=list)    # expanded variable names per word
 
 
 class _Unverifiable(ValueError):
@@ -3368,6 +3485,40 @@ class _PartReader:
         self.wrote = False    # an earlier part may have made files a later pattern would match
         self.expanded = self.tilde = False    # the part being read's ShellPart.expanded and .tilde
 
+    def scan(self, command: str) -> None:
+        """Inspect recognizable commands even when the full script isn't verifiable.
+
+        This only supplies evidence for a hard deny, never for an allow. The
+        lexer retains its prefix on failure; unsupported groups don't discard
+        simple commands elsewhere in the token stream.
+        """
+        tokens: list[tuple] = []
+        _script_tokens(command, credential_scan=True, partial=tokens)
+        chunk: list[tuple] = []
+        case_patterns: list[bool] = []
+        for token in [*tokens, ("op", ";", False)]:
+            if token[0] != "op" or token[1] not in (*_SCRIPT_SEPARATORS, ";;", "(", ")"):
+                chunk.append(token)
+                continue
+            while chunk and chunk[0][0] == "word" and chunk[0][1].plain() in (*_SCRIPT_OPENERS, "!"):
+                chunk.pop(0)
+            head = chunk[0][1].plain() if chunk and chunk[0][0] == "word" else None
+            if head == "case":
+                case_patterns.append(True)
+            elif head == "esac" and case_patterns:
+                case_patterns.pop()
+            elif chunk and not (case_patterns and case_patterns[-1]):
+                line = " ".join(t[1].raw if t[0] == "word" else t[1] for t in chunk if t[0] != "heredoc")
+                try:
+                    self.part(line, False)
+                except ValueError:
+                    pass
+            if case_patterns and token[1] == ")":
+                case_patterns[-1] = False
+            elif case_patterns and token[1] == ";;":
+                case_patterns[-1] = True
+            chunk = []
+
     def read(self, command: str, definite: bool = True, chains: bool = True) -> None:
         """``command``'s parts; ``definite``: whether it surely runs in this
         shell (an eval's words inside an if or a pipeline may not); ``chains``:
@@ -3375,8 +3526,14 @@ class _PartReader:
         if "<<" in command and any(os.path.basename(w) in _CODE_RUNNERS
                                    for w in re.split(r"[\s;&|()<>`\"'$=]+", command)):
             raise ValueError("a heredoc a program may run as code")
-        flattener = _Flattener(self.cwd or "", subshells=self.credential_scan)
-        flattener.script(command, {})
+        flattener = _Flattener(self.cwd or "", credential_scan=self.credential_scan)
+        try:
+            flattener.script(command, {})
+        except ValueError:
+            if not self.credential_scan:
+                raise
+            self.scan(command)
+            return
         for line, sure, (chained, leads) in zip(flattener.out, flattener.definite, flattener.chained):
             self.part(line, definite and sure, chains and chained, chains and leads)
 
@@ -3391,7 +3548,7 @@ class _PartReader:
         """One simple command; ``chained``: it runs only if the one before it
         succeeded (_Flattener.chained); ``leads``: what follows it runs only if
         it succeeded."""
-        tokens = _script_tokens(line)
+        tokens = _script_tokens(line, credential_scan=self.credential_scan)
         if tokens is None or any(t[0] == "heredoc" for t in tokens):
             raise ValueError("unreadable syntax")
         if not chained:
@@ -3399,6 +3556,7 @@ class _PartReader:
         part = ShellPart([], line, self.cwd)
         self.expanded = self.tilde = False
         program: str | None = None
+        runner_unknown, env_assignments = False, False
         i = 0
         while i < len(tokens):
             token = tokens[i]
@@ -3409,6 +3567,7 @@ class _PartReader:
                 if previous is not None and previous[0] == "word" and previous[1].raw.isdigit() and not token[2]:
                     part.words.pop()    # the 2 of 2>&1 names a descriptor
                     part.written.pop()
+                    part.references.pop()
                 self.redirect(part, token[1], tokens[i + 1][1])
                 i += 2
                 continue
@@ -3433,7 +3592,17 @@ class _PartReader:
                 if not known or len(names) != 1 or written is not None:
                     raise ValueError("a program only the run knows")
                 program = os.path.basename(names[0])
+                env_assignments = program == "env"
+            else:
+                # A fully quoted env assignment stays one argument and cannot
+                # select the executable; an unquoted value can split into words.
+                env_value = (env_assignments and not word.substitutions
+                             and re.fullmatch(r'[A-Za-z_]\w*="(?:[^"\\]|\\.)*"', word.raw)
+                             and not _PROGRAM_VARIABLES.match(word.raw))
+                runner_unknown |= not known and not env_value
+                env_assignments &= bool(_ASSIGNMENT.match(word.raw))
             part.words += names
+            part.references.extend([tuple(ref[2] for ref in word.refs)] * len(names))
             part.written.append(written or (names[0] if known else word.raw))
             part.globs |= written is not None
             part.unknown |= not known
@@ -3449,7 +3618,7 @@ class _PartReader:
             return
         if program == "eval":
             raise _Unverifiable("eval runs what only the run knows")
-        if program in ("source", ".") or program in _WRAPPERS and part.unknown and not self.credential_scan:
+        if program in ("source", ".") or program in _WRAPPERS and runner_unknown and not self.credential_scan:
             raise ValueError(f"{program} runs what only the run knows")
         self.parts.append(part)
         if program in ("cd", "pushd"):
