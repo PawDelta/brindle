@@ -243,31 +243,26 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
     fake_agent(db, ws, status="processing" if provider == "codex" else "idle", mode="interactive")
     db.update_agent("a1", provider=provider)
     db.enqueue("a1", "queued message", None)
-    s, pasted = {"on": True, "looks": 0}, []   # the fault holds until the first flush has failed
+    s, pasted = {"on": True, "looks": 0}, []   # the fault holds until the first flush fails
 
     def capture(*a, **k):
         s["looks"] += 1
-        if not s["on"] or (fault == "draft" and s["looks"] == 1):   # a draft shows after the first look
+        if not s["on"] or (fault == "draft" and s["looks"] == 1):
             return CLEAN[provider]
         if fault == "unreadable":
             raise tmux.TmuxError("gone")
         return CLAUDE_BACKGROUND if fault == "escape_fails" else DRAFT[provider]
 
-    def send_keys(*a, **k):
-        raise tmux.TmuxError("gone")
-
     monkeypatch.setattr(tmux, "capture", capture)
-    monkeypatch.setattr(tmux, "send_keys", send_keys)
+    monkeypatch.setattr(tmux, "send_keys", Mock(side_effect=tmux.TmuxError("gone")))
     monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
-    monkeypatch.setattr(inbox, "usable", lambda a: False)   # the typed-paste path
+    monkeypatch.setattr(inbox, "usable", lambda a: False)
     monkeypatch.setattr(launch_health, "before_delivery", lambda *a, **k: "")
     monkeypatch.setattr(launch_health, "verify_delivery", lambda *a, **k: None)
 
-    assert agents.flush(db, "a1") is False
-    assert not pasted and db.pending_count("a1") == 1
-    s["on"] = False   # the draft was sent or cleared
-    assert agents.flush(db, "a1") is True
-    assert pasted == ["queued message"] and db.pending_count("a1") == 0
+    assert agents.flush(db, "a1") is False and not pasted and db.pending_count("a1") == 1
+    s["on"] = False
+    assert agents.flush(db, "a1") is True and pasted == ["queued message"]
 
 
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):
