@@ -36,6 +36,12 @@ def test_keys_set_eof_is_no(settings):
     assert keystore.get_key("GEMINI_API_KEY") == KEY
 
 
+def test_keys_set_does_not_ask_when_already_gemini(settings):
+    write(settings, {"modelProvider": "gemini"})
+    r = set_key("")
+    assert r.exit_code == 0 and "agy ignores" not in r.output and "Set " not in r.output
+
+
 @pytest.fixture
 def agy_installed(monkeypatch):
     monkeypatch.setattr(antigravity, "binary", lambda: "/bin/sh")
@@ -45,6 +51,16 @@ def agy_installed(monkeypatch):
 
 def agy_line():
     return {c.name: c for c in doctor.credential_checks()}["antigravity"]
+
+
+def test_doctor_warns_for_a_stored_key_too(agy_installed, settings):
+    keystore.set_key("GEMINI_API_KEY", KEY)
+    assert agy_line().level == doctor.WARN
+
+
+def test_doctor_fix_has_nothing_to_do_without_a_key(agy_installed, settings):
+    assert doctor.fix(lambda p: pytest.fail("asked")) == ["nothing to fix"]
+    assert not settings.exists()
 
 
 def test_doctor_fix_via_the_cli(agy_installed, settings, monkeypatch):

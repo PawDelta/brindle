@@ -90,6 +90,13 @@ def write_config(repo, **cfg):
 # -- switching it on --------------------------------------------------------------------------------
 
 
+def test_off_by_default():
+    assert not airgap.enabled()
+    assert not airgap.enabled(RepoConfig())
+    assert airgap.source() == "off"
+    airgap.guard("https://pawdelta.com/api")       # nothing refused
+
+
 def test_local_config_can_turn_it_on_but_not_off(tmp_path):
     write_config(tmp_path, airgap=True)
     (tmp_path / ".brindle" / "config.local.json").write_text('{"airgap": false}')
@@ -103,9 +110,14 @@ def test_local_config_can_turn_it_on_but_not_off(tmp_path):
 # -- which endpoints are local ------------------------------------------------------------------------
 
 
+@pytest.mark.variant("a public numeric IP, the documentation IPv6 range and the any-address are not local")
 def test_local_urls():
-    assert not airgap.is_local_host("::")
-    assert not airgap.is_local_host("localhost.evil.com")
+    for host in ("localhost", "foo.localhost", "127.0.0.1", "::1", "10.1.2.3", "172.16.0.1",
+                 "172.31.255.255", "192.168.0.9"):
+        assert airgap.is_local_host(host), host
+    for host in ("example.com", "8.8.8.8", "172.32.0.1", "0.0.0.0", "", None, "2001:db8::1", "::",
+                 "localhost.evil.com"):
+        assert not airgap.is_local_host(host), host
     assert airgap.is_local_url("http://localhost:11434/v1")
     assert airgap.is_local_url("http://[::1]:11434/v1")
     assert airgap.is_local_url("https://10.1.2.3:8443/v1")
@@ -210,16 +222,49 @@ def test_learning_sends_nothing_and_suggests_nothing(on, backend, tmp_path, fixe
     assert "inactive" in learner.report()
 
 
+def test_ci_token_commands_are_refused(on, backend):
+    """The org ci-token helpers are Pro paths like any other: refused before
+    the transport."""
+    store = login(backend, team_claims(features=["team", "ci"]))
+    for call in (lambda: auth.create_ci_token(client(backend), store, ORG, "gh"),
+                 lambda: auth.list_ci_tokens(client(backend), store, ORG),
+                 lambda: auth.revoke_ci_token(client(backend), store, ORG, "ct_" + "0" * 32)):
+        with pytest.raises(auth.AirGapped):
+            call()
+    assert backend.calls == []
+
+
 # -- local vs hosted profiles ----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("profile, why", [
     # `local: true` can't launder a hosted provider: its CLI talks to its own service.
     (hosted("codex", local=True), "`local: true` is ignored"),
+    (native(base_url=None), "no base_url"),
 ])
 def test_hosted_profiles_are_refused(profile, why):
     ok, reason = airgap.profile_allowed(profile)
     assert not ok and why in reason
+
+
+def test_local_flag_parses_from_a_profile():
+    p = _parse("---\nname: x\nprovider: native\nbase_url: http://box.lan:8000/v1\nlocal: true\n---\nhi",
+               "x")
+    assert p.local
+    assert not _parse("---\nname: y\nprovider: native\n---\nhi", "y").local
+
+
+def test_check_assign_from_the_repo_config_alone(repo):
+    """The config object is enough: the process needn't be armed."""
+    assert not airgap.enabled()
+    assert policy.check_assign(RepoConfig(), str(repo), "developer", "t", "assign").allowed
+    d = policy.check_assign(RepoConfig(airgap=True), str(repo), "developer", "t", "assign")
+    assert not d.allowed and "air-gap mode" in d.reason
+
+
+def test_check_profile_refuses_an_unnamed_profile(on, repo):
+    ok, why = airgap.check_profile(None, str(repo))
+    assert not ok and "local profile" in why
 
 
 def test_check_assign_refuses_hosted_profiles_in_air_gap_mode(on, repo):
@@ -300,6 +345,16 @@ def test_request_review_refuses_a_hosted_reviewer(on, db, ws):
     with pytest.raises(agents.AgentError, match="'codex'"):
         agents.request_review(db, None, ws, profile="reviewer-codex")
     assert db.list_agents() == []
+
+
+def test_request_review_passes_a_local_reviewer_to_the_launch(on, db, ws, repo, monkeypatch):
+    from brindle import agents
+
+    add_profile(repo, "local", LOCAL_PROFILE)
+    launched = []
+    monkeypatch.setattr(agents, "spawn", lambda db, ws, profile, **kw: launched.append(profile))
+    agents.request_review(db, None, ws, profile="local")
+    assert launched == ["local"]
 
 
 def test_resume_of_a_hosted_agent_is_refused(on, db, ws):
@@ -404,11 +459,43 @@ def test_install_accepts_a_json_license_file(on, token):
 
 @pytest.mark.parametrize("mangle", [
     lambda t: t[:-4] + ("AAAA" if not t.endswith("AAAA") else "BBBB"),     # bad signature
+    lambda t: json.dumps({"something": "else"}),
 ])
 def test_a_forged_or_malformed_license_is_not_installed(on, token, mangle):
     with pytest.raises(license.LicenseError):
         license.install(mangle(enterprise(token)))
     assert not license.license_path().exists()
+    assert license.installed() is None
+
+
+def test_installed_license_is_used_when_not_logged_in_even_online(token):
+    assert not airgap.enabled()
+    license.install(enterprise(token))
+    assert license.current().plan == "enterprise"
+    assert license.has("airgap")
+
+
+def test_login_credentials_win_over_the_license_when_online(backend, token):
+    login(backend, claims(plan="pro"), access_expires_at=time.time() + 900)
+    license.install(enterprise(token))
+    ent = license.current(store=credentials.default_store(), client=client(backend))
+    assert ent.plan == "pro"
+
+
+def test_uninstall(on, token):
+    license.install(enterprise(token))
+    assert license.uninstall()
+    assert license.installed() is None
+    assert not license.uninstall()
+
+
+def test_account_license_install_rejects_a_bad_file(on, tmp_path):
+    bad = tmp_path / "bad.license"
+    bad.write_text("not a license")
+    err = io.StringIO()
+    acct = ProAccount(store=credentials.default_store(), out=io.StringIO(), err=err)
+    assert acct.run(["license", "install", str(bad)]) == 1
+    assert "malformed entitlement" in err.getvalue()
     assert license.installed() is None
 
 

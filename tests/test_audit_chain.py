@@ -200,6 +200,14 @@ def test_every_events_plugin_hears_every_event(brindle_home, tmp_path, monkeypat
     assert events.plugins_for(RepoConfig(plugins={"events": "off"}), "r") == []
 
 
+def test_a_failing_plugin_does_not_silence_the_others(brindle_home, tmp_path, monkeypatch):
+    audit = AuditChain(str(tmp_path), home=brindle_home, entitled=ENTITLED)
+    install(monkeypatch, {plugins.EVENTS: [("bad", lambda r: Recorder(fail=True)),
+                                           ("audit", lambda r: audit)]})
+    events.emit(RepoConfig(), "merge", workspace(tmp_path), None)
+    assert verify(str(tmp_path), home=brindle_home).records == 1
+
+
 def test_policy_denials_are_recorded_with_the_reason(brindle_home, tmp_path, monkeypatch):
     audit = AuditChain(str(tmp_path), home=brindle_home, entitled=ENTITLED)
     install(monkeypatch, {plugins.EVENTS: [("audit", lambda r: audit)],
@@ -223,6 +231,32 @@ def test_policy_denials_are_recorded_with_the_reason(brindle_home, tmp_path, mon
 
 
 # -- export -----------------------------------------------------------------------------------------
+
+
+def test_export_csv_has_one_row_per_record(brindle_home):
+    chain(brindle_home, 2)
+    out = audit_chain.export(REPO, home=brindle_home, fmt="csv")
+    rows = list(csv.DictReader(io.StringIO(out)))
+    assert list(rows[0]) == list(audit_chain.CSV_COLUMNS)
+    assert [r["seq"] for r in rows] == ["1", "2"]
+    assert rows[0]["kind"] == "assign" and rows[1]["kind"] == "review"
+    assert rows[0]["agent"] == "worker-7" and rows[0]["approved"] == ""
+    assert len(rows[0]["hash"]) == 64 and len(rows[0]["sig"]) == 128
+    with pytest.raises(audit_chain.AuditError):
+        audit_chain.export(REPO, home=brindle_home, fmt="xml")
+
+
+def test_export_since_filters_by_record_time(brindle_home):
+    old, new = (audit_chain._iso(t) for t in (time.time() - 60, time.time() + 60))
+    audit_chain.append(REPO, {"kind": "assign"}, home=brindle_home, ts=old)
+    audit_chain.append(REPO, {"kind": "remove"}, home=brindle_home, ts=new)
+    cut = datetime.now(timezone.utc)
+    out = audit_chain.export(REPO, home=brindle_home, since=cut)
+    assert [json.loads(ln)["seq"] for ln in out.splitlines()] == [2]
+    assert audit_chain.export(REPO, home=brindle_home, since=datetime(2000, 1, 1)).count("\n") == 2
+    assert audit_chain.export(REPO, home=brindle_home, since=datetime(2999, 1, 1)) == ""
+    assert audit_chain.parse_time("2026-09-30T10:00:00Z").tzinfo is not None
+    assert audit_chain.parse_time("2026-09-30").tzinfo is not None
 
 
 # -- the CLI --------------------------------------------------------------------------------------

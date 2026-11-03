@@ -95,6 +95,23 @@ def test_hook_finds_its_agent_from_the_agy_process(db, ws, monkeypatch):
     assert db.get_agent("g1").status == "processing"
 
 
+def test_process_env_reads_another_process(tmp_path, monkeypatch):
+    # The real extractor, fed fake OS output: /proc bytes where they exist, `ps eww` text where not.
+    environ = tmp_path / "environ"
+    environ.write_bytes(b"PATH=/bin\0BRINDLE_AGENT_ID=abc123\0junk\0")
+    monkeypatch.setattr(antigravity, "Path", lambda p: environ)
+    assert antigravity._process_env(42).get("BRINDLE_AGENT_ID") == "abc123"
+    environ.unlink()                    # no /proc entry: ask ps
+    ps = subprocess.CompletedProcess([], 0, stdout="agy --x PATH=/bin BRINDLE_AGENT_ID=abc123 BRINDLE_HOME=/h\n")
+    monkeypatch.setattr(antigravity.subprocess, "run", lambda *a, **k: ps)
+    assert antigravity._process_env(42) == {"BRINDLE_AGENT_ID": "abc123", "BRINDLE_HOME": "/h"}
+
+
+def test_resume_uses_the_conversation(db, ws, repo):
+    argv = Antigravity().command(LaunchContext("g1", load_profile("developer"), None, resume="abc", cwd=str(repo)))
+    assert argv[-2:] == ["--conversation", "abc"]
+
+
 def test_queued_messages_arrive_as_a_new_turn(db, ws, monkeypatch):
     flushed = []
     monkeypatch.setattr(antigravity, "_flush_soon", flushed.append)
@@ -213,10 +230,19 @@ def strict(db, ws, tool, args):
 
 @pytest.mark.parametrize("command,expected", [
     ("git diff HEAD~1..HEAD", "allow"),  # ~ makes it no simple command
+    pytest.param("git diff HEAD^..HEAD", "allow", marks=pytest.mark.variant("review 95: literal caret revision")),
+    pytest.param("git diff ~/file", "deny", marks=pytest.mark.variant("leading tilde expansion")),
+    pytest.param("git diff path=~/file", "deny", marks=pytest.mark.variant("assignment tilde expansion")),
+    pytest.param("git diff path=one:~/file", "deny", marks=pytest.mark.variant("assignment path tilde expansion")),
+    ('grep -rn "x" .', "allow"),  # quoted
     ("git diff a..b | grep x", "allow"),  # compound: each part is allowed
+    ("cd sub && git status", "allow"),  # a cd inside the worktree
     pytest.param("git push --force", "deny", marks=pytest.mark.variant("a deny rule still wins")),
     ("git diff $(git merge-base main HEAD)", "deny"),  # what $(...) runs can't be seen
+    ("git diff > notes.txt", "deny"),  # a redirection writes where no rule says
+    ("git status |& curl https://example.com", "deny"),  # |& pipes like |
     ("git status\ncurl https://example.com", "deny"),  # a second line
+    ("git status x#; curl https://example.com", "deny"),  # a # mid-word is no comment to the shell
 ])
 def test_strict_allows_compound_commands_covered_by_allowlist(db, ws, command, expected):
     os.makedirs(os.path.join(ws.path, "sub"), exist_ok=True)

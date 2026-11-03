@@ -164,6 +164,31 @@ def test_account_without_a_license_lists_every_feature_as_needing_its_plan(run, 
     assert net.calls == []
 
 
+def test_account_marks_exactly_the_plans_features(run, acct):
+    acct.login("pro")
+    code, out = run("account")
+    assert code == 0
+    have = set(plan_features("pro"))
+    for feature, need, _what, _how in account.FEATURES:
+        if feature in account.UNLISTED:
+            continue
+        line = feature_line(out, feature)
+        assert line.lstrip().startswith("✓") if feature in have else line.endswith(f"needs {need.capitalize()}"), line
+    assert "for a team" in out.split("Next")[-1]
+
+
+def test_account_status_reports_the_plan_offline(run, acct):
+    plan = "pro"
+    acct.login(plan)
+    code, out = run("account", "status")
+    assert code == 0, out
+    assert f"plan      {plan} (5 seat(s))" in out
+    assert f"org       {ORG} (admin)" in out
+    features = next(ln for ln in out.splitlines() if ln.strip().startswith("features"))
+    assert set(features.split(None, 1)[1].split(", ")) == set(plan_features(plan))
+    assert "(offline: showing the stored entitlement)" in out
+
+
 def test_an_expired_or_forged_entitlement_is_no_plan(run, acct):
     now = int(time.time())
     acct.login("enterprise", exp=now - 40 * 86400, iat=now - 41 * 86400)
@@ -178,6 +203,17 @@ def test_an_expired_or_forged_entitlement_is_no_plan(run, acct):
     license.clear_cache()
     code, out = run("account")
     assert "signature" in out and all("✓" not in ln for ln in out.splitlines())
+
+
+def test_account_usage_errors_never_reach_the_backend(run, acct, net):
+    acct.login("team")
+    for args in (["bogus"], ["upgrade", "--team"], ["upgrade", "--seats", "3"], ["portal", "extra"],
+                 ["org", "member", "policy-role", "x"], ["org", "profiles", "push"], ["--base-url"]):
+        code, out = run("account", *args)
+        assert code == 2 and "usage: brindle account" in out, (args, code, out)
+    code, out = run("account", "--help")
+    assert code == 0 and "org profiles push" in out and "license install" in out
+    assert net.calls == []
 
 
 # -- the offline license --------------------------------------------------------------------------------
@@ -320,6 +356,27 @@ def test_org_library_list_push_rm_and_use(run, acct, library, repo, tmp_path):
     assert code == 0 and ("pack", "house/rules") not in library.items
 
 
+def test_org_library_uses_the_cache_when_the_backend_is_down(run, acct, library, net):
+    acct.login("team")
+    assert run("account", "org", "profiles")[0] == 0
+    del net.routes[f"GET /orgs/{ORG}/profiles"]
+    code, out = run("account", "org", "profiles")
+    assert code == 0 and "(cached; couldn't refresh" in out and "org-reviewer" in out
+
+
+def test_org_profile_admin_commands_validate_before_calling(run, acct, library, tmp_path, net):
+    acct.login("team")
+    bad = tmp_path / "Bad Name.md"
+    bad.write_text("x")
+    code, out = run("account", "org", "profiles", "push", str(bad))
+    assert code == 1 and "not a valid org profile name" in out
+    code, out = run("account", "org", "profiles", "rm", "Not Valid")
+    assert code == 1 and "not a valid org profile name" in out
+    assert f"POST /orgs/{ORG}/profiles" not in net.calls
+    code, out = run("account", "org", "profiles", "bogus", "x", "y")
+    assert code == 2 and "usage: brindle account" in out
+
+
 def test_a_tampered_library_cache_is_worth_nothing(run, acct, library, net, brindle_home):
     acct.login("team")
     assert run("account", "org", "profiles")[0] == 0
@@ -417,6 +474,27 @@ def test_cost_center_request_approval_raises_the_month_limit(run, acct, net, rep
     assert cost_centers.month_raise() == 7.5
 
 
+def test_cost_center_request_validates(run, acct, net):
+    acct.login("enterprise")
+    code, out = run("cost", "request", "--usd", "0", "--reason", "x")
+    assert code == 1 and "above 0" in out
+    code, out = run("cost", "request", "--usd", "500000", "--reason", "x")
+    assert code == 1 and "at most" in out
+    net.route(f"POST /orgs/{ORG}/cost-approvals", 403, {"error": "forbidden"})
+    code, out = run("cost", "request", "--usd", "5", "--reason", "x")
+    assert code == 1 and "HTTP 403" in out
+
+
+def test_a_denied_request_changes_nothing(acct, net, repo):
+    acct.login("enterprise")
+    month = cost_centers.month_now()
+    net.route(f"POST /orgs/{ORG}/cost-approvals", 201, {"id": "req_3", "status": "pending", "month": month})
+    cost_centers.request(5, "x", str(repo))
+    net.route(f"GET /orgs/{ORG}/cost-approvals/req_3", 200, {"status": "denied", "month": month})
+    assert cost_centers.poll() == ["[brindle cost] request req_3 was denied"]
+    assert cost_centers.month_raise() == 0
+
+
 # -- Enterprise: managed models -------------------------------------------------------------------------
 
 
@@ -452,6 +530,19 @@ def test_managed_models_route_every_agent_to_the_orgs_provider(acct, net, repo):
     why = managed_models.refusal(m, native_profile(base_url="http://localhost:11434/v1"))
     assert why and "isn't Google Vertex AI" in why
     assert "Google Vertex AI" in managed_models.doctor_line(str(repo))[1]
+
+
+def test_managed_models_openai_compatible_endpoint_for_native_and_codex(acct, net, repo):
+    acct.login("enterprise")
+    org_policy(net, provider_config={"provider": "openai-compatible",
+                                     "endpoint": "https://llm.acme.example/v1",
+                                     "model_ids": ["acme-large"]})
+    m = agents.managed(str(repo))
+    p = managed_models.apply_profile(m, native_profile())
+    assert p.base_url == "https://llm.acme.example/v1" and p.model == "acme-large"
+    assert managed_models.refusal(m, native_profile(base_url="https://elsewhere.example/v1"))
+    assert managed_models.agent_env(m, "codex") == {"OPENAI_BASE_URL": "https://llm.acme.example/v1"}
+    assert managed_models.refusal(m, claude_profile()) is not None            # Claude Code can't use it
 
 
 # -- Enterprise: managed rollout --------------------------------------------------------------------------
@@ -492,6 +583,22 @@ def test_rollout_min_version_and_required_items(acct, net, repo, library):
     assert not d.allowed and "not/there" in d.reason
     with pytest.raises(KeyError):
         profiles.load_rule_packs(claude_profile(), str(repo))
+
+
+def test_rollout_sweep_stops_running_workers_under_the_kill_switch(acct, net, repo, db, monkeypatch):
+    acct.login("enterprise")
+    org_policy(net, kill_switch=True)
+    ws = workspaces.adopt_root(db, str(repo))
+    db.add_agent(agent("boss", ws, "supervisor", None, mode="interactive"))
+    db.add_agent(agent("w1", ws))
+    did = []
+    monkeypatch.setattr(agents, "runs_process", lambda a: True)
+    monkeypatch.setattr(agents, "pause_worker", lambda db_, a: did.append(a.id))
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, msg, sender_id=None: did.append(("told", to)))
+    assert rollout.sweep(db) == ["stopped worker w1: org kill switch"]
+    assert did == ["w1", ("told", "boss")]
+    acct.login("team")
+    assert rollout.sweep(db) == []
 
 
 # -- the audit chain (Enterprise) ----------------------------------------------------------------------
@@ -574,6 +681,13 @@ def test_audit_verify_catches_every_kind_of_tampering(run, acct, repo):
     assert run("audit", "verify")[0] == 0                                       # restored: intact
 
 
+def test_audit_with_no_log_yet(run, acct):
+    code, out = run("audit", "verify")
+    assert code == 0 and "no audit log at" in out
+    code, out = run("audit", "export")
+    assert code == 0 and out == ""
+
+
 # -- audit export (Enterprise) ---------------------------------------------------------------------------
 
 
@@ -610,6 +724,23 @@ def test_audit_ship_reports_a_sink_that_cannot_be_set_up(run, acct, brindle_home
     monkeypatch.setenv("SIEM_SECRET", "x")
     code, out = run("audit", "ship")
     assert code == 1 and "FAILED" in out and "https" in out.lower()
+    (brindle_home / "config.json").write_text("{}")
+    code, out = run("audit", "ship")
+    assert code == 2 and "no sinks" in out
+
+
+def test_audit_ship_says_when_another_process_is_already_sending(run, acct, repo, brindle_home, sinks,
+                                                                 monkeypatch):
+    monkeypatch.setenv("SIEM_SECRET", "s3cret")
+    acct.login("enterprise")
+    configure_sinks(brindle_home)
+    make_events(repo, 1)
+    with audit_export.AuditExporter()._sender() as mine:
+        assert mine
+        code, out = run("audit", "ship")
+    assert code == 1 and "another brindle process is sending" in out and sinks.posts == []
+    code, out = run("audit", "ship")
+    assert code == 0 and "sent 1" in out
 
 
 def test_prune_keeps_the_chain_verifiable_and_never_drops_unsent_records(run, acct, repo, brindle_home,
@@ -631,6 +762,19 @@ def test_prune_keeps_the_chain_verifiable_and_never_drops_unsent_records(run, ac
     assert code == 0 and "1 record(s)" in out and "seq 1-3 pruned" in out
     code, out = run("audit", "prune")
     assert code == 2 and "--days" in out
+
+
+def test_retention_days_from_the_config_is_applied_when_shipping(run, acct, repo, brindle_home, monkeypatch):
+    monkeypatch.setenv("SIEM_SECRET", "s3cret")
+    acct.login("enterprise")
+    configure_sinks(brindle_home, retention_days=1)
+    old = time.time() - 5 * 86400
+    for i in range(2):
+        audit_chain.append(str(repo), {"kind": "merge"}, ts=audit_chain._iso(old + i))
+    make_events(repo, 1)
+    assert run("audit", "ship")[0] == 0
+    code, out = run("audit", "verify")
+    assert code == 0 and "1 record(s)" in out and "pruned" in out
 
 
 # -- air-gapped mode (Enterprise) ------------------------------------------------------------------------
@@ -715,6 +859,85 @@ def test_the_kill_switch_also_stops_reviewers(acct, net, repo, db):
         agents.request_review(db, None, ws, cfg=load_repo_config(repo))
 
 
+def test_airgap_org_policy_shows_the_offline_file(run, acct, repo, net):
+    code, _ = run("account", "license", "install", str(acct.license_file("enterprise", role="member")))
+    assert code == 0
+    airgap_repo(repo)
+    code, out = run("account", "org", "policy")
+    assert code == 1 and "no usable offline policy" in out and ".brindle/policy.json" in out
+    offline_policy(repo, allowed_providers=["native"], require_human_review=True)
+    code, out = run("account", "org", "policy")
+    assert code == 0, out
+    assert "Policy for org org_acme, version 3 (offline:" in out
+    assert "providers              native" in out and "require human review   yes" in out
+    assert net.calls == []
+
+
+def test_airgap_from_the_environment_shows_in_the_license_status(run, repo):
+    code, out = run("account", "license", "status", env={airgap.ENV: "1"})
+    assert code == 1 and f"air-gap   on ({airgap.ENV}=1)" in out
+
+
+def test_airgap_denials_are_audited_locally(run, acct, repo):
+    code, _ = run("account", "license", "install", str(acct.license_file("enterprise")))
+    assert code == 0
+    airgap_repo(repo)
+    cfg = load_repo_config(repo)
+    assert not policy.check_assign(cfg, str(repo), "developer", "t", "assign").allowed
+    code, out = run("audit", "export")
+    recs = [json.loads(ln) for ln in out.splitlines()]
+    assert recs and recs[-1]["event"]["kind"] == "deny_assign"
+    assert "air-gap mode" in recs[-1]["event"]["reason"]
+    assert run("audit", "verify")[0] == 0
+
+
+def test_doctor_reports_airgap_state(acct, repo):
+    assert [c.detail for c in doctor.airgap_checks(str(repo))] == ["off"]
+    license.install(acct.license_file("enterprise").read_bytes())
+    airgap_repo(repo)
+    checks = {c.name: c for c in doctor.airgap_checks(str(repo))}
+    assert checks["air-gap"].level == doctor.OK and "no outbound traffic" in checks["air-gap"].detail
+    assert checks["hosted profiles"].level == doctor.WARN and "cloudy" in checks["hosted profiles"].detail
+    assert checks["default agent"].level == doctor.OK
+    assert checks["offline license"].level == doctor.OK and "plan enterprise" in checks["offline license"].detail
+    assert checks["offline policy"].level == doctor.WARN
+    airgap_repo(repo, default_agent="developer")
+    assert {c.name: c for c in doctor.airgap_checks(str(repo))}["default agent"].level == doctor.FAIL
+
+
+def test_airgap_without_the_license_feature_still_blocks_and_warns(run, acct, repo):
+    code, out = run("account", "license", "install", str(acct.license_file("team")))
+    assert code == 0
+    airgap_repo(repo)
+    code, out = run("account", "status")
+    assert "plan doesn't include it" in out and "feature 'airgap'" in out
+    assert not airgap.licensed() and airgap.enabled()      # fail closed: unlicensed, still armed
+    checks = {c.name: c for c in doctor.airgap_checks(str(repo))}
+    assert checks["air-gap"].level == doctor.WARN
+
+
+def test_airgap_team_policy_comes_from_the_offline_file(run, acct, repo, net, db):
+    code, out = run("account", "license", "install", str(acct.license_file("enterprise", role="member")))
+    assert code == 0
+    airgap_repo(repo)
+    cfg = load_repo_config(repo)
+    d = policy.check_assign(cfg, str(repo), "local", "t", "assign")
+    assert not d.allowed and ".brindle/policy.json" in d.reason          # no file: refused
+    ws = workspaces.adopt_root(db, str(repo))
+    assert not policy.check_merge(cfg, ws, None).allowed
+    (repo / ".brindle" / "policy.json").write_text(json.dumps(
+        {"org_id": ORG, "version": 3, "policy": {"allowed_providers": ["native"], "allowed_models": None,
+                                                 "require_human_review": True,
+                                                 "max_parallel_workers": 4}}))
+    assert policy.check_assign(cfg, str(repo), "local", "t", "assign", running_workers=0).allowed
+    assert not policy.check_assign(cfg, str(repo), "local", "t", "assign", running_workers=4).allowed
+    assert policy.check_merge(cfg, ws, None).allowed
+    (repo / ".brindle" / "policy.json").write_text(json.dumps({"org_id": "org_other", "version": 1,
+                                                               "policy": {}}))
+    assert not policy.check_assign(cfg, str(repo), "local", "t", "assign").allowed   # another org's
+    assert net.calls == []
+
+
 def test_airgap_never_ships_audit_records_or_fetches_the_org_library(run, acct, net, repo, brindle_home,
                                                                      sinks, monkeypatch, library):
     monkeypatch.setenv("SIEM_SECRET", "s")
@@ -789,5 +1012,19 @@ def test_a_lapsed_plan_cannot_use_an_attached_repo(run, acct, db, repo, session,
     with pytest.raises(repos.RepoError, match="restricted feature of brindle Pro"):
         repos.resolve(db, session, str(repo), "web")
     assert repos.resolve(db, session, str(repo), None) == str(repo)    # the own repo still works
+
+
+def test_a_repo_held_by_a_running_session_cannot_be_attached(run, acct, db, repo, session, tmp_path,
+                                                             monkeypatch):
+    web = second_repo(tmp_path)
+    other_root = second_repo(tmp_path, "other")
+    ows = workspaces.adopt_root(db, str(other_root))
+    db.add_agent(Agent("other", ows.id, "supervisor", "claude", None, "interactive", "processing", "@1",
+                       None, time.time()))
+    acct.login("pro")
+    repos.attach(db, "other", str(web), "web")
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("boss", "other"))
+    code, out = run("repo", "add", str(web))
+    assert code == 1 and "another running session" in out
 
 

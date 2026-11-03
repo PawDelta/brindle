@@ -9,7 +9,7 @@ import time
 
 from typer.testing import CliRunner
 
-from brindle import agents, doctor, keystore, providers, tmux, workspaces
+from brindle import agents, doctor, keystore, providers, quota, tmux, workspaces
 from brindle.cli import app
 from brindle.db import Agent
 
@@ -52,9 +52,21 @@ def test_approve_merges_and_unrejects(tmp_path):
     assert data["customApiKeyResponses"] == {"approved": ["other", KEY[-20:]], "rejected": []}
 
 
+def test_seed_ci_config_still_seeds_onboarding_trust_and_the_key(tmp_path, repo):
+    providers.seed_ci_config([str(repo)], KEY)
+    data = json.loads(_config(tmp_path).read_text())
+    assert data["hasCompletedOnboarding"] is True and data["theme"]
+    assert data["projects"][os.path.realpath(repo)] == {"hasTrustDialogAccepted": True}
+    assert data["customApiKeyResponses"]["approved"] == [KEY[-20:]]
+
+
 # -- the opt-in question -------------------------------------------------------------------------
 
 def test_keys_set_yes_approves(tmp_path):
+    # Only the Anthropic key is ever offered for approval: another provider's key, even with a yes, is not.
+    r = runner.invoke(app, ["keys", "set", "OPENAI_API_KEY"], input="sk-test-openai-0000\ny\n")
+    assert r.exit_code == 0, r.output
+    assert not _config(tmp_path).exists()
     r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=f"{KEY}\n")   # no answer: declined
     assert r.exit_code == 0, r.output
     assert not _config(tmp_path).exists()
@@ -149,3 +161,12 @@ def test_org_managed_settings_mean_no_provider_config_env(db, repo, tmp_path, mo
     assert "CLAUDE_CODE_USE_BEDROCK" not in agents.agent_env(ws, "c2", a, m)
     assert managed_models.provider_env(cfg, "claude")   # the helper itself is unchanged
 
+
+# -- quota and cost ------------------------------------------------------------------------------
+
+def test_a_key_billed_session_is_not_throttled_by_subscription_usage(monkeypatch):
+    quota.record("claude", [quota.Window(95.0, time.time() + 3600, 300)], source="status line")
+    assert "95%" in quota.note("claude")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
+    assert "pay per token" in quota.note("claude") and "%" not in quota.note("claude")
+    assert quota.headroom("claude") == 100.0

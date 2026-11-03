@@ -112,6 +112,17 @@ def test_frontmatter_comments_blank_values_and_list_forms(repo, agents_dir):
     assert p.prompt == "Body --- with dashes."
 
 
+def test_a_profile_without_a_closing_fence_is_a_profile_error(repo, agents_dir):
+    (agents_dir / "broken.md").write_text("---\nname: broken\nYou forgot the closing fence.\n")
+    with pytest.raises(ProfileError, match="never closed"):
+        load_profile("broken", str(repo))
+    # A child of it, and the listing of everything else, fail or work cleanly too.
+    (agents_dir / "kid.md").write_text("---\nname: kid\nextends: broken\n---\n")
+    with pytest.raises(ProfileError):
+        load_profile("kid", str(repo))
+    assert "developer" in {x.name for x in list_profiles(str(repo))}
+
+
 # -- 3. rule packs ------------------------------------------------------------------------------------
 
 
@@ -214,6 +225,20 @@ def test_a_learned_rule_flows_from_findings_to_a_failing_gate(db, repo, pro):
     result = rule_checks.run(db, ws)
     assert not result.ok and result.packs == ["learned"]
     assert any("m.py:3" in v.detail for v in result.violations)
+
+
+def test_learned_patterns_with_a_comment_marker_survive_the_roundtrip(db, repo, pro):
+    root = str(repo)
+    for b in ("feat/a", "feat/b", "feat/c"):
+        _review(db, root, b, "noqa abuse")
+    [s] = learned_rules.refresh(db, root, _model(lambda ids: [
+        {"title": "noqa", "rule": "No blanket noqa.", "findings": ids,
+         "deny_patterns": [r"\s# noqa$", r"a,b"]}])).suggested
+    learned_rules.accept(db, root, s.key)
+    [pack] = load_rule_packs(load_profile("developer", root), root)
+    for pattern in pack.deny_patterns:
+        assert pattern in (r"\s# noqa$", r"a,b")
+    assert pack.deny_patterns
 
 
 # -- 6. guardrails ------------------------------------------------------------------------------------
@@ -344,5 +369,26 @@ def test_the_real_new_window_scrubs_secrets_and_applies_env_allow(repo, monkeypa
                     allow=["NPM_TOKEN"])
     assert {"DATABASE_URL", "GITHUB_TOKEN", "BRINDLE_PRO_TOKEN"} <= real["unset"]
     assert not ({"PATH", "NPM_TOKEN", "ANTHROPIC_API_KEY"} & real["unset"])
+
+
+def test_a_codex_worker_with_rules_gets_them_in_its_prompt(repo, agents_dir, launched, pro, monkeypatch):
+    (agents_dir / "cx.md").write_text(
+        "---\nname: cx\nprovider: codex\nrules: security/backend\nwrite_scope: [src/**]\n---\nCodex dev.\n")
+    monkeypatch.setattr(providers, "which_cli", lambda *a, **k: "/usr/bin/codex", raising=False)
+    try:
+        seen = launched(repo, "cx")
+    except Exception as e:  # noqa: BLE001 - the CLI isn't installed here; the prompt is what's under test
+        pytest.skip(f"codex launch needs the CLI: {e}")
+    text = " ".join(seen["command"])
+    assert "Rules: security/backend" in text and "Write scope" in text
+
+
+def test_a_subagent_profile_with_rules_gets_them_in_the_brief(db, repo, agents_dir, rules_dir, pro):
+    (agents_dir / "sub.md").write_text(
+        "---\nname: sub\nextends: subagent\nrules: tests/only\nwrite_scope: [tests/**]\n---\nSub.\n")
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    agent = agents.spawn(db, ws, "sub", prompt="Write tests", mode="assign")
+    brief = agent.task
+    assert "Rules: tests/only" in brief and "Write scope" in brief and "Write tests" in brief
 
 

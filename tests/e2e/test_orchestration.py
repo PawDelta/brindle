@@ -136,6 +136,33 @@ def test_assign_isolate_gives_the_worker_its_own_worktree_and_branch(db, repo, b
     assert "feat-a" in mcp_server.list_agents() and wid in mcp_server.list_agents()
 
 
+def test_assign_without_isolate_shares_the_checkout(db, repo, boss):
+    wid = started_id(run(mcp_server.assign("developer", "look around", isolate=False)))
+    assert db.get_workspace(db.get_agent(wid).workspace_id).path == str(repo)
+
+
+def test_handoff_returns_the_result_once_the_worker_reports(db, repo, boss, monkeypatch):
+    configure(repo, pipeline=False)
+    monkeypatch.setattr(agents, "wait_for_result", lambda db_, wid, secs: db_.get_agent(wid).result)
+    orig = agents.spawn
+
+    def spawn_and_report(db_, ws, profile, **kw):
+        a = orig(db_, ws, profile, **kw)
+        commit(ws, "h.py")
+        db_.set_result(a.id, "wrote h.py")
+        return a
+
+    monkeypatch.setattr(agents, "spawn", spawn_and_report)
+    out = run(mcp_server.handoff("developer", "write h.py", branch="feat-h", wait_seconds=5))
+    assert "finished" in out and "wrote h.py" in out and "1 commit(s) ahead of main" in out
+    assert "h.py" in out
+
+
+def test_blank_task_is_refused(db, repo, boss):
+    assert run(mcp_server.assign("developer", "  ")) == "Give the worker a task."
+    assert run(mcp_server.handoff("developer", "")) == "Give the worker a task."
+
+
 # -- the pipeline: review -> checks -> merge -> removal -----------------------------------
 
 
@@ -279,6 +306,11 @@ def test_set_goal_get_progress_and_check_milestone(db, repo, boss, monkeypatch):
     mcp_server.set_goal("ship it", [{"title": "has a.py", "check": "test -f a.py"},
                                     {"title": "has c.py", "check": "test -f c.py"}])
     assert {m.title: m.status for m in db.milestones("boss")}["has a.py"] == "passed"
+
+
+def test_set_goal_rejects_a_milestone_without_a_title(db, repo, boss):
+    db.add_autopilot("boss")
+    assert mcp_server.set_goal("g", [{"title": " ", "check": "true"}]) == "Every milestone needs a title."
 
 
 # -- rewind ----------------------------------------------------------------------------------

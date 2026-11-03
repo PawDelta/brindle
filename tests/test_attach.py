@@ -3,7 +3,10 @@ around it say what happened."""
 
 import time
 
+from typer.testing import CliRunner
+
 from brindle import agents, mcp_server, workspaces
+from brindle.cli import app
 from brindle.db import Agent
 
 
@@ -24,6 +27,24 @@ def test_attach_target_prefers_the_waiting_agent(db, repo, monkeypatch):
     assert agents.attach_target(db, ws) == "%1"        # then the busiest
     db.update_agent("old", status="idle")
     assert agents.attach_target(db, ws) == "%3"        # then the newest
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
+    assert agents.attach_target(db, ws) is None        # no live pane to attach to
+
+
+def test_attach_without_a_terminal_explains(db, repo, monkeypatch):
+    monkeypatch.chdir(repo)
+    res = CliRunner().invoke(app, ["attach"])
+    assert res.exit_code == 1
+    assert "needs a terminal" in res.output
+
+
+def test_send_message_to_a_paused_agent_says_why(db, repo, monkeypatch):
+    ws = workspaces.adopt_root(db, str(repo))
+    db.add_agent(Agent("p1", ws.id, "supervisor", "claude", None, "interactive", "paused", "%9", None, time.time()))
+    monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)
+    out = mcp_server.send_message("p1", "hello")
+    assert out.startswith("Not sent: agent p1 is paused") and "brindle continue" in out
+    assert db.pending_count("p1") == 0
 
 
 

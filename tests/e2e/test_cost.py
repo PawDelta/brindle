@@ -150,6 +150,19 @@ def boss(db, repo, monkeypatch):
     return ws
 
 
+def test_a_cost_with_no_usage_says_so(db, root, cli):
+    out = cli.invoke(app, ["cost"]).output
+    assert "$0.00" in out and "no agent usage on record" in out
+
+
+def test_set_goal_shows_a_priced_estimate_with_pro(db, repo, boss, pro):
+    profile(repo, "developer", "claude-sonnet-5-5")
+    config(repo, pipeline=False, default_agent="developer")
+    out = mcp_server.set_goal("Settings", [{"title": "API", "check": "true"},
+                                           {"title": "UI", "check": "true"}])
+    assert "Cost estimate" in out and "2 tasks" in out and "$" in out and "tokens (no price" not in out
+
+
 def test_set_goal_and_assign_have_no_estimate_without_pro(db, boss, monkeypatch):
     from brindle import agents
 
@@ -263,6 +276,34 @@ def test_savings_in_dollars_from_routing_decisions(db, repo, root, routed):
 
 
 # -- the sidebar's Costs section ------------------------------------------------------------------
+
+
+def test_costs_section_from_real_history(db, repo, root, pro):
+    now = time.time()
+    seed(db, root, tokens=row_tokens(input=2_000_000))                                # $4
+    seed(db, root, tokens=row_tokens(input=1_000_000))                                # $2
+    seed(db, root, tokens=row_tokens("never-heard-of-it", input=1_000_000))           # unpriced
+    seed(db, root, tokens=row_tokens(input=9_000_000), age_days=40)                   # last month
+    local = watch_costs.local(db, root, [], now=now)
+    assert local.month == pytest.approx(6.0)
+    assert sorted(t for _, t in local.models) == [1_000_000, 3_000_000]
+    lines = watch_costs.render(local, watch_costs.Remote(limits=budget.Limits(month_usd=8.0), at=now),
+                               now, 70, False)
+    assert lines[0].text.startswith("▾ Costs")
+    assert local.providers == []     # no provider has reported its usage: none is shown
+    assert any("$6.00 of $8.00" in ln.text and ln.style == "ok" for ln in lines[1:])
+    folded = watch_costs.render(local, None, now, 70, True)
+    assert len(folded) == 1 and "75%)" in folded[0].text
+
+
+def test_costs_section_shows_a_running_workers_dollars(db, repo, root, pro):
+    ws = workspaces.adopt_root(db, str(repo))
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing", "", None, time.time()))
+    seed(db, root, agent_id="w1", profile="developer", tokens=row_tokens(input=1_000_000))
+    snap = [{"id": ws.id, "agents": [{"id": "w1", "mode": "assign", "status": "processing"},
+                                     {"id": "gone", "mode": "assign", "status": "done"}]}]
+    local = watch_costs.local(db, root, snap)
+    assert local.workers == {"w1": pytest.approx(2.0)}
 
 
 def test_costs_section_shows_free_for_a_local_workers_figure(db, repo, root, pro):
