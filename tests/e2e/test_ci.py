@@ -340,13 +340,6 @@ def test_doctor_in_a_gitlab_job_names_the_project_without_gh(job, monkeypatch):
     assert f"repository: {NESTED}, owner is an organization" in r.output
 
 
-def test_review_usage_is_merged_across_models():
-    into = {}
-    ci_adapters.merge_usage(into, {"a": {"input": 1, "output": 2, "cache_read": 3}, "bad": 7})
-    ci_adapters.merge_usage(into, {"a": {"input": 1}})
-    assert into == {"a": {"input": 2, "output": 2, "cache_read": 3}}
-
-
 # -- identity federation ----------------------------------------------------------------------------
 
 

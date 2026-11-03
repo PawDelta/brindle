@@ -55,24 +55,13 @@ def test_unreported_alert_still_fires_once_when_nothing_is_running(db, ws, monke
     agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
     assert len(sent) == 1 and sent[0][1] == "boss"
     assert "parser.py" in sent[0][2]   # what it did, so the supervisor needn't go and look
-
-
-def test_unreported_notice_repeats_after_resume(db, ws, monkeypatch):
-    sent = _unreported_setup(db, ws, monkeypatch)
-    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
-    agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
+    for _ in range(3):   # agy polling a command: brief resumes between stops give no new alert
+        agents.handle_hook(db, "a1", "pre-tool", {})
+        agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
+    assert len(sent) == 1
     agents.handle_hook(db, "a1", "prompt-submit", {})   # its supervisor's message resumes it
     agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
     assert len(sent) == 2
-
-
-def test_unreported_brief_resumes_while_stopped_give_one_alert(db, ws, monkeypatch):
-    sent = _unreported_setup(db, ws, monkeypatch)
-    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
-    for _ in range(3):   # agy polling a command: stop, then a tool call, over and over
-        agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
-        agents.handle_hook(db, "a1", "pre-tool", {})
-    assert len(sent) == 1
 
 
 def test_command_running_sees_a_command_under_an_antigravity_worker_so_not_stopped(db, ws, monkeypatch):
@@ -208,7 +197,7 @@ CLAUDE_TYPING_WITH_INVERSE_CURSOR = (
     (CLAUDE_PLACEHOLDER_GREY_256, True, None),  # grey 256-colour placeholder
     (CLAUDE_PLACEHOLDER_TRUECOLOR_GREY, True, None),  # grey truecolor placeholder
     (CLAUDE_TYPING_WITH_INVERSE_CURSOR, True, "typing"),  # ignore the inverse-video cursor cell
-    ("❯\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing"),
+    ("❯\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing"),   # a long draft, prompt far above
 ])
 def test_claude_paste_blocked(screen, interactive, want):
     assert ClaudeCode().paste_blocked(screen, interactive) == want
@@ -260,6 +249,18 @@ def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch)
     assert agents.reconcile(db, db.get_agent("a1"), gap=0).status == "processing"
 
 
+def test_find_running_reuses_a_live_interactive_agent(db, ws, monkeypatch):
+    alive = {"a1": True}
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: alive.get(a.id, False))
+    assert agents.find_running(db, ws, "developer") is None
+    fake_agent(db, ws, status="idle")
+    db.update_agent("a1", profile="developer")
+    assert agents.find_running(db, ws, "developer").id == "a1"
+    assert agents.find_running(db, ws, "reviewer") is None      # another profile's agent is not reused
+    alive["a1"] = False
+    assert agents.find_running(db, ws, "developer") is None      # dead agents don't count
+
+
 def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
     (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
     (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": false}')
@@ -304,18 +305,6 @@ def test_watch_pane_shares_the_window_and_messages_reach_the_agent(db, ws):
         assert f"reached-{a.id}" in tmux.capture(a.tmux_window)
     finally:
         tmux.kill_session(ws.tmux_session)
-
-
-@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
-def test_find_running_reuses_a_live_interactive_agent(db, ws):
-    assert agents.find_running(db, ws, "developer") is None
-    a = agents.spawn(db, ws, "developer", provider_name="shell")
-    try:
-        assert agents.find_running(db, ws, "developer").id == a.id
-        assert agents.find_running(db, ws, "reviewer") is None
-    finally:
-        tmux.kill_session(ws.tmux_session)
-    assert agents.find_running(db, ws, "developer") is None  # dead agents don't count
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
@@ -377,20 +366,6 @@ def test_no_goal_command_when_hooks_are_disabled(db, ws):
     assert "Finish line: tests pass" in prompt
 
 
-def test_add_dir_is_never_the_last_flag():
-    """--add-dir is variadic, so a flag must follow the last one.
-
-    If it were last, Claude Code would read the initial prompt as another
-    directory and the worker would start with no task and no error.
-    """
-    from dataclasses import replace
-
-    profile = replace(load_profile("developer"), add_dirs=["/srv/cache", "/srv/refs"])
-    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
-    last = max(i for i, a in enumerate(argv) if a == "--add-dir")
-    assert argv[last + 2].startswith("--"), argv[last:]
-
-
 @pytest.mark.parametrize("provider", ["codex", "antigravity"])
 def test_supervisor_resume_keeps_prompt(db, ws, monkeypatch, provider):
     agent = Agent("boss", ws.id, "supervisor", provider, None, "interactive", "idle", "@0", None, time.time())
@@ -419,6 +394,13 @@ def test_repo_read_dirs_become_read_only_allow_rules(ws):
     allowed = argv[argv.index("--allowedTools") + 1].split(",")
     assert f"Read(/{Path(ws.repo_root).resolve()}/results/**)" in allowed and "Read(//srv/data/**)" in allowed
     assert "--add-dir" not in argv
+    # --add-dir is variadic: a flag must follow the last one, or Claude Code reads the prompt as a directory.
+    from dataclasses import replace
+
+    profile = replace(load_profile("developer"), add_dirs=["/srv/cache", "/srv/refs"])
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
+    last = max(i for i, a in enumerate(argv) if a == "--add-dir")
+    assert argv[last + 2].startswith("--"), argv[last:]
 
 
 def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):

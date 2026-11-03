@@ -141,11 +141,6 @@ def test_assign_without_isolate_shares_the_checkout(db, repo, boss):
     assert db.get_workspace(db.get_agent(wid).workspace_id).path == str(repo)
 
 
-def test_blank_task_is_refused(db, repo, boss):
-    assert run(mcp_server.assign("developer", "  ")) == "Give the worker a task."
-    assert run(mcp_server.handoff("developer", "")) == "Give the worker a task."
-
-
 def test_handoff_returns_the_result_once_the_worker_reports(db, repo, boss, monkeypatch):
     """handoff replies at once with its worker's id, never waiting for it;
     wait_for_worker returns the result once the worker reports, and the copy
@@ -161,6 +156,11 @@ def test_handoff_returns_the_result_once_the_worker_reports(db, repo, boss, monk
     assert "finished" in result and "wrote h.py" in result and "1 commit(s) ahead of main" in result
     inbox = [full_text(db, "boss", db.pop_pending("boss").body) for _ in range(db.pending_count("boss"))]
     assert not any("wrote h.py" in m for m in inbox), inbox
+
+
+def test_blank_task_is_refused(db, repo, boss):
+    assert run(mcp_server.assign("developer", "  ")) == "Give the worker a task."
+    assert run(mcp_server.handoff("developer", "")) == "Give the worker a task."
 
 
 # -- the pipeline: review -> checks -> merge -> removal -----------------------------------
