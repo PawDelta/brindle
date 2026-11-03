@@ -121,14 +121,20 @@ def test_cross_session_merged_branch_is_not_warned(db, other_session_task, monke
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197") is None
 
 
-def test_overlap_check_git_calls_bounded(db, repo, monkeypatch):
+@pytest.mark.parametrize("w3_branch", [
+    "feat-w3",
+    pytest.param("origin/feat-w3", marks=pytest.mark.variant(
+        "review finding: a local branch named origin/x must not read as origin's merged x")),
+])
+def test_overlap_check_git_calls_bounded(db, repo, monkeypatch, w3_branch):
     """Reported-unmerged worktrees cost a few cheap git reads each, never a
     fetch or the cherry/patch-id fallback, and nothing again once decided; a
     branch merged into its session branch has landed."""
-    sh("git branch session", repo)
+    sh("git branch session && git update-ref refs/remotes/origin/feat-w3 main", repo)
     root = workspaces.adopt_root(db, str(repo))
     for name in ("w0", "w1", "w2", "w3", "landed"):
-        ws = workspaces.create(db, str(repo), f"feat-{name}", base="session", run_setup=False).workspace
+        branch = w3_branch if name == "w3" else f"feat-{name}"
+        ws = workspaces.create(db, str(repo), branch, base="session", run_setup=False).workspace
         commit_file(Path(ws.path), f"{name}.py")
         db.add_agent(Agent(name, ws.id, "developer", "claude", None, "assign", "done", "@1", "done",
                            time.time()))

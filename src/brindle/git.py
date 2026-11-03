@@ -152,25 +152,30 @@ def merged_into_default(root: str | Path, branch: str) -> bool:
 
 
 def ref_shas(root: str | Path) -> dict[str, str]:
-    """Every local and remote-tracking branch's commit, by short name
-    (``main``, ``origin/main``), in one git call. A local branch wins over a
-    remote one of the same short name."""
+    """Every local and remote-tracking branch's commit, by full ref name
+    (``refs/heads/main``, ``refs/remotes/origin/main``), in one git call. Full
+    names keep a local branch called ``origin/x`` apart from origin's ``x``."""
     shas: dict[str, str] = {}
     lines = out(["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes", "refs/heads"],
                 root).splitlines()
     for line in lines:
         ref, _, sha = line.partition(" ")
-        for prefix in ("refs/remotes/", "refs/heads/"):
-            if ref.startswith(prefix) and sha:
-                shas[ref[len(prefix):]] = sha
+        if sha:
+            shas[ref] = sha
     return shas
+
+
+def _full_ref(name: str) -> str:
+    """A branch name as its ref: ``refs/...`` as given, else a local branch."""
+    return name if name.startswith("refs/") else f"refs/heads/{name}"
 
 
 def default_targets(root: str | Path, refs: dict[str, str], base: str | None = None) -> list[str]:
     """The default branch and, when it exists, its origin copy: what
     "merged" means without a more specific target."""
     base = base or default_branch(root)
-    return [base] + ([f"origin/{base}"] if f"origin/{base}" in refs else [])
+    remote = f"refs/remotes/origin/{base}"
+    return [base] + ([remote] if remote in refs else [])
 
 
 # Decided "merged" per (branch sha, target sha): a commit graph is content-addressed,
@@ -181,8 +186,8 @@ _MERGED_MAX = 4096
 
 def merged_into(root: str | Path, branch: str, targets: list[str], *,
                 refs: dict[str, str] | None = None, thorough: bool = False) -> bool:
-    """Whether ``branch`` has landed in any of ``targets`` (branch names, see
-    ``ref_shas``): an ancestor of one, the same tree, no changes of its own,
+    """Whether local branch ``branch`` has landed in any of ``targets`` (local
+    branch names, or full ``refs/...`` names; see ``ref_shas``): an ancestor of one, the same tree, no changes of its own,
     or a merge into it that changes nothing. Never fetches, and each
     (branch, target) pair is decided once per pair of commits. Only when
     those checks can't tell (a conflicting merge-tree, unrelated histories)
@@ -191,10 +196,12 @@ def merged_into(root: str | Path, branch: str, targets: list[str], *,
     if not branch or branch == "HEAD":
         return False
     refs = ref_shas(root) if refs is None else refs
-    b = refs.get(branch)
+    own = _full_ref(branch)
+    b = refs.get(own)
     if b is None:
         return False
-    shas = list(dict.fromkeys(refs[t] for t in targets if t != branch and t in refs))
+    full = [_full_ref(t) for t in targets]
+    shas = list(dict.fromkeys(refs[t] for t in full if t != own and t in refs))
     unsure = []
     for t in shas:
         verdict = _merged_cheap(root, b, t)
