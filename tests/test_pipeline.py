@@ -425,8 +425,19 @@ def test_reviewer_starts_only_after_passing_checks(db, repo, monkeypatch, outcom
     monkeypatch.setattr(gates, "check_summary", checks)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "w1")
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append((to, body)))
-    agents.review_after_checks(db, "boss", ws, report=since)
-    agents.review_after_checks(db, "boss", ws, "reviewer", second=True, report=since)
+    cfg = workspaces.config_for(db, ws)
+
+    def detach(argv):   # the helper process, run to its end before start_review returns
+        opt = lambda name: argv[argv.index(name) + 1] if name in argv else None  # noqa: E731
+        agents.review_after_checks(db, "boss", ws, opt("--profile"), None, cfg, request_id=opt("--request-id"),
+                                   second="--second-review" in argv, slot=opt("--review-slot"),
+                                   report=float(opt("--report")))
+
+    monkeypatch.setattr(agents, "_detach", detach)
+    # As the pipeline starts them, one report: the first helper's checks end
+    # between the two calls, so a failure has sent the worker back before the second.
+    agents.start_review(db, db.get_agent("boss"), ws, None, None, cfg, slot="", report=since)
+    agents.start_review(db, db.get_agent("boss"), ws, "reviewer", None, cfg, second=True, report=since)
     if passes:
         assert len(spawned) == 2 and all("PASS `true`" in p for p in spawned) and sent == []
         assert db.get_agent("w1").pipeline == "reviewing"

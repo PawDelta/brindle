@@ -3089,8 +3089,13 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) 
 
 def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                  focus: str | None = None, cfg: RepoConfig | None = None,
-                 second: bool = False, *, slot: str | None = None) -> Agent | None:
-    """Have ``ws`` reviewed. Without checks configured the reviewer starts
+                 second: bool = False, *, slot: str | None = None,
+                 report: float | None = None) -> Agent | None:
+    """Have ``ws`` reviewed. ``report``: the pipeline report this review is
+    for, captured once where the report was handled and passed to every
+    start for it; a start for a report the branch has left starts nothing.
+    None: an explicit request, bound to whatever report is current now.
+    Without checks configured the reviewer starts
     right away and is returned. With checks, nothing starts
     yet: a detached ``_review-after-checks`` process runs them and starts the
     reviewer with their results in its prompt, but only if they pass (see
@@ -3108,6 +3113,8 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     _review_worktree_present(ws)
     cfg = cfg or workspaces.config_for(db, ws)
     if not cfg.checks:
+        if not _report_current(db, ws, report):
+            return None
         return request_review(db, caller, ws, profile, focus, cfg, second=second, slot=slot)
     _review_kill_switch(ws)
     slot = _review_claim_slot(profile, slot)
@@ -3124,13 +3131,16 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     # Nobody's child: the worker reporting here may be closed while the checks
     # still run, and stopping it would stop this run too, so no reviewer (#190).
     with review_dispatch_lock(ws.id):
+        if not _report_current(db, ws, report):
+            return None   # the checks of an earlier start for this report failed already
         sha = gates.head(ws)
         existing = _live_reviewer(db, ws, sha, profile)
         if existing:
             return existing
         # The helper is bound to the report that queued it, so a late one
         # can't review a report the branch has since left.
-        report = pipeline.review_claim(db, ws)
+        if report is None:
+            report = pipeline.review_claim(db, ws)
         if _review_pending(ws.id, profile, sha, report):
             return None
         if report is not None:

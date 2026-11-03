@@ -514,8 +514,9 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
                   f"Its report: {agents.first_line(result)}", result), worker.id)
         return True
     # Before the check run starts: it reads this report's claim (see review_claim).
-    db.update_agent(worker.id, pipeline="reviewing", reviewing_since=time.time(), merge_failed=None)
-    _start_review(db, cfg, parent, worker, ws, result)
+    report = time.time()
+    db.update_agent(worker.id, pipeline="reviewing", reviewing_since=report, merge_failed=None)
+    _start_review(db, cfg, parent, worker, ws, result, report)
     return True
 
 
@@ -563,18 +564,21 @@ def review_state(db: DB, ws: Workspace, *, head_reader=None) -> str | None:
 
 
 def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Workspace,
-                  result: str) -> None:
+                  result: str, report: float) -> None:
     """Start the review(s) of ``worker``'s reported branch; when no reviewer
-    can start, hand the branch to the supervisor."""
+    can start, hand the branch to the supervisor. ``report`` is the report's
+    identity (its ``reviewing_since``), captured by the caller once and
+    handed to every start: none looks it up later, so none can mistake a
+    branch the checks have since sent back for a fresh one."""
     try:
         second = second_profile(db, cfg, worker, ws)
         # With a second review both calls carry a concrete profile, so the
         # reviewer dedupe compares profiles and neither can swallow the other.
         first = agents.default_review_profile(cfg, worker, db, ws.repo_root, worker.task) if second else None
-        started = agents.start_review(db, parent, ws, first, None, cfg, slot="")
+        started = agents.start_review(db, parent, ws, first, None, cfg, slot="", report=report)
         if second:
             try:
-                agents.start_review(db, parent, ws, second, None, cfg, second=True)
+                agents.start_review(db, parent, ws, second, None, cfg, second=True, report=report)
             except agents.AgentError:
                 if started is not None:
                     agents.close(db, started.id)   # don't leave a lone first review running
@@ -623,7 +627,7 @@ def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
         except agents.AgentError:
             pass   # _start_review reports an unavailable reviewer through the usual escalation
         db.update_agent(worker.id, review_restarted=since)
-        _start_review(db, cfg, parent, current, ws, current.result or "")
+        _start_review(db, cfg, parent, current, ws, current.result or "", current.reviewing_since)
         return True
 
 
