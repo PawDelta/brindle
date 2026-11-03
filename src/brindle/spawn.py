@@ -347,8 +347,8 @@ def no_room(repo_root: str | None = None) -> str | None:
     :func:`why` says), or None when the machine has room for it. Unlike a
     read or an action this applies in every process, gate on or off: a worker
     or a check run is the heaviest thing brindle starts. It waits until there
-    is room, until the worker's ``room_wait_max`` expires, or until it is
-    cancelled (a supervisor can start a waiting worker anyway:
+    is room (after ``room_wait_max`` its supervisor is told once), or until
+    it is cancelled (a supervisor can start a waiting worker anyway:
     ``tasks.start_now``), unless the repo's ``wait_for_room`` is false.
     Low free disk (``disk.low_disk``, "waiting for disk: N GB free") holds it
     the same way, whatever ``wait_for_room`` says."""

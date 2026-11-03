@@ -1,5 +1,5 @@
-"""With checks configured a detached run starts the reviewer and runs them
-beside it; a repo without checks is reviewed at once."""
+"""With checks configured the reviewer starts only after they finish, with
+their results in its prompt; a repo without checks is reviewed at once."""
 import asyncio
 import json
 import shutil
@@ -63,18 +63,50 @@ def detached(monkeypatch):
     return calls
 
 
-# -- a crash in the checks ---------------------------------------------------------------
+# -- the results are in the reviewer's prompt ------------------------------------------
 
 
-def test_a_crashing_check_run_still_starts_the_review_and_says_so(db, ws, boss, spawned, monkeypatch):
+@pytest.mark.parametrize("caller", ["boss", None])
+def test_a_crashing_check_run_starts_no_review_and_tells_the_caller(db, ws, boss, spawned, monkeypatch,
+                                                                    caller):
+    """Explicit request (no pipeline report): the caller is told, or for a UI
+    request with no caller the worker's supervisor; no reviewer starts."""
+    add(db, ws, "w1", "assign", parent="boss", result="done")
     monkeypatch.setattr(gates, "check_summary",
                         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
-                                      RepoConfig(checks=["true"])).id == "rev1"
-    assert len(spawned) == 1
+    assert agents.review_after_checks(db, caller, ws, "reviewer", None,
+                                      RepoConfig(checks=["true"])) is None
+    assert spawned == []
+    told = db.pop_pending("boss")
+    assert told is not None and "crashed" in told.body and "boom" in told.body
 
 
-# -- the review runs in a detached process -----------------------------------------------
+def test_a_branch_that_moves_before_dispatch_is_checked_again_not_reviewed_unchecked(
+        db, ws, boss, spawned, monkeypatch):
+    """The head moves after the checks end, while the run waits for the
+    dispatch lock: the old commit's results never reach a reviewer of the new one."""
+    ran = []
+
+    def checks(db_, ws_, cfg, cancel=None):
+        ran.append(gates.head(ws))
+        return "PASS `suite`"
+
+    real_lock = agents.review_dispatch_lock
+    moved = []
+
+    def lock(ws_id, **kw):
+        if ran and not moved:
+            moved.append(1)
+            commit(ws, "more.py")   # moved on lock acquisition
+        return real_lock(ws_id, **kw)
+
+    monkeypatch.setattr(gates, "check_summary", checks)
+    monkeypatch.setattr(agents, "review_dispatch_lock", lock)
+    agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["suite"]))
+    assert len(ran) == 2 and ran[0] != ran[1] and len(spawned) == 1 and ran[1][:8] in spawned[0]
+
+
+# -- no reviewer until the checks finish -----------------------------------------------
 
 
 def test_with_checks_nothing_starts_until_a_detached_process_has_run_them(db, ws, boss, spawned, detached):
@@ -85,6 +117,20 @@ def test_with_checks_nothing_starts_until_a_detached_process_has_run_them(db, ws
     assert argv[argv.index("_review-after-checks") + 1] == ws.id
     assert argv[argv.index("--caller") + 1] == "boss"
     assert argv[argv.index("--focus") + 1] == "the parser"
+
+
+def test_a_helper_queued_for_an_older_report_is_not_reused_by_a_newer_one(db, ws, boss, spawned, detached):
+    """The worker reported again on the same commit: the helper still pending
+    for the first report retires itself, so the new report gets its own."""
+    add(db, ws, "w1", "assign", parent="boss", status="processing", pipeline="reviewing")
+    cfg = RepoConfig(checks=["true"])
+    db.update_agent("w1", reviewing_since=100.0)
+    agents.start_review(db, boss, ws, "reviewer", None, cfg)
+    agents.start_review(db, boss, ws, "reviewer", None, cfg)   # same report: reused
+    assert len(detached) == 1 and "100.0" in detached[0]
+    db.update_agent("w1", reviewing_since=200.0)
+    agents.start_review(db, boss, ws, "reviewer", None, cfg)
+    assert len(detached) == 2 and "200.0" in detached[1]
 
 
 def test_a_reviewer_already_at_work_on_this_commit_means_no_second_run(db, ws, boss, spawned,
@@ -115,7 +161,30 @@ def test_the_run_gives_up_when_the_head_moves_during_the_checks(db, ws, boss, sp
     assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
                                       RepoConfig(checks=["suite"])) is None
     assert seen == {"before": False, "after": True}
-    assert len(spawned) == 1   # beside the checks, on the commit the branch then left
+    assert spawned == []
+
+
+def test_the_real_check_path_reuses_a_pass_and_a_new_failure_starts_no_reviewer(
+        db, ws, boss, spawned, monkeypatch):
+    """Only the command execution is faked: a commit that already passed is
+    not run again, and after HEAD moves the failing run starts no reviewer
+    and reaches the caller. (The cache is by tree, written by a real pass;
+    ``db.set_check`` is a per-workspace record that ``run_checked`` never reads.)"""
+    ran, results = [], [(True, "1 passed")]
+    monkeypatch.setattr(gates, "_run_queued",
+                        lambda db_, ws_, cmd, *a, **kw: ran.append(cmd) or results[0])
+    cfg = RepoConfig(checks=["suite"])
+
+    assert agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg) is not None
+    assert agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg) is not None
+    assert ran == ["suite"] and len(spawned) == 2   # the second run reused the pass
+
+    commit(ws, "more.py")
+    results[0] = (False, "1 failed\nexit code 1")
+    assert agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg) is None
+    assert ran == ["suite", "suite"] and len(spawned) == 2
+    [msg] = inbox(db, "boss")
+    assert "checks failed" in msg and "1 failed" in msg
 
 
 def test_results_for_a_commit_the_branch_has_left_start_no_reviewer(db, ws, boss, spawned, monkeypatch):
@@ -126,7 +195,7 @@ def test_results_for_a_commit_the_branch_has_left_start_no_reviewer(db, ws, boss
     monkeypatch.setattr(gates, "check_summary", finishes_late)
     assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
                                       RepoConfig(checks=["suite"])) is None
-    assert len(spawned) == 1
+    assert spawned == []
 
 
 # -- the callers -----------------------------------------------------------------------

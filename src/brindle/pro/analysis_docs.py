@@ -600,16 +600,36 @@ def settle_owed(db, *, client=None, store=None) -> None:
 def _tell_stale(db, agent_id: str, doc_id: str, version: int) -> bool:
     """Tell ``agent_id`` once that ``doc_id``, which it read at an older
     version, now has ``version``. Only the session is told, never the person."""
-    from brindle import gates, knowledge
+    from brindle import gates
     from brindle.pro.analysis_brief import DOC_ITEM
 
     read = _version(_pins(db, agent_id, DOC_ITEM).get(doc_id))
     told = _version(_pins(db, agent_id, TOLD_ITEM).get(doc_id))
     if read is None or version <= max(read, told or 0):
         return False
-    knowledge.record_receipt(db, agent_id, [(TOLD_ITEM, doc_id, str(version))])
-    gates.tell(db, agent_id, f"[brindle] Analysis doc {doc_id}, which you read at version {read}, now has "
-                             f"version {version}. Read it again (read_analysis_doc) before you rely on it.")
+    key = (agent_id, TOLD_ITEM, doc_id)
+    with db.tx() as c:
+        previous = c.execute("SELECT content_hash FROM context_receipts WHERE task_id=?"
+                             " AND item_kind=? AND item_id=?", key).fetchone()
+        claim = c.execute(
+            "INSERT INTO context_receipts (task_id, item_kind, item_id, content_hash) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT (task_id, item_kind, item_id) DO UPDATE SET content_hash=excluded.content_hash"
+            " WHERE CAST(context_receipts.content_hash AS INTEGER) < CAST(excluded.content_hash AS INTEGER)",
+            (*key, str(version)))
+        if not claim.rowcount:
+            return False
+    try:
+        gates.tell(db, agent_id, f"[brindle] Analysis doc {doc_id}, which you read at version {read}, now has "
+                                 f"version {version}. Read it again (read_analysis_doc) before you rely on it.")
+    except Exception:
+        with db.tx() as c:
+            if previous is None:
+                c.execute("DELETE FROM context_receipts WHERE task_id=? AND item_kind=? AND item_id=?"
+                          " AND content_hash=?", (*key, str(version)))
+            else:
+                c.execute("UPDATE context_receipts SET content_hash=? WHERE task_id=? AND item_kind=?"
+                          " AND item_id=? AND content_hash=?", (previous[0], *key, str(version)))
+        raise
     return True
 
 
