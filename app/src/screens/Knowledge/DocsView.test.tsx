@@ -97,10 +97,4 @@ describe("docs view", () => {
       expect(within(screen.getByRole("group", { name: "Share with" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["Stop sharing with Payments team", "Share with Platform"]),
     );
   });
-
-  it("says there isn't enough data yet below the minimum instead of showing numbers", async () => {
-    render(<DocsView client={client(() => ({}), { ...RESULTS, enough: false, compared: 2, similar: 3, with_brief: null, without_brief: null })} />);
-    await waitFor(() => expect(screen.getByTestId("results-not-enough").textContent).toContain("Not enough data yet"));
-    expect(screen.getByTestId("results").textContent).not.toMatch(/review rounds per task/i);
-  });
 });

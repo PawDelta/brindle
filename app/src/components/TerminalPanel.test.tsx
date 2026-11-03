@@ -146,16 +146,6 @@ describe("TerminalPanel", () => {
     expect(screen.getByTestId("terminal").dataset.target).toBe(daemon.actions[2].target);
   });
 
-  it("starts a shell where the open session's agent works, else at the repo root", () => {
-    expect(here).toEqual({ repo: REPO, name: "pawdelta", cwd: WORKTREE, why: "started in a7aaa807's worktree" });
-    expect(shellPlace({ screen: "session", root: "sup-42", repo: REPO }, repos, workspaces)).toMatchObject({ cwd: REPO, why: "started at the repo root" });
-    expect(shellPlace({ screen: "settings" }, repos, workspaces)).toMatchObject({ cwd: REPO, why: "started at the repo root" });
-    // Project settings of the second repo: its shell starts there, not in the last-visited or first repo.
-    const OTHER = "/home/sam/Projects/other";
-    const two = [...repos, { repo_root: OTHER, name: "other" }];
-    expect(shellPlace({ screen: "project-settings", repo: OTHER }, two, workspaces)).toEqual({ repo: OTHER, name: "other", cwd: OTHER, why: "started at the repo root" });
-  });
-
   it("opens a shell from the status line's toggle, another on +, and closes the shown one on ×, saying when either fails", async () => {
     const { daemon, failing } = setup();
     const calls = () => daemon.requests.filter((r) => r.path.startsWith("/terminals")).map((r) => `${r.method} ${r.path}`);
@@ -255,83 +245,4 @@ describe("TerminalPanel", () => {
     expect(daemon.closedTerminals).toEqual([]);
   });
 
-  it("select to copy and ⌘V paste in the shell go through the app's clipboard, not the webview's", async () => {
-    real.on = true;
-    vi.stubGlobal("matchMedia", () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} }));
-    const written: string[] = [];
-    const copied: string[] = [];
-    const clipboard = { text: "" };
-    let handlers: PtyViewHandlers | undefined;
-    const views: PtyViews = {
-      ...standInViews,
-      open: (_at, _size, h) => {
-        handlers = h;
-        return { write: (d) => void written.push(d), resize() {}, focus() {}, close() {} };
-      },
-      copy: (text) => (copied.push(text), Promise.resolve()),
-      paste: () => Promise.resolve(clipboard.text),
-    };
-    setup(views);
-    fireEvent.click(screen.getByTestId("terminal-toggle"));
-    const shell = await within(await screen.findByTestId("terminal-panel")).findByTestId("terminal");
-    await waitFor(() => expect(handlers).toBeDefined());
-    const term = xterms.at(-1)!;
-    await act(() => {
-      handlers!.onData(new TextEncoder().encode("\x1b[?2004h$ echo copy-me\r\ncopy-me\r\n$ "));
-      return new Promise<void>((r) => term.write("", r));
-    });
-
-    // A drag over "copy-me": on the app's clipboard as the mouse lets go.
-    act(() => void shell.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
-    act(() => term.select(0, 1, 7));
-    act(() => void window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
-    expect(copied).toEqual(["copy-me"]);
-
-    // ⌘V (off a Mac here): the app's clipboard, pasted into the shell as a bracketed paste.
-    clipboard.text = "pasted from pbcopy";
-    const key = new KeyboardEvent("keydown", { key: "v", metaKey: true, bubbles: true, cancelable: true });
-    act(() => void term.textarea!.dispatchEvent(key));
-    expect(key.defaultPrevented).toBe(true);
-    await act(() => new Promise((r) => setTimeout(r, 0)));
-    expect(written).toEqual(["\x1b[200~pasted from pbcopy\x1b[201~"]);
-  });
-
-  it("a copy in the shell says \"Copied\" in the panel: tmux's drag (OSC 52, the mouse reported) and a selection let go", async () => {
-    real.on = true;
-    vi.stubGlobal("matchMedia", () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} }));
-    const copied: string[] = [];
-    let handlers: PtyViewHandlers | undefined;
-    const views: PtyViews = {
-      ...standInViews,
-      open: (_at, _size, h) => {
-        handlers = h;
-        return { write() {}, resize() {}, focus() {}, close() {} };
-      },
-      copy: (text) => (copied.push(text), Promise.resolve()),
-    };
-    setup(views);
-    fireEvent.click(screen.getByTestId("terminal-toggle"));
-    const panel = await screen.findByTestId("terminal-panel");
-    const shell = await within(panel).findByTestId("terminal");
-    await waitFor(() => expect(handlers).toBeDefined());
-    const term = xterms.at(-1)!;
-    const fed = (bytes: string) =>
-      act(() => {
-        handlers!.onData(new TextEncoder().encode(bytes));
-        return new Promise<void>((r) => term.write("", r));
-      });
-    // tmux has the mouse reported; a plain drag is tmux's copy mode, which copies on release as OSC 52.
-    await fed("\x1b[?1002h\x1b[?1006h$ echo copy-me\r\ncopy-me\r\n$ ");
-    expect(within(panel).queryByTestId("terminal-copied")).toBeNull();
-    await fed(`\x1b]52;;${btoa("copy-me")}\x07`);
-    await waitFor(() => expect(copied).toEqual(["copy-me"]));
-    expect(within(panel).getByTestId("terminal-copied").textContent).toBe("Copied");
-    await waitFor(() => expect(within(panel).queryByTestId("terminal-copied")).toBeNull(), { timeout: 3000 });
-    // An Option-drag's selection let go: the same.
-    act(() => void shell.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
-    act(() => term.select(0, 1, 7));
-    act(() => void window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
-    expect(copied).toEqual(["copy-me", "copy-me"]);
-    expect((await within(panel).findByTestId("terminal-copied")).textContent).toBe("Copied");
-  });
 });

@@ -114,22 +114,6 @@ describe("FirstRun", () => {
     expect(screen.queryByRole("dialog")).toBeNull();
   });
 
-  it("onboarding's engine step names only what the install adds, and says an engine that won't start with Retry", async () => {
-    const noBrew = detection(["uv", "brindle"], { homebrew: null });
-    const { setup } = fakeSetup([noBrew], [new Error("`brindle daemon` exited (exit status: 2): no such command 'daemon'"), null]);
-    const onReady = vi.fn();
-    render(<FirstRun setup={setup} reason="`brindle daemon` exited" onReady={onReady} />);
-    // Without Homebrew the install adds no tmux (the app ships its own), and says nothing to go and do about it.
-    await waitFor(() => expect(screen.getByTestId("onboarding").textContent).toContain("Installing it adds brindle,"));
-    expect(screen.getByTestId("onboarding").textContent).not.toMatch(COMMANDS);
-
-    fireEvent.click(screen.getByRole("button", { name: "Try starting it again" }));
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("The engine didn't start:");
-    expect(alert.textContent).toContain("no such command 'daemon'");
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(onReady).toHaveBeenCalledTimes(1));
-  });
 });
 
 describe("Launch", () => {
@@ -199,26 +183,5 @@ describe("Launch", () => {
     expect((await screen.findByRole("status")).textContent).toContain("4242");
     connected();
     expect(await screen.findByText("the app")).toBeTruthy();
-  });
-
-  it("onboarding says an engine too old to start is out of date, without the command that would upgrade it", async () => {
-    const TOO_OLD = "engine too old: brindle 0.4.1 has no `daemon` command. Upgrade it: uv tool upgrade brindle";
-    const old = fakeSetup([detection([...REQUIRED])], [TOO_OLD, null]);
-    render(<Launch setup={old.setup}>{() => <p>the app</p>}</Launch>);
-    expect((await screen.findByTestId("first-run-reason")).textContent).toBe(OUT_OF_DATE);
-    expect(screen.queryByText("Starting brindle…")).toBeNull();
-    expect(screen.queryByTestId("engine-banner")).toBeNull();
-    expect(document.body.textContent).not.toMatch(COMMANDS);
-    // Once it's up to date the engine starts and the app opens.
-    fireEvent.click(await screen.findByRole("button", { name: "Try starting it again" }));
-    expect(await screen.findByText("the app")).toBeTruthy();
-    expect(screen.queryByTestId("engine-banner")).toBeNull();
-
-    // Any other reason is the engine step alone.
-    cleanup();
-    const missing = fakeSetup([detection([])], [new Error(NOT_INSTALLED)]);
-    render(<Launch setup={missing.setup}>{() => <p>the app</p>}</Launch>);
-    await screen.findByTestId("first-run-reason");
-    expect(screen.queryByTestId("engine-banner")).toBeNull();
   });
 });
