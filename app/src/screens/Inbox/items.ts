@@ -37,6 +37,7 @@ export const KIND_LABEL: Record<string, string> = {
   org_notice: "Org notice",
   org_blocked: "Org policy",
   setup: "Setup",
+  idle_stopped: "Stopped while idle",
 };
 
 /* What the app can repair itself for a `setup` item, by its `fix` (engine
@@ -73,6 +74,7 @@ export const KIND_SHORT: Record<string, string> = {
   org_notice: "notice",
   org_blocked: "org policy",
   setup: "setup",
+  idle_stopped: "idle",
 };
 
 /* What is being asked, in a line the person can decide on. */
@@ -195,7 +197,7 @@ export const FILTERS: { key: string; label: string; kinds: string[] }[] = [
   { key: "reviews", label: "Reviews", kinds: ["review", "merge_failed"] },
   { key: "checks", label: "Checks", kinds: ["proposed_checks"] },
   { key: "docs", label: "Docs", kinds: ["doc"] },
-  { key: "other", label: "Other", kinds: ["credentials", "login", "org_notice", "org_blocked", "setup"] },
+  { key: "other", label: "Other", kinds: ["credentials", "login", "org_notice", "org_blocked", "setup", "idle_stopped"] },
 ];
 
 export const filterOf = (item: InboxItemDTO) => FILTERS.find((f) => f.kinds.includes(item.kind))?.key ?? "other";

@@ -1,6 +1,6 @@
 [project]
 name = "brindle"
-version = "0.5.11"
+version = "0.5.12"
 description = "Run coding agents in parallel, each on its own git branch, with a supervisor that delegates, reviews, and merges"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -81,5 +81,6 @@ markers = [
     "serial: run outside xdist (`pytest -m serial`); the parallel pass skips these",
     "brindle_ci: a brindle CI test; deselected unless BRINDLE_CI_TESTS=1 (tests/conftest.py marks the test_ci_* files)",
     "brindle_ci_guard: a refusal, fail-closed or secret-hygiene test of the brindle CI commands; always runs",
+    "slow(reason): may run longer than BRINDLE_TEST_DURATION_LIMIT seconds (default 10; tests/conftest.py)",
     "variant(reason): an input variant that covers no new code on purpose (see scripts/check_new_tests.py)",
 ]

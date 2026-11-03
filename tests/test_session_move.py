@@ -34,9 +34,12 @@ def test_checkout_for_worktree_path_creates_it_with_the_branch(db, repo, tmp_pat
 
 
 def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkeypatch):
+    from brindle import knowledge
+
     root = workspaces.adopt_root(db, str(repo))
     dest = workspaces.checkout_for(db, str(repo), branch="integration")
     add(db, root, "old")
+    add(db, root, "onlooker")
     db.update_agent("old", profile="developer")   # launched before launches were supervisor-only
     worker = workspaces.create(db, str(repo), "w-branch").workspace
     add(db, worker, "w1", mode="assign", parent="old")
@@ -76,6 +79,10 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     assert autopilot.on_stop(db, db.get_agent("old"), {}) is None
     assert [(e["root_id"], e["payload"]) for e in bus.tail(db, kinds=("session.handover",))] == [
         ("new", {"from_root": "old"})]
+    # The old session, still up, stops advertising the goal it handed over.
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    found = knowledge.who_is_working(db, knowledge.repo_key(str(repo)), "onlooker")
+    assert [s["session"] for s in found] == ["new"]
     # The wait went with the session: once it ends, one notice, to the new supervisor.
     for root_id in ("old", "new"):
         autopilot.wait_ended(db, db.get_autopilot(root_id), now=time.time() + 120)
@@ -83,3 +90,68 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
                            (autopilot.WAIT_ENDED_HEAD,)).fetchall()
     assert [r["agent_id"] for r in told] == ["new"]
 
+@pytest.mark.parametrize("own_goal", [None, "done", "running", "handed_away", "send_fails"])
+def test_handover_to_a_live_supervisor_delivers_to_it_instead_of_starting_another(db, repo, monkeypatch, own_goal):
+    from brindle import tmux
+
+    root = workspaces.adopt_root(db, str(repo))
+    dest = workspaces.checkout_for(db, str(repo), branch="integration")
+    add(db, root, "old")
+    add(db, dest, "gone", status="paused")      # a paused chat there is not the one taking over
+    add(db, dest, "there")
+    spawned, made = [], []
+
+    def fake_spawn(db_, ws, profile, **kw):
+        spawned.append(ws.id)
+        made.append(ws.id)
+        a = add(db_, ws, f"new{len(made)}")
+        db_.add_autopilot(a.id)
+        return a
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "there")
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
+    if own_goal in ("done", "running", "handed_away"):
+        db.add_autopilot("there")
+        autopilot.set_goal(db, "there", "its own work", [("mine", "true", None)])
+    if own_goal in ("done", "running"):
+        db.update_autopilot("there", state=own_goal)
+    elif own_goal == "handed_away":
+        # A round trip: "there" handed its goal on, and stays up ending its turn.
+        away = workspaces.checkout_for(db, str(repo), branch="elsewhere")
+        sessions.handover_to(db, "there", away, pause_old=False)
+        spawned.clear()
+    worker = workspaces.create(db, str(repo), "w-branch").workspace
+    add(db, worker, "w1", mode="assign", parent="old")
+    db.add_autopilot("old")
+    autopilot.set_goal(db, "old", "ship it", [("one", "true", None)])
+    db.add_task(Task("t1", str(repo), None, "old", root.id, "developer", "later", "assign", 1, None,
+                     None, None, '["w1"]', "pending", time.time()))
+    told = []
+
+    def fake_send(db_, to, body, *a, **kw):
+        if own_goal == "send_fails":
+            raise tmux.TmuxError("paste failed")
+        told.append((to, body))
+
+    monkeypatch.setattr(agents, "send_message", fake_send)
+    paused = []
+    monkeypatch.setattr(agents, "pause", lambda db_, rid, **kw: paused.append(rid))
+
+    h = sessions.handover_to(db, "old", dest, "rule: never push to main")
+
+    # An unfinished goal of its own stays the live supervisor's: a new one takes the session, and says why.
+    to = "new1" if own_goal == "running" else "there"
+    assert h.agent.id == to and db.get_autopilot(to).goal == "ship it" and paused == ["old"]
+    assert db.get_agent("w1").parent_id == to and db.get_task("t1").caller_id == to
+    assert [e["root_id"] for e in bus.tail(db, kinds=("session.handover",))][-1] == to
+    if own_goal == "running":
+        assert spawned == [dest.id] and told == [] and "unfinished goal" in h.why
+        assert db.get_autopilot("there").goal == "its own work"
+    elif own_goal == "send_fails":
+        # The paste failed after the move was saved: the note waits in its inbox instead.
+        queued = db.conn.execute("SELECT body FROM inbox WHERE agent_id='there'").fetchall()
+        assert spawned == [] and h.why is None and "rule: never push to main" in queued[-1]["body"]
+    else:
+        assert spawned == [] and h.why is None
+        assert [t for t, _ in told] == ["there"] and "rule: never push to main" in told[0][1]

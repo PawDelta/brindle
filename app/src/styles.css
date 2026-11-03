@@ -32,6 +32,9 @@
   --fail: #f08c88; --fail-soft: rgba(240, 140, 136, 0.12);
   --on-fawn: #03160e; --on-branch: #15102a; --on-sap: #1a0f08;
   --thread-in: #d7af87; --thread-top: #e8875a; --thread-mid: #a99be0; --thread-out: #34d399;
+  /* The knowledge map's groups: ten hues apart from each other, light on dark here and deeper in light. */
+  --group-1: #6ea8fe; --group-2: #f2a65a; --group-3: #f07a7a; --group-4: #5ccfc4; --group-5: #7fd36a;
+  --group-6: #e8cc5a; --group-7: #c39bf0; --group-8: #f59ac0; --group-9: #c9a27c; --group-10: #9fb8c8;
   --shell-bg: #070b09; --shell-bg-2: color-mix(in srgb, var(--shell-bg), white 5%); --shell-ink: #e8f0eb; --shell-dim: #859a8e; --shell-acc: #34d399; --shell-cursor: #a4aba7; --shell-bad: #f08c88; --shell-line: rgba(52, 96, 74, 0.5);
   --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -53,6 +56,8 @@
     --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
     --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
     --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
+    --group-1: #2f6fbf; --group-2: #b8621b; --group-3: #b83a3a; --group-4: #1f8a80; --group-5: #3b8a2a;
+    --group-6: #8f7a10; --group-7: #7a4fb8; --group-8: #b8457a; --group-9: #7f5a36; --group-10: #4f6b7c;
     color-scheme: light;
   }
 }
@@ -68,6 +73,8 @@
   --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
   --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
   --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
+  --group-1: #2f6fbf; --group-2: #b8621b; --group-3: #b83a3a; --group-4: #1f8a80; --group-5: #3b8a2a;
+  --group-6: #8f7a10; --group-7: #7a4fb8; --group-8: #b8457a; --group-9: #7f5a36; --group-10: #4f6b7c;
   color-scheme: light;
 }
 

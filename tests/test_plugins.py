@@ -11,7 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import sh
-from brindle import account, agents, events, mcp_server, pipeline, plugins, policy, quota, workspaces
+from brindle import account, agents, events, mcp_server, pipeline, plugins, policy, procs, quota, workspaces
 from brindle.cli import app
 from brindle.config import RepoConfig, load_repo_config
 from brindle.db import Agent
@@ -236,6 +236,7 @@ def test_removing_an_unmerged_worktree_emits_remove(db, piped, monkeypatch):
     rec = install_one(monkeypatch, plugins.EVENTS, Recorder())
     root, ws = piped
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    monkeypatch.setattr(procs, "cwds", dict)   # the faked `which` hides lsof: nothing else is in it
     out = mcp_server.remove_workspace(ws.id)
     assert out.startswith("Removed")
     [e] = rec.events

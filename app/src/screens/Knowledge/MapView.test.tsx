@@ -8,6 +8,31 @@ afterEach(cleanup);
 
 const decision: DecisionDTO = { id: "private-d", repo_key: "r", topic: "Storage policy", body: "Keep private notes here", rationale: "Local reason", scope: ["src/cache/**"], status: "accepted", created_at: 1, author_session: "local-session" };
 
+it("shows local knowledge on open when the server library is empty", async () => {
+  const local = [{ id: "local:kb:1", kind: "doc", title: "Indexed cache note", local_path: "/repo/src/cache/note.md", paths: ["src/cache/note.md"], topics: ["Storage policy"] },
+    { id: "local:kb:2", kind: "doc", title: "Indexed storage plan", local_path: "/outside/notes/storage.md", paths: ["/outside/notes/storage.md"], topics: ["Storage policy"] }];
+  const opened: string[] = [];
+  const openPath = async (path: string) => { opened.push(path); };
+  const client = new DaemonClient({ baseUrl: "http://localhost", token: "t", fetch: async (input) => new Response(JSON.stringify(
+    String(input).includes("/scopes") ? { scopes: [{ kind: "user", id: "u1" }] } : { nodes: new URL(String(input)).searchParams.get("repo") === "/repo" ? local : [], edges: [] },
+  )) });
+  const { container, rerender } = render(<MapView client={client} repo="/repo" openPath={openPath} decisions={[decision, { ...decision, id: "global", topic: "Repo policy", scope: [] }, { ...decision, id: "peer", scope: ["docs/**"] }]}
+    sources={[{ id: "cache", kind: "folder", scope: "/repo/src/cache", docs: 3 }, { id: "notes", kind: "folder", scope: "/outside/notes", docs: 1 }]} />);
+  expect(await screen.findAllByRole("button", { name: /Storage policy/ })).toHaveLength(2);
+  expect(screen.getByRole("button", { name: /Repo policy/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Imported.*cache/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Imported.*notes/ })).toBeTruthy();
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="local:source:cache"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="local:decision:peer"]')).not.toBeNull();
+  expect(screen.getByRole("button", { name: /Indexed storage plan/ })).toBeTruthy();
+  expect(container.querySelector('[data-source="local:kb:1"][data-target="local:kb:2"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:source:cache"][data-target="local:kb:1"]')).not.toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /Indexed cache note/ }));
+  expect(opened).toEqual(["/repo/src/cache/note.md"]);
+  rerender(<MapView client={client} repo="/empty" decisions={[]} sources={[]} />);
+  await waitFor(() => expect(container.querySelector("[data-node]")).toBeNull());
+});
+
 it.each([false, true])("applies a scope change immediately and discards older responses (pending: %s)", async (pending) => {
   const finish: { url: URL; resolve: (value: Response) => void }[] = [];
   const client = new DaemonClient({ baseUrl: "http://localhost", token: "t", fetch: async (input) => {
@@ -77,8 +102,10 @@ it("loads all docs automatically with sources, filters by path, and opens each n
   expect(initialDoc.textContent).toMatch(/feat\/cache.*session-1.*user-hannah.*Personal.*2026-11-02/);
   // The automatic whole-scope map still joins local records to the documents they share a path with.
   expect(screen.getByRole("button", { name: /Storage policy/ })).toBeTruthy();
-  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="p"]')).not.toBeNull();
-  expect(container.querySelector('[data-source="local:source:s"][data-target="p"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="d"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:source:s"][data-target="d"]')).not.toBeNull();
+  // Code paths are not nodes.
+  expect(container.querySelector('[data-node="p"]')).toBeNull();
   fireEvent.change(screen.getByLabelText("Code paths"), { target: { value: "src/cache" } });
   fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
   await screen.findByRole("button", { name: /Cache design/ });
@@ -86,11 +113,11 @@ it("loads all docs automatically with sources, filters by path, and opens each n
   await screen.findByRole("button", { name: /Storage policy/ });
   expect(screen.getByRole("button", { name: /Storage policy/ }).textContent).toMatch(/local-session.*1970-01-01/);
   expect(screen.getByRole("button", { name: /Imported.*cache/ }).textContent).toMatch(/\/repo\/src\/cache.*Team.*2026-11-02/);
-  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="p"]')).not.toBeNull();
-  expect(container.querySelector('[data-source="local:source:s"][data-target="p"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="d"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:source:s"][data-target="d"]')).not.toBeNull();
   expect(screen.queryByRole("button", { name: /Imported.*index.ts/ })).toBeNull();
   expect(screen.queryByRole("button", { name: /Imported.*\*/ })).toBeNull();
-  for (let i = 0; i < 6; i++) expect(container.querySelector(`[data-source="local:decision:pattern-${i}"][data-target="p"]`)).not.toBeNull();
+  for (let i = 0; i < 6; i++) expect(container.querySelector(`[data-source="local:decision:pattern-${i}"][data-target="d"]`)).not.toBeNull();
   expect(container.querySelector('[data-kind="supersedes"]')).not.toBeNull();
   expect(screen.queryByRole("button", { name: /Other rule|Repo rule|outside/ })).toBeNull();
   expect(requests.filter((r) => r.path.endsWith("/map")).at(-1)?.query).toEqual({ repo: "/repo", scope_kind: "user", scope_id: "u1", paths: '["src/cache"]', depth: "1" });
@@ -100,10 +127,10 @@ it("loads all docs automatically with sources, filters by path, and opens each n
   expect(screen.getByText(decision.body)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: /Imported.*cache/ }));
   expect(openPath).toHaveBeenLastCalledWith("/repo/src/cache");
-  fireEvent.click(screen.getByRole("button", { name: /Imported.*localrepo/ }));
+  fireEvent.click(screen.getByRole("button", { name: /Imported.*: repo$/ }));
   expect(openPath).toHaveBeenLastCalledWith("/repo");
   rerender(<MapView {...props} sources={[{ id: "root-source", kind: "folder", scope: "/repo" }]} />);
-  expect(screen.getByRole("button", { name: /Imported.*localrepo/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Imported.*: repo$/ })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: /Document.*Cache design/ }));
   expect((await screen.findByTestId("doc-body")).textContent).toContain("Durable cache");
   expect(requests.at(-1)?.path).toBe("/analysis-docs/doc1");
@@ -115,7 +142,7 @@ it("loads all docs automatically with sources, filters by path, and opens each n
   fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
   await waitFor(() => expect(requests.at(-1)?.query.paths).toBe("[]"));
   await screen.findByRole("button", { name: /Storage policy/ });
-  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="p"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="d"]')).not.toBeNull();
   fireEvent.change(screen.getByLabelText("Code paths"), { target: { value: "" } });
   fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
   await waitFor(() => expect(requests.at(-1)?.query.paths).toBe("[]"));

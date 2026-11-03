@@ -183,17 +183,23 @@ def check_assign(cfg: RepoConfig, repo_root: str, profile: str, task: str, mode:
     return d
 
 
-def running_workers(db: DB, repo_root: str) -> int:
-    """How many of ``repo_root``'s workers are still at work (not paused,
-    done or dismissed, and not reviewers)."""
+def worker_agents(db: DB, repo_root: str) -> list[Agent]:
+    """``repo_root``'s workers still at work (not paused, done or dismissed,
+    and not reviewers)."""
     from brindle import agents
 
-    roots = {w.id: w.repo_root for w in (db.get_workspace(a.workspace_id) for a in db.list_agents())
+    every = db.list_agents()
+    roots = {w.id: w.repo_root for w in (db.get_workspace(a.workspace_id) for a in every)
              if w is not None}
-    return sum(1 for a in db.list_agents()
-               if roots.get(a.workspace_id) == repo_root and a.parent_id
-               and a.mode in agents.REPORTING_MODES and a.mode != "review"
-               and a.status not in ("paused", "done") and a.dismissed_at is None)
+    return [a for a in every
+            if roots.get(a.workspace_id) == repo_root and a.parent_id
+            and a.mode in agents.REPORTING_MODES and a.mode != "review"
+            and a.status not in ("paused", "done") and a.dismissed_at is None]
+
+
+def running_workers(db: DB, repo_root: str) -> int:
+    """How many of ``repo_root``'s workers are still at work (``worker_agents``)."""
+    return len(worker_agents(db, repo_root))
 
 
 def check_merge(cfg: RepoConfig, ws: Workspace, worker: Agent | None,
@@ -218,4 +224,4 @@ def check_merge(cfg: RepoConfig, ws: Workspace, worker: Agent | None,
 
 
 __all__ = ["GROUP", "AssignInfo", "Decision", "MergeInfo", "PolicyPlugin", "allow",
-           "check_assign", "check_merge", "deny", "plugin", "running_workers"]
+           "check_assign", "check_merge", "deny", "plugin", "running_workers", "worker_agents"]

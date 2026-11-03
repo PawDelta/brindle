@@ -5,6 +5,7 @@ import { openLocalPath } from "../../api/open";
 import { alert, button, card, field, h2 } from "../../components/ui";
 import { Reader, scopeName } from "./DocsView";
 import { DecisionCard } from "./KnowledgeScreen";
+import { docGraph } from "./graphLayout";
 import { joinLocal, MapGraph, type GraphNode } from "./MapGraph";
 
 interface MapViewProps {
@@ -58,6 +59,8 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
     () => map && repo && area ? joinLocal(map, decisions, sources, repo, area) : null,
     [map, decisions, sources, repo, area],
   );
+  // What the graph shows: documents and the local records that reach them.
+  const shown = useMemo(() => graph && docGraph(graph.nodes, graph.edges), [graph]);
   const titles = useMemo(() => new Map((map?.nodes ?? []).filter((n) => n.kind === "doc").map((n) => [n.doc_id ?? n.id, n.title ?? n.id])), [map]);
   const learn = useCallback(() => {}, []);
   const close = () => setDoc(null);
@@ -83,12 +86,13 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
   };
   const select = (node: GraphNode) => {
     setOpen(node);
-    if (node.kind === "doc") setDoc(node.doc_id ?? node.id);
-    if (node.kind === "imported") void openPath(node.path).catch((e: unknown) => setError(message(e)));
+    if (node.kind === "doc" && !node.local_path) setDoc(node.doc_id ?? node.id);
+    const localPath = node.kind === "imported" ? node.path : node.kind === "doc" ? node.local_path : undefined;
+    if (localPath) void openPath(localPath).catch((e: unknown) => setError(message(e)));
     if (node.kind === "path" && node.path && area) { setInput(node.path); setArea({ scope: area.scope, paths: [node.path] }); }
   };
   return <section className="flex flex-col gap-s2" aria-label="Map" data-testid="map">
-    <header><h2 className={h2}>Knowledge map</h2><p className="text-sm text-ink-2">All docs in this library scope. Code paths optionally narrow the map. Decisions and imported folders are connected on this device by shared paths.</p></header>
+    <header><h2 className={h2}>Knowledge map</h2><p className="text-sm text-ink-2">All knowledge in this library scope, including local decisions and imported folders in Mine. Code paths optionally narrow the map. Shared paths and topics connect records.</p></header>
     {!repo ? <p className="text-ink-3">Choose a repo to explore its knowledge.</p> : <form onSubmit={submit} className={`${card} flex flex-wrap items-end gap-s1 p-s2`}>
       <label className="flex flex-col gap-1 text-xs text-ink-2">Library scope<select className={field} value={scopeKey} onChange={(e) => changeScope(e.target.value)}>{scopes.map((s) => <option key={`${s.kind}:${s.id}`} value={`${s.kind}:${s.id}`}>{scopeName(s)}</option>)}</select></label>
       <label className="flex min-w-48 flex-1 flex-col gap-1 text-xs text-ink-2">Code paths<input className={field} value={input} onChange={(e) => setInput(e.target.value)} placeholder="src/cache, src/db" /></label>
@@ -97,8 +101,8 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
     {error && <p role="alert" className={alert}>{error}</p>}
     {repo && !area && <p className="text-sm text-ink-3">Choose a library scope to load its map.</p>}
     {area && !map && !error && <p role="status">Loading neighbourhood…</p>}
-    {graph && <><div className="flex flex-wrap gap-s2 text-xs text-ink-3"><span>{graph.nodes.length} nodes · {graph.edges.length} connections</span><span>Code areas · Documents · Local decisions and folders</span><span>Dashed: supersedes</span></div>
-      {graph.nodes.length ? <MapGraph {...graph} onOpen={select} /> : <p>No knowledge in this map yet.</p>}
+    {graph && shown && <><p className="text-xs text-ink-3">{shown.nodes.length} documents and local records · {shown.edges.length} links · drag nodes or the background, scroll to zoom, click a node for details</p>
+      {shown.nodes.length ? <MapGraph {...graph} onOpen={select} /> : <p>No knowledge in this map yet.</p>}
     </>}
     {open?.kind === "decision" && <ul><DecisionCard d={open.decision} /></ul>}
     {doc && <Reader key={doc} client={client} repo={repo} id={doc} targets={scopes} titles={titles} onBack={close} onDeleted={close} onOpen={setDoc} onScopes={learn} />}

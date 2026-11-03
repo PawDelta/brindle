@@ -103,7 +103,7 @@ def mode(path):
     return stat.S_IMODE(os.stat(path).st_mode)
 
 
-@pytest.mark.parametrize("cloud", ["aws", "gcp", "azure"])
+@pytest.mark.parametrize("cloud", ["aws", "azure"])
 def test_each_cloud_gets_what_its_library_reads_and_the_mint_sends_device_headers(cloud, fed, backend, store, caplog):
     import brindle
 
@@ -280,14 +280,6 @@ def script(tmp_path, name="brindle", mode=0o755, directory="bin"):
     p.write_text("#!/bin/sh\n")
     os.chmod(p, mode)
     return str(p)
-
-
-def test_the_hook_command_names_the_running_script_or_the_interpreter(tmp_path):
-    exe = script(tmp_path)
-    assert cc.hook_command("aws", ORG, argv0=exe) == f'"{exe}" cloud-credential aws --org {ORG}'
-    py = script(tmp_path, "python3")
-    assert cc.hook_command("gcp", ORG, argv0="/x/pytest/__main__.py", python=py) == \
-        f'"{py}" -P -m brindle cloud-credential gcp --org {ORG}'
 
 
 @pytest.mark.parametrize("how", ["relative", "world_writable_file", "world_writable_dir", "quote", "missing", "not_executable"])

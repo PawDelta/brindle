@@ -38,7 +38,7 @@ APP_ORIGINS = ("tauri://localhost", "http://tauri.localhost")
 FIRST_FRAME_TIMEOUT = 10.0      # seconds a WebSocket has to send its token
 WS_UNAUTHORIZED = 4401          # close code for a WebSocket whose first frame isn't the token
 CALLER_TTL = 5.0                # seconds a Unix-socket caller's agent check is reused
-CALLER_CHECK_LIMIT = 5.0         # includes time queued behind other caller checks
+CALLER_CHECK_LIMIT = 20.0        # includes time queued behind other caller checks
 # Process-wide, so guards cannot grow a separate pool for every connection.
 # A stuck process probe must not occupy the daemon's default executor.
 _CALLER_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="brindle-caller")
@@ -91,6 +91,11 @@ class Guard:
         # Only the Unix socket names its caller: over TCP the token is all that keeps agents out.
         refused = await self._agent_caller(scope[peer.PEER_PID]) if peer.PEER_PID in scope else None
         if scope["type"] == "websocket":
+            if origin_ok and refused == _CALLER_UNCHECKED:
+                if (await receive())["type"] == "websocket.connect":
+                    await send({"type": "websocket.accept"})
+                    await send({"type": "websocket.close", "code": 1013})
+                return
             if not origin_ok or refused:
                 await send({"type": "websocket.close", "code": 1008})   # refused before the handshake: a 403
                 return
@@ -98,6 +103,9 @@ class Guard:
             return
         if not origin_ok:
             await _reject(send, 403, "forbidden", "requests from another origin are refused")
+            return
+        if refused == _CALLER_UNCHECKED:
+            await _reject(send, 503, "caller_unavailable", "caller verification is temporarily unavailable")
             return
         if refused:
             await _reject(send, 403, "agent_caller",
@@ -113,7 +121,7 @@ class Guard:
         """Share a bounded caller check and remember its result for CALLER_TTL.
 
         Threads cannot be stopped when their waiter expires. Keep the future
-        until the worker finishes, including after refusal or cancellation,
+        until the worker finishes, including after the deadline or cancellation,
         so repeated requests cannot queue more work for that pid.
         """
         now = time.monotonic()
@@ -126,7 +134,6 @@ class Guard:
             try:
                 check = asyncio.get_running_loop().run_in_executor(_CALLER_EXECUTOR, peer.agent_caller, pid)
             except Exception:
-                self._callers[pid] = (time.monotonic(), _CALLER_UNCHECKED)
                 return _CALLER_UNCHECKED
             self._caller_checks[pid] = check
             self._caller_deadlines[pid] = now + CALLER_CHECK_LIMIT
@@ -144,14 +151,15 @@ class Guard:
             return refused
         except Exception:
             # Never expose process data from an exception to the requester.
-            self._callers[pid] = (time.monotonic(), _CALLER_UNCHECKED)
             return _CALLER_UNCHECKED
 
     def _caller_checked(self, pid: int, check: asyncio.Future[str | None]) -> None:
         """Publish the result before removing the in-flight entry.
 
         This also consumes failures when every request has disconnected.
-        Late results are consumed but cannot authorize a caller.
+        Late results are consumed but cannot authorize a caller. Transient
+        failures are never cached: the next request starts a new check once
+        the previous worker has finished.
         """
         refused = _CALLER_UNCHECKED
         if not check.cancelled():
@@ -161,7 +169,8 @@ class Guard:
                     refused = result
             except Exception:
                 pass
-        self._callers[pid] = (time.monotonic(), refused)
+        if refused != _CALLER_UNCHECKED:
+            self._callers[pid] = (time.monotonic(), refused)
         self._caller_checks.pop(pid, None)
         self._caller_deadlines.pop(pid, None)
 

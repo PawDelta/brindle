@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, learning, mcp_server, workspaces
+from brindle import agents, learning, local_setup, mcp_server, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from brindle.native import runner
@@ -46,7 +46,8 @@ def capture_profile(monkeypatch):
 @pytest.fixture
 def env(monkeypatch):
     """A PATH with claude, and codex when ``env["codex"]``; the local
-    reviewer's endpoint answers, and its probes are counted."""
+    reviewer's endpoint answers and its model fits in memory, and its
+    probes are counted."""
     state = {"codex": False, "probes": 0, "learner": None}
 
     def which(name):
@@ -59,6 +60,7 @@ def env(monkeypatch):
 
     monkeypatch.setattr(agents.shutil, "which", which)
     monkeypatch.setattr(runner, "probe", probe)
+    monkeypatch.setattr(local_setup, "memory_problem", lambda profile: None)
     monkeypatch.setattr(learning, "plugin", lambda cfg, repo_root: state["learner"])
     return state
 

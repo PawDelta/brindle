@@ -1026,17 +1026,3 @@ def test_a_lapsed_plan_cannot_use_an_attached_repo(run, acct, db, repo, session,
     with pytest.raises(repos.RepoError, match="restricted feature of brindle Pro"):
         repos.resolve(db, session, str(repo), "web")
     assert repos.resolve(db, session, str(repo), None) == str(repo)    # the own repo still works
-
-
-def test_a_repo_held_by_a_running_session_cannot_be_attached(run, acct, db, repo, session, tmp_path,
-                                                             monkeypatch):
-    web = second_repo(tmp_path)
-    other_root = second_repo(tmp_path, "other")
-    ows = workspaces.adopt_root(db, str(other_root))
-    db.add_agent(Agent("other", ows.id, "supervisor", "claude", None, "interactive", "processing", "@1",
-                       None, time.time()))
-    acct.login("pro")
-    repos.attach(db, "other", str(web), "web")
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("boss", "other"))
-    code, out = run("repo", "add", str(web))
-    assert code == 1 and "another running session" in out

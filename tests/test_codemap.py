@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from brindle import agents, codemap, workspaces
+from brindle import agents, codemap, git, workspaces
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import ClaudeCode, LaunchContext, get_provider
@@ -247,6 +247,12 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     assert session_graph.is_file()
     assert json.loads(session_graph.read_text()) == {"nodes": [{"id": "seed-node"}]}
     assert started == [["nice", "-n", "10", "graphify", "update", session_ws.path, "--force"]]
+    # One graph per repo: the session checkout links to it, kept out of git status.
+    out = Path(session_ws.path) / "graphify-out"
+    assert out.is_symlink() and out.resolve() == codemap.shared_out(mapped).resolve()
+    assert git.out(["status", "--porcelain"], session_ws.path) == ""
+    codemap.remove_session_graph(session_ws.path)
+    assert not out.exists() and (codemap.shared_out(mapped) / "graph.json").is_file()
     (mapped / codemap.GRAPH).unlink()
     assert codemap.seed_session(mapped, str(mapped)) is True
     codemap._run_refresh(*runners.pop())

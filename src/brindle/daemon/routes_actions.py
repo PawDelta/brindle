@@ -248,6 +248,79 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
     return got
 
 
+def start_demo(db: DB, params: dict, body: Body) -> Any:
+    """``brindle demo`` from the app: the practice repo brindle.demo makes (two
+    failing test files and a two-milestone goal, under ~/.brindle/demo/) and a
+    supervisor session started there, as the CLI starts it, every agent on
+    ``provider`` (else the CLI the person is signed in to: demo_provider).
+    Nothing is created in the person's own repos. Refused in air-gap mode: the
+    demo's agents are hosted ones. A launch its CLI would stop on answers 409
+    ``preflight`` as POST /sessions does, with the practice repo it was asked
+    for: that repo is kept (the items' actions name it) and the next start
+    launches in it; DELETE /demo removes it."""
+    from brindle import airgap
+    from brindle import demo as demo_mod
+
+    if airgap.enabled():
+        raise ServiceError("airgap", "The demo runs hosted agents, and air-gap mode is on on this Mac.", 403)
+    # One start at a time: a second while one runs is refused, never a second repo and supervisor.
+    if not _DEMO_LOCK.acquire(blocking=False):
+        raise ServiceError("busy", "The demo is already starting.", 409)
+    try:
+        provider = _get(body, "provider") or demo_provider()
+        root = demo_mod.held(db, provider) or demo_mod.create(provider=provider)
+        blocked = session_blockers(db, str(root), provider)
+        if blocked:
+            return DemoBlocked(blocked.items, str(root))
+        got = svc.start(db, str(root), provider=provider)
+    finally:
+        _DEMO_LOCK.release()
+    if not isinstance(got, svc.Started):     # a repo no session ran in has none to open or choose
+        return got
+    return {**got.to_json(), "repo": got.workspace.repo_root, "notes": _notes(got.notes)}
+
+
+def cancel_demo(db: DB, params: dict, body: Body) -> Any:
+    """The person didn't go on with a demo its preflight held: its practice repo goes."""
+    from brindle import demo as demo_mod
+
+    with _DEMO_LOCK:
+        roots = demo_mod.unused(db)
+        for root in roots:
+            demo_mod.discard(db, root)
+    return {"removed": [str(r) for r in roots]}
+
+
+def demo_provider() -> str | None:
+    """The CLI the demo runs on: the person's last supervisor pick, else the
+    first the demo has profiles for, that this Mac is signed in to and the org
+    allows. None when none is (the supervisor profile's own: its preflight
+    then asks for the sign-in)."""
+    from brindle import demo as demo_mod
+    from brindle import doctor
+    from brindle.config import supervisor_pick
+    from brindle.pro import team_policy
+
+    acc = team_policy.access(None)
+    signed = doctor.signed_in_providers()
+    for p in (supervisor_pick(), *demo_mod.PROFILES):
+        if p in demo_mod.PROFILES and p in signed and acc.allows(p):
+            return p
+    return None
+
+
+@dataclass
+class DemoBlocked(preflight.Blocked):
+    """A demo launch held by its preflight, with the practice repo kept for it."""
+    repo: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {**super().to_json(), "repo": self.repo}
+
+
+_DEMO_LOCK = threading.Lock()
+
+
 def continue_session(db: DB, params: dict, body: Body) -> Any:
     _, ws = _root(db, params["root"])
     blocked = _blocked([(a, db.get_workspace(a.workspace_id) or ws)
@@ -285,9 +358,9 @@ def rename_session(db: DB, params: dict, body: Body) -> Any:
 def handover_session(db: DB, params: dict, body: Body) -> Any:
     root, ws = _root(db, params["root"])
     dest = workspaces.checkout_for_target(db, ws.path, _get(body, "to", required=True))
-    new = sessions_mod.handover(db, root.id, dest, _get(body, "note"))
+    h = sessions_mod.handover_to(db, root.id, dest, _get(body, "note"))
     svc.cull_detached(dest.repo_root)
-    return SessionDTO.from_agent(new).to_json()
+    return {**SessionDTO.from_agent(h.agent).to_json(), **({"why": h.why} if h.why else {})}
 
 
 def transfer_session(db: DB, params: dict, body: Body) -> Any:
@@ -487,6 +560,18 @@ def remove_workspace(db: DB, params: dict, body: Body) -> Any:
     teardown = removed.teardown
     return {"removed": ws.id, "branch_note": removed.branch_note, "note": note,
             "teardown_failed": teardown.log if teardown and not teardown.ok else None}
+
+
+def clean_storage(db: DB, params: dict, body: Body) -> Any:
+    """Remove one worktree (``path``: merged or abandoned) or every abandoned
+    one (``abandoned``: true), each with its branch, tip archived first
+    (``disk.clean``). The app asks the person before it calls this."""
+    from brindle import disk
+
+    path, abandoned = _get(body, "path"), _get(body, "abandoned", bool, False)
+    if not path and not abandoned:
+        raise ServiceError("invalid", "path or abandoned is required")
+    return disk.clean(db, path=path, abandoned=not path)
 
 
 # An agent mid-turn (or stopped at a prompt mid-turn) may be writing the same file.
@@ -2401,6 +2486,8 @@ def _post(path: str, fn: Action) -> Route:
 
 ROUTES = [
     _post("/sessions", start_session),
+    _post("/demo", start_demo),
+    Route("/v1/demo", _endpoint(cancel_demo), methods=["DELETE"]),
     _post("/sessions/{root}/continue", continue_session),
     _post("/sessions/{root}/pause", pause_session),
     _post("/sessions/{root}/close", close_session),
@@ -2424,6 +2511,7 @@ ROUTES = [
     _post("/workspaces/{id:path}/sync", sync_workspace),
     _post("/workspaces/{id:path}/pr", pr_workspace),
     _post("/workspaces/{id:path}/remove", remove_workspace),
+    _post("/storage/clean", clean_storage),
     Route("/v1/workspaces/{id:path}/file", _endpoint(edit_file), methods=["PUT"]),
     _post("/goal", set_goal),
     _post("/goal/check", check_goal),

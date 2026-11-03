@@ -396,8 +396,8 @@ def spawn(
     as, kept on the agent so the owner's per-kind effort and instructions apply
     from the first launch. Workers (handoff/assign) given a ``done_when``
     finish line run it as a Claude Code ``/goal``; their brief carries the
-    accepted decisions covering ``files``, and for large work (heavy/advanced,
-    or ``analysis_doc`` asked for) the analysis-doc rule and brief. An
+    accepted decisions covering ``files``, and when ``analysis_doc`` is asked
+    for (never on a merge or sync chore branch) the analysis-doc rule and brief. An
     interactive root always drives toward a goal (see brindle.autopilot);
     with ``claim_goals`` it claims a hand-written ``.brindle/goals.md``."""
     from brindle import autopilot as pilot
@@ -432,7 +432,7 @@ def spawn(
 
         analysis = analysis_brief.brief_context(
             db, ws.repo_root, ws.branch, agent_id, prompt or "", files,
-            large=analysis_brief.large_work(weight, requested=analysis_doc),
+            large=analysis_brief.large_work(requested=analysis_doc, branch=ws.branch),
             **({"session_id": session_root} if session_root else {}))
     if not provider.launches_process:
         if mode not in ("handoff", "assign"):
@@ -679,18 +679,29 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
     try:
         env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
+        agent_env, enforce = _agent_env_policy(ws)
         with secrets.org_key(org_env):
             target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
                                      tag=(AGENT_TAG, agent.id),
                                      keep=credentials,
                                      **({"allow": allow} if allow is not None else {}),
-                                     **({"deny": deny} if deny else {}))
+                                     **({"deny": deny} if deny else {}),
+                                     **({"agent_env": agent_env} if agent_env else {}),
+                                     **({"enforce": True} if enforce else {}))
+            _record_env_drops(agent, ws, env, credentials, allow, deny, agent_env, enforce)
         agent.__dict__.pop("_pane_environment", None)
         # The pane id only means anything on the server that issued it (a
         # resumed agent may come back on a different one), so record both.
         server = tmux.current_server()
         db.update_agent(agent.id, tmux_window=target, tmux_server=server)
         agent.tmux_window, agent.tmux_server = target, server
+        from brindle import procs
+
+        try:
+            # The daemon's snapshot of agent panes must not clear this pane's commands.
+            procs.agent_panes_changed()
+        except OSError:
+            pass   # the snapshot still expires (brindle.daemon.peer.PANE_TTL)
         if get_provider(agent.provider).startup_prompts and not agent.headless:
             from brindle import prompt_answer
 
@@ -705,6 +716,32 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
             tmux.open_gate(gate)
     tmux.apply_theme(ws.tmux_session)
     return target
+
+
+def _agent_env_policy(ws: Workspace) -> tuple[list[str], bool]:
+    """The repo's (and the person's) ``agent_env`` allowlist additions, and
+    whether ``agent_env_mode`` enforces the allowlist (else it only reports)."""
+    from brindle.config import load_repo_config
+
+    cfg = load_repo_config(ws.repo_root)
+    return list(cfg.agent_env), cfg.agent_env_mode == "enforce"
+
+
+def _record_env_drops(agent: Agent, ws: Workspace, env, credentials, allow, deny,
+                      agent_env: list[str], enforce: bool) -> None:
+    """Log the names the allowlist took out of ``agent``'s pane (enforce) or
+    would have (report): names only. Never fails the launch."""
+    try:
+        kept = secrets.launch_keep(credentials, env)
+        names = secrets.allowlist_drops({*tmux.inherited_names(ws.tmux_session), *env}, kept, allow,
+                                        secrets.pane_deny(deny, env), agent_env)
+        secrets.record_env(ws.repo_root, agent.id, "enforce" if enforce else "report", names)
+        if names:
+            log.info("agent %s environment: %s %s (agent_env_mode %s)", agent.id,
+                     "dropped" if enforce else "would drop", ", ".join(names),
+                     "enforce" if enforce else "report")
+    except Exception:
+        log.debug("could not record agent %s's environment report", agent.id, exc_info=True)
 
 
 def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
@@ -756,11 +793,13 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
 
 def _effective_window_env(agent: Agent, ws: Workspace, m=_UNREAD) -> dict[str, str]:
     env, keep, allow, deny, org_env = _window_environment(agent, ws, m)
+    agent_env, enforce = _agent_env_policy(ws)
     inherited = tmux.inherited_env(ws.tmux_session)
     with secrets.org_key(org_env):
         env = {**env, **secrets.proxy_exempt(env)}
-        unset = secrets.pane_unset(inherited, keep=(*keep, *env), allow=allow,
-                                   deny=secrets.pane_deny(deny, env))
+        unset = secrets.pane_unset({*inherited, *env}, keep=secrets.launch_keep(keep, env), allow=allow,
+                                   deny=secrets.pane_deny(deny, env), agent_env=agent_env,
+                                   enforce=enforce)
     return {k: v for k, v in {**inherited, **env}.items() if k not in unset}
 
 
@@ -787,6 +826,10 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
         if m is not None:
             profile = managed_models.apply_profile(m, profile)
     _airgap_check(profile, ws.repo_root)
+    from brindle.local_setup import memory_problem
+
+    if problem := memory_problem(profile):
+        return problem
     if not get_provider(profile.provider).launches_process:
         return None
     agent = agent or Agent("preflight", ws.id, profile_name, profile.provider, None,
@@ -1054,7 +1097,7 @@ def consent_identity(db: DB, repo: str, profile: str, provider: str, session: st
             target = None
         if target is None:
             raise AgentError(f"no session {session!r} in {repo}")
-        ws, parent = repos.target_workspace(db, target), root.id
+        ws, parent = repos.target_workspace(db, session, target), root.id
     who = Agent("", ws.id, profile, provider, parent, "assign" if parent else "interactive", "starting", "",
                 None, 0.0)
     return launch_identity(who, ws)[0]
@@ -2585,8 +2628,16 @@ def close_removed(db: DB, agent_id: str) -> None:
     # The workspace's removal took the agent's record, and with it the link to
     # its root, unless the note kept it.
     root_id = root_id.strip() or root_of(db, agent_id)
+    from brindle import pipeline
+
+    agent = db.get_agent(agent_id)
     try:
-        kill(db, agent_id)
+        if agent is not None and pipeline.verdict_held(agent.workspace_id, agent_id):
+            # Its verdict waits for the commit's checks (pipeline.checks_finished):
+            # stop and hide it, but keep its record until that acts on it.
+            close(db, agent_id)
+        else:
+            kill(db, agent_id)
     except AgentError:
         pass
     if session and db.workspace_by_tmux_session(session) is None \
@@ -2715,16 +2766,24 @@ def admission(profile: str, repo_root: str) -> str | None:
     """Why a worker on ``profile`` must wait for room before it starts, or
     None. A subagent profile starts no process of brindle's: never held."""
     from brindle import spawn as gate
-    from brindle.providers import PROVIDERS
 
     busy = gate.no_room(repo_root)
     if busy is None:
         return None
+    return busy if launches_process(profile, repo_root) else None
+
+
+def launches_process(profile: str, repo_root: str) -> bool:
+    """Whether a worker on ``profile`` runs a process of brindle's: not a
+    subagent profile. An unloadable profile counts as one: its start fails
+    with its reason."""
+    from brindle.providers import PROVIDERS
+
     try:
         provider = PROVIDERS.get(load_profile(profile, repo_root).provider)
     except Exception:  # noqa: BLE001 - an unloadable profile fails at its start, with its reason
-        return busy
-    return busy if provider is None or provider.launches_process else None
+        return True
+    return provider is None or provider.launches_process
 
 
 def delegate(
@@ -2804,14 +2863,21 @@ def delegate(
             _check_branch_owner(db, caller, caller_ws.repo_root, branch)
             caller_ws = workspaces.refresh_branch(db, caller_ws)
             # merge_into applies to the supervisor's workers; a worker's own
-            # sub-workers still branch from (and merge back into) its branch.
+            # sub-workers still branch from (and merge back into) its branch,
+            # and a session's workers in a repo it attached use the session's
+            # own branch there (repos.attach), whatever that repo's merge_into.
             merge_into = load_repo_config(caller_ws.repo_root).merge_into
+            root = pilot.root_of(db, caller.id) if caller else None
+            if root and caller_ws.branch and repos.session_branch(db, root, caller_ws.repo_root) == caller_ws.branch:
+                merge_into = None
             base = merge_into if merge_into and not (caller and caller.parent_id) else caller_ws.branch
             start = start or (base if git.branch_exists(caller_ws.repo_root, base) else "HEAD")
             created = workspaces.create(
                 db, caller_ws.path, branch, base, fetch=False, start=start,
                 apply_prefix=False, reuse_registered=True,
                 session_root=pilot.root_of(db, caller.id) if caller else None,
+                # Admission (low disk included) was just looked at, or a supervisor forced the start.
+                setup_anyway=not admit,
             )
             if created.setup and not created.setup.ok:
                 raise AgentError(f"workspace setup failed:\n{created.setup.log}")
@@ -2829,11 +2895,17 @@ def delegate(
 
 def _check_branch_owner(db: DB, caller: Agent | None, repo_root: str, branch: str) -> None:
     """Naming a branch must not reuse another identity's worktree, nor
-    another session's: several sessions can share a checkout."""
+    another session's: several sessions can share a checkout. A session's
+    own branch in a repo it attached is reserved to it, worker or not."""
     from brindle import autopilot as pilot
     from brindle import identity_lock
 
     mine = pilot.root_of(db, caller.id) if caller else None
+    real = os.path.realpath(repo_root)
+    for r in db.session_repos():
+        if r.branch == branch and r.root_id != mine and os.path.realpath(r.repo_root) == real:
+            raise AgentError(f"branch {branch!r} belongs to session {r.root_id}: it's that session's "
+                             "merge target in this repo; pick another branch name")
     for other in db.find_workspaces(repo_root):
         if other.branch != branch:
             continue
@@ -2910,11 +2982,13 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
 
 def _local_reviewer_available() -> bool:
     """Whether the built-in ``reviewer-local`` profile's model is served
-    right now. Any failure counts as not available."""
+    right now and fits in free memory. Any failure counts as not available."""
+    from brindle.local_setup import memory_problem
     from brindle.native import runner
 
     try:
-        return runner.served(load_profile("reviewer-local"))
+        profile = load_profile("reviewer-local")
+        return runner.served(profile) and not memory_problem(profile)
     except Exception:
         return False
 
@@ -2937,12 +3011,31 @@ def _review_worktree_present(ws: Workspace) -> None:
 
 
 def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig) -> str:
+    """``_review_choice``'s profile. When it passed over a reviewer that can't
+    run (a local model that doesn't fit in memory, say), the supervisor of
+    ``ws``'s worker is told why, whichever path dispatches the review."""
+    name, note = _review_choice(db, ws, profile, cfg)
+    if note:
+        log.warning("%s", note)
+        worker = workspace_worker(db, ws)
+        if worker and worker.parent_id and db.get_agent(worker.parent_id):
+            try:
+                send_message(db, worker.parent_id, note)
+            except AgentError:
+                pass   # a supervisor that can't take messages has the log
+    return name
+
+
+def _review_choice(db: DB, ws: Workspace, profile: str | None,
+                   cfg: RepoConfig) -> tuple[str, str | None]:
     """The reviewer profile to use, checked to be one that can run, rather than
-    spawning a reviewer doomed to fail in a dead pane. ``profile`` asked for by
+    spawning a reviewer doomed to fail in a dead pane, and why any earlier
+    candidate was passed over (None when the first could run). ``profile`` asked for by
     name is the only candidate; otherwise the owner's pick, then each of
     ``cfg.reviewer_fallbacks`` in order: the first that exists, can run on its
     provider here and that policy allows. Raises ``AgentError`` for the first
-    candidate's problem when none can."""
+    candidate's problem when none can. Sends nothing: a check before dispatch
+    uses it so the supervisor hears the reason once."""
     if profile is not None:
         candidates = [profile]
     else:
@@ -2953,9 +3046,11 @@ def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig)
     for name in candidates:
         try:
             _reviewer_can_run(name, ws, cfg)
-            return name
         except AgentError as e:
             first = first or e
+            continue
+        return name, (f"Review of {ws.branch}: {first}; reviewing with {name} instead."
+                      if first is not None else None)
     raise first
 
 
@@ -2968,6 +3063,10 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
     except KeyError as e:
         raise AgentError(str(e)) from e
     _airgap_check(chosen, ws.repo_root)   # before any of the branch is read for the brief
+    from brindle.local_setup import memory_problem
+
+    if why := memory_problem(chosen):
+        raise AgentError(f"reviewer profile {name!r} can't run: {why}")
     if why := unusable(chosen.provider, chosen.env):
         raise AgentError(
             f"reviewer profile {name!r} can't run: {why}. "

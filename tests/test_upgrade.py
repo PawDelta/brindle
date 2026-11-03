@@ -1,16 +1,14 @@
 import asyncio
+import os
 import shutil
 import sqlite3
 import subprocess
 import sys
-from io import StringIO
 from types import SimpleNamespace
 
-import anyio
 import pytest
 from mcp import Client
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.server.stdio import stdio_server
 
 import brindle
 from brindle import agents, mcp_server, profiles, upgrade, watch
@@ -32,16 +30,17 @@ def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch, ex
     notification_db = mcp_server.DB()
     monkeypatch.setattr(mcp_server, "DB", lambda: notification_db)
 
-    def disconnect():
+    async def disconnect(handover):
         raise BrokenPipeError("client pipe closed")
 
     if exit_kind == "broken_pipe":
-        monkeypatch.setattr(mcp_server.mcp, "run", disconnect)
+        monkeypatch.setattr(mcp_server, "_serve_stdio", disconnect)
         with pytest.raises(BrokenPipeError):
             mcp_server.main()
     else:
-        monkeypatch.setattr("mcp.server.mcpserver.server.stdio_server", lambda: stdio_server(
-            stdin=anyio.wrap_file(StringIO()), stdout=anyio.wrap_file(StringIO())))
+        stdin, client = os.pipe()
+        os.close(client)
+        monkeypatch.setattr("brindle.mcp_stdio.claim_stdio", lambda: (stdin, os.open(os.devnull, os.O_WRONLY)))
         mcp_server.main()
     assert stopped == [True]
     assert db.pop_pending("boss") is not None
@@ -84,6 +83,19 @@ def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_starte
     assert exits == []
 
 
+def test_an_upgraded_sidebar_runs_again_in_its_pane(monkeypatch):
+    monkeypatch.setattr(watch, "_log_to_file", lambda: None)
+    monkeypatch.setattr("brindle.spawn.exit_on_hangup", lambda: None)
+    monkeypatch.setattr(watch.curses, "wrapper", lambda fn, root, sidebar, *_: watch.RESTART)
+    monkeypatch.setattr(upgrade.sys, "argv", ["brindle", "watch", "--sidebar"])
+    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: ["/venv/bin/brindle"])
+    execs = []
+    monkeypatch.setattr(upgrade.os, "execv", lambda path, argv: execs.append(argv))
+
+    watch.run("/repo", sidebar=True)
+    assert execs == [["/venv/bin/brindle", "watch", "--sidebar"]]
+
+
 def test_sidebar_upgrade_waits_for_the_new_install_instead_of_exiting(monkeypatch):
     """uv removes the old venv before the new one is in place: an exec in that
     window fails, and the sidebar must wait for it rather than die with its pane."""
@@ -104,6 +116,7 @@ def test_sidebar_upgrade_waits_for_the_new_install_instead_of_exiting(monkeypatc
     assert len(attempts) == 3
 
     monkeypatch.setattr(watch, "_log_to_file", lambda: None)
+    monkeypatch.setattr("brindle.spawn.exit_on_hangup", lambda: None)
     monkeypatch.setattr(watch.curses, "wrapper", lambda *a: watch.RESTART)
     daemon = SimpleNamespace(command=None, clock=0)
     monkeypatch.setattr(upgrade.time, "monotonic", lambda: daemon.clock)
