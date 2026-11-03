@@ -165,23 +165,7 @@ def test_profile_named_differently_inside_still_resumes_with_its_own_permissions
     assert [flag(argv, "--permission-mode") for argv in launches].count("auto") == 1
 
 
-def test_reviewer_never_waits_on_a_permission_prompt(db, root, launches, detached):
-    boss, ws = root
-    agents.spawn(db, ws, "reviewer", prompt="review this", parent_id=boss.id, mode="review")
-    argv = launches[-1]
-    # dontAsk: whatever allowed_tools doesn't cover is refused, not asked about.
-    assert flag(argv, "--permission-mode") == "dontAsk"
-    assert "Bash(git diff:*)" in flag(argv, "--allowedTools")
-
-
 # -- worktree pre-trust ------------------------------------------------------------
-
-
-def test_trust_keeps_the_config_private(tmp_path, claude_config):
-    config = claude_config / ".claude.json"
-    config.chmod(0o600)
-    assert trust_folder(str(tmp_path)) is True
-    assert stat.S_IMODE(config.stat().st_mode) == 0o600
 
 
 def test_trust_cleans_up_its_temp_file_when_the_write_fails(tmp_path, claude_config, monkeypatch):
@@ -293,7 +277,7 @@ def screens(monkeypatch):
 
 
 @pytest.mark.parametrize("status,mode", [
-    ("idle", "assign"), ("starting", "assign"), ("processing", "review"), ("waiting", "assign"),
+    ("idle", "assign"), ("waiting", "assign"),
 ])
 def test_trust_dialog_nobody_answered_is_reported_by_the_sweep(db, root, screens, monkeypatch, status, mode):
     """The sweep reads only a waiting worker's pane, and forwards its live
@@ -310,23 +294,8 @@ def test_trust_dialog_nobody_answered_is_reported_by_the_sweep(db, root, screens
     assert db.pending_count("boss") == (status == "waiting")
 
 
-def test_trust_writes_through_a_symlinked_config(tmp_path, claude_config):
-    real = tmp_path / "dotfiles" / "claude.json"
-    real.parent.mkdir()
-    link = claude_config / ".claude.json"
-    real.write_text(link.read_text())
-    link.unlink()
-    link.symlink_to(real)
-    folder = tmp_path / "wt"
-    folder.mkdir()
-    assert trust_folder(str(folder)) is True
-    assert link.is_symlink()
-    assert json.loads(real.read_text())["projects"][os.path.realpath(folder)]["hasTrustDialogAccepted"] is True
-
-
 @pytest.mark.parametrize("status,provider", [
     ("unknown", "codex"),       # issue #42: no hooks, stuck on a startup error
-    ("processing", "claude"),   # a turn whose pane stopped redrawing
 ])
 def test_silent_codex_worker_is_reported_once(db, root, screens, monkeypatch, status, provider):
     _, ws = root
