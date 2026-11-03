@@ -169,7 +169,8 @@ def test_finished_workers_sessions_are_reaped(db, repo, fake_tmux, monkeypatch, 
 
 
 @pytest.mark.parametrize("case", ["idle", "attached", "recent input", "running worker", "uncommitted work",
-                                  "attached worker shell", "recent output", "a job in a second pane"])
+                                  "attached worker shell", "recent output", "a job in a second pane",
+                                  "a job on a done worker's old pane id"])
 def test_idle_supervisors_are_stopped_but_resumable(db, repo, fake_tmux, case):
     ws = workspaces.adopt_root(db, str(repo))
     add(db, ws, "boss", mode="interactive", profile="supervisor", tmux_window="%1")
@@ -181,7 +182,10 @@ def test_idle_supervisors_are_stopped_but_resumable(db, repo, fake_tmux, case):
         live(fake_tmux, "%2")
     # A second pane the pause would close: logging in a shell, or a job brindle didn't start.
     job = {"recent output": [pane("%8", repo, activity=NOW - 3600)],
-           "a job in a second pane": [pane("%8", repo, cmd="python")]}.get(case, [])
+           "a job in a second pane": [pane("%8", repo, cmd="python")],
+           "a job on a done worker's old pane id": [pane("%8", repo, cmd="node")]}.get(case, [])
+    if case == "a job on a done worker's old pane id":   # tmux restarted and reused %8
+        add(db, ws, "w1", parent_id="boss", result="did it", status="done", tmux_window="%8")
     fake_tmux.sessions = [session("brindle_proj_main", pane("%1", repo, cmd="claude"), *job,
                                   attached=case == "attached",
                                   activity=NOW - 3600 if case == "recent input" else OLD)]
