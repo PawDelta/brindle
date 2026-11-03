@@ -572,11 +572,17 @@ def tell(db, agent, prompt: str) -> bool:
     summary = " | ".join(prompt.splitlines())
     body = (f"Worker {a.id} ({a.profile}) is waiting on a prompt: {summary}\n\n"
             f"{attach}, or send it guidance if it is asking a task question.{request}\n\nThe prompt:\n{prompt}")
+    won, previous = db.claim_note(a.id, a.status_since)
+    if not won:
+        return False
     try:
-        agents.send_message(db, a.parent_id, body, sender_id=a.id)
-    except agents.AgentError:
-        db.enqueue(a.parent_id, body, a.id)
-    db.update_agent(a.id, stuck_noted=a.status_since)
+        try:
+            agents.send_message(db, a.parent_id, body, sender_id=a.id)
+        except agents.AgentError:
+            db.enqueue(a.parent_id, body, a.id)
+    except Exception:
+        db.release_note(a.id, a.status_since, previous)
+        raise
     return True
 
 

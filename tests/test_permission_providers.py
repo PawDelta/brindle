@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -429,19 +430,23 @@ def test_codex_app_server_uses_local_protocol_and_ignores_notifications(monkeypa
     from io import StringIO
 
     # initialize + hooks/list shapes observed from local codex-cli 0.162.1.
+    command = "brindle _hook codex-permission-request"
     hook = {"key": "/<session-flags>/config.toml:permission_request:0:0",
-            "eventName": "permissionRequest", "handlerType": "command", "command": "true",
+            "eventName": "permissionRequest", "handlerType": "command", "command": command,
             "async": False, "matcher": None, "timeoutSec": 30, "source": "sessionFlags",
             "enabled": True, "isManaged": False, "currentHash": "sha256:abc", "trustStatus": "modified"}
+    pre = {**hook, "key": "/<session-flags>/config.toml:pre_tool_use:0:0", "eventName": "preToolUse",
+           "command": "brindle _hook codex-pre-tool", "matcher": codex_hook.PRE_TOOL_MATCHER,
+           "currentHash": "sha256:def", "trustStatus": "untrusted"}
     messages = [
         {"id": 1, "result": {"userAgent": "brindle/0.162.1", "platformFamily": "unix"}},
         {"method": "account/updated", "params": {"authMode": "chatgpt"}},
-        {"id": 2, "result": {"data": [{"cwd": "/", "hooks": [hook], "warnings": [], "errors": []}]}},
+        {"id": 2, "result": {"data": [{"cwd": "/", "hooks": [pre, hook], "warnings": [], "errors": []}]}},
     ]
     proc = _fake_codex_process(monkeypatch, StringIO("\n".join(json.dumps(m) for m in messages)))
-    state = codex_hook.inspect("codex", "true")
-    assert (state.command, state.key, state.hash, state.status) == (
-        "true", hook["key"], "sha256:abc", "modified")
+    state = codex_hook.inspect("codex", command)
+    assert (state.command, state.key, state.hash, state.status, state.pre_key, state.pre_hash) == (
+        command, hook["key"], "sha256:abc", "modified", pre["key"], "sha256:def")
     sent = [json.loads(line) for line in proc.stdin.getvalue().splitlines()]
     assert [m["method"] for m in sent] == ["initialize", "initialized", "hooks/list"]
     assert proc.killed and proc.waited
@@ -519,10 +524,18 @@ def test_codex_app_server_silent_reader_cannot_block_rpc_deadline(monkeypatch):
     assert released.is_set() and proc.killed and proc.waited
 
 
+def hook_command_of(flag):
+    """The command in a ``-c hooks.<Event>=...`` definition."""
+    import re
+
+    return json.loads(re.search(r'command=("(?:[^"\\]|\\.)*")', flag).group(1))
+
+
 class FakeAppServer:
     """Stands in for `codex app-server`: lists brindle's hook, and stores trust
     the way Codex does (config.toml hooks.state)."""
     calls: list = []
+    system_config = "/nonexistent/etc/codex/config.toml"   # Codex's system layer (/etc/codex)
 
     def __init__(self, binary, flags, timeout=30.0):
         self.flags = flags
@@ -530,21 +543,38 @@ class FakeAppServer:
     def call(self, method, params):
         FakeAppServer.calls.append((method, params))
         config = codex_hook.codex_home() / "config.toml"
-        # Like Codex's, the hash covers the hook's whole definition (command, timeout).
-        current = "sha256:" + hashlib.sha256(self.flags[1].encode()).hexdigest()
-        trusted = config.exists() and current in config.read_text()
         if method == "hooks/list":
-            command = json.loads(self.flags[1].split("command=", 1)[1].split(",timeout=")[0])
-            return {"data": [{"cwd": "/", "errors": [], "warnings": [], "hooks": [{
-                "key": "/<session-flags>/config.toml:permission_request:0:0", "source": "sessionFlags",
-                "command": command, "currentHash": current,
-                "trustStatus": "trusted" if trusted else "untrusted"}]}]}
+            hooks = []
+            for flag in self.flags[1::2]:
+                # Like Codex's, the hash covers the hook's whole definition (command, timeout).
+                current = "sha256:" + hashlib.sha256(flag.encode()).hexdigest()
+                trusted = config.exists() and current in config.read_text()
+                event = {"PermissionRequest": "permission_request", "PreToolUse": "pre_tool_use"}[
+                    flag.split("=", 1)[0].removeprefix("hooks.")]
+                hooks.append({"key": f"/<session-flags>/config.toml:{event}:0:0", "source": "sessionFlags",
+                              "command": hook_command_of(flag),
+                              "currentHash": current, "trustStatus": "trusted" if trusted else "untrusted"})
+            return {"data": [{"cwd": "/", "errors": [], "warnings": [], "hooks": hooks}]}
         if method == "config/batchWrite":
             [edit] = params["edits"]
-            [(key, value)] = edit["value"].items()
             config.parent.mkdir(parents=True, exist_ok=True)
-            config.write_text(f'[hooks.state."{key}"]\ntrusted_hash = "{value["trusted_hash"]}"\n')
+            # An upsert: the person's own settings above stay.
+            own = config.read_text().split("[hooks.state.", 1)[0] if config.exists() else ""
+            config.write_text(own + "".join(f'[hooks.state."{key}"]\ntrusted_hash = "{value["trusted_hash"]}"\n'
+                                            for key, value in edit["value"].items()))
             return {"status": "ok"}
+        if method == "config/read":
+            # Like Codex's: every layer, highest precedence first, a project
+            # layer listed (with a disabledReason) even before its folder is trusted.
+            import tomllib
+
+            found = [({"type": "project", "dotCodexFolder": os.path.join(params["cwd"], ".codex")},
+                      os.path.join(params["cwd"], ".codex", "config.toml")),
+                     ({"type": "user", "file": str(config), "profile": None}, str(config)),
+                     ({"type": "system", "file": str(self.system_config)}, str(self.system_config))]
+            return {"config": {}, "origins": {}, "layers": [
+                {"name": name, "version": "", "config": tomllib.loads(Path(path).read_text())}
+                for name, path in found if os.path.exists(path)]}
         raise AssertionError(method)
 
     def close(self):
@@ -568,10 +598,13 @@ def test_install_codex_hook_dry_run_then_yes(monkeypatch):
     assert "trusted" in res.output
     [(home, rec)] = permissions.load_store().codex_hook.items()
     assert home == os.path.realpath(codex_hook.codex_home())
-    flag = codex_hook.config_flags()[1]
+    flags = codex_hook.config_flags()
     assert rec == {"command": codex_hook.hook_command(),
                    "key": "/<session-flags>/config.toml:permission_request:0:0",
-                   "hash": "sha256:" + hashlib.sha256(flag.encode()).hexdigest(), "definition": flag}
+                   "hash": "sha256:" + hashlib.sha256(flags[1].encode()).hexdigest(),
+                   "pre_key": "/<session-flags>/config.toml:pre_tool_use:0:0",
+                   "pre_hash": "sha256:" + hashlib.sha256(flags[3].encode()).hexdigest(),
+                   "definition": codex_hook.definition()}
     assert codex_hook.trusted()
     assert "already trusted" in r.invoke(app, ["permissions", "install-codex-hook"]).output
 
@@ -619,6 +652,161 @@ def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monke
     assert flag not in launch_argv(ws)  # a worker doesn't: permission_policy is the only switch
 
 
+def _sandboxed(command):
+    return pytest.param(command, "deny", marks=pytest.mark.variant(
+        "live release simulation: ran in a Codex worker's sandbox, which never asked brindle"))
+
+
+@pytest.mark.parametrize("command,expected", [
+    _sandboxed("env"),
+    _sandboxed("printenv GH_TOKEN"),
+    _sandboxed("cat ~/.aws/credentials"),
+    _sandboxed("git reset --hard"),
+    _sandboxed("git push --force"),
+    _sandboxed("rm -rf ~"),
+    pytest.param("sh -c 'env'", "deny", marks=pytest.mark.variant("bypass attempt")),
+    pytest.param("bash -lc printenv", "deny", marks=pytest.mark.variant("bypass attempt")),
+    pytest.param("cat $HOME/.npmrc", "deny", marks=pytest.mark.variant("bypass attempt")),
+    pytest.param("python3 -c \"print(open(__import__('os').path.expanduser('~/.aws/credentials')).read())\"",
+                 "deny", marks=pytest.mark.variant("bypass attempt")),
+    ("git status", None),
+])
+def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monkeypatch, command, expected):
+    """Codex runs a sandboxed command without asking, so its PermissionRequest
+    hook never sees it: the launch passes a PreToolUse hook, run before every
+    shell command, which answers brindle's denies."""
+    import re
+
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    a = worker(db, ws)
+    argv = launch_argv(ws)
+    [flag] = [arg for arg in argv if arg.startswith("hooks.PreToolUse=")]
+    assert argv[argv.index(flag) - 1] == "-c"
+    assert re.search(flag.split('matcher="', 1)[1].split('"', 1)[0], "Bash")
+    hook = hook_command_of(flag)
+    assert codex_hook.status() == codex_hook.TRUSTED   # trusted with the PermissionRequest hook
+    payload = {**codex_payload("Bash", {"command": command}, ws.path), "hook_event_name": "PreToolUse"}
+    out = agents.hook_main(db, a.id, hook.rsplit(" ", 1)[1], json.dumps(payload), trusted=False)
+    assert (json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out else None) == expected
+
+
+class SilentAppServer:
+    """A `codex app-server` that doesn't answer (Codex missing or too old)."""
+    def __init__(self, *args, **kwargs):
+        raise codex_hook.CodexHookError("no codex")
+
+
+@pytest.mark.parametrize("policy,layer,setting,server", [
+    ("on", None, "", FakeAppServer),
+    ("off", "user", 'sandbox_mode = "workspace-write"\n', FakeAppServer),
+    # Codex would ignore brindle's profile (sandbox_mode wins), or run it with
+    # full access: the launch is refused, naming the file to change.
+    ("on", "user", 'sandbox_mode = "workspace-write"\n', FakeAppServer),
+    ("on", "project", 'sandbox_mode = "danger-full-access"\n', FakeAppServer),
+    ("on", "system", 'sandbox_mode = "workspace-write"\n', FakeAppServer),
+    ("on", "user", 'default_permissions = ":danger-full-access"\n', FakeAppServer),
+    ("on", "user", 'profile = "x"\n[profiles.x]\nsandbox_mode = "workspace-write"\n', FakeAppServer),
+    # Codex can't list its layers (managed ones brindle can't read among
+    # them): refused, however clean the files brindle can see are.
+    ("on", None, "", SilentAppServer),
+])
+def test_codex_sandbox_denies_reading_credentials(ws, tmp_path, monkeypatch, policy, layer, setting, server):
+    """With the policy on, Codex's own sandbox refuses every sandboxed command
+    (and any shell typed into later) a read of each credential store, for
+    this launch only, whatever the hooks see; the build caches stay writable.
+    A config layer that would make Codex ignore that profile refuses the launch."""
+    import tomllib
+
+    from brindle import build_caches, providers
+    from brindle.pro import credentials
+
+    monkeypatch.setattr(codex_hook, "_AppServer", server)
+    monkeypatch.setattr(FakeAppServer, "system_config", tmp_path / "etc-codex" / "config.toml")
+    set_local(ws.repo_root, "permission_policy", policy)
+    config = {"user": codex_hook.codex_home() / "config.toml", "project": Path(ws.path, ".codex", "config.toml"),
+              "system": FakeAppServer.system_config}.get(layer)
+    if config:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(setting)
+    if policy == "on" and (layer or server is SilentAppServer):
+        with pytest.raises(providers.CodexSandboxRefused) as refused:
+            launch_argv(ws)
+        assert str(config or "config/read") in str(refused.value)
+        return
+    argv = launch_argv(ws)
+    flags = dict(a.split("=", 1) for a in argv if a.startswith(("default_permissions=", "permissions.")))
+    assert bool(flags) == (policy == "on")
+    if policy == "off":
+        assert any(a.startswith("sandbox_workspace_write.writable_roots=") for a in argv)
+        return
+    name = providers.CODEX_PROFILE
+    assert json.loads(flags["default_permissions"]) == name
+    assert json.loads(flags[f"permissions.{name}.extends"]) == ":workspace"
+    table = tomllib.loads(f"t = {flags[f'permissions.{name}.filesystem']}")["t"]
+    home = os.path.realpath(os.environ["BRINDLE_HOME"])
+    for path in ("~/.aws", "~/.ssh", "~/.npmrc", "~/.git-credentials", "~/.docker/config.json", "~/.config/gh"):
+        assert table[path] == "deny", path
+    assert {os.path.realpath(p) for p, access in table.items() if access == "deny" and p.startswith("/")} >= {
+        os.path.join(home, "daemon.json"), os.path.join(home, "brindle-keys"),
+        os.path.realpath(credentials.FileStore().path.parent)}
+    assert table[build_caches.uv_cache_dir()] == "write"
+
+
+@pytest.mark.parametrize("event,chars,expected", [
+    # Codex 0.162.1 asks before write_stdin (write_stdin_approval), and runs no
+    # PreToolUse for it: a live shell (bash, bash -m, env -- bash, sh -c bash)
+    # would run what's typed into it unchecked.
+    ("codex-permission-request", "cat ~/.aws/credentials\n", "deny"),
+    ("codex-pre-tool", "env\n", "deny"),       # should a Codex ever run PreToolUse for it
+    ("codex-permission-request", "", None),    # an empty poll types nothing
+])
+def test_codex_terminal_input_is_never_sent(db, ws, monkeypatch, event, chars, expected):
+    monkeypatch.setattr(agents, "_hold_for_app", lambda *args, **kwargs: None)
+    turn_on(ws)
+    a = worker(db, ws)
+    payload = {**codex_payload("write_stdin", {"session_id": 7, "chars": chars}, ws.path),
+               "hook_event_name": "PreToolUse" if event == "codex-pre-tool" else "PermissionRequest"}
+    out = agents.hook_main(db, a.id, event, json.dumps(payload))
+    answer = json.loads(out)["hookSpecificOutput"] if out else {}
+    decided = answer.get("permissionDecision") or (answer.get("decision") or {}).get("behavior")
+    assert (decided if decided == "deny" else None) == expected
+
+
+@pytest.mark.parametrize("broken,command,reason", [
+    ("bookkeeping", "env", "would print credentials"),   # the policy's own deny still stands
+    ("policy", "git status", permissions.CODEX_PRE_TOOL_UNCHECKED),
+    ("agent", "git status", permissions.CODEX_PRE_TOOL_UNCHECKED),
+    ("cli", "git status", permissions.CODEX_PRE_TOOL_UNCHECKED),
+])
+def test_codex_pre_tool_fails_closed(db, ws, monkeypatch, broken, command, reason):
+    """Codex runs a call its PreToolUse hook gives no answer for, and nothing
+    after it would stop a sandboxed one: a check that can't finish denies."""
+    import sqlite3
+
+    from brindle import prompt_answer
+
+    turn_on(ws)
+    a = worker(db, ws)
+    if broken == "bookkeeping":
+        def locked(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+        monkeypatch.setattr(prompt_answer, "settled", locked)
+    if broken == "policy":
+        def unreadable(*args, **kwargs):
+            raise RuntimeError("profile unreadable")
+        monkeypatch.setattr("brindle.profiles.profile_rules_for", unreadable)
+    payload = json.dumps({**codex_payload("Bash", {"command": command}, ws.path), "hook_event_name": "PreToolUse"})
+    if broken == "cli":
+        monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)
+        monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
+        out = CliRunner().invoke(app, ["_hook", "codex-pre-tool"], input=payload).output
+    else:
+        out = agents.hook_main(db, "gone" if broken == "agent" else a.id, "codex-pre-tool", payload)
+    answer = json.loads(out)["hookSpecificOutput"]
+    assert answer["permissionDecision"] == "deny" and reason in answer["permissionDecisionReason"]
+
+
 @pytest.mark.variant("live incident #239: upgrading 0.4.1 to 0.4.2 left the old trust, and a Codex reviewer stopped at Hooks need review")
 def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatch):
     """#239: the trust on record was for the same command with another timeout
@@ -641,7 +829,8 @@ def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatc
     (codex_hook.codex_home() / "config.toml").write_text("")  # the person takes the trust out
     FakeAppServer.calls = []
     assert flag not in launch_argv(ws, mode="review")
-    assert FakeAppServer.calls == [] and codex_hook.status() == codex_hook.REMOVED
+    # Not asked to trust it again (config/read is the sandbox check's).
+    assert [m for m, _ in FakeAppServer.calls if m != "config/read"] == [] and codex_hook.status() == codex_hook.REMOVED
 
 
 def test_unverifiable_trust_is_reported_not_called_trusted(db, ws, monkeypatch):
@@ -650,7 +839,7 @@ def test_unverifiable_trust_is_reported_not_called_trusted(db, ws, monkeypatch):
     warning and the supervisor's notice read it)."""
     class RefusingCodex(FakeAppServer):
         def __init__(self, binary, flags):
-            super().__init__(binary, [flags[0], flags[1] + "#build2"])
+            super().__init__(binary, [flags[0], flags[1] + "#build2", *flags[2:]])
 
         def call(self, method, params):
             if method == "config/batchWrite":

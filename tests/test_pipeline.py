@@ -35,7 +35,7 @@ def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, rep
         started.append(profile)
         add(db, ws, "rev1", "review", profile, parent=caller.id)
 
-    monkeypatch.setattr(agents, "request_review", fallback)
+    monkeypatch.setattr(agents, "start_review", fallback)
     # A second review's verdict on the same commit isn't rev0's (#172).
     db.add_review(ws.id, gates.head(ws), "rev-second", True, "lgtm")
 
@@ -74,7 +74,7 @@ def test_stalled_reviewer_reopens_own_session_once_before_fallback(db, repo, tmp
         launched.append(agents.get_provider(a.provider).command(ctx))
 
     monkeypatch.setattr(agents, "_launch", fake_launch)
-    monkeypatch.setattr(agents, "request_review", lambda *a, **k: fallbacks.append(1))
+    monkeypatch.setattr(agents, "start_review", lambda *a, **k: fallbacks.append(1))
 
     # 1. Recent transcript write on a live reviewer -> treated as still active.
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is False
@@ -140,20 +140,18 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, prof, cfg: prof or "reviewer")
     monkeypatch.setattr(autopilot, "_unavailable", lambda *a, **k: None)
-    monkeypatch.setattr(gates, "check_summary", lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-ran checks")))
     spawned = []
-    monkeypatch.setattr(
-        agents, "spawn",
-        lambda db_, ws_, prof, prompt=None, **kw: spawned.append((prof, prompt)),
-    )
+    # The fallback goes through start_review, like every reviewer: with checks
+    # a detached helper runs them (reusing the cached results for this commit)
+    # before it starts the reviewer.
+    monkeypatch.setattr(agents, "_detach", lambda argv: spawned.append(argv))
 
-    # Unpinned config -> routes to the cheaper reviewer-light tier and reuses cached checks + findings.
+    # Unpinned config -> routes to the cheaper reviewer-light tier and carries the findings.
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
     assert len(spawned) == 1
-    prof, prompt = spawned[0]
-    assert prof == "reviewer-light"
-    assert "Blocker in big.py line 12" in prompt
-    assert "pytest -q" in prompt
+    argv = spawned[0]
+    assert argv[argv.index("--profile") + 1] == "reviewer-light"
+    assert "Blocker in big.py line 12" in argv[argv.index("--focus") + 1]
 
     # Pinned config -> keeps the pinned reviewer profile instead of downgrading.
     (repo / ".brindle" / "config.json").write_text(
@@ -161,7 +159,34 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     )
     db.update_agent("rev0", unreported_noted=None)
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
-    assert spawned[-1][0] == "reviewer"
+    assert spawned[-1][spawned[-1].index("--profile") + 1] == "reviewer"
+
+    # Run the detached helper itself. On the unchanged commit passing checks
+    # start the fallback with their results in its prompt.
+    from brindle.config import load_repo_config
+
+    argv = spawned[-1]   # the pinned run's
+    cfg = load_repo_config(str(repo))
+    prompts, sent = [], []
+    monkeypatch.setattr(agents, "spawn", lambda db_, ws_, prof, *, prompt=None, parent_id=None, mode="review", **kw:
+                        prompts.append(prompt) or agents.Agent("rev9", ws_.id, prof, "claude", parent_id, mode,
+                                                               "starting", "@0", None, time.time()))
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append((to, body)))
+    rid = argv[argv.index("--request-id") + 1]
+    monkeypatch.setattr(gates, "check_summary", lambda *a, **k: "PASS `pytest -q`\n50 passed")
+    agents.review_after_checks(db, "boss", ws, "reviewer", argv[argv.index("--focus") + 1], cfg,
+                               request_id=rid, slot="")
+    assert len(prompts) == 1 and "50 passed" in prompts[0] and "Blocker in big.py line 12" in prompts[0]
+
+    # The branch moves on and its checks fail now: the old passing results
+    # don't carry over, no fallback starts, and the worker gets the failure.
+    db.update_agent("w1", reviewing_since=time.time())
+    (Path(ws.path) / "more.py").write_text("y = 2\n")
+    sh("git add more.py && git commit -qm more", Path(ws.path))
+    monkeypatch.setattr(gates, "check_summary", lambda *a, **k: "FAIL `pytest -q`\nexit 1: current boom")
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "w1")
+    agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg, slot="")
+    assert len(prompts) == 1 and [to for to, _ in sent] == ["w1"] and "current boom" in sent[0][1]
 
 
 def test_small_diff_stalled_reviewer_escalates_summary_to_supervisor(db, repo, tmp_path, monkeypatch):
@@ -186,7 +211,7 @@ def test_small_diff_stalled_reviewer_escalates_summary_to_supervisor(db, repo, t
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
-    monkeypatch.setattr(agents, "request_review", lambda *a, **k: (_ for _ in ()).throw(AssertionError("spawned fallback")))
+    monkeypatch.setattr(agents, "start_review", lambda *a, **k: (_ for _ in ()).throw(AssertionError("spawned fallback")))
 
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
     assert db.get_agent("w1").pipeline is None
@@ -319,7 +344,8 @@ def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, rep
         assert len(launched) == (1 if check_run == "at work" else 2) and told == []
         active = claim.read_text()
         agents.report_result(db, "w1", "done again")
-        assert claim.read_text() == active
+        # A report of its own: the helper still pending for the earlier one retires.
+        assert claim.read_text() != active
     assert db.get_agent("w1").pipeline == "reviewing"
 
 
@@ -364,39 +390,60 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_m
     assert [e["agent_id"] for e in bus.tail(db, kinds=("pipeline.escalated",))] == ["w1"]
 
 
-def test_review_alongside_checks_sends_findings_and_failures_in_one_message(db, repo, monkeypatch):
-    """The reviewer starts before the checks finish, and a verdict that lands
-    while they run waits for them: the worker gets the review's findings and
-    the failing checks in one message, so one fix round covers both. A
-    required second review's run for the same report, started late, doesn't
-    send those failures again."""
-    ws = _reported(db, repo, reviewing_since=time.time())
-    sha, sent, reviewers = gates.head(ws), [], []
-    verdicts = iter([(False, "- blocker: off by one"), (True, "lgtm")])
+@pytest.mark.parametrize("outcomes", [
+    ("PASS", "PASS"),
+    ("FAIL", "FAIL"),
+    pytest.param(("FAIL", "PASS"), marks=pytest.mark.variant(
+        "review blocker: a pending second review passed after the first one's failure sent a fix round")),
+])
+def test_reviewer_starts_only_after_passing_checks(db, repo, monkeypatch, outcomes):
+    """No reviewer runs while the checks do: it starts once they pass, with
+    their results in its prompt. When they fail none starts at all: the worker
+    gets the failing output as one fix round, and a required second review's
+    run for the same report (even one whose checks pass, queued before the
+    failure) neither sends it again nor reviews the report the worker left."""
+    passes = outcomes == ("PASS", "PASS")
+    since = time.time()
+    ws = _reported(db, repo, reviewing_since=since)
+    sent, spawned, running = [], [], []
+    results = list(outcomes)
 
     def spawn(db_, ws_, prof, **kw):
-        reviewers.append(f"rev{len(reviewers)}")
-        add(db, ws, reviewers[-1], "review", prof, parent="boss", review_sha=kw["review_sha"])
-        return db.get_agent(reviewers[-1])
+        assert not running, "a reviewer started while the checks were running"
+        spawned.append(kw["prompt"])
+        add(db, ws, f"rev{len(spawned)}", "review", prof, parent="boss", review_sha=kw["review_sha"])
+        return db.get_agent(f"rev{len(spawned)}")
 
     def checks(db_, ws_, cfg, cancel=None):
-        reviewer, before = db.get_agent(reviewers[-1]), len(sent)   # already reviewing, mid-run
-        approved, text = next(verdicts)
-        db.add_review(ws.id, sha, reviewer.id, approved, text)
-        assert pipeline.on_review(db, reviewer, ws, approved, text)
-        db.update_agent(reviewer.id, result=text, status="done")
-        assert len(sent) == before
-        return "FAIL `true`\nexit 1: boom"
+        running.append(1)
+        try:
+            return "PASS `true`" if results.pop(0) == "PASS" else "FAIL `true`\nexit 1: boom"
+        finally:
+            running.clear()
 
     monkeypatch.setattr(agents, "spawn", spawn)
     monkeypatch.setattr(gates, "check_summary", checks)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "w1")
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append((to, body)))
-    agents.review_after_checks(db, "boss", ws)
-    agents.review_after_checks(db, "boss", ws, "reviewer", second=True)
-    assert reviewers == ["rev0", "rev1"] and [to for to, _ in sent] == ["w1"]
-    assert "off by one" in sent[0][1] and "boom" in sent[0][1]
-    assert (db.get_agent("w1").pipeline, db.get_agent("w1").pipeline_rounds) == ("fixing", 1)
+    cfg = workspaces.config_for(db, ws)
+
+    def detach(argv):   # the helper process, run to its end before start_review returns
+        opt = lambda name: argv[argv.index(name) + 1] if name in argv else None  # noqa: E731
+        agents.review_after_checks(db, "boss", ws, opt("--profile"), None, cfg, request_id=opt("--request-id"),
+                                   second="--second-review" in argv, slot=opt("--review-slot"),
+                                   report=float(opt("--report")))
+
+    monkeypatch.setattr(agents, "_detach", detach)
+    # As the pipeline starts them, one report: the first helper's checks end
+    # between the two calls, so a failure has sent the worker back before the second.
+    agents.start_review(db, db.get_agent("boss"), ws, None, None, cfg, slot="", report=since)
+    agents.start_review(db, db.get_agent("boss"), ws, "reviewer", None, cfg, second=True, report=since)
+    if passes:
+        assert len(spawned) == 2 and all("PASS `true`" in p for p in spawned) and sent == []
+        assert db.get_agent("w1").pipeline == "reviewing"
+    else:
+        assert spawned == [] and [to for to, _ in sent] == ["w1"] and "boom" in sent[0][1]
+        assert (db.get_agent("w1").pipeline, db.get_agent("w1").pipeline_rounds) == ("fixing", 1)
 
 
 def test_no_duplicate_reviewer_while_the_first_is_still_starting(db, repo, monkeypatch):

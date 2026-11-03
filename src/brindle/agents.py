@@ -1223,9 +1223,12 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     mcp_recovery = bool(agent.mode == "review" and agent.review_sha and db.conn.execute(
         "SELECT 1 FROM review_mcp_retries WHERE workspace_id=? AND sha=?",
         (ws.id, agent.review_sha)).fetchone())
-    argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
-                                          mode=agent.mode, plan_first=bool(agent.plan_first),
-                                          mcp_recovery=mcp_recovery))
+    try:
+        argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
+                                              mode=agent.mode, plan_first=bool(agent.plan_first),
+                                              mcp_recovery=mcp_recovery))
+    except providers.CodexSandboxRefused as e:
+        raise AgentError(str(e)) from e
     if provider.name == "codex":
         from brindle import codex_hook
 
@@ -1387,7 +1390,7 @@ def run_headless(db: DB, agent_id: str, resume: str | None = None, *,
             from brindle import launch_health
             launch_health.delivered(db, agent, launch_health.before_delivery(db, agent))
             code = subprocess.call(provider.command(ctx), cwd=ws.path, stdin=subprocess.DEVNULL)
-        except OSError as e:
+        except (OSError, providers.CodexSandboxRefused) as e:
             print(f"brindle: couldn't start {provider.name}: {e}", flush=True)
             code = 127
         session = session or new_session
@@ -2631,16 +2634,8 @@ def close_removed(db: DB, agent_id: str) -> None:
     # The workspace's removal took the agent's record, and with it the link to
     # its root, unless the note kept it.
     root_id = root_id.strip() or root_of(db, agent_id)
-    from brindle import pipeline
-
-    agent = db.get_agent(agent_id)
     try:
-        if agent is not None and pipeline.verdict_held(agent.workspace_id, agent_id):
-            # Its verdict waits for the commit's checks (pipeline.checks_finished):
-            # stop and hide it, but keep its record until that acts on it.
-            close(db, agent_id)
-        else:
-            kill(db, agent_id)
+        kill(db, agent_id)
     except AgentError:
         pass
     if session and db.workspace_by_tmux_session(session) is None \
@@ -3148,6 +3143,7 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) 
 
     for a in db.list_agents(ws.id):
         if a.mode == "review" and a.result is None and alive_or_starting(a) and a.review_sha == sha \
+                and not a.unreported_noted \
                 and (profile is None or a.profile == profile) and not launch_health.has_mcp_failure(db, a, ws):
             return a
     return None
@@ -3155,25 +3151,32 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) 
 
 def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                  focus: str | None = None, cfg: RepoConfig | None = None,
-                 second: bool = False, *, slot: str | None = None) -> Agent | None:
-    """Have ``ws`` reviewed. Without checks configured the reviewer starts
-    right away and is returned. With checks, a detached
-    ``_review-after-checks`` process starts the reviewer and runs them beside
-    it (see ``review_after_checks``), so this returns
-    at once with None, however long the suite takes. Raises ``AgentError``
+                 second: bool = False, *, slot: str | None = None,
+                 report: float | None = None) -> Agent | None:
+    """Have ``ws`` reviewed. ``report``: the pipeline report this review is
+    for, captured once where the report was handled and passed to every
+    start for it; a start for a report the branch has left starts nothing.
+    None: an explicit request, bound to whatever report is current now.
+    Without checks configured the reviewer starts
+    right away and is returned. With checks, nothing starts
+    yet: a detached ``_review-after-checks`` process runs them and starts the
+    reviewer with their results in its prompt, but only if they pass (see
+    ``review_after_checks``), so this returns at once with None, however long the suite takes. Raises ``AgentError``
     for a reviewer that couldn't start whatever the checks say (the kill
     switch, an unusable profile); a failure after that reaches ``caller``
     as a message. ``second``: the required second review (``cfg.second_review``),
     which has its own reviewer beside the commit's review. ``slot`` overrides
     the claim identity: the pipeline uses "" for its primary review even
     when it selected a concrete profile."""
-    from brindle import gates
+    from brindle import gates, pipeline
     from brindle.config import load_repo_config
     from brindle.providers import brindle_invocation
 
     _review_worktree_present(ws)
     cfg = cfg or workspaces.config_for(db, ws)
     if not cfg.checks:
+        if not _report_current(db, ws, report):
+            return None
         return request_review(db, caller, ws, profile, focus, cfg, second=second, slot=slot)
     _review_kill_switch(ws)
     slot = _review_claim_slot(profile, slot)
@@ -3190,19 +3193,27 @@ def start_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | Non
     # Nobody's child: the worker reporting here may be closed while the checks
     # still run, and stopping it would stop this run too, so no reviewer (#190).
     with review_dispatch_lock(ws.id):
+        if not _report_current(db, ws, report):
+            return None   # the checks of an earlier start for this report failed already
         sha = gates.head(ws)
         existing = _live_reviewer(db, ws, sha, profile)
         if existing:
             return existing
-        if _review_pending(ws.id, profile, sha):
+        # The helper is bound to the report that queued it, so a late one
+        # can't review a report the branch has since left.
+        if report is None:
+            report = pipeline.review_claim(db, ws)
+        if _review_pending(ws.id, profile, sha, report):
             return None
+        if report is not None:
+            argv += ["--report", repr(report)]
         # Publish before detaching: even a helper that hasn't started yet
         # must know that a later request superseded it. Profiles have separate
         # claims so a required second review survives the first one's request.
         request_id = uuid.uuid4().hex
         claim = _review_request_file(ws.id, profile)
         pending = claim.with_suffix("." + request_id)
-        pending.write_text(f"{request_id}\n{sha}\n{time.time()}")
+        pending.write_text(f"{request_id}\n{sha}\n{time.time()}\n{'' if report is None else repr(report)}")
         pending.replace(claim)
         _detach([*ORPHANED, *argv, "--request-id", request_id])
     return None
@@ -3242,16 +3253,32 @@ def _review_requested(workspace_id: str, profile: str, request_id: str | None) -
         return False
 
 
-def _review_pending(workspace_id: str, profile: str, sha: str) -> bool:
-    """Reuse this commit's queued or running helper, but allow a dead one to be replaced."""
+def _review_pending(workspace_id: str, profile: str, sha: str, report: float | None = None) -> bool:
+    """Reuse this commit's queued or running helper for the report ``report``
+    (see ``_report_current``), but allow a dead one to be replaced. A helper
+    queued for an earlier report is not reused: it retires itself, so the new
+    report needs a helper of its own."""
     from brindle import gates
 
     try:
-        request_id, commit, queued_at = _review_request_file(workspace_id, profile).read_text().splitlines()
+        request_id, commit, queued_at, *bound = _review_request_file(workspace_id, profile).read_text().splitlines()
         starting = time.time() - float(queued_at) < LAUNCH_GRACE
+        queued_for = float(bound[0]) if bound and bound[0] else None
     except (FileNotFoundError, ValueError):
         return False   # no request, or an older helper without commit metadata
-    return commit == sha and (starting or gates.marked("review-request", request_id))
+    return (commit == sha and queued_for == report
+            and (starting or gates.marked("review-request", request_id)))
+
+
+def _report_current(db: DB, ws: Workspace, report: float | None) -> bool:
+    """Whether a helper queued for the pipeline report ``report`` (None: for
+    no report) may still act: its branch must still be in review for that very
+    report. Once the checks failed and sent the worker a fix round, or a newer
+    report took the branch over, every helper queued for the old report is
+    retired by this."""
+    from brindle import pipeline
+
+    return report is None or pipeline.still_claimed(db, ws, report)
 
 
 @contextmanager
@@ -3274,13 +3301,14 @@ def _review_request_run(workspace_id: str, profile: str, request_id: str | None)
 def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: str | None = None,
                         focus: str | None = None, cfg: RepoConfig | None = None,
                         request_id: str | None = None, second: bool = False,
-                        *, slot: str | None = None) -> Agent | None:
-    """Start the reviewer of ``ws``, then run ``cfg.checks`` beside it
-    (through ``gates.check_summary``: its lock and the by-sha cache, so a
-    result a worker's report already warmed is instant) and hand their
-    summary to ``pipeline.checks_finished``: a verdict that came in while
-    they ran waits for them, so the worker gets the review's findings and
-    the failing checks in one message. Returns the reviewer. Meant to run from a detached process, which outlives the call that
+                        *, slot: str | None = None, report: float | None = None) -> Agent | None:
+    """Run ``cfg.checks`` for ``ws`` (through ``gates.check_summary``: its
+    lock and the by-sha cache, so a result a worker's report already warmed
+    is instant), then start the reviewer with the results in its prompt. When
+    a check fails no reviewer starts: the worker gets the failing output to
+    fix (``pipeline.on_checks_failed``) and the review happens on its next
+    report. Returns the reviewer, None when none started.
+    Meant to run from a detached process, which outlives the call that
     started it. Gives up quietly when the workspace is gone, a reviewer is
     already at work on this commit, or the branch moves on to a commit a new
     report hands to a run of its own. A request claim also drops superseded
@@ -3298,57 +3326,53 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
     slot = _review_claim_slot(profile, slot)
     profile = _review_profile(db, ws, profile, cfg)
     with _review_request_run(ws.id, profile, request_id), pipeline.review_run(ws.id):
-        since = pipeline.review_claim(db, ws)
-        caller = db.get_agent(caller_id) if caller_id else None
-        reviewer = None
+        # ``report``: the report whose review queued this helper (start_review);
+        # it acts for that report alone and retires once the branch leaves it.
+        since = report if report is not None else pipeline.review_claim(db, ws)
         for _attempt in range(MOVED_RETRIES + 1):
-            if not _review_requested(ws.id, profile, request_id):
+            if not _review_requested(ws.id, profile, request_id) or not _report_current(db, ws, report):
                 return None
             sha = gates.head(ws)
             if _live_reviewer(db, ws, sha, profile):
                 return None
-            # The reviewer starts before the checks, not after them: its
-            # verdict waits for them (pipeline.checks_finished), and the
-            # worker gets both in one message. A newer request cannot slip
-            # between the claim check and spawn.
-            pipeline.checks_started(db, ws, sha)
-            with review_dispatch_lock(ws.id):
-                if not _review_requested(ws.id, profile, request_id):
-                    return None
-                reviewer = request_review(db, caller, ws, profile, focus, cfg, checks_alongside=True,
-                                          second=second, slot=slot)
             try:
                 # In the check queue as of the report (#186): a run restarted
                 # or requested again later doesn't lose its turn.
                 with gates.queue_place(since or time.time()):
                     summary = gates.check_summary(
                         db, ws, cfg, cancel=lambda sha=sha: gates.head(ws) != sha
-                        or not _review_requested(ws.id, profile, request_id))
+                        or not _review_requested(ws.id, profile, request_id)
+                        or not _report_current(db, ws, report))
             except gates.Abandoned:
                 summary = None
-            except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
-                summary = f"(running the checks crashed: {e})"
-            if db.get_workspace(ws.id) is None or not _review_requested(ws.id, profile, request_id):
+            except Exception as e:  # noqa: BLE001 - checks that never finished are a failed gate
+                summary = f"FAIL `{' && '.join(cfg.checks)}`\n(running the checks crashed: {e})"
+            if (db.get_workspace(ws.id) is None or not _review_requested(ws.id, profile, request_id)
+                    or not _report_current(db, ws, report)):
                 return None
-            if gates.head(ws) == sha:
-                break
-            if not pipeline.still_claimed(db, ws, since):
-                _drop_reviewer(db, reviewer)
-                return None
-        else:
-            _drop_reviewer(db, reviewer)
-            pipeline.on_moved_during_checks(db, ws)
-            return None
-        text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
-        pipeline.checks_finished(db, ws, sha, text)
-        return reviewer
-
-
-def _drop_reviewer(db: DB, reviewer: Agent | None) -> None:
-    """Close the reviewer a check run started beside its checks, once the
-    branch has left the commit it reviews: nobody will act on that verdict."""
-    if reviewer is not None and db.get_agent(reviewer.id) is not None:
-        close(db, reviewer.id)
+            if gates.head(ws) != sha:
+                if not pipeline.still_claimed(db, ws, since):
+                    return None
+                continue
+            text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
+            caller = db.get_agent(caller_id) if caller_id else None
+            # A newer request cannot slip between the final claim check and
+            # spawn, and the reviewer is bound to the commit that was checked.
+            with review_dispatch_lock(ws.id):
+                if not _review_requested(ws.id, profile, request_id) or not _report_current(db, ws, report):
+                    return None   # superseded, or its report is over: the checks failed, or a newer one came
+                if gates.head(ws) != sha:
+                    continue   # moved while waiting for the lock: check the new commit
+                if summary and gates.summary_failed(summary):
+                    pipeline.on_checks_failed(db, ws, sha, since, text, caller)
+                    return None
+                try:
+                    return request_review(db, caller, ws, profile, focus, cfg, check_summary=text,
+                                          second=second, slot=slot, expected_sha=sha)
+                except ReviewHeadMoved:
+                    continue
+        pipeline.on_moved_during_checks(db, ws)
+        return None
 
 
 def review_dispatch_lock(workspace_id: str, *, timeout: float | None = None):
@@ -3366,16 +3390,20 @@ def review_dispatch_lock(workspace_id: str, *, timeout: float | None = None):
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None,
                    check_summary: str | None = None, second: bool = False,
-                   *, slot: str | None = None, checks_alongside: bool = False) -> Agent | None:
+                   *, slot: str | None = None, expected_sha: str | None = None) -> Agent | None:
     """Start or reuse a review, replacing an MCP-broken reviewer once. None
     while another dispatcher is still starting this commit's reviewer.
-    ``checks_alongside``: the repo's checks run beside this review
-    (``review_after_checks``), and its prompt says so."""
+    ``expected_sha``: the commit ``check_summary`` is for; ``ReviewHeadMoved``
+    when the branch has left it."""
     # Serialize hook recovery with explicit requests, including the interval
     # between stopping the broken reviewer and publishing its replacement.
     with review_dispatch_lock(ws.id):
         return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second, slot,
-                               checks_alongside)
+                               expected_sha)
+
+
+class ReviewHeadMoved(AgentError):
+    """The branch moved off the commit whose check results a review was to carry."""
 
 
 def _review_claim_slot(profile: str | None, slot: str | None) -> str:
@@ -3441,7 +3469,7 @@ def _review_context(db: DB, ws: Workspace, worker: Agent | None, files: list[str
 def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None,
                     focus: str | None, cfg: RepoConfig | None,
                     check_summary: str | None, second: bool = False,
-                    slot: str | None = None, checks_alongside: bool = False) -> Agent | None:
+                    slot: str | None = None, expected_sha: str | None = None) -> Agent | None:
     """Start a reviewer in a worker's workspace right away. Its verdict is
     recorded for the merge gate and forwarded to ``caller`` as a message.
     ``profile`` picks the reviewer profile; None uses
@@ -3464,6 +3492,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     if second and not slot:
         slot = profile
     sha = gates.head(ws)
+    if expected_sha is not None and sha != expected_sha:
+        raise ReviewHeadMoved(f"{ws.branch} moved off {expected_sha[:8]} before its reviewer started")
     failed = None
     for old in db.list_agents(ws.id):
         if (old.mode == "review" and old.result is None and old.review_sha == sha
@@ -3554,10 +3584,6 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     if check_summary:
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
                  "Take these results into account; don't run the whole suite yourself.")
-    elif checks_alongside:
-        task += ("\n\nThe repo's checks are running on this commit beside your review; brindle "
-                 "sends the worker any that fail together with your verdict. Judge the code; "
-                 "don't run the whole suite yourself.")
 
     prev = db.last_review(ws.id)
     if prev and prev.sha != sha:
@@ -3810,6 +3836,49 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, 
         return None
 
 
+def codex_pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
+    """Codex's PreToolUse hook, with ``permission_policy`` on: the policy's
+    deny before the tool runs. Codex runs most shell commands in its sandbox
+    without asking, so its PermissionRequest hook never sees them; this one
+    runs for every shell command, patch and MCP call, as Claude Code's
+    PreToolUse does (_pre_tool_policy). Only a deny is answered: Codex can't
+    ask from PreToolUse, and the rest stays with its approvals and the
+    PermissionRequest hook. Never raises, and fails closed: Codex runs a
+    call it gets no answer for, so a check that can't finish denies it."""
+    from brindle import permissions
+
+    try:
+        from brindle.config import load_repo_config
+        from brindle.profiles import profile_rules_for
+
+        ws = db.get_workspace(agent.workspace_id)
+        if ws is None:
+            return None
+        cfg = load_repo_config(ws.repo_root)
+        if cfg.permission_policy != "on":
+            return None
+        if permissions.codex_terminal_input(payload):
+            return permissions.codex_pre_tool_output(permissions.Decision("deny", permissions.TERMINAL_INPUT))
+        reqs = permissions.from_codex(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
+        if not reqs:
+            return None
+        rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+        decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
+        if decision.decision != "deny" and len(reqs) == 1:
+            # A deny on one part of a compound command (cd x && <denied>) still denies.
+            decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+    except Exception:  # noqa: BLE001 - nothing after this hook would stop the call: deny it
+        log.exception("brindle: permission policy failed in Codex's PreToolUse; denying the call")
+        return permissions.codex_pre_tool_output(None)
+    if decision.decision != "deny":
+        return None
+    try:
+        _note_decision(db, agent, ws, reqs[0].kind, reqs[0].summary(), decision)
+    except Exception:  # noqa: BLE001 - bookkeeping never changes the answer
+        log.exception("brindle: couldn't record a Codex PreToolUse deny")
+    return permissions.codex_pre_tool_output(decision)
+
+
 def _record_permission(db: DB, agent: Agent, ws: Workspace | None, summary: str, result: str) -> None:
     from brindle import history
 
@@ -3868,6 +3937,16 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         session = _session_of(db, agent)   # for saved actions that last this session
+        if provider == "codex" and policy and permissions.codex_terminal_input(payload):
+            # Input typed into a process already running (write_stdin): no
+            # PreToolUse sees it, and brindle can't tell what the process does
+            # with it, so it never goes in.
+            decision = permissions.Decision("deny", permissions.TERMINAL_INPUT)
+            try:
+                _note_decision(db, agent, ws, "bash", "write_stdin", decision)
+            except Exception:  # noqa: BLE001 - bookkeeping never changes the answer
+                log.exception("brindle: couldn't record a Codex terminal-input deny")
+            return permissions.codex_output(decision)
         if provider == "codex":
             # No tool_use_id in Codex's payload: nothing to pair an approval
             # with, so nothing is kept for learning.
@@ -4314,6 +4393,8 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
         }
     if needs_report:
         db.set_status(agent.id, "idle")
+        # The stop claim must use this idle spell's timestamp.
+        agent = db.get_agent(agent.id) or agent
         from brindle import prompt_answer
 
         if not prompt_answer.at_turn_end(db, agent):   # a question it ended on says more
@@ -4340,9 +4421,37 @@ def _retest_keys(provider: str) -> None:
     keys_cmds.retest_provider(provider)
 
 
+def _codex_pre_tool_hook(db: DB, agent_id: str, payload: dict) -> dict:
+    """Codex's PreToolUse: the policy's answer first, the session bookkeeping
+    every hook does after it, and never at its expense. An agent brindle
+    can't find gets a deny: Codex would run the call on no answer."""
+    from brindle import permissions
+
+    try:
+        agent = db.get_agent(agent_id)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't load the agent for Codex's PreToolUse; denying the call")
+        agent = None
+    if agent is None:
+        return permissions.codex_pre_tool_output(None)
+    answer = codex_pre_tool_decision(db, agent, payload)
+    try:
+        if agent.hooks_off:
+            db.update_agent(agent_id, hooks_off=None)
+        from brindle import launch_health, prompt_answer
+
+        prompt_answer.settled(db, agent)   # see handle_hook
+        launch_health.accepted(db, agent)
+    except Exception:  # noqa: BLE001 - bookkeeping never changes the answer
+        log.exception("brindle: Codex PreToolUse bookkeeping failed")
+    return answer
+
+
 def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
     """Called from ``brindle _hook <event>`` inside the agent's own process tree.
     Returns JSON for Claude Code to read on stdout, or None."""
+    if event == "codex-pre-tool":
+        return _codex_pre_tool_hook(db, agent_id, payload)
     agent = db.get_agent(agent_id)
     if agent is None:
         return None
@@ -4860,7 +4969,7 @@ def liveness(db: DB, a: Agent, ws: Workspace | None, panes: dict[str, bool] | No
     return "; ".join(parts)
 
 
-def tell_parent_unreported(db: DB, agent: Agent) -> bool:
+def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False) -> bool:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
     usually gone idle waiting for it with nothing left to wake it, so tell the
@@ -4882,14 +4991,29 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
         # nothing about whether this one's call got through.
         if any(r.reviewer_id == agent.id for r in db.reviews_at(ws.id, gates.head(ws))):
             return False  # its verdict for the current commit is already recorded
-    if agent.unreported_noted:
+    if agent.unreported_noted and not (remind and unreported_note_expired(agent)):
         return False  # the supervisor was told about this stop; cleared once it resumes
     if command_running(db, agent) or (is_alive(agent) and transcript_active(agent)):
         # Its turn ended while a long or background command (a test run) is
         # still going, or it is still writing to its transcript: it isn't
         # stopped. Not marked noted, so a real stop later still gets its alert.
         return False
-    db.update_agent(agent.id, unreported_noted=int(time.time()))
+    claimed_at = time.time()
+    if not db.claim_unreported(agent.id, claimed_at, agent.unreported_noted,
+                               reopened_at=agent.reopened_at,
+                               status_since=agent.status_since or agent.created_at):
+        return False
+    sent = False
+    try:
+        sent = _tell_parent_unreported(db, agent, ws)
+        return sent
+    finally:
+        if not sent:
+            db.release_note(agent.id, claimed_at, agent.unreported_noted, field="unreported_noted")
+
+
+def _tell_parent_unreported(db: DB, agent: Agent, ws: Workspace | None) -> bool:
+    """Handle the stop whose alert this caller has claimed."""
     if agent.mode == "review" and ws is not None:
         from brindle import pipeline
 
@@ -4913,13 +5037,20 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     try:
         send_message(db, agent.parent_id, body)
     except (AgentError, tmux.TmuxError):
-        # The parent isn't running (or can't take messages): the notice is
-        # deliberately dropped here, since there's nothing left to tell.
+        # Release the alert so a later sweep can reach the parent.
         return False
     return True
 
 
-PERMISSION_EVENTS = ("permission-request", "codex-permission-request")
+CODEX_PRE_TOOL = "codex-pre-tool"
+PERMISSION_EVENTS = ("permission-request", "codex-permission-request", CODEX_PRE_TOOL)
+
+
+def codex_pre_tool_failure() -> dict:
+    """Codex's PreToolUse answer when brindle couldn't check the call."""
+    from brindle import permissions
+
+    return permissions.codex_pre_tool_output(None)
 
 
 def hook_main(db: DB, agent_id: str, event: str, stdin_text: str, trusted: bool = True) -> str:
@@ -4931,17 +5062,19 @@ def hook_main(db: DB, agent_id: str, event: str, stdin_text: str, trusted: bool 
     except json.JSONDecodeError:
         payload = {}
     if event in PERMISSION_EVENTS:
-        # Never let a failure turn into a decision: anything wrong means no
-        # output, so the CLI prompts the person as usual.
+        # Never let a failure turn into an allow: anything wrong means no
+        # output, so the CLI prompts the person as usual; except Codex's
+        # PreToolUse, where no output runs the call, so it's a deny.
+        failed = json.dumps(codex_pre_tool_failure()) if event == CODEX_PRE_TOOL else ""
         if not isinstance(payload, dict):
-            return ""
+            return failed
         try:
             if not trusted:
                 agent_id = agent_for_session(db, payload.get("session_id")) or agent_id
             out = handle_hook(db, agent_id, event, payload)
         except Exception:  # noqa: BLE001
             log.exception("brindle: permission-request hook failed")
-            return ""
+            return failed
         return json.dumps(out) if out else ""
     if not trusted:
         agent_id = agent_for_session(db, payload.get("session_id")) or agent_id
