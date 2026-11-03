@@ -939,6 +939,9 @@ export interface Note {
 /* A started session, or (choice "o") the running one to open instead. */
 export type StartResult = (SessionDTO & { notes: Note[] }) | { opened: SessionDTO };
 
+/* POST /demo (routes_actions.start_demo): the session started in `brindle demo`'s practice repo, and that repo's root. */
+export type DemoResult = SessionDTO & { repo: string; notes: Note[] };
+
 export interface ContinueResult {
   state: "recovered" | "running" | "resumed";
   restarted: number;
@@ -1111,6 +1114,13 @@ export class DaemonClient {
      repo: ask, then call again with `choice` and `session_id`. */
   startSession(body: StartSession) {
     return this.post<StartResult>("/sessions", body);
+  }
+
+  /* `brindle demo` from the app: a practice repo of brindle's own (never one of the person's)
+     and a session started there. Throws a DaemonError with `preflight` set as startSession does,
+     and code "airgap" in air-gap mode. */
+  startDemo() {
+    return this.post<DemoResult>("/demo", {});
   }
 
   /* Resume a paused session (or recover its chat if it has stopped). */

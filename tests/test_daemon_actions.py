@@ -317,6 +317,35 @@ def test_starting_a_session_with_a_name_keeps_it_on_the_new_root(db, world, monk
     assert db.get_agent("sup").name == "Cache work"
 
 
+@pytest.mark.parametrize("case,status", [("started", 200), ("airgap", 403), ("blocked", 409)])
+def test_the_demo_starts_a_session_in_a_practice_repo_of_its_own(db, world, brindle_home, monkeypatch, case, status):
+    from brindle.service import sessions as svc
+
+    started = []
+
+    def start(db, repo, **kw):
+        started.append(repo)
+        return svc.Started(db.get_agent("sup"), workspaces.adopt_root(db, repo), True)
+
+    monkeypatch.setattr(svc, "start", start)
+    if case == "airgap":
+        monkeypatch.setenv("BRINDLE_AIRGAP", "1")
+    if case == "blocked":
+        item = preflight.Item("signin", "claude.login", "claude", "Sign in to Claude", "")
+        monkeypatch.setattr(preflight, "check", lambda provider, repo_root=None, **kw: [item])
+    code, reply = _send("POST", "/v1/demo")
+    made = sorted((brindle_home / "demo").glob("textkit-*"))
+    assert code == status
+    if case == "started":
+        # The CLI's own practice repo (brindle.demo), outside the person's repos, and the session opened on it.
+        assert [Path(r) for r in started] == made and (made[0] / ".brindle" / "goals.md").exists()
+        assert reply["id"] == "sup" and reply["repo"] == db.workspace_by_path(started[0]).repo_root
+    else:
+        # Nothing launched, and no practice repo left behind or registered.
+        assert started == [] and made == [] and len(db.find_workspaces()) == 3
+        assert case == "airgap" or reply["preflight"][0]["id"] == "claude.login"
+
+
 @pytest.mark.parametrize("scope,body,peer_pid,status,written", [
     # The picker's pick for a tier is dropped too, and so is an alias of a tier, or either would still win.
     ("user", {"tiers": {"light": ["developer-codex"], "advanced": ["developer-codex"]}}, None, 200,

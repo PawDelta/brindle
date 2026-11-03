@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import stat
 import subprocess
 import threading
@@ -201,14 +202,17 @@ def _blocked(launches: list[tuple[Agent, Workspace]], keys_only: bool = False) -
     return preflight.Blocked(list(items.values())) if items else None
 
 
-def session_blockers(db: DB, repo: str, provider: str | None, *, read_only: bool = False) -> preflight.Blocked | None:
+def session_blockers(db: DB, repo: str, provider: str | None, *, read_only: bool = False,
+                     register: bool | None = None) -> preflight.Blocked | None:
     """What would stop a new supervisor chat in ``repo`` (on ``provider``, else
     its profile's) before its first turn. ``read_only`` (a GET): the checkout
     isn't registered, and the sign-in check sees only credentials (see
-    agents.launch_blockers)."""
+    agents.launch_blockers). ``register=False``: the checkout isn't registered
+    either, but the check is the launch's own (the demo's practice repo, which
+    is removed again when something blocks it)."""
     from brindle.profiles import load_profile
 
-    if read_only:
+    if not (not read_only if register is None else register):
         top = git.toplevel(repo)
         ws = db.workspace_by_path(top) or Workspace("preflight", git.main_repo_root(repo), "main", "main",
                                                     "HEAD", None, top, None, "", 0.0)
@@ -246,6 +250,34 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
             db.update_agent(got.agent.id, name=name)
         return {**got.to_json(), "notes": _notes(got.notes)}
     return got
+
+
+def start_demo(db: DB, params: dict, body: Body) -> Any:
+    """``brindle demo`` from the app: the practice repo brindle.demo makes (two
+    failing test files and a two-milestone goal, under ~/.brindle/demo/) and a
+    supervisor session started there, as the CLI starts it. Nothing is created
+    in the person's own repos. Refused in air-gap mode: the demo's agents are
+    hosted ones. A launch its CLI would stop on answers 409 ``preflight`` as
+    POST /sessions does, and the practice repo made for it is removed again."""
+    from brindle import airgap
+    from brindle import demo as demo_mod
+
+    if airgap.enabled():
+        raise ServiceError("airgap", "The demo runs hosted agents, and air-gap mode is on on this Mac.", 403)
+    provider = _get(body, "provider")
+    root = demo_mod.create()
+    try:
+        blocked = session_blockers(db, str(root), provider, register=False)
+    except BaseException:
+        shutil.rmtree(root, ignore_errors=True)
+        raise
+    if blocked:
+        shutil.rmtree(root, ignore_errors=True)
+        return blocked
+    got = svc.start(db, str(root), provider=provider)
+    if not isinstance(got, svc.Started):     # a fresh repo has no session to open or choose
+        return got
+    return {**got.to_json(), "repo": got.workspace.repo_root, "notes": _notes(got.notes)}
 
 
 def continue_session(db: DB, params: dict, body: Body) -> Any:
@@ -2401,6 +2433,7 @@ def _post(path: str, fn: Action) -> Route:
 
 ROUTES = [
     _post("/sessions", start_session),
+    _post("/demo", start_demo),
     _post("/sessions/{root}/continue", continue_session),
     _post("/sessions/{root}/pause", pause_session),
     _post("/sessions/{root}/close", close_session),

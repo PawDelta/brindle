@@ -7146,6 +7146,10 @@
       "path": "/v1/decisions"
     },
     {
+      "method": "POST",
+      "path": "/v1/demo"
+    },
+    {
       "method": "GET",
       "path": "/v1/doctor"
     },
