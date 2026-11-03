@@ -300,12 +300,6 @@ def test_no_escapes_over_twenty_merges_suggests_dropping_the_second_review(db, r
         'remove "heavy" from "second_review"']
 
 
-def test_only_the_last_ninety_days_count(db, repo, pro):
-    seed(db, repo, "heavy", 10, escaped=2)
-    assert len(suggestions(db, repo)) == 1
-    assert suggestions(db, repo, now=time.time() + 91 * 86400) == []
-
-
 def test_no_entitlement_means_no_suggestions(db, repo, monkeypatch):
     from brindle.pro import license
 

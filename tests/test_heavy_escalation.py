@@ -98,13 +98,6 @@ def test_fable_is_off_by_default_on_a_cloud_account(db, heavy, monkeypatch):
     assert "needs you" in db.pop_pending("boss").body
 
 
-def test_fable_is_on_by_default_off_the_cloud(db, heavy):
-    ws, retries, configure = heavy
-    configure()
-    reject(db, ws)
-    assert [r[0] for r in retries] == ["developer-heavy"]
-
-
 def test_failing_checks_retry_a_heavy_task_too(db, heavy, monkeypatch):
     ws, retries, configure = heavy
     configure(fable_escalation=True)

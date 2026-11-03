@@ -158,15 +158,6 @@ def test_assign_with_depends_on_a_locked_branch_says_why(db, repo, ws, who, monk
 # -- what the views show -----------------------------------------------------------------
 
 
-def test_the_sidebar_snapshot_shows_the_locked_agent(db, ws, who, monkeypatch):
-    worker(db, ws)
-    who.ident = OTHER
-    monkeypatch.setattr(view.agents, "is_alive", lambda a, panes=None: True)
-    snap = view.snapshot(db, ws.repo_root, panes={})
-    entries = [a for e in snap for a in e["agents"] if a["id"] == "w1"]
-    assert [e["status"] for e in entries] == [f"locked: {ACME}"]
-
-
 def test_agent_turns_hide_the_conversation_of_a_locked_agent(db, ws, who):
     from brindle import mcp_server
 

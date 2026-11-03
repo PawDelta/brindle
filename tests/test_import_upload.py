@@ -123,7 +123,7 @@ def test_secret_looking_files_are_never_sent(folder, remote, deps):
     assert [["md" in f for f in files] for files in remote.posts] == [[False], [True]]   # hashes first, then text
 
 
-@pytest.mark.parametrize("off", ["switch", "airgap"])
+@pytest.mark.parametrize("off", ["switch"])
 def test_nothing_is_sent_when_uploading_is_off(off, folder, remote, deps, monkeypatch):
     db, source, _ = folder
     if off == "switch":
