@@ -89,7 +89,11 @@ def context_checks(repo):
     return [c for c in doctor.native_checks(str(repo)) if c.name == "context local"]
 
 
-def test_small_num_ctx_warns_with_the_fix(repo, serve):
+def test_small_num_ctx_warns_with_the_fix(repo, serve, monkeypatch):
+    # The built-in local profiles point at Ollama's port, which may hang or not answer here.
+    probe = runner.probe
+    monkeypatch.setattr(runner, "probe", lambda ep, *a: (False, "not reachable: refused")
+                        if "11434" in ep.base_url else probe(ep, *a))
     fake = serve(parameters="num_ctx                        4096\nstop  <|im_end|>")
     add_profile(repo, fake)
     [c] = context_checks(repo)

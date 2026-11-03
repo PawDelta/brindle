@@ -2,6 +2,7 @@ import contextvars
 import os
 import re
 import shutil
+import socket
 import subprocess
 import threading
 from pathlib import Path
@@ -437,6 +438,15 @@ def fake_agent_cli(tmp_path, monkeypatch):
     stub.chmod(0o755)
     monkeypatch.setenv("BRINDLE_CLAUDE_BIN", str(stub))
     monkeypatch.setenv("BRINDLE_CODEX_BIN", str(stub))
+
+
+@pytest.fixture(autouse=True)
+def no_reverse_dns(monkeypatch):
+    """No reverse DNS lookups: http.server names every server it binds with
+    socket.getfqdn(host), and on GitHub's macOS runners that lookup of
+    127.0.0.1 waits ~35s for the resolver. A server keeps its address as its
+    name instead."""
+    monkeypatch.setattr(socket, "getfqdn", lambda name="": name or socket.gethostname())
 
 
 @pytest.fixture(autouse=True)
