@@ -33,6 +33,9 @@ from pathlib import Path
 from brindle import spawn
 
 CACHE_DIR = "cache"
+# The variables ``env`` sets. A worktree gets them and the repo's own checkout
+# doesn't, so they are launch bookkeeping, not part of a worker's identity.
+ENV_KEYS = frozenset({"CARGO_TARGET_DIR", "UV_CACHE_DIR"})
 
 # Package manager -> its lockfiles. A worktree's node_modules is cloned only
 # for these, and only when every one present matches the base checkout's.
