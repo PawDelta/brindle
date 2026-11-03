@@ -89,6 +89,7 @@ def test_spawn_falls_back_to_hosted_when_the_local_model_isnt_served(db, ws, rep
     f.write_text(f.read_text().replace("context_tokens:", "fallback: developer-light\ncontext_tokens:"))
     fake.models = models
     monkeypatch.setattr(agents, "_open_window", lambda *a: "@9")
+    monkeypatch.setattr("brindle.prompt_answer.finish_launch", lambda *a: True)   # no real tmux wait
     assert agents.spawn(db, ws, local_profile, prompt="add a README", mode="assign").profile == expected
 
 
