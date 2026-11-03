@@ -26,6 +26,7 @@ from typing import Callable
 from brindle.native.client import Client, ClientError, Reply, ToolCall, Usage
 from brindle.native.permissions import Permissions
 from brindle.native.tools import Toolbox, ToolResult
+from brindle.redact import mask_data
 
 DELIVERY_PREFIX = "brindle delivered this message"
 MAX_SUMMARY_LINES = 150
@@ -176,16 +177,18 @@ class NativeAgent:
         entry["ts"] = time.time()
         self.transcript.parent.mkdir(parents=True, exist_ok=True)
         with self.transcript.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+            f.write(json.dumps(mask_data(entry)) + "\n")   # a masked copy; the live call is unchanged
 
     # -- saving the conversation (so a paused worker resumes where it was) ---
 
     def save(self, path: Path | str) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Saved after a turn, when every call in it has run: the masked copy
+        # is history for the model on resume, never something executed again.
         data = {
-            "messages": [_to_json(m) for m in self.messages],
-            "summary_lines": self._summary_lines, "folded": self.folded, "steps": self.steps,
+            "messages": mask_data([_to_json(m) for m in self.messages]),
+            "summary_lines": mask_data(self._summary_lines), "folded": self.folded, "steps": self.steps,
             "usage": [self.usage.input_tokens, self.usage.output_tokens, self.usage.cache_read_tokens],
             "model": self.model,
         }

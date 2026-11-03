@@ -229,7 +229,23 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
-    return out + _doc_items(db, repo_root) + _setup_items() + _org_blocks(db, repo_root) + _org_notices()
+    return (out + _idle_items(db, repo_root) + _doc_items(db, repo_root) + _setup_items()
+            + _org_blocks(db, repo_root) + _org_notices())
+
+
+def _idle_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
+    """Supervisors the sweep stopped after days without input (brindle.reap),
+    until they are continued or closed."""
+    from brindle import reap
+
+    out = []
+    for a, detail in reap.idle_stopped(db):
+        ws = db.get_workspace(a.workspace_id)
+        if ws is None or (repo_root and ws.repo_root != repo_root) or identity_lock.locked_by(a.id):
+            continue
+        out.append(InboxItemDTO(kind="idle_stopped", reason="stopped while idle; `brindle continue` resumes it",
+                                detail=detail, agent_id=a.id, workspace_id=ws.id, root_id=a.id))
+    return out
 
 
 def _doc_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:

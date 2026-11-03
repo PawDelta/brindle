@@ -41,7 +41,7 @@ from brindle.profiles import list_profiles
 
 LOG_NAME = "ollama.log"
 PIDS_NAME = "ollama-pids.json"  # host -> pid of each `ollama serve` brindle started
-KEEP_ALIVE = "30m"          # how long a warmed model stays in memory unused
+KEEP_ALIVE = "0"            # release warmed models immediately
 CONTEXT_HEADROOM = 8192     # what doctor adds over context_tokens for the reply
 START_TIMEOUT = 20.0        # seconds to wait for a fresh server to answer
 WARM_TIMEOUT = 300.0        # a large model can take minutes to load
@@ -144,6 +144,7 @@ def ollama_env(server: Server, env: dict[str, str] | None = None) -> dict[str, s
     length doctor would recommend (unless already set) and the host when it
     isn't Ollama's default."""
     out = dict(os.environ if env is None else env)
+    out.setdefault("OLLAMA_KEEP_ALIVE", KEEP_ALIVE)
     if server.context_tokens and "OLLAMA_CONTEXT_LENGTH" not in out:
         out["OLLAMA_CONTEXT_LENGTH"] = str(server.context_tokens + CONTEXT_HEADROOM)
     port = urlparse(server.host).port or 11434
@@ -179,10 +180,14 @@ def wait_reachable(server: Server, timeout: float = START_TIMEOUT, step: float =
 
 
 def warm(server: Server, model: str, timeout: float = WARM_TIMEOUT) -> bool:
-    """Load ``model`` into memory and keep it there for a while, so the first
-    real request doesn't pay for the load. Ollama's ``/api/generate`` with no
-    prompt does exactly that. False when it couldn't (a model that isn't
-    pulled, a server that isn't Ollama)."""
+    """Verify that ``model`` can load, then release it immediately. False
+    when RAM is insufficient or the model/server isn't available."""
+    from brindle.local_setup import memory_problem
+    from brindle.profiles import Profile
+
+    profile = Profile("warm", "", "native", "", model=model, base_url=server.host)
+    if memory_problem(profile):
+        return False
     req = urllib.request.Request(
         server.host + "/api/generate",
         data=json.dumps({"model": model, "keep_alive": KEEP_ALIVE}).encode(),

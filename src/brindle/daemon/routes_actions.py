@@ -285,9 +285,9 @@ def rename_session(db: DB, params: dict, body: Body) -> Any:
 def handover_session(db: DB, params: dict, body: Body) -> Any:
     root, ws = _root(db, params["root"])
     dest = workspaces.checkout_for_target(db, ws.path, _get(body, "to", required=True))
-    new = sessions_mod.handover(db, root.id, dest, _get(body, "note"))
+    h = sessions_mod.handover_to(db, root.id, dest, _get(body, "note"))
     svc.cull_detached(dest.repo_root)
-    return SessionDTO.from_agent(new).to_json()
+    return {**SessionDTO.from_agent(h.agent).to_json(), **({"why": h.why} if h.why else {})}
 
 
 def transfer_session(db: DB, params: dict, body: Body) -> Any:
@@ -487,6 +487,18 @@ def remove_workspace(db: DB, params: dict, body: Body) -> Any:
     teardown = removed.teardown
     return {"removed": ws.id, "branch_note": removed.branch_note, "note": note,
             "teardown_failed": teardown.log if teardown and not teardown.ok else None}
+
+
+def clean_storage(db: DB, params: dict, body: Body) -> Any:
+    """Remove one worktree (``path``: merged or abandoned) or every abandoned
+    one (``abandoned``: true), each with its branch, tip archived first
+    (``disk.clean``). The app asks the person before it calls this."""
+    from brindle import disk
+
+    path, abandoned = _get(body, "path"), _get(body, "abandoned", bool, False)
+    if not path and not abandoned:
+        raise ServiceError("invalid", "path or abandoned is required")
+    return disk.clean(db, path=path, abandoned=not path)
 
 
 # An agent mid-turn (or stopped at a prompt mid-turn) may be writing the same file.
@@ -2424,6 +2436,7 @@ ROUTES = [
     _post("/workspaces/{id:path}/sync", sync_workspace),
     _post("/workspaces/{id:path}/pr", pr_workspace),
     _post("/workspaces/{id:path}/remove", remove_workspace),
+    _post("/storage/clean", clean_storage),
     Route("/v1/workspaces/{id:path}/file", _endpoint(edit_file), methods=["PUT"]),
     _post("/goal", set_goal),
     _post("/goal/check", check_goal),

@@ -112,9 +112,14 @@ def _issue_numbers(text: str | None) -> set[str]:
 
 def _reported_unmerged(db: DB, repo_root: str) -> list[tuple[Task, Agent, Workspace]]:
     """Started tasks in ``repo_root``, from any session, whose worker has
-    reported but whose branch isn't merged into the repo's default branch yet:
-    the work still exists and will land later."""
+    reported but whose branch isn't merged into the repo's default branch, or
+    into its workspace's base branch (the session branch), yet: the work still
+    exists and will land later. Cheap on the assign path: no fetch, one ref
+    listing, and each branch decided once per (branch, target) commit pair
+    without the patch-id fallback (git.merged_into)."""
     out = []
+    refs: dict[str, str] | None = None
+    defaults: list[str] = []
     for t in db.list_tasks(repo_root, state="started"):
         agent = db.get_agent(t.agent_id) if t.agent_id else None
         if agent is None or agent.result is None:
@@ -122,8 +127,15 @@ def _reported_unmerged(db: DB, repo_root: str) -> list[tuple[Task, Agent, Worksp
         other_ws = db.get_workspace(agent.workspace_id)
         if other_ws is None or other_ws.kind != "worktree":
             continue
-        if git.merged_into_default(repo_root, other_ws.branch):
-            continue
+        try:
+            if refs is None:
+                refs = git.ref_shas(repo_root)
+                defaults = git.default_targets(repo_root, refs)
+            session = [other_ws.base_branch] if other_ws.base_branch else []
+            if git.merged_into(repo_root, other_ws.branch, session + defaults, refs=refs):
+                continue
+        except git.GitError:
+            pass    # can't tell: still unmerged work as far as overlap goes
         out.append((t, agent, other_ws))
     return out
 
@@ -206,7 +218,7 @@ def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | 
         return None
     for t, _agent, other_ws in _reported_unmerged(db, ws.repo_root):
         where = f"{t.agent_id} ({_where(other_ws)})"
-        candidates = _loads(t.files) + _changed_files(other_ws)
+        candidates = _loads(t.files) + _changed_files(other_ws) if files else []
         for mine in files or []:
             for theirs in candidates:
                 if _glob_match(mine, theirs):
@@ -702,8 +714,8 @@ def _room_wait_overrun(t: Task, why: str) -> str | None:
     """
     from brindle.config import load_repo_config
 
-    if t.waiting_since is None:
-        return None
+    if t.waiting_since is None or why.startswith("waiting for disk"):
+        return None  # low disk holds until there's space: starting anyway could fill it
     elapsed = time.time() - t.waiting_since
     if elapsed > load_repo_config(t.repo_root).room_wait_max:
         return f"started after waiting {elapsed / 60:.0f} min: {why}"

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -78,6 +81,14 @@ def _a_worker_starts_after_its_room_wait_limit(db, tmp_path, monkeypatch, overlo
     assert db.get_task(task.id).state == "started" and launched == [worker]
     assert len(sent) == 1 and f"started after waiting {limit / 60:.0f} min: {task.waiting}" in sent[0]
     assert tasks.start_with_room(db) == 0
+
+
+def _a_disk_wait_outlasts_the_room_wait_limit(tmp_path):
+    """Low free disk holds a start past room_wait_max: starting anyway could fill the disk."""
+    task = Task("t", str(tmp_path), None, "boss", "w", "developer", "do work", "assign", 0,
+                None, None, None, None, "pending", 1.0, waiting_since=1.0)
+    assert tasks._room_wait_overrun(task, "waiting for disk: 1.0 GB free (under 10 GB)") is None
+    assert tasks._room_wait_overrun(task, "load 9.0 on 8 cores") is not None
 
 
 def _a_high_load_average_with_idle_cpus_leaves_room(monkeypatch):
@@ -238,6 +249,27 @@ def _an_abandoned_read_leaves_no_process(tmp_path, monkeypatch):
     assert spawn.running() == 0
 
 
+def _a_hung_up_sidebar_leaves_no_read_running(tmp_path):
+    """tmux hangs up the sidebar while its costs thread waits on `claude -p
+    /usage` (its own session, so the hangup never reaches it): the read is
+    stopped as the sidebar exits, not left running for good."""
+    started = tmp_path / "started"
+    os.mkfifo(started)
+    script = (f"import signal, threading\nfrom brindle import spawn\nspawn.exit_on_hangup()\n"
+              f"threading.Thread(target=spawn.read, args=(['sh', '-c', 'echo $$ > {started}; "
+              f"exec tail -f /dev/null'],), daemon=True).start()\n"
+              f"print(open('{started}').read(), end='', flush=True)\nsignal.pause()\n")
+    sidebar = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True)
+    pid = int(sidebar.stdout.readline())     # (a sidebar that never started reads as "")
+    try:
+        os.kill(sidebar.pid, signal.SIGHUP)
+        sidebar.wait()
+        assert not procs.alive(pid)
+    finally:
+        if procs.alive(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
 def _a_cancelled_request_stops_the_read_its_thread_left_running():
     got: list[BaseException] = []
 
@@ -326,7 +358,7 @@ def _a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db, rep
         spawn.current().stop()             # the client leaves right after the first change
 
     monkeypatch.setattr(tmux, "kill_window", kill_window)
-    monkeypatch.setattr(procs, "Path", lambda p: tmp_path / "no-proc")    # ps, not /proc, on Linux too
+    monkeypatch.setattr(procs, "PROC", tmp_path / "no-proc")    # ps, not /proc, on Linux too
     monkeypatch.setattr(subprocess, "Popen", _FakePs)
     _FakePs.started = []
     monkeypatch.setattr(procs, "terminate", lambda pids, grace=3.0: terminated.update(pids) or len(pids))
@@ -334,7 +366,7 @@ def _a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db, rep
     with spawn.deadline(30):
         agents.pause_worker(db, db.get_agent("a1"))
     assert closed == ["%7"]
-    assert [argv[0] for argv in _FakePs.started] == ["ps"]   # admitted through spawn.read
+    assert [argv[0] for argv in _FakePs.started] == ["ps", "ps"]   # admitted through spawn.read
     assert terminated == {5001, 5002, 5003}
     assert all(s.ended_at is not None for s in db.native_subagents("a1"))
     assert db.get_agent("a1").status == "paused"
@@ -396,6 +428,7 @@ def _row(scenario, id, why=None, **params):
     _row(_room, "room-pressure-warn", load=5.5, level=2, expected=1.5),
     _row(_a_worker_starts_after_its_room_wait_limit, "room-wait-limit", maximum=None),
     _row(_a_worker_starts_after_its_room_wait_limit, "room-wait-configured-limit", maximum=60),
+    _row(_a_disk_wait_outlasts_the_room_wait_limit, "room-wait-not-for-disk"),
     _row(_a_high_load_average_with_idle_cpus_leaves_room, "room-idle-cpu-high-loadavg"),
     _row(_a_start_whose_room_sample_outlasts_its_deadline_is_refused, "room-sample-past-deadline"),
     _row(_checks_and_setup_run_at_normal_priority, "normal-priority-checks"),
@@ -404,6 +437,8 @@ def _row(scenario, id, why=None, **params):
     _row(_a_started_helper_commits_its_request_and_a_started_read_does_not, "subprocess-helper-vs-read",
          "only a helper whose request committed may outlive it; a read must not"),
     _row(_an_abandoned_read_leaves_no_process, "abandoned-read"),
+    _row(_a_hung_up_sidebar_leaves_no_read_running, "hung-up-sidebar-read",
+         "a read must not outlive the process that started it"),
     _row(_a_cancelled_request_stops_the_read_its_thread_left_running, "cancelled-read",
          "a cancelled request stops the read its worker thread left running"),
     _row(_a_post_whose_client_left_mid_action_runs_to_its_end, "client-left-post",
