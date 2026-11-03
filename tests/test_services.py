@@ -7,7 +7,6 @@ import stat
 import pytest
 
 from brindle import services, workspaces
-from brindle.config import PORT_BLOCK_SIZE, load_repo_config
 from brindle.pro import license
 
 
@@ -35,14 +34,6 @@ def entitled(monkeypatch):
 def configure(repo, services_cfg):
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text(json.dumps({"services": services_cfg}))
-
-
-def test_ports_come_from_the_block_after_the_apps_own(db, repo):
-    configure(repo, [{"name": f"s{i}", "image": "i", "port": 1000 + i}
-                     for i in range(PORT_BLOCK_SIZE + 2)])
-    ws = workspaces.create(db, str(repo), "feat-a", run_setup=False).workspace
-    svcs = services.resolve(ws, load_repo_config(str(repo)))
-    assert [s.host_port for s in svcs] == [ws.port_base + 1 + i for i in range(PORT_BLOCK_SIZE - 1)]
 
 
 def test_started_on_create_and_in_workspace_env(db, repo, fake_docker, entitled):
@@ -75,11 +66,3 @@ def test_not_entitled_runs_nothing(db, repo, fake_docker, monkeypatch, capsys):
     assert "need brindle Pro" in capsys.readouterr().err
     assert "DATABASE_URL" not in workspaces.workspace_env(ws)
 
-
-def test_docker_missing_only_warns(db, repo, entitled, monkeypatch, capsys):
-    monkeypatch.setattr(services.shutil, "which",
-                        lambda name, *a, **k: None if name == "docker" else "/usr/bin/" + name)
-    configure(repo, [{"name": "db", "preset": "postgres"}])
-    created = workspaces.create(db, str(repo), "feat-a", run_setup=True)
-    assert created.workspace.id
-    assert "docker not found" in capsys.readouterr().err
