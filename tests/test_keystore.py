@@ -10,8 +10,12 @@ from brindle.keystore import CredentialError
 FAKE = "sk-ant-test-0123456789abcd"
 
 
-@pytest.mark.parametrize("record", [{"value": FAKE, "updated_at": 7}, None])
-def test_keychain_read_cached(monkeypatch, record):
+@pytest.mark.parametrize("record,external", [
+    ({"value": FAKE, "updated_at": 7}, None),
+    ({"value": FAKE, "updated_at": 7}, {"value": "external-replacement"}),
+    (None, None),
+])
+def test_keychain_read_cached(monkeypatch, record, external):
     from starlette.requests import Request
     from brindle import preflight, providers
     from brindle.daemon.routes_read import provider_preflight
@@ -50,13 +54,16 @@ def test_keychain_read_cached(monkeypatch, record):
     now[0] += keystore.KEYCHAIN_READ_TTL
     assert store.load() == record
     assert calls.count("find-generic-password") == 4
+    stored[0] = external  # another process mutates the key without invalidating our cache
+    assert not keystore.set_check(account, "verified", FAKE)
+    assert stored[0] == external
     store.save({"value": "replacement"})
     assert keystore.KeychainStore(service, account).load() == {"value": "replacement"}
-    assert calls.count("find-generic-password") == 5
+    assert calls.count("find-generic-password") == 6
     store.delete()
     assert keystore.KeychainStore(service, account).load() is None
     assert store.load() is None
-    assert calls.count("find-generic-password") == 6
+    assert calls.count("find-generic-password") == 7
     now[0] += keystore.KEYCHAIN_READ_TTL
     monkeypatch.setattr(keystore.KeychainStore, "_run", lambda self, args, stdin=None:
                         calls.append(args[0]) or CompletedProcess(args, 1, FAKE, FAKE))
@@ -64,7 +71,7 @@ def test_keychain_read_cached(monkeypatch, record):
         with pytest.raises(CredentialError) as exc:
             store.load()
         assert FAKE not in str(exc.value)
-    assert calls.count("find-generic-password") == 8
+    assert calls.count("find-generic-password") == 9
 
 
 def test_file_backend_refuses_loose_permissions(brindle_home):

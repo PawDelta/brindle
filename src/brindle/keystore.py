@@ -31,6 +31,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -67,6 +68,25 @@ class _KeychainRead:
 # missing items. Keep immutable blobs here so callers cannot mutate cached records.
 _keychain_reads: dict[tuple[str, str], _KeychainRead] = {}
 _keychain_lock = threading.RLock()
+_uncached_reads: contextvars.ContextVar[bool] = contextvars.ContextVar("keystore_uncached_reads", default=False)
+
+
+@contextlib.contextmanager
+def uncached_reading() -> Iterator[None]:
+    """Read current credentials while holding a cross-process mutation lock.
+
+    Enter only after acquiring that lock: a cache populated before acquisition
+    cannot tell whether another process replaced or deleted the credentials.
+    Both the backend TTL and get_key's request memo are bypassed in this context.
+    Successful backend reads still update the process cache, so subsequent
+    polling sees the newly observed record without another keychain lookup.
+    Nested contexts restore the caller's read policy when they exit.
+    """
+    token = _uncached_reads.set(True)
+    try:
+        yield
+    finally:
+        _uncached_reads.reset(token)
 
 
 class CredentialError(Exception):
@@ -116,7 +136,7 @@ class KeychainStore:
         # Serialize a miss with writes and other readers: an in-flight read must
         # not put an old value back after save/delete invalidates it.
         with self._read.lock:
-            if time.monotonic() < self._read.expires:
+            if not _uncached_reads.get() and time.monotonic() < self._read.expires:
                 return _decode(self._read.blob) if self._read.blob is not None else None
             self._read.invalidate()
             r = self._run(["find-generic-password", "-a", self.account, "-s", self.service, "-w"])
@@ -339,7 +359,8 @@ _key_lock = threading.RLock()
 @contextlib.contextmanager
 def _locked():
     """Serializes every change to a stored key across daemon threads and, through
-    a lock file, across the CLI and hook processes."""
+    a lock file, across the CLI and hook processes.
+    Reads under this lock bypass caches to observe changes from other processes."""
     with _key_lock:
         fd = None
         if fcntl is not None:
@@ -356,7 +377,8 @@ def _locked():
                     os.close(fd)
                 raise CredentialError(f"couldn't lock the key store ({type(e).__name__})") from None
         try:
-            yield
+            with uncached_reading():
+                yield
         finally:
             if fd is not None:
                 os.close(fd)     # closing drops the flock
@@ -392,7 +414,7 @@ def reading():
 
 
 def get_key(name: str) -> str | None:
-    memo = _reads.get()
+    memo = None if _uncached_reads.get() else _reads.get()
     if memo is not None and name in memo:
         return memo[name]
     rec = _key_store(name).load()
