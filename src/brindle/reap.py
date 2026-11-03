@@ -38,7 +38,9 @@ a git status that fails counts as uncommitted work. A session's cleanup
 closes only the agents whose panes are in it (``_occupants``). Each step is
 planned again, for its one target, from a fresh listing just before it acts:
 a client that attached, input that arrived or work that went uncommitted
-since the plan stops it. One reaper runs at a time per brindle home (a
+since the plan stops it. A step whose plan ran git probes (merged,
+contained, similar) is checked once more with their answers, so nothing
+slow sits between the last safety read and the stop. One reaper runs at a time per brindle home (a
 lock); a sweep that finds it held skips its turn.
 
 Everything done is logged in the ``reaped`` table; ``brindle doctor`` lists
@@ -85,6 +87,7 @@ class Reap:
     act: Callable[[], None]
     root_id: str | None = None
     notice: bool = False          # a message to a supervisor, not a stop
+    facts: dict | None = None     # its git probes' answers, for the last check before it acts
 
 
 def _default_home() -> Path:
@@ -154,7 +157,8 @@ def _close_all(db: DB, ids: list[str], panes) -> None:
 
 
 def _sessions(db: DB, now: float, panes, live: set[str], sessions: list[tmux.SessionInfo],
-              session_of: dict[str, tmux.SessionInfo], only: str | None = None) -> list[Reap]:
+              session_of: dict[str, tmux.SessionInfo], only: str | None = None,
+              facts: dict | None = None) -> list[Reap]:
     out: list[Reap] = []
     all_agents = db.list_agents()
     by_pane = {a.tmux_window: a for a in all_agents if a.tmux_window and agents.same_server(a, panes)}
@@ -185,7 +189,7 @@ def _sessions(db: DB, now: float, panes, live: set[str], sessions: list[tmux.Ses
               and not any(a.mode == "interactive" for a in live_here)):
             why = "its worktree is gone"
         else:
-            out.extend(_finished_workers(db, s, ws, live, panes, session_of, now))
+            out.extend(_finished_workers(db, s, ws, live, panes, session_of, now, facts))
             continue
         closing = _occupants(s, live_here, panes, session_of)
 
@@ -197,7 +201,8 @@ def _sessions(db: DB, now: float, panes, live: set[str], sessions: list[tmux.Ses
 
 
 def _finished_workers(db: DB, s: tmux.SessionInfo, ws: Workspace | None, live: set[str],
-                      panes, session_of: dict[str, tmux.SessionInfo], now: float) -> list[Reap]:
+                      panes, session_of: dict[str, tmux.SessionInfo], now: float,
+                      facts: dict | None = None) -> list[Reap]:
     """Cases 2 and 3: the session of a workspace whose work is finished."""
     if ws is None or not os.path.isdir(ws.path):
         return []
@@ -217,15 +222,18 @@ def _finished_workers(db: DB, s: tmux.SessionInfo, ws: Workspace | None, live: s
                          panes, session_of)
     from brindle import cull
 
-    if ws.kind == "worktree" and cull.workspaces_merged(ws):
+    merged = facts["merged"] if facts is not None else (
+        ws.kind == "worktree" and cull.workspaces_merged(ws))
+    if merged:
         def act(running=running) -> None:
             _close_all(db, running, panes)
             _kill(s, True)()
         return [Reap("finished", s.name, f"killed tmux session {s.name}: branch {ws.branch} is merged"
-                     + (f", closed {len(running)} agent(s)" if running else ""), act)]
+                     + (f", closed {len(running)} agent(s)" if running else ""), act,
+                     facts={"merged": True})]
     if not running and s.idle():
         return [Reap("shell", s.name, f"killed tmux session {s.name}: only a shell left, "
-                     f"its work on {ws.branch} is finished", _kill(s, False))]
+                     f"its work on {ws.branch} is finished", _kill(s, False), facts={"merged": False})]
     return []
 
 
@@ -443,7 +451,7 @@ def _tell(db: DB, a: Agent, body: str) -> None:
 
 
 def _superseded(db: DB, now: float, live: set[str], panes, session_of: dict[str, tmux.SessionInfo],
-                cache: dict, only: str | None = None) -> list[Reap]:
+                cache: dict, only: str | None = None, facts: dict | None = None) -> list[Reap]:
     from brindle import cull
 
     out = []
@@ -468,11 +476,15 @@ def _superseded(db: DB, now: float, live: set[str], panes, session_of: dict[str,
         if now - last < hours * 3600:
             continue
         try:
-            commit = contained(ws)
+            if facts is not None:
+                commit, close = facts["commit"], facts["close"]
+            else:
+                commit = contained(ws)
+                close = None if commit else similar(db, a, ws)
             dirty = bool(commit) and _dirty(ws.path)
-            close = None if commit else similar(db, a, ws)
         except git.GitError:
             continue
+        known = {"commit": commit, "close": close}
         base = ws.base_branch
         if commit and not dirty:
             body = (f"Worker {a.id} (branch `{ws.branch}`) was stopped: its branch adds nothing "
@@ -488,21 +500,24 @@ def _superseded(db: DB, now: float, live: set[str], panes, session_of: dict[str,
                 except agents.AgentError:
                     db.enqueue(a.parent_id, body, a.id)
             out.append(Reap("superseded", a.id, f"stopped worker {a.id}: its branch {ws.branch} "
-                            f"is already in {base} ({commit[:10]})", act, root_id=a.parent_id))
+                            f"is already in {base} ({commit[:10]})", act, root_id=a.parent_id,
+                            facts=known))
         elif commit and not _noted(db, "superseded_dirty", a.id):
             body = (f"Worker {a.id}'s branch `{ws.branch}` is already in `{base}` (commit "
                     f"{commit[:10]}), but its worktree {ws.path} has uncommitted changes, so it "
                     f"wasn't stopped. Look at them, then stop {a.id} if nothing there is needed.")
             out.append(Reap("superseded_dirty", a.id, f"told {a.parent_id} that worker {a.id}'s "
                             f"branch is already in {base} (uncommitted changes kept it running)",
-                            lambda a=a, body=body: _tell(db, a, body), root_id=a.parent_id, notice=True))
+                            lambda a=a, body=body: _tell(db, a, body), root_id=a.parent_id, notice=True,
+                            facts=known))
         elif close and not _noted(db, "similar", a.id):
             branch, n, m = close
             body = (f"Similar work merged in {branch} ({n} of {m} files overlap); "
                     f"consider stopping {a.id}.")
             out.append(Reap("similar", a.id, f"told {a.parent_id} that similar work to worker "
                             f"{a.id}'s merged in {branch}",
-                            lambda a=a, body=body: _tell(db, a, body), root_id=a.parent_id, notice=True))
+                            lambda a=a, body=body: _tell(db, a, body), root_id=a.parent_id, notice=True,
+                            facts=known))
     return out
 
 
@@ -517,18 +532,20 @@ def _agents(db: DB, only: str | None) -> list[Agent]:
 
 
 def plan(db: DB, now: float, panes, sessions: list[tmux.SessionInfo],
-         only: str | None = None) -> list[Reap]:
-    """What to reap; ``only``: just what targets that session or agent."""
+         only: str | None = None, facts: dict | None = None) -> list[Reap]:
+    """What to reap; ``only``: just what targets that session or agent.
+    ``facts``: a plan's git probe answers (merged, contained, similar) taken
+    as still true, so only the quick safety reads run (``_apply``'s last check)."""
     from brindle import view
 
     live = view.live_agents(db, panes)
     session_of = {p.id: s for s in sessions for p in s.panes}
     cache: dict = {}
-    steps = [lambda: _sessions(db, now, panes, live, sessions, session_of, only),
+    steps = [lambda: _sessions(db, now, panes, live, sessions, session_of, only, facts),
              lambda: _reviewers(db, now, live, panes, session_of, only),
              lambda: _idle_supervisors(db, now, live, panes, session_of, cache, only),
              lambda: _coordinators(db, now, live, only),
-             lambda: _superseded(db, now, live, panes, session_of, cache, only)]
+             lambda: _superseded(db, now, live, panes, session_of, cache, only, facts)]
     out: list[Reap] = []
     for step in steps:
         try:
@@ -560,18 +577,25 @@ def run(db: DB, now: float | None = None, *, dry_run: bool = False) -> list[str]
         return _apply(db, now, plan(db, now, tmux.list_panes(), tmux.session_infos()))
 
 
-def _again(db: DB, now: float, r: Reap) -> Reap | None:
+def _again(db: DB, now: float, r: Reap, facts: dict | None = None) -> Reap | None:
     """``r`` as a plan made from a fresh listing and the DB now has it, or
     None: planning took a while, and since then a client may have attached,
-    input arrived, a worker resumed or work gone uncommitted."""
-    fresh = plan(db, now, tmux.list_panes(), tmux.session_infos(), only=r.target)
+    input arrived, a worker resumed or work gone uncommitted. With ``facts``
+    its git probes aren't run again: only the quick reads."""
+    fresh = plan(db, now, tmux.list_panes(), tmux.session_infos(), only=r.target, facts=facts)
     return next((f for f in fresh if f.kind == r.kind and f.target == r.target), None)
 
 
 def _apply(db: DB, now: float, reaps: list[Reap]) -> list[str]:
     done = []
     for planned in reaps:
+        # Twice: once to see it's still needed (git probes and all, which take a
+        # while), then, with those answers, for the safety state as it is now
+        # (attached, ownership, agents, activity, uncommitted work), just before
+        # acting, with no slow probe in between.
         r = _again(db, now, planned)
+        if r is not None and r.facts is not None:
+            r = _again(db, now, r, facts=r.facts)
         if r is None:
             continue    # no longer safe, or no longer needed
         # Recorded first: stopping a supervisor can stop the process running this

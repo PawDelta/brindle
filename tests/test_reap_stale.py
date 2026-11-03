@@ -236,6 +236,46 @@ def test_what_changed_since_planning_is_not_reaped(db, repo, tmp_path, fake_tmux
         assert db.get_agent("boss").status != "paused"
 
 
+@pytest.mark.parametrize("probe", ["workspaces_merged", "contained"])
+def test_what_changes_during_the_revalidation_probe_is_not_reaped(db, repo, fake_tmux, monkeypatch, probe):
+    """The re-plan's own git probes take a while too: the stop acts on safety
+    state read after them, not on the listing taken before them."""
+    from pathlib import Path
+
+    ws = workspaces.create(db, str(repo), "feat-race").workspace
+    db.conn.execute("UPDATE workspaces SET created_at=? WHERE id=?", (OLD, ws.id))
+    monkeypatch.setattr(tmux, "window_alive", lambda *a, **k: True)
+    if probe == "workspaces_merged":   # a finished worker's session: a client attaches
+        add(db, ws, "w1", tmux_window="%3", result="did it")
+    else:                              # a superseded worker: input arrives in its pane
+        add(db, ws, "boss", mode="interactive", profile="supervisor", tmux_window="%1", status_since=NOW)
+        add(db, ws, "w1", parent_id="boss", tmux_window="%3", task="Add a greeting")
+        monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+        _commit(Path(ws.path), "def greet():\n    return 'hi'\n")
+        _commit(repo, "def greet():\n    return 'hi'\n", when=NOW, msg="squashed feat-race")
+        live(fake_tmux, "%1")
+    live(fake_tmux, "%3")
+    fake_tmux.sessions = [session(ws.tmux_session, pane("%3", ws.path, cmd="claude"))]
+    real = getattr(cull if probe == "workspaces_merged" else reap, probe)
+    calls = []
+
+    def slow_probe(w):
+        calls.append(w)
+        if len(calls) == 2:   # the revalidation pass, after its fresh listing
+            if probe == "workspaces_merged":
+                fake_tmux.sessions[0].attached = True
+            else:
+                fake_tmux.sessions[0].panes[0].activity = NOW
+        return real(w)
+    monkeypatch.setattr(cull if probe == "workspaces_merged" else reap, probe, slow_probe)
+
+    reap.run(db)
+
+    assert len(calls) >= 2
+    assert fake_tmux.killed == [] and fake_tmux.stopped == []
+    assert db.get_agent("w1").dismissed_at is None
+
+
 def _commit(cwd, text, when=NOW - 2 * 86400, msg="change"):
     (cwd / "app.py").write_text(text)
     sh(f"GIT_AUTHOR_DATE='@{int(when)} +0000' GIT_COMMITTER_DATE='@{int(when)} +0000' git commit -qam '{msg}'", cwd)
