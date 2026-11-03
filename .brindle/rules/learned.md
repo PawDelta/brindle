@@ -38,6 +38,20 @@ that adds more than 15 test functions or more test lines than source lines.
   `@pytest.mark.variant("why")`.
 - Use database rows and fakes, not real tmux sessions, subprocesses or sleeps,
   unless spawning or timing is what the test is about.
+Tests must also be fast. The whole suite runs on every branch, so a slow test
+costs every worker, every time.
+- Each test's call phase must finish within 10 seconds (tests/conftest.py fails
+  the run otherwise; BRINDLE_TEST_DURATION_LIMIT overrides it). Aim for well
+  under one second. Mark a genuinely slow test `@pytest.mark.slow("why")`, and
+  expect reviewers to ask why.
+- Test the function, not the program: call the pure function or seed DB rows
+  instead of running the brindle CLI, a git repo, tmux or a subprocess.
+- At most one end-to-end test per feature; every other case goes in unit tests.
+- Build expensive setup (a git repo, a DB with many rows) once, in a
+  module-scoped fixture, and copy it rather than rebuild it per test.
+- Never wait on the wall clock: pass a fake clock or `now`, and drive events
+  directly instead of polling for them.
+- No network: fake the HTTP client or the server it talks to.
 - Reviewers: treat any of the above in a diff as a blocker, the same as a missing
   test. Deleting a redundant test is an improvement, not a coverage loss.
 - When a lookup takes an optional filter (such as a profile), treat None as 'no filter' only when the caller truly means any; never let a missing value match a live resource that belongs to a different identity. When an action can be triggered twice, make the second trigger check for and respect existing in-flight work instead of cancelling or replacing it, and cover that path with a test that runs the real dispatch code rather than a mock. (learned 2026-10-13 from 4 reviews of developer-sonnet work: Lookup ignores caller's filter and races on detached work; rule 8967a6e2)

@@ -187,6 +187,39 @@ def pytest_collection_modifyitems(config, items):
         items[:] = [item for item in items if not item.get_closest_marker("brindle_ci")]
 
 
+# A test's call phase must finish within BRINDLE_TEST_DURATION_LIMIT seconds
+# (default 10; 0 turns the guard off) unless it is marked
+# @pytest.mark.slow("why"). Slow tests are what make the suite take hours.
+_SLOW_TESTS: list[tuple[str, float]] = []
+
+
+def _duration_limit() -> float:
+    return float(os.environ.get("BRINDLE_TEST_DURATION_LIMIT", "10"))
+
+
+def _over_limit(report, limit: float) -> bool:
+    return (limit > 0 and report.when == "call" and report.passed
+            and report.duration > limit and "slow" not in report.keywords)
+
+
+def pytest_runtest_logreport(report):
+    if _over_limit(report, _duration_limit()):
+        _SLOW_TESTS.append((report.nodeid, report.duration))
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if hasattr(session.config, "workerinput") or not _SLOW_TESTS:
+        return
+    limit = _duration_limit()
+    lines = [f"{nodeid}: {secs:.1f}s" for nodeid, secs in sorted(_SLOW_TESTS, key=lambda t: -t[1])]
+    session.config.get_terminal_writer().line(
+        f"\n{len(lines)} test(s) ran longer than {limit:g}s: make them faster "
+        "(fakes, DB rows, a fake clock) or mark them @pytest.mark.slow(\"why\"):\n  "
+        + "\n  ".join(lines), red=True)
+    if session.exitstatus == 0:
+        session.exitstatus = 1
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_teardown(item, nextitem):
     """Each test's sessions end with it, so none outlive the test that made
