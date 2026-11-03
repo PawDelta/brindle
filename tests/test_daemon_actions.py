@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 from conftest import run_scenario, sh
+from test_daemon_api import _repo_template, repo  # noqa: F401 - a copied template repo, not conftest's rebuild
 from test_reliability import CLAUDE_BUSY, CLAUDE_IDLE
 
 from brindle import agents, autopilot, bus, config, coordinator, pipeline, preflight, providers, workspaces
@@ -617,7 +618,11 @@ def test_api_key_lifecycle_check_result_stays_with_the_key_it_checked(db, monkey
 NOFLOCK = False  # True: children skip flock, which must make the lock test below fail
 
 
-@pytest.mark.parametrize("fault", ["lock-unavailable", "delete-during-update"])
+@pytest.mark.parametrize("fault", [
+    "lock-unavailable",
+    pytest.param("delete-during-update", marks=pytest.mark.slow(
+        "a cross-process lock race: two spawned interpreters, and a 2s window the delete must stay blocked in")),
+])
 def test_api_key_lifecycle_key_updates_hold_the_store_lock(monkeypatch, provider_http, fault):
     import fcntl
     import multiprocessing
@@ -1242,6 +1247,8 @@ ASK = {"hook_event_name": "PermissionRequest", "tool_name": "Bash", "tool_input"
 CLAUDE_PROMPT = "Bash command\n  npm test\nDo you want to proceed?\n" + "\n".join(
     f"{'❯' if i == 0 else ' '} {i + 1}. {o}" for i, o in enumerate(OPTIONS))
 HOLD = 2    # the repo's permission_hold_seconds in these tests
+# A hold running out is the behaviour: the hook's real wait can't be faked away.
+WAITS_OUT_THE_HOLD = pytest.mark.slow("waits out the hook's real permission hold (HOLD seconds)")
 
 
 class _HookConnection:
@@ -1313,7 +1320,7 @@ def _brindle_allows_npm_test() -> bool:
     ("allow_once", False, "native", 200, "allow", None),
     # A deny already in flight holds the request: this answer is refused, writes nothing,
     # and the hold runs out.
-    ("allow_always", False, "in-flight", 409, None, None),
+    pytest.param("allow_always", False, "in-flight", 409, None, None, marks=WAITS_OUT_THE_HOLD),
     # The hook gives up between the claim and the hand-over: the rule written meanwhile goes again.
     ("allow_always", False, "lost", 409, None, None),
     # The hold expires after the answer is handed over but before the hook takes it: not
@@ -1327,17 +1334,18 @@ def _brindle_allows_npm_test() -> bool:
     # own prompt: its PostToolUse ends the retry's hold, not the old denied request's.
     ("allow_once", True, "retried", None, None, None),
     # The stored request changed while the hook waits: it isn't the request the hook registered.
-    ("allow_once", True, "mutated", 409, None, None),
+    pytest.param("allow_once", True, "mutated", 409, None, None, marks=WAITS_OUT_THE_HOLD),
     # An answer written into the database is no answer: the hold runs out.
-    ("allow_once", True, "db-answer", None, None, None),
+    pytest.param("allow_once", True, "db-answer", None, None, None, marks=WAITS_OUT_THE_HOLD),
     # A daemon.json rewritten with another token and socket: the hook never reads it.
     ("allow_once", True, "forged-json", 200, "allow", None),
     # Another identity's session: nothing is answered or written.
-    ("allow_always", False, "locked", 409, None, None),
+    pytest.param("allow_always", False, "locked", 409, None, None, marks=WAITS_OUT_THE_HOLD),
     # The agent is closed while it waits: the hold ends, and the request with it.
     ("allow_once", True, "closed", 409, None, None),
     pytest.param("allow_once", True, "agent", 403, None, None,
-                 marks=pytest.mark.variant("an agent holding the token can't answer a permission request")),
+                 marks=[pytest.mark.variant("an agent holding the token can't answer a permission request"),
+                        WAITS_OUT_THE_HOLD]),
 ], ids=["once", "always-brindle", "always-claude", "deny", "terminal", "codex", "antigravity", "native",
         "in-flight", "lost", "expired-once", "expired-always", "shared-rule", "retried", "mutated", "db-answer", "forged-json", "locked",
         "closed", "agent"])
@@ -1478,6 +1486,7 @@ def test_a_permission_answer_resolves_through_the_hook(db, repo, world, answerin
         assert [e["payload"]["choice"] for e in bus.tail(db, kinds=("permission.answered",))] == [choice]
 
 
+@WAITS_OUT_THE_HOLD
 def test_every_held_request_is_offered_and_answered_by_its_own_id(db, repo, world, answering, monkeypatch):
     from brindle import permissions
     from brindle.db import DB
@@ -1565,6 +1574,9 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     assert (shown.via, shown.choices, bool(shown.terminal)) == ("prompt", [], True)    # "Go to it"
     code, reply = _send("POST", "/v1/inbox/wk/permission", {"choice": "allow_once"})
     assert code == 409 and pressed == [], reply
+    # Once the pane is past its prompt, nothing is shown as pending any more.
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: CLAUDE_IDLE)
+    assert inbox.pending_permissions(db, db.get_agent("wk")) == []
 
 
 # The pane each second: the prompt, past it twice, a read it can't tell (the count starts over), past it for good.
@@ -1627,6 +1639,7 @@ def _commit(path, name: str, text: str, message: str = "work") -> str:
     return sh("git rev-parse HEAD", path)
 
 
+@pytest.mark.slow("real git end to end: 14 readiness reads of a live checkout, ~210 git calls")
 def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     from brindle import gates
     from brindle.daemon import session_review
@@ -1800,6 +1813,7 @@ def test_session_review_edits_commit_on_the_session_branch(db, repo, lead, path,
     assert sh("git ls-files app.py", sess) == ("" if setup == "delete" else "app.py")
 
 
+@pytest.mark.slow("real git end to end: the session's checks run and its branch is pushed, ~110 git calls")
 def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_path, monkeypatch):
     sess, called = Path(lead.path), tmp_path / "gh-called"
     fake = tmp_path / "bin" / "gh"
@@ -1830,16 +1844,15 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     assert "--base main --head sess --title Ship it --body" in called.read_text()
 
 
-@pytest.mark.parametrize("step,passed", [
-    ("ready", True),
-    ("ready", False),
-    ("open", True),
-    ("new-commits", True),
-], ids=["ready", "checks-fail", "open", "new-commits"])
-def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, step, passed):
+@pytest.mark.parametrize("passed", [
+    pytest.param(True, id="new-commits",
+                 marks=pytest.mark.slow("real git end to end: ~150 git calls through readiness, checks, push and gh")),
+    pytest.param(False, id="checks-fail"),
+])
+def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     """A ready session's PR is prepared (drafted, its checks run, nothing pushed) and put to the
     person in the Inbox; only their Open PR pushes the checked sha, and an open PR's new commits
-    wait for their Push."""
+    wait for their Push. (One row walks ready, open and new commits in turn.)"""
     from brindle import gates
     from brindle.daemon import session_review
     from brindle.service import inbox
@@ -1876,15 +1889,11 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, step, passed):
         assert [to for to, _ in told] == ["lead"] and "validate" in told[0][1] and "boom" in told[0][1]
         return
     assert asked() == [("pr_ready", "PR ready for your approval")] and told == []
-    if step == "ready":
-        return
     # A check required since brindle prepared it, the HEAD the same: that one runs, the passed one isn't run again.
     config.set_local(lead.repo_root, "checks", ["validate", "lint"])
     assert _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})[0] == 202
     # The sha brindle checked; the Inbox item goes.
     assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1, [])
-    if step == "open":
-        return
     newer = _commit(sess, "a.py", "b\n")
     watch.sweep(db)
     _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
@@ -2375,11 +2384,15 @@ def test_starting_a_session_with_a_name_keeps_it_on_the_new_root(db, world, monk
 
 
 def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo, world, monkeypatch):
-    from brindle import providers
+    from brindle import providers, tmux
     from brindle.daemon import routes_read
     from brindle.profiles import load_profile
     from brindle.service import sessions as svc
 
+    # No tmux server to ask what a pane would inherit (what tmux.inherited_env returns
+    # without one), and no branch tidying (a fetch) before each start.
+    monkeypatch.setattr(tmux, "inherited_env", lambda session: dict(os.environ))
+    monkeypatch.setattr(svc, "tidy_branch", lambda db_, ws: (ws, []))
     before = config._read_json(config.scope_paths(str(repo))["local"])
     code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local", "kinds": {
         "supervisor": {"model": "nope"}}})

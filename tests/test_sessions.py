@@ -12,6 +12,7 @@ import pytest
 
 from brindle import agents, git, providers, sessions, tmux, workspaces
 from brindle.db import Agent
+from git_snapshots import fast_host_tools, repo, workspaces_once  # noqa: F401  (fixtures)
 
 
 def add(db, ws, aid, mode="interactive", parent=None, status="paused", since=None, result=None):
@@ -48,13 +49,15 @@ def test_continue_backfills_a_live_legacy_root_without_enabling_workers(db, root
 
 @pytest.mark.parametrize("own_dirty", [False, True])
 def test_forget_removes_clean_worktrees_keeps_dirty_ones_and_all_branches_and_own_worktree(
-    db, root, repo, own_dirty
+    db, root, repo, own_dirty, tmp_path, tmp_path_factory
 ):
-    own = workspaces.create(db, str(repo), "brindle/session-1").workspace
-    clean = workspaces.create(db, str(repo), "clean-work").workspace
-    dirty = workspaces.create(db, str(repo), "dirty-work").workspace
-    open(os.path.join(clean.path, "done.txt"), "w").write("x")
-    git.commit_all(clean.path, "finished")
+    def build():
+        made = tuple(workspaces.create(db, str(repo), b).workspace for b in ("brindle/session-1", "clean-work", "dirty-work"))
+        open(os.path.join(made[1].path, "done.txt"), "w").write("x")
+        git.commit_all(made[1].path, "finished")
+        return made
+
+    own, clean, dirty = workspaces_once("sessions:forget", db, tmp_path, tmp_path_factory, build)
     open(os.path.join(dirty.path, "wip.txt"), "w").write("x")  # uncommitted
     if own_dirty:
         open(os.path.join(own.path, "wip.txt"), "w").write("x")
