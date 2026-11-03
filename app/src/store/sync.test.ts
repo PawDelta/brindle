@@ -14,6 +14,33 @@ function setup() {
 }
 
 describe("startSync", () => {
+  it.each(["agent.closed", "rewound"])("discards a snapshot started before %s even if the queued refresh fails", async (kind) => {
+    const { daemon, client, store, sync } = setup();
+    await flush();
+    await sync.idle();
+    let finish!: (rows: typeof daemon.data.workspaces) => void;
+    vi.spyOn(client, "snapshot")
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }))
+      .mockRejectedValueOnce(new Error("offline"));
+    vi.spyOn(client, "inbox").mockResolvedValueOnce([waiting]);
+    const older = sync.refresh();
+    daemon.publish(kind === "rewound" ? "agent.status" : kind, { repo_root: REPO, agent_id: "w1", payload: { status: "rewound" } });
+    await flush();
+    const workers = () => store.getState().workspaces.flatMap((ws) => ws.agents ?? []);
+    expect(workers().some((a) => a.id === "w1")).toBe(false);
+    finish([root, worker]);
+    await older;
+    await sync.idle();
+    expect(store.getState().error).toBe("offline");
+    expect(workers().some((a) => a.id === "w1")).toBe(false);
+    expect(store.getState().inbox.some((i) => i.agent_id === "w1")).toBe(false);
+    daemon.data.inbox = [waiting];
+    await sync.refresh(); // a response requested after the lifecycle event may resume the worker
+    expect(workers().some((a) => a.id === "w1")).toBe(true);
+    expect(store.getState().inbox).toEqual([waiting]);
+    sync.stop();
+  });
+
   it("loads the snapshot and inbox once the stream opens, for its repo only", async () => {
     const { daemon, store, sync } = setup();
     await flush();
