@@ -131,6 +131,17 @@ def test_record_payload_keys_and_contents(parts, remote):
         assert set(body) <= cloud.RECORD_KEYS
 
 
+def test_unsafe_and_rogue_profile_names_are_never_sent_or_followed(parts, remote):
+    lr = make(parts, remote)
+    lr.record(task(profile="my profile/../x"), Outcome("merged"))
+    lr.flush()
+    assert remote.records == []
+    assert lr.suggest(task(), ["developer", "/etc/passwd"]) is None
+    assert remote.suggests == []
+    remote.routes["POST /learning/suggest"] = [(200, {"profile": "rogue"})]   # not among the candidates
+    assert lr.suggest(task(), ["developer", "reviewer"]) is None
+
+
 def test_records_are_sent_by_the_background_thread(parts, remote, monkeypatch):
     # The send is held until flush is polling, so flush's wait loop always runs.
     polling = threading.Event()

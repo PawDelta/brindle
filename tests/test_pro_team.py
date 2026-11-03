@@ -174,8 +174,10 @@ def test_event_payload_has_exactly_the_contract_keys(team):
     p = events_plugin(team)
     p.emit(ev("review", approved=True))
     p.emit(ev("remove", merged=False, actor="user"))
+    p.emit(ev(profile="my profile", provider="Claude Code", model="/Users/me/models/x.gguf"))
     assert p.flush()
-    review, remove = team.events
+    review, remove, unsafe = team.events
+    assert (unsafe["profile"], unsafe["provider"], unsafe["model"]) == (None, None, None)
     keys = {"kind", "agent_ref", "branch_ref", "profile", "provider", "model", "actor_ref", "at",
             "approved", "merged", "cost_usd"}     # by_model only when there is a split
     assert set(review) == set(remove) == keys
@@ -189,7 +191,7 @@ def test_event_payload_has_exactly_the_contract_keys(team):
     assert (review["approved"], review["merged"], remove["merged"]) == (True, None, False)
     assert review["at"] == 1_800_000_000.5
     blob = json.dumps(team.events)
-    for s in ("zebra", BRANCH, AGENT, SUPERVISOR, REPO, "secret-client-project"):
+    for s in ("zebra", BRANCH, AGENT, SUPERVISOR, REPO, "secret-client-project", "x.gguf"):
         assert s not in blob
 
 
@@ -352,10 +354,18 @@ def budgets(team, monkeypatch):
     return team
 
 
-def test_org_budgets_fail_closed_when_the_policy_was_never_fetched(budgets):
+def test_org_budgets_fail_closed_when_the_policy_was_never_fetched(budgets, monkeypatch):
     budgets.routes[f"GET /orgs/{ORG}/policy"] = [auth.TransportError("down")]
     d = plugin(budgets).org_budgets()
     assert not d.allowed and "never been fetched" in d.reason
+    # ... and a budget that can't be read means the budget is exhausted, not unlimited
+    from types import SimpleNamespace
+
+    from brindle import budget
+
+    monkeypatch.setattr(budget, "entitled", lambda: False)
+    lim = budget.limits(SimpleNamespace(budget={}), REPO)
+    assert (lim.month_usd, lim.goal_usd) == (0.0, 0.0)
 
 
 @pytest.mark.parametrize("over", [
@@ -382,6 +392,9 @@ def protected_branch(db, repo):
     from conftest import sh
     from brindle import workspaces
 
+    (repo / "infra").mkdir()
+    (repo / "infra" / "a.tf").write_text("a\n")
+    sh("git add -A && git commit -qm infra && git push -q origin main", repo)
     ws = workspaces.create(db, str(repo), "feat").workspace
     path = Path(ws.path)
     (path / "src").mkdir()
@@ -408,10 +421,17 @@ def test_a_change_to_a_protected_path_fails_the_gate(db, protected_branch, monke
     assert result.ok and result.packs == ["protected_paths"]
     commit(path, "infra/main.tf")
     commit(path, "deep/dir/poetry.lock")
+    from conftest import sh
+
+    sh("git rm -q infra/a.tf && git commit -qm rm", path)         # deleting a protected file fails too
     result = rule_checks.run(db, ws)
     assert not result.ok
-    assert sorted(v.detail.split(" ")[0] for v in result.violations) == ["deep/dir/poetry.lock", "infra/main.tf"]
+    assert sorted(v.detail.split(" ")[0] for v in result.violations) == [
+        "deep/dir/poetry.lock", "infra/a.tf", "infra/main.tf"]
     assert "protected path" in rule_checks.gate_problem(result, ws.branch)
+    files = ["infra/a.tf", "src/infra/b.py", ".github/workflows/ci.yml", "INFRA/c.tf", "src/app.py"]
+    assert rule_checks.protected_files(files, ["infra"]) == ["infra/a.tf", "INFRA/c.tf"]    # a bare directory
+    assert rule_checks.protected_files(files, ["./.github/workflows/"]) == [".github/workflows/ci.yml"]
 
 
 def test_protected_paths_that_cant_be_read_fail_the_gate(db, protected_branch, monkeypatch):
