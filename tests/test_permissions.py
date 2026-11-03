@@ -173,6 +173,8 @@ def _bypass(command):
     _bypass("gh auth -uUSER token"),
     _bypass("echo `en\\v`"),
     _bypass("echo `printenv GITHUB\\_TOKEN`"),
+    _bypass('echo "${UNSET:-`echo \\$TOKEN`}"'),
+    _bypass('echo "${UNSET:-`echo \\`env\\``}"'),
     pytest.param("dd if=README.md", "allow", marks=pytest.mark.variant("non-credential input is safe")),
     pytest.param('TOKEN="$TOKEN" echo ready', "allow",
                  marks=pytest.mark.variant("assignment value does not print")),
@@ -199,6 +201,9 @@ def _bypass(command):
     ("ps -ef", "allow"),
     ("echo $PATH '$GH_TOKEN'", "allow"),
     ("set -e", "allow"),
+    ("set -eux", "allow"),
+    ("printenv SSH_AUTH_SOCK", "allow"),
+    ("echo $GIT_AUTHOR_NAME $TOKENIZERS_PARALLELISM", "allow"),
     ("command -v env", "allow"),
 ])
 def test_credential_dumps_are_denied(tmp_path, command, expected):

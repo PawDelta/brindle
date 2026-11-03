@@ -141,6 +141,10 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "git branch -D topic"), "deny", "d-git-force"),
     (lambda ws: bash(ws, "git clean -fd"), "deny", "d-git-force"),
     (lambda ws: bash(ws, "git worktree remove --force ../wt"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git switch -f main"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git switch --discard-changes main"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git rm -f src/app.py"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git rm -f $(cat stale.txt)"), "deny", "d-git-force"),
     (lambda ws: bash(ws, "git worktree add -f ../wt topic"), "allow", None),       # a forced add discards nothing
     (lambda ws: bash(ws, "git add -f build/out.txt"), "allow", None),
     (lambda ws: bash(ws, "rm -rf / --no-preserve-root"), "deny", "d-rm"),

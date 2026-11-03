@@ -411,8 +411,8 @@ ROUTINE_ALLOWS: tuple[Rule, ...] = (
           "readonly-pipeline", "allow"),
 )
 DESTRUCTIVE_DENIES: tuple[Rule, ...] = (
-    _seed("d-git-force", "bash", "a git command that discards work (push --force or --delete, branch -D, "
-          "reset --hard, clean -f, checkout -f, worktree remove --force)", "git-force", "deny"),
+    _seed("d-git-force", "bash", "a git command that discards work (a force flag other than add -f or "
+          "worktree add -f, push --delete, branch -D, reset --hard, switch --discard-changes)", "git-force", "deny"),
     _seed("d-rm", "bash", "a recursive rm of the root, a top-level folder or the home directory",
           "rm-destructive", "deny"),
 )
@@ -1884,22 +1884,27 @@ def forced_push(command: str) -> bool:
     return any(p.force or p.delete for p in push_calls(command))
 
 
-# The git commands a force flag makes discard work (git add -f, which only adds an ignored file, isn't one).
-GIT_FORCE_DISCARDS = ("push", "branch", "clean", "checkout", "worktree")
+# git commands a force flag can't make discard work: those that only read, and
+# git add -f, which only adds an ignored file. Any other forced command may
+# (switch -f, rm -f, mv -f, tag -f ...), so the list names the safe ones.
+_GIT_UNFORCED = frozenset({*READONLY_GIT, "rev-parse", "merge-base", "rev-list", "ls-files", "ls-tree", "cat-file",
+                           "describe", "shortlog", "blame", "grep", "for-each-ref", "name-rev", "show-ref", "add"})
 
 
 def destructive_git(command: str) -> bool:
     """A git command that discards work: a push that forces or deletes, branch
-    -D (or a forced branch), reset --hard, clean -f, checkout -f, or worktree
-    remove --force."""
+    -D, reset --hard, switch --discard-changes, or a force flag on any command
+    but those in _GIT_UNFORCED and a worktree command other than remove."""
     for sub, args in _git_calls(command):
         if sub == "reset" and "--hard" in args:
             return True
         if sub == "branch" and any(re.fullmatch(r"-[A-Za-z]*D[A-Za-z]*", a) for a in args):
             return True
-        if sub == "worktree" and (not args or args[0] != "remove"):
+        if sub == "switch" and "--discard-changes" in args:
+            return True
+        if sub in _GIT_UNFORCED or sub == "worktree" and (not args or args[0] != "remove"):
             continue
-        if sub in GIT_FORCE_DISCARDS and any(_is_force(a) for a in args):
+        if any(_is_force(a) for a in args):
             return True
     return forced_push(command)
 
@@ -2051,7 +2056,16 @@ def _rule_decision(req: Request, rules: list[Rule], checks: list[str] | None) ->
     return None
 
 
-_SECRET_NAME = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|(?:^|_)PAT(?:_|$)|AUTH|CREDENTIAL|PRIVATE", re.I)
+# A secret's name has a _-separated part that is, or ends in, one of these
+# words (GH_TOKEN, OPENAI_APIKEY, NPM_AUTHTOKEN), or is PAT; a word that only
+# starts a part (TOKENIZERS, AUTHOR) doesn't count.
+_SECRET_NAME = re.compile(r"(?:^|_)(?:[A-Z0-9]*(?:TOKEN|SECRET|KEY|PASSWORD|PASSWD|AUTH|CREDENTIAL|PRIVATE)S?|PATS?)"
+                          r"(?=_|$)", re.I)
+_NOT_SECRET = frozenset({"SSH_AUTH_SOCK"})    # a socket path
+
+
+def _secret_name(name: str) -> bool:
+    return name.upper() not in _NOT_SECRET and bool(_SECRET_NAME.search(name))
 
 
 def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
@@ -2227,13 +2241,15 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
         if any(a in ("--help", "--version") for a in args):
             return False
         names = [a for a in args if not a.startswith("-")]
-        return not names or any(_SECRET_NAME.search(a) for a in names)
+        return not names or any(_secret_name(a) for a in names)
     if program in ("echo", "printf"):
         if program == "printf" and args and args[0] == "-v":
             return False
         # Only output arguments count; assignments and wrapper operands don't print.
-        return any(_SECRET_NAME.search(name) for refs in references[1:] for name in refs)
-    if program in ("set", "export", "declare", "typeset"):
+        return any(_secret_name(name) for refs in references[1:] for name in refs)
+    if program == "set":
+        return not args    # with arguments it sets options (-x traces) or positional parameters
+    if program in ("export", "declare", "typeset"):
         options = "".join(a[1:] for a in args if a.startswith("-"))
         operands = [a for a in args if not a.startswith("-")]
         return not args or (not operands and ("p" in options or "x" in options))
@@ -2980,6 +2996,12 @@ class _Word:
         return self.raw if re.fullmatch(r"[A-Za-z0-9_\-./:=@%+,{}!\[\]]+", self.raw) else None
 
 
+def _backtick_inner(inner: str, quoted: bool) -> str:
+    """A backtick substitution's inner command as its shell reads it: backticks
+    remove the backslash before $, ` and \\ (and " inside double quotes)."""
+    return re.sub(r'\\([$`\\"])' if quoted else r"\\([$`\\])", r"\1", inner)
+
+
 def _parameter_word(command: str, start: int, quoted: bool) -> tuple[int, list, list] | None:
     """Read a ${...} for credential inspection without evaluating its operators."""
     base = re.match(r"\$\{([!#]?)([A-Za-z_]\w*)", command[start:])
@@ -3005,7 +3027,8 @@ def _parameter_word(command: str, start: int, quoted: bool) -> tuple[int, list, 
             end = _substitution_end(command, i)
             if end is None:
                 return None
-            subs.append(command[i + (1 if char == "`" else 2):end - 1])
+            inner = command[i + (1 if char == "`" else 2):end - 1]
+            subs.append(_backtick_inner(inner, quoted or bool(quote)) if char == "`" else inner)
             i = end
         elif command.startswith("${", i):
             nested = _parameter_word(command, i, quoted or bool(quote))
@@ -3071,7 +3094,7 @@ def _script_word(command: str, i: int, *, credential_scan: bool = False) -> tupl
             if c == "`" and "\\" in inner:
                 if not credential_scan:
                     return None    # backticks remove an escape layer before the inner shell reads it
-                inner = re.sub(r'\\([$`\\"])' if quoted else r"\\([$`\\])", r"\1", inner)
+                inner = _backtick_inner(inner, quoted)
             subs.append(inner)
             i = end
         elif c == "$":
@@ -3840,7 +3863,7 @@ def _wild_match(rule: Rule, part: ShellPart) -> bool:
             args = args[2:] if args[0] in ("-C", "-c") else args[1:]
         sub = args[0] if args and not _unread(args[0]) else None
         if rule.match_type == "git-force":
-            return sub is None or sub in (*GIT_FORCE_DISCARDS, "reset")    # only these discard work
+            return sub not in _GIT_UNFORCED    # a force flag discards nothing in these
         return sub in (None, "push")
     if rule.match_type == "rm-destructive":
         return program == "rm"
