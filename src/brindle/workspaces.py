@@ -740,10 +740,16 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
                 "Commit them, or pass --force to discard."
             )
         # Before teardown, its agents or its session go.
-        if disk.live_in(db, ws.path, own=ws, keep_session=keep_session, stopping=[a.id for a in stop]):
+        why: list = []
+        if disk.live_in(db, ws.path, own=ws, keep_session=keep_session, stopping=[a.id for a in stop],
+                        why=why):
+            cause = ("a process or a pane of another session is in it, someone is attached to its "
+                     "session (or that can't be told)")
+            if why:   # a process whose folder can't be read: it could be anywhere
+                cause = (f"the folder of process {why[0].name} (pid {why[0].pid}) can't be read, so it "
+                         "could be in it (add it to live_check_ignore if it never runs in your projects)")
             raise WorkspaceError(
-                f"{ws.name}'s worktree {ws.path} is in use: a process or a pane of another session "
-                "is in it, someone is attached to its session (or that can't be told). It is kept "
+                f"{ws.name}'s worktree {ws.path} is in use: {cause}. It is kept "
                 "for a later sweep; pass --force to remove it anyway."
             )
     stop_them()

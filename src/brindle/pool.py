@@ -271,7 +271,7 @@ def sweep(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> None:
             if branch is not None and branch not in pool_branches:
                 continue  # not a pool worktree (or claimed and renamed): not ours to touch
             if cwds is False:
-                cwds = disk._cwds()   # read once for the whole sweep
+                cwds = disk._cwds(repo_root)   # read once for the whole sweep
             if disk.live_in(db, path, cwds):
                 continue  # a forgotten row's folder something still runs in: kept
             git.run(["worktree", "remove", "--force", path], repo_root, check=False)

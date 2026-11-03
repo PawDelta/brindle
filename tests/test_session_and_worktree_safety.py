@@ -109,7 +109,7 @@ def test_a_wiped_worktree_something_lives_in_is_never_replaced(db, repo, ended, 
 
     monkeypatch.setattr(git, "add_worktree", add)
     monkeypatch.setattr(procs, "table", lambda: {})
-    monkeypatch.setattr(procs, "cwds", lambda: {4242: str(Path(ws.path).resolve())})
+    monkeypatch.setattr(procs, "cwds", lambda *_: {4242: str(Path(ws.path).resolve())})
     monkeypatch.setattr(tmux, "session_panes", lambda name: [])
     monkeypatch.setattr(tmux, "list_sessions", lambda: [])
     with pytest.raises(workspaces.WorkspaceError, match="in use") as refused:

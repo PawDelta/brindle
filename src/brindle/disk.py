@@ -191,15 +191,30 @@ def _inside(child: str, parent: str) -> bool:
     return child == parent or child.startswith(parent + os.sep)
 
 
-def _cwds() -> dict[int, str] | None:
+def live_check_ignore(where: str | Path | None) -> frozenset[str]:
+    """The process names ``where``'s repo excuses from the scan
+    (``live_check_ignore``); none when it has none or its config can't be read."""
+    if where is None:
+        return frozenset()
+    try:
+        return frozenset(str(n) for n in config.load_repo_config(where).live_check_ignore)
+    except (OSError, ValueError):
+        return frozenset()
+
+
+def _cwds(where: str | Path | None = None, why: list | None = None) -> dict[int, str] | None:
     """Every process's folder by pid (``procs.cwds``), resolved; None when
-    they can't be inspected."""
+    they can't be inspected. ``where``: a repo or worktree whose
+    ``live_check_ignore`` applies. ``why``: gets the ``procs.Refused`` that
+    made it None, if a process was what couldn't be read."""
     from brindle import procs
 
     try:
-        return {pid: os.path.realpath(c) for pid, c in procs.cwds().items()}
+        return {pid: os.path.realpath(c) for pid, c in procs.cwds(live_check_ignore(where)).items()}
     except OSError as e:
         log.warning("brindle: can't see which processes use a worktree, so none is removed: %s", e)
+        if why is not None and isinstance(e, procs.Refused):
+            why.append(e)
         return None
 
 
@@ -233,7 +248,7 @@ def _its_own(db, ws, keep_session: bool = False, stopping=()) -> tuple[set[int],
 
 
 def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, own=None,
-            keep_session: bool = False, stopping=()) -> bool:
+            keep_session: bool = False, stopping=(), why: list | None = None) -> bool:
     """Whether anything is live in ``path``: a running agent of a workspace
     there, any process whose folder is in it (a detached dev server, a shell
     on any tmux server or terminal, this very process) or a pane of brindle's
@@ -241,7 +256,8 @@ def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, ow
     ``own``: the workspace being removed, whose processes its removal ends
     don't count (see ``_its_own``; ``keep_session`` and ``stopping`` say
     what that removal ends), unless someone is attached to the session it
-    kills."""
+    kills. ``why``: gets the ``procs.Refused`` process that made it
+    unknown, if that is why (see ``_cwds``)."""
     from brindle import tmux, workspaces
 
     real = os.path.realpath(path)
@@ -256,7 +272,7 @@ def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, ow
             return True
     except OSError:
         pass
-    cwds = _cwds() if cwds is False else cwds
+    cwds = _cwds(path, why) if cwds is False else cwds
     if cwds is None or any(_inside(c, real) for pid, c in cwds.items() if pid not in excused):
         return True
     for ws in db.find_workspaces():
@@ -385,7 +401,7 @@ def trees(db, repo_root: str, now: float | None = None, *, sizes: bool = True,
             dirty = True
         paused = any(a.status == "paused" for w in here for a in db.list_agents(w.id))
         if cwds is False:
-            cwds = _cwds()
+            cwds = _cwds(repo_root)
         t = Tree(path, repo_root, branch, sha, state, last, dirty, paused or live_in(db, path, cwds),
                  bool(here) or _owned(repo_root, path), workspace_id=here[0].id if here else None)
         if sizes:
