@@ -351,6 +351,63 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     assert check(body, seeded)
 
 
+@pytest.mark.parametrize("path", ["snapshot", "agents/w1", "agents/w2", "inbox", "inbox-doc", "sessions", "reassigned", "inbox-reassigned", "permissions/asks", "asks-reassigned"])
+def test_past_workers_are_history_not_live_rows(seeded, db, path):
+    db.set_status("w1", "rewound")
+    db.update_agent("w1", tmux_window="", plan_first=1, plan_state="proposed", plan_text="old plan")
+    db.update_agent("w2", dismissed_at=1)
+    if path in ("permissions/asks", "asks-reassigned"):
+        from brindle import permissions
+        from brindle.daemon.holds import HOLDS
+        req = permissions.Request("claude", "bash", "Bash", seeded["repo"], seeded["repo"], seeded["repo"], command="git push origin fix:main")
+        recorded = json.dumps(req.to_dict())
+        assert HOLDS.register("w1", "past-ask", permissions.request_digest(recorded, None), "nonce", time.time() + 600)
+        db.add_permission_request("w1", "past-ask", recorded, "asking", channel="hook")
+        if path == "asks-reassigned":
+            db.set_status("w1", "waiting")
+            db.add_agent(Agent("fresh", seeded["ws"], "developer", "claude", "r1", "assign", "processing", "@4", None, 1001))
+            # Keep a real held request for the current worker in the same group.
+            assert HOLDS.register("fresh", "current-ask", permissions.request_digest(recorded, None), "nonce2", time.time() + 600)
+            db.add_permission_request("fresh", "current-ask", recorded, "asking", channel="hook")
+    if path in ("inbox-doc", "inbox-reassigned"):
+        with db.tx() as c:
+            c.execute("INSERT INTO doc_requests VALUES (?, ?, ?, ?, ?, ?, ?)",
+                      ("doc1", "w1", "design", "Design", None, "read this", 1))
+    if path == "sessions":
+        db.set_status("w2", "processing")  # a late pane sweep must not count a dismissed worker
+    if path in ("reassigned", "inbox-reassigned"):
+        db.set_status("w1", "paused")
+        db.add_agent(Agent("fresh", seeded["ws"], "developer", "claude", "r1", "assign", "processing", "@4", None, 1001))
+        db.add_agent(Agent("parallel", seeded["ws"], "developer", "claude", "r1", "assign", "processing", "@2", None, 999))
+        db.add_agent(Agent("child", seeded["ws"], "developer", "claude", "w1", "assign", "processing", "@5", None, 999))
+    route = {"inbox-doc": "inbox", "inbox-reassigned": "inbox", "reassigned": "snapshot", "asks-reassigned": "permissions/asks"}.get(path, path)
+    code, body = _get(f"/v1/{route}", AUTH, f"repo={seeded['repo']}")
+    if path in ("permissions/asks", "asks-reassigned"):
+        HOLDS.drop_agent("w1")
+        HOLDS.drop_agent("fresh")
+    assert code == 200
+    if path == "snapshot":
+        assert [a["id"] for ws in body for a in ws["agents"]] == ["r1"]
+    elif path == "agents/w1":
+        assert body["status"] == "rewound"
+    elif path == "agents/w2":
+        assert body["dismissed_at"] is not None
+    elif path == "permissions/asks":
+        assert body == []
+    elif path == "asks-reassigned":
+        assert [i["agent_id"] for g in body for i in g["items"]] == ["fresh"]
+    elif path == "sessions":
+        from brindle import sessions
+        assert sessions.live(db, seeded["repo"])[0].workers == 0
+    elif path == "reassigned":
+        assert {a["id"] for ws in body for a in ws["agents"]} == {"r1", "parallel", "child", "fresh"}
+        db.update_agent("fresh", dismissed_at=2)
+        _, later = _get("/v1/snapshot", AUTH, f"repo={seeded['repo']}")
+        assert {a["id"] for ws in later for a in ws["agents"]} == {"r1", "parallel", "child"}
+    else:
+        assert not any(i.get("agent_id") in ("w1", "w2") for i in body)
+
+
 def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_home, monkeypatch):
     from brindle.pro import auth
     from brindle.pro.account import ProAccount

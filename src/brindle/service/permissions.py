@@ -7,7 +7,7 @@ import os
 import time
 
 from brindle import permission_grants as grants
-from brindle import permissions
+from brindle import permissions, tmux, view
 from brindle.db import DB
 from brindle.service.dto import (
     AllowAllGrantDTO,
@@ -151,7 +151,19 @@ def group_dto(g: grants.Group) -> AskGroupDTO:
 
 
 def asks(db: DB, repo_root: str | None) -> list[AskGroupDTO]:
-    return [group_dto(g) for g in grants.groups(grants.pending_asks(db, repo_root))]
+    pending = grants.pending_asks(db, repo_root)
+    if pending:
+        # Holds can outlive a worker's pane and its replacement. Apply the
+        # same worktree boundary as the snapshot before building any groups;
+        # a fresh app has never seen those hidden ids and cannot filter them.
+        alive = view.live_agents(db, tmux.list_panes())
+        current: set[str] = set()
+        for ws in view.session_workspaces(db, repo_root):
+            rows = db.list_agents(ws.id)
+            shown = view.current_agents(rows, alive) if ws.kind == "worktree" else rows
+            current.update(a.id for a in shown if not view.past_worker(a))
+        pending = [a for a in pending if a.agent_id in current]
+    return [group_dto(g) for g in grants.groups(pending)]
 
 
 def _results(rows: list[dict]) -> list[AskResultDTO]:

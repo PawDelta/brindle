@@ -150,7 +150,7 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
         entry = {"id": a.id, "profile": a.profile, "provider": a.provider,
                  "status": f"locked: {who}", "mode": a.mode, "locked": who}
         if detail:
-            entry.update(parent_id=a.parent_id, status_since=a.status_since, pending=0,
+            entry.update(parent_id=a.parent_id, dismissed_at=a.dismissed_at, status_since=a.status_since, pending=0,
                          reported=a.result is not None, window=None, tmux_server=None,
                          headless=bool(a.headless), subagents=[])
         return entry
@@ -160,8 +160,8 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
     except Exception:
         log.exception("brindle: couldn't read usage for %s", a.id)
         u = None
-    if not agents.runs_process(a):
-        status = a.status  # a supervisor's own subagent: no terminal to check
+    if past_worker(a) or not agents.runs_process(a):
+        status = a.status  # history and supervisor-owned subagents need no pane probe
     elif a.status == "failed":
         status = "failed"
     elif agents.is_alive(a, panes) if alive is None else alive:
@@ -186,6 +186,7 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
         if status in _PARENT_NOT_RUNNING:
             visible = [s for s in visible if s["ended_at"] is not None]
         entry.update(
+            dismissed_at=a.dismissed_at,
             parent_id=a.parent_id,
             status_since=a.status_since,
             pending=db.pending_count(a.id),
@@ -196,6 +197,28 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
             subagents=visible,
         )
     return entry
+
+
+def past_worker(a: Agent) -> bool:
+    """Dismissed/replaced records are history, regardless of pane liveness."""
+    return a.dismissed_at is not None or a.status == "rewound"
+
+
+def current_agents(everyone: list[Agent], alive: set[str]) -> list[Agent]:
+    """Workers shown in a worktree reused by another assignment.
+
+    A stopped worker replaced by a newer worker of the same parent is history.
+    Reviewers and helpers are separate roles; running workers still show even
+    when several were deliberately started in the same worktree.
+    """
+    modes = ("assign", "handoff", "handoff_detached")
+    newest: dict[str | None, float] = {}
+    for a in everyone:
+        if a.mode in modes and a.parent_id is not None:
+            newest[a.parent_id] = max(newest.get(a.parent_id, a.created_at), a.created_at)
+    return [a for a in everyone if not past_worker(a)
+            and not (a.mode in modes and a.parent_id is not None and a.id not in alive
+                     and a.created_at < newest.get(a.parent_id, a.created_at))]
 
 
 def live_agents(db: DB, panes: dict[str, bool]) -> set[str]:
@@ -333,7 +356,8 @@ def snapshot(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None
 
     listed = []
     for ws, everyone in found:
-        shown = [a for a in everyone if a.dismissed_at is None and not hidden(a)]
+        current = current_agents(everyone, alive) if ws.kind == "worktree" else everyone
+        shown = [a for a in current if not past_worker(a) and not hidden(a)]
         if everyone and not shown and ws.kind != "main":
             continue
         if retired(db, ws, alive, now, everyone):

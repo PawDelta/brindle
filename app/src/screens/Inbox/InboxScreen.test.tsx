@@ -60,6 +60,18 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
+  it.each([["rewound", "card"], ["dismissed", "card"], ["rewound", "permission group"], ["dismissed", "permission group"]])("omits stale Inbox %s worker %s", async (reason, surface) => {
+    const past = { ...worker.agents![0], status: reason === "rewound" ? "rewound" : "exited", dismissed_at: reason === "dismissed" ? 1 : null };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, { ...worker, agents: [past] }], inbox: [question, waiting], asks: surface === "permission group" ? [{ ...pushes, items: [pushes.items[0]] }] : [] });
+    const { store, sync } = mount(daemon);
+    await waitFor(() => expect(store.getState().synced).toBe(true));
+    await act(async () => {});
+    expect(screen.queryByTestId("permission-card")).toBeNull();
+    expect(card("waiting")).toBeNull();
+    expect(card("question")).toBeTruthy();
+    sync.stop();
+  });
+
   it.each(["reload", "inbox", "client"])("discards older permission groups after a newer %s response", async (trigger) => {
     const client = new FakeDaemon().client();
     const other = new FakeDaemon().client();

@@ -97,15 +97,17 @@ def live(db: DB, repo_root: str) -> list[LiveSession]:
     whose recorded pane id a newer agent has since taken (tmux reuses ids)
     isn't live: that pane is the newer agent's. One tmux call answers for
     every agent, not one per agent (the app's first load waited on those)."""
+    from brindle.view import past_worker
+
     panes = tmux.list_panes()
     owners = agents.pane_owners(db, panes)
     out = []
     for ws in db.find_workspaces(repo_root):
         for a in db.list_agents(ws.id):
-            if (a.mode == "interactive" and a.status not in ("paused", "done")
+            if (not past_worker(a) and a.mode == "interactive" and a.status not in ("paused", "done")
                     and agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)):
                 running = [m for m in agents.tree(db, a.id)[1:]
-                           if m.mode != "interactive" and m.status not in ("paused", "done", "failed")
+                           if not past_worker(m) and m.mode != "interactive" and m.status not in ("paused", "done", "failed")
                            and agents.is_alive(m, panes)]
                 out.append(LiveSession(a, ws, goal_line(db, a), len(running)))
     return sorted(out, key=lambda s: s.root.created_at, reverse=True)
