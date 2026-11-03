@@ -111,6 +111,7 @@ export interface ActionTerminalDTO {
  * via the `definition` "AgentDTO".
  */
 export interface AgentDTO {
+  dismissed_at?: number | null;
   headless?: boolean | null;
   hooks_off?: string | null;
   id: string;

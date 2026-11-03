@@ -110,6 +110,7 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
   const update = session === null && appUpdates ? appUpdateItem(updateStatus) : null;
   const inbox = useAppState((s) => s.inbox);
   const workspaces = useAppState((s) => s.workspaces);
+  const pastWorkers = useAppState((s) => s.pastWorkers);
   const synced = useAppState((s) => s.synced);
   const error = useAppState((s) => s.error);
   const { find, repoOf, hidden, repos } = useSessions();
@@ -124,7 +125,9 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
   // A request the permission items hold is theirs, not a card of its own.
   const inSession = (i: InboxItemDTO) => session === null || (i.root_id ?? (i.agent_id ? rootOf(agents, i.agent_id, hidden) : null)) === session;
   const here = useMemo(() => (session === null ? inbox : inbox.filter(inSession)).filter((i) => !actions.hidden.has(itemKey(i)) && !asks.held(i)), [inbox, session, agents, hidden, actions.hidden, asks.held]); // eslint-disable-line react-hooks/exhaustive-deps
-  const askGroups = useMemo(() => (session === null ? asks.groups : asks.groups.map((g) => ({ ...g, items: g.items.filter((a) => a.root_id === session) })).filter((g) => g.items.length > 0)), [asks.groups, session]);
+  const askGroups = useMemo(() => asks.groups
+    .map((g) => ({ ...g, items: g.items.filter((a) => !pastWorkers.includes(a.agent_id) && (session === null || a.root_id === session)) }))
+    .filter((g) => g.items.length > 0), [asks.groups, session, pastWorkers]);
   const waiting = here.length + askGroups.length + (update ? 1 : 0);
 
   /* What this page showed before it opened is not new; the rest is marked "new" until the person leaves,

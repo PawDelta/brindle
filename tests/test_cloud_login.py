@@ -165,7 +165,21 @@ def test_signed_out_never_prompts(provider, stderr, tmp_path):
     assert how == "no lapse"
 
 
-def test_custom_adc_lapse_does_not_open_a_different_login(tmp_path, monkeypatch):
+@pytest.fixture(scope="module")
+def inherited_agent_env():
+    """The env an agent launched by brindle hands the suite: BRINDLE_CLOUD_ROUTE
+    is set to "" (the agent allowlist). Module scope runs it before the
+    function-scoped ambient_brindle_env cleanup, which must clear it again."""
+    old = os.environ.get("BRINDLE_CLOUD_ROUTE")
+    os.environ["BRINDLE_CLOUD_ROUTE"] = ""
+    yield
+    if old is None:
+        os.environ.pop("BRINDLE_CLOUD_ROUTE", None)
+    else:
+        os.environ["BRINDLE_CLOUD_ROUTE"] = old
+
+
+def test_custom_adc_lapse_does_not_open_a_different_login(tmp_path, monkeypatch, inherited_agent_env):
     monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / "home"))
     env = {"CLAUDE_CODE_USE_VERTEX": "1", "GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "adc.json")}
     opened = []

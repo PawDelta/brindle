@@ -1,5 +1,12 @@
-"""Codex's PermissionRequest hook for brindle's permission policy, and the
-one-time trust it needs.
+"""Codex's PermissionRequest and PreToolUse hooks for brindle's permission
+policy, and the one-time trust they need.
+
+PermissionRequest only runs when Codex would ask the person; Codex runs most
+shell commands in its sandbox without asking (and the person's saved Codex
+prefix rules run more), so brindle's denies (credentials, destructive git,
+rm, the person's and org's own) are checked in PreToolUse, which runs before
+every shell command, patch and MCP call (agents.codex_pre_tool_decision). The
+two are passed and trusted together: one without the other is neither.
 
 Codex runs a hook it didn't get from managed config only once the person has
 trusted it. Codex records that trust in its user ``config.toml`` as
@@ -57,6 +64,17 @@ EVENT = "codex-permission-request"
 # (status() reads it as MOVED, and ensure() trusts it again). A longer hold
 # is cut to fit (agents).
 TIMEOUT = 86400 + 30
+# Codex runs most shell commands in its sandbox without asking, so the
+# PermissionRequest hook never sees them; PreToolUse runs before every one
+# (shell commands and exec_command match as Bash). It only denies, so it
+# holds nothing for the person: a short timeout.
+PRE_TOOL_EVENT = "codex-pre-tool"
+# write_stdin too, should a Codex ever run PreToolUse for it: 0.162.1 doesn't,
+# and asks for approval instead (its write_stdin_approval feature), where the
+# PermissionRequest hook denies the input (permissions.codex_terminal_input).
+# Users can't turn unified exec (resumable processes) off: Codex ignores it.
+PRE_TOOL_MATCHER = "^(Bash|apply_patch|write_stdin|mcp__.*)$"
+PRE_TOOL_SECONDS = 120
 SOURCE = "sessionFlags"
 
 
@@ -125,11 +143,25 @@ def hook_command() -> str:
     return assigns + " ".join(shlex.quote(a) for a in [*_stable_invocation(), "_hook", EVENT])
 
 
+def pre_tool_command(command: str) -> str:
+    """The PreToolUse hook's command beside the PermissionRequest ``command``."""
+    return command.removesuffix(EVENT) + PRE_TOOL_EVENT
+
+
 def config_flags(command: str | None = None) -> list[str]:
-    """``-c`` arguments that give a Codex session brindle's hook."""
+    """``-c`` arguments that give a Codex session brindle's hooks: PermissionRequest
+    (what Codex would ask the person) and PreToolUse (every shell command, patch
+    and MCP call, sandboxed or not: brindle's denies, before it runs)."""
     command = command or hook_command()
     hooks = f'[{{hooks=[{{type="command",command={json.dumps(command)},timeout={TIMEOUT}}}]}}]'
-    return ["-c", f"hooks.PermissionRequest={hooks}"]
+    pre = (f'[{{matcher={json.dumps(PRE_TOOL_MATCHER)},hooks=[{{type="command",'
+           f'command={json.dumps(pre_tool_command(command))},timeout={PRE_TOOL_SECONDS}}}]}}]')
+    return ["-c", f"hooks.PermissionRequest={hooks}", "-c", f"hooks.PreToolUse={pre}"]
+
+
+def definition(command: str | None = None) -> str:
+    """What Codex's trusted hashes cover, as brindle records it: both hooks' definitions."""
+    return "\n".join(config_flags(command)[1::2])
 
 
 TRUSTED, MOVED, NEW, REMOVED = "trusted", "moved", "new", "removed"
@@ -158,14 +190,16 @@ def status(command: str | None = None) -> str:
     except ValueError:
         return REMOVED  # can't tell; don't write into a config Codex can't read either
     state = cfg.get("hooks", {}).get("state", {}) if isinstance(cfg.get("hooks"), dict) else {}
-    entry = state.get(rec["key"]) if isinstance(state, dict) else None
-    if not (isinstance(entry, dict) and entry.get("trusted_hash") == rec["hash"]):
-        return REMOVED
+    for key, hash_ in ((rec["key"], rec["hash"]), (rec.get("pre_key"), rec.get("pre_hash"))):
+        entry = state.get(key) if key and isinstance(state, dict) else None
+        if key and not (isinstance(entry, dict) and entry.get("trusted_hash") == hash_):
+            return REMOVED
     # Codex's hash covers the whole definition, not just the command: a trust
     # recorded for another timeout (another build of brindle) is for another
     # hook, and so is one recorded before brindle kept the definition (it can't
-    # tell what that was for), so ensure() trusts it again once.
-    return TRUSTED if rec.get("definition") == config_flags(command)[1] else MOVED
+    # tell what that was for), or before it had a PreToolUse hook, so ensure()
+    # trusts it again once.
+    return TRUSTED if rec.get("definition") == definition(command) else MOVED
 
 
 def trusted(command: str | None = None) -> bool:
@@ -240,7 +274,9 @@ def launch_flags(cwd: str | None, review: bool = False) -> list[str]:
                 return []
         else:
             command = hook_command()
-        return config_flags(command) if ensure(command=command) == TRUSTED else []
+        if ensure(command=command) != TRUSTED:
+            return []
+        return config_flags(command)
     except Exception:  # noqa: BLE001 - never stop a launch over this
         return []
 
@@ -256,7 +292,7 @@ def launch_warning(provider: str, cwd: str | None) -> str | None:
         return None
     state = status()
     if state == TRUSTED:
-        return None
+        return None   # a config Codex would ignore brindle's sandbox profile under is refused at launch
     why = ("its trust was removed from Codex's config" if state == REMOVED
            else "Codex didn't accept it (is Codex too old for hooks?)")
     return ("permission_policy is on, but this Codex worker runs without brindle's permission hook "
@@ -374,50 +410,63 @@ class _AppServer:
 @dataclass
 class HookState:
     command: str
-    key: str
+    key: str     # the PermissionRequest hook's trust key and hash
     hash: str
-    status: str  # Codex's trustStatus: untrusted | trusted | modified | managed
+    status: str  # Codex's trustStatus (untrusted | trusted | modified | managed): "trusted" only if both are
     config: Path
+    pre_key: str = ""    # the PreToolUse hook's
+    pre_hash: str = ""
+
+    def keys(self) -> dict[str, str]:
+        return {self.key: self.hash, self.pre_key: self.pre_hash}
+
+    def record(self) -> dict[str, str]:
+        return {"command": self.command, "key": self.key, "hash": self.hash,
+                "pre_key": self.pre_key, "pre_hash": self.pre_hash}
 
 
 def inspect(binary: str, command: str | None = None) -> HookState:
-    """What Codex makes of brindle's hook: its trust key, hash and status."""
+    """What Codex makes of brindle's hooks: their trust keys, hashes and status."""
     command = command or hook_command()
     server = _AppServer(binary, config_flags(command))
     try:
         result = server.call("hooks/list", {"cwds": [str(Path.home())]})
     finally:
         server.close()
+    found: dict[str, dict] = {}
     for entry in result.get("data") or []:
         for hook in entry.get("hooks") or []:
-            if hook.get("source") == SOURCE and hook.get("command") == command:
-                return HookState(command, str(hook["key"]), str(hook["currentHash"]),
-                                 str(hook.get("trustStatus")), codex_home() / "config.toml")
-    raise CodexHookError("Codex didn't list brindle's hook (is this Codex too old for hooks?)")
+            if hook.get("source") == SOURCE and hook.get("command") in (command, pre_tool_command(command)):
+                found.setdefault(hook["command"], hook)
+    if len(found) < 2:
+        raise CodexHookError("Codex didn't list brindle's hooks (is this Codex too old for PreToolUse hooks?)")
+    asks, pre = found[command], found[pre_tool_command(command)]
+    statuses = [str(h.get("trustStatus")) for h in (asks, pre)]
+    return HookState(command, str(asks["key"]), str(asks["currentHash"]),
+                     next((s for s in statuses if s != "trusted"), "trusted"), codex_home() / "config.toml",
+                     str(pre["key"]), str(pre["currentHash"]))
 
 
 def trust(binary: str, state: HookState) -> HookState:
-    """Record the person's trust of the hook in Codex's config (through Codex's
-    own writer), check Codex now sees it as trusted, and remember it."""
+    """Record the person's trust of the hooks in Codex's config (through Codex's
+    own writer), check Codex now sees them as trusted, and remember it."""
     from brindle import permissions
 
     server = _AppServer(binary, config_flags(state.command))
     try:
         server.call("config/batchWrite", {"edits": [{
             "keyPath": "hooks.state", "mergeStrategy": "upsert",
-            "value": {state.key: {"trusted_hash": state.hash}}}]})
+            "value": {key: {"trusted_hash": hash_} for key, hash_ in state.keys().items()}}]})
     finally:
         server.close()
     # Written but not yet verified: on record without its definition, which
     # status() reads as MOVED (verify again, and tell), never as a removal.
     home = _home_key(codex_home())
     with permissions.editing() as store:
-        store.codex_hook[home] = {"command": state.command, "key": state.key, "hash": state.hash}
+        store.codex_hook[home] = state.record()
     after = inspect(binary, state.command)
     if after.status != "trusted":
-        raise CodexHookError(f"Codex still reports the hook as {after.status}")
+        raise CodexHookError(f"Codex still reports the hooks as {after.status}")
     with permissions.editing() as store:
-        store.codex_hook[_home_key(after.config.parent)] = {
-            "command": after.command, "key": after.key, "hash": after.hash,
-            "definition": config_flags(after.command)[1]}
+        store.codex_hook[_home_key(after.config.parent)] = {**after.record(), "definition": definition(after.command)}
     return after

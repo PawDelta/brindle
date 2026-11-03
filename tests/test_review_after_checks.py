@@ -1,5 +1,5 @@
-"""With checks configured a detached run starts the reviewer and runs them
-beside it; a repo without checks is reviewed at once."""
+"""With checks configured the reviewer starts only after they finish, with
+their results in its prompt; a repo without checks is reviewed at once."""
 import asyncio
 import json
 import shutil
@@ -63,18 +63,50 @@ def detached(monkeypatch):
     return calls
 
 
-# -- a crash in the checks ---------------------------------------------------------------
+# -- the results are in the reviewer's prompt ------------------------------------------
 
 
-def test_a_crashing_check_run_still_starts_the_review_and_says_so(db, ws, boss, spawned, monkeypatch):
+@pytest.mark.parametrize("caller", ["boss", None])
+def test_a_crashing_check_run_starts_no_review_and_tells_the_caller(db, ws, boss, spawned, monkeypatch,
+                                                                    caller):
+    """Explicit request (no pipeline report): the caller is told, or for a UI
+    request with no caller the worker's supervisor; no reviewer starts."""
+    add(db, ws, "w1", "assign", parent="boss", result="done")
     monkeypatch.setattr(gates, "check_summary",
                         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
-                                      RepoConfig(checks=["true"])).id == "rev1"
-    assert len(spawned) == 1
+    assert agents.review_after_checks(db, caller, ws, "reviewer", None,
+                                      RepoConfig(checks=["true"])) is None
+    assert spawned == []
+    told = db.pop_pending("boss")
+    assert told is not None and "crashed" in told.body and "boom" in told.body
 
 
-# -- the review runs in a detached process -----------------------------------------------
+def test_a_branch_that_moves_before_dispatch_is_checked_again_not_reviewed_unchecked(
+        db, ws, boss, spawned, monkeypatch):
+    """The head moves after the checks end, while the run waits for the
+    dispatch lock: the old commit's results never reach a reviewer of the new one."""
+    ran = []
+
+    def checks(db_, ws_, cfg, cancel=None):
+        ran.append(gates.head(ws))
+        return "PASS `suite`"
+
+    real_lock = agents.review_dispatch_lock
+    moved = []
+
+    def lock(ws_id, **kw):
+        if ran and not moved:
+            moved.append(1)
+            commit(ws, "more.py")   # moved on lock acquisition
+        return real_lock(ws_id, **kw)
+
+    monkeypatch.setattr(gates, "check_summary", checks)
+    monkeypatch.setattr(agents, "review_dispatch_lock", lock)
+    agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["suite"]))
+    assert len(ran) == 2 and ran[0] != ran[1] and len(spawned) == 1 and ran[1][:8] in spawned[0]
+
+
+# -- no reviewer until the checks finish -----------------------------------------------
 
 
 def test_with_checks_nothing_starts_until_a_detached_process_has_run_them(db, ws, boss, spawned, detached):
@@ -115,7 +147,7 @@ def test_the_run_gives_up_when_the_head_moves_during_the_checks(db, ws, boss, sp
     assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
                                       RepoConfig(checks=["suite"])) is None
     assert seen == {"before": False, "after": True}
-    assert len(spawned) == 1   # beside the checks, on the commit the branch then left
+    assert spawned == []
 
 
 def test_results_for_a_commit_the_branch_has_left_start_no_reviewer(db, ws, boss, spawned, monkeypatch):
@@ -126,7 +158,7 @@ def test_results_for_a_commit_the_branch_has_left_start_no_reviewer(db, ws, boss
     monkeypatch.setattr(gates, "check_summary", finishes_late)
     assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
                                       RepoConfig(checks=["suite"])) is None
-    assert len(spawned) == 1
+    assert spawned == []
 
 
 # -- the callers -----------------------------------------------------------------------

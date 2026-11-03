@@ -708,6 +708,41 @@ def decide_all(reqs: list[Request] | None, *, checks: list[str] | None = None,
     return next(d for d in decisions if d.decision == "ask")
 
 
+TERMINAL_INPUT = ("typing into a running process (write_stdin) isn't checked by brindle's policy, so it isn't "
+                  "sent. Run what you need as one command instead (bash -c '...', python -c '...', a script), "
+                  "with its input given up front (a file, a heredoc or a pipe)")
+
+
+def codex_terminal_input(payload: dict) -> bool:
+    """Whether Codex's PermissionRequest is for input to a process already
+    running (its write_stdin tool, which never runs PreToolUse): non-empty
+    characters, or ones brindle can't read. An empty poll (only reading the
+    output) types nothing."""
+    ti = payload.get("tool_input")
+    ti = ti if isinstance(ti, dict) else {}
+    if payload.get("tool_name") != "write_stdin" and "chars" not in ti:
+        return False
+    chars = ti.get("chars")
+    return not isinstance(chars, str) or chars != ""
+
+
+CODEX_PRE_TOOL_UNCHECKED = ("brindle couldn't check this call against the permission policy, so it doesn't "
+                            "run; try again, and if it keeps failing tell your supervisor (send_message)")
+
+
+def codex_pre_tool_output(decision: Decision | None) -> dict | None:
+    """What Codex's PreToolUse hook prints: only a deny (Codex can't ask from
+    PreToolUse, and an allow is left to its own approvals); None otherwise.
+    None for ``decision`` is a check that couldn't finish: Codex would run the
+    call on no answer, with nothing after it to stop it, so that's a deny too."""
+    if decision is None:
+        decision = Decision("deny", CODEX_PRE_TOOL_UNCHECKED)
+    if decision.decision != "deny":
+        return None
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": f"brindle: {decision.reason}"}}
+
+
 def codex_output(decision: Decision) -> dict | None:
     """What Codex's PermissionRequest hook prints; None (no output) for ask.
     Codex's schema requires hookEventName and fails closed on unknown fields."""
@@ -1271,12 +1306,12 @@ def _command_texts(command: str) -> list[str]:
     each text still reads as shell words. ``$'...'`` honours its backslash
     escapes, an unquoted ``#`` that starts a word comments out the rest of its
     line, and a heredoc body is cut at every separator with its quotes read as
-    text. A quote that never closes falls back to cutting at every separator
-    (_SEPARATORS), so a stray apostrophe can't hide a command."""
+    text. Unclosed quotes, heredocs and unreadable constructs fall back to
+    cutting at every separator (_SEPARATORS), so they can't hide a command."""
     texts: list[str] = []
     text: list[str] = []
     stack: list[str] = []      # what is open: '"' (a double quote), "$(" or "`" (a substitution)
-    heredocs: list[str] = []   # delimiters of heredocs whose bodies start at the next newline
+    heredocs: list[tuple[str, bool]] = []   # delimiter and whether <<- strips tabs
 
     def quoted() -> bool:
         return bool(stack) and stack[-1] == '"'
@@ -1316,19 +1351,89 @@ def _command_texts(command: str) -> list[str]:
             j = command.find("\n", i)
             i = n if j < 0 else j      # the newline still cuts
             continue
-        if command.startswith("<<", i) and not quoted() and not command.startswith("<<<", i):
-            m = re.compile(r"<<-?[ \t]*([\"']?)(\w+)\1").match(command, i)
-            if m is not None:
-                heredocs.append(m.group(2))
-                text.append(m.group())
-                i = m.end()
-                continue
+        if command.startswith("$((", i):
+            # Only skip numeric arithmetic with the required adjacent closing
+            # pair. $((command); command) can instead run a subshell in $(...).
+            # Names, substitutions and other unsupported syntax use the fallback.
+            j, depth = i + 3, 2
+            while j < n and depth > 1:
+                if command[j] not in "0123456789 \t\n()+-*/%<>&|^~!?:=,":
+                    return re.split(_SEPARATORS, command)
+                if command[j] == "(":
+                    depth += 1
+                elif command[j] == ")":
+                    depth -= 1
+                j += 1
+            if depth != 1 or command[j:j + 1] != ")":
+                return re.split(_SEPARATORS, command)
+            j += 1
+            text.append(command[i:j])
+            i = j
+            continue
+        if command.startswith("<<<", i) and not quoted():
+            text.append("<<<")
+            i += 3
+            continue
+        if command.startswith("<<", i) and not quoted():
+            dash = command.startswith("<<-", i)
+            j = i + (3 if dash else 2)
+            while j < n and command[j] in " \t":
+                j += 1
+            start, quote, delimiter = j, "", []
+            # A delimiter is a shell word with quote removal, not a \w+
+            # identifier. Other quotes inside a quoted part are literal.
+            while j < n:
+                ch = command[j]
+                if not quote and ch in " \t\n;&|<>()":
+                    break
+                if not quote and command.startswith("$'", j):
+                    ansi = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL).match(command, j)
+                    if ansi is None:
+                        return re.split(_SEPARATORS, command)
+                    delimiter.append(_ansi_c(ansi.group(1)))
+                    j = ansi.end()
+                    continue
+                if ch == "\\" and quote != "'":
+                    if j + 1 == n:
+                        return re.split(_SEPARATORS, command)
+                    following = command[j + 1]
+                    if not quote or following in '$`"\\\n':
+                        if following != "\n":
+                            delimiter.append(following)
+                        j += 2
+                        continue
+                if ch == quote:
+                    quote = ""
+                elif not quote and ch in "'\"":
+                    quote = ch
+                else:
+                    delimiter.append(ch)
+                j += 1
+            if quote or j == start:
+                return re.split(_SEPARATORS, command)
+            heredocs.append(("".join(delimiter), dash))
+            text.append(command[i:j])
+            i = j
+            continue
         if c == "\n" and heredocs and not quoted():
             cut()
             i += 1
-            for delimiter in heredocs:   # each body, through its closing line, is cut as the old splitter cut it
-                close = re.compile(r"^[ \t]*" + re.escape(delimiter) + r"[ \t]*$", re.MULTILINE).search(command, i)
-                end = close.end() if close is not None else n
+            for delimiter, dash in heredocs:
+                end = i
+                while end < n:
+                    line_end = command.find("\n", end)
+                    line_end = n if line_end < 0 else line_end
+                    line = command[end:line_end]
+                    end = min(line_end + 1, n)
+                    # An unquoted heredoc folds backslash-newline before
+                    # delimiter matching. Do not guess at physical boundaries
+                    # when a continuation could join this line to the next.
+                    if line.endswith("\\") and line_end < n:
+                        return re.split(_SEPARATORS, command)
+                    if (line.lstrip("\t") if dash else line) == delimiter:
+                        break
+                else:
+                    return re.split(_SEPARATORS, command)
                 texts.extend(re.split(_SEPARATORS, command[i:end]))
                 i = end
             heredocs.clear()
@@ -1363,7 +1468,7 @@ def _command_texts(command: str) -> list[str]:
         else:
             text.append(c)
         i += 1
-    if '"' in stack:
+    if stack or heredocs:
         return re.split(_SEPARATORS, command)
     texts.append("".join(text))
     return texts
@@ -2209,20 +2314,33 @@ def _secret_name(name: str) -> bool:
     return name.upper() not in _NOT_SECRET and bool(_SECRET_NAME.search(name))
 
 
+_HOME_REFERENCE = re.compile(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])")
+# Key and token stores: a program reading under one prints credentials.
+_CREDENTIAL_DIRS = (".ssh", ".gnupg", ".config")
+
+
 def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
     """Recognizable credential stores, including patterns and uncertain cwd reads."""
-    name = os.path.expanduser(name)
-    path = os.path.normpath(os.path.join(part.cwd or "", name))
     home = os.path.expanduser("~")
+    # The credential scan keeps a word as written: quotes in place, $HOME unexpanded.
+    name = os.path.expanduser(_HOME_REFERENCE.sub(lambda _: home, name.replace('"', "").replace("'", "")))
+    path = os.path.normpath(os.path.join(part.cwd or "", name))
     if fnmatch.fnmatch(path, "/proc/*/environ") or part.cwd is None and name == "environ":
         return True
     if (path in (f"{home}/.netrc", f"{home}/.npmrc", f"{home}/.git-credentials", f"{home}/.docker/config.json")
-            or path.startswith(f"{home}/.config/") or path == f"{home}/.config"):
+            or any(path == f"{home}/{d}" or path.startswith(f"{home}/{d}/") for d in _CREDENTIAL_DIRS)):
         return True
     if path.startswith(f"{home}/.aws/") and fnmatch.fnmatch("credentials", os.path.basename(path)):
         return True
     return (os.path.basename(path) == ".env"
             and (part.cwd is None or not req.worktree or _inside(path, req.worktree) is None))
+
+
+_INTERPRETERS = frozenset({"python", "pypy", "node", "ruby", "perl", "php", "osascript", "deno", "bun", "lua",
+                           "Rscript", "irb", "swift"})
+# A credential store named in an interpreter's inline code (_credential_file's, as text).
+_CREDENTIAL_TEXT = re.compile(r"\.aws\W+credentials|\.npmrc|\.netrc|\.git-credentials|\.docker\W+config\.json"
+                              r"|\.ssh\b|\.gnupg\b|\.config\W+(?:gh|gcloud)\b|/environ\b")
 
 
 def _credential_options(args: list[str], valued: set[str]) -> tuple[list[str], set[str]]:
@@ -2430,6 +2548,9 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
         return any(_credential_file(req, part, name) for name in [*inputs, *part.reads])
     if program in (*READERS, "awk", "less", "more", "strings", "od", "xxd"):
         return any(_credential_file(req, part, name) for name in [*words[1:], *part.written[1:], *part.reads])
+    if re.sub(r"[\d.]+$", "", program) in _INTERPRETERS:
+        # Code given inline (python -c, node -e ...) that names a credential store reads it.
+        return any(_CREDENTIAL_TEXT.search(arg) for arg in args)
     return False
 
 

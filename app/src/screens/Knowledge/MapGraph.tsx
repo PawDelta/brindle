@@ -250,7 +250,7 @@ function fitView(s: Sim, w: number, h: number): View {
 /* The map as documents and how they connect: code paths are not nodes but
    what links documents, and a document's paths are listed in its details,
    where clicking one narrows the map to it. */
-export function MapGraph({ nodes: given, edges: givenEdges, onOpen }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void }) {
+export function MapGraph({ nodes: given, edges: givenEdges, onOpen, onDeselect, preview, onDoc }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void; onDeselect?(): void; preview?: { node: string; summary: string } | null; onDoc?(): void }) {
   const { nodes, edges, paths } = useMemo(() => docGraph(given, givenEdges), [given, givenEdges]);
   const frame = useRef<HTMLDivElement>(null);
   /* The frame's width, and its height above the legend. */
@@ -295,6 +295,14 @@ export function MapGraph({ nodes: given, edges: givenEdges, onOpen }: { nodes: G
   const view = manual?.sim === sim ? manual.view : fitted;
   const selected = picked?.nodes === nodes ? picked.id : null;
   const focusGroup = shown?.lines === lines ? shown.group : null;
+  // Closing the details, Escape or a background click all end the selection; the owner drops what it had started for it.
+  const hadSelection = useRef(false);
+  const deselected = useRef(onDeselect);
+  deselected.current = onDeselect;
+  useEffect(() => {
+    if (selected === null && hadSelection.current) deselected.current?.();
+    hadSelection.current = selected !== null;
+  }, [selected]);
   const live = useRef({ view, sim, fitted, size, lines, selected });
   live.current = { view, sim, fitted, size, lines, selected };
   const uid = `kg${useId().replace(/[^\w-]/g, "")}`;
@@ -560,7 +568,7 @@ export function MapGraph({ nodes: given, edges: givenEdges, onOpen }: { nodes: G
           {alone > 0 && <span className="px-1">Unconnected · {alone}</span>}
         </div>}
       </div>
-      {chosen !== undefined && <Details node={nodes[chosen]} full={sim.labels[chosen].full} group={sim.groups[sim.group[chosen]]} paths={paths.get(nodes[chosen].id) ?? []} onPath={(path) => onOpen({ id: `path:${path}`, kind: "path", path })} neighbours={[...(near.get(nodes[chosen].id) ?? [])].flatMap((id) => {
+      {chosen !== undefined && <Details node={nodes[chosen]} full={sim.labels[chosen].full} group={sim.groups[sim.group[chosen]]} summary={preview?.node === nodes[chosen].id ? preview.summary : ""} onDoc={selected === nodes[chosen].id ? onDoc : undefined} paths={paths.get(nodes[chosen].id) ?? []} onPath={(path) => onOpen({ id: `path:${path}`, kind: "path", path })} neighbours={[...(near.get(nodes[chosen].id) ?? [])].flatMap((id) => {
         const i = index.get(id);
         return i === undefined ? [] : [{ node: nodes[i], full: sim.labels[i].full, group: sim.groups[sim.group[i]] }];
       })} onClose={() => setPicked(null)} />}
@@ -569,7 +577,7 @@ export function MapGraph({ nodes: given, edges: givenEdges, onOpen }: { nodes: G
 }
 
 /* The selected node's details, beside the graph like an inspector. */
-function Details({ node, full, group, paths, onPath, neighbours, onClose }: { node: GraphNode; full: string; group: Group; paths: string[]; onPath(path: string): void; neighbours: { node: GraphNode; full: string; group: Group }[]; onClose(): void }) {
+function Details({ node, full, group, summary, onDoc, paths, onPath, neighbours, onClose }: { node: GraphNode; full: string; group: Group; summary: string; onDoc?(): void; paths: string[]; onPath(path: string): void; neighbours: { node: GraphNode; full: string; group: Group }[]; onClose(): void }) {
   const kind = KINDS[node.kind];
   return <aside aria-label="Node details" className="absolute inset-y-0 right-0 flex max-w-[85%] cursor-auto select-text flex-col gap-2 overflow-auto border-l border-line bg-surface p-3 text-xs" style={{ width: PANEL_W }}>
     <div className="flex items-center justify-between gap-2">
@@ -578,6 +586,8 @@ function Details({ node, full, group, paths, onPath, neighbours, onClose }: { no
     </div>
     <p className="break-words text-sm font-medium text-ink">{full}</p>
     {provenance(node, false).map((line, i) => <p key={i} data-provenance className="break-words text-ink-3">{line}</p>)}
+    {summary && <p data-summary className="break-words text-ink-2">{summary}</p>}
+    {onDoc && <button type="button" className="self-start rounded-md border border-line px-2 py-1 text-ink hover:bg-surface-2" onClick={onDoc}>Open document</button>}
     <p className="flex min-w-0 items-center gap-1.5 text-ink-3">
       <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ background: toneOf(group) }} />
       <span className="truncate">{group.tone === null ? "Unconnected" : `Group: ${group.name} · ${group.size}`}</span>

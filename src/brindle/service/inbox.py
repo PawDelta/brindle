@@ -181,7 +181,9 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
     session when None), then the org's unread notices. Each agent's item
     names its session (``root_id``), so the app can link into it."""
     out: list[InboxItemDTO] = []
+    shown: set[str] = set()
     for ws in view.snapshot(db, repo_root, panes=panes):
+        shown.update(a["id"] for a in ws["agents"])
         for a in ws["agents"]:
             if a.get("locked"):
                 continue   # another identity's session: structure only, nothing read from it
@@ -229,8 +231,13 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
-    return (out + _idle_items(db, repo_root) + _doc_items(db, repo_root) + _setup_items()
-            + _org_blocks(db, repo_root) + _org_notices())
+    all_items = (out + _idle_items(db, repo_root) + _doc_items(db, repo_root, shown) + _setup_items()
+                 + _org_blocks(db, repo_root) + _org_notices())
+    # Requests can outlive the live snapshot (notably document requests).
+    # Paused sessions keep theirs, but dismissed/replaced workers do not ask
+    # for attention again just because a historical request is still stored.
+    return [i for i in all_items if not i.agent_id
+            or (a := db.get_agent(i.agent_id)) is None or not view.past_worker(a)]
 
 
 def _idle_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
@@ -248,14 +255,18 @@ def _idle_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
     return out
 
 
-def _doc_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
+def _doc_items(db: DB, repo_root: str | None, shown: set[str]) -> list[InboxItemDTO]:
     """Unread requests survive a session leaving the sidebar, until dismissed."""
     out = []
     for ws in view.session_workspaces(db, repo_root):
+        # A replacement was already resolved by the snapshot. Those still
+        # shown (including deliberately concurrent workers) must stay current.
+        everyone = db.list_agents(ws.id)
+        current = {a.id for a in view.current_agents(everyone, shown)} if ws.kind == "worktree" else None
         for r in db.conn.execute(
                 "SELECT r.* FROM doc_requests r JOIN agents a ON a.id = r.agent_id"
                 " WHERE a.workspace_id = ? ORDER BY r.created_at, r.rowid", (ws.id,)):
-            if identity_lock.locked_by(r["agent_id"]):
+            if (current is not None and r["agent_id"] not in current) or identity_lock.locked_by(r["agent_id"]):
                 continue
             out.append(InboxItemDTO(kind="doc", reason=r["why"], detail=r["title"],
                                     request_id=r["id"], doc=r["doc_id"], section=r["section"],
@@ -367,7 +378,7 @@ def _prompt_wording(screen: str) -> str:
 
 
 def _closed(agent: Agent) -> bool:
-    return agent.status in ("done", "paused") or agent.dismissed_at is not None
+    return agent.status in ("done", "paused") or view.past_worker(agent)
 
 
 def drop_orphan_requests(db: DB, agent: Agent) -> None:

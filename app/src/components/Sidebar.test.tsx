@@ -44,6 +44,16 @@ const sessionRow = (id: string) => document.querySelector<HTMLButtonElement>(`bu
 const list = () => screen.getByRole("navigation", { name: "Sessions" });
 
 describe("Sidebar", () => {
+  it.each(["rewound", "dismissed"])("omits a %s worker from the session sidebar and its agent count", async (reason) => {
+    const past = { ...worker.agents![0], status: reason === "rewound" ? "rewound" : "exited", dismissed_at: reason === "dismissed" ? 1 : null };
+    const fresh = { ...worker.agents![0], id: "fresh" };
+    const { sync } = mount({ workspaces: [root, { ...worker, agents: [past, fresh] }] }, { screen: "session", root: "sup1", repo: REPO });
+    await waitFor(() => expect(agentRow("fresh")).toBeTruthy());
+    expect(agentRow("w1")).toBeNull();
+    expect(sessionRow("sup1")!.textContent).toContain("2 agents");
+    sync.stop();
+  });
+
   it.each([
     { account: { signed_in: true, name: "Sam Rivera", email: "other@example.com" }, initials: "SR" },
     { account: { signed_in: true, name: "  ", email: "sam.rivera@example.com" }, initials: "S" },

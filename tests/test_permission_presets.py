@@ -169,6 +169,43 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "echo $'it\\'s'; rm -rf /"), "deny", "d-rm"),
     (lambda ws: bash(ws, "echo $'it\\'s' && rm -rf $HOME"), "deny", "d-rm"),
     (lambda ws: bash(ws, "cat <<EOF\nit's $(date)\nEOF\nrm -rf /"), "deny", "d-rm"),
+    # Delimiter variants from splitter bypasses; body quotes must stay inert.
+    pytest.param(lambda ws: bash(ws, "echo $((echo hello); rm -rf /)"), "deny", "d-rm",
+                 marks=pytest.mark.variant("subshell inside command substitution is not arithmetic"),
+                 id="arithmetic-subshell"),
+    pytest.param(lambda ws: bash(ws, "cat <<EOF\nx\\\nEOF\nit's\nEOF\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("heredoc continuation prevents an early delimiter match"),
+                 id="heredoc-continuation"),
+    pytest.param(lambda ws: bash(ws, "cat <<\\EOF\nit's\nEOF\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("backslash-quoted heredoc delimiter bypass")),
+    pytest.param(lambda ws: bash(ws, "cat <<'END-X'\nit's\nEND-X\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("single-quoted punctuation delimiter bypass")),
+    pytest.param(lambda ws: bash(ws, 'cat <<"x.y"\nit\'s\nx.y\nrm -rf /\n# \''), "deny", "d-rm",
+                 marks=pytest.mark.variant("double-quoted punctuation delimiter bypass")),
+    pytest.param(lambda ws: bash(ws, 'cat <<E"O"F\nE\nit\'s\nEOF\nrm -rf /\n# \''), "deny", "d-rm",
+                 marks=pytest.mark.variant("partly quoted delimiter bypass")),
+    pytest.param(lambda ws: bash(ws, "cat <<END-X\nEND\nit's\nEND-X\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("unquoted punctuation delimiter bypass")),
+    pytest.param(lambda ws: bash(ws, "cat <<EOF\n  EOF\nit's\nEOF\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("spaces do not close a heredoc")),
+    pytest.param(lambda ws: bash(ws, "cat <<EOF\nEOF \nit's\nEOF\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("trailing spaces do not close a heredoc")),
+    pytest.param(lambda ws: bash(ws, "cat <<-EOF\n\t EOF\nit's\n\tEOF\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("dash strips tabs only")),
+    pytest.param(lambda ws: bash(ws, "cat <<A <<B\nA\n B\nit's\nB\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("multiple heredocs close in order")),
+    pytest.param(lambda ws: bash(ws, 'cat <<\'E"OF\'\nit\'s\nE"OF\nrm -rf /\n# \''), "deny", "d-rm",
+                 marks=pytest.mark.variant("nested double quote in delimiter")),
+    pytest.param(lambda ws: bash(ws, "cat <<\\EOF\nit's\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("unterminated heredoc fails closed")),
+    pytest.param(lambda ws: bash(ws, "cat <<\\EOF\r\nit's\r\nEOF\r\nrm -rf /\r\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("CRLF preserves carriage returns in delimiter")),
+    pytest.param(lambda ws: bash(ws, "echo \"$(cat <<\\EOF\nit's\nEOF\nrm -rf /\n# '\n)\""), "deny", "d-rm",
+                 marks=pytest.mark.variant("heredoc inside a command substitution")),
+    pytest.param(lambda ws: bash(ws, "cat <<$'E\\x4fF'\nit's\nEOF\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("ANSI C quoted delimiter")),
+    pytest.param(lambda ws: bash(ws, "cat <<''\nit's\n\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("empty quoted delimiter")),
     (lambda ws: bash(ws, "rm -rf build/"), "allow", None),
     (lambda ws: read(ws, os.path.expanduser("~/.aws/credentials")), "deny", "d-aws"),
     (lambda ws: read(ws, os.path.join(ws.repo_root, ".env")), "deny", "d-env"),
@@ -187,7 +224,10 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
 ])
 def test_autonomous_runs_everything_but_default_branch_pushes_and_destructive_actions(ws, request_of, decision, rule):
     permissions.apply_preset("autonomous")
-    got = decide(request_of(ws))
+    request = request_of(ws)
+    if rule == "d-rm":
+        assert permissions.destructive_rm(request.command)
+    got = decide(request)
     assert got.decision == decision, got.reason
     assert (got.rule.id if got.rule else None) == rule
 
