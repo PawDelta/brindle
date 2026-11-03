@@ -9,10 +9,14 @@ afterEach(cleanup);
 const decision: DecisionDTO = { id: "private-d", repo_key: "r", topic: "Storage policy", body: "Keep private notes here", rationale: "Local reason", scope: ["src/cache/**"], status: "accepted", created_at: 1, author_session: "local-session" };
 
 it("shows local knowledge on open when the server library is empty", async () => {
+  const local = [{ id: "local:kb:1", kind: "doc", title: "Indexed cache note", local_path: "/repo/src/cache/note.md", paths: ["src/cache/note.md"], topics: ["Storage policy"] },
+    { id: "local:kb:2", kind: "doc", title: "Indexed storage plan", local_path: "/outside/notes/storage.md", paths: ["/outside/notes/storage.md"], topics: ["Storage policy"] }];
+  const opened: string[] = [];
+  const openPath = async (path: string) => { opened.push(path); };
   const client = new DaemonClient({ baseUrl: "http://localhost", token: "t", fetch: async (input) => new Response(JSON.stringify(
-    String(input).includes("/scopes") ? { scopes: [{ kind: "user", id: "u1" }] } : { nodes: [], edges: [] },
+    String(input).includes("/scopes") ? { scopes: [{ kind: "user", id: "u1" }] } : { nodes: new URL(String(input)).searchParams.get("repo") === "/repo" ? local : [], edges: [] },
   )) });
-  const { container, rerender } = render(<MapView client={client} repo="/repo" decisions={[decision, { ...decision, id: "global", topic: "Repo policy", scope: [] }, { ...decision, id: "peer", scope: ["docs/**"] }]}
+  const { container, rerender } = render(<MapView client={client} repo="/repo" openPath={openPath} decisions={[decision, { ...decision, id: "global", topic: "Repo policy", scope: [] }, { ...decision, id: "peer", scope: ["docs/**"] }]}
     sources={[{ id: "cache", kind: "folder", scope: "/repo/src/cache", docs: 3 }, { id: "notes", kind: "folder", scope: "/outside/notes", docs: 1 }]} />);
   expect(await screen.findAllByRole("button", { name: /Storage policy/ })).toHaveLength(2);
   expect(screen.getByRole("button", { name: /Repo policy/ })).toBeTruthy();
@@ -20,8 +24,13 @@ it("shows local knowledge on open when the server library is empty", async () =>
   expect(screen.getByRole("button", { name: /Imported.*notes/ })).toBeTruthy();
   expect(container.querySelector('[data-source="local:decision:private-d"][data-target="local:source:cache"]')).not.toBeNull();
   expect(container.querySelector('[data-source="local:decision:private-d"][data-target="local:decision:peer"]')).not.toBeNull();
-  rerender(<MapView client={client} repo="/repo" decisions={[]} sources={[]} />);
-  expect(container.querySelector("[data-node]")).toBeNull();
+  expect(screen.getByRole("button", { name: /Indexed storage plan/ })).toBeTruthy();
+  expect(container.querySelector('[data-source="local:kb:1"][data-target="local:kb:2"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:source:cache"][data-target="local:kb:1"]')).not.toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: /Indexed cache note/ }));
+  expect(opened).toEqual(["/repo/src/cache/note.md"]);
+  rerender(<MapView client={client} repo="/empty" decisions={[]} sources={[]} />);
+  await waitFor(() => expect(container.querySelector("[data-node]")).toBeNull());
 });
 
 it.each([false, true])("applies a scope change immediately and discards older responses (pending: %s)", async (pending) => {

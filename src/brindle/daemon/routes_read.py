@@ -789,6 +789,8 @@ def analysis_doc_map(db: DB, request: Request) -> Any:
     listed = docs_api("GET", "/analysis-docs", repo=_repo(request), query=query)
     docs = {d["doc_id"]: {**d, "scope": d.get("scope") or scope}
             for d in listed.get("docs") or [] if isinstance(d, dict) and isinstance(d.get("doc_id"), str)}
+    # Local documents belong to the repo on this device, never a shared scope.
+    local = kb.map_documents(db, _need_repo(request), paths) if scope["kind"] == "user" else []
 
     def doc_paths(doc: dict) -> list[str]:
         declared = doc.get("paths") or []
@@ -814,8 +816,8 @@ def analysis_doc_map(db: DB, request: Request) -> Any:
         ids = {n["id"] for n in nodes}
         edges = [{"source": e["from"], "target": e["to"], "kind": e["kind"]}
                  for e in got.get("edges") or [] if e.get("from") in ids and e.get("to") in ids]
-        return {"nodes": nodes, "edges": edges}
-    nodes, edges = [], []
+        return {"nodes": [*nodes, *local], "edges": edges}
+    nodes, edges = list(local), []
     seen_paths = set()
     for doc_id, doc in docs.items():
         files = doc_paths(doc)

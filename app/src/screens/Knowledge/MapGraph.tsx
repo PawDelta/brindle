@@ -189,6 +189,7 @@ function provenance(node: GraphNode, unrecorded = true): string[] {
   if (node.kind === "path") return [];
   if (node.kind === "decision") return [node.decision.author_session ? `Session ${node.decision.author_session}` : missing("Session/author unrecorded"), line("Local decision", date(node.decision.created_at))].filter(Boolean);
   if (node.kind === "imported") return [node.path, line("Imported on this device", scope(node.source.visibility), date(node.source.added_at))];
+  if (node.local_path) return [node.local_path, line("Indexed on this device", date(node.updated_at))];
   const source = node.source;
   return [
     line(source?.ref, source?.session && `Session ${source.session}`) || missing("Session/branch unrecorded"),

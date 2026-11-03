@@ -981,6 +981,32 @@ def test_doc_map_proxies_only_a_neighbourhood_without_caching(brindle_home, monk
     assert len(calls) == 4
 
 
+def test_doc_map_includes_live_local_documents_only_in_their_repo_and_personal_scope(db, repo, monkeypatch):
+    from urllib.parse import urlencode
+
+    from brindle.daemon import routes_read
+
+    monkeypatch.setattr(routes_read, "docs_api", lambda *a, **kw: {"docs": [], "nodes": [], "edges": []})
+    source = kb_mod.add_source(db, knowledge.repo_key(str(repo)), "folder", str(repo / "docs"))
+    other = kb_mod.add_source(db, "another-repo", "folder", "/other/docs")
+    with db.tx() as c:
+        for i, (src, dead, quarantine) in enumerate([(source, 0, None), (source, 1, None), (source, 0, "unsafe"), (other, 0, None)]):
+            c.execute("INSERT INTO kb_docs (id, source_id, external_id, url, title, content_hash, tombstoned)"
+                      " VALUES (?, ?, ?, ?, ?, 'hash', ?)",
+                      (i + 1, src, f"{i}.md", (repo / "docs" / f"{i}.md").as_uri(), f"Note {i}", dead))
+            c.execute("INSERT INTO kb_chunks (id, doc_id, heading_path, text, quarantined) VALUES (?, ?, 'Storage', 'body', ?)",
+                      (f"chunk-{i}", i + 1, quarantine))
+    query = {"repo": str(repo), "scope_kind": "user", "scope_id": "u1"}
+    code, body = _get("/v1/analysis-docs/map", AUTH, urlencode(query))
+    docs = [n for n in body["nodes"] if n["kind"] == "doc"]
+    assert code == 200 and len(docs) == 1
+    assert docs[0]["local_path"] == str(repo / "docs/0.md")
+    assert docs[0]["paths"] == ["docs/0.md"] and docs[0]["topics"] == ["Storage"]
+    assert _get("/v1/analysis-docs/map", AUTH, urlencode(query | {"paths": '["docs"]'}))[1]["nodes"] == docs
+    assert _get("/v1/analysis-docs/map", AUTH, urlencode(query | {"scope_kind": "group"}))[1]["nodes"] == []
+    assert _get("/v1/analysis-docs/map", AUTH, urlencode(query | {"paths": '["src"]'}))[1]["nodes"] == []
+
+
 def test_doc_map_whole_scope_uses_list_with_provenance_and_connections(brindle_home, monkeypatch):
     from urllib.parse import parse_qs, urlencode, urlsplit
 

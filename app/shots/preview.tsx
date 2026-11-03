@@ -98,6 +98,11 @@ if (scene === "knowledge-map") {
     { kind: "org", id: "org_6e83ecddb131dfc35d43d5a8", name: "PawDelta" },
   ];
   daemon.data.knowledgeMap = { nodes: [], edges: [] };
+  daemon.data.kbDocuments = [
+    { id: "local:kb:1", kind: "doc", title: "State architecture", local_path: `${REPO}/docs/architecture.md`, paths: ["docs/architecture.md"], topics: ["state"], updated_at: 1793610000 },
+    { id: "local:kb:2", kind: "doc", title: "Terminal streaming", local_path: `${REPO}/docs/terminals.md`, paths: ["docs/terminals.md"], topics: ["terminals", "state"], updated_at: 1793610000 },
+    { id: "local:kb:3", kind: "doc", title: "Credential storage", local_path: "/home/sam/Notes/pawdelta-design/storage.md", paths: ["/home/sam/Notes/pawdelta-design/storage.md"], topics: ["secrets"], updated_at: 1793610000 },
+  ];
   daemon.data.decisions.push({ ...daemon.data.decisions[0], id: "daemon-reads", topic: "Read-only daemon access", scope: ["docs/**", "src/brindle/daemon/**"] });
 }
 if (scene === "settings-login" || scene === "settings-signin") {

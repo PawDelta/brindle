@@ -86,8 +86,9 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
   };
   const select = (node: GraphNode) => {
     setOpen(node);
-    if (node.kind === "doc") setDoc(node.doc_id ?? node.id);
-    if (node.kind === "imported") void openPath(node.path).catch((e: unknown) => setError(message(e)));
+    if (node.kind === "doc" && !node.local_path) setDoc(node.doc_id ?? node.id);
+    const localPath = node.kind === "imported" ? node.path : node.kind === "doc" ? node.local_path : undefined;
+    if (localPath) void openPath(localPath).catch((e: unknown) => setError(message(e)));
     if (node.kind === "path" && node.path && area) { setInput(node.path); setArea({ scope: area.scope, paths: [node.path] }); }
   };
   return <section className="flex flex-col gap-s2" aria-label="Map" data-testid="map">
