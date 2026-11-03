@@ -570,6 +570,22 @@ def no_machine_cloud_state(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def no_real_docker(tmp_path, monkeypatch):
+    """No test asks the machine's docker about containers (every workspace
+    removal would: ``services.down``): only a docker the test put on PATH
+    under its tmp_path counts as installed."""
+    from brindle import services
+
+    root = tmp_path.resolve()
+
+    def docker_path():
+        found = shutil.which("docker")
+        return found if found and Path(found).resolve().is_relative_to(root) else None
+
+    monkeypatch.setattr(services, "docker_path", docker_path)
+
+
+@pytest.fixture(autouse=True)
 def push_messages(monkeypatch):
     """Most tests read the messages brindle queues for a supervisor directly;
     tests/test_message_pull.py turns pull mode (the real default) back on."""
@@ -613,6 +629,14 @@ def _claude_stub_dir(tmp_path_factory):
     stub = path / "claude"
     stub.write_text("#!/bin/sh\nexit 1\n")
     stub.chmod(0o755)
+    # macOS's /usr/bin/git is a shim that looks up the developer tools on
+    # every run (about 55ms a call, against 20ms for the git it runs): link
+    # that same git here, first on the tests' PATH. Nothing changes elsewhere.
+    if shutil.which("git") == "/usr/bin/git" and shutil.which("xcrun"):
+        found = _REAL_RUN(["xcrun", "--find", "git"], capture_output=True, text=True)
+        real = found.stdout.strip()
+        if found.returncode == 0 and real and os.access(real, os.X_OK):
+            (path / "git").symlink_to(real)
     return path
 
 
@@ -643,18 +667,20 @@ def db(brindle_home):
 
 
 @pytest.fixture(scope="session")
-def _repo_template(tmp_path_factory):
+def _repo_template(tmp_path_factory, _claude_stub_dir):
     """``repo``'s repo and origin, built once per run (about seven git runs)."""
     base = tmp_path_factory.mktemp("repo-template")
     origin = base / "origin.git"
     work = base / "proj"
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
-           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
+           "PATH": f"{_claude_stub_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
     for k in ("GIT_DIR", "GIT_WORK_TREE"):
         env.pop(k, None)
+    binary = shutil.which("git", path=env["PATH"]) or "git"
 
     def git(*args, cwd=work):
-        _REAL_RUN(["git", *args], cwd=cwd, env=env, check=True, capture_output=True)
+        _REAL_RUN([binary, *args], cwd=cwd, env=env, check=True, capture_output=True)
 
     git("init", "-q", "--bare", "-b", "main", str(origin), cwd=base)
     work.mkdir()
