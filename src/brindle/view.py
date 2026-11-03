@@ -263,6 +263,11 @@ def retired(db: DB, ws: Workspace, alive: set[str], now: float | None = None,
         return False
     if not everyone and now - ws.created_at <= UNUSED_WORKTREE_GRACE:
         return False
+    from brindle import repos
+
+    if repos.is_session_branch(db, ws.repo_root, ws.branch):
+        return False   # a session's merge target in a repo it has attached, whoever ran there
+
     try:
         st = status_cache.cached_status(ws.path, ws.base_branch, now=now)
     except git.GitError:

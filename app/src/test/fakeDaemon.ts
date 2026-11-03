@@ -638,6 +638,9 @@ export class FakeDaemon {
   /* The clones started ({url, parent_dir}) and the folders opened, in order. */
   readonly clones: { url: string; parent_dir: string }[] = [];
   readonly opened: string[] = [];
+  /* The practice repos POST /demo started a session in, in order, and the one a held start kept. */
+  readonly demos: string[] = [];
+  heldDemo: string | null = null;
   /* Provider → how many of its next installs fail (the installer exits 1 partway). */
   installFails: Record<string, number> = {};
   /* Hold each install partway until completeInstall(): the installer is still running. */
@@ -1262,6 +1265,33 @@ export class FakeDaemon {
   }
 
   /* POST /repos/open: a folder as a repo brindle works in; refused (409) when it isn't a git repository. */
+  /* routes_actions.start_demo: `brindle demo`'s practice repo (a new one under ~/.brindle/demo/
+     each time) and a session started there as POST /sessions starts one, with the repo's root;
+     refused in air-gap mode. A launch its preflight holds keeps its repo (named in the 409), and
+     the next start launches there; DELETE /demo removes it. */
+  private async startDemo(): Promise<Response> {
+    if (this.data.meta.airgap) return error("airgap", "The demo runs hosted agents, and air-gap mode is on on this Mac.", 403);
+    const name = `textkit-${this.demos.length + 1}`;
+    const root = `/home/u/.brindle/demo/${name}`;
+    if (this.heldDemo !== root) this.data.repos = [...this.data.repos, { repo_root: root, name }];
+    const started = await this.write("/sessions", { repo: root });
+    if (!started.ok) {
+      this.heldDemo = root;
+      return json({ ...((await started.json()) as object), repo: root }, started.status);
+    }
+    this.heldDemo = null;
+    this.demos.push(root);
+    return json({ ...((await started.json()) as object), repo: root });
+  }
+
+  /* routes_actions.cancel_demo: the practice repo a held start kept goes. */
+  private cancelDemo(): Response {
+    const removed = this.heldDemo ? [this.heldDemo] : [];
+    this.data.repos = this.data.repos.filter((r) => !removed.includes(r.repo_root));
+    this.heldDemo = null;
+    return json({ removed });
+  }
+
   private openRepo(body: Record<string, unknown>): Response {
     const path = typeof body.path === "string" ? body.path.replace(/\/+$/, "") : "";
     if (!path) return error("invalid", "path is required", 400);
@@ -2318,6 +2348,8 @@ export class FakeDaemon {
       return policy;
     }
     if (method === "POST" && /^\/sessions(\/|$)/.test(path)) return this.write(path, (body ?? {}) as Record<string, unknown>);
+    if (method === "POST" && path === "/demo") return this.startDemo();
+    if (method === "DELETE" && path === "/demo") return this.cancelDemo();
     if (method === "PUT" || method === "DELETE") {
       const sessionFile = path.match(/^\/sessions\/([^/]+)\/file$/);
       if (sessionFile) return this.editSessionFile(sessionFile[1], (body ?? {}) as Record<string, unknown>, method === "DELETE");
