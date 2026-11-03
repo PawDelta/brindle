@@ -112,13 +112,22 @@ def test_orphan_sessions_are_reaped_by_the_sweep(db, repo, tmp_path, fake_tmux, 
     ("merged, worker still working", False),
     ("closed worker left a shell", True),
     ("unreported worker with uncommitted work", False),
+    # The leftover session goes, but a worker running elsewhere is no occupant of it.
+    ("merged, reported worker on another tmux server", True),
+    ("merged, reported worker in an attached session", True),
 ])
-def test_finished_workers_sessions_are_reaped(db, repo, fake_tmux, case, killed):
+def test_finished_workers_sessions_are_reaped(db, repo, fake_tmux, monkeypatch, case, killed):
     ws = workspaces.create(db, str(repo), "feat-done").workspace
     db.conn.execute("UPDATE workspaces SET created_at=? WHERE id=?", (OLD, ws.id))
     reported = "did it" if case in ("merged, worker reported", "closed worker left a shell") else None
+    elsewhere = "reported worker" in case
     if case == "merged, worker still working":
         add(db, ws, "w1", tmux_window="%3", status="processing")
+    elif elsewhere:
+        foreign = "another tmux server" in case
+        add(db, ws, "w1", result="did it", tmux_window="%3" if foreign else "%9",
+            tmux_server="brindle-elsewhere" if foreign else None)
+        monkeypatch.setattr(tmux, "window_alive", lambda *a, **k: True)   # alive on its own server
     else:
         add(db, ws, "w1", tmux_window="%3", result=reported)
     if case in ("closed worker left a shell", "unreported worker with uncommitted work"):
@@ -130,12 +139,18 @@ def test_finished_workers_sessions_are_reaped(db, repo, fake_tmux, case, killed)
         live(fake_tmux, "%3")
     fake_tmux.sessions = [session(ws.tmux_session, pane("%3", ws.path, cmd="zsh" if case ==
                                                          "closed worker left a shell" else "claude"))]
+    if case == "merged, reported worker in an attached session":
+        live(fake_tmux, "%9")
+        fake_tmux.sessions.append(session("brindle_proj_alt", pane("%9", ws.path, cmd="claude"), attached=True))
 
     reap.run(db)
 
     assert (ws.tmux_session in fake_tmux.killed) == killed
+    assert "brindle_proj_alt" not in fake_tmux.killed
     if case == "merged, worker reported":
         assert db.get_agent("w1").dismissed_at is not None
+    if elsewhere:
+        assert db.get_agent("w1").dismissed_at is None
     assert os.path.isdir(ws.path)   # the worktree itself is never touched here
 
 
@@ -188,6 +203,37 @@ def test_leftover_reviewers_and_coordinator_rows(db, repo, fake_tmux, case, gone
 
     a = db.get_agent("x1")
     assert (a is None or a.dismissed_at is not None) == gone
+
+
+@pytest.mark.parametrize("change", ["a client attaches", "uncommitted work appears", "input arrives"])
+def test_what_changed_since_planning_is_not_reaped(db, repo, tmp_path, fake_tmux, monkeypatch, change):
+    """Planning (git probes and all) takes a while: a stop acts on the state
+    just before it, not on the plan's snapshot."""
+    if change == "input arrives":
+        ws = workspaces.adopt_root(db, str(repo))
+        add(db, ws, "boss", mode="interactive", profile="supervisor", tmux_window="%1")
+        live(fake_tmux, "%1")
+        fake_tmux.sessions = [session("brindle_proj_main", pane("%1", repo, cmd="claude"))]
+    else:
+        fake_tmux.sessions = [session("brindle_proj_old", pane("%7", repo))]
+    planned = reap.plan
+
+    def then_changed(*a, **k):
+        out = planned(*a, **k)
+        [s] = fake_tmux.sessions
+        if change == "a client attaches":
+            s.attached = True
+        elif change == "uncommitted work appears":
+            (repo / "wip.py").write_text("x = 1\n")
+        else:
+            s.activity = NOW
+        return out
+    monkeypatch.setattr(reap, "plan", then_changed)
+
+    assert reap.run(db) == []
+    assert fake_tmux.killed == [] and fake_tmux.stopped == []
+    if change == "input arrives":
+        assert db.get_agent("boss").status != "paused"
 
 
 def _commit(cwd, text, when=NOW - 2 * 86400, msg="change"):
