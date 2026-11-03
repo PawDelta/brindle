@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -1110,6 +1111,76 @@ def session_panes(session: str) -> list[tuple[int, str]]:
     return out
 
 
+@dataclass
+class PaneInfo:
+    id: str
+    pid: int
+    path: str            # its current folder; '' when tmux can't say (deleted)
+    command: str         # what runs in it now
+    dead: bool
+    start: str           # the command it was started with
+    activity: float      # its window's last output (epoch seconds)
+
+    def idle(self) -> bool:
+        """Dead, a bare shell, or a brindle sidebar (see session_idle)."""
+        return (self.dead or "watch --sidebar" in self.start
+                or self.command.lstrip("-") in SHELLS)
+
+
+@dataclass
+class SessionInfo:
+    name: str
+    attached: bool
+    created: float
+    activity: float      # the last input any client gave it (tmux's session_activity)
+    home: str | None     # its BRINDLE_HOME, None if it has none
+    panes: list[PaneInfo]
+
+    def idle(self) -> bool:
+        return all(p.idle() for p in self.panes)
+
+
+_INFO_FORMAT = "\t".join([
+    "#{session_name}", "#{session_attached}", "#{session_created}", "#{session_activity}",
+    "#{pane_id}", "#{pane_pid}", "#{pane_dead}", "#{window_activity}", "#{pane_current_command}",
+    "#{pane_current_path}", "#{pane_start_command}"])
+
+
+def session_infos(prefix: str = "brindle_") -> list[SessionInfo]:
+    """Every session on brindle's server whose name starts with ``prefix``,
+    with its panes, in one listing (plus one environment read each). Empty
+    with no server; a hung one raises TmuxTimeout."""
+    try:
+        proc = _tmux("list-panes", "-a", "-F", _INFO_FORMAT, check=False)
+    except TmuxTimeout:
+        raise
+    except TmuxError:
+        return []
+    if proc.returncode != 0:
+        return []
+    found: dict[str, SessionInfo] = {}
+
+    def num(text: str) -> float:
+        return float(text) if text.strip().isdigit() else 0.0
+
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t", 10)
+        if len(parts) < 11 or not parts[0].startswith(prefix):
+            continue
+        name, attached, created, activity, pane, pid, dead, wact, cmd, path, start = parts
+        s = found.get(name)
+        if s is None:
+            s = found[name] = SessionInfo(name, attached.strip() not in ("", "0"), num(created),
+                                          num(activity), None, [])
+        if pid.isdigit():
+            s.panes.append(PaneInfo(pane, int(pid), path.strip(), cmd.strip(), dead == "1",
+                                    start, num(wact)))
+    for s in found.values():
+        env = _tmux("show-environment", "-t", f"={s.name}", "BRINDLE_HOME", check=False).stdout.strip()
+        s.home = (env.partition("=")[2] if env.startswith("BRINDLE_HOME=") else "") or None
+    return list(found.values())
+
+
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu"}
 
 
@@ -1189,6 +1260,29 @@ def tagged_pane_ids(keys: Iterable[str], server: object = _THIS_SERVER) -> list[
         raise TmuxError(f"tmux list-panes: {proc.stderr.strip()}")
     rows = (line.split("\t") for line in proc.stdout.splitlines())
     return [pane for pane, *tags in rows if any(tags)]
+
+
+def server_pid(server: object = _THIS_SERVER) -> int | None:
+    """The pid of the tmux server itself (every pane's first process is its
+    child), or None when it can't say."""
+    try:
+        out = _tmux("list-sessions", "-F", "#{pid}", check=False, server=server).stdout.split()
+    except TmuxError:
+        return None
+    return int(out[0]) if out and out[0].isdigit() else None
+
+
+def pane_windows(server: object = _THIS_SERVER) -> dict[int, str]:
+    """Every pane's process id on ``server`` -> its window's id, as tmux has
+    them now; empty when no server runs there. Raises TmuxError when the
+    server can't be asked, so an answer it never gave isn't read as "none"."""
+    proc = _tmux("list-panes", "-a", "-F", "#{pane_pid}\t#{window_id}", check=False, server=server)
+    if proc.returncode != 0:
+        if _NO_SERVER.search(proc.stderr):
+            return {}
+        raise TmuxError(f"tmux list-panes: {proc.stderr.strip()}")
+    rows = (line.split("\t") for line in proc.stdout.splitlines())
+    return {int(pid): window for pid, window in rows if pid.isdigit()}
 
 
 def window_size_option(target: str, server: object = _THIS_SERVER) -> str | None:

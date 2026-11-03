@@ -695,6 +695,13 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
         server = tmux.current_server()
         db.update_agent(agent.id, tmux_window=target, tmux_server=server)
         agent.tmux_window, agent.tmux_server = target, server
+        from brindle import procs
+
+        try:
+            # The daemon's snapshot of agent panes must not clear this pane's commands.
+            procs.agent_panes_changed()
+        except OSError:
+            pass   # the snapshot still expires (brindle.daemon.peer.PANE_TTL)
         if get_provider(agent.provider).startup_prompts and not agent.headless:
             from brindle import prompt_answer
 

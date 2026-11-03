@@ -98,7 +98,7 @@ signed in. Claude Code is the default for the supervisor, workers and reviewer
 There's also a free brindle desktop app for macOS and Linux (on Windows, use the CLI inside WSL2). It's a download from the brindle website and runs on the same engine; the CLI keeps working alongside it. `brindle app` opens the app, or prints the download link if it isn't installed. `brindle daemon` runs the local API the app talks to: over a Unix socket by default, or on `--tcp` at 127.0.0.1 for WSL. Over `--tcp` the daemon can't check whether a caller is an agent, so its token is the only gate: keep TCP for the WSL client.
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.5.11`). A session started before an upgrade keeps
+session shows it too (`brindle 0.5.12`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -685,6 +685,8 @@ Goal driving, merge gates and cleanup:
 | `graphify_auto_refresh` | `true` | automatically rebuild untracked code maps; `false` disables rebuilds while keeping queries available |
 | `stale_after` | `30` | minutes before a worker that reported and sat idle is closed (one whose branch is still in review, fixing or ready is left open and its supervisor told), or `brindle prune` closes a stale paused/exited agent whose workspace is merged or gone (`0`: never) |
 | `stall_alert_after` | `10` | minutes a branch in review, fixing or ready may sit with no live worker, reviewer or check run before its supervisor is told, once (`0`: never) |
+| `idle_supervisor_days` | `3` | days without input (no client attached, no running workers) before the sweep stops a supervisor; it stays resumable with `brindle continue` and the Inbox says so (`0`: never) |
+| `superseded_after` | `6` | hours without a commit, turn or output before a worker whose branch is already in its base is stopped (its supervisor is told; uncommitted changes only notify), or one whose work closely matches a newly merged branch is reported (`0`: never) |
 | `pipeline` | `true` | brindle reviews and merges reported branches itself; the supervisor gets one message per branch |
 | `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
