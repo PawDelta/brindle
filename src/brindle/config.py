@@ -127,6 +127,7 @@ class RepoConfig:
     graphify: bool | None = None       # point agents at graphify-out/graph.json (None: if it's there)
     graphify_auto_refresh: bool = True  # rebuild untracked code maps automatically; queries work when false
     stale_after: int = 30              # minutes before an idle, reported worker is closed; 0: never
+    stall_alert_after: int = 10        # minutes a piped branch may sit with nothing working on it before the supervisor is told; 0: never
     pipeline: bool = True              # brindle reviews and merges reported branches itself (brindle.pipeline)
     review_start_delay: int = 60       # seconds before recovering a reported branch with no review in progress
     goal_audit: bool = True            # an adversarial reviewer checks a finished goal against the original request before it counts as reached
@@ -199,6 +200,8 @@ class RepoConfig:
     local_models: bool = True
     delete_merged_branches: bool = True  # removing a worktree deletes its branch once fully merged into its base
     shared_cargo_target: bool = True   # worktrees share one CARGO_TARGET_DIR per repo (see brindle.build_caches)
+    delete_pushed_branches: bool = False  # delete the origin branch brindle pushed once its PR merged
+    min_free_disk_gb: float = 10.0     # a new worker or check run waits for disk below this much free (0: never)
     pr_footer: bool = True             # `brindle pr` ends the PR body with one "built with brindle" line
     sidebar: str = "left"              # where the dashboard sits: "left" of the chat or "bottom"
     # Standing rules for the supervisor ("fix review findings without asking", ...):
@@ -392,8 +395,8 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
-                "check_concurrency", "wait_for_room", "room_wait_max",
-                "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",
+                "check_concurrency", "wait_for_room", "room_wait_max", "min_free_disk_gb", "delete_pushed_branches",
+                "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
                 "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",

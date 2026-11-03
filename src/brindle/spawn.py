@@ -349,7 +349,13 @@ def no_room(repo_root: str | None = None) -> str | None:
     or a check run is the heaviest thing brindle starts. It waits until there
     is room, until the worker's ``room_wait_max`` expires, or until it is
     cancelled (a supervisor can start a waiting worker anyway:
-    ``tasks.start_now``), unless the repo's ``wait_for_room`` is false."""
+    ``tasks.start_now``), unless the repo's ``wait_for_room`` is false.
+    Low free disk (``disk.low_disk``, "waiting for disk: N GB free") holds it
+    the same way, whatever ``wait_for_room`` says."""
+    from brindle import disk
+
+    if (low := disk.low_disk(repo_root)) is not None:
+        return low
     if room() >= 1:
         return None
     if repo_root is not None:
@@ -365,7 +371,12 @@ def check_no_room(repo_root: str | None = None) -> str | None:
     slots (``check_concurrency``, with the xdist workers split across them)
     already bound check load, so unlike :func:`no_room` this waits only when
     the machine is in real trouble: memory pressure, or a load above
-    ``CHECK_LOAD_FACTOR`` times its cores. ``wait_for_room`` false skips it."""
+    ``CHECK_LOAD_FACTOR`` times its cores. ``wait_for_room`` false skips it.
+    Low free disk holds it too (``disk.low_disk``)."""
+    from brindle import disk
+
+    if (low := disk.low_disk(repo_root)) is not None:
+        return low
     if pressure() < PRESSURE_WARN and _load() <= CHECK_LOAD_FACTOR * _cores():
         return None
     if repo_root is not None:

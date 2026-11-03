@@ -83,6 +83,14 @@ def _a_worker_starts_after_its_room_wait_limit(db, tmp_path, monkeypatch, overlo
     assert tasks.start_with_room(db) == 0
 
 
+def _a_disk_wait_outlasts_the_room_wait_limit(tmp_path):
+    """Low free disk holds a start past room_wait_max: starting anyway could fill the disk."""
+    task = Task("t", str(tmp_path), None, "boss", "w", "developer", "do work", "assign", 0,
+                None, None, None, None, "pending", 1.0, waiting_since=1.0)
+    assert tasks._room_wait_overrun(task, "waiting for disk: 1.0 GB free (under 10 GB)") is None
+    assert tasks._room_wait_overrun(task, "load 9.0 on 8 cores") is not None
+
+
 def _a_high_load_average_with_idle_cpus_leaves_room(monkeypatch):
     """macOS counts throttled runnable threads in the load average: 96 with
     the CPUs 63% idle once held every check run back."""
@@ -350,7 +358,7 @@ def _a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db, rep
         spawn.current().stop()             # the client leaves right after the first change
 
     monkeypatch.setattr(tmux, "kill_window", kill_window)
-    monkeypatch.setattr(procs, "Path", lambda p: tmp_path / "no-proc")    # ps, not /proc, on Linux too
+    monkeypatch.setattr(procs, "PROC", tmp_path / "no-proc")    # ps, not /proc, on Linux too
     monkeypatch.setattr(subprocess, "Popen", _FakePs)
     _FakePs.started = []
     monkeypatch.setattr(procs, "terminate", lambda pids, grace=3.0: terminated.update(pids) or len(pids))
@@ -358,7 +366,7 @@ def _a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db, rep
     with spawn.deadline(30):
         agents.pause_worker(db, db.get_agent("a1"))
     assert closed == ["%7"]
-    assert [argv[0] for argv in _FakePs.started] == ["ps"]   # admitted through spawn.read
+    assert [argv[0] for argv in _FakePs.started] == ["ps", "ps"]   # admitted through spawn.read
     assert terminated == {5001, 5002, 5003}
     assert all(s.ended_at is not None for s in db.native_subagents("a1"))
     assert db.get_agent("a1").status == "paused"
@@ -420,6 +428,7 @@ def _row(scenario, id, why=None, **params):
     _row(_room, "room-pressure-warn", load=5.5, level=2, expected=1.5),
     _row(_a_worker_starts_after_its_room_wait_limit, "room-wait-limit", maximum=None),
     _row(_a_worker_starts_after_its_room_wait_limit, "room-wait-configured-limit", maximum=60),
+    _row(_a_disk_wait_outlasts_the_room_wait_limit, "room-wait-not-for-disk"),
     _row(_a_high_load_average_with_idle_cpus_leaves_room, "room-idle-cpu-high-loadavg"),
     _row(_a_start_whose_room_sample_outlasts_its_deadline_is_refused, "room-sample-past-deadline"),
     _row(_checks_and_setup_run_at_normal_priority, "normal-priority-checks"),

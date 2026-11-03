@@ -18,6 +18,7 @@ from typing import Iterator
 
 from brindle import bus
 from brindle.config import db_path
+from brindle.redact import mask
 
 # Claude Code's own subagents (native_subagents table, see below). A crash
 # can skip SubagentStop, so a subagent still "running" past this age is
@@ -1614,7 +1615,7 @@ class DB:
 
     def set_result(self, agent_id: str, result: str) -> None:
         with self.tx() as c:
-            c.execute("UPDATE agents SET result=? WHERE id=?", (result, agent_id))
+            c.execute("UPDATE agents SET result=? WHERE id=?", (mask(result), agent_id))
         bus.publish_agent(self, "agent.result", agent_id)
 
     def delete_agent(self, agent_id: str) -> None:
@@ -1631,7 +1632,7 @@ class DB:
         with self.tx() as c:
             cur = c.execute(
                 "INSERT INTO inbox (agent_id, sender_id, body, created_at, noticed_at) VALUES (?,?,?,?,?)",
-                (agent_id, sender_id, body, now, now if notice else None),
+                (agent_id, sender_id, mask(body), now, now if notice else None),
             )
             message_id = int(cur.lastrowid)
         if not notice:
@@ -1778,7 +1779,7 @@ class DB:
         with self.tx() as c:
             cur = c.execute(
                 "INSERT INTO inbox (agent_id, sender_id, body, created_at, held) VALUES (?,?,?,?,1)",
-                (agent_id, sender_id, body, time.time()),
+                (agent_id, sender_id, mask(body), time.time()),
             )
             message_id = int(cur.lastrowid)
         if publish:
@@ -1966,7 +1967,7 @@ class DB:
                 "WHERE root_id=? AND external_wait=?", (now, root_id, wait)).rowcount
             if changed:
                 c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at) VALUES (?,NULL,?,?)",
-                          (root_id, message, now))
+                          (root_id, mask(message), now))
             return bool(changed)
 
     def bump_progress(self, root_id: str) -> None:
@@ -2024,7 +2025,7 @@ class DB:
             c.execute(
                 "INSERT INTO reviews (workspace_id, sha, reviewer_id, approved, summary, created_at, "
                 "review_slot, reviewer_created_at) VALUES (?,?,?,?,?,?,?,?)",
-                (workspace_id, sha, reviewer_id, int(approved), summary, time.time(),
+                (workspace_id, sha, reviewer_id, int(approved), mask(summary), time.time(),
                  reviewer["review_slot"] if reviewer else None,
                  reviewer["created_at"] if reviewer else None),
             )
@@ -2159,7 +2160,7 @@ class DB:
                 "INSERT INTO check_cache (workspace_id, sha, command, ok, output, created_at) "
                 "VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id, sha, command) DO UPDATE SET "
                 "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
-                (workspace_id, sha, command, int(ok), output, time.time()),
+                (workspace_id, sha, command, int(ok), mask(output), time.time()),
             )
 
     def get_tree_check(self, repo_root: str, tree: str, command: str):
@@ -2174,7 +2175,7 @@ class DB:
                 "INSERT INTO check_tree_cache (repo_root, tree, command, ok, output, created_at) "
                 "VALUES (?,?,?,?,?,?) ON CONFLICT(repo_root, tree, command) DO UPDATE SET "
                 "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
-                (repo_root, tree, command, int(ok), output, time.time()),
+                (repo_root, tree, command, int(ok), mask(output), time.time()),
             )
 
     def check_duration(self, repo_root: str, command: str) -> float | None:
@@ -2322,7 +2323,7 @@ class DB:
             c.execute(
                 "INSERT INTO history (repo_root, ts, kind, agent_id, branch, profile, task, "
                 "result, tokens) VALUES (?,?,?,?,?,?,?,?,?)",
-                (repo_root, time.time(), kind, agent_id, branch, profile, task, result, tokens),
+                (repo_root, time.time(), kind, agent_id, branch, profile, mask(task), mask(result), tokens),
             )
             if mark is not None:
                 transcript_path, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens = mark
@@ -2372,7 +2373,7 @@ class DB:
             c.execute(
                 "INSERT OR REPLACE INTO learned_rules (repo_root, key, profile, title, rule, checks, "
                 "findings, branches, status, created_at, decided_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (r.repo_root, r.key, r.profile, r.title, r.rule, r.checks, r.findings, r.branches,
+                (r.repo_root, r.key, r.profile, mask(r.title), mask(r.rule), r.checks, r.findings, r.branches,
                  r.status, r.created_at, r.decided_at))
 
     def learned_rules_mark(self, repo_root: str) -> int:

@@ -407,7 +407,8 @@ def _request_refresh(checkout: str, repo_root: str | None, *, background: bool) 
                 with log.open("a", encoding="utf-8") as out:
                     spawn.start(
                         [sys.executable, "-P", "-c",
-                         "import sys; from brindle.codemap import _run_refresh; "
+                         "import sys; from brindle import redact; redact.guard_std(); "
+                         "from brindle.codemap import _run_refresh; "
                          "_run_refresh(sys.argv[1], sys.argv[2] or None, int(sys.argv[3]))",
                          checkout, repo_root or "", str(lock.fileno())],
                         cwd=checkout, start_new_session=True,
@@ -480,25 +481,41 @@ def _start_refresh(checkout: str, repo_root: str | None, lock_fd: int) -> Callab
 
     log = brindle_home() / "graphify.log"
     log.parent.mkdir(parents=True, exist_ok=True)
-    with open(log, "a", encoding="utf-8") as out:
-        proc = spawn.start(
-            ["nice", "-n", "10", "graphify", "update", checkout, "--force"],
-            cwd=checkout,
-            start_new_session=True,
-            pass_fds=(lock_fd,),
-            stdin=subprocess.DEVNULL,
-            stdout=out,
-            stderr=out,
-        )
+    proc = spawn.start(
+        ["nice", "-n", "10", "graphify", "update", checkout, "--force"],
+        cwd=checkout,
+        start_new_session=True,
+        pass_fds=(lock_fd,),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,     # copied to graphify.log masked, by _post
+        stderr=subprocess.STDOUT,
+    )
 
     def _post():
         if proc is not None and hasattr(proc, "wait"):
+            _log_masked(getattr(proc, "stdout", None), log)
             proc.wait()
         if target_graph.is_file():
             carry_community_names(old_graph, target_graph)
             copy_to_store(target_graph, repo_root)
 
     return _post
+
+
+def _log_masked(stream, log: Path) -> None:
+    """Append what ``stream`` (graphify's output pipe) says to ``log``, with
+    secrets masked (by a MaskingStream, so one split across lines is held
+    whole), until it closes."""
+    if stream is None:
+        return
+    from brindle.redact import MaskingStream
+
+    with stream, open(log, "a", encoding="utf-8") as out:
+        masked = MaskingStream(out)
+        for raw in stream:
+            masked.write(raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw)
+            masked.flush()
+        masked.finish()
 
 
 def remove_session_graph(checkout: str | Path) -> None:

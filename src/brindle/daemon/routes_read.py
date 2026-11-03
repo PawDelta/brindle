@@ -593,6 +593,15 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True
 
 
 @_json
+def get_storage(db: DB, request: Request) -> Any:
+    """brindle's disk use: every worktree classified merged / abandoned / active
+    with its size and why it must stay (``disk.storage_report``)."""
+    from brindle import disk
+
+    return disk.storage_report(db, _repo(request))
+
+
+@_json
 def get_doctor(db: DB, request: Request) -> Any:
     return [dataclasses.asdict(c) for c in doctor.checks(_repo(request), db=db)]
 
@@ -970,6 +979,7 @@ ROUTES = [
     Route("/v1/routing", get_routing),
     Route("/v1/debug", get_debug),
     Route("/v1/doctor", get_doctor),
+    Route("/v1/storage", get_storage),
     # Before the action routes' DELETE /v1/providers/{provider}.
     Route("/v1/providers/installed", providers_installed),
     Route("/v1/providers/{provider}/preflight", provider_preflight),
