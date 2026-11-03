@@ -223,7 +223,8 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         if a.status == "paused" and _usage_paused(db, a):
             continue
         limit = _stale_after(db, a, limits)
-        idle_for = now - max(a.created_at, a.status_since or 0)
+        idle_since = max(a.created_at, a.status_since or 0)
+        idle_for = now - idle_since
         if limit <= 0 or idle_for <= limit:
             continue
         running = alive(a)
@@ -232,6 +233,18 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         # continue`; one whose session carried on without it won't.
         root = db.get_agent(_root(db, a))
         gone = not running and (a.status != "paused" or root is None or root.status != "paused")
+        if (finished or gone) and a.pipeline in PIPED:
+            # The pipeline still owns its branch: closing it would leave the
+            # branch with nobody on it. A stopped one is note_stalled's.
+            ws = db.get_workspace(a.workspace_id)
+            if finished and a.parent_id and ws is not None and a.stuck_noted != idle_since:
+                from brindle import pipeline
+
+                done.extend(_tell_stalled(db, a, idle_since, (
+                    f"Worker {a.id} has sat idle {int(idle_for // 60)} min, but its branch `{ws.branch}` "
+                    f"is still in the pipeline ({pipeline.review_state(db, ws) or a.pipeline}), so "
+                    "brindle left it open. Check it's not stuck: send_message it what it needs.")))
+            continue
         if finished or gone:
             agents.close(db, a.id, panes)
             done.append(f"closed {'idle' if finished else 'stopped'} worker {a.id} "
@@ -258,6 +271,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     done.extend(note_stuck(db, now, panes))
     done.extend(note_idle_unreported(db, now, panes))
     done.extend(note_reported_stuck(db, now, panes))
+    done.extend(note_stalled(db, now, panes))
     done.extend(note_silent(db, now, panes))
     done.extend(note_model_refused(db, now, panes))
 
@@ -521,10 +535,23 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
                 done.append(f"acted on the review of `{ws.branch}`, whose check run died")
                 continue
             reviewers = [r for r in db.list_agents(ws.id) if r.mode == "review"]
+            reviewing = any(r.dismissed_at is None and r.status not in ("paused", "done")
+                            and agents.is_alive(r, panes) for r in reviewers)
+            unacted = None if reviewing else pipeline.unacted_verdict(db, ws, a, head, now)
+            if unacted is not None and a.stuck_noted != unacted.created_at:
+                # A verdict on record that never moved the branch on (the
+                # pipeline dropped it): act on it once, and say so.
+                db.update_agent(a.id, stuck_noted=unacted.created_at)
+                pipeline.replay_verdict(db, ws, unacted)
+                verdict = "approved" if unacted.approved else "requested changes on"
+                state = pipeline.review_state(db, ws) or "out of the pipeline"
+                done.extend(_tell_stalled(db, a, unacted.created_at, (
+                    f"Reviewer {unacted.reviewer_id} {verdict} {where} at {unacted.sha[:8]} "
+                    f"{int((now - unacted.created_at) // 60)} min ago, but the pipeline never acted on "
+                    f"it. brindle has acted on it now; the branch stands at: {state}.")))
+                continue
             since = max([a.reviewing_since] + [r.created_at for r in reviewers])
-            if (now - since < cfg.review_start_delay or db.latest_review(ws.id, head)
-                    or any(r.dismissed_at is None and r.status not in ("paused", "done")
-                           and agents.is_alive(r, panes) for r in reviewers)):
+            if now - since < cfg.review_start_delay or db.latest_review(ws.id, head) or reviewing:
                 continue
             # Its check run died (#186, #190): start it again before asking anyone.
             if pipeline.restart_review(db, a, ws, since):
@@ -545,6 +572,74 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
             continue
         db.update_agent(a.id, stuck_noted=since)
         done.append(f"told {a.parent_id} that reported worker {a.id} is stuck")
+    return done
+
+
+# The pipeline's stages: a worker in one has a branch the pipeline still owns.
+PIPED = ("reviewing", "fixing", "ready")
+
+
+def _tell_stalled(db: DB, a: Agent, since: float, body: str) -> list[str]:
+    """Tell ``a``'s supervisor ``body`` about its piped branch, once per
+    ``since`` (kept in stuck_noted, as the other notes do)."""
+    try:
+        agents.send_message(db, a.parent_id, f"[brindle pipeline] {body}", sender_id=a.id)
+    except agents.AgentError:
+        return []
+    db.update_agent(a.id, stuck_noted=since)
+    return [f"told {a.parent_id} that the branch of {a.id} is stalled"]
+
+
+def note_stalled(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Tell each supervisor, once per spell, about a branch the pipeline
+    owns (in review, fixing or ready) that nothing has worked on for the
+    repo's stall_alert_after minutes: no live worker, no reviewer running,
+    no check run or merge at work. A branch in review with no verdict on
+    its commit is note_reported_stuck's, which starts its review again
+    first."""
+    from brindle import gates, pipeline
+
+    done = []
+    owners = agents.pane_owners(db, panes)
+    limits: dict[str, float] = {}
+    for a in db.list_agents():
+        if a.mode not in pipeline.WORKER_MODES or not a.parent_id or a.pipeline not in PIPED:
+            continue
+        ws = db.get_workspace(a.workspace_id)
+        if ws is None or not agents.same_server(a, panes) or pipeline._settled(db, ws) is not None:
+            continue
+        if agents.is_alive(a, panes) and agents.owns_pane(db, a, owners):
+            continue
+        reviewers = [r for r in db.list_agents(ws.id) if r.mode == "review"]
+        if any(r.dismissed_at is None and r.status not in ("paused", "done")
+               and agents.is_alive(r, panes) for r in reviewers):
+            continue
+        if pipeline.review_running(ws.id) or any(
+                gates.marked(kind, ws.id) for kind in ("checks-running", "checks-room", "merge-run")):
+            continue
+        try:
+            head = gates.head(ws)
+        except git.GitError:
+            continue
+        last = db.last_review(ws.id)
+        if a.pipeline == "reviewing" and db.latest_review(ws.id, head) is None:
+            continue
+        if ws.repo_root not in limits:
+            try:
+                limits[ws.repo_root] = load_repo_config(ws.repo_root).stall_alert_after * 60.0
+            except ValueError:
+                limits[ws.repo_root] = 0.0
+        since = max([a.created_at, a.status_since or 0, a.reviewing_since or 0, a.dismissed_at or 0,
+                     a.reopened_at or 0, last.created_at if last else 0]
+                    + [r.created_at for r in reviewers])
+        if limits[ws.repo_root] <= 0 or now - since < limits[ws.repo_root] or a.stuck_noted == since:
+            continue
+        state = pipeline.review_state(db, ws) or a.pipeline
+        done.extend(_tell_stalled(db, a, since, (
+            f"Branch `{ws.branch}` (workspace {ws.id}) is in the pipeline ({state}), but nothing is "
+            f"working on it: worker {a.id} isn't running, and no reviewer or check run is at work, "
+            f"for {int((now - since) // 60)} min. This needs you: send_message the worker what it "
+            f"needs, assign a new one on the branch, or merge_workspace(\"{ws.id}\") if it's approved.")))
     return done
 
 

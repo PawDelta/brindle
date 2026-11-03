@@ -47,6 +47,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -59,7 +60,9 @@ from brindle import (
     savings, session_sync, tasks, workspaces,
 )
 from brindle.config import RepoConfig, load_repo_config
-from brindle.db import DB, Agent, Workspace
+from brindle.db import DB, Agent, Review, Workspace
+
+log = logging.getLogger(__name__)
 
 PIPED_MODES = ("assign", "handoff_detached")
 WORKER_MODES = ("handoff", "handoff_detached", "assign")
@@ -251,12 +254,16 @@ def checks_finished(db: DB, ws: Workspace, sha: str, summary: str | None) -> Non
         state["checks"] = summary
         _set_alongside(ws.id, state)
         for reviewer_id in held:
-            reviewer = db.get_agent(reviewer_id)
+            # From the reviews row: the reviewer's own row may be gone by now.
             review = next((r for r in reversed(db.workspace_reviews(ws.id))
                            if r.reviewer_id == reviewer_id), None)
-            if reviewer is None or review is None or review.sha != sha:
+            if review is None or review.sha != sha:
+                log.warning("brindle: the verdict of %s held for the checks of %s at %s has no "
+                            "review of that commit on record; not acted on",
+                            reviewer_id, ws.branch, sha[:8])
                 continue
-            ready = _on_review(db, reviewer, ws, review.approved, review.summary or "")[1] or ready
+            ready = _on_review(db, reviewer_of(db, review), ws, bool(review.approved),
+                               review.summary or "")[1] or ready
     if ready:
         drain(db, ws.repo_root, ws.base_branch)
 
@@ -270,6 +277,61 @@ def release_held(db: DB, ws: Workspace) -> bool:
         return False
     checks_finished(db, ws, state["sha"], None)
     return True
+
+
+def verdict_held(ws_id: str, reviewer_id: str) -> bool:
+    """Whether ``reviewer_id``'s verdict waits for a check run of ``ws_id``."""
+    return reviewer_id in _alongside(ws_id).get("held", [])
+
+
+def reviewer_of(db: DB, review: Review) -> Agent:
+    """The reviewer who gave ``review``: its row, or once that is gone (a
+    reviewer is closed seconds after its verdict, usually before the checks
+    its verdict waits for end) a stand-in from what the reviews row kept,
+    which is all ``_on_review`` reads: its id, commit, start and slot."""
+    reviewer = db.get_agent(review.reviewer_id) if review.reviewer_id else None
+    if reviewer is not None:
+        return reviewer
+    started = review.reviewer_created_at if review.reviewer_created_at is not None else review.created_at
+    return Agent(review.reviewer_id or "", review.workspace_id, "", "", None, "review", "done", "",
+                 None, started, review_sha=review.sha, review_slot=review.review_slot)
+
+
+# A verdict on record this long that left its branch waiting in review was
+# never acted on (``unacted_verdict``): acting on one takes seconds.
+UNACTED_AFTER = 120.0
+
+
+def unacted_verdict(db: DB, ws: Workspace, worker: Agent, head: str, now: float) -> Review | None:
+    """The standing verdict on ``head`` that the pipeline never acted on:
+    a reviewer's, given since ``worker`` last reported and UNACTED_AFTER
+    seconds ago, with the branch still waiting in review and nothing left
+    that would act on it (no verdict held for a check run, no run at work,
+    no second review it waits for)."""
+    if worker.pipeline != "reviewing" or worker.reviewing_since is None:
+        return None
+    review = gates.verdict(db, ws.id, head)
+    if (review is None or not review.reviewer_id or review.created_at < worker.reviewing_since
+            or now - review.created_at < UNACTED_AFTER
+            or _alongside(ws.id).get("held") or review_running(ws.id)):
+        return None
+    if review.approved:
+        try:
+            cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
+        except ValueError:
+            cfg = RepoConfig()
+        if second_review_pending(db, cfg, worker, ws):
+            return None
+    return review
+
+
+def replay_verdict(db: DB, ws: Workspace, review: Review) -> None:
+    """Act on ``review`` as ``on_review`` would have when it was given."""
+    with merge_lock(ws.id):
+        ready = _on_review(db, reviewer_of(db, review), ws, bool(review.approved),
+                           review.summary or "")[1]
+    if ready:
+        drain(db, ws.repo_root, ws.base_branch)
 
 
 def _hold_verdict(ws: Workspace, reviewer: Agent, sha: str) -> bool:
@@ -483,8 +545,10 @@ def second_review_pending(db: DB, cfg: RepoConfig, worker: Agent, ws: Workspace)
         return True   # one is missing, or one asked for changes (the worker is fixing it)
     # An approval in each slot: the commit's review ("") and the second
     # review's (its profile). Two in one slot are one review.
-    slots = {_review_slot(db, a) for r in reviews
-             if r.reviewer_id and (a := db.get_agent(r.reviewer_id)) is not None}
+    # From the reviews row first: the reviewer's own row is deleted once it's closed.
+    slots = {r.review_slot if r.review_slot is not None
+             else _review_slot(db, a) if (a := db.get_agent(r.reviewer_id)) is not None else None
+             for r in reviews if r.reviewer_id}
     return not {"", profile} <= slots
 
 
