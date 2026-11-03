@@ -219,7 +219,10 @@ def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brin
     target = os.path.join(ws.repo_root, ".brindle", "worktrees", "created-after-launch")
     os.makedirs(target)
     assert json.loads(pre("bash", {"command": f"git -C {target} status; ls"}))["decision"] == "allow"
-    assert pre("bash", {"command": f"git -C {target} branch -D victim"}) == ""
+    # branch -D discards work: d-git-force denies it in every preset, inside the checkout too.
+    answer = json.loads(pre("bash", {"command": f"git -C {target} branch -D victim"}))
+    assert answer["decision"] == "deny" and "d-git-force" in answer["reason"]
+    assert pre("bash", {"command": f"git -C {target} merge -s ours victim"}) == ""   # a change that asks
     db.update_agent("o1", profile="reviewer-opencode")
     assert json.loads(pre("bash", {"command": f"git -C {target} status"}))["decision"] == "allow"
     # Respelled as OpenCode's rules match it; quoted spacing is an argument and stays.

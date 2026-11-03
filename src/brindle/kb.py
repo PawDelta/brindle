@@ -20,7 +20,9 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
+from fnmatch import fnmatch
 from pathlib import Path
+from urllib.parse import unquote, urlsplit
 
 from brindle import knowledge, secrets
 from brindle.db import DB
@@ -416,6 +418,37 @@ def sources(db: DB, repo_key: str, library_identity: str | None = None) -> list[
         r["in_library"] = r["library_state"] == "in_library"
         r["library_removing"] = max(1, r["library_removing"]) if r["library_state"] == "removing" else 0
     return rows
+
+
+def map_documents(db: DB, repo_root: str, paths: list[str]) -> list[dict]:
+    """Local file metadata for the map; never read files or return chunk text.
+
+    Tombstones and documents with only quarantined chunks stay out, matching
+    search visibility. Headings supply the indexed documents' shared topics.
+    """
+    rows = db.conn.execute(
+        "SELECT d.id, d.title, d.url, d.updated_at, s.scope,"
+        " json_group_array(DISTINCT c.heading_path) FILTER (WHERE c.heading_path IS NOT NULL) AS topics"
+        " FROM kb_docs d JOIN kb_sources s ON s.id = d.source_id"
+        " LEFT JOIN kb_chunks c ON c.doc_id = d.id AND c.quarantined IS NULL"
+        " WHERE s.repo_key = ? AND s.kind = 'folder' AND NOT d.tombstoned"
+        " AND (c.id IS NOT NULL OR NOT EXISTS (SELECT 1 FROM kb_chunks x WHERE x.doc_id = d.id))"
+        " GROUP BY d.id ORDER BY d.id", (knowledge.repo_key(repo_root),))
+    nodes = []
+    for row in rows:
+        url = urlsplit(row["url"] or "")
+        if url.scheme != "file" or url.netloc not in ("", "localhost"):
+            continue
+        local = Path(unquote(url.path))
+        if not local.is_absolute():
+            continue
+        path = local.relative_to(repo_root).as_posix() if local.is_relative_to(repo_root) else str(local)
+        if paths and not any(path == p or path.startswith(p.rstrip("/") + "/") or fnmatch(path, p) for p in paths):
+            continue
+        nodes.append({"id": f"local:kb:{row['id']}", "kind": "doc", "title": row["title"] or local.name,
+                      "local_path": str(local), "paths": [path], "topics": [t for t in json.loads(row["topics"]) if t],
+                      "source": {"kind": "folder", "ref": row["scope"]}, "updated_at": row["updated_at"]})
+    return nodes
 
 
 def find_source(db: DB, repo_key: str, ref: str) -> str:

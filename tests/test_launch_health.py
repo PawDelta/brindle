@@ -26,7 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, cli, cull, pool, procs, providers, sessions, tmux, workspaces
+from brindle import agents, cli, cull, pool, procs, providers, secrets, sessions, tmux, workspaces
 from brindle.db import Agent
 from brindle.providers import ClaudeCode, trust_folder
 
@@ -496,9 +496,12 @@ def test_quoted_prompt_and_foreign_error_markers_remain_silent_pending(db, healt
 def test_early_exit_reports_without_claiming_access(db, health, monkeypatch):
     lh, a, _, _, _, reports = health
     monkeypatch.setattr(agents, "is_alive", lambda a: False)
+    # agent_env_mode enforce kept a variable out of its pane: the report names it.
+    secrets.record_env("/repo", a.id, "enforce", ["STRAY_SETTING"])
     lh.delivered(db, a)
     assert lh.inspect(db, a.id) == "exited"
     assert len(reports) == 1 and "exited" in reports[0][1] and "retry" in reports[0][1]
+    assert "STRAY_SETTING" in reports[0][1]
 
 
 def test_shell_followup_starts_after_actual_paste(db, root, launches, monkeypatch):

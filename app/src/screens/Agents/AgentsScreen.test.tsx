@@ -1,5 +1,5 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
 import { DaemonClient } from "../../api/client";
 import { PtyViewsProvider } from "../../api/ptyView";
@@ -10,11 +10,13 @@ import { StoreContext } from "../../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN, flush, type DaemonData, type RoutingProfile } from "../../test/fakeDaemon";
 import { REPO, root, worker } from "../../test/fixtures";
 import { standInViews } from "../../test/panes";
+import { DEMO_OFFERED_KEY } from "../Onboarding";
 import { AgentsScreen } from ".";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
 afterEach(cleanup);
+beforeEach(() => localStorage.setItem(DEMO_OFFERED_KEY, "1"));     // past the first launch's demo offer
 
 const rp = (name: string, provider: string, model: string | null, cost_tier: string, fields: Partial<RoutingProfile> = {}): RoutingProfile => ({
   name,

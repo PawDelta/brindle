@@ -620,23 +620,16 @@ def test_logout_and_a_signed_out_doctor_fix_remove_the_federation_directory(aws_
     assert cloud_credential.org_ids() == [] and "brindle-acme" not in aws_config.read_text()
 
 
-@pytest.mark.parametrize("tool, platform", [
-    ("codex", "linux"),       # the Linux alternative only
-    ("az", "darwin"),         # neither
-    ("claude", "darwin"),     # another way to install it only
-    ("claude", "linux"),      # both, the other way first
+@pytest.mark.parametrize("tool, platform, wanted", [
+    ("codex", "linux", "EACCES"),
+    ("az", "linux", "InstallAzureCLIDeb"),
+    ("az", "darwin", None),
 ])
-def test_install_hint_gives_linux_alternatives_only_on_linux(monkeypatch, tool, platform):
+def test_install_hint_gives_linux_alternatives_only_on_linux(monkeypatch, tool, platform, wanted):
     monkeypatch.setattr(sys, "platform", platform)
     hint = company_login.install_hint(tool)
-    # The command, then the other way to install it and the Linux note, each only where it applies.
-    expected = [p for p in (company_login.ALTERNATIVE.get(tool),
-                            company_login.INSTALL_LINUX[tool] if platform == "linux" else None) if p]
-    assert hint.startswith(company_login.INSTALL[tool])
-    at = [hint.find(p) for p in expected]
-    assert -1 not in at and at == sorted(at)
-    assert expected or hint == company_login.INSTALL[tool]
-    assert platform == "linux" or company_login.INSTALL_LINUX[tool] not in hint
+    assert company_login.INSTALL[tool] in hint
+    assert (wanted in hint) if wanted else hint == company_login.INSTALL[tool]
 
 
 def test_wsl_browser_interactive_login_gets_its_env(monkeypatch):

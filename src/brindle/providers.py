@@ -90,13 +90,41 @@ class LaunchContext:
 
 
 def _uv_cache_env(ctx: LaunchContext) -> dict[str, str]:
-    """uv's cache inside the worktree, so a sandboxed worker's `uv run`
-    needs no write access outside it. uv writes a `*` .gitignore into its
-    cache, so it never shows as uncommitted work. A profile's own
-    ``env.UV_CACHE_DIR`` wins."""
+    """uv's global cache, shared by every worktree (brindle.build_caches),
+    not one per worktree. A sandboxed Codex worker may write it through
+    _codex_writable_roots. A profile's own ``env.UV_CACHE_DIR`` wins."""
     if not ctx.cwd or "UV_CACHE_DIR" in (ctx.profile.env or {}):
         return {}
-    return {"UV_CACHE_DIR": os.path.join(ctx.cwd, ".uv-cache")}
+    from brindle import build_caches
+
+    return {"UV_CACHE_DIR": build_caches.uv_cache_dir()}
+
+
+def _codex_writable_roots(ctx: LaunchContext) -> list[str]:
+    """``-c sandbox_workspace_write.writable_roots``: the shared build caches
+    (uv's, the repo's cargo target dir) outside the worktree, so a worker under
+    Codex's workspace-write sandbox can still build. A ``-c`` replaces the
+    config.toml value, so the person's own roots are kept in it."""
+    if not ctx.cwd:
+        return []
+    import tomllib
+
+    from brindle import build_caches, git
+    from brindle.config import load_repo_config
+
+    try:
+        repo_root = git.main_repo_root(ctx.cwd)
+        roots = build_caches.writable_dirs(repo_root, load_repo_config(repo_root))
+    except (git.GitError, ValueError, OSError):
+        return []
+    try:
+        with open(os.path.join(codex_home(), "config.toml"), "rb") as f:
+            own = tomllib.load(f).get("sandbox_workspace_write", {}).get("writable_roots", [])
+    except (OSError, ValueError, AttributeError):
+        own = []
+    merged = [r for r in own if isinstance(r, str)] if isinstance(own, list) else []
+    merged += [r for r in roots if r not in merged]
+    return ["-c", f"sandbox_workspace_write.writable_roots={json.dumps(merged)}"]
 
 
 def _venv_path_env(ctx: LaunchContext) -> dict[str, str]:
@@ -1682,6 +1710,7 @@ class Codex(Provider):
             # Only this launch's shell commands; the person's config.toml is untouched.
             *(a for k, v in {**_uv_cache_env(ctx), **_venv_path_env(ctx)}.items()
               for a in ("-c", f"shell_environment_policy.set.{k}={json.dumps(v)}")),
+            *_codex_writable_roots(ctx),
         ]
         # brindle's permission policy, when it's on and the person has trusted
         # brindle's hook once (`brindle permissions install-codex-hook`; see

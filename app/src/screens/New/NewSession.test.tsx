@@ -215,6 +215,32 @@ describe("NewSession", () => {
     stop();
   });
 
+  it("starts the demo again from New session, past the preflight its launch asks for, and opens its session", async () => {
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      workspaces: [root],
+      preflight: { claude: [{ id: "consent", kind: "consent", label: "Agree to Claude Code's terms", done: false }] },
+    });
+    const { onOpen, stop } = setup(daemon);
+    fireEvent.click(await screen.findByRole("button", { name: "Watch brindle work on a practice repo" }));
+    const card = await screen.findByTestId("preflight");
+    expect(daemon.demos).toEqual([]);
+    fireEvent.click(within(card).getByRole("button", { name: "Agree" }));
+    await waitFor(() => expect(within(card).getByRole("button", { name: "Start the demo" })).toHaveProperty("disabled", false));
+    // While that start is under way, every way to start the demo waits: a double click sends one request.
+    daemon.holdLaunch = true;
+    const launch = within(card).getByRole("button", { name: "Start the demo" });
+    fireEvent.click(launch);
+    fireEvent.click(launch);
+    await waitFor(() => expect(launch).toHaveProperty("disabled", true));
+    expect(screen.getByRole("button", { name: "Starting the demo…" })).toHaveProperty("disabled", true);
+    await waitFor(() => expect(posts(daemon).filter((r) => r.path === "/demo")).toHaveLength(2));
+    daemon.finishLaunch();
+    await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", "/home/u/.brindle/demo/textkit-1"));
+    expect(posts(daemon).map((r) => r.path)).toEqual(["/demo", "/providers/claude/preflight/consent", "/demo"]);
+    stop();
+  });
+
   it("shows a failed load with a retry, and welcomes a first-time user with no repo yet", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [live] });
     const client = daemon.client();

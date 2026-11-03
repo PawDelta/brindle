@@ -7,6 +7,7 @@ import { DaemonClient } from "../../api/client";
 import { PtyViewsProvider } from "../../api/ptyView";
 import { BASE_URL, FakeDaemon, TOKEN, flush, freshProviders } from "../../test/fakeDaemon";
 import { ONBOARDED_KEY } from "../../api/providers";
+import { DEMO_OFFERED_KEY } from "./Demo";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
@@ -100,7 +101,13 @@ describe("Onboarding", () => {
     await step("project");
     expect(daemon.requests.filter((r) => r.method === "PUT" && r.path === "/permissions/preset").map((r) => r.body)).toEqual([{ preset: "autonomous" }]);
     fireEvent.click(screen.getByRole("button", { name: "Open a folder…" }));
+
+    // The demo, offered once: Skip starts nothing and goes on into the app, in the project picked.
+    await step("demo");
+    expect(localStorage.getItem(DEMO_OFFERED_KEY)).toBe("1");
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
     await waitFor(() => expect(sidebar()).toBeTruthy());
+    expect(daemon.demos).toEqual([]);
     expect(daemon.opened).toEqual([PROJECT]);
     expect(screen.queryByTestId("onboarding")).toBeNull();
     // The composer, in the project just opened (the app's repo list has it, though no event said so).
@@ -150,6 +157,49 @@ describe("Onboarding", () => {
     await step("project");
     expect(daemon.requests.filter((r) => r.path === "/permissions/preset").map((r) => r.body)).toEqual([{ preset: "secure" }]);
     expect(daemon.data.policy.preset).toBe("secure");
+  });
+
+  /* A first launch with Codex found here, through its sign-in to the project picked. */
+  async function onboardWithCodex(daemon: FakeDaemon) {
+    launch(daemon);
+    await step("connect");
+    fireEvent.click(screen.getByRole("button", { name: "Continue with Codex" }));
+    await step("install");
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await step("provider-signin");
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with your browser" }));
+    await waitFor(() => expect(screen.getByTestId("onb-provider-signin").getAttribute("data-phase")).toBe("waiting"));
+    daemon.signInProvider("codex");
+    await step("ready");
+    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await step("permissions");
+    fireEvent.click(screen.getByRole("button", { name: "Skip for now" }));
+    await step("project");
+    fireEvent.click(screen.getByRole("button", { name: "Open a folder…" }));
+  }
+  const codexHere = () => new FakeDaemon({ account: SIGNED_IN, providers: freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.46.0", signed_in: false } }) });
+
+  it("onboarding's demo: Start the demo starts brindle demo's practice repo and opens its session", async () => {
+    const daemon = codexHere();
+    await onboardWithCodex(daemon);
+    await step("demo");
+    fireEvent.click(screen.getByRole("button", { name: "Start the demo" }));
+    await waitFor(() => expect(sidebar()).toBeTruthy());
+    expect(daemon.demos).toEqual(["/home/u/.brindle/demo/textkit-1"]);
+    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
+    expect(screen.queryByRole("form", { name: "Start a session" })).toBeNull();
+  });
+
+  it.each([
+    ["once offered", (_: FakeDaemon) => localStorage.setItem(DEMO_OFFERED_KEY, "1")],
+    ["with the engine air-gapped", (d: FakeDaemon) => void (d.data.meta.airgap = true)],
+  ])("onboarding's demo isn't offered %s: the app opens on the project picked", async (_, given) => {
+    const daemon = codexHere();
+    given(daemon);
+    await onboardWithCodex(daemon);
+    expect(await screen.findByRole("form", { name: "Start a session" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Start the demo" })).toBeNull();
+    expect(daemon.demos).toEqual([]);
   });
 
   const puts = (daemon: FakeDaemon, path: string) => daemon.requests.filter((r) => r.method === "PUT" && r.path === path).map((r) => r.body);

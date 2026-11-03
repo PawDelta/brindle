@@ -77,10 +77,11 @@ def scrub(value):
     home directory written as ``~``: secret-shaped text, an ``Authorization``
     style credential, and anything under a key that names a secret."""
     if isinstance(value, str):
-        from brindle import kb
+        from brindle import kb, redact
 
+        text = redact.mask(value)       # before ~: an env value may hold the home path
         home = str(Path.home())
-        text = value.replace(home, "~") if home not in ("", "/") else value
+        text = text.replace(home, "~") if home not in ("", "/") else text
         text = _AUTH_HEADER.sub(lambda m: m.group(1) + m.group(2) + kb.REDACTED, text)
         return kb.redact(text)[:MAX_TEXT]
     if isinstance(value, dict):

@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
 
-from brindle import airgap
+from brindle import airgap, keystore
 from brindle.pro import license, loopback
 
 log = logging.getLogger(__name__)
@@ -499,7 +499,8 @@ def lock_path() -> Path:
 @contextmanager
 def refresh_lock(timeout: float = LOCK_TIMEOUT):
     """An exclusive, cross-process lock (``flock``) around every read-rotate-
-    save of the refresh token."""
+    save of the refresh token.
+    Credential reads bypass caches after acquisition to observe token rotation."""
     path = lock_path()
     old = os.umask(0o077)
     try:
@@ -519,7 +520,8 @@ def refresh_lock(timeout: float = LOCK_TIMEOUT):
                                     code="lock_timeout") from None
                 time.sleep(0.02)
         try:
-            yield
+            with keystore.uncached_reading():
+                yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
