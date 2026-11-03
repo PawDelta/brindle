@@ -149,8 +149,26 @@ CREATE TABLE IF NOT EXISTS session_repos (
     alias TEXT NOT NULL,
     repo_root TEXT NOT NULL,
     added_at REAL NOT NULL,
-    branch TEXT,                   -- the session's own branch there, its workers' merge target (NULL: attached before there was one)
     PRIMARY KEY (root_id, alias)
+);
+-- The session's own branch in an attached repo, its workers' merge target. A
+-- table of its own, not a column of session_repos: an older brindle refuses
+-- its MCP tools when a table it declares has columns it doesn't (see
+-- migrated_by_newer), so released tables never gain columns.
+CREATE TABLE IF NOT EXISTS session_repo_branches (
+    root_id TEXT NOT NULL,
+    alias TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    PRIMARY KEY (root_id, alias),
+    FOREIGN KEY (root_id, alias) REFERENCES session_repos(root_id, alias) ON DELETE CASCADE
+);
+-- One-shot notices about a task (kind 'wait': its supervisor was told it waits
+-- long for room). A table of its own, not a column of tasks: see above.
+CREATE TABLE IF NOT EXISTS task_notes (
+    task_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    noted REAL NOT NULL,
+    PRIMARY KEY (task_id, kind)
 );
 CREATE TABLE IF NOT EXISTS session_credentials (
     session_id TEXT NOT NULL,
@@ -810,7 +828,7 @@ class Agent:
     pipeline_rounds: int | None = None
     stuck_noted: float | None = None
     review_sha: str | None = None
-    unreported_noted: int | None = None
+    unreported_noted: float | None = None
     plan_first: int | None = None      # must get its plan approved before editing (brindle.agents.submit_plan)
     plan_state: str | None = None      # proposed | approved | revise
     plan_text: str | None = None       # the plan awaiting a decision (agents.submit_plan), shown in the inbox
@@ -1296,8 +1314,8 @@ class DB:
                           ("hold_until", "REAL")):
             if col not in request_cols:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} {kind}")
-        if "branch" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_repos)")}:
-            self.conn.execute("ALTER TABLE session_repos ADD COLUMN branch TEXT")
+        self._move_session_repo_branches()
+        self._move_task_wait_noted()
         if "merged_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_prs)")}:
             self.conn.execute("ALTER TABLE session_prs ADD COLUMN merged_at REAL")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
@@ -1318,6 +1336,39 @@ class DB:
                               "text, heading_path, chunk_id UNINDEXED)")
         except sqlite3.OperationalError:
             pass
+
+    def _move_session_repo_branches(self) -> None:
+        """A development build kept the branch on session_repos itself: copy
+        it to session_repo_branches and drop the column. In one transaction,
+        rechecked inside it, so a second process opening at the same time
+        finds the move done instead of failing on the vanished column."""
+        def has_branch(c: sqlite3.Connection) -> bool:
+            return "branch" in {r["name"] for r in c.execute("PRAGMA table_info(session_repos)")}
+
+        if not has_branch(self.conn):
+            return
+        with self.tx() as c:
+            if not has_branch(c):
+                return
+            c.execute("INSERT OR IGNORE INTO session_repo_branches (root_id, alias, branch) "
+                      "SELECT root_id, alias, branch FROM session_repos WHERE branch IS NOT NULL")
+            c.execute("ALTER TABLE session_repos DROP COLUMN branch")
+
+    def _move_task_wait_noted(self) -> None:
+        """A development build kept the long-wait note on tasks.wait_noted:
+        copy it to task_notes and drop the column (same transaction pattern as
+        _move_session_repo_branches)."""
+        def has_col(c: sqlite3.Connection) -> bool:
+            return "wait_noted" in {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
+
+        if not has_col(self.conn):
+            return
+        with self.tx() as c:
+            if not has_col(c):
+                return
+            c.execute("INSERT OR IGNORE INTO task_notes (task_id, kind, noted) "
+                      "SELECT id, 'wait', wait_noted FROM tasks WHERE wait_noted IS NOT NULL")
+            c.execute("ALTER TABLE tasks DROP COLUMN wait_noted")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -1409,8 +1460,11 @@ class DB:
 
     def add_session_repo(self, root_id: str, alias: str, repo_root: str, branch: str | None = None) -> None:
         with self.tx() as c:
-            c.execute("INSERT INTO session_repos (root_id, alias, repo_root, added_at, branch) VALUES (?,?,?,?,?)",
-                      (root_id, alias, repo_root, time.time(), branch))
+            c.execute("INSERT INTO session_repos (root_id, alias, repo_root, added_at) VALUES (?,?,?,?)",
+                      (root_id, alias, repo_root, time.time()))
+            if branch is not None:
+                c.execute("INSERT INTO session_repo_branches (root_id, alias, branch) VALUES (?,?,?)",
+                          (root_id, alias, branch))
 
     def remove_session_repo(self, root_id: str, alias: str) -> bool:
         with self.tx() as c:
@@ -1420,11 +1474,12 @@ class DB:
     def session_repos(self, root_id: str | None = None) -> list[SessionRepo]:
         """A session's attached repos in the order they were added; every
         session's when ``root_id`` is None."""
+        sql = ("SELECT r.root_id, r.alias, r.repo_root, r.added_at, b.branch FROM session_repos r "
+               "LEFT JOIN session_repo_branches b ON b.root_id=r.root_id AND b.alias=r.alias")
         if root_id:
-            rows = self.conn.execute(
-                "SELECT * FROM session_repos WHERE root_id=? ORDER BY added_at", (root_id,))
+            rows = self.conn.execute(sql + " WHERE r.root_id=? ORDER BY r.added_at", (root_id,))
         else:
-            rows = self.conn.execute("SELECT * FROM session_repos ORDER BY added_at")
+            rows = self.conn.execute(sql + " ORDER BY r.added_at")
         return [_load(SessionRepo, r) for r in rows]
 
     def used_port_bases(self) -> set[int]:
@@ -1621,10 +1676,28 @@ class DB:
                             (since, agent_id, since))
         return cur.rowcount == 1, row["stuck_noted"] if row else None
 
-    def release_note(self, agent_id: str, since: float, previous: float | None) -> None:
-        """Undo ``claim_note`` when the note couldn't be sent, unless a later one replaced it."""
+    def claim_unreported(self, agent_id: str, since: float, previous: float | None,
+                         *, reopened_at: float | None, status_since: float | None) -> bool:
+        """Claim the stop read by the caller, without replacing a newer alert.
+
+        Reviewer recovery clears the alert so a later stop can be handled.
+        Its reopened_at changes in that same write: checking it prevents an
+        old snapshot from reclaiming the cleared alert and escalating the
+        reviewer just resumed. status_since also rejects a different turn.
+        """
         with self.tx() as c:
-            c.execute("UPDATE agents SET stuck_noted=? WHERE id=? AND stuck_noted IS ?",
+            cur = c.execute("UPDATE agents SET unreported_noted=? WHERE id=? AND unreported_noted IS ?"
+                            " AND reopened_at IS ? AND COALESCE(status_since, created_at) IS ?",
+                            (since, agent_id, previous, reopened_at, status_since))
+        return cur.rowcount == 1
+
+    def release_note(self, agent_id: str, since: float, previous: float | None,
+                     *, field: str = "stuck_noted") -> None:
+        """Undo ``claim_note`` when the note couldn't be sent, unless a later one replaced it."""
+        if field not in ("stuck_noted", "unreported_noted"):
+            raise ValueError(f"Not a note field: {field}")
+        with self.tx() as c:
+            c.execute(f"UPDATE agents SET {field}=? WHERE id=? AND {field} IS ?",
                       (previous, agent_id, since))
 
     def claim_idle(self, agent_id: str) -> float | None:
@@ -2666,6 +2739,21 @@ class DB:
                 "UPDATE tasks SET waiting=?, waiting_since=COALESCE(waiting_since, ?) "
                 "WHERE id=? AND state='pending'", (why, since, task_id),
             ).rowcount == 1
+
+    def claim_wait_note(self, task_id: str, at: float) -> bool:
+        """Atomically mark that the long-wait note of pending task ``task_id``
+        is being sent: only the one sweep that wins may send it, once."""
+        with self.tx() as c:
+            return c.execute(
+                "INSERT OR IGNORE INTO task_notes (task_id, kind, noted) "
+                "SELECT id, 'wait', ? FROM tasks WHERE id=? AND state='pending'",
+                (at, task_id)).rowcount == 1
+
+    def release_wait_note(self, task_id: str, at: float) -> None:
+        """Undo ``claim_wait_note`` when the note couldn't be sent."""
+        with self.tx() as c:
+            c.execute("DELETE FROM task_notes WHERE task_id=? AND kind='wait' AND noted=?",
+                      (task_id, at))
 
     def get_reported_spend(self, agent_id: str) -> float:
         row = self.conn.execute("SELECT reported_usd FROM agent_reported_spend WHERE agent_id=?", (agent_id,)).fetchone()

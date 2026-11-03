@@ -29,13 +29,17 @@ class SecretServiceStore(keystore.SecretServiceStore):
         super().__init__(service, account, LABEL)
 
 
+def file_store_dir() -> Path:
+    """The directory the file backend keeps Pro's credentials in: ``$BRINDLE_HOME/pro``."""
+    from brindle.config import brindle_home
+
+    return brindle_home() / "pro"
+
+
 class FileStore(keystore.FileStore):
     def __init__(self, directory: Path | None = None, account: str = ACCOUNT) -> None:
-        if directory is None:
-            from brindle.config import brindle_home
-
-            directory = brindle_home() / "pro"
-        super().__init__(directory, "credentials" if account == ACCOUNT else account)
+        super().__init__(directory if directory is not None else file_store_dir(),
+                         "credentials" if account == ACCOUNT else account)
 
 
 LEARNING_SECRET = "learning-secret"

@@ -902,6 +902,9 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
                 # on_reviewer_unreported if this resumed turn also stops without
                 # a verdict, while reopened_at prevents resuming a second time
                 # (and respects a queued reminder while it is still in flight).
+                # Keep both fields in one write: claim_unreported checks the
+                # snapshot's reopened_at so clearing the alert cannot let a
+                # pre-resume snapshot reclaim this stop and start a fallback.
                 db.update_agent(reviewer.id, reopened_at=reviewer.reopened_at or now,
                                 unreported_noted=None)
                 return True

@@ -539,11 +539,17 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
         since = max(since, _last_edit(db.get_workspace(a.workspace_id)))
         if now - since < IDLE_UNREPORTED_AFTER or a.stuck_noted == since:
             continue
-        if agents.unreported_note_expired(a):
-            db.update_agent(a.id, unreported_noted=None)
+        won, previous = db.claim_note(a.id, since)
+        if not won:
+            continue
         # Not told while a command it started is still running; tried again then.
-        if agents.tell_parent_unreported(db, db.get_agent(a.id) or a):
-            db.update_agent(a.id, stuck_noted=since)
+        sent = False
+        try:
+            sent = agents.tell_parent_unreported(db, a, remind=True)
+        finally:
+            if not sent:
+                db.release_note(a.id, since, previous)
+        if sent:
             done.append(f"told {a.parent_id} that worker {a.id} is idle without reporting")
     return done
 
@@ -671,11 +677,15 @@ def _send_note(db: DB, a: Agent, since: float, body: str) -> bool:
     won, previous = db.claim_note(a.id, since)
     if not won:
         return False
+    sent = False
     try:
         agents.send_message(db, a.parent_id, body, sender_id=a.id)
+        sent = True
     except agents.AgentError:
-        db.release_note(a.id, since, previous)
         return False
+    finally:
+        if not sent:
+            db.release_note(a.id, since, previous)
     return True
 
 
