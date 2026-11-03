@@ -191,26 +191,37 @@ def _inside(child: str, parent: str) -> bool:
     return child == parent or child.startswith(parent + os.sep)
 
 
-def live_check_ignore(where: str | Path | None) -> frozenset[str]:
-    """The process names ``where``'s repo excuses from the scan
-    (``live_check_ignore``); none when it has none or its config can't be read."""
-    if where is None:
-        return frozenset()
+def live_check_ignore(repo_root: str | Path, branch: str | None = None) -> frozenset[str]:
+    """The process names the repo at ``repo_root`` (its main checkout)
+    excuses from the scan (``live_check_ignore``), its shared file read as
+    committed on ``branch`` (see ``config.workspace_config``); none when it
+    has none or its config can't be read."""
     try:
-        return frozenset(str(n) for n in config.load_repo_config(where).live_check_ignore)
+        return frozenset(str(n) for n in config.load_repo_config(repo_root, branch=branch).live_check_ignore)
     except (OSError, ValueError):
         return frozenset()
 
 
-def _cwds(where: str | Path | None = None, why: list | None = None) -> dict[int, str] | None:
+def _ignore_for(db, path: str | Path, own=None) -> frozenset[str]:
+    """``live_check_ignore`` for removing the worktree at ``path``: from its
+    repo's base config (the workspace's repo and base branch, else the main
+    checkout's), never from the worktree itself, so a branch can't excuse
+    what holds its own worktree."""
+    ws = own or db.workspace_by_path(str(path)) or db.workspace_by_path(os.path.realpath(path))
+    if ws is not None:
+        return live_check_ignore(ws.repo_root, ws.base_branch)
+    return live_check_ignore(config.linked_main(path) or path)
+
+
+def _cwds(ignore: frozenset[str] = frozenset(), why: list | None = None) -> dict[int, str] | None:
     """Every process's folder by pid (``procs.cwds``), resolved; None when
-    they can't be inspected. ``where``: a repo or worktree whose
-    ``live_check_ignore`` applies. ``why``: gets the ``procs.Refused`` that
+    they can't be inspected. ``ignore``: names a repo's
+    ``live_check_ignore`` excuses. ``why``: gets the ``procs.Refused`` that
     made it None, if a process was what couldn't be read."""
     from brindle import procs
 
     try:
-        return {pid: os.path.realpath(c) for pid, c in procs.cwds(live_check_ignore(where)).items()}
+        return {pid: os.path.realpath(c) for pid, c in procs.cwds(ignore).items()}
     except OSError as e:
         log.warning("brindle: can't see which processes use a worktree, so none is removed: %s", e)
         if why is not None and isinstance(e, procs.Refused):
@@ -272,7 +283,7 @@ def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, ow
             return True
     except OSError:
         pass
-    cwds = _cwds(path, why) if cwds is False else cwds
+    cwds = _cwds(_ignore_for(db, path, own), why) if cwds is False else cwds
     if cwds is None or any(_inside(c, real) for pid, c in cwds.items() if pid not in excused):
         return True
     for ws in db.find_workspaces():
@@ -401,7 +412,7 @@ def trees(db, repo_root: str, now: float | None = None, *, sizes: bool = True,
             dirty = True
         paused = any(a.status == "paused" for w in here for a in db.list_agents(w.id))
         if cwds is False:
-            cwds = _cwds(repo_root)
+            cwds = _cwds(live_check_ignore(repo_root))
         t = Tree(path, repo_root, branch, sha, state, last, dirty, paused or live_in(db, path, cwds),
                  bool(here) or _owned(repo_root, path), workspace_id=here[0].id if here else None)
         if sizes:
