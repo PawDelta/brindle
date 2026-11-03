@@ -556,8 +556,10 @@ class FakeAppServer:
         if method == "config/batchWrite":
             [edit] = params["edits"]
             config.parent.mkdir(parents=True, exist_ok=True)
-            config.write_text("".join(f'[hooks.state."{key}"]\ntrusted_hash = "{value["trusted_hash"]}"\n'
-                                      for key, value in edit["value"].items()))
+            # An upsert: the person's own settings above stay.
+            own = config.read_text().split("[hooks.state.", 1)[0] if config.exists() else ""
+            config.write_text(own + "".join(f'[hooks.state."{key}"]\ntrusted_hash = "{value["trusted_hash"]}"\n'
+                                            for key, value in edit["value"].items()))
             return {"status": "ok"}
         raise AssertionError(method)
 
@@ -673,6 +675,45 @@ def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monke
     payload = {**codex_payload("Bash", {"command": command}, ws.path), "hook_event_name": "PreToolUse"}
     out = agents.hook_main(db, a.id, hook.rsplit(" ", 1)[1], json.dumps(payload), trusted=False)
     assert (json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out else None) == expected
+
+
+@pytest.mark.parametrize("policy,own_config,profile", [
+    ("on", "", True),
+    ("off", "", False),
+    ("on", 'sandbox_mode = "workspace-write"\n', False),   # Codex would ignore a profile: said at launch
+])
+def test_codex_sandbox_denies_reading_credentials(ws, monkeypatch, policy, own_config, profile):
+    """With the policy on, Codex's own sandbox refuses every sandboxed command
+    (and any shell typed into later) a read of each credential store, for
+    this launch only, whatever the hooks see; the build caches stay writable."""
+    import tomllib
+
+    from brindle import build_caches, providers
+
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    set_local(ws.repo_root, "permission_policy", policy)
+    config = codex_hook.codex_home() / "config.toml"
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text(own_config)
+    argv = launch_argv(ws)
+    flags = dict(a.split("=", 1) for a in argv if a.startswith(("default_permissions=", "permissions.")))
+    assert bool(flags) == profile
+    assert config.read_text().startswith(own_config)   # the sandbox profile is this launch's, not the config's
+    if not profile:
+        assert any(a.startswith("sandbox_workspace_write.writable_roots=") for a in argv)
+        assert bool(codex_hook.launch_warning("codex", ws.path)) == (policy == "on")
+        return
+    name = providers.CODEX_PROFILE
+    assert json.loads(flags["default_permissions"]) == name
+    assert json.loads(flags[f"permissions.{name}.extends"]) == ":workspace"
+    table = tomllib.loads(f"t = {flags[f'permissions.{name}.filesystem']}")["t"]
+    home = os.path.realpath(os.environ["BRINDLE_HOME"])
+    for path in ("~/.aws", "~/.ssh", "~/.npmrc", "~/.git-credentials", "~/.docker/config.json", "~/.config/gh"):
+        assert table[path] == "deny", path
+    assert {os.path.realpath(p) for p, access in table.items() if access == "deny" and p.startswith("/")} >= {
+        os.path.join(home, "daemon.json"), os.path.join(home, "brindle-keys"), os.path.join(home, "brindle-pro")}
+    assert table[build_caches.uv_cache_dir()] == "write"
+    assert codex_hook.launch_warning("codex", ws.path) is None
 
 
 @pytest.mark.parametrize("event,chars,expected", [

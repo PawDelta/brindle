@@ -290,9 +290,14 @@ def launch_warning(provider: str, cwd: str | None) -> str | None:
     launch's reply, and the worker would otherwise just stop on Codex's prompts."""
     if provider != "codex" or not policy_on(cwd):
         return None
+    from brindle.providers import codex_legacy_sandbox
+
     state = status()
     if state == TRUSTED:
-        return None
+        legacy = codex_legacy_sandbox()
+        return (f"permission_policy is on, but {legacy}, so Codex ignores brindle's sandbox profile and this "
+                "worker's sandboxed commands can read credential files (brindle's hooks still deny the commands "
+                "they recognize). Ask the user to remove it for brindle's Codex home") if legacy else None
     why = ("its trust was removed from Codex's config" if state == REMOVED
            else "Codex didn't accept it (is Codex too old for hooks?)")
     return ("permission_policy is on, but this Codex worker runs without brindle's permission hook "
