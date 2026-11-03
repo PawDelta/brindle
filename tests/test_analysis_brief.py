@@ -35,6 +35,17 @@ def boss(db, tmp_path, monkeypatch):
     return ws
 
 
+@pytest.mark.parametrize("kwargs, large", [
+    ({"weight": "heavy"}, False),   # weight alone never asks
+    ({"requested": True}, True), ({"milestones": 2}, False), ({"milestones": 3}, True),
+    ({"requested": True, "branch": "merge/x"}, False), ({"milestones": 3, "branch": "sync-main"}, False),
+    pytest.param({"requested": True, "branch": "team/alice/merge/main"}, False,
+                 marks=pytest.mark.variant("branch_prefix puts the namespace in front of the chore name")),
+])
+def test_large_work_needs_a_request_or_a_three_milestone_goal(kwargs, large):
+    assert ab.large_work(**kwargs) is large
+
+
 @pytest.mark.parametrize("weight, plan", [("medium", "pro"), ("heavy", "pro"), ("heavy", "off"),
                                           ("advanced", "free")])
 def test_brief_only_for_large_work(weight, plan, db, backend, tmp_path):
@@ -46,7 +57,7 @@ def test_brief_only_for_large_work(weight, plan, db, backend, tmp_path):
              features=("learning",) if plan == "free" else ("analysis_docs",))
     repo = str(tmp_path / "repo")
     out = ab.brief_context(db, repo, "feat/x", "a1", "speed up the cache", ["src/cache.py"],
-                           large=ab.large_work(weight), client=auth.Client(None, backend))
+                           large=ab.large_work(requested=weight != "medium"), client=auth.Client(None, backend))
     assert plan != "off" or ab.review_context(db, repo, "x", ["a.py"], client=auth.Client(None, backend)) == ("", [])
     sent = [p for p in backend.paths() if p == "POST /analysis-docs/brief"]
     sources = kb.sources(db, knowledge.repo_key(repo))
@@ -112,7 +123,7 @@ def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, bo
     monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, *a: backend.request(*a))
     login_as(backend, credentials.default_store(), features=("analysis_docs",))
     db.add_autopilot("boss")
-    milestones = [("API", "true", None), ("UI", "true", None)]
+    milestones = [("API", "true", None), ("UI", "true", None), ("Docs", "true", None)]
     autopilot.set_goal(db, "boss", "Settings page", milestones)
     autopilot.set_goal(db, "boss", "Settings page", milestones)   # the same goal again: no second brief
     queued = [r[0] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss'")]
