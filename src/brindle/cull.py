@@ -981,3 +981,6 @@ def sweep_quietly(db: DB) -> None:
             prune_retired(db, cautious=True)
         except Exception:  # noqa: BLE001
             pass
+    from brindle import disk
+
+    disk.now_and_then(db)   # old backups, aged archive, big logs, merged worktrees: at most hourly

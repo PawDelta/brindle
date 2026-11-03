@@ -394,7 +394,7 @@ def checks_state(ws: Workspace) -> str:
     if marked("checks-running", ws.id):
         return "checks running"
     if marked("checks-room", ws.id):
-        return f"checks waiting for room: {spawn.why()}"
+        return f"checks waiting for room: {spawn.check_no_room(ws.repo_root) or spawn.why()}"
     return "waiting for checks"
 
 

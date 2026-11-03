@@ -76,7 +76,12 @@ def fingerprint(repo_root: str, sha: str, cfg: RepoConfig) -> str:
 
 def fill_one(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> PoolEntry | None:
     """Build one pool entry from the repo's base branch, at its permanent
-    path. Returns ``None`` (after cleaning up) if setup fails."""
+    path. Returns ``None`` (after cleaning up) if setup fails, or without
+    building anything while free disk is low (``disk.low_disk``)."""
+    from brindle import disk
+
+    if disk.low_disk(repo_root) is not None:
+        return None
     cfg = cfg or load_repo_config(repo_root)
     base = cfg.base_branch or git.default_branch(repo_root)
     base_ref = git.resolve_start_point(repo_root, base, cfg.fetch)

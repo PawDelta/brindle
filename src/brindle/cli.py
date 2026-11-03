@@ -305,7 +305,8 @@ def new(
         if created.setup.ok:
             typer.echo("  setup   ok")
         else:
-            typer.secho(f"  setup   FAILED\n{created.setup.log}", fg="yellow")
+            typer.secho(f"  setup   {'WAITING' if created.setup.waiting else 'FAILED'}\n{created.setup.log}",
+                        fg="yellow")
             typer.echo(f"  (workspace kept; fix and re-run with `brindle setup {ws.name}`)")
 
     window = None
@@ -706,6 +707,92 @@ def prune() -> None:
         typer.echo(line)
 
 
+_RETAIN_VERB = {"log to rotate": "rotate", "archived records past retention": "trim"}
+_RETAIN_DONE = {"log to rotate": "rotated", "archived records past retention": "trimmed"}
+
+
+@app.command()
+def clean(
+    dry_run: bool = typer.Option(False, "--dry-run", help="List what would be removed; remove nothing."),
+    branches: bool = typer.Option(False, "--branches", help="Also delete the dead local branches listed "
+                                  "(each tip is kept under refs/brindle-archive/<branch>)."),
+    abandoned: bool = typer.Option(False, "--abandoned", help="Also remove every abandoned worktree "
+                                   "and its branch (asks first)."),
+    worktree: Optional[str] = typer.Option(None, "--worktree", help="Remove just this worktree, merged "
+                                           "or abandoned, and its branch (asks first)."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask before removing."),
+) -> None:
+    """Give disk space back: merged worktrees, old backups, aged archive, big logs.
+
+    Removes the worktrees brindle made whose branch is merged (squash merges
+    too), with their local branch, keeping each tip under
+    refs/brindle-archive/<branch>; database backups beyond the newest few;
+    archived transcripts past `retention`; and rotates brindle's logs. Abandoned
+    worktrees (unmerged, untouched for `stale_branch_days`) are only listed,
+    with their size: --abandoned or --worktree removes them after asking. A
+    worktree with uncommitted changes or a live session is never removed, and
+    the database itself never is."""
+    from brindle import disk
+
+    db = DB()
+    try:
+        here = git.main_repo_root(os.getcwd())
+    except git.GitError:
+        here = None
+    if dry_run:
+        for line in disk.report_lines(disk.storage_report(db, here)):
+            typer.echo(line)
+        for it in disk.retain(dry_run=True):
+            typer.echo(f"would {_RETAIN_VERB.get(it.why, 'remove')} {it.path} "
+                       f"({disk.human(it.size)}, {it.why})")
+        return
+
+    def removed(r: dict) -> None:
+        typer.echo(f"removed {r['state']} worktree {r['path']} ({disk.human(r['size'])}); "
+                   + (f"kept branch {r['branch']}: {r['branch_kept']}" if r["branch_kept"] else
+                      f"branch {r['branch']} deleted, restore with: git branch {r['branch']} {r['archived']}"))
+
+    if worktree or abandoned:
+        what = worktree or "every abandoned worktree"
+        if not yes and not typer.confirm(f"Remove {what} and its branch? Each tip is kept under "
+                                         f"{disk.ARCHIVE_REF}<branch>.", default=False):
+            return
+        done = disk.clean(db, path=os.path.abspath(worktree) if worktree else None,
+                          abandoned=not worktree, here=here)
+        for r in done["removed"]:
+            removed(r)
+        for k in done["kept"]:
+            typer.echo(k["reason"])
+    for t in disk.all_trees(db, here, sizes=False):
+        if t.state == disk.MERGED and t.reason is None:
+            try:
+                removed(disk.remove_tree(db, t.path, states=(disk.MERGED,)))
+            except (disk.CantClean, git.GitError) as e:
+                typer.echo(str(e))
+    for it in disk.retain():
+        typer.echo(f"{_RETAIN_DONE.get(it.why, 'removed')} {it.path} ({disk.human(it.size)})")
+    left = disk.storage_report(db, here)
+    for t in left["worktrees"]:
+        if t["state"] == disk.ABANDONED or t["dirty"]:
+            typer.echo(f"kept {t['state']} worktree {t['path']} ({disk.human(t['size'])})"
+                       + (f": {t['reason']}" if t["reason"] else ": `brindle clean --abandoned` removes it"))
+    dead = left["dead_branches"]
+    for b in dead:
+        typer.echo(f"branch {b['name']} in {b['repo_root']}: {'merged' if b['merged'] else 'unmerged'}, "
+                   "no worktree")
+    if not dead or not branches:
+        return
+    if not yes and not typer.confirm(f"Delete {len(dead)} branch(es)? Each tip is kept under "
+                                     f"{disk.ARCHIVE_REF}<branch>.", default=False):
+        return
+    for b in dead:   # just the ones confirmed, each only at the commit listed
+        try:
+            disk.delete_branch(db, b["repo_root"], disk.Branch(b["name"], b["sha"], b["last_commit"], b["merged"]))
+            typer.echo(f"deleted {b['name']} (restore: git branch {b['name']} {disk.ARCHIVE_REF}{b['name']})")
+        except git.GitError as e:
+            typer.echo(f"kept {b['name']}: {e}")
+
+
 def _here_or_scratch(db: DB, reuse_scratch: bool) -> Workspace:
     """This checkout, or (outside any git repo) a scratch session for this folder."""
     from brindle import scratch
@@ -987,7 +1074,7 @@ def doctor(
         root = git.main_repo_root(os.getcwd())
     except git.GitError:
         pass
-    results = doctor_mod.checks(root)
+    results = doctor_mod.checks(root) + doctor_mod.disk_checks(root)
     typer.echo(doctor_mod.render(results))
     if any(c.level == doctor_mod.FAIL for c in results):
         raise typer.Exit(1)
@@ -2471,12 +2558,17 @@ def open_cmd(
 
 
 @app.command()
-def setup(workspace: Optional[str] = typer.Argument(None)) -> None:
+def setup(
+    workspace: Optional[str] = typer.Argument(None),
+    anyway: bool = typer.Option(False, "--anyway", help="Run it even while free disk is under "
+                                "min_free_disk_gb (it waits otherwise)."),
+) -> None:
     """Re-run setup commands in a workspace."""
     db = DB()
     ws = _ws(db, workspace)
     cfg = workspaces.config_for(db, ws)
-    res = workspaces.run_commands(cfg.setup, ws.path, workspaces.workspace_env(ws, cfg))
+    res = workspaces.setup_admitted(cfg.setup, ws.path, workspaces.workspace_env(ws, cfg), ws.repo_root,
+                                    anyway=anyway)
     typer.echo(res.log or "(no setup commands)")
     raise typer.Exit(0 if res.ok else 1)
 

@@ -489,6 +489,18 @@ def remove_workspace(db: DB, params: dict, body: Body) -> Any:
             "teardown_failed": teardown.log if teardown and not teardown.ok else None}
 
 
+def clean_storage(db: DB, params: dict, body: Body) -> Any:
+    """Remove one worktree (``path``: merged or abandoned) or every abandoned
+    one (``abandoned``: true), each with its branch, tip archived first
+    (``disk.clean``). The app asks the person before it calls this."""
+    from brindle import disk
+
+    path, abandoned = _get(body, "path"), _get(body, "abandoned", bool, False)
+    if not path and not abandoned:
+        raise ServiceError("invalid", "path or abandoned is required")
+    return disk.clean(db, path=path, abandoned=not path)
+
+
 # An agent mid-turn (or stopped at a prompt mid-turn) may be writing the same file.
 BUSY = ("starting", "processing", "waiting")
 MAX_EDIT_BYTES = 1 << 20       # a file the review sheet can edit inline
@@ -2424,6 +2436,7 @@ ROUTES = [
     _post("/workspaces/{id:path}/sync", sync_workspace),
     _post("/workspaces/{id:path}/pr", pr_workspace),
     _post("/workspaces/{id:path}/remove", remove_workspace),
+    _post("/storage/clean", clean_storage),
     Route("/v1/workspaces/{id:path}/file", _endpoint(edit_file), methods=["PUT"]),
     _post("/goal", set_goal),
     _post("/goal/check", check_goal),

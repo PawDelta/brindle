@@ -283,6 +283,10 @@ def _sync_after_merge(db: DB, root_id: str, branch: str | None = None, url: str 
         row = db.conn.execute("SELECT pushed_sha FROM session_prs WHERE root_id = ? AND branch = ?",
                               (root_id, branch)).fetchone()
         session_sync.on_pr_merged(db, root_id, ws, url, row["pushed_sha"] if row else None)
+        if row:
+            from brindle import disk
+
+            disk.delete_pushed_remote(ws, row["pushed_sha"])   # opt-in: delete_pushed_branches
     except Exception:  # noqa: BLE001 - one session's sync never stops the round
         log.exception("brindle: couldn't sync %s after its PR merged", ws.branch)
 

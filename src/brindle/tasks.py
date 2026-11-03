@@ -643,8 +643,8 @@ def _room_wait_overrun(t: Task, why: str) -> str | None:
     """
     from brindle.config import load_repo_config
 
-    if t.waiting_since is None:
-        return None
+    if t.waiting_since is None or why.startswith("waiting for disk"):
+        return None  # low disk holds until there's space: starting anyway could fill it
     elapsed = time.time() - t.waiting_since
     if elapsed > load_repo_config(t.repo_root).room_wait_max:
         return f"started after waiting {elapsed / 60:.0f} min: {why}"
