@@ -72,3 +72,24 @@ def test_a_404_disables_polling_for_the_session(org):
     assert p.poll_once() is None and p.disabled
     n = len(org.calls)
     assert p.poll_once() is None and len(org.calls) == n
+
+
+@pytest.mark.variant("regression for #94: main gives both machines one session id")
+def test_machines_with_one_hostname_get_distinct_stable_session_ids(monkeypatch, tmp_path):
+    """(#94) A hostname alone named two machines the same."""
+    monkeypatch.setattr(status.socket, "gethostname", lambda: "MacBook Pro")
+    ids = []
+    for home in ("a", "b"):
+        monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / home))
+        ids.append(status.session_id())
+        assert status.session_id() == ids[-1]
+    assert ids[0] != ids[1]
+    assert all(i.startswith("MacBook-Pro-") for i in ids)
+
+
+def test_garbage_answers_change_nothing(org):
+    org.body = {"policy_version": 1, "paused": True}
+    p = poller()
+    p.poll_once()
+    org.body = "not json at all"
+    assert p.poll_once() is None and status.load(ORG).status.paused

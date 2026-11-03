@@ -133,3 +133,25 @@ def test_notice_text_cannot_carry_terminal_escapes_or_line_breaks(org):
     assert saved.status.paused_reason.isprintable() and "\x1b" not in saved.status.paused_reason
     r = CliRunner().invoke(app, ["org", "messages", "--keep"])
     assert "\x1b" not in r.output and "\x07" not in r.output
+
+
+def test_scoped_checks_notice_goes_once_and_only_while_unset(db, repo, boss, monkeypatch):
+    from brindle import check_scope
+
+    (repo / ".brindle").mkdir(exist_ok=True)
+    cfg = repo / ".brindle" / "config.json"
+    cfg.write_text('{"checks": ["uv run pytest -q"], "scoped_checks": "off"}')
+    assert not check_scope.deliver_notice(db, str(repo), "boss")   # chosen: nothing to announce
+    cfg.write_text('{"checks": ["make lint"]}')
+    assert not check_scope.deliver_notice(db, str(repo), "boss")   # no pytest command
+    cfg.write_text('{"checks": ["python -m pytest -n auto -m serial"]}')
+    sidebars = []   # a second sidebar polling while the first is mid-send must not announce it again
+    real = agents.send_message
+
+    def send(db, to, body, **kw):
+        sidebars.append(check_scope.deliver_notice(db, str(repo), "boss"))
+        real(db, to, body, **kw)
+    monkeypatch.setattr(agents, "send_message", send)
+    assert check_scope.deliver_notice(db, str(repo), "boss")
+    assert not check_scope.deliver_notice(db, str(repo), "boss")
+    assert sidebars == [False] and len(boss) == 1

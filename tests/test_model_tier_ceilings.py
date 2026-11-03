@@ -150,4 +150,50 @@ def test_custom_expensive_profiles_capped_under_max_weight(db, repo, monkeypatch
     assert "exceeds configured max_weight 'medium'" in str(exc_info3.value)
 
 
+def test_max_weight_ceiling_caps_heavy_to_medium(db, repo, monkeypatch):
+    cfg = RepoConfig(max_weight="medium")
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
 
+    why = []
+    profile, learned = autopilot.choose_profile(db, "caller-1", str(repo), weight="heavy", why=why)
+    assert any("capped to medium" in w for w in why)
+    # The resolved profile must be in medium routing, not developer-heavy
+    assert profile in cfg.routing["medium"]
+
+
+def test_retry_on_heavy_refuses_when_max_weight_medium(db, repo):
+    ws = Workspace("ws-m", str(repo), "feat/m", "main", "main", "worktree", str(repo), 20000, "tmux-m", 0)
+    db.add_workspace(ws)
+    worker = agents.spawn(db, ws, "developer", mode="assign")
+    # Record task with heavy weight
+    t = Task("t-1", str(repo), worker.id, None, ws.id, "developer", "task", "assign", 1, "feat/m", None, None, None, "started", 0.0, weight="heavy")
+    db.add_task(t)
+
+    cfg = RepoConfig(max_weight="medium")
+    # Must refuse retry on heavy
+    assert not pipeline._retry_on_heavy(db, worker, ws, cfg, "failed review", "worker report")
+
+
+def test_docs_only_files_demotes_tier(db, repo, monkeypatch):
+    # Even if developer-heavy is in medium candidates, docs-only must NOT select a heavy profile
+    cfg = RepoConfig()
+    cfg.routing["medium"] = ["developer-heavy", "developer"]
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+
+    why = []
+    profile, learned = autopilot.choose_profile(
+        db, "caller-2", str(repo), weight="heavy", files=["docs/guide.md", "docs/index.md"], why=why
+    )
+    assert any("demoted" in w for w in why)
+    assert profile != "developer-heavy"
+    assert profile == "developer"
+
+
+def test_fallback_heavy_capped_under_light_ceiling(db, repo, monkeypatch):
+    cfg = RepoConfig(max_weight="light", default_agent="developer-heavy")
+    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
+
+    why = []
+    profile, learned = autopilot.choose_profile(db, "caller-fallback", str(repo), why=why)
+    assert any("capped to" in w for w in why)
+    assert profile in cfg.routing["light"]

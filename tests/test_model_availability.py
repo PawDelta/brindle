@@ -569,3 +569,22 @@ def test_launch_gates_count_toward_route_health(db, repo, monkeypatch, status, e
     assert agents.model_problem("test", ws, m=managed_models.Managed("org", None, False))
     assert route_health.pending() == {(ws.repo_root, "claude", route, "claude-opus-5-5", outcome): 1}
     route_health.reset()
+
+
+def test_cache_expires_is_bounded_and_can_be_cleared():
+    now = [10.0]
+    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), clock=lambda: now[0])
+    for _ in range(2):
+        check.check(profile(), effective_env={"KEY": "secret"})
+    assert discover.call_count == 1
+    now[0] += ma.CACHE_TTL
+    check.check(profile(), effective_env={"KEY": "secret"})
+    assert discover.call_count == 2
+    check.clear()
+    check.check(profile(), effective_env={"KEY": "secret"})
+    assert discover.call_count == 3
+    for i in range(140):
+        check.check(profile(), effective_env={"KEY": str(i)})
+    assert len(check._cache) == 128
+    assert all(isinstance(k, bytes) and len(k) == 32 for k in check._cache)
+    assert "secret" not in repr(check._cache)

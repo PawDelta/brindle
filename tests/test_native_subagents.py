@@ -80,3 +80,27 @@ def test_migration_adds_the_native_subagents_table_to_an_old_db(tmp_path):
     db.start_native_subagent("sub1", "a", "Explore")
     [row] = db.native_subagents("a")
     assert row.agent_type == "Explore"
+
+
+def test_agent_entry_drops_running_subs_once_the_parent_is_not_running(db, ws):
+    # A parent's process can exit without ever going through agents.pause/kill
+    # (e.g. the person closed its terminal), so the view itself must not show
+    # a subagent as running once the parent's computed status says otherwise.
+    fake_agent(db, ws, agent_id="w1", mode="assign", status="processing")
+    agents.handle_hook(db, "w1", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
+    entry = view.agent_entry(db, db.get_agent("w1"), detail=True)
+    assert entry["status"] in view._PARENT_NOT_RUNNING  # no real tmux window: it reads as "exited"
+    assert entry["subagents"] == []
+
+
+def test_snapshot_hides_a_subagent_that_finished_a_while_ago(db, ws, monkeypatch):
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)  # boss is actually running
+    fake_agent(db, ws, agent_id="boss", mode="interactive", status="processing")
+    agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
+    agents.handle_hook(db, "boss", "subagent-stop", {"agent_id": "sub1", "agent_type": "Explore"})
+    later = time.time() + 60
+    monkeypatch.setattr(time, "time", lambda: later)
+
+    [snap_ws] = view.snapshot(db, ws.repo_root)
+    [entry] = [a for a in snap_ws["agents"] if a["id"] == "boss"]
+    assert entry["subagents"] == []

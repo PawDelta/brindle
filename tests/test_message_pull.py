@@ -145,4 +145,15 @@ def test_queued_message_goes_through_the_inbox_at_stop(db, boss, via_inbox):
     assert via_inbox == ["a queued message"]
 
 
+def test_tool_hooks_mark_an_idle_agent_busy(db, boss):
+    # A turn begun by a finished background task runs no UserPromptSubmit,
+    # so the 'idle' its previous Stop left would otherwise stick.
+    db.set_status("boss", "idle")
+    agents.handle_hook(db, "boss", "pre-tool", {"tool_name": "Bash", "tool_input": {"command": "ls"}})
+    assert db.get_agent("boss").status == "processing"
 
+
+def test_tool_hooks_leave_a_paused_agent_alone(db, boss):
+    db.set_status("boss", "paused")
+    agents.handle_hook(db, "boss", "tool-done", {})
+    assert db.get_agent("boss").status == "paused"

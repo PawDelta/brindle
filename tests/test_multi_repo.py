@@ -282,3 +282,54 @@ def test_two_sessions_do_not_share_attached_repos(db, dependency_rows, monkeypat
     tasks.on_merged(db, alien)
     assert tasks.sweep(db) == 0
     assert db.get_task(pending.id).state == "pending" and launched == []
+
+
+def test_attach_a_repo_whose_folder_name_matches_the_session_repo(db, repo, boss, tmp_path):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    twin = git_repo(elsewhere, repo.name, {"pipeline": False})
+    assert twin != repo and twin.name == repo.name
+    attached = repos.attach(db, "boss", str(twin))
+    ows = workspaces.adopt_root(db, str(twin))
+    assert attached.repo_root == str(twin)
+    assert boss.id == f"{repo.name}/root"          # existing ids are unchanged
+    assert ows.id != boss.id and ows.tmux_session != boss.tmux_session
+    assert workspaces.resolve(db, boss.id).repo_root == str(repo)
+    assert workspaces.resolve(db, ows.id).repo_root == str(twin)
+    # The same branch in both repos: separate ids, sessions and directories.
+    wt1 = workspaces.create(db, str(repo), "feat/x", fetch=False).workspace
+    wt2 = workspaces.create(db, str(twin), "feat/x", fetch=False).workspace
+    assert wt2.id.startswith(ows.id.rsplit("/", 1)[0] + "/")
+    assert wt1.id != wt2.id and wt1.path != wt2.path and wt1.tmux_session != wt2.tmux_session
+    assert workspaces.resolve(db, wt1.id).repo_root == str(repo)
+    assert workspaces.resolve(db, wt2.id).repo_root == str(twin)
+    # Pool entries of the twin don't share the first repo's pool directory either.
+    from brindle import pool
+    e1, e2 = pool.fill_one(db, str(repo)), pool.fill_one(db, str(twin))
+    assert e1 and e2 and Path(e1.path).parent != Path(e2.path).parent
+    assert pool.pool_dir(str(twin)) == Path(e2.path).parent
+
+
+def test_milestone_check_runs_in_the_attached_repo(db, repo, web, boss):
+    db.add_autopilot("boss")
+    repos.attach(db, "boss", str(web), "web")
+    reply = mcp_server.set_goal("Two repos", [
+        {"title": "Main", "check": "test -f app.py"},
+        {"title": "Web", "check": "@web: test -f web.txt"},
+    ])
+    assert "@web: test -f web.txt" in reply
+    [m_main, m_web] = db.milestones("boss")
+    assert m_web.repo == "web" and m_web.check_cmd == "test -f web.txt"
+
+    autopilot.check_milestones(db, "boss", boss)
+    [m_main, m_web] = db.milestones("boss")
+    assert m_main.status == "passed" and m_web.status == "failed"
+
+    commit_file(web, "web.txt")
+    autopilot.check_milestones(db, "boss", boss, position=2)
+    [m_main, m_web] = db.milestones("boss")
+    assert m_web.status == "passed"
+    assert m_web.checked_sha == sh("git rev-parse HEAD", web)
+    assert m_main.checked_sha == sh("git rev-parse HEAD", repo)
+
+    assert "isn't attached" in mcp_server.set_goal("G", [{"title": "X", "check": "@nope: true"}])

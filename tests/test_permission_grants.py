@@ -308,7 +308,7 @@ def test_cd_chain_keeps_its_family(ws):
     ("mkdir -p build", [("sed -i '' s/a/b/ app.py && rm -rf build/x > out.log && cp app.py build/", "allow"),
                         ("rm -rf {lib}/dist && echo x > {other}/notes.txt", "allow"),   # another repo, its worktree
                         ("cp notes.txt build/", "ask"),                              # build/notes.txt links out
-                        ("cp --target-directory=build notes.txt", "ask"), ("cp -RT src build", "ask"),
+                        ("cp --target-directory=build notes.txt", "ask"), ("cp -RT src build", "ask"), ("cp -R src/ build", "ask"),
                         ("cp -R src copied && echo changed > copied/link/file", "ask"),   # src/link leads out
                         ("sed -i'{out}/*' s/a/b/ app.py", "ask"),                    # its backup, outside
                         ("rm -rf {ws}", "ask"),                                      # a repo root
