@@ -140,7 +140,6 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     monkeypatch.setattr(agents, "_review_profile", lambda db_, ws_, prof, cfg: prof or "reviewer")
     monkeypatch.setattr(autopilot, "_unavailable", lambda *a, **k: None)
-    monkeypatch.setattr(gates, "check_summary", lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-ran checks")))
     spawned = []
     # The fallback goes through start_review, like every reviewer: with checks
     # a detached helper runs them (reusing the cached results for this commit)
@@ -161,6 +160,33 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     db.update_agent("rev0", unreported_noted=None)
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
     assert spawned[-1][spawned[-1].index("--profile") + 1] == "reviewer"
+
+    # Run the detached helper itself. On the unchanged commit passing checks
+    # start the fallback with their results in its prompt.
+    from brindle.config import load_repo_config
+
+    argv = spawned[-1]   # the pinned run's
+    cfg = load_repo_config(str(repo))
+    prompts, sent = [], []
+    monkeypatch.setattr(agents, "spawn", lambda db_, ws_, prof, *, prompt=None, parent_id=None, mode="review", **kw:
+                        prompts.append(prompt) or agents.Agent("rev9", ws_.id, prof, "claude", parent_id, mode,
+                                                               "starting", "@0", None, time.time()))
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append((to, body)))
+    rid = argv[argv.index("--request-id") + 1]
+    monkeypatch.setattr(gates, "check_summary", lambda *a, **k: "PASS `pytest -q`\n50 passed")
+    agents.review_after_checks(db, "boss", ws, "reviewer", argv[argv.index("--focus") + 1], cfg,
+                               request_id=rid, slot="")
+    assert len(prompts) == 1 and "50 passed" in prompts[0] and "Blocker in big.py line 12" in prompts[0]
+
+    # The branch moves on and its checks fail now: the old passing results
+    # don't carry over, no fallback starts, and the worker gets the failure.
+    db.update_agent("w1", reviewing_since=time.time())
+    (Path(ws.path) / "more.py").write_text("y = 2\n")
+    sh("git add more.py && git commit -qm more", Path(ws.path))
+    monkeypatch.setattr(gates, "check_summary", lambda *a, **k: "FAIL `pytest -q`\nexit 1: current boom")
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "w1")
+    agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg, slot="")
+    assert len(prompts) == 1 and [to for to, _ in sent] == ["w1"] and "current boom" in sent[0][1]
 
 
 def test_small_diff_stalled_reviewer_escalates_summary_to_supervisor(db, repo, tmp_path, monkeypatch):

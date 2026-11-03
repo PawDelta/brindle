@@ -66,11 +66,15 @@ def detached(monkeypatch):
 # -- the results are in the reviewer's prompt ------------------------------------------
 
 
-def test_a_crashing_check_run_starts_no_review_and_tells_the_caller(db, ws, boss, spawned, monkeypatch):
-    """Explicit request (no pipeline report): the caller is told, no reviewer."""
+@pytest.mark.parametrize("caller", ["boss", None])
+def test_a_crashing_check_run_starts_no_review_and_tells_the_caller(db, ws, boss, spawned, monkeypatch,
+                                                                    caller):
+    """Explicit request (no pipeline report): the caller is told, or for a UI
+    request with no caller the worker's supervisor; no reviewer starts."""
+    add(db, ws, "w1", "assign", parent="boss", result="done")
     monkeypatch.setattr(gates, "check_summary",
                         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
+    assert agents.review_after_checks(db, caller, ws, "reviewer", None,
                                       RepoConfig(checks=["true"])) is None
     assert spawned == []
     told = db.pop_pending("boss")

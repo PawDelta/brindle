@@ -198,8 +198,10 @@ def on_checks_failed(db: DB, ws: Workspace, sha: str, since: float | None, summa
             return
         if since is None:
             worker = piped_worker(db, ws)
-            if caller is not None and (worker is None or not worker.pipeline):
-                gates.tell(db, caller.id,
+            # The requester; for a UI request (no caller) the worker's supervisor.
+            to = caller.id if caller is not None else worker.parent_id if worker is not None else None
+            if to and (worker is None or not worker.pipeline):
+                gates.tell(db, to,
                            f"[brindle] The repo's checks failed on `{ws.branch}` at {sha[:8]}, so no "
                            f"reviewer was started. Fix them, then request_review(\"{ws.id}\") again."
                            f"\n\n{summary}")
