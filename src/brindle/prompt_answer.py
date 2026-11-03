@@ -172,6 +172,11 @@ def brief_draft(screen: str, brief: str) -> bool:
             and sum(len(part) for part in parts if part in brief) >= 60)
 
 
+def pane_busy(screen: str) -> bool:
+    """A live activity indicator in the pane's current tail, across providers."""
+    return bool(BUSY_SPINNER.search("\n".join(_tail(screen))))
+
+
 def looks_like_prompt(screen: str) -> bool:
     """Whether the bottom of ``screen`` is a menu or question waiting for an
     answer: a selected menu line next to another option, or an "Enter to
@@ -202,7 +207,7 @@ def blocking_prompt(screen: str, provider: str, brief: str = "") -> bool:
     screen = "\n".join(_tail(_past_brief(screen, brief)))
     # A live spinner supersedes approval text still visible in the transcript,
     # for every provider. "esc to cancel" alone also appears on real menus.
-    if BUSY_SPINNER.search(screen):
+    if pane_busy(screen):
         return False
     return (get_provider(provider).tool_permission(screen)
             or _numbered_question(screen)

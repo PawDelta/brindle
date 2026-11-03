@@ -50,6 +50,13 @@ def test_a_prompted_worker_shows_needs_you_and_its_supervisor_is_told(db, root, 
     a = worker(db, ws, provider)
     if not waiting:
         assert not prompt_answer.at_turn_end(db, a)
+        agents.reconcile(db, a, samples=1)
+        reconciled = db.get_agent("w1").status
+        for mode in ("assign", "review"):
+            db.update_agent("w1", mode=mode, status="waiting", status_since=time.time() - cull.STUCK_AFTER - 5)
+            assert not cull.note_stuck(db, time.time(), {})
+        assert reconciled == "processing"
+        agents.reconcile(db, db.get_agent("w1"), samples=1)
         assert db.get_agent("w1").status == "processing"
         assert db.pending_count("boss") == 0
         return
