@@ -2126,13 +2126,23 @@ def _command_path(args: list[str], valued: set[str], flags: set[str], target: tu
         if arg == "--":
             words.extend((a, False) for a in args[index:])
             break
-        if arg.startswith("-") and arg != "-":
+        if arg.startswith("--"):
             name, equals, _ = arg.partition("=")
-            if not name.startswith("--"):
-                name = "-" + arg[-1]    # the last of a cluster of short options takes any value
-            if name in valued and not equals:
-                index += 1
+            index += name in valued and not equals
             maybe = not equals and name not in valued and name not in flags
+            continue
+        if arg.startswith("-") and arg != "-":
+            # Left to right: the first option that takes a value ends the cluster, with the
+            # rest of the word as its value or, when nothing follows, the next word. An
+            # unknown option may itself take the rest, so a later one's value is a maybe.
+            unknown, consumes, ended = False, False, False
+            for pos, char in enumerate(arg[1:], 2):
+                if "-" + char in valued:
+                    consumes, ended = pos == len(arg), True
+                    break
+                unknown |= "-" + char not in flags
+            index += consumes and not unknown
+            maybe = unknown and (consumes or not ended and "-" + arg[-1] not in flags)
             continue
         words.append((arg, maybe))
         maybe = False
@@ -3012,11 +3022,34 @@ def _parameter_word(command: str, start: int, quoted: bool) -> tuple[int, list, 
     return None
 
 
+_ANSI_C_ESCAPES = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r",
+                   "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c(body: str) -> str:
+    """The text a ``$'...'`` body stands for, as bash decodes it (a NUL ends it)."""
+    def one(found: re.Match) -> str:
+        escape = found.group(0)[1:]
+        if escape[0] in "01234567":
+            return chr(int(escape, 8) & 0xFF)
+        if escape[0] in "xuU":
+            return chr(min(int(escape[1:], 16), 0x10FFFF)) if len(escape) > 1 else found.group(0)
+        if escape[0] == "c":
+            return chr(ord(escape[1].upper()) & 0x1F) if len(escape) > 1 else found.group(0)
+        return _ANSI_C_ESCAPES.get(escape, found.group(0))
+    text = re.sub(r"\\(?:[0-7]{1,3}|x[0-9a-fA-F]{0,2}|u[0-9a-fA-F]{0,4}|U[0-9a-fA-F]{0,8}|c.?|.)", one, body,
+                  flags=re.S)
+    return text.split("\0", 1)[0]
+
+
 def _script_word(command: str, i: int, *, credential_scan: bool = False) -> tuple[str, list, list, int] | None:
     """The word starting at ``i``: (raw text, references, substitutions,
     end), or None for quoting or an expansion it doesn't read (``$'...'``,
-    ``${x:-y}``) or an unclosed quote or substitution."""
+    ``${x:-y}``) or an unclosed quote or substitution. A credential scan
+    reads ``$'...'`` as the single-quoted text it decodes to, and a backtick
+    substitution's inner command with the escape layer backticks remove."""
     start, refs, subs, quoted, n = i, [], [], False, len(command)
+    pieces, copied, shift = [], i, 0    # credential_scan: $'...' rewritten as the '...' it stands for
     while i < n:
         c = command[i]
         if not quoted and (c in " \t\n" or c in ";&|<>()"):
@@ -3036,26 +3069,32 @@ def _script_word(command: str, i: int, *, credential_scan: bool = False) -> tupl
                 return None
             inner = command[i + (1 if c == "`" else 2):end - 1]
             if c == "`" and "\\" in inner:
-                return None    # backticks remove an escape layer before the inner shell reads it
+                if not credential_scan:
+                    return None    # backticks remove an escape layer before the inner shell reads it
+                inner = re.sub(r'\\([$`\\"])' if quoted else r"\\([$`\\])", r"\1", inner)
             subs.append(inner)
             i = end
         elif c == "$":
             found = _REFERENCE.match(command, i)
             if found:
-                refs.append((i - start, found.end() - start, found.group(1) or found.group(2), quoted))
+                refs.append((i - start + shift, found.end() - start + shift, found.group(1) or found.group(2), quoted))
                 i = found.end()
             elif credential_scan and command.startswith("${", i):
                 parameter = _parameter_word(command, i, quoted)
                 if parameter is None:
                     return None
                 i, inner_refs, inner_subs = parameter
-                refs.extend((s - start, e - start, name, q) for s, e, name, q in inner_refs)
+                refs.extend((s - start + shift, e - start + shift, name, q) for s, e, name, q in inner_refs)
                 subs.extend(inner_subs)
             elif credential_scan and not quoted and command.startswith("$'", i):
-                close = re.match(r"\$'(?:[^'\\]|\\.)*'", command[i:])
+                close = re.match(r"\$'((?:[^'\\]|\\.)*)'", command[i:], re.S)
                 if close is None:
                     return None
+                literal = "'" + _ansi_c(close.group(1)).replace("'", "'\\''") + "'"
+                pieces += [command[copied:i], literal]
+                shift += len(literal) - close.end()
                 i += close.end()
+                copied = i
             elif command.startswith("${", i) or not quoted and command.startswith("$'", i):
                 return None
             else:
@@ -3064,7 +3103,7 @@ def _script_word(command: str, i: int, *, credential_scan: bool = False) -> tupl
             i += 1
     if quoted:
         return None
-    return command[start:i], refs, subs, i
+    return "".join(pieces) + command[copied:i], refs, subs, i
 
 
 def _script_tokens(command: str, *, credential_scan: bool = False,
