@@ -25,7 +25,7 @@ import json
 import logging
 import time
 
-from brindle import agents, autopilot, bus, gates, knowledge, repos, tasks
+from brindle import agents, autopilot, bus, gates, knowledge, tasks, workspaces
 from brindle.config import load_repo_config, set_local
 from brindle.db import DB, Agent, Task, Workspace
 
@@ -472,7 +472,7 @@ def wake(db: DB, now: float | None = None) -> list[str]:
                              {"action": "wake", "through": last, "tasks": flagged,
                               "before": [mark[1], mark[2]]})
         try:
-            agent = agents.spawn(db, repos.target_workspace(db, roots[0]), PROFILE,
+            agent = agents.spawn(db, workspaces.adopt_root(db, roots[0]), PROFILE,
                                  prompt=brief(events, stale, recent(db, key, RECALL)),
                                  mode=MODE, background_setup=True)
         except Exception as e:  # noqa: BLE001 - give the events back for the next sweep

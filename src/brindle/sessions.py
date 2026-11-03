@@ -236,8 +236,8 @@ def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = No
         c.execute("UPDATE tasks SET caller_id=? WHERE caller_id=? AND state IN ('pending', 'started')",
                   (new.id, old_root_id))
         # The attached repos (brindle.repos) move across with the session.
-        c.execute("INSERT OR IGNORE INTO session_repos (root_id, alias, repo_root, added_at) "
-                  "SELECT ?, alias, repo_root, added_at FROM session_repos WHERE root_id=?",
+        c.execute("INSERT OR IGNORE INTO session_repos (root_id, alias, repo_root, added_at, branch) "
+                  "SELECT ?, alias, repo_root, added_at, branch FROM session_repos WHERE root_id=?",
                   (new.id, old_root_id))
         c.execute("DELETE FROM session_repos WHERE root_id=?", (old_root_id,))
         # So does an outside job it waits on (wait_on), or the notice of one
@@ -289,8 +289,8 @@ def _repoint_orphaned_tasks(db: DB, root_id: str) -> None:
         if t.caller_id != root_id or db.get_workspace(t.caller_ws_id) is not None:
             continue
         try:
-            ws = repos.target_workspace(db, t.repo_root)
-        except git.GitError:
+            ws = repos.target_workspace(db, root_id, t.repo_root)
+        except (git.GitError, workspaces.WorkspaceError):
             continue
         db.update_task(t.id, caller_ws_id=ws.id)
 

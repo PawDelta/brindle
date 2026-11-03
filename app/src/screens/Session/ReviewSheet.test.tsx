@@ -11,10 +11,14 @@ import { PtyViewsProvider } from "../../api/ptyView";
 import { REPO, root, worker } from "../../test/fixtures";
 import { standInViews } from "../../test/panes";
 import { READY_TITLE, watchInbox } from "../Inbox/notify";
+import { DEMO_OFFERED_KEY } from "../Onboarding";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  localStorage.setItem(DEMO_OFFERED_KEY, "1");     // past the first launch's demo offer
+});
 let sync: Sync | null = null;
 afterEach(() => {
   sync?.stop();

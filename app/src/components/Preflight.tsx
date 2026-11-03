@@ -25,6 +25,8 @@ export interface PreflightProps {
   launchLabel?: string;
   /* The repo (a sign-in's check). */
   repo?: string | null;
+  /* The launch is under way: its button waits. */
+  launching?: boolean;
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -93,7 +95,7 @@ function Settle({ item, provider, onDone, label, repo }: { item: PreflightItem; 
 
 const KIND_LABEL: Record<PreflightItem["kind"], string> = { signin: "Sign in", key: "API key", trust: "Trust", consent: "Consent" };
 
-export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start", repo }: PreflightProps) {
+export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start", repo, launching = false }: PreflightProps) {
   const client = useDaemon();
   const { provider, items } = preflight;
   const name = providerName(provider);
@@ -145,7 +147,7 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
         ))}
       </ul>
       <div className="flex items-center gap-s1">
-        <button type="button" className={main} disabled={open.length > 0} onClick={onLaunch}>
+        <button type="button" className={main} disabled={open.length > 0 || launching} onClick={onLaunch}>
           {launchLabel}
         </button>
         {open.length > 0 && <span className="text-xs text-ink-3">{repo ? `in ${repo}` : ""}</span>}

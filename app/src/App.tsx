@@ -47,7 +47,7 @@ import { AccountScreen } from "./screens/Account";
 import { InboxScreen } from "./screens/Inbox";
 import { KnowledgeScreen } from "./screens/Knowledge";
 import { NewSession } from "./screens/New";
-import { Onboarding, Starting, markOnboarded, onboarded, readOnboarded } from "./screens/Onboarding";
+import { DemoOffer, Onboarding, Starting, markOnboarded, onboarded, readDemoOffered, readOnboarded } from "./screens/Onboarding";
 import { AgentsScreen } from "./screens/Agents";
 import { SessionScreen } from "./screens/Session";
 import { SettingsScreen } from "./screens/Settings";
@@ -293,7 +293,14 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
    without the route (an older one: 404), whose banner speaks for it. Any
    other failure (the network, a 500) says so in Starting's place, with
    Retry: a first launch never skips its setup on a hiccup. */
-type Gate = { kind: "checking"; error?: string } | { kind: "onboarding"; providers: ProviderInstalled[] } | { kind: "app"; route?: Route };
+/* The flow done, or skipped on a first launch with a CLI signed in already,
+   the demo is offered once (screens/Onboarding/Demo): Skip goes where the
+   app would have, Start the demo opens the demo's session. */
+type Gate =
+  | { kind: "checking"; error?: string }
+  | { kind: "onboarding"; providers: ProviderInstalled[] }
+  | { kind: "demo"; route?: Route }
+  | { kind: "app"; route?: Route };
 
 function FirstLaunch(props: AppProps) {
   const { client, openUrl = openExternal, pickFolder = nativePicker } = props;
@@ -309,8 +316,9 @@ function FirstLaunch(props: AppProps) {
       (rows) => {
         if (!live) return;
         if (!onboarded(rows)) return setGate({ kind: "onboarding", providers: rows });
+        // A first launch on this Mac with a CLI signed in already: nothing to set up, the demo still offered once.
         markOnboarded();
-        setGate({ kind: "app" });
+        setGate(readDemoOffered() ? { kind: "app" } : { kind: "demo" });
       },
       (e: unknown) => {
         if (!live) return;
@@ -323,7 +331,9 @@ function FirstLaunch(props: AppProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, asked]);
-  const done = useCallback((route?: Route) => setGate({ kind: "app", route }), []);
+  const done = useCallback((route?: Route) => setGate(readDemoOffered() ? { kind: "app", route } : { kind: "demo", route }), []);
+  const after = gate.kind === "demo" ? gate.route : undefined;
+  const skipDemo = useCallback(() => setGate({ kind: "app", route: after }), [after]);
   if (gate.kind === "checking") {
     const retry = () => {
       setGate({ kind: "checking" });
@@ -333,6 +343,9 @@ function FirstLaunch(props: AppProps) {
   }
   if (gate.kind === "onboarding" && client) {
     return <Onboarding client={client} providers={gate.providers} openUrl={openUrl} pickFolder={pickFolder} onDone={done} />;
+  }
+  if (gate.kind === "demo" && client) {
+    return <DemoOffer client={client} refresh={props.refresh} onSkip={skipDemo} onStarted={(root, repo) => setGate({ kind: "app", route: { screen: "session", root, repo } })} />;
   }
   // The providers feed starts with the app itself: the first launch reads its own rows.
   return (
