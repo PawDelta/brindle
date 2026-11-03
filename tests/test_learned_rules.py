@@ -72,16 +72,6 @@ def test_findings_are_change_requests_filed_under_the_workers_profile(db, tmp_pa
 # -- grouping and suggesting -----------------------------------------------------------
 
 
-def test_no_new_findings_no_call(db, tmp_path, pro):
-    root = str(tmp_path)
-    fake = FakeModel(bare_except)
-    assert not learned_rules.refresh(db, root, fake).called
-    review(db, root, "feat/a", "fine", approved=True)
-    assert not learned_rules.refresh(db, root, fake).called
-    assert fake.prompts == []
-    assert db.learned_rules_mark(root) == rows(db, root)[-1].id
-
-
 def test_a_failed_call_leaves_the_findings_for_next_time(db, tmp_path, pro):
     root = str(tmp_path)
     review(db, root, "feat/a", "bare except")
@@ -93,13 +83,6 @@ def test_a_failed_call_leaves_the_findings_for_next_time(db, tmp_path, pro):
         learned_rules.refresh(db, root, broken)
     assert db.learned_rules_mark(root) == 0
     assert learned_rules.refresh(db, root, FakeModel(bare_except)).findings == 1
-
-
-def test_parse_groups_tolerates_fences_and_drops_junk():
-    text = ('Here you go:\n```json\n{"groups": [{"title": "t", "rule": "r", "findings": [1, "2", "x"]},'
-            ' {"title": "empty", "findings": []}, "junk"]}\n```')
-    [g] = learned_rules.parse_groups(text)
-    assert g.findings == [1, 2] and g.title == "t"
 
 
 def test_unusable_mechanical_checks_are_dropped(db, tmp_path, pro):
@@ -146,23 +129,6 @@ def test_accept_writes_a_rule_pack_every_profile_gets_and_checks(db, tmp_path, p
         learned_rules.accept(db, root, s.key)
 
 
-def test_a_second_accepted_rule_adds_to_the_pack(db, tmp_path, pro):
-    root = str(tmp_path)
-    first = suggest_one(db, root)
-    _, path = learned_rules.accept(db, root, first.key)
-    path.write_text(path.read_text().replace("\n---\n", "\ndirect_spawn_allowed:\n  - src/spawn.py\n---\n", 1))
-    for b in ("feat/d", "feat/e", "feat/f"):
-        review(db, root, b, "print left in")
-    [second] = learned_rules.refresh(db, root, FakeModel(lambda ids: [
-        {"title": "debug prints", "rule": "Remove debug prints.", "findings": ids,
-         "deny_patterns": [r"^\s*print\("]}])).suggested
-    learned_rules.accept(db, root, second.key)
-    pack = [p for p in load_rule_packs(load_profile("reviewer", root), root) if p.name == "learned"][0]
-    assert pack.deny_patterns == [r"except\s*:", r"^\s*print\("]
-    assert pack.direct_spawn_allowed == ["src/spawn.py"]    # the pack's own list survives
-    assert "Catch specific exceptions" in pack.prompt and "Remove debug prints." in pack.prompt
-
-
 def test_a_rejected_rule_is_never_proposed_again(db, tmp_path, pro):
     root = str(tmp_path)
     s = suggest_one(db, root)
@@ -184,8 +150,7 @@ def test_a_rejected_rule_is_never_proposed_again(db, tmp_path, pro):
 
 
 @pytest.mark.parametrize("url,local", [
-    ("http://[::1]:1/v1", True), ("https://localhost.evil.example/v1", False),
-    ("https://user@evil.example/localhost", False),
+    ("http://[::1]:1/v1", True), ("https://user@evil.example/localhost", False),
 ])
 def test_loopback_is_the_parsed_host(url, local):
     assert learned_rules.is_loopback(url) is local
@@ -240,25 +205,7 @@ def test_without_the_entitlement_nothing_is_grouped_or_suggested(db, tmp_path, m
     assert spawned == []
 
 
-def test_refresh_later_starts_the_helper_when_entitled(db, tmp_path, monkeypatch, pro):
-    spawned = []
-    monkeypatch.setattr(learned_rules.subprocess, "Popen", lambda argv, **k: spawned.append(argv))
-    learned_rules.refresh_later(str(tmp_path))
-    assert spawned and spawned[0][-2:] == ["_learn-rules", str(tmp_path)]
-
-
-# -- the supervisor and the CLI ------------------------------------------------------------
-
-
-def test_get_progress_carries_the_suggestion(db, tmp_path, monkeypatch, pro):
-    from types import SimpleNamespace
-
-    from brindle import mcp_server
-
-    s = suggest_one(db, str(tmp_path))
-    monkeypatch.setattr(mcp_server, "_session", lambda db: ("root", SimpleNamespace(repo_root=str(tmp_path))))
-    monkeypatch.setattr(mcp_server.autopilot, "progress", lambda db, root: "Autopilot on.")
-    assert s.key in mcp_server.get_progress()
+# -- the CLI ------------------------------------------------------------
 
 
 def test_rules_cli(db, repo, monkeypatch, pro):

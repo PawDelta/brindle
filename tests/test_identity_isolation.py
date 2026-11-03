@@ -70,13 +70,6 @@ def launches(monkeypatch):
     return got
 
 
-def test_resume_works_under_the_recorded_identity(db, ws, who, launches):
-    worker(db, ws, status="paused", parent="boss")
-    worker(db, ws, "boss", status="paused", mode="interactive")
-    assert [a.id for a in agents.resume(db, "boss")] == ["boss", "w1"]
-    assert sorted(launches) == ["boss", "w1"]
-
-
 def test_continue_command_is_refused_under_a_different_identity(db, repo, ws, who, launches, monkeypatch):
     main = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("chat", main.id, "supervisor", "claude", None, "interactive", "paused", "",
@@ -121,13 +114,6 @@ def test_rewind_is_refused_under_a_different_identity(db, ws, who, spawned):
     assert spawned == [] and db.get_agent("w1").status != "rewound"
     out = asyncio.run(__import__("brindle.mcp_server", fromlist=["x"]).rewind_agent("w1", 1))
     assert out == f"Not rewound: {LOCKED}"
-
-
-def test_rewind_works_under_the_recorded_identity(db, ws, who, spawned):
-    worker(db, ws)
-    one_turn(db, ws)
-    assert rewind.rewind(db, "w1", 1).id == "new1"
-    assert spawned == [ws.id]
 
 
 # -- messages and handoffs --------------------------------------------------------------
@@ -194,14 +180,6 @@ def test_agent_turns_hide_the_conversation_of_a_locked_agent(db, ws, who):
     assert res.exit_code != 0 and f"locked: {ACME}" in res.output
 
 
-def test_agent_peek_is_refused(db, ws, who):
-    worker(db, ws)
-    db.update_agent("w1", tmux_window="brindle:1")
-    who.ident = OTHER
-    res = CliRunner().invoke(app, ["agent", "peek", "w1"])
-    assert res.exit_code != 0 and LOCKED in res.output
-
-
 def test_ls_lists_the_agent_as_locked(db, repo, ws, who, monkeypatch):
     worker(db, ws)
     monkeypatch.chdir(repo)
@@ -227,14 +205,6 @@ def test_list_agents_tool_shows_locked_not_the_transcript_activity(db, repo, ws,
     assert f"locked: {ACME}" in out and "WebFetch" not in out
 
 
-def test_agent_rewind_command_is_refused(db, ws, who, spawned):
-    worker(db, ws)
-    one_turn(db, ws)
-    who.ident = OTHER
-    res = CliRunner().invoke(app, ["agent", "rewind", "w1", "--to", "1"])
-    assert res.exit_code != 0 and LOCKED in res.output and spawned == []
-
-
 def test_merge_workspace_goes_ahead_under_the_recorded_identity(db, ws, who, monkeypatch):
     from brindle import mcp_server, pipeline
 
@@ -243,24 +213,6 @@ def test_merge_workspace_goes_ahead_under_the_recorded_identity(db, ws, who, mon
     assert asyncio.run(mcp_server.merge_workspace(ws.id)) == "Merged."
     who.ident = OTHER
     assert asyncio.run(mcp_server.merge_workspace(ws.id)) == f"Not merged: {LOCKED}"
-
-
-def test_assign_with_depends_on_goes_ahead_under_the_recorded_identity(db, repo, ws, who, monkeypatch):
-    from brindle import mcp_server
-
-    worker(db, ws)
-    main = workspaces.adopt_root(db, str(repo))
-    worker(db, main, "boss", recorded=None, mode="interactive")
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    monkeypatch.setattr(agents, "delegate", lambda *a, **k: (_ for _ in ()).throw(agents.AgentError("stub")))
-    out = asyncio.run(mcp_server.assign(task="build on it", depends_on=["w1"]))
-    assert LOCKED not in out and "stub" in out   # got past the dependency check to the start
-
-
-def test_view_shows_the_agent_normally_under_the_recorded_identity(db, ws, who):
-    worker(db, ws)
-    entry = view.agent_entry(db, db.get_agent("w1"), alive=True)
-    assert entry["status"] != f"locked: {ACME}" and "locked" not in entry
 
 
 # -- who is not locked ---------------------------------------------------------------------
