@@ -1808,8 +1808,9 @@ def permissions_install_codex_hook(
         return
     typer.echo(f"Codex reports it as: {state.status}")
     typer.echo(f"will set in {state.config}:")
-    typer.echo(f'  [hooks.state."{state.key}"]')
-    typer.echo(f'  trusted_hash = "{state.hash}"')
+    for key, hash_ in state.keys().items():
+        typer.echo(f'  [hooks.state."{key}"]')
+        typer.echo(f'  trusted_hash = "{hash_}"')
     typer.echo("and remember it in ~/.brindle/permissions.json (codex_hook)")
     if not yes:
         typer.echo("nothing changed; run again with --yes to trust it")
@@ -3088,7 +3089,7 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
     # Codex's permission hook is the same command for every agent (so one
     # trust covers them all): Codex passes the agent's environment through.
     agent_id = agent or os.environ.get("BRINDLE_AGENT_ID")
-    if not agent_id and event == "codex-permission-request":
+    if not agent_id and event in ("codex-permission-request", "codex-pre-tool"):
         try:
             from brindle import antigravity
 

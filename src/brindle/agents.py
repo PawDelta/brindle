@@ -3738,6 +3738,49 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, 
         return None
 
 
+STDIN_SESSION = ("a shell or interpreter with nothing to run: what it runs would be typed in later, past "
+                 "brindle's check. Pass the program on the command line (bash -c '...', python -c '...') "
+                 "or run a script file")
+
+
+def codex_pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
+    """Codex's PreToolUse hook, with ``permission_policy`` on: the policy's
+    deny before the tool runs. Codex runs most shell commands in its sandbox
+    without asking, so its PermissionRequest hook never sees them; this one
+    runs for every shell command, patch and MCP call, as Claude Code's
+    PreToolUse does (_pre_tool_policy). Only a deny is answered: Codex can't
+    ask from PreToolUse, and the rest stays with its approvals and the
+    PermissionRequest hook. Never raises: a failure is no answer."""
+    try:
+        from brindle import permissions
+        from brindle.config import load_repo_config
+        from brindle.profiles import profile_rules_for
+
+        ws = db.get_workspace(agent.workspace_id)
+        if ws is None:
+            return None
+        cfg = load_repo_config(ws.repo_root)
+        if cfg.permission_policy != "on":
+            return None
+        reqs = permissions.from_codex(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
+        if not reqs:
+            return None
+        rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+        decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
+        if decision.decision != "deny" and len(reqs) == 1:
+            # A deny on one part of a compound command (cd x && <denied>) still denies.
+            decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+        if decision.decision != "deny" and reqs[0].kind == "bash" and permissions.stdin_session(reqs[0].command):
+            decision = permissions.Decision("deny", STDIN_SESSION)
+        if decision.decision != "deny":
+            return None
+        _note_decision(db, agent, ws, reqs[0].kind, reqs[0].summary(), decision)
+        return permissions.codex_pre_tool_output(decision)
+    except Exception:  # noqa: BLE001 - a broken policy leaves the call to Codex, as Claude Code's hook does
+        log.exception("brindle: permission policy failed in Codex's PreToolUse")
+        return None
+
+
 def _record_permission(db: DB, agent: Agent, ws: Workspace | None, summary: str, result: str) -> None:
     from brindle import history
 
@@ -4282,9 +4325,11 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     from brindle import prompt_answer
 
     prompt_answer.settled(db, agent)
-    if event in ("pre-tool", "tool-done", "stop", "codex-notify"):
+    if event in ("pre-tool", "tool-done", "stop", "codex-notify", "codex-pre-tool"):
         from brindle import launch_health
         launch_health.accepted(db, agent)
+    if event == "codex-pre-tool":
+        return codex_pre_tool_decision(db, agent, payload)
     if event == "codex-permission-request":
         # Session/status writes are bookkeeping, never prerequisites for
         # returning a policy decision (especially a deny).
@@ -4847,7 +4892,7 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     return True
 
 
-PERMISSION_EVENTS = ("permission-request", "codex-permission-request")
+PERMISSION_EVENTS = ("permission-request", "codex-permission-request", "codex-pre-tool")
 
 
 def hook_main(db: DB, agent_id: str, event: str, stdin_text: str, trusted: bool = True) -> str:
