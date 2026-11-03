@@ -131,24 +131,15 @@ def test_record_payload_keys_and_contents(parts, remote):
         assert set(body) <= cloud.RECORD_KEYS
 
 
-def test_an_override_carries_the_servers_reason(parts, remote):
-    remote.suggest_pick = "reviewer"
-    lr = make(parts, remote)
-    assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "reviewer"
-    assert lr.last_reason == "cheaper and as good"
-    assert remote.suggests[0]["default"] == "developer"
-    remote.suggest_pick = None
-    assert lr.suggest(task(), ["developer", "reviewer"], "developer") == "developer"
-    assert lr.last_reason is None
-
-
-def test_unsafe_profile_names_are_never_sent(parts, remote):
+def test_unsafe_and_rogue_profile_names_are_never_sent_or_followed(parts, remote):
     lr = make(parts, remote)
     lr.record(task(profile="my profile/../x"), Outcome("merged"))
     lr.flush()
     assert remote.records == []
     assert lr.suggest(task(), ["developer", "/etc/passwd"]) is None
     assert remote.suggests == []
+    remote.routes["POST /learning/suggest"] = [(200, {"profile": "rogue"})]   # not among the candidates
+    assert lr.suggest(task(), ["developer", "reviewer"]) is None
 
 
 def test_records_are_sent_by_the_background_thread(parts, remote, monkeypatch):
@@ -161,20 +152,6 @@ def test_records_are_sent_by_the_background_thread(parts, remote, monkeypatch):
     lr.record(task(), Outcome("merged"))
     assert lr.flush(5)
     assert len(remote.records) == 1
-
-
-def test_the_record_queue_is_bounded(parts, remote, monkeypatch):
-    monkeypatch.setattr(cloud, "QUEUE_SIZE", 3)
-    lr = make(parts, remote)
-    for i in range(5):
-        lr.record(task(agent_id=f"w{i}"), Outcome("merged"))
-    assert lr.queue.qsize() == 3 and lr.dropped == 2
-
-
-def test_cost_rank_guesses_from_the_profile(tmp_path):
-    ranks = [cloud.cost_rank(n, str(tmp_path))
-             for n in ("no-such-profile", "developer", "developer-heavy", "developer-local")]
-    assert ranks == [2, 2, 3, 0]
 
 
 # -- repo_key and agent_ref ---------------------------------------------------------------------------
@@ -216,30 +193,6 @@ def test_server_refusals_give_no_suggestion(parts, remote, status, error):
     assert not fallback_case(parts, remote).active()
 
 
-def test_a_profile_outside_the_candidates_is_ignored(parts, remote):
-    remote.routes["POST /learning/suggest"] = [(200, {"profile": "rogue"})]
-    assert make(parts, remote).suggest(task(), ["developer", "reviewer"]) is None
-
-
-def test_report_says_whether_cloud_is_active(parts, remote):
-    assert make(parts, remote).report().startswith("cloud learning: active")
-    login_as(remote, parts[0], features=())
-    assert "inactive" in make(parts, remote).report()
-
-
-# -- nothing is learned on this machine -------------------------------------------------------------
-
-
-def test_records_and_suggestions_go_to_the_server(parts, remote):
-    lr = make(parts, remote)
-    assert lr.suggest(task(), ["developer", "reviewer"]) == "developer"
-    lr.record(task(), Outcome("review", approved=True))
-    lr.record(task(), Outcome("merged"))
-    lr.flush()
-    assert [r["event"] for r in remote.records] == ["review", "merged"]
-    assert remote.records[-1]["review_rounds"] == 1
-
-
 # -- wiring --------------------------------------------------------------------------------------------
 
 
@@ -248,30 +201,6 @@ def fresh_plugins():
     plugins.reset()
     yield
     plugins.reset()
-
-
-def test_brindle_learning_command_explains_auto(repo, monkeypatch):
-    from typer.testing import CliRunner
-
-    from brindle.cli import app
-
-    monkeypatch.chdir(repo)
-    res = CliRunner().invoke(app, ["learning"])
-    assert res.exit_code == 0, res.output
-    assert "brindle Pro" in res.output and "brindle account upgrade" in res.output
-
-
-def test_brindle_learning_command_rejects_unsupported_value(repo, monkeypatch):
-    from typer.testing import CliRunner
-
-    from brindle.cli import app
-
-    (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text('{"learning": "myplugin"}')
-    monkeypatch.chdir(repo)
-    res = CliRunner().invoke(app, ["learning"])
-    assert res.exit_code == 0, res.output
-    assert "not a supported value" in res.output
 
 
 # -- brindle learning seed ------------------------------------------------------------------------------

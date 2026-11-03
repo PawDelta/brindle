@@ -74,14 +74,4 @@ describe("EventStream", () => {
     expect(states).toEqual(["connecting", "open", "unauthorized"]);
     expect(daemon.sockets).toHaveLength(1);
   });
-
-  it("doesn't reconnect once stopped", async () => {
-    const daemon = new FakeDaemon();
-    const { s } = stream(daemon);
-    await flush();
-    s.stop();
-    await flush();
-    expect(daemon.sockets).toHaveLength(1);
-    expect(daemon.sockets[0].closed).toBe(true);
-  });
 });

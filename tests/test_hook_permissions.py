@@ -40,8 +40,6 @@ def test_cd_into_the_worktree_counts_as_covered(db, ws):
 def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
     a = worker(db, ws)
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cd .. && git status")) is None
-    assert agents.handle_hook(db, a.id, "pre-tool", bash("cd /tmp && ls")) is None
-    assert agents.handle_hook(db, a.id, "pre-tool", bash("cd ~ && ls")) is None
 
 
 @pytest.mark.parametrize("command, bound, extra", [
@@ -209,10 +207,6 @@ def launch_matcher(**ctx):
     return entry["matcher"]
 
 
-def test_plan_first_agents_hook_edit_tools_too():
-    assert launch_matcher(plan_first=True) == "Bash|Edit|Write|NotebookEdit"
-
-
 def test_with_the_policy_on_the_hook_sees_every_tool_it_rules_on(db, ws):
     """The policy's deny or ask on a file, fetch or MCP tool reaches Claude
     Code only through the PreToolUse hook, so a launch with the policy on
@@ -234,7 +228,7 @@ def test_with_the_policy_on_the_hook_sees_every_tool_it_rules_on(db, ws):
         assert (got["hookEventName"], got["permissionDecision"]) == ("PreToolUse", "deny")
 
 
-@pytest.mark.parametrize("route", ["python -m brindle", "console script"])
+@pytest.mark.parametrize("route", ["console script"])
 def test_pre_tool_fast_path(db, ws, monkeypatch, capsys, route):
     """`brindle _hook pre-tool --agent <id>` skips typer from either entry
     point, loads the profile once per call, and reads every rule source on

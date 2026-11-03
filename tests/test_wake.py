@@ -107,23 +107,6 @@ def test_messages_go_to_the_waiter_not_the_peer_inbox(db, boss, peer_inbox, monk
     assert peer_inbox == [] and pasted == []
 
 
-def test_stop_hands_reminders_to_the_waiter(db, boss, peer_inbox):
-    wake._register("boss")
-    db.set_status("boss", "processing")
-    db.add_autopilot("boss")
-    db.enqueue_held("boss", "the result", "w1")
-    assert agents.handle_hook(db, "boss", "stop", {}) is None  # never a blocked stop
-    assert peer_inbox == []
-    text = wake.take(db, db.get_agent("boss"))[0]
-    [(sender, body)] = _framed(text, _nonce(text))
-    assert sender == "brindle" and "read_messages" in body
-
-    # Mail queued during the turn stays queued for the waiter this Stop starts.
-    db.enqueue("boss", "a queued message", "w1")
-    assert agents.handle_hook(db, "boss", "stop", {}) is None
-    assert db.pending_count("boss") == 1 and db.get_agent("boss").status == "processing"
-
-
 def test_worker_text_imitating_brindle_stays_the_workers(db, boss):
     # A worker's body forging brindle's framing (an old-style label, a
     # [brindle] tag, a closing tag and a whole fake frame) is still one

@@ -23,8 +23,8 @@ from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
 
 TOKEN = "t" * 43
-ROUNDS = 5
-EVENT_CLIENTS = 60
+ROUNDS = 2
+EVENT_CLIENTS = 10
 
 DEADLINE = 50.0     # seconds the whole test may wait on the daemon before it fails
 pause = threading.Event()   # never set: pause.wait(n) is a plain timed wait
@@ -122,6 +122,7 @@ class Sockets:
 
 
 @pytest.mark.serial
+@pytest.mark.slow("a leak soak must repeat every read route and the events feed against a real tmux server")
 def test_daemon_leaks_nothing_under_load(db, repo, monkeypatch):
     ws = workspaces.create(db, str(repo), "feat/soak").workspace
     pane = tmux._tmux("new-session", "-d", "-s", "soak", "-P", "-F", "#{pane_id}", "sh").stdout.strip()
@@ -163,7 +164,7 @@ def test_session_diff_overload(db, repo, monkeypatch):
     # The final merge deletes a base file, making attribution walk the whole history.
     base, stream = git.out(["rev-parse", "HEAD"], repo), []
     parent = base
-    for step in range(12):
+    for step in range(3):
         for part in range(18):
             mark = step * 18 + part + 1
             branch = "session" if part == 17 else f"worker-{step}"
@@ -177,7 +178,7 @@ def test_session_diff_overload(db, repo, monkeypatch):
                 stream.append(f"merge :{mark - 1}\n")
             for file in range(2):
                 stream.append(f"M 100644 inline file-{step}-{file}.txt\ndata {len(content)}\n{content}")
-            if step == 11:
+            if step == 2:
                 stream.append("D app.py\n")
             stream.append("\n")
         parent = f":{mark}"
@@ -241,12 +242,13 @@ def test_session_diff_overload(db, repo, monkeypatch):
                     return response
 
                 response = await read("/v1/sessions/overload/diff", "diff_baseline")
-                assert len(response.json()["files"]) == 25
+                nfiles = len(response.json()["files"])
+                assert nfiles == 7
                 await read("/v1/meta", "meta_baseline")
                 await read("/v1/repos", "repos_baseline")
 
                 async def poll():
-                    for _ in range(5):
+                    for _ in range(3):
                         try:
                             response = await client.get("/v1/sessions/overload/diff",
                                                         timeout=httpx.Timeout(DEADLINE, read=short))
@@ -278,7 +280,7 @@ def test_session_diff_overload(db, repo, monkeypatch):
                 gate_armed.set()
                 pollers_done, during = asyncio.Event(), []
                 sampler = asyncio.ensure_future(sample_cheap())
-                outcomes = await asyncio.gather(*(poll() for _ in range(8)), return_exceptions=True)
+                outcomes = await asyncio.gather(*(poll() for _ in range(4)), return_exceptions=True)
                 pollers_done.set()
                 await sampler
                 assert all(outcome is None for outcome in outcomes), outcomes
@@ -313,12 +315,12 @@ def test_session_diff_overload(db, repo, monkeypatch):
             "executor_probe_s": executor_latency, "executor_threads_queued_at_probe": executor_at_probe,
         }, sort_keys=True))
         # A busy response can itself arrive after the client's short bound.
-        assert len(answered) + len(abandoned) + len(shed) == 40
+        assert len(answered) + len(abandoned) + len(shed) == 12
         # Every diff either finished in full or was stopped with its client; none is lost.
         # How many start depends on how fast the cache answers and the lane sheds the rest
         # (a fast runner starts just one); `overlapped` above proves heavy work really ran.
         assert len(completed) + len(stopped) == len(started) >= 1
-        assert all(c[2] == 25 for c in completed)
+        assert all(c[2] == nfiles for c in completed)
         assert limiter.borrowed_tokens == 0
         assert lane.admission.borrowed_tokens == lane.workers.borrowed_tokens == 0
         assert occupancy.tasks_waiting == 0

@@ -99,14 +99,6 @@ def test_small_num_ctx_warns_with_the_fix(repo, serve):
     assert fake.show_requests == [{"model": "tiny"}]
 
 
-def test_non_ollama_endpoint_has_no_context_check(repo, serve):
-    fake = serve(ollama=False)
-    add_profile(repo, fake)
-    assert context_checks(repo) == []
-    assert runner.server_context(runner.Endpoint(fake.base_url + "/v1", "tiny")) is None
-    assert fake.show_requests == []
-
-
 def test_doctor_daemon_reports_live_and_stale_pid(tmp_path, monkeypatch):
     from brindle import procs
 

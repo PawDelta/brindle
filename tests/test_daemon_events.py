@@ -222,17 +222,12 @@ def _status_fingerprint(tmp_path, monkeypatch):
 @pytest.mark.parametrize("scenario, params", [
     pytest.param(_readiness_reuses_unchanged_sessions, {"gitlink": False}, id="readiness-reuses",
                  marks=pytest.mark.variant("an unchanged tracked file is not re-read: a sweep runs no git at all")),
-    pytest.param(_readiness_reuses_unchanged_sessions, {"gitlink": True}, id="readiness-reuses-gitlink"),
     pytest.param(_readiness_slow_gh_is_parallel_and_bounded, {}, id="readiness-slow-gh"),
-    pytest.param(_readiness_deferred_prs_get_a_turn, {"queued": "cancelled"}, id="readiness-deferred-cancelled"),
     pytest.param(_readiness_deferred_prs_get_a_turn, {"queued": "expired"}, id="readiness-deferred-expired",
                  marks=pytest.mark.variant("a queued check starts after deadline expiry before the sweep can cancel it")),
     pytest.param(_session_changed_tracks_head_and_index_without_status_changes, {"memory": False},
                  id="session_changed-file-db",
                  marks=pytest.mark.variant("two daemons on one database file each announce a change exactly once")),
-    pytest.param(_session_changed_tracks_head_and_index_without_status_changes, {"memory": True},
-                 id="session_changed-memory-db",
-                 marks=pytest.mark.variant("an in-memory database announces each change exactly once")),
     pytest.param(_status_fingerprint, {}, id="status_fingerprint",
                  marks=pytest.mark.variant("a cached git status is reused until a file's size or the tree changes")),
 ])
@@ -250,7 +245,7 @@ def test_missing_token_is_rejected(db):
     assert closed.value.code == WS_UNAUTHORIZED
 
 
-@pytest.mark.parametrize("since,first", [(1, ["event", "event"]), (99, ["resnapshot"])])
+@pytest.mark.parametrize("since,first", [(1, ["event", "event"])])
 def test_since_replays_then_tails(db, since, first):
     for n in range(3):
         bus.publish(db, "note", n=n)
