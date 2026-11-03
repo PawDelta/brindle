@@ -61,7 +61,7 @@ def test_removed_on_remove(db, repo, fake_docker, entitled):
 def test_no_containers_means_nothing_to_remove(monkeypatch):
     from types import SimpleNamespace
 
-    def docker(args, timeout=60):
+    def docker(args):
         assert args[0] == "ps", f"nothing to remove, yet ran docker {args}"
         return SimpleNamespace(returncode=0, stdout="", stderr="")     # lists no containers
 
