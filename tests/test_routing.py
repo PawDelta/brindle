@@ -115,6 +115,11 @@ def test_weight_picks_the_first_candidate(db, repo, boss):
     assert choose(db, repo, weight="reasoning")[0] == "developer-fable"   # an alias of advanced
 
 
+def test_invalid_weight_is_refused(db, repo, boss):
+    with pytest.raises(autopilot.AutopilotError):
+        choose(db, repo, weight="enormous")
+
+
 def test_native_down_is_skipped(db, repo, boss, monkeypatch):
     monkeypatch.setattr(quota, "headroom",
                         lambda provider, cfg=None, repo_root=None: 0.0 if provider == "native" else 100.0)
@@ -156,3 +161,22 @@ def test_assign_reply_names_the_pick_and_stores_the_weight(db, repo, boss, monke
     assert t.weight == "medium" and t.profile == "developer-sonnet"
 
 
+def test_learning_outcomes_carry_the_weight(db, repo, boss, monkeypatch):
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    config(repo, pipeline=False, learning="cloud")
+
+    class Recorder(Picker):
+        def __init__(self):
+            super().__init__()
+            self.events = []
+
+        def record(self, task, outcome):
+            self.events.append(task)
+
+    plugin = Recorder()
+    install(monkeypatch, plugin)
+    asyncio.run(mcp_server.assign(task="do A", branch="feat-a", weight="heavy"))
+    [t] = db.list_tasks(str(repo), state="started")
+    worker = db.get_agent(t.agent_id)
+    learning.note(db, load_repo_config(repo), worker, boss, merged=True)
+    assert plugin.events[0].weight == "heavy"

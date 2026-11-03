@@ -67,6 +67,19 @@ def test_parse_diff_is_not_fooled_by_content_that_looks_like_headers():
     assert rule_checks.check_require_tests(pack(require_tests_for=["src/*"]), d)
 
 
+def test_parse_diff_handles_blank_context_and_quoted_paths():
+    text = (
+        'diff --git "a/src/caf\\303\\251 x.py" "b/src/caf\\303\\251 x.py"\n'
+        '--- "a/src/caf\\303\\251 x.py"\n+++ "b/src/caf\\303\\251 x.py"\n'
+        "@@ -1,3 +1,4 @@\n a\n\n+new\n b\n"
+        "diff --git a/one.py b/one.py\n--- a/one.py\n+++ b/one.py\n@@ -1 +1,2 @@\n x\n+y\n"
+    )
+    d = rule_checks.parse_diff(text)
+    assert d.files == ["src/café x.py", "one.py"]
+    assert d.added["src/café x.py"] == [(3, "new")]
+    assert d.added["one.py"] == [(2, "y")]
+
+
 def test_parse_diff_counts_lines_the_way_git_does():
     """A form feed, a bare CR or U+2028 inside a line is one line to git. If
     the parser broke there too, the hunk's counts would run out early and
