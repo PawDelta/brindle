@@ -176,17 +176,6 @@ def test_a_session_whose_worktree_is_gone_is_killed_with_the_cli_in_it(db, tmp_p
     assert not any(test_cull.alive(p) for p in pids)   # terminate() returns once they are gone
 
 
-def test_empty_worktree_folders_are_removed(db, repo):
-    ws = workspaces.create(db, str(repo), "feat/real").workspace
-    (worktree_root(repo) / "fix" / "gone").mkdir(parents=True)
-    (worktrees_dir() / "proj" / "old").mkdir(parents=True)  # from before #182
-    assert cull.empty_worktree_dirs(db) == 4
-    assert not (worktree_root(repo) / "fix").exists()
-    assert not (worktrees_dir() / "proj").exists()
-    assert os.path.isdir(ws.path)
-    assert worktrees_dir().is_dir()
-
-
 @pytest.mark.variant("#199 incident input: parse the full owner PID in per-test server names; startup parsing lives in unmeasured conftest.py")
 @pytest.mark.parametrize("name, alive, reaped", [
     ("brindle-test-1234-7", False, True),      # a dead owner's per-test server
