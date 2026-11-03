@@ -850,3 +850,33 @@ def _session_diff_concurrent_asks_share_one_computation(db, repo, tmp_path, monk
 ])
 def test_daemon_overload_lanes_health_caller_check_and_session_diff(request, scenario, params):
     run_scenario(request, scenario, params)
+
+
+@pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])
+def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, enough):
+    from brindle.db import Task
+    from brindle.pro import analysis_brief
+
+    def finished(agent_id, weight, rounds, *, brief=False, files=None, repo="/r"):
+        if files:
+            db.add_task(Task(f"t-{agent_id}", repo, agent_id, None, "ws", "dev", "x", "assign", 1, None, None,
+                             json.dumps(files), None, "merged", 1.0))
+        db.add_routing_decision(repo, task_id=f"t-{agent_id}", agent_id=agent_id, weight=weight,
+                                baseline_profile="dev", profile="dev", learned=False)
+        with db.tx() as c:
+            c.execute("UPDATE routing_decisions SET review_rounds=?, outcome='merged' WHERE agent_id=?",
+                      (rounds, agent_id))
+        if brief:
+            knowledge.record_receipt(db, agent_id, [(analysis_brief.BRIEF_ITEM, agent_id, "h")])
+
+    for i in range(briefed):
+        finished(f"b{i}", "heavy", 1, brief=True)
+    for i in range(5):
+        finished(f"o{i}", "heavy", 3)
+    finished("light", "light", 0)                                      # another size
+    finished("docs", "heavy", 9, files=["docs/plan.md"])              # another kind
+    finished("elsewhere", "heavy", 9, repo="/other")                  # another repo
+    finished("alone", "advanced", 7, brief=True)                      # nothing similar to compare with
+    code, body = _get("/v1/analysis-docs/results", AUTH, "repo=/r")
+    assert code == 200 and (body["enough"], body["compared"], body["briefed"]) == (enough, briefed, briefed + 1)
+    assert (body["with_brief"], body["without_brief"]) == ((1.0, 3.0) if enough else (None, None))
