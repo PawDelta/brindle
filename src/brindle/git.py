@@ -333,7 +333,17 @@ def exclude(root: str | Path, path: str | Path) -> None:
     rel = os.path.relpath(os.path.realpath(path), os.path.realpath(root))
     if rel == "." or rel.startswith(".."):
         return
-    pattern = "/" + Path(rel).as_posix() + "/"
+    _add_exclude(root, "/" + Path(rel).as_posix() + "/")
+
+
+def exclude_name(root: str | Path, rel: str) -> None:
+    """Keep the entry ``rel`` (relative to the checkout at ``root``) out of
+    ``git status`` whatever it is: a symlink too, which a ``dir/`` pattern
+    doesn't match."""
+    _add_exclude(root, "/" + rel.strip("/"))
+
+
+def _add_exclude(root: str | Path, pattern: str) -> None:
     info = Path(out(["rev-parse", "--path-format=absolute", "--git-common-dir"], root)) / "info"
     info.mkdir(parents=True, exist_ok=True)
     # Locked, so two creates at once neither lose nor repeat the line.

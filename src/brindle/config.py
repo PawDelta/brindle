@@ -197,6 +197,7 @@ class RepoConfig:
     # false to never start or preload one.
     local_models: bool = True
     delete_merged_branches: bool = True  # removing a worktree deletes its branch once fully merged into its base
+    shared_cargo_target: bool = True   # worktrees share one CARGO_TARGET_DIR per repo (see brindle.build_caches)
     pr_footer: bool = True             # `brindle pr` ends the PR body with one "built with brindle" line
     sidebar: str = "left"              # where the dashboard sits: "left" of the chat or "bottom"
     # Standing rules for the supervisor ("fix review findings without asking", ...):
@@ -385,7 +386,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "check_concurrency", "wait_for_room",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",
                 "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
-                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
+                "auto_merge_default_branch", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
