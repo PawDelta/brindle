@@ -4368,6 +4368,8 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
         }
     if needs_report:
         db.set_status(agent.id, "idle")
+        # The stop claim must use this idle spell's timestamp.
+        agent = db.get_agent(agent.id) or agent
         from brindle import prompt_answer
 
         if not prompt_answer.at_turn_end(db, agent):   # a question it ended on says more
@@ -4942,7 +4944,7 @@ def liveness(db: DB, a: Agent, ws: Workspace | None, panes: dict[str, bool] | No
     return "; ".join(parts)
 
 
-def tell_parent_unreported(db: DB, agent: Agent) -> bool:
+def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False) -> bool:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
     usually gone idle waiting for it with nothing left to wake it, so tell the
@@ -4964,14 +4966,29 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
         # nothing about whether this one's call got through.
         if any(r.reviewer_id == agent.id for r in db.reviews_at(ws.id, gates.head(ws))):
             return False  # its verdict for the current commit is already recorded
-    if agent.unreported_noted:
+    if agent.unreported_noted and not (remind and unreported_note_expired(agent)):
         return False  # the supervisor was told about this stop; cleared once it resumes
     if command_running(db, agent) or (is_alive(agent) and transcript_active(agent)):
         # Its turn ended while a long or background command (a test run) is
         # still going, or it is still writing to its transcript: it isn't
         # stopped. Not marked noted, so a real stop later still gets its alert.
         return False
-    db.update_agent(agent.id, unreported_noted=int(time.time()))
+    claimed_at = time.time()
+    if not db.claim_unreported(agent.id, claimed_at, agent.unreported_noted,
+                               reopened_at=agent.reopened_at,
+                               status_since=agent.status_since or agent.created_at):
+        return False
+    sent = False
+    try:
+        sent = _tell_parent_unreported(db, agent, ws)
+        return sent
+    finally:
+        if not sent:
+            db.release_note(agent.id, claimed_at, agent.unreported_noted, field="unreported_noted")
+
+
+def _tell_parent_unreported(db: DB, agent: Agent, ws: Workspace | None) -> bool:
+    """Handle the stop whose alert this caller has claimed."""
     if agent.mode == "review" and ws is not None:
         from brindle import pipeline
 
@@ -4995,8 +5012,7 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     try:
         send_message(db, agent.parent_id, body)
     except (AgentError, tmux.TmuxError):
-        # The parent isn't running (or can't take messages): the notice is
-        # deliberately dropped here, since there's nothing left to tell.
+        # Release the alert so a later sweep can reach the parent.
         return False
     return True
 

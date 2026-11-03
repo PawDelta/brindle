@@ -124,27 +124,54 @@ def test_a_piped_branch_nothing_works_on_is_reported_once_not_closed(db, repo, m
     assert len(told) == 1
 
 
-@pytest.mark.parametrize("note, says", [(cull.note_stalled, "nothing is working on"),
-                                        (cull.note_silent, "has shown nothing new")])
-def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, repo, monkeypatch, note, says):
+@pytest.mark.parametrize("note", [cull.note_stalled, cull.note_silent, cull.note_idle_unreported,
+                                agents.tell_parent_unreported, "prompt", "doc", "reviewer",
+                                pytest.param("reviewer-stop", marks=pytest.mark.variant(
+                                    "Stop hook changes status before claiming reviewer recovery"))])
+def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, tmp_path, monkeypatch, note):
     """The daemon and each session's MCP server sweep side by side: two that
     read the workers before either noted it send the note once between them."""
-    from brindle import tmux
-    from brindle.db import DB
+    from brindle import knowledge, prompt_answer, tmux
+    from brindle.db import DB, Workspace
+    from brindle.pro import analysis_docs
+    from brindle.pro.analysis_brief import DOC_ITEM
 
-    ws = _reported(db, repo)
+    ws = Workspace("ws", str(tmp_path), "feat", "worktree", "feat", "main", str(tmp_path), None, "", 0)
+    db.add_workspace(ws)
+    add(db, ws, "boss", "interactive", "supervisor", status="processing")
+    add(db, ws, "w1", "assign", parent="boss", result="done")
+    monkeypatch.setattr(gates, "head", lambda ws_: "head")
     old = time.time() - 7200
     if note is cull.note_stalled:   # a dead worker's branch in a fix round
         db.update_agent("w1", pipeline="fixing", created_at=old, status_since=old)
-    else:                           # a live worker whose pane has printed nothing
-        db.update_agent("w1", result=None, status="unknown", created_at=old)
-    alive = {"boss", "w1"} if note is cull.note_silent else {"boss"}
+    else:
+        db.update_agent("w1", result=None, status="idle", created_at=old, status_since=old)
+    if note is cull.note_silent:
+        db.update_agent("w1", status="unknown")
+    fallbacks = []
+    reviewer = note in ("reviewer", "reviewer-stop")
+    if reviewer:
+        db.update_agent("w1", result="done", pipeline="reviewing")
+        add(db, ws, "rev", "review", "reviewer", parent="boss",
+            status="processing" if note == "reviewer-stop" else "idle")
+        monkeypatch.setattr(agents, "request_review", lambda *a, **kw: fallbacks.append(1))
+        monkeypatch.setattr(agents, "close_later", lambda *a: None)
+        monkeypatch.setattr(pipeline.learning, "note_reviewer", lambda *a, **kw: None)
+        monkeypatch.setattr(pipeline, "_cached_check_summary", lambda *a: None)
+        monkeypatch.setattr(pipeline, "_small_diff_stat", lambda *a: None)
+    alive = {"boss"} if note is cull.note_stalled else {"boss", "w1", "rev"}
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in alive)
     monkeypatch.setattr(agents, "owns_pane", lambda db_, a, owners=None: True)
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
     monkeypatch.setattr(agents, "same_server", lambda a, panes=None: True)
     monkeypatch.setattr(tmux, "window_activity", lambda window, server=None: old)
     monkeypatch.setattr(tmux, "capture", lambda window, lines=40, server=None: "")
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    monkeypatch.setattr(agents, "transcript_active", lambda a: False)
+    monkeypatch.setattr(cull, "_last_edit", lambda ws_: 0)
+    knowledge.record_receipt(db, "w1", [(DOC_ITEM, "doc", "1")])
+    pins = {kind: analysis_docs._pins(db, "w1", kind) for kind in (DOC_ITEM, analysis_docs.TOLD_ITEM)}
+    monkeypatch.setattr(analysis_docs, "_pins", lambda db_, agent_id, kind: pins[kind])
     snapshot = db.list_agents()
     other = DB()
     for conn in (db, other):
@@ -152,7 +179,74 @@ def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, repo, monkeypatch,
         monkeypatch.setattr(conn, "list_agents",
                             lambda ws_id=None, real=real: snapshot if ws_id is None else real(ws_id))
     now = time.time()
-    note(db, now, {})
-    note(other, now, {})
-    told = [b for b in inbox(db) if ws.branch in b and says in b]
-    assert len(told) == 1
+    worker = next(a for a in snapshot if a.id == ("rev" if reviewer else "w1"))
+    version = 2
+
+    def run(conn):
+        if note == "reviewer-stop" and conn is db:
+            agents._stop_decision(conn, worker, {"stop_hook_active": True})
+        elif note is agents.tell_parent_unreported or reviewer:
+            agents.tell_parent_unreported(conn, worker)
+        elif note == "prompt":
+            prompt_answer.tell(conn, worker, "Continue?")
+        elif note == "doc":
+            analysis_docs._tell_stale(conn, "w1", "doc", version)
+        else:
+            note(conn, now, {})
+
+    sent = []
+
+    def send(conn, to, body, **kw):
+        sent.append(to)
+        if len(sent) == 1:
+            run(other)  # the other process enters before this send returns
+        return "delivered"
+
+    monkeypatch.setattr(agents, "send_message", send)
+
+    def next_event():
+        nonlocal old, worker, version
+        old += 1
+        version += 1
+        db.update_agent("w1", status_since=old, unreported_noted=None)
+        worker = db.get_agent("w1")
+        snapshot[:] = [worker if a.id == "w1" else a for a in snapshot]
+
+    try:
+        run(db)
+        run(other)
+        assert len(sent) == 1
+        if reviewer:
+            assert fallbacks == []
+            db.set_status("rev", "processing")
+            db.set_status("rev", "idle")  # a genuinely new stop after the resume
+            worker = db.get_agent("rev")
+            run(other)
+            assert fallbacks == [1] and len(sent) == 1
+            return
+        next_event()
+
+        def fail(conn, to, body, **kw):
+            raise RuntimeError("send failed")
+
+        monkeypatch.setattr(agents, "send_message", fail)
+        with pytest.raises(RuntimeError):
+            run(db)
+        monkeypatch.setattr(agents, "send_message", send)
+        run(other)
+        assert len(sent) == 2  # the failed send released its claim
+        next_event()
+
+        def newer_then_fail(conn, to, body, **kw):
+            next_event()
+            monkeypatch.setattr(agents, "send_message", send)
+            run(other)
+            raise RuntimeError("older send failed")
+
+        monkeypatch.setattr(agents, "send_message", newer_then_fail)
+        with pytest.raises(RuntimeError):
+            run(db)
+        run(other)
+        assert len(sent) == 3  # releasing the older claim kept the newer one
+    finally:
+        other.conn.close()
