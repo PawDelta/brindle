@@ -497,8 +497,10 @@ def _route_clash(req: _Request, db: DB, caller: Agent, ws: Workspace, profile: s
     setting (``tasks.overlap_mode``): (a reply to return instead of starting,
     a warning for the started reply). Queueing waits on the holder's worker;
     a second identical assign leaves the queued task in place. Another
-    session's work is never cancelled or replaced: both supervisors are told."""
-    clash = tasks.find_clash(db, ws, files, task, caller.id)
+    session's work is never cancelled or replaced: both supervisors are told.
+    Only declared files, from the database (``tasks.declared_clash``): what
+    takes git to tell is checked at launch, after the reply."""
+    clash = tasks.declared_clash(db, ws, files, caller.id)
     if clash is None:
         return None, None
     how = tasks.overlap_mode(load_repo_config(ws.repo_root).overlap, clash.cross_session)
@@ -646,7 +648,8 @@ async def handoff(
         if repeated:
             return repeated
         try:
-            unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id)
+            # No git before the reply: the start checks the rest before launching.
+            unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id, inspect=False)
         except agents.AgentError as e:
             return str(e)
         effective_weight = decision.get("weight") or weight
@@ -775,7 +778,8 @@ async def assign(
         if repeated:
             return repeated
         try:
-            unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id)
+            # No git before the reply: the start checks the rest before launching.
+            unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id, inspect=False)
         except agents.AgentError as e:
             return str(e)
         effective_weight = decision.get("weight") or weight

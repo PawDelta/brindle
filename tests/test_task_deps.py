@@ -79,7 +79,7 @@ def test_overlapping_tasks_are_blocked(db, repo, monkeypatch):
     db.add_agent(Agent("boss", root.id, "supervisor", "claude", None, "interactive", "idle", "@0", None,
                        time.time()))
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    monkeypatch.setattr(tasks, "find_clash", lambda db_, ws_, files, text=None, caller_id=None:
+    monkeypatch.setattr(tasks, "declared_clash", lambda db_, ws_, files, caller_id=None:
                         tasks.Clash("overlaps with w0 (feat/a) on ledger.py", "w0", "boss"))
     delegated = []
     monkeypatch.setattr(agents, "delegate", lambda *a, **k: delegated.append(a))
@@ -650,7 +650,10 @@ def test_requeue_with_a_cancelled_dependency_asks_for_new_ones(db, repo, boss):
 # -- replying before the start ---------------------------------------------------
 
 
-@pytest.mark.parametrize("tool, start", [("assign", "detached"), ("handoff", "detached"), ("handoff", "at once")])
+@pytest.mark.parametrize("tool, start", [
+    ("assign", "detached"), ("handoff", "detached"), ("handoff", "at once"),
+    ("assign", "behind a worker"), ("assign", "capped"),
+])
 def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
     """Under load every git and tmux step of a start waits for room, and
     assigns ran past the client's 120 s (2026-11-03): assign (and handoff)
@@ -658,8 +661,11 @@ def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
     happen in the detached start afterwards. Repeated before that start
     runs, it queues nothing more, and another task on the same files is
     refused (overlap "block"); a start that beat the reply is named in it,
-    never waited for."""
-    from brindle import spawn
+    never waited for. Behind a running worker, the git look at what it
+    changed waits for the start too, which still refuses the overlap it
+    finds; and a team's worker cap holds for tasks both queued before
+    either start ran, even while the first is still starting."""
+    from brindle import policy, spawn
 
     (repo / ".brindle" / "config.json").write_text('{"overlap": "block", "pipeline": false, "review": false}')
     events, helpers = [], []
@@ -667,11 +673,24 @@ def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
 
     def slow_delegate(*a, **k):   # admission, worktree, setup and the tmux launch
         events.append("spawn")
-        return real_delegate(*a, **k)
+        if start == "capped":   # the other task's start, while this one is under way
+            for other_task in db.list_tasks(str(repo), state="pending"):
+                assert not tasks.start_when_room(db, other_task.id)
+        worker = real_delegate(*a, **k)
+        if start == "capped":   # its worker exists before its task names it: counted once
+            workers = policy.worker_agents(db, str(repo))
+            assert len(workers) + tasks.launching_workers(db, str(repo), workers) == 1
+        return worker
 
-    def call(task: str = "do A") -> str:
-        return asyncio.run(getattr(mcp_server, tool)("developer", task, files=["app.py"]))
+    def call(task: str = "do A", files: tuple[str, ...] = ("app.py",)) -> str:
+        return asyncio.run(getattr(mcp_server, tool)("developer", task, files=list(files)))
 
+    if start == "behind a worker":   # its branch has changed app.py, which only git can tell
+        started_worker_id(call("do W", ()))
+        monkeypatch.setattr(tasks, "_changed_files", lambda ws: events.append("git") or ["app.py"])
+    if start == "capped":   # as an org's max_parallel_workers of 1 decides
+        monkeypatch.setattr(policy, "check_assign", lambda *a, running_workers=None, **k: (
+            policy.allow() if running_workers == 0 else policy.deny("at most 1 parallel worker")))
     monkeypatch.setattr(agents, "delegate", slow_delegate)
     monkeypatch.setattr(agents, "wait_for_result", lambda *a, **k: pytest.fail("the reply waited for the worker"))
     if start == "at once":   # conftest's start runs as the reply is released
@@ -685,12 +704,23 @@ def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
     events.append("reply")
     again = call()   # the same task, before its start has run
     other = call("do B")   # another task on the same files, before either start has run
-    [t] = db.list_tasks(str(repo))
+    [t] = [x for x in db.list_tasks(str(repo)) if x.task_text == "do A"]
     assert t.id in out and t.id in again and events == ["reply"] and helpers == [t.id], (out, again)
     assert other.startswith("Not started") and f"queued task {t.id}" in other, other
     monkeypatch.setattr(spawn, "room", lambda: 4.0)
+    if start == "behind a worker":
+        assert not tasks.start_when_room(db, t.id)
+        assert events == ["reply", "git"] and db.get_task(t.id).state == "cancelled"
+        return
+    if start == "capped":
+        c = call("do C", ("c.py",))   # accepted: no worker is at work yet
+        [t_c] = [x for x in db.list_tasks(str(repo)) if x.task_text == "do C"]
+        assert t_c.id in c and helpers == [t.id, t_c.id], c
     assert tasks.start_when_room(db, t.id)   # what the detached helper runs once there's room
     assert events == ["reply", "spawn"] and db.get_task(t.id).agent_id
+    if start == "capped":
+        assert db.get_task(t_c.id).state == "cancelled" and "at most 1" in tasks.cancel_reason(db, t_c.id)
+        assert policy.running_workers(db, str(repo)) == 1
 
 
 @pytest.mark.parametrize("when", ["while it works", "while its reply is written", "client gone", "written"])
