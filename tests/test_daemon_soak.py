@@ -122,6 +122,7 @@ class Sockets:
 
 
 @pytest.mark.serial
+@pytest.mark.slow("a leak soak must repeat every read route and the events feed against a real tmux server")
 def test_daemon_leaks_nothing_under_load(db, repo, monkeypatch):
     ws = workspaces.create(db, str(repo), "feat/soak").workspace
     pane = tmux._tmux("new-session", "-d", "-s", "soak", "-P", "-F", "#{pane_id}", "sh").stdout.strip()

@@ -168,6 +168,20 @@ def test_profile_named_differently_inside_still_resumes_with_its_own_permissions
 # -- worktree pre-trust ------------------------------------------------------------
 
 
+def test_concurrent_trusts_all_land(tmp_path, claude_config):
+    folders = [tmp_path / f"wt{i}" for i in range(2)]
+    for f in folders:
+        f.mkdir()
+    threads = [threading.Thread(target=trust_folder, args=(str(f),)) for f in folders]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    projects = json.loads((claude_config / ".claude.json").read_text())["projects"]
+    assert all(projects[os.path.realpath(f)]["hasTrustDialogAccepted"] is True for f in folders)
+    assert sorted(p.name for p in claude_config.iterdir()) == [".claude.json"]
+
+
 def test_trust_cleans_up_its_temp_file_when_the_write_fails(tmp_path, claude_config, monkeypatch):
     config = claude_config / ".claude.json"
     before = config.read_text()
@@ -863,7 +877,7 @@ def test_codex_at_an_approval_prompt_is_delivered_or_at_least_not_failed(db, hea
     assert now[0] == 100.0
 
 
-@pytest.mark.parametrize("started,clears", [(True, True), (False, True)])
+@pytest.mark.parametrize("started,clears", [(True, True), (False, True), (False, False)])
 def test_partial_first_brief_is_retried_and_verified(db, health, monkeypatch, started, clears):
     from brindle import prompt_answer
     lh, a, now, _, _, reports = health

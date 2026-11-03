@@ -57,6 +57,7 @@ def test_handling_inbox_items_notifies_connected_apps(db, tmp_path, monkeypatch,
 @pytest.mark.parametrize("claimed, registered_digest, listed", [
     (False, None, True),     # a live hold nobody answered: listed
     (True, None, False),     # its answer is already claimed: answer_permission refuses it
+    (False, "other", False),  # the hook registered a different request: refused
 ])
 def test_items_lists_no_hook_request_the_answer_refuses(db, repo, claimed, registered_digest, listed):
     ws = workspaces.create(db, str(repo), "feat/hold").workspace

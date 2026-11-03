@@ -238,6 +238,17 @@ def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, mon
 # -- /clear and other transcript resets ---------------------------------------
 
 
+def test_clear_with_a_larger_new_transcript_starts_a_fresh_baseline(db):
+    """After /clear a brand-new, larger transcript has nothing to do with the old mark."""
+    history.record(db, "/r", "worker_result", agent_id="a1", transcript_path="/t/old.jsonl",
+                   usage=Usage(1000, 1000, 0, 0))
+    history.record(db, "/r", "worker_result", agent_id="a1", transcript_path="/t/new.jsonl",
+                   usage=Usage(5000, 5000, 0, 0))
+    rows = db.list_history("/r")
+    assert history.tokens_total(rows[0].tokens) == 10000     # not 10000 - 2000
+    assert history.tokens_total(rows[1].tokens) == 2000
+
+
 def test_same_transcript_usage_drop_falls_back_to_a_fresh_baseline(db):
     """If usage on the *same* transcript somehow drops (a component going
     down that isn't the transcript changing), that's still not a negative
