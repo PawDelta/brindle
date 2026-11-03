@@ -180,6 +180,10 @@ class RepoConfig:
     # Paths/globs whose merge conflicts brindle never hands to a worker to
     # resolve (migrations, lockfiles, generated code): they go to the person.
     protected_paths: list[str] = field(default_factory=list)
+    # Names of processes (as Linux shows them, or argv[0]'s basename) whose
+    # folder may be unreadable but which never run in a project, so they don't
+    # keep a worktree from removal (see brindle.procs.cwds).
+    live_check_ignore: list[str] = field(default_factory=list)
     # Worktree pool: pre-built worktrees (checked out, files copied, setup run)
     # that `create` claims instead of doing that work live. None here means
     # "not set"; load_repo_config resolves it to 1 if the repo has `setup`
@@ -392,7 +396,8 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
     user = user_settings()
 
     cfg = RepoConfig()
-    for key in ("setup", "teardown", "copy", "checks", "add_dirs", "worker_extra_read_dirs", "protected_paths"):
+    for key in ("setup", "teardown", "copy", "checks", "add_dirs", "worker_extra_read_dirs", "protected_paths",
+                "live_check_ignore"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "review",

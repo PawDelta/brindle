@@ -295,17 +295,68 @@ def _status(d: Path) -> dict[str, list[str]]:
     return out
 
 
-def _not_this_users(d: Path) -> bool:
+# Processes of this user whose folder the kernel may refuse to show this user
+# (systemd's user manager holds CAP_WAKE_ALARM, say) but which never live in a
+# project folder, so a refusal of theirs keeps no worktree. By Name (as
+# /proc/<pid>/status gives it), with why each qualifies.
+NEVER_IN_A_PROJECT = {
+    # The user's service manager (``systemd --user``): PID 1 starts it in /
+    # for each logged-in user and it stays there; the services it starts are
+    # processes of their own. It runs on nearly every Linux desktop and server.
+    "systemd": "the user's service manager",
+    # Both chdir to / when they daemonize, so they never hold a folder.
+    "ssh-agent": "the SSH agent",
+    "gpg-agent": "the GnuPG agent",
+}
+
+
+class Refused(OSError):
+    """A process of this user whose folder can't be read: it could be in any
+    worktree. ``name`` (its Name, or ``?``) and ``pid`` say which, so a
+    refusal can name it."""
+
+    def __init__(self, pid: int, name: str):
+        super().__init__(f"the folder of process {name} (pid {pid}) can't be read")
+        self.pid, self.name = pid, name
+
+
+def _is_known_manager(name: str, status: dict[str, list[str]], argv0: str) -> bool:
+    """Whether the process is one of NEVER_IN_A_PROJECT: systemd only as the
+    user's manager (started by PID 1, argv[0] ``systemd``), not anything
+    else that calls itself that."""
+    if name not in NEVER_IN_A_PROJECT:
+        return False
+    return name != "systemd" or (status.get("PPid") == ["1"] and argv0 == "systemd")
+
+
+def _argv0(d: Path) -> str:
+    """The basename of argv[0] of the process at ``d``, or ``?``."""
+    try:
+        argv0 = (d / "cmdline").read_bytes().split(b"\0", 1)[0].decode(errors="replace")
+    except OSError:
+        return "?"
+    return os.path.basename(argv0) or "?"
+
+
+def _excused(d: Path, ignore: frozenset[str] = frozenset()) -> bool:
     """Whether the process at ``d`` (``/proc/<pid>``), whose folder this user
-    was refused, runs with another's ids: a uid or gid (real, effective,
-    saved or filesystem) other than this user's. That is one thing the kernel
-    refuses it for (ptrace_may_access), though ``d`` shows this user as its
-    owner when only its effective uid is this user's: a system service like
-    that is no more this user's than a root process, which ``cwds`` leaves
-    out too. False (so: can't be told) when its ids are all this user's
-    (capabilities, say, non-dumpable, or a security module refused it) or
-    can't be read. Either way it logs one warning saying what the process is
-    (``_describe``)."""
+    was refused, can be left out of ``cwds``:
+
+    - it runs with another's ids: a uid or gid (real, effective, saved or
+      filesystem) other than this user's. That is one thing the kernel
+      refuses it for (ptrace_may_access), though ``d`` shows this user as its
+      owner when only its effective uid is this user's: a system service like
+      that is no more this user's than a root process, which ``cwds`` leaves
+      out too;
+    - it has this user's ids but is a known process that never lives in a
+      project folder (NEVER_IN_A_PROJECT), or one the person excused by name
+      (``ignore``: a repo's ``live_check_ignore``, matched against its Name
+      or the basename of its argv[0]).
+
+    Anything else refused (capabilities, say, non-dumpable, or a security
+    module refused it), or whose ids can't be read, can't be told: False.
+    Except for a known or excused process, it logs one warning saying what
+    the process is (``_describe``)."""
     try:
         status = _status(d)
         uids, gids = [int(u) for u in status["Uid"]], [int(g) for g in status["Gid"]]
@@ -320,9 +371,26 @@ def _not_this_users(d: Path) -> bool:
         log.warning("brindle: a process's folder can't be read, but it runs with another's ids (%s), so it "
                     "isn't this user's: %s", ", ".join(differ), _describe(d, status))
         return True
+    name, argv0 = " ".join(status.get("Name", [])), _argv0(d)
+    if _is_known_manager(name, status, argv0):
+        log.debug("brindle: %s (pid %s) has a folder that can't be read, but never runs in a project",
+                  NEVER_IN_A_PROJECT[name], d.name)
+        return True
+    if name in ignore or argv0 in ignore:
+        log.debug("brindle: %s (pid %s) has a folder that can't be read; live_check_ignore excuses it",
+                  name, d.name)
+        return True
     log.warning("brindle: a process with this user's ids has a folder that can't be read, so it counts "
                 "as in use: %s", _describe(d, status))
     return False
+
+
+def _name(d: Path) -> str:
+    """The Name of the process at ``d``, or ``?``."""
+    try:
+        return " ".join(_status(d).get("Name", [])) or "?"
+    except OSError:
+        return "?"
 
 
 def _describe(d: Path, status: dict[str, list[str]]) -> str:
@@ -344,24 +412,22 @@ def _describe(d: Path, status: dict[str, list[str]]) -> str:
         parent = field(_status(PROC / ppid), "Name") if ppid.isdigit() else "?"
     except OSError:
         parent = "?"
-    try:
-        argv0 = (d / "cmdline").read_bytes().split(b"\0", 1)[0].decode(errors="replace")
-        argv0 = os.path.basename(argv0) or "?"
-    except OSError:
-        argv0 = "?"
+    argv0 = _argv0(d)
     return (f"pid {d.name}, Name {field(status, 'Name')}, State {field(status, 'State')}, PPid {ppid} "
             f"({parent}), Uid {field(status, 'Uid')}, Gid {field(status, 'Gid')}, "
             f"CapEff {field(status, 'CapEff')}, NoNewPrivs {field(status, 'NoNewPrivs')}, "
             f"Seccomp {field(status, 'Seccomp')}, started {start} after boot, argv[0] {argv0}")
 
 
-def cwds() -> dict[int, str]:
+def cwds(ignore: frozenset[str] | set[str] | list[str] = frozenset()) -> dict[int, str]:
     """The current folder of every process of this user, whatever started it
     (a detached dev server, a shell on any tmux server or terminal). Raises
     OSError when it can't be told: a caller deciding whether something is in
     use must then assume it is: one process of this user it can't read
-    (not one that exited during the scan, nor one running with another's
-    ids: see ``_not_this_users``) or an lsof that failed part way."""
+    (``Refused``; not one that exited during the scan, one running with
+    another's ids, a known service manager or agent, nor one named in
+    ``ignore``: see ``_excused``) or an lsof that failed part way."""
+    ignore = frozenset(ignore)
     proc = PROC
     if (proc / "self" / "cwd").exists():
         out: dict[int, str] = {}
@@ -372,9 +438,9 @@ def cwds() -> dict[int, str]:
                         out[int(d.name)] = os.readlink(d / "cwd")
                 except (FileNotFoundError, ProcessLookupError):
                     continue   # it exited meanwhile (or is a zombie): no folder to hold
-                except PermissionError:
-                    if not _not_this_users(d):
-                        raise
+                except PermissionError as e:
+                    if not _excused(d, ignore):
+                        raise Refused(int(d.name), _name(d)) from e
         return out
     lsof = shutil.which("lsof") or "/usr/sbin/lsof"
     try:
