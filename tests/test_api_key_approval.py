@@ -78,6 +78,7 @@ def test_keys_set_yes_approves(tmp_path):
 
 
 def test_doctor_fix_accepted_approves_and_then_stops_asking(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, "disk_checks", lambda *a, **k: [])      # it walks every worktree on the machine
     monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
     doctor.fix(lambda p: False)   # declined: nothing is approved
     assert not _config(tmp_path).exists()
