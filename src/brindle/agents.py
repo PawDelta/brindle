@@ -2028,6 +2028,8 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
     screen to go by: it may leave 'starting', a single read may move it from
     'idle' to busy, and a ``samples`` >= 2 idle read delivers what's queued
     even when the status was already idle, since no Stop hook ever will."""
+    from brindle import prompt_answer
+
     provider = get_provider(agent.provider)
     if (agent.headless or not provider.uses_hooks
             or agent.status not in ("starting", "idle", "processing", "waiting")):
@@ -2045,7 +2047,7 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
             screen = tmux.capture(agent.tmux_window, lines=40, server=server_of(agent))
         except tmux.TmuxError:
             return None
-        state = provider.screen_state(screen)
+        state = "busy" if prompt_answer.pane_busy(screen) else provider.screen_state(screen)
         if agent.status == "idle" and state == "busy" and not provider.busy_in_footer(screen):
             state = None
         seen.add(state)
