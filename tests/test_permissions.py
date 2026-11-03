@@ -7,6 +7,13 @@ from brindle.cli import app
 runner = CliRunner()
 
 
+@pytest.mark.parametrize("expression", ["<<<EOF", "$((1<<2))"])
+def test_splitter_does_not_read_heredocs_in_other_operators(expression):
+    from brindle.permissions import _segments
+
+    assert ["printf", "%s", "a;b"] in _segments(f"echo {expression}\nprintf '%s' 'a;b'\n")
+
+
 def test_single_arg_allow():
     """Verify `brindle permissions allow <command>` with a single argument defaults to bash."""
     # We will test the CLI directly
@@ -128,6 +135,12 @@ def _bypass(command):
     ("cat ~/.npmrc", "deny"),
     ("cat ~/.git-credentials", "deny"),
     ("cat ~/.docker/config.json", "deny"),
+    ("cat $HOME/.npmrc", "deny"),
+    ("cat ~/.ssh/id_ed25519", "deny"),
+    ("python3 -c \"print(open(__import__('os').path.expanduser('~/.aws/credentials')).read())\"", "deny"),
+    _bypass('cat "${HOME}/.aws/credentials"'),
+    _bypass("node -e \"console.log(require('fs').readFileSync(require('os').homedir() + '/.npmrc', 'utf8'))\""),
+    ("python3 -c 'print(1)'", "allow"),
     ("echo $GH_TOKEN2", "deny"),
     ("printenv DB_PASS", "deny"),
     ("printenv MYSQL_PWD", "deny"),
