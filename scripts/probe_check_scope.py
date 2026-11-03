@@ -56,9 +56,15 @@ def main() -> int:
     check_scope._changed_nodes = changed_nodes
     ws = SimpleNamespace(path=str(ROOT))
     failed = False
-    for name, text in NEW.items():
-        (ROOT / name).write_text(text)
+    created: list[Path] = []
     try:
+        for name, text in NEW.items():
+            try:
+                with open(ROOT / name, "x", encoding="utf-8") as f:   # never overwrite a real file
+                    f.write(text)
+            except FileExistsError:
+                parser.error(f"{name} already exists; move it away to run the probe")
+            created.append(ROOT / name)
         print(f"{'change set':<24}{'reached':>8}{'runs':>6}  {'own test included':<40}command")
         for name, (files, own) in SETS.items():
             changes.clear()
@@ -75,8 +81,8 @@ def main() -> int:
             print(f"{name:<24}{reached!s:>8}{len(tests):>6}  {own if own in tests else 'MISSING ' + own:<40}"
                   f"{'' if ok else 'FAIL  '}{run if len(run or '') < 160 else run[:157] + '...'}")
     finally:
-        for name in NEW:
-            (ROOT / name).unlink(missing_ok=True)
+        for path in created:   # only what this run made
+            path.unlink(missing_ok=True)
     return 1 if failed else 0
 
 
