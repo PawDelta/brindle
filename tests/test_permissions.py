@@ -7,13 +7,6 @@ from brindle.cli import app
 runner = CliRunner()
 
 
-@pytest.mark.parametrize("expression", ["<<<EOF", "$((1<<2))"])
-def test_splitter_does_not_read_heredocs_in_other_operators(expression):
-    from brindle.permissions import _segments
-
-    assert ["printf", "%s", "a;b"] in _segments(f"echo {expression}\nprintf '%s' 'a;b'\n")
-
-
 def test_single_arg_allow():
     """Verify `brindle permissions allow <command>` with a single argument defaults to bash."""
     # We will test the CLI directly
@@ -90,6 +83,10 @@ def test_an_agent_cannot_change_the_permission_rules(monkeypatch):
                  marks=pytest.mark.variant("unquoted env assignment can split and select another executable")),
     ("cat <(git status)", "ask"),
     ("case x in x) git status;; esac", "ask"),
+    pytest.param("echo <<<EOF\nblocked", "deny", marks=pytest.mark.variant(
+        "a here-string is not a heredoc: the line after it still gets checked")),
+    pytest.param("echo $((1<<2))\nblocked", "ask", marks=pytest.mark.variant(
+        "a shift in arithmetic is not a heredoc: the shell syntax is unchecked, so it asks")),
 ])
 def test_shell_forms(tmp_path, command, expected):
     from brindle import permissions
