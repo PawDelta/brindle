@@ -18,8 +18,11 @@ left its base decide what runs:
   affected by them), and if none is left the check is skipped; the command
   runs on the test files the branch touched plus the
   tests ``graphify affected`` reaches from each changed symbol. A changed file
-  the graph can't map is resolved through test imports of its module path;
-  an unresolved module or import runs the full suite instead.
+  the graph can't map, or a symbol it reaches no test from, is resolved
+  through the tests that import its module (``Imports``); more tests than
+  ``scoped_checks_max_files`` run only the branch's own and namesake tests.
+  Only a changed file no import can name (outside any package) runs the full
+  suite, after a one-line note saying why.
 
 Every check on a worker's branch also gets ``BRINDLE_CHANGED_FILES`` (see
 ``changed_files``), so a script can narrow itself.
@@ -48,7 +51,8 @@ if TYPE_CHECKING:
 ALWAYS_FULL = (".brindle/**",)   # the checks themselves (or the rules) changed
 CAP_NOTE = ("brindle: this change reaches more than {max} test files (scoped_checks_max_files); ran only the "
             "branch's own and namesake tests ({tests}). The full suite runs on the session branch before its PR.")
-MAX_SYMBOLS = 30         # more changed symbols than this: run everything
+FULL_NOTE = "brindle: ran this check in full because {why}."
+MAX_SYMBOLS = 30         # more changed symbols than this: use their modules' importing tests instead
 GRAPHIFY_SECONDS = 60
 SKIPPED = "skipped: "     # run_checked's output for a skipped check starts with this
 _HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@", re.M)
@@ -187,9 +191,10 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
     changed = [f for f in changed if f.endswith(".py")]   # pytest can't be affected by the rest
     if not changed:
         return None
-    tests = pytest_targets(ws, base, changed)
-    if tests is None:
-        return cmd
+    try:
+        tests = pytest_targets(ws, base, changed)
+    except Unscoped as why:
+        return f"printf '%s\\n' {shlex.quote(FULL_NOTE.format(why=why))}; {cmd}"
     if not tests:
         return None
     if max_files > 0 and len(tests) > max_files:
@@ -223,10 +228,17 @@ def is_test_file(path: str) -> bool:
     return name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
 
 
-def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | None:
+class Unscoped(Exception):
+    """The tests a change reaches can't be worked out; the message says why."""
+
+
+def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str]:
     """The test files to run for a branch that changed ``files``: the test
     files among them, and those the code graph reaches from every changed
-    symbol, or imports of an unmapped source module; None when unresolved.
+    symbol. A file the graph can't map, or a symbol it reaches no test from
+    (or whose lookup failed), is resolved through the tests that import its
+    module (see ``Imports.tests_reaching``). Raises ``Unscoped`` only when a
+    changed file's module can't be named or the tests can't be read.
 
     A change inside a test function is covered by running its own file. Any
     other change to a test file (a helper, a fixture, an import) may reach the
@@ -235,39 +247,41 @@ def pytest_targets(ws: Workspace, base: str, files: list[str]) -> list[str] | No
     from brindle import codemap
 
     if any(not f.endswith(".py") for f in files):
-        return None
+        raise Unscoped("a changed file isn't Python")
     graph = codemap.graph_path(ws)
     nodes = _nodes_by_file(graph) if graph else {}
     tests: set[str] = set()
-    must_reach: set[str] = set()    # source symbols: one that reaches no test is unresolved
-    optional: set[str] = set()
+    owners: dict[str, set[str]] = {}   # graph node -> the changed files it stands for
+    unmapped: set[str] = set()         # files resolved through test imports
     for f in files:
         test = is_test_file(f)
+        if test:
+            tests.add(f)
         found = _changed_nodes(ws, base, f, nodes.get(f, []), skip_tests=test)
         if found is None or (not test and not found):
-            imported = _importing_tests(Path(ws.path), f)
-            if imported is None:
-                return None
-            tests |= imported
-            if test:
-                tests.add(f)
+            unmapped.add(f)
             continue
-        if not test:
-            must_reach |= found
-            continue
-        tests.add(f)
-        if found:
+        if test and found:
             module = [n["id"] for n in nodes.get(f, []) if n.get("label") == PurePosixPath(f).name]
             if not module:
-                return None
-            optional |= found | set(module)
-    if len(must_reach | optional) > MAX_SYMBOLS:
-        return None
-    for node_id in sorted(must_reach | optional):
+                unmapped.add(f)
+                continue
+            found = found | set(module)
+        for node_id in found:
+            owners.setdefault(node_id, set()).add(f)
+    if len(owners) > MAX_SYMBOLS:
+        unmapped.update(*owners.values())
+        owners = {}
+    for node_id, fs in sorted(owners.items()):
         reached = affected_tests(graph, node_id, ws.path)
-        if reached is None or (not reached and node_id in must_reach):
-            return None
-        tests |= reached
+        if reached:
+            tests |= reached
+        elif reached is None or not all(map(is_test_file, fs)):   # a source symbol must reach a test
+            unmapped |= fs
+    if unmapped:
+        imports = Imports(Path(ws.path))
+        for f in sorted(unmapped):
+            tests |= imports.tests_reaching(f)
     return sorted(t for t in tests if (Path(ws.path) / t).is_file())
 
 
@@ -279,60 +293,152 @@ def _module_path(root: Path, path: str) -> str | None:
     while parent != root and (parent / "__init__.py").is_file():
         parts.insert(0, parent.name)
         parent = parent.parent
-    if ((parent == file.parent and not is_test_file(path))
-            or not file.is_file() or not all(p.isidentifier() for p in parts)):
+    # A deleted module keeps its name: tests still importing it must run.
+    if (parent == file.parent and not is_test_file(path)) or not all(p.isidentifier() for p in parts):
         return None
     return ".".join(parts)
 
 
-def _importing_tests(root: Path, path: str) -> set[str] | None:
-    """Find static test imports by full module path; uncertain imports require full checks."""
-    module = _module_path(root, path)
-    if module is None:
-        return None
-    tests: set[str] = set()
-    try:
-        paths = git.paths(["ls-files", "--cached", "--others", "--exclude-standard", "*.py"], str(root))
-        for test in paths:
-            if not is_test_file(test) or not (root / test).is_file():
-                continue
-            tree = ast.parse((root / test).read_text(encoding="utf-8"))
-            dynamic = {"__import__"}
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom) and node.module == "importlib":
-                    dynamic.update(n.asname or n.name for n in node.names if n.name == "import_module")
-            for node in ast.walk(tree):
-                if isinstance(node, ast.Call) and (
-                    isinstance(node.func, ast.Name) and node.func.id in dynamic
-                    or isinstance(node.func, ast.Attribute) and node.func.attr == "import_module"
-                ):
-                    # fromlist, level and package arguments can change the imported module.
-                    # Only a lone absolute name is resolved here.
-                    if len(node.args) > 1 or any(kw.arg != "name" for kw in node.keywords):
-                        return None
-                    name = node.args[0] if node.args else next(
-                        (kw.value for kw in node.keywords if kw.arg == "name"), None)
-                    if not isinstance(name, ast.Constant) or not isinstance(name.value, str) or name.value.startswith("."):
-                        return None
-                    imports = [name.value]
-                elif isinstance(node, ast.Import):
-                    imports = [n.name for n in node.names]
-                elif isinstance(node, ast.ImportFrom):
-                    prefix = node.module or ""
-                    if node.level:
-                        owner = _module_path(root, test)
-                        if owner is None or node.level >= len(owner.split(".")):
-                            return None
-                        package = owner.split(".")[:-node.level]
-                        prefix = ".".join([*package, prefix]).rstrip(".")
-                    imports = [prefix, *(f"{prefix}.{n.name}" for n in node.names)]
-                else:
+class Imports:
+    """The modules each Python file of a checkout may import, from an AST
+    scan: ``import a.b``, ``from a import b`` (relative too, and inside
+    functions), ``__import__`` and ``importlib.import_module`` calls, dotted
+    attribute chains (``brindle.daemon.routes.x`` after ``import
+    brindle.daemon``) and dotted strings (``monkeypatch.setattr("brindle.x.y",
+    ...)``, ``mock.patch(...)``). An import whose target isn't literal counts
+    as importing anything its literal part allows (anything at all when no
+    part is), and so does a file that doesn't parse: such a file is run, never
+    left out, and never makes the whole scope unresolved."""
+
+    def __init__(self, root: Path):
+        self.root = root
+        try:
+            paths = git.paths(["ls-files", "--cached", "--others", "--exclude-standard", "*.py"], str(root))
+        except git.GitError as e:
+            raise Unscoped("git couldn't list the checkout's Python files") from e
+        self.files = [p for p in paths if (root / p).is_file()]
+        self._scans: dict[str, tuple[set[str], set[str]]] = {}
+
+    def tests_reaching(self, path: str) -> set[str]:
+        """The test files importing ``path``'s module; when none does, those
+        importing a module that imports it (one level; a module that may
+        import anything, such as one loading every submodule, isn't one)."""
+        module = _module_path(self.root, path)
+        if module is None:
+            raise Unscoped(f"{path} is not in a package, so no import can name it")
+        tests = [f for f in self.files if is_test_file(f)]
+        found = {t for t in tests if self.imports(t, module)}
+        if found:
+            return found
+        importers = {m for f in self.files if f != path and not is_test_file(f)
+                     and (m := _module_path(self.root, f)) and self.imports(f, module, catch_all=False)}
+        return {t for t in tests if any(self.imports(t, m) for m in importers)}
+
+    def imports(self, path: str, module: str, catch_all: bool = True) -> bool:
+        """Whether ``path`` may import ``module`` (``catch_all``: counting an import of anything)."""
+        if path not in self._scans:
+            self._scans[path] = self._scan(path)
+        names, prefixes = self._scans[path]
+        return (any(n == module or n.startswith(module + ".") for n in names)
+                or any((catch_all if not p else module == p or module.startswith(p + ".")) for p in prefixes))
+
+    def _scan(self, path: str) -> tuple[set[str], set[str]]:
+        """(the modules ``path`` names, the packages it may import anything under; "" for all)."""
+        names: set[str] = set()
+        prefixes: set[str] = set()
+        try:
+            tree = ast.parse((self.root / path).read_text(encoding="utf-8"))
+        except (OSError, SyntaxError, ValueError):
+            return names, {""}
+        owner = _module_path(self.root, path)
+        package = None if owner is None else owner.split(".")[:None if path.endswith("__init__.py") else -1]
+        loaders = {"__import__"} | {n.asname or n.name for node in ast.walk(tree)
+                                    if isinstance(node, ast.ImportFrom) and node.module == "importlib"
+                                    for n in node.names if n.name == "import_module"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                names.update(n.name for n in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                prefix = _relative(package, node.level, node.module or "")
+                if prefix is None:
+                    prefixes.add("")
                     continue
-                if any(name == module or name.startswith(module + ".") for name in imports):
-                    tests.add(test)
-    except (OSError, SyntaxError, ValueError, git.GitError):
+                names.add(prefix)
+                for n in node.names:
+                    if n.name == "*":
+                        prefixes.add(prefix)
+                    else:
+                        names.add(f"{prefix}.{n.name}")
+            elif isinstance(node, ast.Call) and (isinstance(node.func, ast.Name) and node.func.id in loaders
+                                                 or isinstance(node.func, ast.Attribute)
+                                                 and node.func.attr == "import_module"):
+                _dynamic(node, package, names, prefixes)
+            elif isinstance(node, ast.Attribute) and (dotted := _dotted(node)):
+                names.add(dotted)
+            elif isinstance(node, ast.Constant) and isinstance(node.value, str) and "." in node.value \
+                    and all(p.isidentifier() for p in node.value.split(".")):
+                names.add(node.value)
+        return names, prefixes
+
+
+_UNKNOWN = object()
+
+
+def _relative(package: list[str] | None, level: int, name: str) -> str | None:
+    """The absolute name of a ``level``-dot import of ``name`` from ``package``; None if there is none."""
+    if not level:
+        return name
+    if package is None or level > len(package):
         return None
-    return tests
+    return ".".join([*package[:len(package) - level + 1], *([name] if name else [])])
+
+
+def _literal(node: ast.expr | None, default):
+    if node is None:
+        return default
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return _UNKNOWN
+
+
+def _dynamic(call: ast.Call, package: list[str] | None, names: set[str], prefixes: set[str]) -> None:
+    """Record what an ``__import__(name, globals, locals, fromlist, level)`` or
+    ``import_module(name, package)`` call may import."""
+    if any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+        prefixes.add("")
+        return
+
+    def arg(pos: int, kw: str, default=None):
+        node = call.args[pos] if len(call.args) > pos else next(
+            (k.value for k in call.keywords if k.arg == kw), None)
+        return _literal(node, default)
+
+    name = arg(0, "name")
+    if isinstance(call.func, ast.Name) and call.func.id == "__import__":
+        level, fromlist = arg(4, "level", 0), arg(3, "fromlist", ())
+    else:   # import_module(name, package): a leading dot is relative to ``package``
+        level, fromlist = 0, ()
+        if isinstance(name, str) and name.startswith("."):
+            level, name = len(name) - len(name.lstrip(".")), name.lstrip(".")
+            anchor = arg(1, "package")
+            package = anchor.split(".") if isinstance(anchor, str) and anchor else None
+    module = _relative(package, level, name) if isinstance(name, str) and isinstance(level, int) else None
+    if not module:
+        prefixes.add("")
+    elif isinstance(fromlist, (list, tuple, set)) and all(isinstance(x, str) for x in fromlist):
+        names.update([module, *(f"{module}.{x}" for x in fromlist)])
+    else:
+        prefixes.add(module)
+
+
+def _dotted(node: ast.Attribute) -> str | None:
+    """``a.b.c`` for an attribute chain on a plain name."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.insert(0, node.attr)
+        node = node.value
+    return ".".join([node.id, *parts]) if isinstance(node, ast.Name) else None
 
 
 def _nodes_by_file(graph: Path) -> dict[str, list[dict]]:
