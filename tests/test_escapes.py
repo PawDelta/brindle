@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
+from fast_repo import build_repo, copy_tree, moved, no_screen_gap, repo_template, scratch_db  # noqa: F401
 from brindle import agents, autopilot, bus, config, escapes, gates, history, workspaces
 
 REAL_REQUEST_REVIEW = agents.request_review
@@ -73,8 +74,28 @@ def test_audit_gaps_naming_no_merged_branch_record_nothing(db, repo, goal):
 # -- second_review -------------------------------------------------------------
 
 
+@pytest.fixture(scope="module")
+def feat_template(tmp_path_factory):
+    """The repo with a ``feat`` worktree one commit (new.py) ahead, made once."""
+    base = tmp_path_factory.mktemp("feat-template")
+    repo_ = build_repo(base)
+    with scratch_db(tmp_path_factory.mktemp("feat-template-home")) as db_:
+        ws = workspaces.create(db_, str(repo_), "feat").workspace
+    (Path(ws.path) / "new.py").write_text("x = 1\n")
+    sh("git add new.py && git -c user.name=t -c user.email=t@example.com commit -qm work", Path(ws.path))
+    return base, ws
+
+
 @pytest.fixture
-def piped(db, repo, monkeypatch):
+def repo(request, repo_template, tmp_path):
+    """conftest's repo; with the ``feat`` worktree for the tests that use ``piped``."""
+    if "piped" in request.fixturenames:
+        return copy_tree(request.getfixturevalue("feat_template")[0], tmp_path)
+    return copy_tree(repo_template, tmp_path)
+
+
+@pytest.fixture
+def piped(db, repo, tmp_path, feat_template, monkeypatch):
     def setup(second=None, weight="heavy"):
         cfg = {"review": True, "auto_merge_default_branch": True}
         if second is not None:
@@ -83,9 +104,8 @@ def piped(db, repo, monkeypatch):
         (repo / ".brindle" / "config.json").write_text(json.dumps(cfg))
         root = workspaces.adopt_root(db, str(repo))
         add(db, root, "boss", "interactive", "supervisor", status="processing")
-        ws = workspaces.create(db, str(repo), "feat").workspace
-        (Path(ws.path) / "new.py").write_text("x = 1\n")
-        sh("git add new.py && git commit -qm work", Path(ws.path))
+        ws = moved(feat_template[1], feat_template[0], tmp_path)
+        db.add_workspace(ws)
         add(db, ws, "w1", "assign", parent="boss", status="processing")
         db.add_task(Task("t1", str(repo), "w1", "boss", root.id, "developer", "do it", "assign", 1,
                          "feat", None, None, None, "started", time.time(), weight=weight))

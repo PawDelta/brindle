@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from fast_repo import no_screen_gap, repo, repo_template  # noqa: F401
 from brindle import agents, autopilot, config, knowledge, mcp_server, pipeline, providers, sessions, tmux
 from brindle.config import RepoConfig
 from brindle.db import Agent, Task, Workspace

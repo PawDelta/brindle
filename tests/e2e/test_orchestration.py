@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from conftest import full_text, sh
+from fast_repo import repo, repo_template  # noqa: F401
 from brindle import agents, autopilot, mcp_server, rewind, workspaces
 from brindle.db import Agent
 
@@ -166,6 +167,7 @@ def test_blank_task_is_refused(db, repo, boss):
 # -- the pipeline: review -> checks -> merge -> removal -----------------------------------
 
 
+@pytest.mark.slow("The one real pipeline flow: a worktree, checks, a merge and removal")
 def test_pipeline_review_checks_merge_and_removal(db, repo, boss, reviewers, monkeypatch):
     configure(repo, review=True, auto_merge_default_branch=True, checks=["test -f new.py"])
     wid = started_id(run(mcp_server.assign("developer", "add new.py", branch="feat-p")))
@@ -210,6 +212,7 @@ def test_failed_checks_leave_the_branch_unmerged_and_need_the_supervisor(db, rep
     assert "FAIL `test -f never_there.py`" in full_text(db, wid, msg.body)   # in one message with the verdict
 
 
+@pytest.mark.slow("The one real fix-and-re-review flow: two review rounds, then a merge and removal")
 def test_changes_requested_are_sent_back_to_the_worker(db, repo, boss, reviewers, monkeypatch):
     wid = started_id(run(mcp_server.assign("developer", "add new.py", branch="feat-r")))
     ws = ws_of(db, repo, "feat-r")
@@ -227,6 +230,7 @@ def test_changes_requested_are_sent_back_to_the_worker(db, repo, boss, reviewers
     assert {"new.py", "test_new.py"} <= set(main_files(repo))
 
 
+@pytest.mark.slow("The one real manual-merge flow: a worktree, the review gate, a merge and removal")
 def test_merge_workspace_by_hand_runs_the_review_gate(db, repo, boss, reviewers, monkeypatch):
     configure(repo, review=True, pipeline=False)
     wid = started_id(run(mcp_server.assign("developer", "add new.py", branch="feat-m")))
@@ -247,6 +251,7 @@ def test_merge_workspace_by_hand_runs_the_review_gate(db, repo, boss, reviewers,
 # -- depends_on: queue, then auto-start after the merge ------------------------------------
 
 
+@pytest.mark.slow("The one real depends_on flow: two worktrees, a pipeline merge and a queued start")
 def test_depends_on_queues_then_starts_from_the_merged_base(db, repo, boss, reviewers, monkeypatch):
     configure(repo, review=True, auto_merge_default_branch=True, overlap="warn")
     a = started_id(run(mcp_server.assign("developer", "do A", branch="feat-a")))
@@ -321,6 +326,7 @@ def turn(db, wid, ws, name, text):
     agents.handle_hook(db, wid, "stop", {"stop_hook_active": True})
 
 
+@pytest.mark.slow("The one real rewind flow: a worktree, three turn snapshots and a reset, ~120 git calls")
 def test_rewind_agent_restores_the_turn_and_starts_a_fresh_worker(db, repo, boss):
     wid = started_id(run(mcp_server.assign("developer", "build the thing", branch="feat-w")))
     ws = ws_of(db, repo, "feat-w")
@@ -381,6 +387,7 @@ def two_branches_on_one_file(db, repo, monkeypatch, protected=None, **extra):
     return ids
 
 
+@pytest.mark.slow("The one real conflicting-merge flow: two worktrees on one file, a merge and a refused sync")
 def test_manual_merge_of_a_conflicting_branch_names_the_files(db, repo, boss, monkeypatch):
     ids = two_branches_on_one_file(db, repo, monkeypatch, pipeline=False, review=False)
     ws1, ws2 = ws_of(db, repo, "feat-1"), ws_of(db, repo, "feat-2")
