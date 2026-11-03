@@ -2941,6 +2941,7 @@ class ReviewBase:
     sha: str | None = None
     merged: str | None = None
     edited: list[str] = field(default_factory=list)
+    both: list[str] = field(default_factory=list)   # changed on both sides
 
 
 def review_base(ws: Workspace, prev_sha: str) -> ReviewBase:
@@ -2981,20 +2982,13 @@ def review_base(ws: Workspace, prev_sha: str) -> ReviewBase:
         commit = git.out(["-c", "user.name=brindle", "-c", "user.email=brindle@localhost",
                           "commit-tree", merged.stdout.split()[0], "-p", prev_sha,
                           "-m", "review base"], ws.path)
+        # Files changed by the merged base commits and by the worker since prev.
+        theirs = set(git.paths(["diff", "--name-only", f"{prev_sha}...{newest}"], ws.path))
+        mine = set(git.paths(["diff", "--name-only", commit, "HEAD"], ws.path))
         git.run(["update-ref", review_base_ref(ws.id), commit], ws.path)
-        return ReviewBase(sha=review_base_ref(ws.id), merged=newest)
+        return ReviewBase(sha=review_base_ref(ws.id), merged=newest, both=sorted(theirs & mine))
     except git.GitError:
         return ReviewBase()
-
-
-def _both_sides(ws: Workspace, prev_sha: str, base: ReviewBase) -> list[str]:
-    """Files changed by the merged base commits and by the worker since prev."""
-    try:
-        theirs = set(git.paths(["diff", "--name-only", f"{prev_sha}...{base.merged}"], ws.path))
-        mine = set(git.paths(["diff", "--name-only", base.sha, "HEAD"], ws.path))
-    except git.GitError:
-        return []
-    return sorted(theirs & mine)
 
 
 def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None = None,
@@ -3571,7 +3565,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
                      "those changes were reviewed on their own branches. Focus on the worker's "
                      f"own changes since your last review: `git diff {rb.sha}..HEAD`. First check "
                      "each earlier finding is fixed, then a final sanity pass over the rest.")
-            both = _both_sides(ws, prev.sha, rb)
+            both = rb.both
             if both:
                 task += ("\n\nFiles changed on both sides (by the merged base commits and by the "
                          "worker); check these interact correctly: " + ", ".join(both))
