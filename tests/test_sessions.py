@@ -106,6 +106,8 @@ def test_a_resumed_chat_is_shown_with_its_conversation_and_sidebar(db, root, mon
     drew, tmux_cmd = tmp_path / "drew", [shutil.which(tmux._bin()), *tmux._base()[1:]]
     stub = tmp_path / "claude-stub"
     stub.write_text("#!/bin/sh\n"
+                    # The sidebar's `claude -p /usage` must not overwrite what the chat drew.
+                    '[ "$1" = -p ] && exit 1\n'
                     "trap 'printf \"\\033[2J\\033[H> \"' WINCH\n"
                     f'echo "$(stty size) $*" > {drew}\n'
                     "printf 'you: where were we\\nclaude: the earlier conversation\\n> '\n"

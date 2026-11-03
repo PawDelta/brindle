@@ -191,7 +191,11 @@ def test_read_only_commands_follow_the_policy_and_its_rules_alone(db, ws, monkey
     assert pre["hookSpecificOutput"]["permissionDecision"] == "deny"     # a kept deny still applies
     pre = agents.handle_hook(db, a.id, "pre-tool", bash("grep -n hi app.py | head -1"))
     assert pre["hookSpecificOutput"]["permissionDecision"] == "ask"
-    assert answer("cat ../../../.env") is None     # a read deny keeps it from the read-only allowance
+    # A secrets file is never in the read-only allowance: printing one is
+    # denied outright as credential printing, before any read rule is read.
+    assert answer("cat ../../../.env") == "deny"
+    pre = agents.handle_hook(db, a.id, "pre-tool", bash("cat ../../../.env"))
+    assert pre["hookSpecificOutput"]["permissionDecision"] == "deny"
     # Writes, the network, push, rm and nested shells still ask.
     for command in ("sed -i s/a/b/ app.py", "cat app.py > ../out", "curl https://example.com", "git push",
                     "rm app.py", "bash -c 'ls'", "sh -c ls"):

@@ -20,7 +20,7 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from brindle import model_access, tmux
+from brindle import build_caches, model_access, tmux
 from brindle.pro import route_health
 
 FOLLOWUP_SECONDS = 5.0
@@ -31,7 +31,7 @@ DELIVERY_SECONDS = 120.0
 _LAUNCH_ENV = frozenset({"BRINDLE_AGENT_ID", "BRINDLE_ROOT_PATH", "BRINDLE_WORKSPACE_PATH",
                          "BRINDLE_WORKSPACE_NAME", "BRINDLE_WORKSPACE_ID", "BRINDLE_BRANCH",
                          "BRINDLE_BASE_BRANCH", "BRINDLE_PORT_BASE", "BRINDLE_TMUX_SOCKET",
-                         "PWD", "TMUX", "TMUX_PANE"})
+                         "PWD", "TMUX", "TMUX_PANE", *build_caches.ENV_KEYS})
 AUTH = model_access.LAUNCH_AUTH
 MODEL = model_access.LAUNCH_MODEL
 CAPACITY = model_access.LAUNCH_CAPACITY
@@ -595,6 +595,14 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
                                 outcome=refused)
     detail = (cause.line() if cause else
               "the worker exited before launch health could be established. Check its pane and CLI installation/login, then retry.")
+    from brindle import secrets
+
+    dropped = secrets.dropped_for(agent.id) if not alive else []
+    if dropped:
+        # Names only: agent_env_mode "enforce" kept these out of its pane.
+        detail += (f" Its environment went without {', '.join(dropped)} (not on the allowlist, "
+                   "agent_env_mode enforce); if it needs any of them, add them to agent_env "
+                   "in .brindle/config.json.")
     # Never forward provider output, which can contain URLs, keys or prompt text.
     body = f"Worker {agent.id} launch health: {detail}"
     try:

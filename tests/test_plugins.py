@@ -11,7 +11,7 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import sh
-from brindle import account, agents, events, mcp_server, pipeline, plugins, policy, quota, workspaces
+from brindle import account, agents, events, mcp_server, pipeline, plugins, policy, procs, quota, workspaces
 from brindle.cli import app
 from brindle.config import RepoConfig, load_repo_config
 from brindle.db import Agent
@@ -151,6 +151,13 @@ def test_a_broken_factory_or_listing_never_raises(repo, monkeypatch):
     plugins.reset()
     assert plugins.installed(plugins.EVENTS) == []
     assert plugins.select(plugins.EVENTS, cfg, str(repo)) is None
+    # a configured policy that won't load refuses
+    install(monkeypatch, {})
+    cfg.plugins["policy"] = "pro"
+    d = policy.check_assign(cfg, str(repo), "dev", "do A", "assign")
+    assert not d.allowed and "'pro'" in d.reason
+    cfg.plugins["policy"] = "off"
+    assert policy.check_assign(cfg, str(repo), "dev", "do A", "assign").allowed
 
 
 # -- events at each call site -----------------------------------------------------------
@@ -236,6 +243,7 @@ def test_removing_an_unmerged_worktree_emits_remove(db, piped, monkeypatch):
     rec = install_one(monkeypatch, plugins.EVENTS, Recorder())
     root, ws = piped
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    monkeypatch.setattr(procs, "cwds", dict)   # the faked `which` hides lsof: nothing else is in it
     out = mcp_server.remove_workspace(ws.id)
     assert out.startswith("Removed")
     [e] = rec.events
@@ -290,19 +298,6 @@ def test_a_broken_policy_plugin_refuses(db, repo, boss, monkeypatch):
     monkeypatch.setattr(agents, "spawn", fake_spawn)
     out = asyncio.run(mcp_server.assign(task="do A", branch="feat-a"))
     assert "Not started" in out and "failed" in out, out
-
-
-def test_a_configured_policy_that_wont_load_refuses(repo, monkeypatch):
-    from brindle import policy
-    from brindle.config import RepoConfig
-
-    install(monkeypatch, {})
-    cfg = RepoConfig()
-    cfg.plugins["policy"] = "pro"
-    d = policy.check_assign(cfg, str(repo), "dev", "do A", "assign")
-    assert not d.allowed and "'pro'" in d.reason
-    cfg.plugins["policy"] = "off"
-    assert policy.check_assign(cfg, str(repo), "dev", "do A", "assign").allowed
 
 
 # -- brindle account ----------------------------------------------------------------------

@@ -10,7 +10,8 @@
    session's provider session. A project is added as the first launch adds
    one (components/ProjectPicker: open a folder, or clone a repository):
    in place of the composer while there is none, and behind "Add a
-   project…" beside the repo after. */
+   project…" beside the repo after. Under it, the way to the demo the first
+   launch offers (screens/Onboarding/Demo). */
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { DaemonError, type DaemonClient, type Note, type PreflightDTO, type Repo, type SessionConflict, type StartSession } from "../../api/client";
@@ -23,6 +24,7 @@ import { ProjectPicker } from "../../components/ProjectPicker";
 import { alert, button, card, field, main, mono, quiet } from "../../components/ui";
 import { isPaused } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
+import { WatchDemo } from "../Onboarding/Demo";
 
 export interface NewSessionProps {
   client: DaemonClient;
@@ -80,6 +82,7 @@ export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh }:
           ) : (
             <Composer client={client} repos={repos} sessions={sessions} reload={reload} refresh={refresh} onOpen={onOpen} chosen={chosen} pickFolder={pickFolder} onAdded={added} />
           )}
+          <WatchDemo client={client} refresh={refresh} onStarted={onOpen} />
         </div>
       </div>
     </section>

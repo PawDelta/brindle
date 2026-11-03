@@ -6,6 +6,7 @@ import type { EngineStatus } from "./api/engine";
 import type { WebSocketFactory } from "./api/events";
 import type { GoalDTO, SessionDTO } from "./api/schema";
 import { LAST_SESSION_KEY } from "./routes";
+import { DEMO_OFFERED_KEY } from "./screens/Onboarding";
 import { createAppStore } from "./store/store";
 import { startSync } from "./store/sync";
 import { DaemonClient } from "./api/client";
@@ -16,7 +17,11 @@ import { standInViews } from "./test/panes";
 
 vi.mock("./components/PtyTerminal", () => import("./test/panes"));
 
-beforeEach(() => localStorage.clear());
+// Each test's Mac is past the first launch's demo offer, but for the test of that offer.
+beforeEach(() => {
+  localStorage.clear();
+  localStorage.setItem(DEMO_OFFERED_KEY, "1");
+});
 afterEach(cleanup);
 
 /* The app as the shell shows it: its panes through pty views (stand-ins here). */
@@ -367,7 +372,7 @@ describe("App", () => {
 
   it("runs an old engine's upgrade from the banner in the background: waiting, failed with a retry, then updated", async () => {
     const daemon = new FakeDaemon();
-    daemon.data.meta = { ...daemon.data.meta, engine_version: "0.4.1", api_version: "0.9" };
+    daemon.data.meta ={ ...daemon.data.meta, engine_version: "0.4.1", api_version: "0.9" };
     daemon.deferUpgrade = true;
     daemon.upgradeFails = true;
     const store = createAppStore();
@@ -484,6 +489,34 @@ describe("App", () => {
     fireEvent.click(link("Knowledge"));
     expect(await screen.findByRole("region", { name: "Knowledge" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
+    sync.stop();
+  });
+
+  it("a first launch with a CLI signed in already offers the demo once, repos or not: Skip after a held start removes its repo and opens the app, and the next launch goes straight in", async () => {
+    localStorage.removeItem(DEMO_OFFERED_KEY);
+    // The CLI used before this app: a repo registered already.
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      preflight: { claude: [{ id: "consent", kind: "consent", label: "Agree to Claude Code's terms", done: false }] },
+    });
+    const store = createAppStore();
+    const client = daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+    await waitFor(() => expect(screen.getByTestId("onboarding").getAttribute("data-step")).toBe("demo"));
+    // Held by its preflight: the practice repo is kept for it until Skip.
+    fireEvent.click(screen.getByRole("button", { name: "Start the demo" }));
+    await screen.findByTestId("preflight");
+    expect(daemon.heldDemo).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+    await screen.findByRole("complementary", { name: "Sidebar" });
+    await waitFor(() => expect(daemon.heldDemo).toBeNull());
+    expect(daemon.requests.filter((r) => r.path === "/demo").map((r) => r.method)).toEqual(["POST", "DELETE"]);
+    cleanup();
+    renderApp(<App store={createAppStore()} client={client} refresh={sync.refresh} />);
+    await screen.findByRole("complementary", { name: "Sidebar" });
+    expect(screen.queryByTestId("onboarding")).toBeNull();
+    expect(daemon.demos).toEqual([]);
     sync.stop();
   });
 

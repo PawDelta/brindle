@@ -71,7 +71,7 @@ it("edits and clears a constructor role without reading inherited object propert
   click("Save approval limits");
   await waitFor(() => expect(state.policy.permission_grants.max_uses).toBe(9));
   expect(state.policy.permission_grants.controls).toEqual([controls[0], controls[1],
-    { decision: "ask", rule: "bash git-force a git command with a force flag, or a push that forces or deletes a branch", reason: "" }]);
+    { decision: "ask", rule: "bash git-force a git command that discards work (a force flag other than add -f or worktree add -f, push --delete, branch -D, reset --hard, switch --discard-changes)", reason: "" }]);
   // A rejected field can be corrected and saved again; a server without the
   // scoped save stops further saves until a reload.
   refusal = { code: "invalid_request", message: "The account rejected the approval limits (permission_grants)." };

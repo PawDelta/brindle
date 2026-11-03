@@ -118,6 +118,9 @@ def test_an_installed_learning_entry_point_is_never_used(db, ws, monkeypatch):
 
 def test_resolve_profile_precedence(db, ws, monkeypatch):
     install(monkeypatch, Recorder(pick="developer-local"))
+    # The local model memory guard fails closed where it can't measure memory;
+    # this test is about precedence, not the host's free memory.
+    monkeypatch.setattr("brindle.local_setup.memory_problem", lambda profile: None)
     (__import__("pathlib").Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
     (__import__("pathlib").Path(ws.repo_root) / ".brindle" / "config.json").write_text(
         '{"learning": "cloud", "learning_candidates": ["developer-local"], "default_agent": "developer"}')

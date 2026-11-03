@@ -25,7 +25,8 @@
 
    Above them all, the app's own item (AppUpdateItem.tsx): an update the
    app installed by itself, with Restart to update, then "Updated to
-   brindle X" once.
+   brindle X" once. On the whole Inbox, a quiet line (StorageNudge.tsx)
+   when brindle could give back over 5 GB of disk, to Settings › Storage.
 
    The same items count on the sidebar's "Inbox · N" at its top, and
    nowhere else: the Inbox is where what needs a person is read and acted
@@ -49,6 +50,7 @@ import { appUpdateItem } from "../../store/appUpdates";
 import { AppUpdateCard } from "./AppUpdateItem";
 import { ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
+import { StorageNudge } from "./StorageNudge";
 import { FIXES, KIND_SHORT, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
 import { useInboxActions } from "./useInboxActions";
 
@@ -231,6 +233,7 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
             <AppUpdateCard key={`${update.kind}:${update.version}`} item={update} updates={appUpdates} openUrl={openUrl} />
           </section>
         )}
+        {session === null && <StorageNudge client={client} onNavigate={onNavigate} />}
         <PermissionAsks
           client={client}
           groups={askGroups}
