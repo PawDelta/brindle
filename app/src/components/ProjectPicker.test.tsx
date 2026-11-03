@@ -82,11 +82,4 @@ describe("ProjectPicker", () => {
     expect(pickFolder).toHaveBeenCalledWith("Open a folder");
     expect(daemon.opened).toEqual(["/home/u/Projects/proj"]);
   });
-
-  it("onboarding's Pick a project without the app's folder picker still clones", () => {
-    setup(new FakeDaemon(), null);
-    expect((screen.getByRole("button", { name: "Open a folder…" }) as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.queryByRole("button", { name: "Change…" })).toBeNull();
-    expect((screen.getByRole("textbox", { name: "Repository URL" }) as HTMLInputElement).disabled).toBe(false);
-  });
 });

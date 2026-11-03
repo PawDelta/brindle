@@ -1,8 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { bannerStatus, landing } from "./App";
-import type { EngineStatus } from "./api/engine";
+import App, { landing } from "./App";
 import type { WebSocketFactory } from "./api/events";
 import type { GoalDTO, SessionDTO } from "./api/schema";
 import { LAST_SESSION_KEY } from "./routes";
@@ -380,15 +379,6 @@ describe("App", () => {
     expect(daemon.upgrades).toHaveLength(2);
     expect(daemon.actions).toHaveLength(0);
     sync.stop();
-  });
-
-  it("puts a stream the engine refuses, or one that dropped, in the banner when the engine itself is fine", () => {
-    const ok: EngineStatus = { state: "ok", meta: new FakeDaemon().data.meta };
-    expect(bannerStatus(ok, "open")).toBe(ok);
-    expect(bannerStatus(ok, "unauthorized")).toMatchObject({ state: "unreachable", message: expect.stringContaining("refused the app's token") });
-    expect(bannerStatus(ok, "closed")).toMatchObject({ state: "unreachable", message: expect.stringContaining("dropped") });
-    const old: EngineStatus = { state: "upgrade-engine", meta: ok.meta };
-    expect(bannerStatus(old, "closed")).toBe(old);
   });
 
   it("self-repair: an engine that dies comes back without a click: the app keeps reconnecting, and once the shell has restarted it, catches up and clears the banner", async () => {

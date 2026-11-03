@@ -224,6 +224,47 @@ describe("settings screen", () => {
     stop();
   });
 
+  it("permissions: a rule's limits save, and a deny that conflicts with an allow is auto-resolved without broadening the allow", async () => {
+    const npm = { id: "u-npm", kind: "bash", match: "npm ", match_type: "prefix", decision: "allow", source: "user", created: 1, describe: "bash prefix 'npm '", exclusions: [] };
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), npm], saved: [], prompts: {} } }, undefined, undefined, undefined, "d-push-default");
+    const editor = await screen.findByTestId("rule-editor");
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Remember approvals for" }), { target: { value: "time" } });
+    fireEvent.change(within(editor).getByRole("spinbutton", { name: "Longest approval" }), { target: { value: "15" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save rule" }));
+    await waitFor(() => expect(daemon.data.policy.rules.find((r) => r.id === "d-push-default")?.limits).toEqual({ life: "time", minutes: 15, max_scope: "all" }));
+    fireEvent.click(screen.getByRole("button", { name: "+ Add rule" }));
+    const add = screen.getByTestId("rule-editor");
+    fireEvent.change(within(add).getByRole("textbox", { name: "Target" }), { target: { value: "npm publish" } });
+    fireEvent.change(within(add).getByRole("combobox", { name: "Decision" }), { target: { value: "deny" } });
+    fireEvent.click(within(add).getByRole("button", { name: "Save rule" }));
+    const review = within(add).getByTestId("conflict-review");
+    // Stopped at the conflict: nothing saved until it is resolved.
+    expect(daemon.data.policy.rules.some((r) => r.match === "npm publish")).toBe(false);
+    fireEvent.click(within(review).getByRole("button", { name: "Auto-resolve" }));
+    await waitFor(() => expect(daemon.data.policy.rules.find((r) => r.id === "u-npm")?.exclusions).toEqual([{ kind: "bash", match: "npm publish", match_type: "exact", describe: "bash exact 'npm publish'" }]));
+    expect(daemon.data.policy.rules.find((r) => r.match === "npm publish")?.decision).toBe("deny");
+    stop();
+  });
+
+  it("permissions: a saved action's scope and lifetime are edited, and deleting it can be undone", async () => {
+    const saved = { id: "s9", kind: "write", pattern: "src/auth/login.ts", decision: "allow", scope: "exact", life: "forever", created: 1_700_000_000, note: "This file only · src/auth/login.ts" };
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [saved], prompts: {} } });
+    fireEvent.click(await screen.findByRole("button", { name: "Manage saved actions" }));
+    fireEvent.click(screen.getByRole("button", { name: "Edit Write files saved action" }));
+    const editor = screen.getByTestId("saved-editor");
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Scope" }), { target: { value: "general" } });
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Lasts" }), { target: { value: "time" } });
+    fireEvent.change(within(editor).getByRole("combobox", { name: "Saved action duration unit" }), { target: { value: "hours" } });
+    fireEvent.change(within(editor).getByRole("spinbutton", { name: "Saved action duration" }), { target: { value: "2" } });
+    fireEvent.click(within(editor).getByRole("button", { name: "Save changes" }));
+    await waitFor(() => expect(daemon.data.policy.saved[0]).toMatchObject({ pattern: "src/**", scope: "general", life: "time", minutes: 120 }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete Write files saved action" }));
+    await waitFor(() => expect(daemon.data.policy.saved).toHaveLength(0));
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await waitFor(() => expect(daemon.data.policy.saved).toMatchObject([{ kind: "write", pattern: "src/**", life: "time", minutes: 120 }]));
+    stop();
+  });
+
   it("providers: each row says how it connects, an API key with its health (Test, Replace, Remove, rejected naming only the agents its credentials stopped), a cloud with its login (Renew login), Change method saving Sign in over auto, and an Import for a key in the shell", async () => {
     const now = Date.now() / 1000;
     const failed = (id: string) => ({ ...root.agents![0], id, provider: "claude", status: "failed" });

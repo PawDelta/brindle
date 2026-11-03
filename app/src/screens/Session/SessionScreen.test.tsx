@@ -649,6 +649,22 @@ describe("SessionScreen", () => {
     sync.stop();
   });
 
+  it("hands the session over from the supervisor's ⋯: a destination is required, the request carries it and the note, and the new session opens", async () => {
+    const { daemon, sync, opened } = mount({ sup1: live, w1: live });
+    await waitFor(() => expect(shownAgent()).toBe("sup1"));
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Hand over…" }));
+    const dialog = screen.getByRole("dialog", { name: "Confirm handover" });
+    const confirm = within(dialog).getByRole("button", { name: "Confirm handover" }) as HTMLButtonElement;
+    expect(confirm.disabled).toBe(true);
+    fireEvent.change(within(dialog).getByLabelText("Branch or worktree"), { target: { value: "dev/next" } });
+    fireEvent.change(within(dialog).getByLabelText("Handoff note"), { target: { value: "merge w1 first" } });
+    fireEvent.click(confirm);
+    await waitFor(() => expect(opened).toEqual([["new1", REPO]]));
+    expect(daemon.requests.filter((r) => r.method === "POST").map((r) => [r.path, r.body])).toEqual([["/sessions/sup1/handover", { to: "dev/next", note: "merge w1 first" }]]);
+    sync.stop();
+  });
+
   it("opens a view on the window of the agent picked, for the supervisor and every worker, and shows that agent's own pane", async () => {
     const child = { ...worker.agents![0], id: "c1", parent_id: "w1", provider: "codex", window: windowOf("c1") };
     const panes: Record<string, Pane & { screen: string }> = { sup1: { ...live, screen: "supervisor pane" }, w1: { ...live, screen: "worker pane" }, c1: { ...live, screen: "reviewer pane" } };
