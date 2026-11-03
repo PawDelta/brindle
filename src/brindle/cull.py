@@ -463,7 +463,10 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         health = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?",
                                  (a.id,)).fetchone()
         brief = (health["submitted_prompt"] if health else None) or a.task or ""
-        if prompt_answer.brief_draft(screen, brief):
+        # A hook-held permission request can leave the CLI's spinner running
+        # while the person answers it, just as in agents.screen_status.
+        if ((prompt_answer.pane_busy(screen) and db.hook_permission_request(a.id) is None)
+                or prompt_answer.brief_draft(screen, brief)):
             continue
         if prompt_answer.blocking_prompt(screen, a.provider, brief):
             if prompt_answer.tell(db, a, "\n".join(prompt_answer._tail(screen))):
@@ -539,11 +542,17 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
         since = max(since, _last_edit(db.get_workspace(a.workspace_id)))
         if now - since < IDLE_UNREPORTED_AFTER or a.stuck_noted == since:
             continue
-        if agents.unreported_note_expired(a):
-            db.update_agent(a.id, unreported_noted=None)
+        won, previous = db.claim_note(a.id, since)
+        if not won:
+            continue
         # Not told while a command it started is still running; tried again then.
-        if agents.tell_parent_unreported(db, db.get_agent(a.id) or a):
-            db.update_agent(a.id, stuck_noted=since)
+        sent = False
+        try:
+            sent = agents.tell_parent_unreported(db, a, remind=True)
+        finally:
+            if not sent:
+                db.release_note(a.id, since, previous)
+        if sent:
             done.append(f"told {a.parent_id} that worker {a.id} is idle without reporting")
     return done
 
@@ -621,9 +630,6 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
                 continue
             # The spell starts at the report that put it in review, or at a
             # later reviewer's start (a fallback review, say).
-            if pipeline.release_held(db, ws):   # its verdict waited on a check run that died
-                done.append(f"acted on the review of `{ws.branch}`, whose check run died")
-                continue
             reviewers = [r for r in db.list_agents(ws.id) if r.mode == "review"]
             reviewing = any(r.dismissed_at is None and r.status not in ("paused", "done")
                             and agents.is_alive(r, panes) for r in reviewers)
@@ -674,11 +680,15 @@ def _send_note(db: DB, a: Agent, since: float, body: str) -> bool:
     won, previous = db.claim_note(a.id, since)
     if not won:
         return False
+    sent = False
     try:
         agents.send_message(db, a.parent_id, body, sender_id=a.id)
+        sent = True
     except agents.AgentError:
-        db.release_note(a.id, since, previous)
         return False
+    finally:
+        if not sent:
+            db.release_note(a.id, since, previous)
     return True
 
 

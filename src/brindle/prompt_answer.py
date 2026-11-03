@@ -58,7 +58,10 @@ INPUT_BOX = re.compile(r"\? for shortcuts|\d+% context left|esc to interrupt|⏵
                        r"|\S…\s*\((?:\d+m\s*)?\d+s\b", re.I)   # the last: a busy spinner, "✳ Clauding… (1m 37s)"
 # A turn under way: a spinner before its timer shows ("✻ Pondering…"), or a
 # tool call or reply ("⏺ Read(…)", "⎿ Running…"). No startup prompt has these.
-BUSY_SPINNER = re.compile(r"(?m)^\s*[·✢✳✶✻✽*]\s*[^\W\d_][\w-]*…")
+BUSY_SPINNER = re.compile(
+    r"(?m)^\s*(?:[·✢✳✶✻✽*]\s*[^\W\d_][\w-]*…"
+    r"|[\u2801-\u28ff]\s*[^\n]+(?:…|\.{3})"
+    r"|(?:Working|Running command)(?:…|\.{3}))")
 WORKING = re.compile(BUSY_SPINNER.pattern + r"|^\s*[⏺⎿]")
 BRIEF_LETTERS = 10   # fewest letters in a screen line taken as part of the brief
 # Only the person answers these, whatever the model makes of them: their
@@ -184,6 +187,11 @@ def brief_draft(screen: str, brief: str) -> bool:
             and sum(len(part) for part in parts if part in brief) >= 60)
 
 
+def pane_busy(screen: str) -> bool:
+    """A live activity indicator in the pane's current tail, across providers."""
+    return bool(BUSY_SPINNER.search("\n".join(_tail(screen))))
+
+
 def looks_like_prompt(screen: str) -> bool:
     """Whether the bottom of ``screen`` is a menu or question waiting for an
     answer: a selected menu line next to another option, or an "Enter to
@@ -212,6 +220,10 @@ def blocking_prompt(screen: str, provider: str, brief: str = "") -> bool:
     if brief_draft(screen, brief):
         return False
     screen = "\n".join(_tail(_past_brief(screen, brief)))
+    # A live spinner supersedes approval text still visible in the transcript,
+    # for every provider. "esc to cancel" alone also appears on real menus.
+    if pane_busy(screen):
+        return False
     return (get_provider(provider).tool_permission(screen)
             or _numbered_question(screen)
             or (looks_like_prompt(screen) and cached_kind(screen) != "not_a_prompt"))
@@ -588,11 +600,17 @@ def tell(db, agent, prompt: str) -> bool:
     summary = " | ".join(prompt.splitlines())
     body = (f"Worker {a.id} ({a.profile}) is waiting on a prompt: {summary}\n\n"
             f"{attach}, or send it guidance if it is asking a task question.{request}\n\nThe prompt:\n{prompt}")
+    won, previous = db.claim_note(a.id, a.status_since)
+    if not won:
+        return False
     try:
-        agents.send_message(db, a.parent_id, body, sender_id=a.id)
-    except agents.AgentError:
-        db.enqueue(a.parent_id, body, a.id)
-    db.update_agent(a.id, stuck_noted=a.status_since)
+        try:
+            agents.send_message(db, a.parent_id, body, sender_id=a.id)
+        except agents.AgentError:
+            db.enqueue(a.parent_id, body, a.id)
+    except Exception:
+        db.release_note(a.id, a.status_since, previous)
+        raise
     return True
 
 
