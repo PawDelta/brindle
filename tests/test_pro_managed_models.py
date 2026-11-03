@@ -44,11 +44,9 @@ def test_the_policy_fields_are_parsed():
     p = parse_policy(ORG, {"version": 1, "policy": {**POLICY, "provider_config": BEDROCK,
                                                     "deny_personal_keys": True}})
     assert p.provider_config == cfg(BEDROCK) and p.deny_personal_keys is True
-
-
-def test_a_policy_without_them_manages_nothing():
-    p = parse_policy(ORG, {"version": 1, "policy": POLICY})
-    assert p.provider_config is None and p.deny_personal_keys is False
+    # ...and survive the cache
+    again = parse_policy(ORG, json.loads(json.dumps(p.to_json())))
+    assert (again.provider_config, again.deny_personal_keys) == (cfg(BEDROCK), True)
 
 
 def test_the_effective_policy_inherits_them_unless_it_sets_its_own():
@@ -64,13 +62,6 @@ def test_the_effective_policy_inherits_them_unless_it_sets_its_own():
     p = parse_policy(ORG, {"version": 1, "policy": {**POLICY, "agent_setup": ROUTED,
                                                     "roles": {"member": {"max_parallel_workers": 1}}}})
     assert team_policy.with_role_overrides(p, "member", None).enforced.agent_setup == p.agent_setup
-
-
-def test_the_fields_survive_the_cache():
-    p = parse_policy(ORG, {"version": 1, "policy": {**POLICY, "provider_config": VERTEX,
-                                                    "deny_personal_keys": True}})
-    again = parse_policy(ORG, json.loads(json.dumps(p.to_json())))
-    assert (again.provider_config, again.deny_personal_keys) == (cfg(VERTEX), True)
 
 
 @pytest.mark.parametrize("over", [

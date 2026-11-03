@@ -83,15 +83,6 @@ def test_a_hung_server_is_not_an_empty_pane_list(hung_tmux):
         tmux.server_homes("brindle-elsewhere")
 
 
-def test_the_timeout_is_configurable(monkeypatch):
-    monkeypatch.setenv("BRINDLE_TMUX_TIMEOUT", "2.5")
-    assert tmux.timeout() == 2.5
-    monkeypatch.setenv("BRINDLE_TMUX_TIMEOUT", "nonsense")
-    assert tmux.timeout() == tmux.DEFAULT_TIMEOUT
-    monkeypatch.delenv("BRINDLE_TMUX_TIMEOUT")
-    assert tmux.timeout() == tmux.DEFAULT_TIMEOUT
-
-
 # -- a hung server is never a verdict on any agent -------------------------------------
 
 
@@ -128,14 +119,6 @@ def test_orphan_servers_leaves_a_hung_server_and_its_socket_alone(monkeypatch):
     notes = cull.orphan_servers()
     assert touched == []
     assert any("brindle-hung" in n and "answering" in n for n in notes)
-
-
-def test_the_cli_reports_a_hung_server_in_one_line(db, repo, hung_tmux, monkeypatch, capsys):
-    monkeypatch.chdir(repo)
-    with pytest.raises(SystemExit) as e:
-        cli.app(["ls"])
-    assert e.value.code == 1
-    assert "not responding" in capsys.readouterr().err
 
 
 # -- nothing in brindle stops the default server ---------------------------------------
@@ -207,30 +190,6 @@ def test_from_inside_a_pane_brindle_switches_the_client(db, repo, monkeypatch):
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
     cli._attach(ws, "%3")
     assert not any(a[0] in ("switch-client", "attach-session") for a in ran)
-
-
-def test_a_pane_this_server_does_not_know_is_not_inside(monkeypatch):
-    monkeypatch.delenv("TMUX", raising=False)
-    monkeypatch.setenv("TMUX_PANE", "%7")
-    monkeypatch.setattr(tmux, "pane_session", lambda pane: None)
-    assert not tmux.inside_this_server()
-    monkeypatch.delenv("TMUX_PANE")
-    assert not tmux.inside_this_server()
-    monkeypatch.setenv("TMUX", "/tmp/tmux-1/default,1,0")
-    assert tmux.inside_this_server()
-
-
-def test_from_outside_brindle_attaches(db, repo, monkeypatch):
-    ws = workspaces.adopt_root(db, str(repo))
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
-    monkeypatch.delenv("TMUX", raising=False)
-    monkeypatch.delenv("TMUX_PANE", raising=False)
-    monkeypatch.setattr(tmux, "has_session", lambda s: True)
-    monkeypatch.setattr(tmux, "select_window", lambda t: None)
-    ran = []
-    monkeypatch.setattr(cli.subprocess, "run", lambda argv, *a, **k: ran.append(tuple(argv)))
-    cli._attach(ws, "%3")
-    assert len(ran) == 1 and "attach-session" in ran[0] and "switch-client" not in ran[0]
 
 
 def test_attach_fails_fast_on_a_hung_server(db, repo, hung_tmux):

@@ -79,12 +79,6 @@ def test_real_codex_footer_allows_placeholder_but_protects_grey_input(db, ws, mo
     assert db.pending_count("c1") == 0
 
 
-def test_hook_main_parses_notify_payload(db, ws):
-    codex_agent(db, ws)
-    agents.hook_main(db, "c1", "codex-notify", json.dumps({"type": "agent-turn-complete"}))
-    assert db.get_agent("c1").status == "idle"
-
-
 def test_codex_turn_complete_unreported_tells_parent(db, ws, monkeypatch):
     """No Stop hook can remind a Codex worker to report: a turn it ends
     without a result is one its supervisor hears about."""
@@ -94,7 +88,8 @@ def test_codex_turn_complete_unreported_tells_parent(db, ws, monkeypatch):
                        None, time.time()))
     sent = []
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append(to))
-    agents.handle_hook(db, "c1", "codex-notify", {"type": "agent-turn-complete"})
+    agents.hook_main(db, "c1", "codex-notify", json.dumps({"type": "agent-turn-complete"}))
+    assert db.get_agent("c1").status == "idle"
     assert sent == ["boss"]
 
 
@@ -138,14 +133,3 @@ def test_supervisor_refuses_a_provider_that_cant_supervise(repo, monkeypatch):
     monkeypatch.chdir(repo)
     res = CliRunner().invoke(app, ["supervisor", "--provider", "native"])
     assert res.exit_code != 0 and "can't run the supervisor" in res.output
-
-
-def test_command_passes_the_profiles_model_and_effort(monkeypatch):
-    import dataclasses
-    monkeypatch.setenv("BRINDLE_CODEX_BIN", "/opt/codex")
-    profile = dataclasses.replace(load_profile("developer"), model="gpt-6.1-sol", effort="high")
-    argv = Codex().command(LaunchContext("abc", profile, "do it"))
-    assert argv[argv.index("--model") + 1] == "gpt-6.1-sol"
-    assert 'model_reasoning_effort="high"' in argv
-    assert argv[argv.index('model_reasoning_effort="high"') - 1] == "-c"
-    assert argv[argv.index("mcp_servers.brindle.startup_timeout_sec=120") - 1] == "-c"

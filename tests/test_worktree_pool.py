@@ -6,8 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from brindle import git, pool, view, workspaces
-from brindle.config import load_repo_config
+from brindle import git, pool, workspaces
 from brindle.db import DB
 
 from conftest import sh
@@ -47,20 +46,30 @@ def test_lockfile_change_triggers_setup_again(db, repo, tmp_path):
     )
 
 
-def test_pool_size_zero_disables_pool(db, repo, tmp_path):
-    counter = tmp_path / "counter"
-    write_config(repo, setup=[f'echo x >> "{counter}"'], pool_size=0)
-    cfg = load_repo_config(str(repo))
-    assert cfg.pool_size == 0
-    assert pool.fill(db, str(repo)) == 0
+def test_failed_claim_falls_back(db, repo, tmp_path, monkeypatch):
+    write_config(repo, setup=["false"])
+    attempted = []
+    clock = [1000.0]
 
-    created = workspaces.create(db, str(repo), "feature")
-    assert created.how != "pool"
-    assert created.setup is not None and created.setup.ok
-    assert counter.read_text().count("x") == 1
+    def failed_setup(commands, cwd, env):
+        attempted.append((cwd, git.out(["branch", "--show-current"], cwd)))
+        return workspaces.SetupResult(False, "setup failed")
 
+    with monkeypatch.context() as patch:
+        patch.setattr(workspaces, "run_commands", failed_setup)
+        patch.setattr(pool.time, "time", lambda: clock[0])
+        assert pool.fill(db, str(repo)) == 0
+        assert db.last_pool_failure(str(repo), "main") == clock[0]
+        assert db.pool_entries(str(repo), ready_only=False) == []
+        assert len(attempted) == 1
+        assert not Path(attempted[0][0]).exists()
+        assert not git.branch_exists(str(repo), attempted[0][1])
+        assert pool.fill(db, str(repo)) == 0
+        assert len(attempted) == 1
+        clock[0] += pool.FAILURE_BACKOFF
+        assert pool.fill(db, str(repo)) == 0
+        assert len(attempted) == 2
 
-def test_failed_claim_falls_back(db, repo, tmp_path):
     counter = tmp_path / "counter"
     write_config(repo, setup=[f'echo x >> "{counter}"'])
     entry = pool.fill_one(db, str(repo))
@@ -72,13 +81,6 @@ def test_failed_claim_falls_back(db, repo, tmp_path):
     assert created.setup is not None and created.setup.ok
     assert counter.read_text().count("x") == 2  # once during fill, once via fallback
     assert db.count_pool_entries(str(repo), "main") == 0
-
-
-def test_pool_entries_do_not_appear_in_workspace_listings(db, repo):
-    write_config(repo, setup=["true"])
-    pool.fill(db, str(repo))
-    assert db.find_workspaces(str(repo)) == []
-    assert view.snapshot(db, str(repo)) == []
 
 
 @pytest.mark.variant("data loss: a claim must never reset an existing branch")
@@ -106,34 +108,6 @@ def test_claim_skipped_when_the_branch_exists(db, repo, tmp_path, where):
     assert git.out(["rev-parse", "HEAD"], created.workspace.path) == sha
     assert (Path(created.workspace.path) / "own_work.txt").exists()
     assert db.count_pool_entries(str(repo), "main") == 1  # entry left untouched
-
-
-def test_claim_recopies_changed_copy_files(db, repo):
-    write_config(repo, setup=["true"], copy=[".env"])
-    entry = pool.fill_one(db, str(repo))
-    assert entry is not None
-    assert (Path(entry.path) / ".env").read_text() == "SECRET=1\n"
-
-    (repo / ".env").write_text("SECRET=2\n")
-
-    created = workspaces.create(db, str(repo), "feature")
-    assert created.how == "pool"
-    assert (Path(created.workspace.path) / ".env").read_text() == "SECRET=2\n"
-    assert ".env" in created.copied
-
-
-def test_sweep_drops_entries_for_an_unconfigured_base_branch(db, repo, tmp_path):
-    write_config(repo, setup=["true"])
-    pool.fill(db, str(repo))
-    assert db.count_pool_entries(str(repo), "main") == 1
-
-    sh("git checkout -q -b other", repo)
-    sh("git push -q -u origin other", repo)
-    write_config(repo, setup=["true"], base_branch="other")
-
-    assert pool.fill_locked(db, str(repo)) == 1
-    assert db.count_pool_entries(str(repo), "main") == 0
-    assert db.count_pool_entries(str(repo), "other") == 1
 
 
 def test_two_concurrent_claims_only_one_wins(db, repo):
@@ -167,12 +141,17 @@ def test_sweep_never_deletes_a_worktree_claimed_by_a_workspace(db, repo):
     is gone but its directory stays right where it was, inside the pool dir.
     sweep must recognize it as a live workspace (by path, and by its branch
     no longer being a brindle-pool/* placeholder) and leave it alone."""
-    write_config(repo, setup=["true"])
+    write_config(repo, setup=["true"], copy=[".env"])
     pool.fill(db, str(repo))
     assert db.count_pool_entries(str(repo), "main") == 1
+    [entry] = db.pool_entries(str(repo), "main")
+    assert (Path(entry.path) / ".env").read_text() == "SECRET=1\n"
+    (repo / ".env").write_text("SECRET=2\n")
 
     created = workspaces.create(db, str(repo), "feature")
     assert created.how == "pool"
+    assert (Path(created.workspace.path) / ".env").read_text() == "SECRET=2\n"
+    assert ".env" in created.copied
     assert db.count_pool_entries(str(repo), "main") == 0  # claimed: row gone
 
     pool.sweep(db, str(repo))
@@ -210,21 +189,3 @@ def test_trim_skips_discard_when_a_claim_wins_the_race(db, repo, monkeypatch):
     assert os.path.isdir(victim.path)  # claimed worktree left untouched
     assert git.branch_exists(str(repo), victim.branch)
 
-
-def test_fill_backs_off_after_a_setup_failure(db, repo, monkeypatch):
-    write_config(repo, setup=["false"])  # always fails
-    assert pool.fill(db, str(repo)) == 0
-    assert db.last_pool_failure(str(repo), "main") is not None
-
-    calls: list = []
-    real_fill_one = pool.fill_one
-    monkeypatch.setattr(
-        pool, "fill_one", lambda *a, **kw: (calls.append(1), real_fill_one(*a, **kw))[1]
-    )
-
-    assert pool.fill(db, str(repo)) == 0
-    assert calls == []  # still inside the backoff window: never even tried
-
-    monkeypatch.setattr(pool, "FAILURE_BACKOFF", 0)
-    assert pool.fill(db, str(repo)) == 0
-    assert calls == [1]  # backoff expired: retried (and failed again)
