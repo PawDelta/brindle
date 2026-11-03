@@ -4242,6 +4242,8 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
         }
     if needs_report:
         db.set_status(agent.id, "idle")
+        # The stop claim must use this idle spell's timestamp.
+        agent = db.get_agent(agent.id) or agent
         from brindle import prompt_answer
 
         if not prompt_answer.at_turn_end(db, agent):   # a question it ended on says more

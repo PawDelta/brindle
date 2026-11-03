@@ -125,7 +125,9 @@ def test_a_piped_branch_nothing_works_on_is_reported_once_not_closed(db, repo, m
 
 
 @pytest.mark.parametrize("note", [cull.note_stalled, cull.note_silent, cull.note_idle_unreported,
-                                agents.tell_parent_unreported, "prompt", "doc", "reviewer"])
+                                agents.tell_parent_unreported, "prompt", "doc", "reviewer",
+                                pytest.param("reviewer-stop", marks=pytest.mark.variant(
+                                    "Stop hook changes status before claiming reviewer recovery"))])
 def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, tmp_path, monkeypatch, note):
     """The daemon and each session's MCP server sweep side by side: two that
     read the workers before either noted it send the note once between them."""
@@ -147,9 +149,11 @@ def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, tmp_path, monkeypa
     if note is cull.note_silent:
         db.update_agent("w1", status="unknown")
     fallbacks = []
-    if note == "reviewer":
+    reviewer = note in ("reviewer", "reviewer-stop")
+    if reviewer:
         db.update_agent("w1", result="done", pipeline="reviewing")
-        add(db, ws, "rev", "review", "reviewer", parent="boss")
+        add(db, ws, "rev", "review", "reviewer", parent="boss",
+            status="processing" if note == "reviewer-stop" else "idle")
         monkeypatch.setattr(agents, "request_review", lambda *a, **kw: fallbacks.append(1))
         monkeypatch.setattr(agents, "close_later", lambda *a: None)
         monkeypatch.setattr(pipeline.learning, "note_reviewer", lambda *a, **kw: None)
@@ -175,11 +179,13 @@ def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, tmp_path, monkeypa
         monkeypatch.setattr(conn, "list_agents",
                             lambda ws_id=None, real=real: snapshot if ws_id is None else real(ws_id))
     now = time.time()
-    worker = next(a for a in snapshot if a.id == ("rev" if note == "reviewer" else "w1"))
+    worker = next(a for a in snapshot if a.id == ("rev" if reviewer else "w1"))
     version = 2
 
     def run(conn):
-        if note is agents.tell_parent_unreported or note == "reviewer":
+        if note == "reviewer-stop" and conn is db:
+            agents._stop_decision(conn, worker, {"stop_hook_active": True})
+        elif note is agents.tell_parent_unreported or reviewer:
             agents.tell_parent_unreported(conn, worker)
         elif note == "prompt":
             prompt_answer.tell(conn, worker, "Continue?")
@@ -210,7 +216,7 @@ def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, tmp_path, monkeypa
         run(db)
         run(other)
         assert len(sent) == 1
-        if note == "reviewer":
+        if reviewer:
             assert fallbacks == []
             db.set_status("rev", "processing")
             db.set_status("rev", "idle")  # a genuinely new stop after the resume
