@@ -463,7 +463,10 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         health = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?",
                                  (a.id,)).fetchone()
         brief = (health["submitted_prompt"] if health else None) or a.task or ""
-        if prompt_answer.pane_busy(screen) or prompt_answer.brief_draft(screen, brief):
+        # A hook-held permission request can leave the CLI's spinner running
+        # while the person answers it, just as in agents.screen_status.
+        if ((prompt_answer.pane_busy(screen) and db.hook_permission_request(a.id) is None)
+                or prompt_answer.brief_draft(screen, brief)):
             continue
         if prompt_answer.blocking_prompt(screen, a.provider, brief):
             if prompt_answer.tell(db, a, "\n".join(prompt_answer._tail(screen))):
