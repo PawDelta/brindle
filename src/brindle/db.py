@@ -18,6 +18,7 @@ from typing import Iterator
 
 from brindle import bus
 from brindle.config import db_path
+from brindle.redact import mask
 
 # Claude Code's own subagents (native_subagents table, see below). A crash
 # can skip SubagentStop, so a subagent still "running" past this age is
@@ -512,6 +513,42 @@ CREATE TABLE IF NOT EXISTS session_pr_prep (
     prepared_at REAL NOT NULL,
     PRIMARY KEY (root_id, branch)
 );
+-- A session branch against origin/<default> as brindle last synced it
+-- (brindle.session_sync). state: synced | behind (its checkout was dirty) |
+-- conflict (files: the JSON list); upstream_sha: the origin commit looked at;
+-- told_sha: the origin commit the supervisor was last told about.
+CREATE TABLE IF NOT EXISTS session_sync (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    upstream_sha TEXT NOT NULL,
+    state TEXT NOT NULL,
+    files TEXT,
+    told_sha TEXT,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, branch)
+);
+-- A session PR that landed on the default branch as a squash (or rebase):
+-- squash_sha is that commit, covers_sha the session commit the PR carried,
+-- so a later sync records it as merged instead of re-applying it.
+CREATE TABLE IF NOT EXISTS session_squashes (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    squash_sha TEXT NOT NULL,
+    covers_sha TEXT NOT NULL,
+    recorded_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, squash_sha)
+);
+-- A session PR that merged but whose landing commit (merge or squash) isn't
+-- known yet: looked up at each sync until it is (brindle.session_sync).
+CREATE TABLE IF NOT EXISTS session_pr_landings (
+    root_id TEXT NOT NULL,
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    url TEXT NOT NULL,
+    covers_sha TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (repo_root, branch, url)
+);
 -- The one reviewer of a workspace's commit (agents.request_review): only the
 -- dispatcher that inserts or takes over this row starts it. slot is '' for
 -- the commit's review, or the profile of a configured second review.
@@ -706,6 +743,17 @@ CREATE TABLE IF NOT EXISTS doc_requests (
     why TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+-- What the sweep reaped (brindle.reap): tmux sessions, stopped supervisors,
+-- superseded workers, notices sent once. `brindle doctor` lists recent rows;
+-- an 'idle_supervisor' row is an Inbox item while its root stays paused.
+CREATE TABLE IF NOT EXISTS reaped (
+    at REAL NOT NULL,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,          -- a tmux session name or an agent id
+    root_id TEXT,                  -- the session root it belonged to, if known
+    detail TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reaped_target ON reaped(kind, target);
 CREATE INDEX IF NOT EXISTS kb_chunks_doc ON kb_chunks(doc_id);
 CREATE TABLE IF NOT EXISTS kb_links (
     chunk_id TEXT NOT NULL REFERENCES kb_chunks(id) ON DELETE CASCADE,
@@ -1264,6 +1312,21 @@ class DB:
             self.conn.execute("ROLLBACK")
             raise
 
+    @contextmanager
+    def snapshot(self) -> Iterator[sqlite3.Connection]:
+        """Reads that see one moment of the database (a WAL read transaction
+        from the first read on), whatever other connections commit meanwhile,
+        without holding off their writes. Reads only; inside a transaction
+        already, they share that one."""
+        if self.conn.in_transaction:
+            yield self.conn
+            return
+        self.conn.execute("BEGIN")
+        try:
+            yield self.conn
+        finally:
+            self.conn.execute("COMMIT")
+
     # -- workspaces --------------------------------------------------------
 
     def add_workspace(self, ws: Workspace) -> None:
@@ -1530,6 +1593,23 @@ class DB:
             bus.publish_agent(self, "agent.pipeline", agent_id, pipeline=fields["pipeline"],
                               merge_failed=bool(fields.get("merge_failed")))
 
+    def claim_note(self, agent_id: str, since: float) -> tuple[bool, float | None]:
+        """Atomically set stuck_noted to ``since`` unless it already is. Every
+        brindle process sweeps (the daemon, each session's MCP server), so only
+        the one that wins may send that note. Returns whether it won, and
+        the value it replaced (for ``release_note``)."""
+        with self.tx() as c:
+            row = c.execute("SELECT stuck_noted FROM agents WHERE id=?", (agent_id,)).fetchone()
+            cur = c.execute("UPDATE agents SET stuck_noted=? WHERE id=? AND stuck_noted IS NOT ?",
+                            (since, agent_id, since))
+        return cur.rowcount == 1, row["stuck_noted"] if row else None
+
+    def release_note(self, agent_id: str, since: float, previous: float | None) -> None:
+        """Undo ``claim_note`` when the note couldn't be sent, unless a later one replaced it."""
+        with self.tx() as c:
+            c.execute("UPDATE agents SET stuck_noted=? WHERE id=? AND stuck_noted IS ?",
+                      (previous, agent_id, since))
+
     def claim_idle(self, agent_id: str) -> float | None:
         """Atomically flip idle -> processing. Only the caller that wins may type
         into the agent's terminal, so two senders never interleave keystrokes.
@@ -1559,9 +1639,30 @@ class DB:
         if changed:
             bus.publish_agent(self, "agent.status", agent_id, status=status)
 
+    def claim_exited(self, agent_id: str, from_status: str, failed_why: str) -> str | None:
+        """Atomically mark an agent whose process is gone stopped, if it is
+        still in ``from_status`` and not dismissed: 'done' when it has a
+        result (read in the same statement, so a report that just landed
+        counts), else 'failed' with ``failed_why``. Returns the status set,
+        or None when another caller changed the row first: only the caller
+        that gets a status back may act on the change."""
+        with self.tx() as c:
+            changed = c.execute(
+                "UPDATE agents SET status_since=?, "
+                "failed_why = CASE WHEN result IS NULL THEN ? ELSE failed_why END, "
+                "status = CASE WHEN result IS NULL THEN 'failed' ELSE 'done' END "
+                "WHERE id=? AND status=? AND dismissed_at IS NULL",
+                (time.time(), failed_why, agent_id, from_status),
+            ).rowcount
+            status = (c.execute("SELECT status FROM agents WHERE id=?", (agent_id,)).fetchone()[0]
+                      if changed else None)
+        if status:
+            bus.publish_agent(self, "agent.status", agent_id, status=status)
+        return status
+
     def set_result(self, agent_id: str, result: str) -> None:
         with self.tx() as c:
-            c.execute("UPDATE agents SET result=? WHERE id=?", (result, agent_id))
+            c.execute("UPDATE agents SET result=? WHERE id=?", (mask(result), agent_id))
         bus.publish_agent(self, "agent.result", agent_id)
 
     def delete_agent(self, agent_id: str) -> None:
@@ -1578,7 +1679,7 @@ class DB:
         with self.tx() as c:
             cur = c.execute(
                 "INSERT INTO inbox (agent_id, sender_id, body, created_at, noticed_at) VALUES (?,?,?,?,?)",
-                (agent_id, sender_id, body, now, now if notice else None),
+                (agent_id, sender_id, mask(body), now, now if notice else None),
             )
             message_id = int(cur.lastrowid)
         if not notice:
@@ -1725,7 +1826,7 @@ class DB:
         with self.tx() as c:
             cur = c.execute(
                 "INSERT INTO inbox (agent_id, sender_id, body, created_at, held) VALUES (?,?,?,?,1)",
-                (agent_id, sender_id, body, time.time()),
+                (agent_id, sender_id, mask(body), time.time()),
             )
             message_id = int(cur.lastrowid)
         if publish:
@@ -1913,7 +2014,7 @@ class DB:
                 "WHERE root_id=? AND external_wait=?", (now, root_id, wait)).rowcount
             if changed:
                 c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at) VALUES (?,NULL,?,?)",
-                          (root_id, message, now))
+                          (root_id, mask(message), now))
             return bool(changed)
 
     def bump_progress(self, root_id: str) -> None:
@@ -1971,7 +2072,7 @@ class DB:
             c.execute(
                 "INSERT INTO reviews (workspace_id, sha, reviewer_id, approved, summary, created_at, "
                 "review_slot, reviewer_created_at) VALUES (?,?,?,?,?,?,?,?)",
-                (workspace_id, sha, reviewer_id, int(approved), summary, time.time(),
+                (workspace_id, sha, reviewer_id, int(approved), mask(summary), time.time(),
                  reviewer["review_slot"] if reviewer else None,
                  reviewer["created_at"] if reviewer else None),
             )
@@ -2106,7 +2207,7 @@ class DB:
                 "INSERT INTO check_cache (workspace_id, sha, command, ok, output, created_at) "
                 "VALUES (?,?,?,?,?,?) ON CONFLICT(workspace_id, sha, command) DO UPDATE SET "
                 "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
-                (workspace_id, sha, command, int(ok), output, time.time()),
+                (workspace_id, sha, command, int(ok), mask(output), time.time()),
             )
 
     def get_tree_check(self, repo_root: str, tree: str, command: str):
@@ -2121,7 +2222,7 @@ class DB:
                 "INSERT INTO check_tree_cache (repo_root, tree, command, ok, output, created_at) "
                 "VALUES (?,?,?,?,?,?) ON CONFLICT(repo_root, tree, command) DO UPDATE SET "
                 "ok=excluded.ok, output=excluded.output, created_at=excluded.created_at",
-                (repo_root, tree, command, int(ok), output, time.time()),
+                (repo_root, tree, command, int(ok), mask(output), time.time()),
             )
 
     def check_duration(self, repo_root: str, command: str) -> float | None:
@@ -2269,7 +2370,7 @@ class DB:
             c.execute(
                 "INSERT INTO history (repo_root, ts, kind, agent_id, branch, profile, task, "
                 "result, tokens) VALUES (?,?,?,?,?,?,?,?,?)",
-                (repo_root, time.time(), kind, agent_id, branch, profile, task, result, tokens),
+                (repo_root, time.time(), kind, agent_id, branch, profile, mask(task), mask(result), tokens),
             )
             if mark is not None:
                 transcript_path, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens = mark
@@ -2319,7 +2420,7 @@ class DB:
             c.execute(
                 "INSERT OR REPLACE INTO learned_rules (repo_root, key, profile, title, rule, checks, "
                 "findings, branches, status, created_at, decided_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (r.repo_root, r.key, r.profile, r.title, r.rule, r.checks, r.findings, r.branches,
+                (r.repo_root, r.key, r.profile, mask(r.title), mask(r.rule), r.checks, r.findings, r.branches,
                  r.status, r.created_at, r.decided_at))
 
     def learned_rules_mark(self, repo_root: str) -> int:

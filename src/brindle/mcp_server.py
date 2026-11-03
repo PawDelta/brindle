@@ -4,21 +4,25 @@ from ``BRINDLE_AGENT_ID`` (set in the agent's environment at spawn)."""
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import re
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
-from brindle import agents, antigravity, autopilot, codex_hook, coordinator, cost_estimate, git, history, kb, knowledge, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
+from brindle import agents, autopilot, coordinator, cost_estimate, git, history, kb, knowledge, mcp_stdio, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config
-from brindle.db import DB, Agent, Workspace, migrated_by_newer
+from brindle.db import DB, Agent, Task, Workspace, migrated_by_newer
 from brindle.profiles import list_profiles
 from brindle.view import last_activity
 
@@ -30,16 +34,23 @@ MIGRATED_ERROR = ("brindle was updated, run /mcp → brindle → Reconnect: this
                   "still run the old version, and the new one has changed brindle's database")
 
 
+# The id of the MCP request the running tool serves, when it came through the
+# transport (None for a direct call): _answer releases what the tool queued
+# only once its response is written (mcp_stdio.after_reply).
+_reply_to: contextvars.ContextVar[Any] = contextvars.ContextVar("brindle_mcp_reply_to", default=None)
+
+
 def _calling_agent() -> Agent | None:
     agent_id = os.environ.get("BRINDLE_AGENT_ID")
     return DB().get_agent(agent_id) if agent_id else None
 
 
 def _migrated_under_us() -> bool:
-    """Whether brindle was upgraded under this server and the new version has
-    migrated the database since: this server's code no longer writes the rows
-    that version expects (see upgrade.py)."""
-    return upgrade.install.changed() and migrated_by_newer()
+    """Whether a newer brindle has migrated the database: this server's code
+    no longer writes the rows that version expects (see upgrade.py). Whether
+    or not this install changed: a reload can land on code that is still
+    older (another install migrated the database), or fail."""
+    return migrated_by_newer()
 
 
 class _Server(MCPServer):
@@ -51,6 +62,11 @@ class _Server(MCPServer):
     async def call_tool(self, name, arguments, context=None):
         if _migrated_under_us():
             raise ToolError(MIGRATED_ERROR)
+        try:
+            request_id = context.request_context.request_id if context is not None else None
+        except ValueError:   # a Context with no request behind it
+            request_id = None
+        _reply_to.set(request_id)   # this call's own task: nothing else sees it
         try:
             refused = coordinator.refusal(_calling_agent(), name)
             if refused:
@@ -332,7 +348,148 @@ def _await_worker(db: DB, worker_id: str, wait_seconds: int) -> str:
     return f"Worker {worker.id} finished.\n\n{result}{tail}"
 
 
-def _route_clash(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, mode: str, *,
+class _Request:
+    """The tasks one assign/handoff request queued before replying. They stay
+    unanswered (``tasks.UNANSWERED``: nothing starts them) until its response
+    is written (``answer``); if its client cancels the request or goes away
+    first (``cancel``) they are cancelled instead, even one its thread
+    queues after the cancel, so no worker ever starts for a request nobody
+    got an answer to."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._gone = False
+        self._queued: list[str] = []
+        self._start: set[str] = set()
+
+    def enqueue(self, db: DB, *args, start: bool = False, **kwargs) -> Task:
+        """``tasks.enqueue``, unanswered; ``start``: started (detached) as
+        soon as the request replies, having nothing to wait on."""
+        t = tasks.enqueue(db, *args, unanswered=True, **kwargs)
+        with self._lock:
+            self._queued.append(t.id)
+            if start:
+                self._start.add(t.id)
+            gone = self._gone
+        if gone:
+            tasks.drop_unanswered(db, [t.id])
+        return t
+
+    def cancel(self) -> None:
+        with self._lock:
+            self._gone = True
+            queued = list(self._queued)
+        if queued:
+            tasks.drop_unanswered(DB(), queued)
+
+    def answer(self) -> None:
+        with self._lock:
+            queued, start = list(self._queued), set(self._start)
+        if queued:
+            tasks.answered(DB(), queued, start)
+
+    def settle(self, written: bool) -> None:
+        """``mcp_stdio.after_reply``'s callback, on the event loop: release
+        (or cancel) on a thread of its own, so launching the start helper
+        holds up no other reply."""
+        threading.Thread(target=self.answer if written else self.cancel,
+                         name="brindle-release", daemon=True).start()
+
+
+async def _answer(prepare: Callable[[_Request], str | Callable[[], str]]) -> str:
+    """Run ``prepare`` (a tool's work up to its reply; quick: nothing in it
+    waits for the machine) off the event loop and return its reply: a
+    string, or a function that composes it from the tasks it queued.
+
+    What it queued is released (``_Request.answer``) only once the transport
+    has written the response (``mcp_stdio.after_reply``), and cancelled if
+    the request is cancelled (MCP notifications/cancelled) or its client
+    goes away first, or if ``prepare`` fails. A direct call, with no
+    transport to hear from, releases at once."""
+    req = _Request()
+    work = asyncio.ensure_future(asyncio.to_thread(prepare, req))
+    try:
+        out = await asyncio.shield(work)
+    except BaseException:   # cancelled, or it failed: nobody gets the task ids
+        req.cancel()
+        raise
+    request_id = _reply_to.get()
+    if request_id is None or not mcp_stdio.after_reply(request_id, req.settle):
+        req.answer()
+    return out() if callable(out) else out
+
+
+def _queued_text(t: Task, profile: str, branch: str | None, subagent: bool) -> str:
+    """The reply for a worker its request queued to start in the background
+    (``t`` as it is now: waiting for room, if its start found none)."""
+    if subagent:
+        return (f"Queued task {t.id}: its worktree is being made in the background. A message "
+                "gives you the worktree and the prompt for your own Agent tool once it's ready, or "
+                f"why it couldn't be; cancel_task(\"{t.id}\") gives it up. Don't assign it again.")
+    return (f"Queued task {t.id}: its worker ({profile}) starts in the background"
+            + (f" on branch {branch}" if branch else "")
+            + (f", once there's room: {t.waiting}." if t.waiting else ", once the machine has room.")
+            + " A message tells you its worker id when it starts, or "
+            f"why it couldn't. list_tasks shows it meanwhile; cancel_task(\"{t.id}\") gives it up, "
+            f"start_now(\"{t.id}\") starts it despite the load. Don't assign it again.")
+
+
+def _not_started(db: DB, t: Task) -> str:
+    """The reply when the task its request queued was cancelled before
+    the reply (its start failed at once)."""
+    return f"Not started: {tasks.cancel_reason(db, t.id) or f'task {t.id} was cancelled'}"
+
+
+def _reply(caller: Agent, t: Task, mode: str, profile: str, branch: str | None, repo: str | None,
+           notes: str, warnings: list[str], tail: str = "") -> str:
+    """assign/handoff's reply for task ``t`` it queued to start, from what it
+    is now: still queued (as it always is when the transport releases it
+    after the reply), started already (named, never waited for: waiting is
+    wait_for_worker's job) or cancelled (its start failed at once)."""
+    db = DB()
+    now = db.get_task(t.id) or t
+    worker = db.get_agent(now.agent_id) if now.agent_id else None
+    wws = db.get_workspace(worker.workspace_id) if worker else None
+    if worker and wws and not agents.runs_process(worker):
+        return _remind_goal(db, caller, agents.subagent_brief(worker, wws))
+    if now.state == "cancelled":
+        return _not_started(db, t)
+    wait = ("" if mode != "handoff" else
+            " Call wait_for_worker(agent_id=\"{}\") to wait for its result; it also arrives as a message.")
+    if worker and wws:
+        text = f"Started worker {worker.id} ({worker.profile}) in workspace {wws.id} on branch {wws.branch}."
+        if repo and repo.strip():
+            text += f" (repo {repo.strip()}: {wws.repo_root})"
+        text += wait.format(worker.id)
+        warnings = [*warnings, *tasks._launch_warnings(worker, wws)]
+    else:
+        text = _queued_text(now, profile, branch, not agents.launches_process(profile, now.repo_root))
+        text += wait.format(t.id)
+    return _remind_goal(db, caller, text + notes + "".join(f"\nWarning: {w}" for w in warnings) + tail)
+
+
+def _await_task(db: DB, task_id: str, wait_seconds: int) -> str:
+    """Wait a bounded time for queued task ``task_id``'s worker to start,
+    then for its result (``_await_worker``) in what's left of the time."""
+    end = time.monotonic() + wait_seconds
+    pause = threading.Event()
+    while True:
+        t = db.get_task(task_id)
+        if t is None:
+            return f"No worker or task {task_id}."
+        if t.agent_id:
+            return _await_worker(db, t.agent_id, max(0, int(end - time.monotonic())))
+        if t.state == "cancelled":
+            return f"Task {task_id} was cancelled before its worker started: {tasks.cancel_reason(db, task_id)}"
+        if time.monotonic() >= end:
+            return (f"Task {task_id} hasn't started its worker yet"
+                    + (f" (waiting for room: {t.waiting})" if t.waiting else "")
+                    + f". Its result will arrive as a message; to keep waiting now, call "
+                    f"wait_for_worker(agent_id=\"{task_id}\").")
+        pause.wait(min(2.0, max(0.0, end - time.monotonic())))
+
+
+def _route_clash(req: _Request, db: DB, caller: Agent, ws: Workspace, profile: str, task: str, mode: str, *,
                  isolate: bool, branch: str | None, done_when: str | None, files: list[str] | None,
                  depends_on: list[str] | None, plan_first: bool | None, weight: str | None,
                  decision: dict, why: list[str], analysis_doc: bool = False) -> tuple[str | None, str | None]:
@@ -340,8 +497,10 @@ def _route_clash(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, 
     setting (``tasks.overlap_mode``): (a reply to return instead of starting,
     a warning for the started reply). Queueing waits on the holder's worker;
     a second identical assign leaves the queued task in place. Another
-    session's work is never cancelled or replaced: both supervisors are told."""
-    clash = tasks.find_clash(db, ws, files, task, caller.id)
+    session's work is never cancelled or replaced: both supervisors are told.
+    Only declared files, from the database (``tasks.declared_clash``): what
+    takes git to tell is checked at launch, after the reply."""
+    clash = tasks.declared_clash(db, ws, files, caller.id)
     if clash is None:
         return None, None
     how = tasks.overlap_mode(load_repo_config(ws.repo_root).overlap, clash.cross_session)
@@ -352,7 +511,7 @@ def _route_clash(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, 
         existing = tasks.pending_duplicate(db, caller.id, ws.repo_root, task)
         if existing:
             return f"Already queued as task {existing.id}; left it in place.", None
-        t = tasks.enqueue(
+        t = req.enqueue(
             db, caller, ws, profile, task, mode, isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=[*(depends_on or []), clash.holder],
             plan_first=plan_first, weight=weight, analysis_doc=analysis_doc,
@@ -373,50 +532,30 @@ def _route_clash(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, 
     return reply, clash.warning
 
 
-def _room_duplicate(db: DB, caller: Agent, ws: Workspace, task: str) -> str | None:
-    """The reply when this exact task is already queued for room (or being
-    started from that queue): never a second worker for it. If there's room
-    now, the queued one starts instead of waiting for its helper."""
-    t = tasks.room_duplicate(db, caller.id, ws.repo_root, task)
+def _room_duplicate(db: DB, caller: Agent, ws: Workspace, task: str, branch: str | None) -> str | None:
+    """The reply when this exact task is already queued and hasn't started a
+    worker yet (``tasks.room_duplicate``): never a second worker for it. If
+    it waits only for room and there's room now, it starts (detached)
+    instead of waiting for its helper's next look."""
+    t = tasks.room_duplicate(db, caller.id, ws.repo_root, task, branch)
     if t is None:
         return None
-    if t.state == "pending" and tasks.start_with_room_now(db, t):
-        t = db.get_task(t.id)
+    deps = tasks._loads(t.depends_on)
+    if t.state == "pending" and t.waiting and not deps and tasks.room_wait(t.repo_root, t.profile) is None:
+        tasks.start_in_background(t.id)
+        t = db.get_task(t.id) or t
+        started = f"it started: worker {t.agent_id}" if t.agent_id else "it is starting now"
         return _remind_goal(db, caller, f"This task was already queued as task {t.id}; there's room "
-                            f"now, so it started: worker {t.agent_id}. Nothing else was started.")
-    state = "being started right now" if t.state != "pending" else f"waiting for room: {t.waiting}"
+                            f"now, so {started}. Nothing else was started.")
+    if t.state == tasks.UNANSWERED:
+        state = "queued by a request still being answered"
+    elif t.state != "pending":
+        state = "being started right now"
+    elif deps:
+        state = f"waiting on {', '.join(deps)}"
+    else:
+        state = f"waiting for room: {t.waiting}" if t.waiting else "starting in the background"
     return f"Already queued as task {t.id} ({state}); left it in place."
-
-
-def _queue_for_room(db: DB, caller: Agent, ws: Workspace, profile: str, task: str, mode: str, *,
-                    isolate: bool, branch: str | None, done_when: str | None, files: list[str] | None,
-                    depends_on: list[str] | None, plan_first: bool | None, weight: str | None,
-                    decision: dict, why: list[str], busy: str, analysis_doc: bool = False) -> str:
-    """The machine has no room for another worker (``agents.NoRoom``, why
-    ``busy``): queue the task until it has, and return the reply saying so."""
-    t = tasks.enqueue(
-        db, caller, ws, profile, task, mode, isolate=isolate, branch=branch, done_when=done_when,
-        files=files, depends_on=depends_on, plan_first=plan_first, weight=weight,
-        analysis_doc=analysis_doc, waiting=busy,
-    )
-    savings.record(db, ws.repo_root, decision, task_id=t.id)
-    return _remind_goal(db, caller, (
-        f"Queued task {t.id}, not started: {tasks.load_note(db)}. Your choices: wait (it starts on "
-        "its own once there's room and you get a message then; list_tasks shows it as waiting for "
-        f"room), start_now(\"{t.id}\") to start this worker despite the load, or cancel_task to give "
-        "it up. Don't assign it again.")
-        + "".join(f"\nprofile: {w}" for w in why))
-
-
-def _start_failure(profile: str, e: Exception) -> str:
-    """The reply when a worker couldn't be started. Returned rather than
-    raised: an exception with no message reaches the supervisor as a bare
-    "Error executing tool", with nothing to act on."""
-    reason = str(e).strip()
-    kind = type(e).__name__
-    return (f"Not started: couldn't start a worker on profile {profile!r}: "
-            + (reason if isinstance(e, agents.AgentError) and reason
-               else f"{kind}: {reason}" if reason else kind))
 
 
 @mcp.tool()
@@ -449,9 +588,11 @@ async def handoff(
     architecture, broad refactoring; advanced = complex, long-running
     system-design and implementation tasks.
 
-    Waits up to wait_seconds (default 4 minutes). If the worker isn't done by
-    then, this returns "still running": call wait_for_worker to keep waiting,
-    or carry on, and the result will arrive as a message.
+    Replies at once with the task id (or the worker id, if it started that
+    fast): the worker starts in the background, once the machine has room.
+    Then call wait_for_worker with that id to wait for its result (up to its
+    wait_seconds; this tool's own wait_seconds is no longer used), or carry
+    on, and the result will arrive as a message.
 
     With isolate=true (default) the worker gets its own git worktree on a new
     branch cut from YOUR current branch. It only sees work you've committed,
@@ -482,7 +623,7 @@ async def handoff(
     default whatever the weight; ask only for work worth documenting (never
     for merge or sync chores).
     """
-    def run() -> str:
+    def run(req: _Request):
         db = DB()
         caller, ws = _caller(db)
         if not task.strip():
@@ -504,16 +645,17 @@ async def handoff(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
-        repeated = _room_duplicate(db, caller, ws, task)
+        repeated = _room_duplicate(db, caller, ws, task, branch)
         if repeated:
             return repeated
         try:
-            unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id)
+            # No git before the reply: the start checks the rest before launching.
+            unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id, inspect=False)
         except agents.AgentError as e:
             return str(e)
         effective_weight = decision.get("weight") or weight
         if unmet:
-            t = tasks.enqueue(
+            t = req.enqueue(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
                 weight=effective_weight, analysis_doc=analysis_doc,
@@ -523,53 +665,35 @@ async def handoff(
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
                                 + "".join(f"\nprofile: {w}" for w in why))
         reply, warning = _route_clash(
-            db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
+            req, db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
             weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
         if reply:
             return reply
-        try:
-            worker, wws = agents.delegate(
-                db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
-                done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
-                analysis_doc=analysis_doc,
-            )
-        except agents.NoRoom as e:
-            return _queue_for_room(
-                db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
-                done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight, decision=decision, why=why, busy=str(e),
-                analysis_doc=analysis_doc)
-        except Exception as e:  # noqa: BLE001
-            return _start_failure(profile, e)
-        started = tasks.record_started(
-            db, ws, worker, profile, task,"handoff", isolate=isolate, branch=branch,
-            done_when=done_when, files=files, depends_on=depends_on, weight=effective_weight,
+        # The worktree, its setup and the launch (a subagent's worktree too) wait
+        # for room under load: they run detached once this has replied.
+        t = req.enqueue(
+            db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
+            done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+            weight=effective_weight, analysis_doc=analysis_doc, start=True,
         )
-        savings.record(db, ws.repo_root, decision, task_id=started.id, agent_id=worker.id)
-        if not agents.runs_process(worker):
-            return _remind_goal(db, caller, agents.subagent_brief(worker, wws))
-        missing = agents.add_dirs_warning(worker, wws)
-        unhooked = codex_hook.launch_warning(worker.provider, wws.path)
-        unapplied = antigravity.launch_warning(worker, wws)
-        result = _await_worker(db, worker.id, wait_seconds)
-        for w in why:
-            result += f"\n\nProfile: {w}"
-        brief = brief_learning.warning(db, ws.repo_root, task, done_when, files, weight)
-        for w in (warning, missing, unhooked, unapplied, brief):
-            if w:
-                result += f"\n\nWarning: {w}"
-        return _remind_goal(db, caller, result)
+        savings.record(db, ws.repo_root, decision, task_id=t.id)
+        notes = "".join(f"\nprofile: {w}" for w in why)
+        late = [w for w in (warning, brief_learning.warning(db, ws.repo_root, task, done_when, files, weight)) if w]
+        return lambda: _reply(caller, t, "handoff", profile, branch, repo, notes, late)
 
-    return await asyncio.to_thread(run)
+    return await _answer(run)
 
 
 @mcp.tool()
 async def wait_for_worker(agent_id: str, wait_seconds: int = DEFAULT_WAIT_SECONDS) -> str:
-    """Keep waiting for a worker started with handoff that was still running.
+    """Keep waiting for a worker started with handoff that was still running,
+    or (a task id handoff replied with) for its worker to start and finish.
     Returns its result, or "still running" again after wait_seconds."""
     def run() -> str:
         db = DB()
+        if db.get_agent(agent_id) is None and db.get_task(agent_id) is not None:
+            return _await_task(db, agent_id, wait_seconds)
         return _await_worker(db, agent_id, wait_seconds)
 
     return await asyncio.to_thread(run)
@@ -630,7 +754,7 @@ async def assign(
     default whatever the weight; ask only for work worth documenting (never
     for merge or sync chores).
     """
-    def run() -> str:
+    def run(req: _Request):
         db = DB()
         caller, ws = _caller(db)
         if not task.strip():
@@ -652,16 +776,17 @@ async def assign(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
-        repeated = _room_duplicate(db, caller, ws, task)
+        repeated = _room_duplicate(db, caller, ws, task, branch)
         if repeated:
             return repeated
         try:
-            unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id)
+            # No git before the reply: the start checks the rest before launching.
+            unmet = tasks.unmet_dependencies(db, ws, depends_on, caller_id=caller.id, inspect=False)
         except agents.AgentError as e:
             return str(e)
         effective_weight = decision.get("weight") or weight
         if unmet:
-            t = tasks.enqueue(
+            t = req.enqueue(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
                 weight=effective_weight, analysis_doc=analysis_doc,
@@ -671,53 +796,31 @@ async def assign(
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
                                 + "".join(f"\nprofile: {w}" for w in why))
         reply, warning = _route_clash(
-            db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
+            req, db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
             weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
         if reply:
             return reply
-        try:
-            worker, wws = agents.delegate(
-                db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
-                done_when=done_when, plan_first=plan_first, files=files, weight=effective_weight,
-                analysis_doc=analysis_doc,
-            )
-        except agents.NoRoom as e:
-            return _queue_for_room(
-                db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
-                done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight, decision=decision, why=why, busy=str(e),
-                analysis_doc=analysis_doc)
-        except Exception as e:  # noqa: BLE001
-            return _start_failure(profile, e)
-        started = tasks.record_started(
-            db, ws, worker, profile, task,"assign", isolate=isolate, branch=branch,
-            done_when=done_when, files=files, depends_on=depends_on, weight=effective_weight,
+        # Admission, the worktree, its setup and the launch (a subagent's
+        # worktree too) wait for room under load: they run detached once this
+        # has replied (tasks.answered).
+        t = req.enqueue(
+            db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
+            done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+            weight=effective_weight, analysis_doc=analysis_doc, start=True,
         )
-        savings.record(db, ws.repo_root, decision, task_id=started.id, agent_id=worker.id)
-        if not agents.runs_process(worker):
-            return _remind_goal(db, caller, agents.subagent_brief(worker, wws))
-        text = f"Started worker {worker.id} ({worker.profile}) in workspace {wws.id} on branch {wws.branch}."
-        if repo and repo.strip():
-            text += f" (repo {repo.strip()}: {wws.repo_root})"
-        for w in why:
-            text += f"\nprofile: {w}"
+        savings.record(db, ws.repo_root, decision, task_id=t.id)
+        notes = "".join(f"\nprofile: {w}" for w in why)
         if learned and not why:
-            text += f"\nprofile chosen by learning: {profile}"
-        for w in (warning, agents.add_dirs_warning(worker, wws),
-                  codex_hook.launch_warning(worker.provider, wws.path),
-                  antigravity.launch_warning(worker, wws),
-                  brief_learning.warning(db, wws.repo_root, task, done_when, files, weight)):
-            if w:
-                text += f"\nWarning: {w}"
-        for n in quota.notes(wws.repo_root):
-            text += f"\nNote: {n}."
-        estimate = cost_estimate.reply_note(db, wws.repo_root, [cost_estimate.TaskSpec(profile, weight)])
+            notes += f"\nprofile chosen by learning: {profile}"
+        late = [w for w in (warning, brief_learning.warning(db, ws.repo_root, task, done_when, files, weight)) if w]
+        tail = "".join(f"\nNote: {n}." for n in quota.notes(ws.repo_root))
+        estimate = cost_estimate.reply_note(db, ws.repo_root, [cost_estimate.TaskSpec(profile, weight)])
         if estimate:
-            text += f"\n{estimate}"
-        return _remind_goal(db, caller, text)
+            tail += f"\n{estimate}"
+        return lambda: _reply(caller, t, "assign", profile, branch, repo, notes, late, tail)
 
-    return await asyncio.to_thread(run)
+    return await _answer(run)
 
 
 @mcp.tool()
@@ -1456,10 +1559,11 @@ def handover(to: str, note: str | None = None) -> str:
         return "No session to hand over."
     try:
         dest = workspaces.checkout_for_target(db, ws.path, to)
-        new = sessions.handover(db, root_id, dest, note, pause_old=False)
+        h = sessions.handover_to(db, root_id, dest, note, pause_old=False)
     except (git.GitError, workspaces.WorkspaceError, agents.AgentError, ValueError) as e:
         return f"Handover failed: {e}"
-    return (f"Handed the session over to {new.id} in {dest.id} ({dest.branch}). Your goal, workers and "
+    return (f"Handed the session over to {h.agent.id} in {dest.id} ({dest.branch})"
+            + (f": {h.why}" if h.why else "") + ". Your goal, workers and "
             "queued tasks are now theirs; tell the user and stop.")
 
 
@@ -1666,10 +1770,67 @@ def _report_server_exit(error: Exception | None = None) -> None:
         logger.exception("Could not deliver the MCP recovery notice")
 
 
+def _wants_reload(reloaded: bool) -> bool:
+    """Whether to exec the installed brindle in place before serving the next
+    request: the install changed under this server, or a newer brindle
+    migrated the database. A server that a reload started and still finds
+    the database newer than its code gets nothing from another one."""
+    return upgrade.install.changed() or (not reloaded and migrated_by_newer())
+
+
+async def _run_server(read_stream, write_stream) -> None:
+    server = mcp._lowlevel_server
+    await server.run(read_stream, write_stream, server.create_initialization_options())
+
+
+async def _serve_stdio(handover) -> None:
+    from brindle import mcp_stdio
+
+    in_fd, out_fd = mcp_stdio.claim_stdio()
+    await _serve(mcp_stdio.Connection(in_fd, out_fd, handover, wants_reload=_wants_reload,
+                                      replace=mcp_stdio.replace, std=True))
+
+
+INSTALL_WATCH_INTERVAL = 5.0   # seconds between an idle server's looks at its install
+
+
+async def _serve(conn, wait=None) -> None:
+    """Serve the client on ``conn`` (an mcp_stdio.Connection). Every
+    INSTALL_WATCH_INTERVAL it looks at the install, as the daemon does, and
+    wakes ``conn`` when that changed since its last look: an update reloads
+    an idle server too, however it was installed (app, `uv tool upgrade`, by
+    hand) and whether or not a daemon runs. A change mid-update wakes it
+    again on the next look, once the install is complete."""
+    import anyio
+
+    from brindle.daemon.lifecycle import _elapse
+
+    wait = wait or _elapse
+
+    async def watch_install():
+        seen = upgrade.stamp()
+        while True:
+            await wait(INSTALL_WATCH_INTERVAL)
+            now = upgrade.stamp()
+            if now != seen and upgrade.install.changed():
+                conn.wake()
+            seen = now
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(watch_install)
+        await conn.serve(_run_server)
+        tg.cancel_scope.cancel()
+
+
 def main() -> None:
+    import anyio
+
+    from brindle import mcp_stdio
+
+    handover = mcp_stdio.take_handover()    # before anything this process starts inherits it
     refresher = start_azure_refresher()
     try:
-        mcp.run()
+        anyio.run(_serve_stdio, handover)
     except Exception as error:
         _report_server_exit(error)
         raise

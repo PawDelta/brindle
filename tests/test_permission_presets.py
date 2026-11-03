@@ -137,9 +137,37 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "git push --force origin feature"), "deny", "d-git-force"),
     (lambda ws: bash(ws, "git push origin +topic:feature"), "deny", "d-git-force"),   # a forced refspec
     (lambda ws: bash(ws, "git push origin :feature"), "deny", "d-git-force"),         # deletes the branch
+    (lambda ws: bash(ws, "git reset --hard HEAD~1"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git branch -D topic"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git clean -fd"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git worktree remove --force ../wt"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git switch -f main"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git switch --discard-changes main"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git rm -f src/app.py"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git rm -f $(cat stale.txt)"), "deny", "d-git-force"),
+    # A separator inside quotes splits no command: the force flag after it still counts.
+    (lambda ws: bash(ws, "git rm 'a;b' -f"), "deny", "d-git-force"),
+    (lambda ws: bash(ws, 'git checkout "x;y" -f'), "deny", "d-git-force"),
+    (lambda ws: bash(ws, 'git reset "x;y" --hard'), "deny", "d-git-force"),
+    (lambda ws: bash(ws, 'git push origin "a;b" --force'), "deny", "d-git-force"),
+    (lambda ws: bash(ws, 'git tag -m "fix (x)" -f v1'), "deny", "d-git-force"),
+    (lambda ws: bash(ws, "git worktree add -f ../wt topic"), "allow", None),       # a forced add discards nothing
+    (lambda ws: bash(ws, "git add -f build/out.txt"), "allow", None),
+    (lambda ws: bash(ws, 'git commit -m "Add --force option"'), "allow", None),     # a message, not an option
+    (lambda ws: bash(ws, "git tag -F -f v1"), "allow", None),                      # -F's value is a file name
+    (lambda ws: bash(ws, "git commit -mfix"), "allow", None),                      # an attached message, not -f
+    (lambda ws: bash(ws, "git config -f .gitmodules submodule.x.url u"), "allow", None),   # -f is --file
+    (lambda ws: bash(ws, "git rebase -f main"), "allow", None),
+    (lambda ws: bash(ws, "git gc --force"), "allow", None),
     (lambda ws: bash(ws, "rm -rf / --no-preserve-root"), "deny", "d-rm"),
     (lambda ws: bash(ws, "rm -fr /"), "deny", "d-rm"),
     (lambda ws: bash(ws, "rm -Rf ~/"), "deny", "d-rm"),
+    # An apostrophe in a comment, a $'...' escape or a heredoc body opens no quote.
+    (lambda ws: bash(ws, "ls # it's fine\nrm -rf /"), "deny", "d-rm"),
+    (lambda ws: bash(ws, "echo hi # don't\nrm -rf ~"), "deny", "d-rm"),
+    (lambda ws: bash(ws, "echo $'it\\'s'; rm -rf /"), "deny", "d-rm"),
+    (lambda ws: bash(ws, "echo $'it\\'s' && rm -rf $HOME"), "deny", "d-rm"),
+    (lambda ws: bash(ws, "cat <<EOF\nit's $(date)\nEOF\nrm -rf /"), "deny", "d-rm"),
     (lambda ws: bash(ws, "rm -rf build/"), "allow", None),
     (lambda ws: read(ws, os.path.expanduser("~/.aws/credentials")), "deny", "d-aws"),
     (lambda ws: read(ws, os.path.join(ws.repo_root, ".env")), "deny", "d-env"),

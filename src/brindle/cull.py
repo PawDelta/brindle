@@ -9,7 +9,10 @@ A sweep, run by the sidebar every minute, when ``brindle`` starts, and by
    see agents.owns_pane) is stopped (see brindle.procs). An
    agent whose window vanished while it was marked running is recorded the
    way ``agents.pause`` would have: paused, so ``brindle continue`` can still
-   bring it back, or done if it had already reported.
+   bring it back, or done if it had already reported. A worker whose pane
+   is dead (its CLI killed outside brindle, often with no process left to
+   find) is marked failed with its exit status, and its supervisor told
+   (note_dead_panes); done instead if it had reported.
 
 2. Stale workers. A worker that reported and has sat idle for ``stale_after``
    minutes (repo config, default 30; 0 turns this off), with nothing queued
@@ -18,7 +21,10 @@ A sweep, run by the sidebar every minute, when ``brindle`` starts, and by
    or branch, so its supervisor can still review and merge the work.
 
 It also stops the Ollama server brindle started once no running session uses
-it (see brindle.native.serve.stop_unused).
+it (see brindle.native.serve.stop_unused), and reaps what outlived its work
+(see brindle.reap): orphan and finished workers' tmux sessions, empty shells,
+supervisors idle for days (paused, resumable), old coordinator rows, and
+workers whose branch already landed.
 
 Interactive agents (supervisor chats) are never closed here; only their
 leftover processes are stopped.
@@ -40,6 +46,7 @@ from __future__ import annotations
 import fcntl
 import os
 import re
+import signal
 import time
 from pathlib import Path
 
@@ -128,11 +135,16 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
             paused = agents.pause(db, a.id, stop_procs=False, stop_local_models=False)
             done.append(f"paused session {a.id} ({len(paused)} agent(s)): its chat is gone")
 
+    # 0c. Workers whose CLI was killed outside brindle: a dead pane, often
+    # with nothing left for step 1 to find.
+    done.extend(note_dead_panes(db, now, panes))
+
     # 1. Processes of agents that shouldn't be running.
     leftovers = []
     for aid in procs.all_agent_ids(table):
         a = db.get_agent(aid)
-        if a is None or a.status in ("paused", "done") or a.dismissed_at is not None:
+        if (a is None or a.status in ("paused", "done") or a.dismissed_at is not None
+                or (a.status == "failed" and here(a) and not alive(a))):
             leftovers.append(aid)
         elif (agents.runs_process(a) and here(a) and not alive(a)
               and now - max(a.created_at, a.status_since or 0) > LAUNCH_GRACE):
@@ -290,6 +302,86 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     # 6. Finished work: merged worktrees and ones whose folder is gone leave
     # the live view, archived (not only when someone runs `brindle prune`).
     done.extend(prune_retired(db, now, cautious=True))
+
+    # 7. What outlived its work: orphan and finished tmux sessions, empty
+    # shells, idle supervisors, old coordinator rows, superseded workers.
+    from brindle import reap
+
+    done.extend(reap.run(db, now))
+    return done
+
+
+# What a worker can be doing while its CLI runs ('unknown': a Codex worker,
+# whose status no hook reports). 'starting' is launch_health's to judge.
+RUNNING_STATUSES = ("processing", "idle", "waiting", "unknown")
+
+
+def exit_cause(status: int | None, signum: int | str | None) -> str:
+    """How a dead pane's program ended, for people: "status 143 (SIGTERM)",
+    "signal 9 (SIGKILL)", "status 1". A status above 128 from a shell is
+    128 plus the signal that killed what it ran. A signal tmux named but
+    Python doesn't know stays as tmux named it."""
+    def name(n: int) -> str | None:
+        try:
+            return signal.Signals(n).name
+        except ValueError:
+            return None
+
+    if isinstance(signum, str):
+        return f"signal {signum}"
+    if signum is not None:
+        return f"signal {signum} ({name(signum) or 'unknown signal'})"
+    if status is None:
+        return "an unknown status"
+    sig = name(status - 128) if status > 128 else None
+    return f"status {status} ({sig})" if sig else f"status {status}"
+
+
+def note_dead_panes(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """A worker or reviewer still marked running whose pane is dead (its CLI
+    was killed outside brindle, or exited on its own) is marked stopped: done
+    if it had already reported, else 'failed' with failed_why naming the exit,
+    and its supervisor is told once (the status change is what keeps it to
+    once). A dead pane's exit status is only in a tmux.PaneSnapshot."""
+    exits = getattr(panes, "exits", None)
+    if not exits:
+        return []
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for a in db.list_agents():
+        if (a.mode not in agents.REPORTING_MODES or a.status not in RUNNING_STATUSES
+                or a.dismissed_at is not None or a.tmux_window not in exits
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.owns_pane(db, a, owners)
+                or now - max(a.created_at, a.status_since or 0) <= LAUNCH_GRACE):
+            continue
+        cause = exit_cause(*exits[a.tmux_window])
+        # Only from the status it was read in, and only once: a hook that
+        # moved it since, or another sweep that got there first, wins.
+        status = db.claim_exited(a.id, a.status, f"exited: {cause}")
+        if status is None:
+            continue
+        db.end_native_subagents(a.id)
+        if status == "done":
+            done.append(f"marked {a.id} done: its pane died ({cause}) after it reported")
+            continue
+        agents._note_reviewer_end(db, db.get_agent(a.id) or a)
+        done.append(f"marked {a.id} failed: its pane died ({cause})")
+        if not a.parent_id:
+            continue
+        ws = db.get_workspace(a.workspace_id)
+        where = f" on branch `{ws.branch}`" if ws else ""
+        who = "Reviewer" if a.mode == "review" else "Worker"
+        body = (f"{who} {a.id} ({a.profile}, {a.provider}){where} stopped before it reported: "
+                f"its process exited with {cause} outside brindle, and its pane is dead. Its "
+                "worktree and branch are untouched. Resume it with `brindle continue` (which "
+                "restarts a live session's failed workers), or rewind it to an earlier turn "
+                "with rewind_agent.")
+        try:
+            agents.send_message(db, a.parent_id, body, sender_id=a.id)
+        except agents.AgentError:
+            db.enqueue(a.parent_id, body, a.id)
+        done.append(f"told {a.parent_id} that {a.id}'s pane died")
     return done
 
 
@@ -396,11 +488,8 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 f"It can't continue until someone answers it.{attach} "
                 f"or remove the workspace if it's no longer needed.{auto_mode_note(a, ws)}"
                 f"{request}\n\nIts screen:\n{tail}")
-        try:
-            agents.send_message(db, a.parent_id, body, sender_id=a.id)
-        except agents.AgentError:
-            continue  # its supervisor isn't running; try again on a later sweep
-        db.update_agent(a.id, stuck_noted=since)
+        if not _send_note(db, a, since, body):
+            continue  # noted by another sweep, or its supervisor isn't running (tried again later)
         done.append(f"told {a.parent_id} that worker {a.id} is stuck on a prompt")
     return done
 
@@ -542,7 +631,8 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
             if unacted is not None and a.stuck_noted != unacted.created_at:
                 # A verdict on record that never moved the branch on (the
                 # pipeline dropped it): act on it once, and say so.
-                db.update_agent(a.id, stuck_noted=unacted.created_at)
+                if not db.claim_note(a.id, unacted.created_at)[0]:
+                    continue   # another process's sweep took it
                 if not pipeline.replay_verdict(db, ws, unacted, a, head, now):
                     continue   # acted on since ``a`` was read
                 verdict = "approved" if unacted.approved else "requested changes on"
@@ -550,7 +640,7 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
                 done.extend(_tell_stalled(db, a, unacted.created_at, (
                     f"Reviewer {unacted.reviewer_id} {verdict} {where} at {unacted.sha[:8]} "
                     f"{int((now - unacted.created_at) // 60)} min ago, but the pipeline never acted on "
-                    f"it. brindle has acted on it now; the branch stands at: {state}.")))
+                    f"it. brindle has acted on it now; the branch stands at: {state}."), claimed=True))
                 continue
             since = max([a.reviewing_since] + [r.created_at for r in reviewers])
             if now - since < cfg.review_start_delay or db.latest_review(ws.id, head) or reviewing:
@@ -566,13 +656,8 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
                     f"request_review(\"{ws.id}\") to get it reviewed.")
         else:
             continue
-        if a.stuck_noted == since:
+        if a.stuck_noted == since or not _send_note(db, a, since, body):
             continue
-        try:
-            agents.send_message(db, a.parent_id, body, sender_id=a.id)
-        except agents.AgentError:
-            continue
-        db.update_agent(a.id, stuck_noted=since)
         done.append(f"told {a.parent_id} that reported worker {a.id} is stuck")
     return done
 
@@ -581,14 +666,33 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
 PIPED = ("reviewing", "fixing", "ready")
 
 
-def _tell_stalled(db: DB, a: Agent, since: float, body: str) -> list[str]:
-    """Tell ``a``'s supervisor ``body`` about its piped branch, once per
-    ``since`` (kept in stuck_noted, as the other notes do)."""
+def _send_note(db: DB, a: Agent, since: float, body: str) -> bool:
+    """Send ``a``'s supervisor ``body``, once per ``since`` (kept in
+    stuck_noted). Every brindle process sweeps from its own read of the
+    workers, so the note is claimed in the database before it is sent: only
+    one of them sends it, and the claim is let go if the send fails."""
+    won, previous = db.claim_note(a.id, since)
+    if not won:
+        return False
     try:
-        agents.send_message(db, a.parent_id, f"[brindle pipeline] {body}", sender_id=a.id)
+        agents.send_message(db, a.parent_id, body, sender_id=a.id)
     except agents.AgentError:
+        db.release_note(a.id, since, previous)
+        return False
+    return True
+
+
+def _tell_stalled(db: DB, a: Agent, since: float, body: str, *, claimed: bool = False) -> list[str]:
+    """Tell ``a``'s supervisor ``body`` about its piped branch, once per
+    ``since`` (see ``_send_note``). A caller that has ``claimed`` it already
+    says so."""
+    if claimed:
+        try:
+            agents.send_message(db, a.parent_id, f"[brindle pipeline] {body}", sender_id=a.id)
+        except agents.AgentError:
+            return []
+    elif not _send_note(db, a, since, f"[brindle pipeline] {body}"):
         return []
-    db.update_agent(a.id, stuck_noted=since)
     return [f"told {a.parent_id} that the branch of {a.id} is stalled"]
 
 
@@ -697,11 +801,8 @@ def note_silent(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 f"{int((now - last) // 60)} min and hasn't reported. {why} {look} "
                 "cancel it and assign the task to another profile."
                 f"\n\nIts screen:\n{tail}")
-        try:
-            agents.send_message(db, a.parent_id, body, sender_id=a.id)
-        except agents.AgentError:
+        if not _send_note(db, a, last, body):
             continue
-        db.update_agent(a.id, stuck_noted=last)
         done.append(f"told {a.parent_id} that worker {a.id} has gone silent")
     return done
 
@@ -1078,3 +1179,6 @@ def sweep_quietly(db: DB) -> None:
             prune_retired(db, cautious=True)
         except Exception:  # noqa: BLE001
             pass
+    from brindle import disk
+
+    disk.now_and_then(db)   # old backups, aged archive, big logs, merged worktrees: at most hourly

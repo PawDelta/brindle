@@ -57,7 +57,7 @@ from contextlib import contextmanager
 
 from brindle import (
     agents, autopilot, bus, codemap, codemap_docs, conflicts, events, gates, git, history, learning, policy,
-    savings, tasks, workspaces,
+    savings, session_sync, tasks, workspaces,
 )
 from brindle.config import RepoConfig, load_repo_config
 from brindle.db import DB, Agent, Review, Workspace
@@ -712,7 +712,7 @@ def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
         try:
             second = second_profile(db, cfg, current, ws)
             first = agents.default_review_profile(cfg, current, db, ws.repo_root, current.task) if second else None
-            profile = agents._review_profile(db, ws, first, cfg)
+            profile = agents._review_choice(db, ws, first, cfg)[0]   # start_review tells the reason
             sha = gates.head(ws)
             if agents._live_reviewer(db, ws, sha, profile) or (
                     cfg.checks and agents._review_pending(ws.id, profile, sha)):
@@ -1624,14 +1624,12 @@ def _still_in_use(db: DB, ws: Workspace) -> str | None:
 
 def _remove(db: DB, ws: Workspace, keep: Agent | None = None) -> str:
     """Remove ``ws`` while ``keep`` (the agent running this code) survives:
-    the other agents' windows are stopped, but the session ``keep`` is in is
-    left for its own close."""
+    the other agents are stopped once the worktree is known to go (kept,
+    it keeps them), but the session ``keep`` is in is left for its own close."""
     try:
-        if keep is not None:
-            for a in db.list_agents(ws.id):
-                if a.id != keep.id and agents.is_alive(a):
-                    agents._stop(db, a)
-        removed = workspaces.remove(db, ws, force=False, keep_session=keep is not None)
+        others = [a for a in db.list_agents(ws.id)
+                  if keep is not None and a.id != keep.id and agents.is_alive(a)]
+        removed = workspaces.remove(db, ws, force=False, keep_session=keep is not None, stop=others)
         return f"Worktree removed; {removed.branch_note or 'branch kept'}."
     except workspaces.WorkspaceError as e:
         return f"(worktree kept: {e})"
@@ -1750,6 +1748,12 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
     verdict = policy.check_merge(cfg, ws, agents.workspace_worker(db, ws), caller)
     if not verdict.allowed:
         return f"Not merged: the repo's policy refused it: {verdict.reason}"
+    # Into a session's branch: bring origin's default branch into it first
+    # (under the base lock this merge holds), and refuse while that conflicts.
+    if (home := session_sync.session_checkout(db, ws)) is not None:
+        session_sync.sync(db, home)
+    if why := session_sync.merge_block(db, ws):
+        return f"Not merged: {why}"
     try:
         behind, _ahead = git.ahead_behind(ws.path, workspaces.require_base(ws))
         if behind:

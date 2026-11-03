@@ -57,24 +57,21 @@ const topicsOf = (node: GraphNode) => {
   return Array.isArray(topics) ? topics.filter((t): t is string => typeof t === "string" && t.trim() !== "") : [];
 };
 
-/* The map as documents only. Code paths stop being nodes: two documents
+/* The map as knowledge records. Code paths stop being nodes: two records
    that share paths or topics get one link, weighted by how many they share,
-   and explicit document-to-document relations stay. Local records keep the
-   documents they reach directly or through a path, and are dropped if they
-   reach none. */
+   and explicit relations stay. Local records are knowledge in their own
+   right, even when the hosted library is empty. */
 export function docGraph(nodes: GraphNode[], edges: MapEdge[]): DocGraph {
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const docs = nodes.filter((node) => node.kind === "doc");
-  const paths = new Map(docs.map((doc) => [doc.id, new Set(doc.kind === "doc" ? doc.paths ?? [] : [])]));
-  const reach = new Map<string, Set<string>>();
+  const docs = nodes.filter((node) => node.kind !== "path");
+  const paths = new Map(docs.map((doc) => [doc.id, new Set(doc.paths ?? [])]));
   for (const edge of edges) {
     const a = byId.get(edge.source), b = byId.get(edge.target);
     if (!a || !b) continue;
     for (const [one, other] of [[a, b], [b, a]]) {
       const path = pathOf(other);
       if (path === null) continue;
-      if (one.kind === "doc") paths.get(one.id)!.add(path);
-      else if (one.kind !== "path") { if (!reach.has(one.id)) reach.set(one.id, new Set()); reach.get(one.id)!.add(path); }
+      if (one.kind !== "path") paths.get(one.id)!.add(path);
     }
   }
   const holders = new Map<string, string[]>();
@@ -95,24 +92,13 @@ export function docGraph(nodes: GraphNode[], edges: MapEdge[]): DocGraph {
     }
   }
   const out: DocEdge[] = [...pairs.values()];
-  const local = new Map<string, Set<string>>();
-  const link = (from: string, to: string, kind: string) => {
-    if (!local.has(from)) local.set(from, new Set());
-    if (local.get(from)!.has(to)) return;
-    local.get(from)!.add(to);
-    out.push({ source: from, target: to, kind });
-  };
   for (const edge of edges) {
     const a = byId.get(edge.source), b = byId.get(edge.target);
     if (!a || !b || a.kind === "path" || b.kind === "path") continue;
-    if (a.kind === "doc" && b.kind === "doc") out.push(edge);
-    else if (a.kind === "doc" || b.kind === "doc") link(a.kind === "doc" ? b.id : a.id, a.kind === "doc" ? a.id : b.id, edge.kind);
-  }
-  for (const [id, held] of reach) for (const doc of docs) {
-    if ([...held].some((path) => paths.get(doc.id)!.has(path))) link(id, doc.id, "shared_path");
+    out.push(edge);
   }
   return {
-    nodes: nodes.filter((node) => node.kind === "doc" || (node.kind !== "path" && local.has(node.id))),
+    nodes: docs,
     edges: out,
     paths: new Map([...paths].map(([id, held]) => [id, [...held].sort()])),
   };

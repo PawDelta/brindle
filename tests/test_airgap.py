@@ -366,6 +366,7 @@ def test_request_review_passes_a_local_reviewer_to_the_launch(on, db, ws, repo, 
     add_profile(repo, "local", LOCAL_PROFILE)
     launched = []
     monkeypatch.setattr(agents, "spawn", lambda db, ws, profile, **kw: launched.append(profile))
+    monkeypatch.setattr("brindle.local_setup.memory_problem", lambda profile: None)
     agents.request_review(db, None, ws, profile="local")
     assert launched == ["local"]
 

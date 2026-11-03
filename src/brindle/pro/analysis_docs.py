@@ -37,6 +37,7 @@ from typing import Callable
 
 from brindle.pro import analysis_policy
 from brindle.pro.orgkey import OrgKeys, repo_identity
+from brindle.redact import mask_data
 
 log = logging.getLogger(__name__)
 
@@ -201,8 +202,8 @@ class AnalysisDocs:
             key = self.keys.get(ent.org_id)
             self._first_notice()
             client, store = self._deps()
-            body = {"scope": {"kind": "user", "id": ent.sub}, "files": doc.files, "source": doc.source,
-                    "repo_key": key.repo_key(identity)}
+            body = {"scope": {"kind": "user", "id": ent.sub}, "files": mask_data(doc.files),
+                    "source": mask_data(doc.source), "repo_key": key.repo_key(identity)}
             status, resp = auth.authed(client, store, "POST", "/analysis-docs", auth.JSONBody(body))
             if status != 200:
                 log.info("analysis doc not stored (HTTP %s)", status)
@@ -311,7 +312,8 @@ def _call(method: str, path: str, body: dict | None = None, *, client=None, stor
 
     client, store = _session(client, store)
     require_entitlement(store)
-    status, resp = auth.authed(client, store, method, path, auth.JSONBody(body) if body is not None else None)
+    sent = auth.JSONBody(mask_data(body)) if body is not None else None   # briefs, drafts: agent text
+    status, resp = auth.authed(client, store, method, path, sent)
     return status, resp if isinstance(resp, dict) else {}
 
 

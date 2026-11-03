@@ -6,10 +6,12 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -68,6 +70,46 @@ def current_server() -> str | None:
     meaningful on the server that issued them, so nothing may judge an agent
     by another server's panes."""
     return os.environ.get("BRINDLE_TMUX_SOCKET") or None
+
+
+def _server_pid(server: str | None) -> int | None:
+    proc = _tmux("display-message", "-p", "#{pid}", check=False, server=server)
+    out = proc.stdout.strip()
+    return int(out) if proc.returncode == 0 and out.isdigit() else None
+
+
+def cwd_gone(server: str | None) -> bool:
+    """Whether the running tmux ``server``'s working directory was deleted
+    (and maybe recreated at the same path: a new directory, a different
+    inode). Every window such a server opens then starts in the dead
+    directory, whatever ``-c`` says (tmux 3.8), and Claude Code exits at once
+    with "The current directory no longer exists" unless the pane changes
+    directory itself (in_dir, which every pane brindle starts does).
+    `brindle doctor` warns about it. False when the server isn't running or
+    its directory can't be read."""
+    pid = _server_pid(server)
+    if pid is None:
+        return False
+    if os.path.isdir("/proc/self"):     # Linux: the link names a deleted directory so
+        try:
+            return os.readlink(f"/proc/{pid}/cwd").endswith(" (deleted)")
+        except OSError:
+            return False
+    if not shutil.which("lsof"):
+        return False
+    try:
+        proc = spawn.read(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fin"], timeout=timeout())
+    except (spawn.Busy, subprocess.TimeoutExpired, OSError):
+        return False
+    fields = {line[0]: line[1:] for line in proc.stdout.splitlines() if line[:1] in ("i", "n")}
+    if not fields.get("i", "").isdigit() or not fields.get("n"):
+        return False
+    try:
+        return os.stat(fields["n"]).st_ino != int(fields["i"])
+    except OSError:
+        return True
+
+
 
 
 def _bin() -> str:
@@ -278,9 +320,22 @@ def scrubbed(command: list[str], unset: list[str]) -> list[str]:
     return ["/usr/bin/env", *(a for n in unset for a in ("-u", n)), "--", *command]
 
 
+# The pane tag of the daemon's action terminals (sign-ins, upgrades, the
+# app's shell tabs): the person's own terminals, not agents' (see new_window).
+TERMINAL_TAG = "@brindle_terminal"
+
+
+def in_dir(cwd: str, command: list[str]) -> list[str]:
+    """``command`` run in ``cwd``: the pane changes there itself, so it never
+    depends on tmux's start directory (a server sitting in a deleted
+    directory starts every window there, whatever ``-c`` says)."""
+    return ["/bin/sh", "-c", 'cd -- "$0" && exec "$@"', cwd, *command]
+
+
 def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[str, str],
                tag: tuple[str, str] | None = None, keep: Iterable[str] = (),
-               allow: Iterable[str] | None = None, deny: Iterable[str] = ()) -> str:
+               allow: Iterable[str] | None = None, deny: Iterable[str] = (),
+               agent_env: Iterable[str] = (), enforce: bool = False) -> str:
     """Open a window running ``command``. Returns the agent's PANE id (``%<n>``),
     not the window's: a window can hold more than one pane (e.g. the watch
     dashboard beside a supervisor), and keys sent to a window go to whichever
@@ -288,14 +343,21 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     set_pane_tag) is set on the pane before this returns, so the pane says
     whose it is from the moment anything else can see it.
 
-    The pane starts without brindle's secrets (secrets.SECRET_ENV and
-    SECRET_PREFIXES: the Pro token, GitHub's tokens), which it would otherwise
-    inherit from the tmux server. Whatever ``env`` sets (a profile's own key)
-    and the names in ``keep`` (the agent's provider's credentials, see
-    secrets.provider_credentials) are left alone. With ``allow`` (a profile's
-    ``env_allow``), every other inherited variable is taken out too (see
-    secrets.env_allowed). The names in ``deny`` (an org's managed models: the
-    person's own keys) are taken out whatever else says."""
+    An agent's pane starts without any secret-looking variable
+    (secrets.secret_looking: brindle's own secrets, and a SLACK_BOT_TOKEN the
+    person's shell exported), which it would otherwise inherit from the tmux
+    server. Whatever ``env`` sets (a profile's own key) and the names in
+    ``keep`` (the agent's provider's credentials, see
+    secrets.provider_credentials) are left alone. With ``enforce`` (a repo's
+    ``agent_env_mode``), every inherited variable off the allowlist (see
+    secrets.env_allowed, with the repo's ``agent_env``) is taken out too;
+    with ``allow`` (a profile's ``env_allow``) the allowlist is that, always
+    enforced. The names in ``deny`` (an org's managed models: the person's
+    own keys) are taken out whatever else says. A pane tagged TERMINAL_TAG
+    (an action terminal the person types into) loses only brindle's own
+    secrets.
+
+    The pane changes to ``cwd`` itself (in_dir)."""
     from brindle import secrets
 
     # The federation proxy's token isn't a person's key: set explicitly, so a
@@ -304,10 +366,19 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     if exempt:
         env = {**env, **exempt}
     deny = secrets.pane_deny(deny, env)
-    unset = secrets.pane_unset(inherited_names(session), keep=(*keep, *env), allow=allow, deny=deny)
+    names = inherited_names(session)
+    if not tag or tag[0] != TERMINAL_TAG:
+        # What the launch sets itself is filtered too: a secret-looking name in a
+        # profile's env passes only as the provider's credential.
+        unset = secrets.pane_unset({*names, *env}, keep=secrets.launch_keep(keep, env), allow=allow,
+                                   deny=deny, agent_env=agent_env, enforce=enforce)
+        env = {k: v for k, v in env.items() if k not in unset}
+    else:
+        unset = secrets.pane_unset([n for n in names if secrets.is_job_secret(n)], keep=(*keep, *env),
+                                   allow=allow, deny=deny)
     proc = _tmux(
         "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:",
-        "-n", name, "-c", cwd, "--", *_short(scrubbed(command, unset), env),
+        "-n", name, "-c", cwd, "--", *_short(scrubbed(in_dir(cwd, command), unset), env),
     )
     target = proc.stdout.strip()
     if tag:
@@ -445,7 +516,7 @@ def split_left(target: str, cwd: str, command: list[str], env: dict[str, str],
     geometry, axis = _sidebar_geometry(position, columns)
     proc = _tmux(
         "split-window", "-d", *geometry, "-P", "-F", "#{pane_id}",
-        "-t", target, "-c", cwd, *env_args, "--", *command,
+        "-t", target, "-c", cwd, *env_args, "--", *in_dir(cwd, command),
     )
     pane = proc.stdout.strip()
     # tmux grows every pane proportionally when a client attaches at a bigger
@@ -517,7 +588,7 @@ def start_sidebar(pane: str, cwd: str, command: list[str], env: dict[str, str], 
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     _tmux_batch([["set-option", "-p", "-t", pane, "remain-on-exit", "failed"],
                  ["set-hook", "-p", "-t", pane, "pane-died", f"run-shell -b {shlex.quote(shell)}"],
-                 ["respawn-pane", "-k", "-t", pane, "-c", cwd, *env_args, "--", *command]])
+                 ["respawn-pane", "-k", "-t", pane, "-c", cwd, *env_args, "--", *in_dir(cwd, command)]])
 
 
 def window_alive(target: str, server: object = _THIS_SERVER) -> bool:
@@ -541,15 +612,37 @@ class PaneSnapshot(dict):
     """list_panes' result: pane (and window) id -> alive, plus ``tags``,
     pane id -> {tag: value} for every live-or-dead pane that carries one of
     PANE_TAGS, and ``server``, the tmux server it was taken from (see
-    current_server): it says nothing about panes on any other server."""
+    current_server): it says nothing about panes on any other server.
+    ``exits``: dead pane id -> (exit status, signal), each None when tmux
+    doesn't give it: a status for a program that exited, a signal (its
+    number; see _signal_number) for one a signal killed."""
 
     tags: dict[str, dict[str, str]]
     server: str | None
+    exits: dict[str, tuple[int | None, int | str | None]]
 
     def __init__(self, server: str | None = None) -> None:
         super().__init__()
         self.tags = {}
         self.server = server
+        self.exits = {}
+
+
+def _signal_number(text: str) -> int | str | None:
+    """#{pane_dead_signal} as a signal number. tmux names the signal
+    (sig2name: sys_signame's "term" on macOS and the BSDs) or, where the
+    platform has no names, gives its number. A name Python doesn't know is
+    kept as tmux gave it; None when the program wasn't killed by a signal."""
+    text = text.strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    name = text.upper()
+    try:
+        return signal.Signals[name if name.startswith("SIG") else f"SIG{name}"].value
+    except KeyError:
+        return text
 
 
 def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
@@ -562,7 +655,8 @@ def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
     ``display-message`` per agent. Empty (not an error) when there is no
     server running, or tmux isn't installed at all."""
     result = PaneSnapshot(current_server() if server is _THIS_SERVER else server)  # type: ignore[arg-type]
-    fmt = "\t".join(["#{window_id}", "#{pane_id}", "#{pane_dead}", *(f"#{{{k}}}" for k in PANE_TAGS)])
+    fmt = "\t".join(["#{window_id}", "#{pane_id}", "#{pane_dead}", "#{pane_dead_status}",
+                     "#{pane_dead_signal}", *(f"#{{{k}}}" for k in PANE_TAGS)])
     try:
         proc = _tmux("list-panes", "-a", "-F", fmt, check=False, server=server)
     except TmuxTimeout:
@@ -572,10 +666,13 @@ def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
     if proc.returncode != 0:
         return result
     for line in proc.stdout.splitlines():
-        window_id, pane_id, dead, *values = line.split("\t")
+        window_id, pane_id, dead, status, sig, *values = line.split("\t")
         alive = dead.strip() == "0"
         result[pane_id] = alive
         result[window_id] = result.get(window_id, False) or alive
+        if dead.strip() == "1":
+            result.exits[pane_id] = (int(status) if status.strip().isdigit() else None,
+                                     _signal_number(sig))
         tags = {k: v for k, v in zip(PANE_TAGS, values) if v}
         if tags:
             result.tags[pane_id] = tags
@@ -1014,6 +1111,76 @@ def session_panes(session: str) -> list[tuple[int, str]]:
     return out
 
 
+@dataclass
+class PaneInfo:
+    id: str
+    pid: int
+    path: str            # its current folder; '' when tmux can't say (deleted)
+    command: str         # what runs in it now
+    dead: bool
+    start: str           # the command it was started with
+    activity: float      # its window's last output (epoch seconds)
+
+    def idle(self) -> bool:
+        """Dead, a bare shell, or a brindle sidebar (see session_idle)."""
+        return (self.dead or "watch --sidebar" in self.start
+                or self.command.lstrip("-") in SHELLS)
+
+
+@dataclass
+class SessionInfo:
+    name: str
+    attached: bool
+    created: float
+    activity: float      # the last input any client gave it (tmux's session_activity)
+    home: str | None     # its BRINDLE_HOME, None if it has none
+    panes: list[PaneInfo]
+
+    def idle(self) -> bool:
+        return all(p.idle() for p in self.panes)
+
+
+_INFO_FORMAT = "\t".join([
+    "#{session_name}", "#{session_attached}", "#{session_created}", "#{session_activity}",
+    "#{pane_id}", "#{pane_pid}", "#{pane_dead}", "#{window_activity}", "#{pane_current_command}",
+    "#{pane_current_path}", "#{pane_start_command}"])
+
+
+def session_infos(prefix: str = "brindle_") -> list[SessionInfo]:
+    """Every session on brindle's server whose name starts with ``prefix``,
+    with its panes, in one listing (plus one environment read each). Empty
+    with no server; a hung one raises TmuxTimeout."""
+    try:
+        proc = _tmux("list-panes", "-a", "-F", _INFO_FORMAT, check=False)
+    except TmuxTimeout:
+        raise
+    except TmuxError:
+        return []
+    if proc.returncode != 0:
+        return []
+    found: dict[str, SessionInfo] = {}
+
+    def num(text: str) -> float:
+        return float(text) if text.strip().isdigit() else 0.0
+
+    for line in proc.stdout.splitlines():
+        parts = line.split("\t", 10)
+        if len(parts) < 11 or not parts[0].startswith(prefix):
+            continue
+        name, attached, created, activity, pane, pid, dead, wact, cmd, path, start = parts
+        s = found.get(name)
+        if s is None:
+            s = found[name] = SessionInfo(name, attached.strip() not in ("", "0"), num(created),
+                                          num(activity), None, [])
+        if pid.isdigit():
+            s.panes.append(PaneInfo(pane, int(pid), path.strip(), cmd.strip(), dead == "1",
+                                    start, num(wact)))
+    for s in found.values():
+        env = _tmux("show-environment", "-t", f"={s.name}", "BRINDLE_HOME", check=False).stdout.strip()
+        s.home = (env.partition("=")[2] if env.startswith("BRINDLE_HOME=") else "") or None
+    return list(found.values())
+
+
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "nu"}
 
 
@@ -1093,6 +1260,29 @@ def tagged_pane_ids(keys: Iterable[str], server: object = _THIS_SERVER) -> list[
         raise TmuxError(f"tmux list-panes: {proc.stderr.strip()}")
     rows = (line.split("\t") for line in proc.stdout.splitlines())
     return [pane for pane, *tags in rows if any(tags)]
+
+
+def server_pid(server: object = _THIS_SERVER) -> int | None:
+    """The pid of the tmux server itself (every pane's first process is its
+    child), or None when it can't say."""
+    try:
+        out = _tmux("list-sessions", "-F", "#{pid}", check=False, server=server).stdout.split()
+    except TmuxError:
+        return None
+    return int(out[0]) if out and out[0].isdigit() else None
+
+
+def pane_windows(server: object = _THIS_SERVER) -> dict[int, str]:
+    """Every pane's process id on ``server`` -> its window's id, as tmux has
+    them now; empty when no server runs there. Raises TmuxError when the
+    server can't be asked, so an answer it never gave isn't read as "none"."""
+    proc = _tmux("list-panes", "-a", "-F", "#{pane_pid}\t#{window_id}", check=False, server=server)
+    if proc.returncode != 0:
+        if _NO_SERVER.search(proc.stderr):
+            return {}
+        raise TmuxError(f"tmux list-panes: {proc.stderr.strip()}")
+    rows = (line.split("\t") for line in proc.stdout.splitlines())
+    return {int(pid): window for pid, window in rows if pid.isdigit()}
 
 
 def window_size_option(target: str, server: object = _THIS_SERVER) -> str | None:

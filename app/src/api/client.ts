@@ -434,6 +434,10 @@ export interface MapNode {
   kind: "doc" | "path";
   title?: string;
   doc_id?: string;
+  /* Indexed on this device: open the file instead of the hosted doc reader. */
+  local_path?: string;
+  updated_at?: number;
+  topics?: string[];
   path?: string;
   paths?: string[];
   source?: DocSource;
@@ -1054,6 +1058,52 @@ export interface Transferred {
   commits: number;
 }
 
+/* GET /storage (disk.storage_report): brindle's disk use. A worktree is
+   Tree.to_json: `removable` false with `reason` (uncommitted changes, a live
+   session, not brindle's, still in use) when Clean would keep it. */
+export type StorageState = "merged" | "abandoned" | "active";
+
+export interface StorageWorktree {
+  path: string;
+  repo_root: string;
+  branch: string;
+  sha: string;
+  state: StorageState;
+  /* Epoch seconds: its last commit, checkout or creation. */
+  last_activity: number;
+  dirty: boolean;
+  live: boolean;
+  owned: boolean;
+  size: number;
+  build_size: number;
+  workspace_id: string | null;
+  removable: boolean;
+  reason: string | null;
+}
+
+export interface StorageCategory {
+  name: string;
+  size: number;
+  detail: string;
+}
+
+export interface StorageReport {
+  worktrees: StorageWorktree[];
+  categories: StorageCategory[];
+  /* Bytes Clean and retention could give back. */
+  reclaimable: number;
+  free_bytes: number | null;
+  low_disk: string | null;
+  dead_branches: { repo_root: string; name: string; sha: string; last_commit: number; merged: boolean }[];
+}
+
+/* POST /storage/clean (disk.clean): what went, and what was kept and why
+   (the engine refuses a dirty or live worktree). */
+export interface StorageCleaned {
+  removed: { path: string; repo_root: string; branch: string; state: StorageState; size: number; archived: string | null; branch_kept: string | null }[];
+  kept: { path: string; reason: string }[];
+}
+
 export interface DaemonConfig {
   /* Where the daemon listens, e.g. http://127.0.0.1:47321 (routes live under /v1). */
   baseUrl: string;
@@ -1453,6 +1503,19 @@ export class DaemonClient {
   /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked. */
   async setDocSwitch(name: DocSwitchName, on: boolean) {
     return (await this.put<{ switches: DocSwitch[] }>("/analysis-docs/switches", { name, on })).switches;
+  }
+
+  /* brindle's disk use (slow: the daemon measures every worktree). */
+  storage(repo?: string) {
+    return this.get<StorageReport>("/storage", { repo });
+  }
+
+  /* Removes one worktree (merged or abandoned; the engine checks it again),
+     its branch tip archived first. The app asks the person before calling
+     this, and sends one call per confirmed path: never the route's
+     `abandoned`, which removes whatever the engine lists at that moment. */
+  cleanStorage(target: { path: string }) {
+    return this.post<StorageCleaned>("/storage/clean", target);
   }
 
   /* The public client ids for the in-app Google / Microsoft sign-in; null hides that button. */

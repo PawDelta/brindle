@@ -52,6 +52,10 @@ export interface DaemonData {
   inbox: InboxItemDTO[];
   goal: GoalDTO | null;
   decisions: DecisionDTO[];
+  /* Optional hosted library fixtures, independent of the local KB. */
+  docScopes?: import("../api/client").DocScope[];
+  knowledgeMap?: import("../api/client").KnowledgeMap;
+  kbDocuments?: import("../api/client").MapNode[];
   profiles: ProfileDTO[];
   /* GET /profiles/{name}: what the resolved view adds to a listed profile
      (source, extends, rules, prompt, lint); a profile with no entry gets
@@ -2478,6 +2482,15 @@ export class FakeDaemon {
         return json(d.inbox);
       case "/decisions":
         return needRepo() ?? json(d.decisions);
+      case "/analysis-docs/scopes":
+        return json({ scopes: d.docScopes ?? [] });
+      case "/analysis-docs/map": {
+        const map = d.knowledgeMap ?? { nodes: [], edges: [] };
+        const paths = JSON.parse(query.paths ?? "[]") as string[];
+        const local = query.scope_kind === "user" ? (d.kbDocuments ?? []).filter((doc) =>
+          !paths.length || doc.paths?.some((path) => paths.some((p) => path === p || path.startsWith(`${p}/`)))) : [];
+        return json({ nodes: [...map.nodes, ...local], edges: map.edges });
+      }
       case "/kb/sources":
         return needRepo() ?? json(d.kbSources);
       case "/kb/search": {

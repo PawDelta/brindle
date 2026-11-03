@@ -261,6 +261,21 @@ def _reset_window_sizes() -> None:
         log.warning("brindle: couldn't reset the old daemon's window sizes", exc_info=True)
 
 
+def _upgrade_sweep() -> None:
+    """disk.upgrade_sweep (once per machine), off the daemon's way."""
+    from brindle import disk
+    from brindle.db import DB
+
+    try:
+        db = DB()
+        try:
+            disk.upgrade_sweep(db)
+        finally:
+            db.conn.close()
+    except Exception:
+        log.warning("brindle: the one-time disk sweep didn't run", exc_info=True)
+
+
 def _exit(sig, frame) -> None:
     raise SystemExit(0)
 
@@ -306,11 +321,13 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     async def run() -> None:
         watcher = asyncio.create_task(_watch(server, activity, idle_exit))
         resizer = asyncio.create_task(asyncio.to_thread(_reset_window_sizes))
+        sweeper = asyncio.create_task(asyncio.to_thread(_upgrade_sweep))
         try:
             await server.serve(sockets=socks)
         finally:
             watcher.cancel()
             resizer.cancel()
+            sweeper.cancel()
 
     # uvicorn shuts down gracefully on SIGTERM, then raises it again with the
     # handler it found: make that an exit that still runs the cleanup below.
