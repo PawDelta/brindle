@@ -323,14 +323,12 @@ def pressure() -> int:
 def room() -> float:
     """How many more processes the machine can take now: cores minus the
     cores' worth of CPU busy (:func:`_load`) minus this process's running
-    children, halved under
-    memory-pressure warnings and nothing at all when it's critical. May be
+    children, with nothing at all when memory pressure is critical. May be
     zero or negative; a start needs at least 1 (see :func:`read`)."""
     level = pressure()
     if level >= PRESSURE_CRITICAL:
         return 0.0 - running()
-    free = _cores() - _load() - running()
-    return free / 2 if level == PRESSURE_WARN and free > 0 else free
+    return _cores() - _load() - running()
 
 
 def why() -> str:
@@ -346,8 +344,9 @@ def no_room(repo_root: str | None = None) -> str | None:
     :func:`why` says), or None when the machine has room for it. Unlike a
     read or an action this applies in every process, gate on or off: a worker
     or a check run is the heaviest thing brindle starts. It waits until there
-    is room or until it is cancelled (a supervisor can start a waiting worker
-    anyway: ``tasks.start_now``), unless the repo's ``wait_for_room`` is false."""
+    is room, until the worker's ``room_wait_max`` expires, or until it is
+    cancelled (a supervisor can start a waiting worker anyway:
+    ``tasks.start_now``), unless the repo's ``wait_for_room`` is false."""
     if room() >= 1:
         return None
     if repo_root is not None:
