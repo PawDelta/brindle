@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import full_text, sh
+from fast_repo import build_repo, copy_tree, moved, no_screen_gap, repo, repo_template, scratch_db  # noqa: F401
 from brindle import agents, bus, mcp_server, tasks, workspaces
 from brindle.db import DB, Agent, Workspace
 from test_merge_order import fake_spawn
@@ -113,27 +114,48 @@ def test_cross_session_overlap_warns_by_files_or_issue_number_until_merged(db, o
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197") is None
 
 
-@pytest.mark.slow("Builds five real Git worktrees and merges one to bound overlap Git calls and verify caching")
+@pytest.fixture(scope="module")
+def overlap_template(tmp_path_factory):
+    """Four reported worktrees on ``session`` (w0-w2 and ``landed``, merged
+    into it), made once; ``start`` is ``session`` as w3 is cut from it."""
+    base = tmp_path_factory.mktemp("overlap-template")
+    repo_ = build_repo(base)
+    sh("git branch session && git update-ref refs/remotes/origin/feat-w3 main", repo_)
+    start = sh("git rev-parse session", repo_)
+    made = {}
+    with scratch_db(tmp_path_factory.mktemp("overlap-template-home")) as db_:
+        for name in ("w0", "w1", "w2", "landed"):
+            made[name] = workspaces.create(db_, str(repo_), f"feat-{name}", base="session",
+                                           run_setup=False).workspace
+            commit_file(Path(made[name].path), f"{name}.py")
+    sh("git checkout -q session && git merge -q --no-ff feat-landed -m land && git checkout -q main", repo_)
+    return base, made, start
+
+
 @pytest.mark.parametrize("w3_branch", [
     "feat-w3",
     pytest.param("origin/feat-w3", marks=pytest.mark.variant(
         "review finding: a local branch named origin/x must not read as origin's merged x")),
 ])
-def test_overlap_check_git_calls_bounded(db, repo, monkeypatch, w3_branch):
+def test_overlap_check_git_calls_bounded(db, tmp_path, overlap_template, monkeypatch, w3_branch):
     """Reported-unmerged worktrees cost a few cheap git reads each, never a
     fetch or the cherry/patch-id fallback, and nothing again once decided; a
     branch merged into its session branch has landed."""
-    sh("git branch session && git update-ref refs/remotes/origin/feat-w3 main", repo)
+    template, made, start = overlap_template
+    repo = copy_tree(template, tmp_path)
     root = workspaces.adopt_root(db, str(repo))
     for name in ("w0", "w1", "w2", "w3", "landed"):
-        branch = w3_branch if name == "w3" else f"feat-{name}"
-        ws = workspaces.create(db, str(repo), branch, base="session", run_setup=False).workspace
-        commit_file(Path(ws.path), f"{name}.py")
+        if name == "w3":
+            ws = workspaces.create(db, str(repo), w3_branch, base="session", start=start,
+                                   run_setup=False).workspace
+            commit_file(Path(ws.path), "w3.py")
+        else:
+            ws = moved(made[name], template, tmp_path)
+            db.add_workspace(ws)
         db.add_agent(Agent(name, ws.id, "developer", "claude", None, "assign", "done", "@1", "done",
                            time.time()))
         db.add_task(tasks.Task(f"t-{name}", str(repo), name, None, root.id, "developer", "work",
                                "assign", 1, ws.branch, None, None, None, "started", time.time()))
-    sh(f"git checkout -q session && git merge -q --no-ff {ws.branch} -m land && git checkout -q main", repo)
     calls = []
     real = tasks.git.run_env
     monkeypatch.setattr(tasks.git, "run_env", lambda args, *a, **k: calls.append(args) or real(args, *a, **k))

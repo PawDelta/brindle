@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from conftest import full_text, sh
+from fast_repo import repo, repo_template  # noqa: F401
 from brindle import agents, autopilot, mcp_server, rewind, workspaces
 from brindle.db import Agent
 
