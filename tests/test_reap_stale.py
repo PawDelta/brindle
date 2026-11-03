@@ -96,8 +96,9 @@ def test_orphan_sessions_are_reaped_by_the_sweep(db, repo, tmp_path, fake_tmux, 
             raise git.GitBusy("git status: no room")
         monkeypatch.setattr(git, "dirty_files", refused)
         folder = repo
-    fake_tmux.sessions = [session(name, pane("%7", folder, activity=NOW if case == "recent output" else OLD),
-                                  attached=case == "attached", activity=NOW if case == "recent input" else OLD,
+    recent = time.time()   # not NOW: taken at import, it is over SESSION_GRACE old by the time a long suite runs this
+    fake_tmux.sessions = [session(name, pane("%7", folder, activity=recent if case == "recent output" else OLD),
+                                  attached=case == "attached", activity=recent if case == "recent input" else OLD,
                                   home="/elsewhere" if case == "another brindle home" else None)]
 
     before = doctor.reap_checks(db)
