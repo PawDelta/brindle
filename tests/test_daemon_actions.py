@@ -317,6 +317,84 @@ def test_starting_a_session_with_a_name_keeps_it_on_the_new_root(db, world, monk
     assert db.get_agent("sup").name == "Cache work"
 
 
+@pytest.fixture
+def demo_launches(db, monkeypatch):
+    """The demo's supervisor launches recorded (repo, provider) where its window would open."""
+    from brindle import doctor
+    from brindle.service import sessions as svc
+
+    launched = []
+
+    def spawn(db, ws, profile, provider_name=None, **kw):
+        launched.append((ws.repo_root, provider_name))
+        a = Agent(f"demo{len(launched)}", ws.id, profile, provider_name, None, "interactive", "idle", "%9", None,
+                  time.time())
+        db.add_agent(a)
+        return a
+
+    monkeypatch.setattr(agents, "spawn", spawn)
+    monkeypatch.setattr(svc, "preflight", lambda *a, **k: [])
+    monkeypatch.setattr(svc, "cull_detached", lambda root=None: None)
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: ["codex"])
+    return launched
+
+
+@pytest.mark.parametrize("case,status", [("codex-only", 200), ("overlapping", 200), ("airgap", 403)])
+def test_the_demo_runs_in_a_practice_repo_on_the_cli_signed_in(db, world, brindle_home, demo_launches, monkeypatch,
+                                                               case, status):
+    if case == "airgap":
+        monkeypatch.setenv("BRINDLE_AIRGAP", "1")
+    second = []
+    if case == "overlapping":
+        # A second press arrives while the first is launching its supervisor: refused, nothing more made.
+        launch = agents.spawn
+
+        def spawn_while_another_arrives(*a, **k):
+            second.append(_send("POST", "/v1/demo"))
+            return launch(*a, **k)
+
+        monkeypatch.setattr(agents, "spawn", spawn_while_another_arrives)
+    code, reply = _send("POST", "/v1/demo")
+    assert [c for c, _ in second] == ([409] if case == "overlapping" else [])
+    made = sorted((brindle_home / "demo").glob("textkit-*"))
+    assert code == status, reply
+    if case == "airgap":
+        assert demo_launches == [] and made == []
+        return
+    # The CLI's own practice repo (brindle.demo), outside the person's repos; with only Codex signed in,
+    # the supervisor, workers and reviewers all run on it.
+    assert len(made) == 1 and reply["repo"] == db.workspace_by_path(str(made[0])).repo_root
+    assert demo_launches == [(reply["repo"], "codex")]
+    cfg = config.load_repo_config(reply["repo"])
+    assert (cfg.routing["light"], cfg.review_profile) == (["developer-codex"], "reviewer-codex")
+
+
+@pytest.mark.parametrize("then", ["settled", "cancelled"])
+def test_a_demo_held_by_its_preflight_keeps_its_repo_until_settled_or_cancelled(db, world, tmp_path, demo_launches,
+                                                                               brindle_home, monkeypatch, then):
+    from brindle import doctor, keystore
+
+    _provider_setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: ["claude"])
+    monkeypatch.setattr(providers, "signed_out", lambda p, env=None: None)
+    # Signed in by the key brindle stores, which Claude Code asks about for this launch's identity.
+    keystore.set_key("ANTHROPIC_API_KEY", SECRET)
+    code, held = _send("POST", "/v1/demo")
+    assert code == 409 and demo_launches == [], held
+    action = next(i["action"] for i in held["preflight"] if i["kind"] == "consent")
+    assert action["body"]["repo"] == held["repo"] and action["body"]["profile"] and Path(held["repo"]).is_dir()
+    if then == "cancelled":
+        assert _send("DELETE", "/v1/demo")[0] == 200
+        assert not Path(held["repo"]).exists() and db.find_workspaces(held["repo"]) == []
+        return
+    # Settled against the repo it was asked for (its identity), then the next start launches there.
+    assert _send(action["method"], action["path"], {**action["body"], "accept": True})[0] == 200
+    code, reply = _send("POST", "/v1/demo")
+    assert code == 200, reply
+    assert demo_launches == [(held["repo"], "claude")]
+    assert len(list((brindle_home / "demo").glob("textkit-*"))) == 1
+
+
 @pytest.mark.parametrize("scope,body,peer_pid,status,written", [
     # The picker's pick for a tier is dropped too, and so is an alias of a tier, or either would still win.
     ("user", {"tiers": {"light": ["developer-codex"], "advanced": ["developer-codex"]}}, None, 200,
