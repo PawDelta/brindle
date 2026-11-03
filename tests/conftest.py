@@ -1,7 +1,9 @@
+import contextvars
 import os
 import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -303,12 +305,26 @@ def fake_agent_cli(tmp_path, monkeypatch):
 def machine_has_room(monkeypatch):
     """Workers and check runs start at once, however loaded the machine
     running the tests is (spawn.no_room); a test that wants it busy sets
-    spawn._load itself. No detached helper waits for room either."""
+    spawn._load itself. No detached helper waits for room either: a task
+    assign/handoff queued starts in-process when it replies, if there's room."""
     from brindle import spawn, tasks
+
+    def start_once(task_id: str) -> None:
+        def start() -> None:
+            db = DB()
+            t = db.get_task(task_id)
+            if t is not None:
+                tasks.start_with_room_now(db, t)
+
+        # Off the request's event loop, as the real helper process is.
+        thread = threading.Thread(target=contextvars.copy_context().run, args=(start,))
+        thread.start()
+        thread.join()
 
     monkeypatch.setattr(spawn, "_load", lambda: 0.0)
     monkeypatch.setattr(spawn, "pressure", lambda: 1)
     monkeypatch.setattr(tasks, "_wait_in_background", lambda task_id: None)
+    monkeypatch.setattr(tasks, "start_in_background", start_once)
 
 
 @pytest.fixture(autouse=True)

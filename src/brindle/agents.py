@@ -2747,16 +2747,24 @@ def admission(profile: str, repo_root: str) -> str | None:
     """Why a worker on ``profile`` must wait for room before it starts, or
     None. A subagent profile starts no process of brindle's: never held."""
     from brindle import spawn as gate
-    from brindle.providers import PROVIDERS
 
     busy = gate.no_room(repo_root)
     if busy is None:
         return None
+    return busy if launches_process(profile, repo_root) else None
+
+
+def launches_process(profile: str, repo_root: str) -> bool:
+    """Whether a worker on ``profile`` runs a process of brindle's: not a
+    subagent profile. An unloadable profile counts as one: its start fails
+    with its reason."""
+    from brindle.providers import PROVIDERS
+
     try:
         provider = PROVIDERS.get(load_profile(profile, repo_root).provider)
     except Exception:  # noqa: BLE001 - an unloadable profile fails at its start, with its reason
-        return busy
-    return busy if provider is None or provider.launches_process else None
+        return True
+    return provider is None or provider.launches_process
 
 
 def delegate(

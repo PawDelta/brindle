@@ -13,10 +13,17 @@ A task whose worker would start on a machine with no room for it
 (``spawn.no_room``; ``agents.delegate`` raises ``NoRoom``) is queued the
 same way, 'pending' with the reason in ``waiting``, and started by a
 detached helper (``start_when_room``) once there's room.
+
+assign/handoff never start a worker inside the MCP request: under load its
+worktree, setup and launch can take minutes. They queue the task
+'unanswered' (``UNANSWERED``), reply with its id, and only then release it
+(``answered``) to that detached helper; a request cancelled before its
+reply cancels it instead (``drop_unanswered``).
 """
 
 from __future__ import annotations
 
+import contextvars
 import fnmatch
 import json
 import os
@@ -592,19 +599,21 @@ def enqueue(
     *, isolate: bool, branch: str | None, done_when: str | None,
     files: list[str] | None, depends_on: list[str] | None, plan_first: bool | None = None,
     weight: str | None = None, analysis_doc: bool = False, waiting: str | None = None,
-    pipeline: str | None = None,
+    pipeline: str | None = None, unanswered: bool = False,
 ) -> Task:
     """Record a task that can't start yet: no worker, no workspace, just what
     it takes to start it once its dependencies are merged, or (``waiting``,
     why) once the machine has room for it. ``pipeline``: the pipeline state
-    its worker starts in (a branch's second attempt or conflict resolver)."""
+    its worker starts in (a branch's second attempt or conflict resolver).
+    ``unanswered``: queued by a request that hasn't replied yet, so nothing
+    starts it until ``answered`` (or ``drop_unanswered`` cancels it)."""
     t = Task(
         id=new_id(), repo_root=caller_ws.repo_root, agent_id=None,
         caller_id=caller.id if caller else None, caller_ws_id=caller_ws.id,
         profile=profile, task_text=task_text, mode=mode, isolate=int(isolate),
         branch=branch, done_when=done_when, files=_dumps(files),
-        depends_on=_dumps(depends_on), state="pending", created_at=time.time(), weight=weight,
-        analysis_doc=1 if analysis_doc else None,
+        depends_on=_dumps(depends_on), state=UNANSWERED if unanswered else "pending",
+        created_at=time.time(), weight=weight, analysis_doc=1 if analysis_doc else None,
     )
     db.add_task(t)
     if plan_first is not None:
@@ -615,9 +624,56 @@ def enqueue(
         db.update_task(t.id, pipeline=pipeline)
     bus.publish(db, "task.queued", repo_root=t.repo_root, task_id=t.id, caller_id=t.caller_id,
                 depends_on=depends_on or [], waiting=waiting)
-    if waiting:
+    if waiting and unanswered:
+        db.update_task(t.id, waiting=waiting, waiting_since=time.time())   # its helper starts at answered
+    elif waiting:
         wait_for_room(db, t, waiting)
     return db.get_task(t.id) or t
+
+
+# A task an MCP request (assign/handoff) queued before it replied: nothing
+# starts it, no sweep included, until the reply is on its way (``answered``).
+# A request its client cancelled or dropped never replies: ``drop_unanswered``.
+UNANSWERED = "unanswered"
+
+# Set while a request releases its tasks: a worker started right there is
+# named by the reply that follows, so its caller gets no "Started" message.
+_replying: contextvars.ContextVar[bool] = contextvars.ContextVar("brindle_tasks_replying", default=False)
+
+
+def answered(db: DB, task_ids: list[str], start: set[str]) -> None:
+    """The request that queued ``task_ids`` is replying: they may start now.
+    Those in ``start`` (nothing to wait on) get their detached start
+    (``start_in_background``); the others start once their dependencies
+    merge, as any queued task."""
+    token = _replying.set(True)
+    try:
+        for task_id in task_ids:
+            if move(db, task_id, UNANSWERED, "pending") and task_id in start:
+                start_in_background(task_id)
+    finally:
+        _replying.reset(token)
+
+
+def drop_unanswered(db: DB, task_ids: list[str]) -> None:
+    """The request that queued ``task_ids`` was cancelled, or its client went,
+    before it replied: cancel them, so no worker ever starts for them."""
+    for task_id in task_ids:
+        move(db, task_id, UNANSWERED, "cancelled")
+
+
+def cancel_reason(db: DB, task_id: str) -> str | None:
+    """Why task ``task_id`` was cancelled, as its caller was told."""
+    row = db.conn.execute("SELECT payload FROM events WHERE kind='task.cancelled' AND task_id=? "
+                          "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    return json.loads(row[0]).get("reason") if row and row[0] else None
+
+
+def start_in_background(task_id: str) -> None:
+    """Start pending task ``task_id`` from a detached helper (``start_when_room``):
+    it looks for room, cuts the worktree and launches the worker, all after
+    the request that queued it has replied. Tests replace it."""
+    _wait_in_background(task_id)
 
 
 # -- waiting for room ---------------------------------------------------------------
@@ -747,13 +803,14 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
     """The detached helper's loop: start task ``task_id`` once there's room
     or its room wait limit expires (``_start_if_ready`` looks), telling its
     caller how it was admitted. Ends when it starts, or
-    when the task is no longer waiting (cancelled, held, started by a
+    when the task is no longer pending (cancelled, held, started by a
     sweep) or its session is paused (``on_resumed`` takes over). Returns
-    whether it started it."""
+    whether it started it. A task assign/handoff just queued
+    (``start_in_background``) has no ``waiting`` until it finds no room."""
     pause = threading.Event()
     while True:
         t = db.get_task(task_id)
-        if t is None or t.state != "pending" or t.waiting is None or session_paused(db, t):
+        if t is None or t.state != "pending" or session_paused(db, t):
             return False
         why = room_wait(t.repo_root)
         if why is None or _room_wait_overrun(t, why):
@@ -1009,25 +1066,43 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
         return False
     try:
         new_worker = start_queued(db, t)
-    except agents.AgentError as e:
+    except Exception as e:  # noqa: BLE001 - from a detached helper: its caller must hear why
         db.update_task(t.id, state="pending")
-        _cancel(db, t.id, f"it could not start: {e}")
+        reason = str(e).strip()
+        if not isinstance(e, agents.AgentError) or not reason:
+            reason = f"{type(e).__name__}: {reason}" if reason else type(e).__name__
+        _cancel(db, t.id, f"couldn't start a worker on profile {t.profile!r}: {reason}")
         return False
-    if t.caller_id:
+    if t.caller_id and not _replying.get():
         try:
+            new_ws = db.get_workspace(new_worker.workspace_id)
             if overrun:
                 text = f"Started {new_worker.id} for task {t.id} ({overrun})."
-            else:
-                text = (f"Started {new_worker.id} for task {t.id} (was waiting for room: {t.waiting})."
-                        if t.waiting else f"Started {new_worker.id} (was waiting on {dep_ref}).")
-            new_ws = db.get_workspace(new_worker.workspace_id)
-            warning = agents.add_dirs_warning(new_worker, new_ws) if new_ws else None
-            if warning:
+            elif t.waiting:
+                text = f"Started {new_worker.id} for task {t.id} (was waiting for room: {t.waiting})."
+            elif _loads(t.depends_on):
+                text = f"Started {new_worker.id} (was waiting on {dep_ref})."
+            else:   # just queued by assign/handoff, which replied with the task id
+                text = (f"Started worker {new_worker.id} ({new_worker.profile}) for task {t.id}"
+                        + (f" in workspace {new_ws.id} on branch {new_ws.branch}." if new_ws else "."))
+            for warning in _launch_warnings(new_worker, new_ws):
                 text += f"\nWarning: {warning}"
             agents.send_message(db, t.caller_id, text, sender_id=None)
         except agents.AgentError:
             pass
     return True
+
+
+def _launch_warnings(worker: Agent, ws: Workspace | None) -> list[str]:
+    """What the caller should know about a worker started from the queue:
+    the warnings assign's reply gave when it started the worker itself."""
+    if ws is None:
+        return []
+    from brindle import antigravity, codex_hook
+
+    found = (agents.add_dirs_warning(worker, ws), codex_hook.launch_warning(worker.provider, ws.path),
+             antigravity.launch_warning(worker, ws))
+    return [w for w in found if w]
 
 
 def sweep(db: DB) -> int:

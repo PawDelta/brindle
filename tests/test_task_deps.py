@@ -5,6 +5,7 @@ assign/handoff's dry_run."""
 
 import asyncio
 import re
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -608,6 +609,66 @@ def test_requeue_with_a_cancelled_dependency_asks_for_new_ones(db, repo, boss):
     mcp_server.cancel_task(b.id)  # cascades to c
     out = mcp_server.requeue(c.id)
     assert out.startswith("Error") and "depends_on" in out
+
+
+# -- replying before the start ---------------------------------------------------
+
+
+def test_assign_returns_before_spawn(db, repo, boss, monkeypatch):
+    """Under load every git and tmux step of a start waits for room, and
+    assigns ran past the client's 120 s (2026-11-03): assign replies with
+    its task id first, and admission, the worktree and the launch happen in
+    the detached start afterwards."""
+    events, helpers = [], []
+    real_delegate = agents.delegate
+
+    def slow_delegate(*a, **k):   # admission, worktree, setup and the tmux launch
+        events.append("spawn")
+        return real_delegate(*a, **k)
+
+    from brindle import spawn
+
+    monkeypatch.setattr(agents, "delegate", slow_delegate)
+    monkeypatch.setattr(tasks, "start_in_background", helpers.append, raising=False)
+    monkeypatch.setattr(spawn, "room", lambda: 0.0)   # the machine at 0% idle
+    out = asyncio.run(mcp_server.assign("developer", "do A"))
+    events.append("reply")
+    [t] = db.list_tasks(str(repo))
+    assert t.id in out and events == ["reply"] and helpers == [t.id], out
+    monkeypatch.setattr(spawn, "room", lambda: 4.0)
+    assert tasks.start_when_room(db, t.id)   # what the detached helper runs once there's room
+    assert events == ["reply", "spawn"] and db.get_task(t.id).agent_id
+
+
+def test_cancelled_assign_never_launches(db, repo, boss, monkeypatch):
+    """The client gave up on an assign (TaskStop, a disconnect) while brindle
+    was still working on it: what it queued is cancelled, and no worker ever
+    starts for it later."""
+    from brindle import autopilot
+
+    inside, go, launched = threading.Event(), threading.Event(), []
+    real_choose = autopilot.choose_profile
+
+    def held(*a, **k):
+        inside.set()
+        go.wait()
+        return real_choose(*a, **k)
+
+    monkeypatch.setattr(autopilot, "choose_profile", held)
+    monkeypatch.setattr(agents, "spawn", lambda *a, **k: launched.append("spawn") or fake_spawn(*a, **k))
+    monkeypatch.setattr(tasks, "start_in_background", launched.append, raising=False)
+
+    async def cancelled_mid_call():
+        call = asyncio.ensure_future(mcp_server.assign("developer", "do A"))
+        await asyncio.to_thread(inside.wait)
+        call.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await call
+        go.set()   # asyncio.run waits for the request's thread to finish
+
+    asyncio.run(cancelled_mid_call())
+    tasks.sweep(db)
+    assert launched == [] and [t.state for t in db.list_tasks(str(repo))] == ["cancelled"]
 
 
 # -- waiting for room ------------------------------------------------------------
