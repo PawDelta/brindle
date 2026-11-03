@@ -1223,9 +1223,12 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     mcp_recovery = bool(agent.mode == "review" and agent.review_sha and db.conn.execute(
         "SELECT 1 FROM review_mcp_retries WHERE workspace_id=? AND sha=?",
         (ws.id, agent.review_sha)).fetchone())
-    argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
-                                          mode=agent.mode, plan_first=bool(agent.plan_first),
-                                          mcp_recovery=mcp_recovery))
+    try:
+        argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
+                                              mode=agent.mode, plan_first=bool(agent.plan_first),
+                                              mcp_recovery=mcp_recovery))
+    except providers.CodexSandboxRefused as e:
+        raise AgentError(str(e)) from e
     if provider.name == "codex":
         from brindle import codex_hook
 
@@ -1387,7 +1390,7 @@ def run_headless(db: DB, agent_id: str, resume: str | None = None, *,
             from brindle import launch_health
             launch_health.delivered(db, agent, launch_health.before_delivery(db, agent))
             code = subprocess.call(provider.command(ctx), cwd=ws.path, stdin=subprocess.DEVNULL)
-        except OSError as e:
+        except (OSError, providers.CodexSandboxRefused) as e:
             print(f"brindle: couldn't start {provider.name}: {e}", flush=True)
             code = 127
         session = session or new_session
@@ -3808,6 +3811,49 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, 
         return None
 
 
+def codex_pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
+    """Codex's PreToolUse hook, with ``permission_policy`` on: the policy's
+    deny before the tool runs. Codex runs most shell commands in its sandbox
+    without asking, so its PermissionRequest hook never sees them; this one
+    runs for every shell command, patch and MCP call, as Claude Code's
+    PreToolUse does (_pre_tool_policy). Only a deny is answered: Codex can't
+    ask from PreToolUse, and the rest stays with its approvals and the
+    PermissionRequest hook. Never raises, and fails closed: Codex runs a
+    call it gets no answer for, so a check that can't finish denies it."""
+    from brindle import permissions
+
+    try:
+        from brindle.config import load_repo_config
+        from brindle.profiles import profile_rules_for
+
+        ws = db.get_workspace(agent.workspace_id)
+        if ws is None:
+            return None
+        cfg = load_repo_config(ws.repo_root)
+        if cfg.permission_policy != "on":
+            return None
+        if permissions.codex_terminal_input(payload):
+            return permissions.codex_pre_tool_output(permissions.Decision("deny", permissions.TERMINAL_INPUT))
+        reqs = permissions.from_codex(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
+        if not reqs:
+            return None
+        rules = [*permissions.all_rules(ws.repo_root), *profile_rules_for(agent.profile, ws.repo_root)]
+        decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
+        if decision.decision != "deny" and len(reqs) == 1:
+            # A deny on one part of a compound command (cd x && <denied>) still denies.
+            decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
+    except Exception:  # noqa: BLE001 - nothing after this hook would stop the call: deny it
+        log.exception("brindle: permission policy failed in Codex's PreToolUse; denying the call")
+        return permissions.codex_pre_tool_output(None)
+    if decision.decision != "deny":
+        return None
+    try:
+        _note_decision(db, agent, ws, reqs[0].kind, reqs[0].summary(), decision)
+    except Exception:  # noqa: BLE001 - bookkeeping never changes the answer
+        log.exception("brindle: couldn't record a Codex PreToolUse deny")
+    return permissions.codex_pre_tool_output(decision)
+
+
 def _record_permission(db: DB, agent: Agent, ws: Workspace | None, summary: str, result: str) -> None:
     from brindle import history
 
@@ -3866,6 +3912,16 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         session = _session_of(db, agent)   # for saved actions that last this session
+        if provider == "codex" and policy and permissions.codex_terminal_input(payload):
+            # Input typed into a process already running (write_stdin): no
+            # PreToolUse sees it, and brindle can't tell what the process does
+            # with it, so it never goes in.
+            decision = permissions.Decision("deny", permissions.TERMINAL_INPUT)
+            try:
+                _note_decision(db, agent, ws, "bash", "write_stdin", decision)
+            except Exception:  # noqa: BLE001 - bookkeeping never changes the answer
+                log.exception("brindle: couldn't record a Codex terminal-input deny")
+            return permissions.codex_output(decision)
         if provider == "codex":
             # No tool_use_id in Codex's payload: nothing to pair an approval
             # with, so nothing is kept for learning.
@@ -4338,9 +4394,37 @@ def _retest_keys(provider: str) -> None:
     keys_cmds.retest_provider(provider)
 
 
+def _codex_pre_tool_hook(db: DB, agent_id: str, payload: dict) -> dict:
+    """Codex's PreToolUse: the policy's answer first, the session bookkeeping
+    every hook does after it, and never at its expense. An agent brindle
+    can't find gets a deny: Codex would run the call on no answer."""
+    from brindle import permissions
+
+    try:
+        agent = db.get_agent(agent_id)
+    except Exception:  # noqa: BLE001
+        log.exception("brindle: couldn't load the agent for Codex's PreToolUse; denying the call")
+        agent = None
+    if agent is None:
+        return permissions.codex_pre_tool_output(None)
+    answer = codex_pre_tool_decision(db, agent, payload)
+    try:
+        if agent.hooks_off:
+            db.update_agent(agent_id, hooks_off=None)
+        from brindle import launch_health, prompt_answer
+
+        prompt_answer.settled(db, agent)   # see handle_hook
+        launch_health.accepted(db, agent)
+    except Exception:  # noqa: BLE001 - bookkeeping never changes the answer
+        log.exception("brindle: Codex PreToolUse bookkeeping failed")
+    return answer
+
+
 def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
     """Called from ``brindle _hook <event>`` inside the agent's own process tree.
     Returns JSON for Claude Code to read on stdout, or None."""
+    if event == "codex-pre-tool":
+        return _codex_pre_tool_hook(db, agent_id, payload)
     agent = db.get_agent(agent_id)
     if agent is None:
         return None
@@ -4917,7 +5001,15 @@ def tell_parent_unreported(db: DB, agent: Agent) -> bool:
     return True
 
 
-PERMISSION_EVENTS = ("permission-request", "codex-permission-request")
+CODEX_PRE_TOOL = "codex-pre-tool"
+PERMISSION_EVENTS = ("permission-request", "codex-permission-request", CODEX_PRE_TOOL)
+
+
+def codex_pre_tool_failure() -> dict:
+    """Codex's PreToolUse answer when brindle couldn't check the call."""
+    from brindle import permissions
+
+    return permissions.codex_pre_tool_output(None)
 
 
 def hook_main(db: DB, agent_id: str, event: str, stdin_text: str, trusted: bool = True) -> str:
@@ -4929,17 +5021,19 @@ def hook_main(db: DB, agent_id: str, event: str, stdin_text: str, trusted: bool 
     except json.JSONDecodeError:
         payload = {}
     if event in PERMISSION_EVENTS:
-        # Never let a failure turn into a decision: anything wrong means no
-        # output, so the CLI prompts the person as usual.
+        # Never let a failure turn into an allow: anything wrong means no
+        # output, so the CLI prompts the person as usual; except Codex's
+        # PreToolUse, where no output runs the call, so it's a deny.
+        failed = json.dumps(codex_pre_tool_failure()) if event == CODEX_PRE_TOOL else ""
         if not isinstance(payload, dict):
-            return ""
+            return failed
         try:
             if not trusted:
                 agent_id = agent_for_session(db, payload.get("session_id")) or agent_id
             out = handle_hook(db, agent_id, event, payload)
         except Exception:  # noqa: BLE001
             log.exception("brindle: permission-request hook failed")
-            return ""
+            return failed
         return json.dumps(out) if out else ""
     if not trusted:
         agent_id = agent_for_session(db, payload.get("session_id")) or agent_id

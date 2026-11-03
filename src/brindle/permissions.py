@@ -708,6 +708,41 @@ def decide_all(reqs: list[Request] | None, *, checks: list[str] | None = None,
     return next(d for d in decisions if d.decision == "ask")
 
 
+TERMINAL_INPUT = ("typing into a running process (write_stdin) isn't checked by brindle's policy, so it isn't "
+                  "sent. Run what you need as one command instead (bash -c '...', python -c '...', a script), "
+                  "with its input given up front (a file, a heredoc or a pipe)")
+
+
+def codex_terminal_input(payload: dict) -> bool:
+    """Whether Codex's PermissionRequest is for input to a process already
+    running (its write_stdin tool, which never runs PreToolUse): non-empty
+    characters, or ones brindle can't read. An empty poll (only reading the
+    output) types nothing."""
+    ti = payload.get("tool_input")
+    ti = ti if isinstance(ti, dict) else {}
+    if payload.get("tool_name") != "write_stdin" and "chars" not in ti:
+        return False
+    chars = ti.get("chars")
+    return not isinstance(chars, str) or chars != ""
+
+
+CODEX_PRE_TOOL_UNCHECKED = ("brindle couldn't check this call against the permission policy, so it doesn't "
+                            "run; try again, and if it keeps failing tell your supervisor (send_message)")
+
+
+def codex_pre_tool_output(decision: Decision | None) -> dict | None:
+    """What Codex's PreToolUse hook prints: only a deny (Codex can't ask from
+    PreToolUse, and an allow is left to its own approvals); None otherwise.
+    None for ``decision`` is a check that couldn't finish: Codex would run the
+    call on no answer, with nothing after it to stop it, so that's a deny too."""
+    if decision is None:
+        decision = Decision("deny", CODEX_PRE_TOOL_UNCHECKED)
+    if decision.decision != "deny":
+        return None
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                   "permissionDecisionReason": f"brindle: {decision.reason}"}}
+
+
 def codex_output(decision: Decision) -> dict | None:
     """What Codex's PermissionRequest hook prints; None (no output) for ask.
     Codex's schema requires hookEventName and fails closed on unknown fields."""
@@ -2279,20 +2314,33 @@ def _secret_name(name: str) -> bool:
     return name.upper() not in _NOT_SECRET and bool(_SECRET_NAME.search(name))
 
 
+_HOME_REFERENCE = re.compile(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])")
+# Key and token stores: a program reading under one prints credentials.
+_CREDENTIAL_DIRS = (".ssh", ".gnupg", ".config")
+
+
 def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
     """Recognizable credential stores, including patterns and uncertain cwd reads."""
-    name = os.path.expanduser(name)
-    path = os.path.normpath(os.path.join(part.cwd or "", name))
     home = os.path.expanduser("~")
+    # The credential scan keeps a word as written: quotes in place, $HOME unexpanded.
+    name = os.path.expanduser(_HOME_REFERENCE.sub(lambda _: home, name.replace('"', "").replace("'", "")))
+    path = os.path.normpath(os.path.join(part.cwd or "", name))
     if fnmatch.fnmatch(path, "/proc/*/environ") or part.cwd is None and name == "environ":
         return True
     if (path in (f"{home}/.netrc", f"{home}/.npmrc", f"{home}/.git-credentials", f"{home}/.docker/config.json")
-            or path.startswith(f"{home}/.config/") or path == f"{home}/.config"):
+            or any(path == f"{home}/{d}" or path.startswith(f"{home}/{d}/") for d in _CREDENTIAL_DIRS)):
         return True
     if path.startswith(f"{home}/.aws/") and fnmatch.fnmatch("credentials", os.path.basename(path)):
         return True
     return (os.path.basename(path) == ".env"
             and (part.cwd is None or not req.worktree or _inside(path, req.worktree) is None))
+
+
+_INTERPRETERS = frozenset({"python", "pypy", "node", "ruby", "perl", "php", "osascript", "deno", "bun", "lua",
+                           "Rscript", "irb", "swift"})
+# A credential store named in an interpreter's inline code (_credential_file's, as text).
+_CREDENTIAL_TEXT = re.compile(r"\.aws\W+credentials|\.npmrc|\.netrc|\.git-credentials|\.docker\W+config\.json"
+                              r"|\.ssh\b|\.gnupg\b|\.config\W+(?:gh|gcloud)\b|/environ\b")
 
 
 def _credential_options(args: list[str], valued: set[str]) -> tuple[list[str], set[str]]:
@@ -2500,6 +2548,9 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
         return any(_credential_file(req, part, name) for name in [*inputs, *part.reads])
     if program in (*READERS, "awk", "less", "more", "strings", "od", "xxd"):
         return any(_credential_file(req, part, name) for name in [*words[1:], *part.written[1:], *part.reads])
+    if re.sub(r"[\d.]+$", "", program) in _INTERPRETERS:
+        # Code given inline (python -c, node -e ...) that names a credential store reads it.
+        return any(_CREDENTIAL_TEXT.search(arg) for arg in args)
     return False
 
 

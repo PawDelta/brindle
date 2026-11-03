@@ -1808,8 +1808,9 @@ def permissions_install_codex_hook(
         return
     typer.echo(f"Codex reports it as: {state.status}")
     typer.echo(f"will set in {state.config}:")
-    typer.echo(f'  [hooks.state."{state.key}"]')
-    typer.echo(f'  trusted_hash = "{state.hash}"')
+    for key, hash_ in state.keys().items():
+        typer.echo(f'  [hooks.state."{key}"]')
+        typer.echo(f'  trusted_hash = "{hash_}"')
     typer.echo("and remember it in ~/.brindle/permissions.json (codex_hook)")
     if not yes:
         typer.echo("nothing changed; run again with --yes to trust it")
@@ -3088,7 +3089,7 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
     # Codex's permission hook is the same command for every agent (so one
     # trust covers them all): Codex passes the agent's environment through.
     agent_id = agent or os.environ.get("BRINDLE_AGENT_ID")
-    if not agent_id and event == "codex-permission-request":
+    if not agent_id and event in ("codex-permission-request", "codex-pre-tool"):
         try:
             from brindle import antigravity
 
@@ -3096,6 +3097,8 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
         except Exception:  # noqa: BLE001
             agent_id = None
     if not agent_id:
+        if event == agents.CODEX_PRE_TOOL:   # no output runs the call: brindle couldn't check it
+            typer.echo(json.dumps(agents.codex_pre_tool_failure()))
         return
     # Codex's notify passes the JSON as an argument; Claude Code's hooks use stdin.
     text = payload if payload is not None else sys.stdin.read()
@@ -3111,6 +3114,8 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
         try:  # any failure means no output: the person is asked as usual
             out = agents.hook_main(DB(), agent_id, event, text, trusted=agent is not None)
         except Exception:  # noqa: BLE001
+            if event == agents.CODEX_PRE_TOOL:
+                typer.echo(json.dumps(agents.codex_pre_tool_failure()))
             return
     else:
         out = agents.hook_main(DB(), agent_id, event, text, trusted=agent is not None)
