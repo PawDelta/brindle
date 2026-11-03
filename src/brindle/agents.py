@@ -2585,8 +2585,16 @@ def close_removed(db: DB, agent_id: str) -> None:
     # The workspace's removal took the agent's record, and with it the link to
     # its root, unless the note kept it.
     root_id = root_id.strip() or root_of(db, agent_id)
+    from brindle import pipeline
+
+    agent = db.get_agent(agent_id)
     try:
-        kill(db, agent_id)
+        if agent is not None and pipeline.verdict_held(agent.workspace_id, agent_id):
+            # Its verdict waits for the commit's checks (pipeline.checks_finished):
+            # stop and hide it, but keep its record until that acts on it.
+            close(db, agent_id)
+        else:
+            kill(db, agent_id)
     except AgentError:
         pass
     if session and db.workspace_by_tmux_session(session) is None \
