@@ -36,6 +36,7 @@ def _workspace(db, tmp_path):
     return ws
 
 
+@pytest.mark.variant("security boundary: secrets are masked in stored messages and in analysis doc uploads")
 def test_message_and_analysis_doc_upload_are_masked(tmp_path, db, remote, fixed_identity):
     _workspace(db, tmp_path)
     stored = db.get_message("sup", db.enqueue_held("sup", TEXT, None))
@@ -72,6 +73,7 @@ def test_check_output_learned_rule_and_graphify_log_are_masked(tmp_path, db, mon
         assert PAT not in text and SLACK not in text and MASKED in text
 
 
+@pytest.mark.variant("security boundary: a CI reviewer reply is masked before truncation can split a token, and evidence and event uploads are masked")
 def test_ci_reply_is_masked_before_it_is_cut_and_uploads_are_masked(tmp_path):
     reply = PAT + " " + "y" * (ci_client.REPLY_MAX - 20)    # the cut falls inside the token
     adapter = FakeAdapter("claude", reply=reply)
@@ -95,6 +97,7 @@ class _Scripted:
         return self.replies.pop(0)
 
 
+@pytest.mark.variant("security boundary: the native agent's transcript and saved state on disk are masked, the live conversation is not")
 def test_native_transcript_and_saved_state_are_masked_but_the_live_conversation_is_not(tmp_path):
     (tmp_path / "secret.txt").write_text(f"token {PAT}\n")
     client = _Scripted([Reply("reading", [ToolCall("t1", "Read", {"path": "secret.txt", "API_KEY": LABELLED_KEY})], "tool_calls"),

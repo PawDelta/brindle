@@ -75,19 +75,6 @@ def test_routing_and_suggestions_respect_memory(db, tmp_path, monkeypatch, ollam
     assert learned_rules.default_call(str(repo)).__name__ == ('native' if expected == 'developer-local' else 'claude')
 
 
-def test_local_calls_unload_after_completion(monkeypatch, ollama):
-    monkeypatch.setattr(local_setup, 'free_memory_gb', lambda: 26)
-    reply = client.Client(client.Endpoint('http://localhost:11434/v1', 'qwen3-coder:30b')).complete(
-        None, [{'role': 'user', 'content': 'hello'}], [])
-    assert reply.text == 'done'
-    assert all(body.get('keep_alive') == '0' for _, body in ollama if body)
-    # The compatibility endpoint may ignore keep_alive: the native unload must follow it.
-    assert ollama[-1][0].endswith('/api/generate')
-    server = serve.Server('http://localhost:11434', ['qwen3-coder:30b'], ['developer-local'])
-    assert serve.warm(server, 'qwen3-coder:30b')
-    assert ollama[-1][1]['keep_alive'] == '0'
-
-
 def test_darwin_free_memory_does_not_count_speculative_pages_twice(monkeypatch, ollama):
     import ctypes
     import os
@@ -117,11 +104,20 @@ def test_darwin_free_memory_does_not_count_speculative_pages_twice(monkeypatch, 
                                               base_url='http://localhost:11434/v1'))
 
 
+@pytest.mark.variant("race (review blocker): free memory that drops after a client was admitted stops its next local call")
 def test_admitted_client_rechecks_memory_before_each_local_call(monkeypatch, ollama):
-    free = iter([26, 1])
-    monkeypatch.setattr(local_setup, 'free_memory_gb', lambda: next(free))
+    free = [26]
+    monkeypatch.setattr(local_setup, 'free_memory_gb', lambda: free[0])
     local = client.Client(client.Endpoint('http://localhost:11434/v1', 'qwen3-coder:30b'))
     assert local.complete(None, [{'role': 'user', 'content': 'hello'}], []).text == 'done'
+    # An admitted call unloads after completion.
+    assert all(body.get('keep_alive') == '0' for _, body in ollama if body)
+    # The compatibility endpoint may ignore keep_alive: the native unload must follow it.
+    assert ollama[-1][0].endswith('/api/generate')
+    server = serve.Server('http://localhost:11434', ['qwen3-coder:30b'], ['developer-local'])
+    assert serve.warm(server, 'qwen3-coder:30b')
+    assert ollama[-1][1]['keep_alive'] == '0'
+    free[0] = 1   # memory drops after admission: the next call is refused
     chats = sum(url.endswith('/chat/completions') for url, _ in ollama)
     with pytest.raises(client.ClientError, match='insufficient free memory.*cloud profile'):
         local.complete(None, [{'role': 'user', 'content': 'again'}], [])
@@ -146,6 +142,7 @@ def test_reviewer_resolver_falls_back_to_cloud_and_tells_the_supervisor(db, tmp_
     assert not agents._local_reviewer_available()   # never offered to the learner
 
 
+@pytest.mark.variant("bypass attempt (review blocker): a failed Ollama discovery on a custom port fails closed and never admits a load")
 @pytest.mark.parametrize('versions', [['ollama', 'down'], ['down']])
 def test_custom_port_discovery_failure_never_admits_a_load(monkeypatch, ollama, versions):
     """A server that answered as Ollama stays Ollama when a later probe fails,
