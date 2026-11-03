@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import signal
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -203,6 +206,27 @@ def _an_abandoned_read_leaves_no_process(tmp_path, monkeypatch):
     assert spawn.running() == 0
 
 
+def _a_hung_up_sidebar_leaves_no_read_running(tmp_path):
+    """tmux hangs up the sidebar while its costs thread waits on `claude -p
+    /usage` (its own session, so the hangup never reaches it): the read is
+    stopped as the sidebar exits, not left running for good."""
+    started = tmp_path / "started"
+    os.mkfifo(started)
+    script = (f"import signal, threading\nfrom brindle import spawn\nspawn.exit_on_hangup()\n"
+              f"threading.Thread(target=spawn.read, args=(['sh', '-c', 'echo $$ > {started}; "
+              f"exec tail -f /dev/null'],), daemon=True).start()\n"
+              f"print(open('{started}').read(), end='', flush=True)\nsignal.pause()\n")
+    sidebar = subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE, text=True)
+    pid = int(sidebar.stdout.readline())     # (a sidebar that never started reads as "")
+    try:
+        os.kill(sidebar.pid, signal.SIGHUP)
+        sidebar.wait()
+        assert not procs.alive(pid)
+    finally:
+        if procs.alive(pid):
+            os.kill(pid, signal.SIGKILL)
+
+
 def _a_cancelled_request_stops_the_read_its_thread_left_running():
     got: list[BaseException] = []
 
@@ -366,6 +390,8 @@ def _row(scenario, id, why=None, **params):
     _row(_a_started_helper_commits_its_request_and_a_started_read_does_not, "subprocess-helper-vs-read",
          "only a helper whose request committed may outlive it; a read must not"),
     _row(_an_abandoned_read_leaves_no_process, "abandoned-read"),
+    _row(_a_hung_up_sidebar_leaves_no_read_running, "hung-up-sidebar-read",
+         "a read must not outlive the process that started it"),
     _row(_a_cancelled_request_stops_the_read_its_thread_left_running, "cancelled-read",
          "a cancelled request stops the read its worker thread left running"),
     _row(_a_post_whose_client_left_mid_action_runs_to_its_end, "client-left-post",
