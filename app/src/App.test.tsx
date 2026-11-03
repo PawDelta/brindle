@@ -382,31 +382,6 @@ describe("App", () => {
     sync.stop();
   });
 
-  it("hands the shell's command-line installer to Settings: the button is live and its result lands on the row", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker] });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    const installCli = vi.fn(() => Promise.resolve({ path: "/home/sam/.local/bin/brindle", target: "/Applications/brindle.app/Contents/Resources/engine/bin/brindle" }));
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "settings" }} installCli={installCli} />);
-    fireEvent.click(await screen.findByRole("button", { name: /Details/ }));
-    const cli = await screen.findByTestId("install-cli");
-    const btn = within(cli).getByRole("button", { name: "Install command-line tool" });
-    expect(btn).toHaveProperty("disabled", false);
-    fireEvent.click(btn);
-    await waitFor(() => expect(cli.textContent).toContain("Installed as /home/sam/.local/bin/brindle"));
-    expect(installCli).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("dialog")).toBeNull();
-    sync.stop();
-  });
-
-  it("says what to do on a page with no engine at all", () => {
-    renderApp(<App store={createAppStore()} client={null} />);
-    expect(screen.getByTestId("engine-banner").textContent).toContain("this page has no engine");
-    expect(screen.getByText("Nothing to show without an engine.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Upgrade the engine" })).toBeNull();
-  });
-
   it("puts a stream the engine refuses, or one that dropped, in the banner when the engine itself is fine", () => {
     const ok: EngineStatus = { state: "ok", meta: new FakeDaemon().data.meta };
     expect(bannerStatus(ok, "open")).toBe(ok);

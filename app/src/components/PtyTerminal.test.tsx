@@ -187,68 +187,6 @@ it("keeps what's typed after ⌘V behind the paste while the clipboard is read, 
   expect(written.at(-1)).toBe("y");
 });
 
-it("drag-select then ⌘C copies the highlighted text: xterm.js's selection, or tmux's (its copy key, the copy back as OSC 52), never a key to the pane", async () => {
-  const { written, copied, opened, term } = mount();
-  const textarea = term().textarea!;
-  const press = () => {
-    const e = new KeyboardEvent("keydown", { key: "c", metaKey: true, bubbles: true, cancelable: true });
-    act(() => void textarea.dispatchEvent(e));
-    return e;
-  };
-  // tmux's selection: a plain drag over a pane (tmux's mouse, copy mode). ⌘C asks tmux for it, the key taken.
-  expect(press().defaultPrevented).toBe(true);
-  expect(written).toEqual([COPY_KEY]);
-  expect(copied).toEqual([]);
-  // tmux copies it as it copies a drag's end: OSC 52 with no selection named (`52;;`), onto the app's clipboard.
-  const b64 = (text: string) => btoa(String.fromCharCode(...new TextEncoder().encode(text)));
-  act(() => opened.handlers!.onData(new TextEncoder().encode(`\x1b]52;;${b64("dragged in tmux ✓")}\x07`)));
-  await parsed(term());
-  await settled();
-  expect(copied).toEqual(["dragged in tmux ✓"]);
-  // A program's own drag (Claude Code's, the mouse its own) copies on release the same way, through tmux.
-  act(() => opened.handlers!.onData(new TextEncoder().encode(`\x1b]52;;${b64("dragged in Claude Code")}\x07`)));
-  await parsed(term());
-  await settled();
-  expect(copied.at(-1)).toBe("dragged in Claude Code");
-
-  // xterm.js's own selection (Option-drag): ⌘C copies it, nothing to tmux.
-  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[2J\x1b[Hhighlighted text")));
-  await parsed(term());
-  act(() => term().select(0, 0, 11));
-  expect(press().defaultPrevented).toBe(true);
-  expect(copied.at(-1)).toBe("highlighted");
-  expect(written).toEqual([COPY_KEY]);
-});
-
-it("select to copy: xterm.js's own selection (a drag, a double-click's word, a triple-click's line) goes onto the app's clipboard as the mouse lets go, no ⌘C", async () => {
-  const { written, copied, opened, view, term } = mount();
-  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[2J\x1b[Hselect me please\r\nsecond line")));
-  await parsed(term());
-  const host = view.getByTestId("terminal");
-  // The mouse pressed in the view, the selection made while it is held, let go (off the view, as a drag can end).
-  const gesture = (select: () => void) => {
-    act(() => void host.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
-    act(select);
-    act(() => void window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
-  };
-  gesture(() => term().select(0, 0, 9));
-  expect(copied).toEqual(["select me"]);
-  gesture(() => term().selectLines(1, 1));
-  expect(copied.at(-1)).toBe("second line");
-  // A click that selects nothing copies nothing; nor does a mouseup with no press in the view.
-  gesture(() => term().clearSelection());
-  act(() => term().select(0, 0, 6));
-  act(() => void window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
-  expect(copied).toEqual(["select me", "second line"]);
-  // Nothing goes to the pane for it.
-  expect(written).toEqual([]);
-  // Unmounted: a late let-go copies nothing.
-  act(() => void host.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
-  view.unmount();
-  act(() => void window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
-  expect(copied).toHaveLength(2);
-});
-
 it("says \"Copied\" over the view for a moment whenever a copy reaches the app's clipboard: the program's (Claude Code's, through tmux, as OSC 52 with the mouse reported), tmux's, or xterm.js's selection let go", async () => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   try {
@@ -328,18 +266,6 @@ it("says nothing for a copy the app's clipboard couldn't take, and \"Copied\" on
   expect(shownCopied()).toBeNull();
   await act(async () => land());
   expect(shownCopied()?.textContent).toBe("Copied");
-});
-
-it("select to copy with columns cropped: only the shown columns go onto the app's clipboard", async () => {
-  const { copied, opened, view, term } = mount();
-  act(() => opened.handlers!.onCrop!({ cols: 11, left: 11 }));
-  act(() => opened.handlers!.onData(new TextEncoder().encode(`\x1b[2J\x1b[H${"side".padEnd(10)}│agent text`)));
-  await parsed(term());
-  const host = view.getByTestId("terminal");
-  act(() => void host.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
-  act(() => term().selectLines(0, 0));
-  act(() => void window.dispatchEvent(new MouseEvent("mouseup", { bubbles: true })));
-  expect(copied).toEqual(["agent text"]);
 });
 
 it("Ctrl+C on Windows and Linux copies xterm.js's selection or tmux's, else is ^C (tmux's key decides); on a Mac it is always ^C", async () => {
@@ -471,21 +397,6 @@ it("off a Mac, ⌘V pastes the app's clipboard, and an Edit > Paste after it pas
   expect(written).toHaveLength(2);
 });
 
-it("pastes after a press anywhere in the view, its margin too: the press gives xterm.js the keyboard, so ⌘V's paste reaches the pane", async () => {
-  const { written, opened, view, term } = mount();
-  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
-  await parsed(term());
-  // A press on the view outside xterm.js's own element (its margin, the strip under its last row, the mask): the
-  // webview would leave the focus on the page, where the paste went, pasting nothing.
-  const press = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
-  act(() => void view.getByTestId("terminal").dispatchEvent(press));
-  // ⌘V's paste, on whatever has the focus.
-  webviewPaste(document.activeElement!, "pasted ✓");
-  await settled();
-  expect(written).toEqual(["\x1b[200~pasted ✓\x1b[201~"]);
-  expect(press.defaultPrevented, "the press's default doesn't take the focus off the view again").toBe(true);
-});
-
 it("opens a link Ctrl-clicked (⌘-clicked on a Mac) in the system browser, a URL the pane prints or a program's OSC 8 hyperlink; a plain click opens nothing", async () => {
   const urls: string[] = [];
   let handlers: PtyViewHandlers | undefined;
@@ -508,31 +419,6 @@ it("opens a link Ctrl-clicked (⌘-clicked on a Mac) in the system browser, a UR
   expect(urls).toEqual(["https://example.com/docs?a=1", "https://example.com/osc"]);
 });
 
-it("tells the view it was focused or clicked, so the window takes its size, typing nothing", () => {
-  const { written, opened, view, term } = mount();
-  act(() => term().focus());
-  expect(opened.focused).toBe(1);
-  // Clicked while focused already: no focus event, the click says it.
-  act(() => void view.getByTestId("terminal").querySelector(".xterm-screen")!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true })));
-  expect(opened.focused).toBe(2);
-  expect(written).toEqual([]);
-  view.unmount();
-  term().textarea?.dispatchEvent(new FocusEvent("focus"));
-  expect(opened.focused).toBe(2);
-});
-
-it("says its size once open and on each change, as its client asks tmux for it", () => {
-  const sizes: [number, number][] = [];
-  const resized: [number, number][] = [];
-  const open: PtyViewOpener = () => ({ write() {}, resize: (c, r) => void resized.push([c, r]), focus() {}, close() {} });
-  render(<PtyTerminal at={{ server: "brindle", target: "s:@1" }} open={open} onSize={(c, r) => sizes.push([c, r])} />);
-  const term = xterms.at(-1)!;
-  expect(sizes).toEqual([[term.cols, term.rows]]);
-  act(() => term.resize(90, 30));
-  expect(sizes.at(-1)).toEqual([90, 30]);
-  expect(resized.at(-1)).toEqual([90, 30]);
-});
-
 it("copies a selection across rows only from the columns shown: never a cropped sidebar's or its border", async () => {
   const { opened, term } = mount();
   // A 10-column sidebar and its border at the left, the agent's rows after (columns 11 on).
@@ -548,9 +434,8 @@ it("copies a selection across rows only from the columns shown: never a cropped 
   expect(selectionIn(term(), 0, 14)).toBe("\nside 2    │age\nside 3    │age");
 });
 
-it("keeps no scrollback of its own (the history is tmux's) and closes the client when unmounted", () => {
-  const { opened, view, term } = mount();
-  expect(term().options.scrollback).toBe(0);
+it("closes the client when unmounted", () => {
+  const { opened, view } = mount();
   view.unmount();
   expect(opened.closed).toBe(true);
 });

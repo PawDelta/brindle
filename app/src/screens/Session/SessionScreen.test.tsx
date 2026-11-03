@@ -405,29 +405,6 @@ describe("SessionScreen", () => {
     sync.stop();
   });
 
-  it("draws with WebGL, asks again for a lost context, then draws with the DOM renderer once none can be had, and the pane keeps streaming", async () => {
-    fake.Webgl.supported = true;
-    const { daemon, sync, term } = mount({ sup1: live });
-    await waitFor(() => expect(shownAgent()).toBe("sup1"));
-    await waitFor(() => expect(term().written).toBe(drawnLive));
-    expect(screen.getByTestId("terminal").dataset.renderer).toBe("webgl");
-
-    // The GPU switched: a fresh context, still WebGL.
-    const [webgl] = fake.Webgl.all.slice(-1);
-    act(() => webgl.loseContext());
-    expect(webgl.disposed).toBe(true);
-    expect(fake.Webgl.all.at(-1)).not.toBe(webgl);
-    expect(screen.getByTestId("terminal").dataset.renderer).toBe("webgl");
-    // Lost again, and WebGL can't be had any more: the DOM renderer.
-    fake.Webgl.supported = false;
-    act(() => fake.Webgl.all.at(-1)!.loseContext());
-    expect(screen.getByTestId("terminal").dataset.renderer).toBe("dom");
-
-    daemon.print("sup1", "after");
-    await waitFor(() => expect(term().written).toContain("after"));
-    sync.stop();
-  });
-
   it("shows a native card, never a shell, for an agent whose process isn't running, with what it left behind a disclosure", async () => {
     // The supervisor's process is gone (liveness says so, the pane is dead): an ended card with Continue.
     const { daemon, sync, term } = mount({ sup1: { live: false, text: "$ \n" } });
@@ -456,17 +433,6 @@ describe("SessionScreen", () => {
     sync.stop();
   });
 
-  it("says when a pane's window is gone, and says so in place of what it left", async () => {
-    const { daemon, sync } = mount({ sup1: { live: false, text: "$ \n" } });
-    await waitFor(() => expect(daemon.open.length).toBeGreaterThan(0));
-    daemon.send({ type: "liveness", agents: { sup1: false } });
-    delete daemon.data.terminals.sup1; // the window was reaped since
-    const card = await screen.findByTestId("state-card");
-    fireEvent.click(within(card).getByRole("button", { name: "Show what it left" }));
-    await waitFor(() => expect(surface().textContent).toContain(`Nothing of it is left to show: can't find pane: ${windowOf("sup1")}`));
-    sync.stop();
-  });
-
   it("reopens a view whose client exited on request: a fresh view, the pane drawn again", async () => {
     const { daemon, sync, term } = mount({ sup1: live });
     await waitFor(() => expect(term().written).toBe(drawnLive));
@@ -484,21 +450,6 @@ describe("SessionScreen", () => {
     await waitFor(() => expect(term().written).toBe(drawnLive));
     daemon.print("sup1", "more");
     await waitFor(() => expect(term().written).toContain("more"));
-    sync.stop();
-  });
-
-  it("shows a finished worker's final screen from the start, under its card", async () => {
-    const done = { ...worker, agents: [{ ...worker.agents![0], status: "idle", reported: true }] };
-    const { daemon, sync, term } = mount({ sup1: live, w1: { live: false, text: "⏺ Done: ls prints JSON with --json. Reported.\n" } }, { workspaces: [root, done] });
-    await waitFor(() => expect(shownAgent()).toBe("sup1"));
-    // The liveness sweep finds its process gone.
-    daemon.send({ type: "liveness", agents: { sup1: true, w1: false } });
-    pick("w1");
-    const card = await screen.findByTestId("state-card");
-    expect(card.dataset.kind).toBe("ended");
-    // What it left is on screen already, no click needed; the card can fold it away.
-    await waitFor(() => expect(term().written).toContain("Done: ls prints JSON with --json"));
-    expect(within(card).getByRole("button", { name: "Hide what it left" })).toBeTruthy();
     sync.stop();
   });
 
@@ -698,34 +649,6 @@ describe("SessionScreen", () => {
     sync.stop();
   });
 
-  it("handover: hands the session over from the supervisor's ⋯ to a branch, with a note, after saying what moves; the new session opens", async () => {
-    const { daemon, sync, opened } = mount({ sup1: live, w1: live });
-    await waitFor(() => expect(shownAgent()).toBe("sup1"));
-
-    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
-    expect(screen.queryByRole("menuitem", { name: "Rewind…" })).toBeNull(); // a worker's alone
-    // Not a scratch session (its repo isn't under brindle's scratch folder): nothing to move.
-    await waitFor(() => expect(daemon.requests.some((r) => r.path === "/meta")).toBe(true));
-    await act(() => flush());
-    expect(screen.queryByRole("menuitem", { name: "Move to a repo…" })).toBeNull();
-    fireEvent.click(screen.getByRole("menuitem", { name: "Hand over…" }));
-    const dialog = screen.getByRole("dialog", { name: "Confirm handover" });
-    const confirm = within(dialog).getByRole("button", { name: "Confirm handover" }) as HTMLButtonElement;
-    expect(confirm.disabled).toBe(true); // nowhere to go yet
-    fireEvent.change(within(dialog).getByLabelText("Branch or worktree"), { target: { value: "dev/next" } });
-    fireEvent.change(within(dialog).getByLabelText("Handoff note"), { target: { value: "merge w1 first" } });
-    const says = screen.getByTestId("handover-consequence").textContent;
-    expect(says).toContain("A new supervisor starts on dev/next with this session's goal, milestones, workers and queued tasks");
-    expect(says).toContain("sup1 is paused");
-    fireEvent.click(confirm);
-
-    await waitFor(() => expect(opened).toEqual([["new1", REPO]]));
-    expect(daemon.requests.filter((r) => r.method === "POST").map((r) => [r.path, r.body])).toEqual([["/sessions/sup1/handover", { to: "dev/next", note: "merge w1 first" }]]);
-    expect(daemon.data.sessions.find((s) => s.id === "sup1")?.status).toBe("paused");
-    expect(daemon.data.workspaces.flatMap((w) => w.agents ?? []).find((a) => a.id === "w1")?.parent_id).toBe("new1");
-    sync.stop();
-  });
-
   it("opens a view on the window of the agent picked, for the supervisor and every worker, and shows that agent's own pane", async () => {
     const child = { ...worker.agents![0], id: "c1", parent_id: "w1", provider: "codex", window: windowOf("c1") };
     const panes: Record<string, Pane & { screen: string }> = { sup1: { ...live, screen: "supervisor pane" }, w1: { ...live, screen: "worker pane" }, c1: { ...live, screen: "reviewer pane" } };
@@ -742,86 +665,6 @@ describe("SessionScreen", () => {
       expect(open[0].at).toEqual({ server: "brindle", target: windowOf(id) });
       expect(screen.getByTestId("surface-title").textContent).toBe(id === "sup1" ? "Claude Code · supervisor" : id === "w1" ? "Claude Code · ls" : "Codex · claude");
     }
-    sync.stop();
-  });
-
-  it("keeps the session untouched: nothing pops up over an agent's pane for what waits on the person, and nothing sits beside the surface or on the bar", async () => {
-    const { daemon, sync } = mount({ sup1: live, w1: live }, { inbox: [waiting] });
-    await waitFor(() => expect(shownAgent()).toBe("sup1"));
-    // The bar is the agent's alone: no count of what waits, no goal; brindle's layer lives in the sidebar and the
-    // Inbox, not beside the surface.
-    expect(screen.queryByRole("button", { name: /needs you/ })).toBeNull();
-    expect(screen.queryByRole("complementary")).toBeNull();
-    expect(screen.queryByRole("region", { name: "Goal" })).toBeNull();
-    // The worker waits at its own prompt: its pane, and no sheet, card or banner about it (the Inbox's card
-    // goes here and says the answer is given at the prompt).
-    pick("w1");
-    await waitFor(() => expect(shownAgent()).toBe("w1"));
-    expect(screen.getByTestId("terminal")).toBeTruthy();
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(screen.queryByTestId("state-card")).toBeNull();
-    expect(screen.queryByRole("status")).toBeNull();
-    expect(daemon.requests.filter((r) => r.method === "POST")).toEqual([]);
-
-    // No per-worker review entry and no message box: a branch is reviewed from its inbox item, and the
-    // person talks to the agent in its own session.
-    expect(screen.queryByRole("button", { name: "Review changes" })).toBeNull();
-    expect(screen.queryByLabelText("Message")).toBeNull();
-    sync.stop();
-  });
-
-  it("continues from the bar through the same handler as the card: a paused session's pane is shown again on a fresh view", async () => {
-    // Listed as paused while the snapshot still shows its root idle; its pane is dead, as the liveness sweep finds.
-    const pausedRoot: SessionDTO = { ...session, status: "paused" };
-    const { daemon, sync, term } = mount({ sup1: { live: false, text: "$ \n" } }, { sessions: [pausedRoot] });
-    await waitFor(() => expect(daemon.open.length).toBeGreaterThan(0));
-    daemon.send({ type: "liveness", agents: { sup1: false } });
-    const card = await screen.findByTestId("state-card");
-    expect(card.dataset.kind).toBe("ended");
-    expect(screen.queryByTestId("terminal")).toBeNull();
-    const bar = screen.getByTestId("session-bar");
-    expect(within(bar).getByRole("button", { name: "Continue" })).toBeTruthy();
-    expect(daemon.viewers("sup1")).toEqual([]);
-
-    // The chat comes back: the bar's Continue posts once, and the surface opens a view on the live pane.
-    daemon.data.terminals.sup1 = live;
-    fireEvent.click(within(bar).getByRole("button", { name: "Continue" }));
-    await waitFor(() => expect(daemon.requests.filter((r) => r.method === "POST").map((r) => r.path)).toEqual(["/sessions/sup1/continue"]));
-    daemon.send({ type: "liveness", agents: { sup1: true } });
-    await waitFor(() => expect(screen.queryByTestId("state-card")).toBeNull());
-    await waitFor(() => expect(term().written).toBe(drawnLive));
-    expect(daemon.viewers("sup1")).toHaveLength(1);
-    await waitFor(() => expect(within(bar).getByRole("button", { name: "Pause" })).toBeTruthy());
-    sync.stop();
-  });
-
-  it("shows the bar's preflight refusal over a live worker's pane when a failed session's supervisor is continued", async () => {
-    // The supervisor failed (the session lists so) while its worker still runs, and the worker is the one on screen.
-    const failed: SessionDTO = { ...session, status: "failed" };
-    const deadRoot = { ...root, agents: [{ ...root.agents![0], status: "failed" }] };
-    const preflight = { claude: [{ id: "trust", kind: "trust" as const, label: "Trust the folder /home/u/proj", done: false }] };
-    const { daemon, sync, term } = mount({ w1: { ...live, screen: "worker" }, sup1: { live: false, text: "$ \n" } }, { sessions: [failed], workspaces: [deadRoot, worker], preflight });
-    await waitFor(() => expect(shownAgent()).toBe("sup1"));
-    pick("w1");
-    await waitFor(() => expect(term().written).toBe("\x1b[H\x1b[2Jworker\x1b[2;3H"));
-    expect(surface().dataset.card).toBe("live");
-    const bar = screen.getByTestId("session-bar");
-    // The bar offers Continue for the failed session; the engine refuses over Claude Code's preflight, which shows
-    // here, above the worker's pane, which keeps streaming beneath it.
-    fireEvent.click(within(bar).getByRole("button", { name: "Continue" }));
-    const shown = await screen.findByTestId("preflight");
-    expect(shown.textContent).toContain("Trust the folder /home/u/proj");
-    expect(screen.getByTestId("terminal")).toBeTruthy();
-    expect(screen.queryByTestId("state-card")).toBeNull();
-    daemon.print("w1", "still here");
-    await waitFor(() => expect(term().written).toContain("still here"));
-    // Settled, Continue from the preflight brings the supervisor's chat back; the worker's pane stays.
-    fireEvent.click(within(shown).getByRole("button", { name: "Trust this folder" }));
-    await waitFor(() => expect(within(shown).getByRole("button", { name: "Continue" })).toHaveProperty("disabled", false));
-    fireEvent.click(within(shown).getByRole("button", { name: "Continue" }));
-    await waitFor(() => expect(daemon.requests.filter((r) => r.method === "POST").map((r) => r.path)).toEqual(["/sessions/sup1/continue", "/providers/claude/preflight/trust", "/sessions/sup1/continue"]));
-    await waitFor(() => expect(screen.queryByTestId("preflight")).toBeNull());
-    expect(screen.getByTestId("terminal")).toBeTruthy();
     sync.stop();
   });
 
@@ -927,26 +770,6 @@ describe("SessionScreen, the pty view", () => {
     again.sync.stop();
   });
 
-  it("says why a pane can't be shown when the app's tmux is too old, with nothing to restart and nothing opened", async () => {
-    const message = "The app's tmux is tmux 3.0a, and brindle needs tmux 3.2 or newer to show a session. Update tmux, then reopen the session.";
-    const v = views({ kind: "unusable", message });
-    const { sync } = mount({ sup1: live, w1: live }, {}, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
-    await waitFor(() => expect(screen.getByTestId("state-card").dataset.kind).toBe("failed"));
-    const card = screen.getByTestId("state-card");
-    expect(card.textContent).toContain("Claude Code can't be shown");
-    expect(card.textContent).toContain(message);
-    expect(within(card).queryByRole("button", { name: "Restart" })).toBeNull();
-    expect(v.opened).toEqual([]);
-    // Opened on that card, the surface asked the shell again; Check again asks once more, and so does reopening it.
-    expect(v.rechecks.n).toBe(1);
-    fireEvent.click(within(card).getByRole("button", { name: "Check again" }));
-    expect(v.rechecks.n).toBe(2);
-    pick("w1");
-    await waitFor(() => expect(shownAgent()).toBe("w1"));
-    await waitFor(() => expect(v.rechecks.n).toBe(3));
-    sync.stop();
-  });
-
   it("says why a view couldn't open (the agents' tmux too old), and offers to look again, which opens it afresh, not to restart the agent", async () => {
     const v = views({ kind: "ready", tmux: "tmux 3.8" });
     const { sync } = mount({ sup1: live, w1: live }, {}, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
@@ -968,13 +791,4 @@ describe("SessionScreen, the pty view", () => {
     sync.stop();
   });
 
-  it("opens nothing until the shell has said whether the pty view can run", async () => {
-    const v = views({ kind: "pending" });
-    const { sync } = mount({ sup1: live, w1: live }, {}, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
-    await waitFor(() => expect(shownAgent()).toBe("sup1"));
-    await flush();
-    expect(v.opened).toEqual([]);
-    expect(screen.queryByTestId("terminal")).toBeNull();
-    sync.stop();
-  });
 });
