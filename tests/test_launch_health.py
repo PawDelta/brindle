@@ -168,15 +168,50 @@ def test_profile_named_differently_inside_still_resumes_with_its_own_permissions
 # -- worktree pre-trust ------------------------------------------------------------
 
 
-def test_concurrent_trusts_all_land(tmp_path, claude_config):
-    folders = [tmp_path / f"wt{i}" for i in range(2)]
+def test_concurrent_trusts_all_land(tmp_path, claude_config, monkeypatch):
+    """The second writer reaches the lock while the first is between its read and
+    its write: only the lock keeps the first from overwriting the second's entry."""
+    folders = [tmp_path / "wt-a", tmp_path / "wt-b"]
     for f in folders:
         f.mkdir()
-    threads = [threading.Thread(target=trust_folder, args=(str(f),)) for f in folders]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    first_inside, second_waiting, second_writing = threading.Event(), threading.Event(), threading.Event()
+    real_lock, real_replace = providers._config_lock, providers._replace_json
+    contended = []
+
+    def lock(*a, **k):
+        if threading.current_thread().name == "second":
+            second_waiting.set()        # about to contend for the lock
+        return real_lock(*a, **k)
+
+    def second_is_blocked():            # parked in the lock's flock, not yet in the critical section
+        frame = sys._current_frames().get(second.ident)
+        return frame is not None and frame.f_code.co_name == "held"
+
+    def replace(config, data, mode):
+        name = threading.current_thread().name
+        if name == "first":
+            first_inside.set()          # read done, write pending
+            assert second_waiting.wait(10), "the second writer never reached the lock"
+            deadline = time.monotonic() + 10
+            # Hold the write until the second writer is stuck behind the lock, or (with no
+            # working lock) has read the same file and is about to write it too.
+            while not (second_writing.is_set() or second_is_blocked()):
+                assert time.monotonic() < deadline, "the second writer neither waited nor wrote"
+            contended.append(second_is_blocked())
+        elif name == "second":
+            second_writing.set()
+        real_replace(config, data, mode)
+
+    monkeypatch.setattr(providers, "_config_lock", lock)
+    monkeypatch.setattr(providers, "_replace_json", replace)
+    first = threading.Thread(target=trust_folder, args=(str(folders[0]),), name="first")
+    second = threading.Thread(target=trust_folder, args=(str(folders[1]),), name="second")
+    first.start()
+    assert first_inside.wait(10)
+    second.start()
+    first.join()
+    second.join()
+    assert contended == [True]          # the second writer really waited on the lock
     projects = json.loads((claude_config / ".claude.json").read_text())["projects"]
     assert all(projects[os.path.realpath(f)]["hasTrustDialogAccepted"] is True for f in folders)
     assert sorted(p.name for p in claude_config.iterdir()) == [".claude.json"]
