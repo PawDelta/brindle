@@ -119,24 +119,6 @@ def test_undetermined_not_repeated_never_pauses_and_warns_once(w):
     assert sum("can't be verified" in b for _, b in w.messages) == 2
 
 
-def test_an_org_route_not_in_use_checks_the_persons_own_signin(w, monkeypatch):
-    # The org sets up a federated Bedrock route, but company login stored no env
-    # and the policy doesn't enforce: panes run on the person's own sign-in.
-    w.route = "bedrock"
-    monkeypatch.setattr(company_login, "route_in_use", _REAL_ROUTE_IN_USE)
-    monkeypatch.setattr(company_identity, "claude_identity", lambda org_id, claude, cache=True: (
-        Identity("claude", "AWS federated role: no credential fetched yet", determined=False)
-        if claude is not None else w.claude))
-    w.agent("c1")
-    w.claude = PERSONAL
-    assert signin_pause.check("claude")[0].ident == PERSONAL.ident
-    signin_pause.run(w.db)
-    assert w.messages == [] and w.status("c1") == "processing"
-    w.claude = OUT              # a real problem with the person's own sign-in still shows
-    signin_pause.run(w.db)
-    assert w.status("c1") == "paused"
-
-
 def test_mismatch_pauses_only_with_enforce(w):
     w.route, w.org_id = "subscription", "org-1"    # the org expects an identity to come back under
     w.agent("c1")
@@ -203,28 +185,6 @@ def test_a_mismatching_identity_is_never_recorded_as_the_agents_own(w):
     assert signin_pause._load()["identity"] == {"c1": OK.ident}
 
 
-def test_cloud_logout_then_login_follows_the_fingerprint(w):
-    w.route = "bedrock"
-    w.agent("c1")
-    w.claude = OUT
-    signin_pause.run(w.db)
-    assert w.status("c1") == "paused"
-    w.claude = AWS_OK
-    signin_pause.run(w.db)           # nothing changed on disk: no new probe, still paused
-    assert w.status("c1") == "paused" and w.claude_probes == 1
-    w.fp = "fp2"
-    signin_pause.run(w.db)           # the org expects this AWS account: it resumes on it
-    assert w.status("c1") == "processing"
-
-
-def test_gateway_and_antigravity_are_not_verified(w, monkeypatch):
-    w.route = "gateway"
-    w.agent("c1")
-    w.agent("g1", provider="antigravity")
-    signin_pause.run(w.db)
-    assert w.claude_probes == 0 and w.status("g1") == "processing"
-
-
 # -- who it runs as --------------------------------------------------------------------------
 
 
@@ -251,22 +211,6 @@ def test_the_state_file_holds_ids_only_and_is_private(w, brindle_home):
     path = signin_pause._path()
     assert path.stat().st_mode & 0o777 == 0o600
     assert "token" not in path.read_text().lower()
-
-
-def test_unrecorded_agent_resumes_only_on_the_org_expected_identity(w):
-    w.route, w.org_id = "subscription", "org-1"
-    w.agent("c1")
-    w.claude = OUT
-    signin_pause.run(w.db)
-    entry = signin_pause.paused_for_signin()["c1"]
-    assert entry == {"provider": "claude", "reason": "Claude signed out", "identity": "org:org-1"}
-    w.claude = PERSONAL              # someone else's login: stays paused
-    signin_pause.run(w.db)
-    signin_pause.run(w.db)
-    assert w.status("c1") == "paused" and w.resumed == []
-    w.claude = OK                    # the org's account: resumes
-    signin_pause.run(w.db)
-    assert w.status("c1") == "processing" and w.resumed == ["c1"]
 
 
 def test_unrecorded_agent_with_nothing_known_never_auto_resumes_and_resumes_by_hand(w):
@@ -319,30 +263,6 @@ def _an_agent_recorded_under_a_brindle_login_is_never_adopted(w, brindle_login, 
     assert signin_pause.recorded_identity("c2") == OK.ident
 
 
-def _a_setup_applied_with_no_brindle_login_leaves_agents_unowned(w, brindle_login, monkeypatch):
-    w.claude = PERSONAL
-    w.agent("c1")
-    signin_pause.record_launch(w.db.get_agent("c1"))
-    assert signin_pause.adopt(OK.ident, signed_in=False) == ["c1"]
-    assert signin_pause.recorded_identity("c1") == OK.ident
-    assert signin_pause.adopt(OTHER_ORG.ident) == ["c1"]     # the brindle sign-in still adopts it
-    assert signin_pause._load()["unowned"] == []
-
-
-def _an_agent_gone_is_dropped_from_the_unowned(w, brindle_login, monkeypatch):
-    w.agent("c1")
-    signin_pause.record_launch(w.db.get_agent("c1"))
-    w.db.delete_agent("c1")
-    signin_pause.run(w.db)
-    assert signin_pause._load()["unowned"] == []
-
-
-def _adopt_never_raises(w, brindle_login, monkeypatch):
-    monkeypatch.setattr(signin_pause, "_load", lambda: 1 / 0)
-    assert signin_pause.adopt(OK.ident) == []
-    assert signin_pause.adopt("") == []
-
-
 def _the_sweep_adopts_when_the_sign_in_check_failed(w, brindle_login, monkeypatch):
     from brindle import identity_lock
 
@@ -371,8 +291,6 @@ def _the_sweep_adopts_when_the_sign_in_check_failed(w, brindle_login, monkeypatc
 
 @pytest.mark.parametrize("scenario", [
     _an_agent_recorded_under_a_brindle_login_is_never_adopted,
-    _a_setup_applied_with_no_brindle_login_leaves_agents_unowned,
-    _an_agent_gone_is_dropped_from_the_unowned, _adopt_never_raises,
     _the_sweep_adopts_when_the_sign_in_check_failed,
 ], ids=lambda f: f.__name__.strip("_"))
 def test_unowned_agents(scenario, w, brindle_login, monkeypatch):

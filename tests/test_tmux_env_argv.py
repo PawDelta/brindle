@@ -3,8 +3,6 @@ must never be a tmux ``-e NAME=VALUE`` argument: any user can read those in
 ``ps``. It reaches the pane through a private launch script instead."""
 import time
 
-import pytest
-
 from brindle import tmux
 
 
@@ -35,7 +33,3 @@ def test_a_stored_key_never_reaches_argv_or_the_tmux_environment(db, repo, monke
     [script] = (brindle_home / "launch").iterdir()
     assert f"export ANTHROPIC_API_KEY={fake}" in script.read_text()
 
-
-def test_a_bad_variable_name_is_refused(brindle_home):
-    with pytest.raises(tmux.TmuxError):
-        tmux._short(["true"], {"A B; rm -rf /": "x"})

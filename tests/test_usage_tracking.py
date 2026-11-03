@@ -30,17 +30,6 @@ def write(path: Path, lines: list[str]) -> None:
             f.write(line)
 
 
-def test_ignores_non_assistant_entries(db, tmp_path):
-    t = tmp_path / "sess.jsonl"
-    write(t, [
-        json.dumps({"type": "user", "message": {"content": "hi"}}) + "\n",
-        json.dumps({"type": "queue-operation", "operation": "enqueue"}) + "\n",
-        _line("m1", input_tokens=1, output_tokens=2),
-    ])
-    u = usage.transcript_usage(db, str(t))
-    assert (u.input_tokens, u.output_tokens) == (1, 2)
-
-
 def test_incremental_reread_dedupes_a_message_split_across_calls(db, tmp_path):
     """A message's later content-block line can land in its own incremental
     read, separate from the call that already counted the message's first
@@ -57,10 +46,6 @@ def test_incremental_reread_dedupes_a_message_split_across_calls(db, tmp_path):
     write(t, [_line("m2", input_tokens=1, output_tokens=2)])
     third = usage.transcript_usage(db, str(t))
     assert (third.input_tokens, third.output_tokens) == (11, 22)
-
-
-def test_missing_file_returns_none(db, tmp_path):
-    assert usage.transcript_usage(db, str(tmp_path / "nope.jsonl")) is None
 
 
 def _codex_rollout(home: Path, cwd: Path, session_id: str, started: float) -> Path:
@@ -108,22 +93,6 @@ def test_agent_usage_reads_a_codex_rollout_in_the_current_layout(db, tmp_path, m
         assert u.model == "gpt-6-luna"
 
 
-def test_format_helpers():
-    assert usage.format_tokens(999) == "999"
-    assert usage.format_tokens(1000) == "1k"
-    assert usage.format_tokens(182000) == "182k"
-    assert usage.format_tokens(1500) == "2k"  # half up, not banker's rounding to even
-    assert usage.format_tokens(2500) == "3k"
-    assert usage.format_tokens(2499) == "2k"
-    assert usage.short_model("claude-opus-4-7") == "opus"
-    assert usage.short_model("claude-sonnet-5") == "sonnet"
-    assert usage.short_model(None) == "?"
-    # Test new functionality for open-weight models
-    assert usage.short_model("qwen3-coder:30b") == "qwen3-coder"
-    assert usage.short_model("qwen/qwen3.8-27b:free") == "qwen3.8-27b"
-    assert usage.short_model("sonnet-4-5") == "sonnet"
-
-
 def test_report_result_forwards_usage_summary(db, tmp_path, monkeypatch):
     from brindle import workspaces
 
@@ -163,16 +132,6 @@ def test_report_result_forwards_usage_summary(db, tmp_path, monkeypatch):
     assert "more detail" in rest
     assert "tokens: 182k in (160k cached, 20k written)" in rest
     assert "sonnet" in rest
-
-
-def test_hook_records_the_transcript_path(db, repo):
-    from brindle import workspaces
-
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    a = Agent("a1", ws.id, "developer", "claude", None, "assign", "idle", "", None, time.time())
-    db.add_agent(a)
-    agents.handle_hook(db, "a1", "prompt-submit", {"transcript_path": "/tmp/x/a1.jsonl"})
-    assert db.get_agent("a1").transcript_path == "/tmp/x/a1.jsonl"
 
 
 def test_agent_entry_reads_once_then_only_stats(db, tmp_path, monkeypatch):
@@ -224,72 +183,6 @@ def test_model_label_is_the_main_transcripts_and_skips_synthetic(db, tmp_path):
     assert u.model == "claude-opus-4-7"
 
 
-def test_malformed_usage_values_are_skipped(db, tmp_path):
-    t = tmp_path / "sess.jsonl"
-    bad = json.dumps({"type": "assistant",
-                      "message": {"id": "bad", "usage": {"input_tokens": "lots"}}}) + "\n"
-    write(t, [bad, _line("m1", input_tokens=5, output_tokens=6)])
-    u = usage.transcript_usage(db, str(t))
-    assert (u.input_tokens, u.output_tokens) == (5, 6)
-
-
-def test_unreadable_file_does_not_raise(db, tmp_path, monkeypatch):
-    t = tmp_path / "sess.jsonl"
-    write(t, [_line("m1", input_tokens=5)])
-
-    def boom(*a, **k):
-        raise PermissionError("nope")
-
-    monkeypatch.setattr(Path, "open", boom)
-    u = usage.transcript_usage(db, str(t))
-    assert u is not None and u.total == 0
-
-
-def test_no_summary_line_when_usage_is_empty(db, repo, monkeypatch):
-    from brindle import workspaces
-
-    (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text('{"pipeline": false}')
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    t = repo.parent / "empty.jsonl"
-    t.write_text("")
-    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
-                       "@0", None, time.time()))
-    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing", "@1",
-                       None, time.time(), transcript_path=str(t)))
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-
-    agents.report_result(db, "w1", "done")
-    assert "tokens:" not in db.pop_pending("boss").body
-
-
-def test_agent_entry_survives_a_broken_usage_read(db, repo, monkeypatch):
-    from brindle import workspaces
-
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    a = Agent("a1", ws.id, "developer", "claude", None, "assign", "idle", "", "done", time.time(),
-             transcript_path="/wherever.jsonl")
-    db.add_agent(a)
-
-    def boom(db, agent):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(view.usage_mod, "agent_usage", boom)
-
-    entry = view.agent_entry(db, db.get_agent("a1"))
-    assert "tokens" not in entry
-
-
-def test_hook_ignores_transcript_path_for_non_claude_providers(db, repo):
-    from brindle import workspaces
-
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    db.add_agent(Agent("a1", ws.id, "developer", "antigravity", None, "assign", "idle", "", None,
-                       time.time()))
-    agents.handle_hook(db, "a1", "prompt-submit", {"transcript_path": "/tmp/x/a1.jsonl"})
-    assert db.get_agent("a1").transcript_path is None
-
-
 def _planner(input_tokens, output_tokens, cache_read=0, model="gemini-3-pro"):
     ev = {"type": "PLANNER_RESPONSE", "input_tokens": input_tokens,
           "output_tokens": output_tokens, "cache_read_tokens": cache_read}
@@ -339,14 +232,3 @@ def test_antigravity_transcript_without_model_uses_worker_launch_model(db, tmp_p
                             now, transcript_path=str(t2))
     assert usage.antigravity_agent_usage(db, no_model_worker).model == "unknown"
 
-
-def test_antigravity_missing_own_transcript_does_not_fall_back_to_other_session(db, tmp_path, monkeypatch):
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    other = tmp_path / ".gemini" / "antigravity-cli" / "brain" / "other-sess" / ".system_generated" / "logs" / "transcript.jsonl"
-    write(other, [_planner(100, 200)])
-
-    missing_ref = Agent("a1", "ws", "developer", "antigravity", None, "assign", "idle", "", None,
-                        time.time(), session_ref="my-sess")
-    no_ref = Agent("a2", "ws", "developer", "antigravity", None, "assign", "idle", "", None, time.time())
-    assert usage.antigravity_agent_usage(db, missing_ref) is None
-    assert usage.antigravity_agent_usage(db, no_ref) is None

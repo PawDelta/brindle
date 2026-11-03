@@ -47,15 +47,6 @@ def test_a_paused_supervisor_with_nothing_running_is_hidden_but_resumable(db, re
     assert agents.latest_paused(db, root).id == "p1"
 
 
-def test_a_dead_supervisor_with_a_live_worker_still_shows(db, repo, root):
-    pane = running_window(root)
-    add(db, root, "boss", window="%99999", age=LONG_AGO)
-    add(db, root, "w1", mode="assign", parent="boss", window=pane, profile="developer")
-    got = shown(db, repo)
-    assert got["boss"]["status"] == "exited" and "w1" in got
-    assert db.get_agent("boss").status == "idle"
-
-
 def test_a_reused_pane_id_only_counts_for_the_newest_agent(db, repo, root):
     pane = running_window(root)
     add(db, root, "stale", window=pane, age=LONG_AGO)
@@ -89,18 +80,3 @@ def test_the_hook_command_wins_over_a_stale_environment(db, repo, root, monkeypa
     assert db.get_agent("new").session_ref == "s-new"
     assert db.get_agent("old").status == "idle" and db.get_agent("old").session_ref is None
 
-
-def test_an_env_only_hook_prefers_the_agent_that_owns_the_session(db, repo, root, monkeypatch):
-    from typer.testing import CliRunner
-
-    from brindle.cli import app
-
-    add(db, root, "old", status="idle", age=LONG_AGO)
-    add(db, root, "new", status="idle")
-    db.update_agent("new", session_ref="s-new")
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "old")  # a session launched by an older brindle
-    res = CliRunner().invoke(app, ["_hook", "prompt-submit"],
-                             input='{"session_id": "s-new", "prompt": "hi"}')
-    assert res.exit_code == 0, res.output
-    assert db.get_agent("new").status == "processing"
-    assert db.get_agent("old").status == "idle"

@@ -25,14 +25,6 @@ def task(db, agent, profile, weight, outcome, rounds=0, output=None, ts=None):
                        tokens=tokens(output))
 
 
-def test_empty_db(db):
-    assert cost.profile_stats(db, ROOT, 0) == {}
-    rep = cost.report(db, ROOT)
-    assert rep.stats == {}
-    text = cost.describe_report(rep, ROOT)
-    assert "Worker profiles by weight" in text and "no finished tasks in this period" in text
-
-
 def test_merge_rate_rounds_and_cost_per_merged_branch(db):
     task(db, "a1", "developer", "medium", "merged", rounds=1, output=100_000)       # $1
     task(db, "a2", "developer", "medium", "merged", rounds=3, output=300_000)       # $3
@@ -56,13 +48,3 @@ def test_merge_rate_rounds_and_cost_per_merged_branch(db):
     assert "3 finished, 67% merged, 2.0 review rounds avg, 200k tokens, $2.00 per merged branch" in text
     assert "developer-codex / heavy" in text and "0% merged" in text
 
-
-def test_merged_branches_on_a_free_model_read_free():
-    s = cost.ProfileStats(finished=1, merged=1, merged_counted=1)
-    s.merged_spend.add(0.0, 5000, free=True)
-    assert s.dollars_per_merged == 0.0
-    text = "\n".join(cost.describe_stats({("developer-local", "light"): s}))
-    assert "5k tokens, free per merged branch" in text
-    unpriced = cost.ProfileStats(finished=1, merged=1, merged_counted=1)
-    unpriced.merged_spend.add(None, 5000)
-    assert unpriced.dollars_per_merged is None

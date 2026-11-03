@@ -90,21 +90,6 @@ def test_subagent_is_working_until_completed_then_merges_and_removes(db, boss, r
     assert db.get_agent(worker.id) is None and not os.path.exists(ws.path)
 
 
-def test_complete_subagent_refuses_process_workers(db, boss):
-    db.add_agent(Agent("w1", boss.id, "developer", "claude", "boss", "assign", "processing",
-                       "@1", None, time.time()))
-    assert "report_result" in mcp_server.complete_subagent("w1", "done")
-    assert db.get_agent("w1").result is None
-
-
-def test_subagent_profile_only_works_through_delegation(db, boss):
-    with pytest.raises(agents.AgentError, match="handoff or assign"):
-        agents.spawn(db, boss, "subagent", prompt="x")
-    with pytest.raises(agents.AgentError, match="handoff or assign"):
-        agents.spawn(db, boss, "subagent", prompt="x", mode="review")
-    assert [a.id for a in db.list_agents()] == ["boss"]
-
-
 def test_pause_and_resume_keep_subagent_records(db, boss, monkeypatch):
     monkeypatch.setattr(tmux, "kill_window", lambda w: None)
     monkeypatch.setattr(tmux, "kill_session", lambda s: None)

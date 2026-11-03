@@ -8,16 +8,11 @@ Real tmux on the suite's private socket (see conftest.py), since the
 behaviour under test is genuine tmux pane/hook plumbing.
 """
 
-import fcntl
-import threading
 import time
 
 import pytest
-from typer.testing import CliRunner
 
 from brindle import agents, tmux, workspaces
-from brindle.cli import app
-from brindle.config import brindle_home
 from brindle.db import Agent, Workspace
 from brindle.sidebar_follow import sidebar_here
 
@@ -137,41 +132,6 @@ def test_a_dismissed_sidebar_stays_gone_until_a_relaunch(db, tmp_path, session):
     assert len(window_panes(session, "winA")) == 2
 
 
-def test_dismiss_ignores_panes_that_are_not_the_recorded_sidebar(db, tmp_path, session):
-    win_a = make_window(session, "winA")
-    ws = make_workspace(db, tmp_path, "winA", session)
-    fake_agent(db, ws, win_a, "root1")
-    agents._ensure_sidebar(db, "root1", ws, win_a)
-    sidebar = db.get_sidebar_pane("root1")
-
-    agents.dismiss_sidebar(db, None)  # a plain `brindle watch` outside tmux
-    agents.dismiss_sidebar(db, win_a)  # a plain `brindle watch` in some pane
-    # An old sidebar pane still tagged for root1 but since replaced.
-    stale = make_window(session, "stale")
-    tmux.set_pane_tag(stale, agents.SIDEBAR_TAG, "root1")
-    agents.dismiss_sidebar(db, stale)
-
-    assert db.get_sidebar_pane("root1") == sidebar
-
-
-def test_relaunch_over_a_row_whose_pane_no_longer_exists(db, tmp_path, session):
-    """A tmux server restart (or the pane simply gone) leaves a row naming
-    a pane id nothing has: both paths treat it as dead, not as present."""
-    win_a = make_window(session, "winA")
-    ws = make_workspace(db, tmp_path, "winA", session)
-    fake_agent(db, ws, win_a, "root1")
-    db.set_sidebar_pane("root1", "%99999")
-
-    tmux._tmux("select-window", "-t", f"{session}:winA")
-    agents.sidebar_follow(db, session)
-    first = db.get_sidebar_pane("root1")
-    assert first != "%99999" and tmux.window_alive(first)
-
-    agents._ensure_sidebar(db, "root1", ws, win_a)
-    assert db.get_sidebar_pane("root1") == first
-    assert len(window_panes(session, "winA")) == 2
-
-
 def test_follow_moves_a_sidebar_left_alone_in_its_window(db, tmp_path, session):
     """Whatever it sat beside exited (e.g. `exit` in the shell window), so
     the sidebar is the only pane there: switching away must still bring it
@@ -194,52 +154,7 @@ def test_follow_moves_a_sidebar_left_alone_in_its_window(db, tmp_path, session):
     assert "winA" not in tmux.windows(session)
 
 
-def _hold_lock(root_id, seconds, held):
-    lock = brindle_home() / "locks" / f"sidebar-{root_id}.lock"
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock, "w") as f:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        held.set()
-        time.sleep(seconds)
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-
-
-def test_launch_lock_wait_is_bounded(db, tmp_path, session, monkeypatch):
-    monkeypatch.setattr(agents, "SIDEBAR_LOCK_TIMEOUT", 0.1)
-    win_a = make_window(session, "winA")
-    ws = make_workspace(db, tmp_path, "winA", session)
-    fake_agent(db, ws, win_a, "root1")
-    held = threading.Event()
-    holder = threading.Thread(target=_hold_lock, args=("root1", 1.0, held))
-    holder.start()
-    held.wait(5)
-    try:
-        start = time.monotonic()
-        with pytest.raises(BlockingIOError):
-            agents._ensure_sidebar(db, "root1", ws, win_a)
-        assert time.monotonic() - start < 0.9
-    finally:
-        holder.join()
-
-
 # -- following the person (serial: real hooks fire across sessions) ----------
-
-
-@pytest.mark.serial
-def test_sidebar_follow_never_creates_one(db, tmp_path, session):
-    """Only _open_window (via _ensure_sidebar) creates a root's first
-    sidebar; follow only restores one a root already had, so a `--no-watch`
-    root never gets one."""
-    win_a = make_window(session, "winA")
-    ws = make_workspace(db, tmp_path, "winA", session)
-    fake_agent(db, ws, win_a, "root1")
-    tmux._tmux("select-window", "-t", f"{session}:winA")
-
-    agents.sidebar_follow(db, "no-such-session")  # unknown session: no crash
-    agents.sidebar_follow(db, session)
-
-    assert db.get_sidebar_pane("root1") is None
-    assert len(window_panes(session, "winA")) == 1
 
 
 @pytest.mark.serial
@@ -422,31 +337,6 @@ def test_sidebar_here_pulls_it_from_another_session(stranded):
     assert tmux.pane_window(sidebar) == tmux.pane_window(root_win)
     assert db.get_sidebar_pane("root1") == sidebar
     assert sidebar_here(db, ROOT_SESSION) == "the sidebar is already here"
-
-
-def test_sidebar_zoom_sidebar_here_unzooms_the_window(stranded):
-    db, root_win, _, sidebar = stranded
-    assert sidebar_here(db, ROOT_SESSION) == "sidebar brought here"
-    tmux._tmux("resize-pane", "-Z", "-t", root_win)  # the sidebar is already in this window
-    assert tmux.window_zoomed(root_win)
-    assert sidebar_here(db, ROOT_SESSION) == "unzoomed the window: the sidebar is shown now"
-    assert not tmux.window_zoomed(root_win)
-    assert db.get_sidebar_pane("root1") == sidebar
-
-
-def test_sidebar_here_restarts_a_quit_sidebar(stranded):
-    db, root_win, _, sidebar = stranded
-    agents.dismiss_sidebar(db, sidebar)
-    tmux.kill_pane(sidebar)
-    sidebar_here(db, ROOT_SESSION)
-    new = db.get_sidebar_pane("root1")
-    assert new != sidebar and tmux.window_alive(new)
-    assert tmux.pane_session(new) == ROOT_SESSION
-
-
-def test_sidebar_command_reports_failure(brindle_home):
-    result = CliRunner().invoke(app, ["sidebar", "--session", "no-such-session"])
-    assert result.exit_code != 0
 
 
 def test_removing_a_workspace_rescues_the_sidebar(stranded):

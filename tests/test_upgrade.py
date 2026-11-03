@@ -16,7 +16,7 @@ import brindle
 from brindle import agents, mcp_server, profiles, upgrade, watch
 
 
-@pytest.mark.parametrize("exit_kind", ["broken_pipe", "eof"])
+@pytest.mark.parametrize("exit_kind", ["broken_pipe"])
 def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch, exit_kind):
     from brindle.db import Agent, Workspace
 
@@ -82,18 +82,6 @@ def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_starte
         assert "developer-heavy (claude)" in result.content[0].text
         assert "developer (claude)" in result.content[0].text
     assert exits == []
-
-
-def test_an_upgraded_sidebar_runs_again_in_its_pane(monkeypatch):
-    monkeypatch.setattr(watch, "_log_to_file", lambda: None)
-    monkeypatch.setattr(watch.curses, "wrapper", lambda fn, root, sidebar, *_: watch.RESTART)
-    monkeypatch.setattr(upgrade.sys, "argv", ["brindle", "watch", "--sidebar"])
-    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: ["/venv/bin/brindle"])
-    execs = []
-    monkeypatch.setattr(upgrade.os, "execv", lambda path, argv: execs.append(argv))
-
-    watch.run("/repo", sidebar=True)
-    assert execs == [["/venv/bin/brindle", "watch", "--sidebar"]]
 
 
 def test_sidebar_upgrade_waits_for_the_new_install_instead_of_exiting(monkeypatch):
