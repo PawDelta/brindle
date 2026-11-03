@@ -478,8 +478,9 @@ async def handoff(
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
 
-    analysis_doc: the worker leaves an analysis doc of its work, as heavy and
-    advanced tasks always do.
+    analysis_doc: the worker leaves an analysis doc of its work. Off by
+    default whatever the weight; ask only for work worth documenting (never
+    for merge or sync chores).
     """
     def run() -> str:
         db = DB()
@@ -625,8 +626,9 @@ async def assign(
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
 
-    analysis_doc: the worker leaves an analysis doc of its work, as heavy and
-    advanced tasks always do.
+    analysis_doc: the worker leaves an analysis doc of its work. Off by
+    default whatever the weight; ask only for work worth documenting (never
+    for merge or sync chores).
     """
     def run() -> str:
         db = DB()

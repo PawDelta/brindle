@@ -670,7 +670,7 @@ def set_goal(db: DB, root_id: str, goal: str,
     ap = db.get_autopilot(root_id)
     from brindle.pro import analysis_brief
 
-    # A goal that becomes large work (new, or grown to 2+ milestones) gets the
+    # A goal that becomes large work (new, or grown to 3+ milestones) gets the
     # server's brief once, whichever way it was set.
     briefed = analysis_brief.large_work(milestones=len(old)) and ap is not None and ap.goal == goal.strip()
     fields: dict[str, object] = {}
@@ -702,15 +702,16 @@ def set_goal(db: DB, root_id: str, goal: str,
 
 
 def _goal_doc_rule(db: DB, root_id: str) -> str:
-    """For a goal of 2+ milestones, now reached: the rule to leave its analysis doc."""
+    """For a goal of 3+ milestones, now reached: the rule to leave its analysis doc."""
     from brindle.pro import analysis_brief
 
     try:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
-        if ws is None or not analysis_brief.large_work(milestones=len(db.milestones(root_id))):
+        if ws is None or not analysis_brief.large_work(milestones=len(db.milestones(root_id)),
+                                                       branch=ws.branch):
             return ""
-        return ("This goal had 2+ milestones: before you tell the user, leave its analysis doc.\n\n"
+        return ("This goal had 3+ milestones: before you tell the user, leave its analysis doc.\n\n"
                 + analysis_brief.doc_rule(db, ws.repo_root, ws.branch))
     except Exception:  # noqa: BLE001 - extra guidance, never a reason to lose the verdict
         log.info("goal analysis doc rule not added", exc_info=True)
