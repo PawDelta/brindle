@@ -1574,6 +1574,23 @@ class DB:
             bus.publish_agent(self, "agent.pipeline", agent_id, pipeline=fields["pipeline"],
                               merge_failed=bool(fields.get("merge_failed")))
 
+    def claim_note(self, agent_id: str, since: float) -> tuple[bool, float | None]:
+        """Atomically set stuck_noted to ``since`` unless it already is. Every
+        brindle process sweeps (the daemon, each session's MCP server), so only
+        the one that wins may send that note. Returns whether it won, and
+        the value it replaced (for ``release_note``)."""
+        with self.tx() as c:
+            row = c.execute("SELECT stuck_noted FROM agents WHERE id=?", (agent_id,)).fetchone()
+            cur = c.execute("UPDATE agents SET stuck_noted=? WHERE id=? AND stuck_noted IS NOT ?",
+                            (since, agent_id, since))
+        return cur.rowcount == 1, row["stuck_noted"] if row else None
+
+    def release_note(self, agent_id: str, since: float, previous: float | None) -> None:
+        """Undo ``claim_note`` when the note couldn't be sent, unless a later one replaced it."""
+        with self.tx() as c:
+            c.execute("UPDATE agents SET stuck_noted=? WHERE id=? AND stuck_noted IS ?",
+                      (previous, agent_id, since))
+
     def claim_idle(self, agent_id: str) -> float | None:
         """Atomically flip idle -> processing. Only the caller that wins may type
         into the agent's terminal, so two senders never interleave keystrokes.

@@ -96,7 +96,9 @@ def test_orphan_sessions_are_reaped_by_the_sweep(db, repo, tmp_path, fake_tmux, 
             raise git.GitBusy("git status: no room")
         monkeypatch.setattr(git, "dirty_files", refused)
         folder = repo
-    recent = time.time()   # not NOW: taken at import, it is over SESSION_GRACE old by the time a long suite runs this
+    # Recent as of this test, not of the module's import: a long suite runs it
+    # well after collection, past the reaper's SESSION_GRACE.
+    recent = time.time()
     fake_tmux.sessions = [session(name, pane("%7", folder, activity=recent if case == "recent output" else OLD),
                                   attached=case == "attached", activity=recent if case == "recent input" else OLD,
                                   home="/elsewhere" if case == "another brindle home" else None)]
@@ -255,7 +257,7 @@ def test_what_changed_since_planning_is_not_reaped(db, repo, tmp_path, fake_tmux
         elif change == "uncommitted work appears":
             (repo / "wip.py").write_text("x = 1\n")
         else:
-            s.activity = NOW
+            s.activity = time.time()   # input as the stop runs, not at the module's import
         return out
     monkeypatch.setattr(reap, "plan", then_changed)
 
@@ -294,7 +296,7 @@ def test_what_changes_during_the_revalidation_probe_is_not_reaped(db, repo, fake
             if probe == "workspaces_merged":
                 fake_tmux.sessions[0].attached = True
             else:
-                fake_tmux.sessions[0].panes[0].activity = NOW
+                fake_tmux.sessions[0].panes[0].activity = time.time()
         return real(w)
     monkeypatch.setattr(cull if probe == "workspaces_merged" else reap, probe, slow_probe)
 
