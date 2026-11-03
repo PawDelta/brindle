@@ -760,21 +760,30 @@ def room_wait(repo_root: str | None = None, profile: str | None = None) -> str |
     return spawn.no_room(repo_root)
 
 
-def _room_wait_overrun(t: Task, why: str) -> str | None:
-    """A start's explanation once its persisted room wait exceeds the limit.
-
-    Use the original waiting time, so helper restarts and changing load
-    reasons cannot extend the wait. Dependencies and session pauses are
-    still checked by the caller before the task can be claimed.
-    """
+def _note_long_wait(db: DB, t: Task, why: str) -> bool:
+    """Tell ``t``'s supervisor, once, that it has waited for room longer than
+    the repo's ``room_wait_max``: what waits, for how long and why. It never
+    starts the task (that takes room, or the supervisor's ``start_now``) and
+    tells nobody else. ``claim_wait_note`` lets one of the concurrent sweeps
+    send it. Returns whether this call sent it."""
     from brindle.config import load_repo_config
 
-    if t.waiting_since is None or why.startswith("waiting for disk"):
-        return None  # low disk holds until there's space: starting anyway could fill it
+    if t.waiting_since is None or not t.caller_id:
+        return False
     elapsed = time.time() - t.waiting_since
-    if elapsed > load_repo_config(t.repo_root).room_wait_max:
-        return f"started after waiting {elapsed / 60:.0f} min: {why}"
-    return None
+    if elapsed <= load_repo_config(t.repo_root).room_wait_max:
+        return False
+    at = time.time()
+    if not db.claim_wait_note(t.id, at):
+        return False
+    text = (f"Task {t.id} ({t.profile}) has waited {elapsed / 60:.0f} min to start: {why}. "
+            "It starts on its own when there's room; start_now starts it now.")
+    try:
+        agents.send_message(db, t.caller_id, text, sender_id=None)
+    except agents.AgentError:
+        db.release_wait_note(t.id, at)
+        return False
+    return True
 
 
 def load_counts(db: DB) -> tuple[int, int]:
@@ -871,6 +880,7 @@ def wait_for_room(db: DB, t: Task, why: str) -> None:
     # Only while it is still pending: a task claimed meanwhile (started, forced) is left as it is.
     if db.set_task_waiting(t.id, why, time.time()) and first:
         _wait_in_background(t.id)
+    _note_long_wait(db, t, why)
 
 
 def _wait_in_background(task_id: str) -> None:
@@ -881,8 +891,9 @@ def _wait_in_background(task_id: str) -> None:
 
 def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
     """The detached helper's loop: start task ``task_id`` once there's room
-    or its room wait limit expires (``_start_if_ready`` looks), telling its
-    caller how it was admitted. Ends when it starts, or
+    (``_start_if_ready`` looks), telling its caller how it was admitted;
+    past ``room_wait_max`` it tells the caller once that it still waits, and
+    never starts it before there's room. Ends when it starts, or
     when the task is no longer pending (cancelled, held, started by a
     sweep) or its session is paused (``on_resumed`` takes over). Returns
     whether it started it. A task assign/handoff just queued
@@ -893,11 +904,12 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
         if t is None or t.state != "pending" or session_paused(db, t):
             return False
         why = room_wait(t.repo_root, t.profile)
-        if why is None or _room_wait_overrun(t, why):
+        if why is None:
             # Unless a dependency added since holds it: merging that starts it.
-            return _start_if_ready(db, t, "room on the machine", check_room=why is not None)
+            return _start_if_ready(db, t, "room on the machine", check_room=False)
         if why != t.waiting:
             db.set_task_waiting(t.id, why, time.time())   # list_tasks shows the machine as it is now
+        _note_long_wait(db, t, why)
         pause.wait(poll)
 
 
@@ -930,8 +942,8 @@ def on_resumed(db: DB, root_id: str) -> None:
 
 
 def start_with_room_now(db: DB, t: Task) -> bool:
-    """Start pending task ``t`` now if the machine has room or its room
-    wait limit expires (and its dependencies are merged), telling its
+    """Start pending task ``t`` now if the machine has room (and its
+    dependencies are merged), telling its
     caller; else it keeps waiting."""
     return _start_if_ready(db, t, "room on the machine")
 
@@ -1238,8 +1250,8 @@ def _launch_overlap(db: DB, t: Task, caller_ws: Workspace) -> tuple[bool, str | 
 
 def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> bool:
     """Start pending task ``t`` if every dependency is merged and the
-    machine has room for it or its room wait limit expires (else it waits
-    for room: ``wait_for_room``), and tell its caller why it started.
+    machine has room for it (else it waits for room: ``wait_for_room``),
+    and tell its caller why it started.
     The task is claimed first, so a second call (a sweep racing a
     merge) finds it taken. A dependency that can never merge cancels it; a
     start that fails cancels it too, with the reason sent to its caller
@@ -1255,8 +1267,7 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
         _cancel(db, t.id, str(e))
         return False
     why = room_wait(t.repo_root, t.profile) if check_room else None
-    overrun = _room_wait_overrun(t, why) if why else None
-    if why and overrun is None:
+    if why:
         wait_for_room(db, t, why)
         return False
     launch, overlap = _launch_overlap(db, t, caller_ws)
@@ -1279,9 +1290,7 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     if t.caller_id and not _replying.get():
         try:
             new_ws = db.get_workspace(new_worker.workspace_id)
-            if overrun:
-                text = f"Started {new_worker.id} for task {t.id} ({overrun})."
-            elif t.waiting:
+            if t.waiting:
                 text = f"Started {new_worker.id} for task {t.id} (was waiting for room: {t.waiting})."
             elif _loads(t.depends_on):
                 text = f"Started {new_worker.id} (was waiting on {dep_ref})."

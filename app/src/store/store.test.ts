@@ -25,6 +25,18 @@ const agentOf = (s: AppState, id: string) => s.workspaces.flatMap((ws) => ws.age
 
 describe("reduce: stream messages", () => {
   it.each<[string, StreamMessage, (s: AppState) => void]>([
+    ...["agent.closed", "agent.status"].map((kind): [string, StreamMessage, (s: AppState) => void] => [
+      `${kind} removes past workers before the next snapshot`,
+      event(kind, { agent_id: "w1", payload: { status: "rewound" } }),
+      (s) => {
+        expect(agentOf(s, "w1")).toBeUndefined();
+        const later = reduce(s, { type: "snapshot", workspaces: [root], inbox: [question, waiting] });
+        expect(later.inbox).toEqual([question]);
+        const resumed = reduce(later, { type: "snapshot", workspaces: [root, worker], inbox: [waiting] });
+        expect(agentOf(resumed, "w1")).toBeTruthy();
+        expect(resumed.inbox).toEqual([waiting]);
+      },
+    ]),
     [
       "agent.status patches the agent and invalidates its inbox cards",
       event("agent.status", { agent_id: "w1", payload: { status: "waiting" } }),

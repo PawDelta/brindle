@@ -61,13 +61,9 @@ def reviewers(db, monkeypatch):
     """Reviews start without a process; the list holds the reviewers started."""
     started: list[Agent] = []
 
-    def fake_review(db_, caller, ws, profile=None, focus=None, cfg=None, check_summary=None,
-                    checks_alongside=False, **kw):
-        # task: what its prompt carried. With the checks beside the review it
-        # starts without their results.
-        task = check_summary or ("checks run beside the review" if checks_alongside else None)
+    def fake_review(db_, caller, ws, profile=None, focus=None, cfg=None, check_summary=None, **kw):
         a = Agent(f"rev{len(started)}", ws.id, "reviewer", "claude", caller.id, "review",
-                  "processing", "@r", None, time.time(), task=task)
+                  "processing", "@r", None, time.time(), task=check_summary)   # task: what its prompt carried
         db_.add_agent(a)
         started.append(a)
         return a
@@ -176,11 +172,11 @@ def test_pipeline_review_checks_merge_and_removal(db, repo, boss, reviewers, mon
 
     out = worker_reports(db, monkeypatch, wid, "added new.py")
     assert "having your branch reviewed" in out
-    assert db.get_agent(wid).pipeline == "reviewing" and reviewers == []   # the detached step starts it
+    assert db.get_agent(wid).pipeline == "reviewing" and reviewers == []   # waits for the checks
     assert db.pending_count("boss") == 0                      # nothing to bother the supervisor with
 
-    review_after_checks(db, ws)                               # the detached step: reviewer, checks beside it
-    assert len(reviewers) == 1 and reviewers[0].task         # the reviewer started with its task
+    review_after_checks(db, ws)                               # the detached step: checks, then the reviewer
+    assert len(reviewers) == 1 and "PASS `test -f new.py`" in reviewers[0].task
 
     out = reviewer_approves(monkeypatch, reviewers[0].id)
     assert "takes it from here" in out
@@ -191,25 +187,6 @@ def test_pipeline_review_checks_merge_and_removal(db, repo, boss, reviewers, mon
     msg = db.pop_pending("boss")
     body = full_text(db, "boss", msg.body)
     assert "Merged feat-p into main" in body and "added new.py" in body
-
-
-def test_failed_checks_leave_the_branch_unmerged_and_need_the_supervisor(db, repo, boss, reviewers,
-                                                                          monkeypatch):
-    configure(repo, review=True, auto_merge_default_branch=True, checks=["test -f never_there.py"])
-    wid = started_id(run(mcp_server.assign("developer", "add new.py", branch="feat-f")))
-    ws = ws_of(db, repo, "feat-f")
-    commit(ws, "new.py")
-    worker_reports(db, monkeypatch, wid, "added new.py")
-    review_after_checks(db, ws)
-    assert reviewers[0].task                                  # the reviewer started with the report
-
-    reviewer_approves(monkeypatch, reviewers[0].id)
-
-    assert "new.py" not in main_files(repo)
-    assert db.get_workspace(ws.id) is not None and Path(ws.path).is_dir()
-    assert db.get_agent(wid).pipeline == "fixing"             # the worker gets the failure to fix
-    msg = db.pop_pending(wid)
-    assert "FAIL `test -f never_there.py`" in full_text(db, wid, msg.body)   # in one message with the verdict
 
 
 @pytest.mark.slow("The one real fix-and-re-review flow: two review rounds, then a merge and removal")

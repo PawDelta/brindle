@@ -1808,8 +1808,9 @@ def permissions_install_codex_hook(
         return
     typer.echo(f"Codex reports it as: {state.status}")
     typer.echo(f"will set in {state.config}:")
-    typer.echo(f'  [hooks.state."{state.key}"]')
-    typer.echo(f'  trusted_hash = "{state.hash}"')
+    for key, hash_ in state.keys().items():
+        typer.echo(f'  [hooks.state."{key}"]')
+        typer.echo(f'  trusted_hash = "{hash_}"')
     typer.echo("and remember it in ~/.brindle/permissions.json (codex_hook)")
     if not yes:
         typer.echo("nothing changed; run again with --yes to trust it")
@@ -3088,7 +3089,7 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
     # Codex's permission hook is the same command for every agent (so one
     # trust covers them all): Codex passes the agent's environment through.
     agent_id = agent or os.environ.get("BRINDLE_AGENT_ID")
-    if not agent_id and event == "codex-permission-request":
+    if not agent_id and event in ("codex-permission-request", "codex-pre-tool"):
         try:
             from brindle import antigravity
 
@@ -3096,6 +3097,8 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
         except Exception:  # noqa: BLE001
             agent_id = None
     if not agent_id:
+        if event == agents.CODEX_PRE_TOOL:   # no output runs the call: brindle couldn't check it
+            typer.echo(json.dumps(agents.codex_pre_tool_failure()))
         return
     # Codex's notify passes the JSON as an argument; Claude Code's hooks use stdin.
     text = payload if payload is not None else sys.stdin.read()
@@ -3111,6 +3114,8 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
         try:  # any failure means no output: the person is asked as usual
             out = agents.hook_main(DB(), agent_id, event, text, trusted=agent is not None)
         except Exception:  # noqa: BLE001
+            if event == agents.CODEX_PRE_TOOL:
+                typer.echo(json.dumps(agents.codex_pre_tool_failure()))
             return
     else:
         out = agents.hook_main(DB(), agent_id, event, text, trusted=agent is not None)
@@ -3349,9 +3354,11 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
                             focus: Optional[str] = typer.Option(None, "--focus"),
                             request_id: Annotated[Optional[str], typer.Option("--request-id")] = None,
                             second: Annotated[bool, typer.Option("--second-review")] = False,
-                            slot: Annotated[Optional[str], typer.Option("--review-slot")] = None) -> None:
-    """Start the reviewer, then run a repo's checks beside it; the worker gets
-    the verdict and any failing checks together. Started detached from start_review, so the review still starts
+                            slot: Annotated[Optional[str], typer.Option("--review-slot")] = None,
+                            report: Annotated[Optional[float], typer.Option("--report")] = None) -> None:
+    """Run a repo's checks, then start the reviewer with their results in its
+    prompt (or, when a check fails, send the worker the failing output and
+    start none). Started detached from start_review, so the review still starts
     even if the MCP server that asked for it has exited."""
     from brindle import gates
     from brindle.config import load_repo_config
@@ -3362,7 +3369,7 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
         return
     try:
         agents.review_after_checks(db, caller, ws, profile, focus, workspaces.config_for(db, ws),
-                                   request_id=request_id, second=second, slot=slot)
+                                   request_id=request_id, second=second, slot=slot, report=report)
     except (agents.AgentError, ValueError) as e:
         from brindle import pipeline
 
@@ -3370,8 +3377,8 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
         if worker and worker.pipeline == "reviewing":
             db.update_agent(worker.id, pipeline=None)   # nothing is reviewing it after all
         if db.get_agent(caller) if caller else None:
-            gates.tell(db, caller, f"[brindle] No reviewer could start on `{ws.branch}` "
-                                   f"({e}). Review it yourself with workspace_diff, then "
+            gates.tell(db, caller, f"[brindle] No reviewer could start on `{ws.branch}` after its "
+                                   f"checks ({e}). Review it yourself with workspace_diff, then "
                                    "merge_workspace.")
 
 

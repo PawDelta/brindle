@@ -83,6 +83,10 @@ def test_an_agent_cannot_change_the_permission_rules(monkeypatch):
                  marks=pytest.mark.variant("unquoted env assignment can split and select another executable")),
     ("cat <(git status)", "ask"),
     ("case x in x) git status;; esac", "ask"),
+    pytest.param("echo <<<EOF\nprintf '%s' 'a;b'", "allow", marks=pytest.mark.variant(
+        "a here-string is not a heredoc: the line after it is split, its quoted ';' kept in one argument")),
+    pytest.param("echo $((1<<2))\nprintf '%s' 'a;b'", "ask", marks=pytest.mark.variant(
+        "a shift in arithmetic is not a heredoc: the line after it is split, its quoted ';' kept in one argument")),
 ])
 def test_shell_forms(tmp_path, command, expected):
     from brindle import permissions
@@ -94,6 +98,8 @@ def test_shell_forms(tmp_path, command, expected):
     (tmp_path / 'BEGIN{system("id")}').write_text("")
     here = str(tmp_path)
     req = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
+    if "\nprintf" in command:   # the splitter reads the next line as its own command
+        assert ["printf", "%s", "a;b"] in permissions._segments(command)
     decision = permissions.decide(req)
     assert decision.decision == expected, decision.reason
 
@@ -128,6 +134,12 @@ def _bypass(command):
     ("cat ~/.npmrc", "deny"),
     ("cat ~/.git-credentials", "deny"),
     ("cat ~/.docker/config.json", "deny"),
+    ("cat $HOME/.npmrc", "deny"),
+    ("cat ~/.ssh/id_ed25519", "deny"),
+    ("python3 -c \"print(open(__import__('os').path.expanduser('~/.aws/credentials')).read())\"", "deny"),
+    _bypass('cat "${HOME}/.aws/credentials"'),
+    _bypass("node -e \"console.log(require('fs').readFileSync(require('os').homedir() + '/.npmrc', 'utf8'))\""),
+    ("python3 -c 'print(1)'", "allow"),
     ("echo $GH_TOKEN2", "deny"),
     ("printenv DB_PASS", "deny"),
     ("printenv MYSQL_PWD", "deny"),

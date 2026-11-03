@@ -117,6 +117,39 @@ def _tmux_path() -> str | None:
     return _TMUX_PATH[0]
 
 
+# Routing, cloud, identity and credential-selection variables that brindle reads
+# from the environment. An agent launched by brindle inherits some of them
+# (BRINDLE_CLOUD_ROUTE="" among them) and a developer's shell may carry any, so
+# a test starts without them and sets the ones it needs itself. BRINDLE_HOME,
+# BRINDLE_TMUX_SOCKET and the rest a test's own fixtures set are left to those.
+AMBIENT_BRINDLE_ENV = (
+    # provider routing and the provider binaries / policies
+    "BRINDLE_CLOUD_ROUTE", "BRINDLE_CLAUDE_BIN", "BRINDLE_CODEX_BIN", "BRINDLE_AGY_BIN",
+    "BRINDLE_OPENCODE_BIN", "BRINDLE_OPENCODE_POLICY", "BRINDLE_CLAUDE_MANAGED_SETTINGS",
+    "BRINDLE_AIRGAP",
+    # cloud (CI and company login)
+    "BRINDLE_CI_PREVIEW_CLOUDS", "BRINDLE_AWS_ID_TOKEN", "BRINDLE_GCP_ID_TOKEN",
+    "BRINDLE_AZURE_ID_TOKEN", "BRINDLE_ID_TOKEN", "BRINDLE_GITLAB_TOKEN",
+    # credential selection and the Pro account
+    "BRINDLE_PRO_TOKEN", "BRINDLE_PRO_DEV", "BRINDLE_PRO_BASE_URL",
+    "BRINDLE_PRO_CREDENTIAL_STORE", "BRINDLE_CODEX_AUTH",
+    # identity of the agent (and its workspace) that launched this run
+    "BRINDLE_AGENT_ID", "BRINDLE_WORKSPACE_ID", "BRINDLE_WORKSPACE_NAME",
+    "BRINDLE_WORKSPACE_PATH", "BRINDLE_ROOT_PATH", "BRINDLE_BRANCH", "BRINDLE_BASE_BRANCH",
+)
+
+
+@pytest.fixture(autouse=True)
+def ambient_brindle_env(monkeypatch):
+    """Every test starts without the routing, cloud, identity and credential
+    variables of the shell or agent that runs the suite (AMBIENT_BRINDLE_ENV);
+    tests that need one set it themselves. brindle_home requests this fixture,
+    so it runs first and its own overrides (the credential store, managed
+    settings) are set after the cleanup, not wiped by it."""
+    for name in AMBIENT_BRINDLE_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def real_process_scan():
     """Opts a test out of ``process_scan``: it runs the real ``procs.cwds``
@@ -505,7 +538,7 @@ def provider_http(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def brindle_home(tmp_path, monkeypatch):
+def brindle_home(tmp_path, monkeypatch, ambient_brindle_env):
     home = tmp_path / "brindle-home"
     monkeypatch.setenv("BRINDLE_HOME", str(home))
     monkeypatch.setenv("BRINDLE_CACHE_DIR", str(tmp_path / "brindle-cache"))   # not ~/Library/Caches

@@ -9,6 +9,7 @@
 import type { AccountDTO, InboxItemDTO, WorkspaceDTO } from "../api/schema";
 import type { AppUpdateStatus } from "../api/tauri";
 import type { BusEvent, OrgNotice, StreamMessage, StreamState } from "../api/events";
+import { isPastWorker } from "./overview";
 
 export const RECENT_EVENTS = 50;
 
@@ -20,6 +21,9 @@ export interface AppState {
   lastEventId: number;
   workspaces: WorkspaceDTO[];
   inbox: InboxItemDTO[];
+  /* Past ids also suppress independently fetched permission groups. A live
+     snapshot of the same id clears it when a session is continued. */
+  pastWorkers: string[];
   /* Agent id → whether its process is alive, from the daemon's liveness sweep. */
   alive: Record<string, boolean>;
   org: { bar: string[] | null; notices: OrgNotice[] };
@@ -48,6 +52,7 @@ export const initialState: AppState = {
   lastEventId: 0,
   workspaces: [],
   inbox: [],
+  pastWorkers: [],
   alive: {},
   org: { bar: null, notices: [] },
   stale: false,
@@ -66,12 +71,29 @@ export function reduce(state: AppState, action: Action): AppState {
     case "connection":
       return { ...state, connection: action.state };
     case "snapshot":
-      return { ...state, workspaces: action.workspaces, inbox: action.inbox, stale: false, synced: true, error: null };
+      return { ...state, ...liveSnapshot(action.workspaces, action.inbox, state.pastWorkers), stale: false, synced: true, error: null };
     case "error":
       return { ...state, error: action.message };
     case "stream":
       return applyMessage(state, action.message);
   }
+}
+
+/* One boundary for every live surface, including Inbox badges. Do not drop
+   items merely because their agent is absent: paused sessions keep requests. */
+function liveSnapshot(workspaces: WorkspaceDTO[], inbox: InboxItemDTO[], previous: string[]) {
+  const past = new Set(previous);
+  for (const a of workspaces.flatMap((ws) => ws.agents ?? [])) {
+    if (isPastWorker(a)) past.add(a.id);
+    else past.delete(a.id);
+  }
+  const pastWorkers = [...past];
+  if (past.size === 0) return { workspaces, inbox, pastWorkers };
+  return {
+    pastWorkers,
+    workspaces: workspaces.map((ws) => ({ ...ws, agents: ws.agents?.filter((a) => !past.has(a.id)) })),
+    inbox: inbox.filter((i) => !i.agent_id || !past.has(i.agent_id)),
+  };
 }
 
 function applyMessage(state: AppState, m: StreamMessage): AppState {
@@ -107,6 +129,15 @@ function applyEvent(state: AppState, e: BusEvent): AppState {
   switch (e.kind) {
     case "session.changed":
       return state;
+    case "agent.closed":
+      if (!e.agent_id) return { ...state, stale: true };
+      return {
+        ...state,
+        stale: true,
+        pastWorkers: e.agent_id ? [...new Set([...state.pastWorkers, e.agent_id])] : state.pastWorkers,
+        workspaces: state.workspaces.map((ws) => ({ ...ws, agents: ws.agents?.filter((a) => a.id !== e.agent_id) })),
+        inbox: state.inbox.filter((i) => i.agent_id !== e.agent_id),
+      };
     case "agent.status": {
       const status = e.payload.status;
       if (typeof status !== "string" || !e.agent_id) return { ...state, stale: true };
@@ -118,10 +149,10 @@ function applyEvent(state: AppState, e: BusEvent): AppState {
         // Status determines waiting/failed cards as well as the agent row.
         // Keep the row responsive while fetching the authoritative inbox.
         stale: true,
-        workspaces: state.workspaces.map((ws) => ({
+        ...liveSnapshot(state.workspaces.map((ws) => ({
           ...ws,
           agents: ws.agents?.map((a) => (a.id === e.agent_id ? { ...a, status, status_since: e.ts } : a)),
-        })),
+        })), state.inbox, state.pastWorkers),
       };
     }
     case "workspace.removed":
