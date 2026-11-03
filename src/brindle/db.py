@@ -838,7 +838,7 @@ class Agent:
     pipeline_rounds: int | None = None
     stuck_noted: float | None = None
     review_sha: str | None = None
-    unreported_noted: int | None = None
+    unreported_noted: float | None = None
     plan_first: int | None = None      # must get its plan approved before editing (brindle.agents.submit_plan)
     plan_state: str | None = None      # proposed | approved | revise
     plan_text: str | None = None       # the plan awaiting a decision (agents.submit_plan), shown in the inbox
@@ -1686,10 +1686,28 @@ class DB:
                             (since, agent_id, since))
         return cur.rowcount == 1, row["stuck_noted"] if row else None
 
-    def release_note(self, agent_id: str, since: float, previous: float | None) -> None:
-        """Undo ``claim_note`` when the note couldn't be sent, unless a later one replaced it."""
+    def claim_unreported(self, agent_id: str, since: float, previous: float | None,
+                         *, reopened_at: float | None, status_since: float | None) -> bool:
+        """Claim the stop read by the caller, without replacing a newer alert.
+
+        Reviewer recovery clears the alert so a later stop can be handled.
+        Its reopened_at changes in that same write: checking it prevents an
+        old snapshot from reclaiming the cleared alert and escalating the
+        reviewer just resumed. status_since also rejects a different turn.
+        """
         with self.tx() as c:
-            c.execute("UPDATE agents SET stuck_noted=? WHERE id=? AND stuck_noted IS ?",
+            cur = c.execute("UPDATE agents SET unreported_noted=? WHERE id=? AND unreported_noted IS ?"
+                            " AND reopened_at IS ? AND COALESCE(status_since, created_at) IS ?",
+                            (since, agent_id, previous, reopened_at, status_since))
+        return cur.rowcount == 1
+
+    def release_note(self, agent_id: str, since: float, previous: float | None,
+                     *, field: str = "stuck_noted") -> None:
+        """Undo ``claim_note`` when the note couldn't be sent, unless a later one replaced it."""
+        if field not in ("stuck_noted", "unreported_noted"):
+            raise ValueError(f"Not a note field: {field}")
+        with self.tx() as c:
+            c.execute(f"UPDATE agents SET {field}=? WHERE id=? AND {field} IS ?",
                       (previous, agent_id, since))
 
     def claim_idle(self, agent_id: str) -> float | None:
