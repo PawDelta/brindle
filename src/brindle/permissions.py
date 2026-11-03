@@ -1317,19 +1317,21 @@ def _command_texts(command: str) -> list[str]:
             i = n if j < 0 else j      # the newline still cuts
             continue
         if command.startswith("$((", i):
-            # Arithmetic shifts aren't redirections. Keep substitutions in a
-            # complex expression visible to the conservative fallback.
+            # Only skip numeric arithmetic with the required adjacent closing
+            # pair. $((command); command) can instead run a subshell in $(...).
+            # Names, substitutions and other unsupported syntax use the fallback.
             j, depth = i + 3, 2
-            while j < n and depth:
-                if command[j] in "'\"`$\\":
+            while j < n and depth > 1:
+                if command[j] not in "0123456789 \t\n()+-*/%<>&|^~!?:=,":
                     return re.split(_SEPARATORS, command)
                 if command[j] == "(":
                     depth += 1
                 elif command[j] == ")":
                     depth -= 1
                 j += 1
-            if depth:
+            if depth != 1 or command[j:j + 1] != ")":
                 return re.split(_SEPARATORS, command)
+            j += 1
             text.append(command[i:j])
             i = j
             continue
@@ -1388,6 +1390,11 @@ def _command_texts(command: str) -> list[str]:
                     line_end = n if line_end < 0 else line_end
                     line = command[end:line_end]
                     end = min(line_end + 1, n)
+                    # An unquoted heredoc folds backslash-newline before
+                    # delimiter matching. Do not guess at physical boundaries
+                    # when a continuation could join this line to the next.
+                    if line.endswith("\\") and line_end < n:
+                        return re.split(_SEPARATORS, command)
                     if (line.lstrip("\t") if dash else line) == delimiter:
                         break
                 else:

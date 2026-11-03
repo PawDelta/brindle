@@ -169,6 +169,12 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "echo $'it\\'s' && rm -rf $HOME"), "deny", "d-rm"),
     (lambda ws: bash(ws, "cat <<EOF\nit's $(date)\nEOF\nrm -rf /"), "deny", "d-rm"),
     # Delimiter variants from splitter bypasses; body quotes must stay inert.
+    pytest.param(lambda ws: bash(ws, "echo $((echo hello); rm -rf /)"), "deny", "d-rm",
+                 marks=pytest.mark.variant("subshell inside command substitution is not arithmetic"),
+                 id="arithmetic-subshell"),
+    pytest.param(lambda ws: bash(ws, "cat <<EOF\nx\\\nEOF\nit's\nEOF\nrm -rf /\n# '"), "deny", "d-rm",
+                 marks=pytest.mark.variant("heredoc continuation prevents an early delimiter match"),
+                 id="heredoc-continuation"),
     pytest.param(lambda ws: bash(ws, "cat <<\\EOF\nit's\nEOF\nrm -rf /\n# '"), "deny", "d-rm",
                  marks=pytest.mark.variant("backslash-quoted heredoc delimiter bypass")),
     pytest.param(lambda ws: bash(ws, "cat <<'END-X'\nit's\nEND-X\nrm -rf /\n# '"), "deny", "d-rm",
@@ -217,7 +223,10 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
 ])
 def test_autonomous_runs_everything_but_default_branch_pushes_and_destructive_actions(ws, request_of, decision, rule):
     permissions.apply_preset("autonomous")
-    got = decide(request_of(ws))
+    request = request_of(ws)
+    if rule == "d-rm":
+        assert permissions.destructive_rm(request.command)
+    got = decide(request)
     assert got.decision == decision, got.reason
     assert (got.rule.id if got.rule else None) == rule
 
