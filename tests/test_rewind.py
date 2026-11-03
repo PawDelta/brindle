@@ -65,18 +65,16 @@ def test_only_workers_in_their_own_worktree_get_snapshots(db, repo, ws):
     assert refs(repo, "w2") == []
 
 
-def test_a_turn_without_a_transcript_is_summed_up_from_its_live_pane(db, ws, tmp_path):
+def test_a_turn_without_a_transcript_is_summed_up_from_its_live_pane(monkeypatch):
     from brindle import tmux
 
-    server = os.environ["BRINDLE_TMUX_SOCKET"]
-    tmux.ensure_session("turns", str(tmp_path), {})
-    t = [tmux._bin(), "-L", server]
-    pane = tmux.new_window("turns", "w", str(tmp_path), ["/bin/sh", "-c",
-                           f"echo added the login page; {' '.join(t)} wait-for -S drew; exec cat"], {})
-    tmux._tmux("wait-for", "drew")
-    a = Agent("w1", ws.id, "developer", "claude", None, "assign", "processing", pane, None,
-              time.time(), tmux_server=server)
-    assert "added the login page" in rewind.turn_words(a)
+    screens = {("%7", "own"): "  added the login page   \n\n   \n"}
+    monkeypatch.setattr(agents, "is_alive", lambda agent, panes=None: True)
+    monkeypatch.setattr(tmux, "capture", lambda target, lines=200, server=None, **kw:
+                        screens.get((target, server), ""))
+    a = Agent("w1", "ws-1", "developer", "claude", None, "assign", "processing", "%7", None,
+              time.time(), tmux_server="own")
+    assert rewind.turn_words(a) == "added the login page"
 
 
 def test_codex_turn_complete_snapshots_too(db, repo, ws):
