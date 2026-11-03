@@ -14,13 +14,6 @@ const open = async (page: Page, scene: string) => {
     const opened: string[] = [];
     Object.assign(window, { opened });
     window.open = (url) => (opened.push(String(url)), null);
-    // Start as a user who has already decided on the first-launch demo offer
-    // (the flag Onboarding/Demo.tsx readDemoOffered reads), so it doesn't cover the app.
-    try {
-      localStorage.setItem("brindle.demo.offered", "1");
-    } catch {
-      // No storage: the offer shows, as it would for a real user.
-    }
   });
   await page.goto(`/shots/preview.html?scene=${scene}&theme=light&renderer=dom`);
   await page.waitForSelector("html[data-ready]");
