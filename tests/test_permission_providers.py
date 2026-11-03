@@ -535,6 +535,7 @@ class FakeAppServer:
     """Stands in for `codex app-server`: lists brindle's hook, and stores trust
     the way Codex does (config.toml hooks.state)."""
     calls: list = []
+    system_config = "/nonexistent/etc/codex/config.toml"   # Codex's system layer (/etc/codex)
 
     def __init__(self, binary, flags, timeout=30.0):
         self.flags = flags
@@ -567,12 +568,10 @@ class FakeAppServer:
             # layer listed (with a disabledReason) even before its folder is trusted.
             import tomllib
 
-            from brindle import providers
-
             found = [({"type": "project", "dotCodexFolder": os.path.join(params["cwd"], ".codex")},
                       os.path.join(params["cwd"], ".codex", "config.toml")),
                      ({"type": "user", "file": str(config), "profile": None}, str(config)),
-                     ({"type": "system", "file": providers.CODEX_SYSTEM_CONFIG}, providers.CODEX_SYSTEM_CONFIG)]
+                     ({"type": "system", "file": str(self.system_config)}, str(self.system_config))]
             return {"config": {}, "origins": {}, "layers": [
                 {"name": name, "version": "", "config": tomllib.loads(Path(path).read_text())}
                 for name, path in found if os.path.exists(path)]}
@@ -694,7 +693,7 @@ def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monke
 
 class SilentAppServer:
     """A `codex app-server` that doesn't answer (Codex missing or too old)."""
-    def __init__(self, binary, flags, timeout=30.0):
+    def __init__(self, *args, **kwargs):
         raise codex_hook.CodexHookError("no codex")
 
 
@@ -708,7 +707,9 @@ class SilentAppServer:
     ("on", "system", 'sandbox_mode = "workspace-write"\n', FakeAppServer),
     ("on", "user", 'default_permissions = ":danger-full-access"\n', FakeAppServer),
     ("on", "user", 'profile = "x"\n[profiles.x]\nsandbox_mode = "workspace-write"\n', FakeAppServer),
-    ("on", "project", 'sandbox_mode = "workspace-write"\n', SilentAppServer),   # Codex can't say: its files
+    # Codex can't list its layers (managed ones brindle can't read among
+    # them): refused, however clean the files brindle can see are.
+    ("on", None, "", SilentAppServer),
 ])
 def test_codex_sandbox_denies_reading_credentials(ws, tmp_path, monkeypatch, policy, layer, setting, server):
     """With the policy on, Codex's own sandbox refuses every sandboxed command
@@ -721,17 +722,17 @@ def test_codex_sandbox_denies_reading_credentials(ws, tmp_path, monkeypatch, pol
     from brindle.pro import credentials
 
     monkeypatch.setattr(codex_hook, "_AppServer", server)
-    monkeypatch.setattr(providers, "CODEX_SYSTEM_CONFIG", str(tmp_path / "etc-codex" / "config.toml"))
+    monkeypatch.setattr(FakeAppServer, "system_config", tmp_path / "etc-codex" / "config.toml")
     set_local(ws.repo_root, "permission_policy", policy)
     config = {"user": codex_hook.codex_home() / "config.toml", "project": Path(ws.path, ".codex", "config.toml"),
-              "system": Path(providers.CODEX_SYSTEM_CONFIG)}.get(layer)
+              "system": FakeAppServer.system_config}.get(layer)
     if config:
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(setting)
-    if policy == "on" and layer:
+    if policy == "on" and (layer or server is SilentAppServer):
         with pytest.raises(providers.CodexSandboxRefused) as refused:
             launch_argv(ws)
-        assert str(config) in str(refused.value)
+        assert str(config or "config/read") in str(refused.value)
         return
     argv = launch_argv(ws)
     flags = dict(a.split("=", 1) for a in argv if a.startswith(("default_permissions=", "permissions.")))

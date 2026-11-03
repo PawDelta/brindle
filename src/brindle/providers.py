@@ -151,22 +151,19 @@ def _codex_denied_reads() -> list[str]:
             str(credentials.file_store_dir()), os.path.join(codex_home(), "auth.json")]
 
 
-# Codex's system-wide config layer (below the user's and the project's).
-CODEX_SYSTEM_CONFIG = "/etc/codex/config.toml"
-
-
 class CodexSandboxRefused(RuntimeError):
     """The permission policy is on, but Codex would ignore brindle's sandbox profile."""
 
 
-def _codex_layers(cwd: str) -> list[tuple[str, dict | None]]:
+def _codex_layers(cwd: str) -> list[tuple[str, dict]] | None:
     """Every Codex config layer a launch in ``cwd`` reads, highest precedence
-    first, as (file, its settings; None if unreadable). Codex's own answer
-    (app-server ``config/read``, which covers managed layers too), counting
-    a project layer Codex hasn't loaded yet because the folder isn't
-    trusted: brindle trusts it at launch (trust_codex_project). If Codex
-    can't say, the files in its documented order: ``.codex/config.toml``
-    from ``cwd`` up to the project root, the user's, the system's."""
+    first, as (where, its settings): Codex's own answer (app-server
+    ``config/read``, which covers its managed layers: managed_config.toml,
+    MDM, cloud defaults), counting a project layer Codex hasn't loaded yet
+    because the folder isn't trusted: brindle trusts it at launch
+    (trust_codex_project). None when Codex can't say (missing, too old to
+    list layers, not answering): no scan of the files brindle can see is
+    complete, so the caller refuses rather than guess."""
     from brindle import codex_hook
 
     try:
@@ -183,26 +180,8 @@ def _codex_layers(cwd: str) -> list[tuple[str, dict | None]]:
             cfg = layer.get("config")
             layers.append((str(where), cfg if isinstance(cfg, dict) else {}))
         return layers
-    except Exception:  # noqa: BLE001 - Codex missing, too old (no layers) or not answering: read the files
-        pass
-    import tomllib
-
-    files, here = [], os.path.abspath(cwd)
-    while True:
-        files.append(os.path.join(here, ".codex", "config.toml"))
-        if os.path.exists(os.path.join(here, ".git")) or os.path.dirname(here) == here:
-            break
-        here = os.path.dirname(here)
-    layers = []
-    for path in [*files, os.path.join(codex_home(), "config.toml"), CODEX_SYSTEM_CONFIG]:
-        try:
-            with open(path, "rb") as f:
-                layers.append((path, tomllib.load(f)))
-        except FileNotFoundError:
-            continue
-        except (OSError, ValueError):
-            layers.append((path, None))
-    return layers
+    except Exception:  # noqa: BLE001 - Codex missing, too old (no layers) or not answering
+        return None
 
 
 def codex_sandbox_base(cwd: str) -> str:
@@ -215,9 +194,12 @@ def codex_sandbox_base(cwd: str) -> str:
     why = ("brindle won't start this Codex worker: permission_policy is on, but {} so Codex would ignore the "
            "sandbox profile that stops its commands reading credential files. {}, " + off)
     layers = _codex_layers(cwd)
-    for where, cfg in layers:
-        if cfg is None:
-            raise CodexSandboxRefused(why.format(f"brindle can't read {where},", f"Fix {where}"))
+    if layers is None:
+        raise CodexSandboxRefused(
+            "brindle won't start this Codex worker: permission_policy is on, but Codex didn't report its "
+            "config layers (`codex app-server` config/read; is Codex installed and current?), so brindle can't "
+            "tell whether a sandbox_mode would make Codex ignore the sandbox profile that stops its commands "
+            "reading credential files. Update Codex, " + off)
     active = next((c["profile"] for _, c in layers if isinstance(c.get("profile"), str)), None)
     for where, cfg in layers:
         if "sandbox_mode" in cfg:
