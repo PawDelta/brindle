@@ -13,12 +13,20 @@ from brindle import agents, bus, disk, gates, git, mcp_server, providers, servic
 from brindle.config import load_repo_config
 
 from conftest import sh
+from git_snapshots import fast_host_tools, repo, workspaces_once  # noqa: F401  (fixtures)
 from test_merge_order import add
 
 
 def write_config(repo, **cfg):
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text(json.dumps(cfg))
+
+
+@pytest.fixture
+def feature(db, repo, tmp_path, tmp_path_factory):
+    """``workspaces.create(db, repo, "feature")``, built once and copied."""
+    return workspaces_once("workspaces:feature", db, tmp_path, tmp_path_factory,
+                           lambda: (workspaces.create(db, str(repo), "feature").workspace,))[0]
 
 
 def test_failed_setup_keeps_workspace(db, repo):
@@ -86,8 +94,8 @@ def test_session_config_setup_comes_from_base_branch(db, repo, monkeypatch):
     assert load_repo_config(repo, branch="bare").scoped_checks == "infer"
 
 
-def test_remove_refuses_dirty_and_keeps_branch(db, repo):
-    ws = workspaces.create(db, str(repo), "feature").workspace
+def test_remove_refuses_dirty_and_keeps_branch(db, repo, feature):
+    ws = feature
     open(os.path.join(ws.path, "wip.txt"), "w").write("wip")
     with pytest.raises(workspaces.WorkspaceError, match="uncommitted"):
         workspaces.remove(db, ws)
@@ -119,8 +127,8 @@ def test_remove_refuses_dirty_and_keeps_branch(db, repo):
     assert sh(f"git rev-parse {disk.ARCHIVE_REF}plain", repo).strip()
 
 
-def test_remove_workspace_accepts_an_agent_id(db, repo, monkeypatch):
-    ws = workspaces.create(db, str(repo), "feature").workspace
+def test_remove_workspace_accepts_an_agent_id(db, feature, monkeypatch):
+    ws = feature
     add(db, ws, "worker", "assign", result="finished")
     monkeypatch.setattr(mcp_server, "_caller", lambda db: (None, ws))
     mcp_server.remove_workspace("worker", delete_branch=False)
@@ -131,11 +139,11 @@ def test_remove_workspace_accepts_an_agent_id(db, repo, monkeypatch):
 
 @pytest.mark.variant("incident: 8 merged workspaces kept their rows after a reviewer's "
                      "`uv run` from the worktree")
-def test_remove_forgets_the_row_when_brindle_ran_from_the_removed_worktree(db, repo, monkeypatch):
+def test_remove_forgets_the_row_when_brindle_ran_from_the_removed_worktree(db, feature, monkeypatch):
     # A reviewer ran brindle from the worktree under review (`uv run` there):
     # removing it took brindle's source with it, so a module not loaded yet
     # failed to import afterwards, leaving the row and its agents behind.
-    ws = workspaces.create(db, str(repo), "feature").workspace
+    ws = feature
     add(db, ws, "rev0", "review", "reviewer")
     real = git.remove_worktree
 

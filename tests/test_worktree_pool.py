@@ -10,6 +10,7 @@ from brindle import git, pool, workspaces
 from brindle.db import DB
 
 from conftest import sh
+from git_snapshots import fast_host_tools, repo  # noqa: F401  (fixtures)
 
 
 def write_config(repo, **cfg):
