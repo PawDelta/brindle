@@ -13,20 +13,21 @@ from pathlib import Path
 import pytest
 
 from brindle import permission_grants as grants
-from brindle import permissions, workspaces
+from brindle import permissions
 from brindle.daemon.holds import HOLDS
 from brindle.db import Agent
 from brindle.permissions import Request, decide
 from brindle.service import inbox
 from brindle.service import permissions as svc
+from workspace_template import copy_workspace, workspace_template  # noqa: F401 (a fixture)
 
 
 @pytest.fixture
-def ws(db, repo, monkeypatch):
+def ws(db, workspace_template, tmp_path, monkeypatch):
     monkeypatch.setattr("brindle.permissions.PRESET_RULES", ())
     monkeypatch.setattr(inbox, "STEP_SECONDS", 0.01)
     monkeypatch.setattr(inbox, "CONFIRM_SECONDS", 0.5)
-    return workspaces.create(db, str(repo), "feature").workspace
+    return copy_workspace(workspace_template, db, tmp_path)
 
 
 def bash(ws, command):
