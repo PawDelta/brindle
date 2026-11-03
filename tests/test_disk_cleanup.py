@@ -78,9 +78,9 @@ def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, monkeypatch
     if state == "dirty":
         (wt / "notes.txt").write_text("unsaved thought\n")
     elif state == "process":   # a detached dev server, or a shell on another tmux server
-        monkeypatch.setattr(procs, "cwds", lambda: {4242: str(wt / "web")})
+        monkeypatch.setattr(procs, "cwds", lambda *_: {4242: str(wt / "web")})
     elif state == "unknown":   # processes can't be inspected: fail closed
-        def blind():
+        def blind(*_):
             raise OSError("lsof: not found")
         monkeypatch.setattr(procs, "cwds", blind)
     else:
@@ -98,11 +98,11 @@ def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, monkeypatch
 
 @pytest.mark.parametrize("cleanup", ["post-merge", "retired"])
 @pytest.mark.parametrize("other", ["pane", "process", None])
-def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, repo, cleanup, other):
+def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, repo, process_scan, cleanup, other):
     """The pipeline's post-merge removal and the sweep of retired workspaces
     go through workspaces.remove: a pane of another session or a detached
-    process in the worktree keeps it, while the workspace's own session
-    (which the removal ends) doesn't."""
+    process in the worktree (the scan, faked, shows it there) keeps it,
+    while the workspace's own session (which the removal ends) doesn't."""
     ws = workspaces.create(db, str(repo), "shipped").workspace
     Path(ws.path, "a.txt").write_text("a\n")
     sh("git add a.txt && git commit -qm a", ws.path)
@@ -116,6 +116,7 @@ def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, repo, 
     elif other == "process":   # a dev server started by hand, outside any pane
         held = subprocess.Popen(["/bin/sh", "-c", "read line"], cwd=ws.path, stdin=subprocess.PIPE,
                                 start_new_session=True)
+        process_scan[held.pid] = os.path.realpath(ws.path)
     try:
         if cleanup == "post-merge":
             pipeline._remove(db, ws)
@@ -149,7 +150,7 @@ def test_scratch_prune_and_pool_sweep_keep_a_folder_a_process_is_in(db, repo, mo
         db.delete_pool_entry(entry.path)
         path = entry.path
     monkeypatch.setattr(procs, "table", lambda: {})
-    monkeypatch.setattr(procs, "cwds", lambda: {4242: os.path.realpath(path)})
+    monkeypatch.setattr(procs, "cwds", lambda *_: {4242: os.path.realpath(path)})
     monkeypatch.setattr(tmux, "session_panes", lambda name: [])
     monkeypatch.setattr(tmux, "list_sessions", lambda: [])
 
@@ -208,7 +209,7 @@ def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, monke
     read = spawn.read
     monkeypatch.setattr(procs, "PROC", Path(repo, "no-proc"))
     monkeypatch.setattr(spawn, "read", ps)
-    monkeypatch.setattr(procs, "cwds", lambda: {pid: wt for pid, _ppid, _cmd in rows}
+    monkeypatch.setattr(procs, "cwds", lambda *_: {pid: wt for pid, _ppid, _cmd in rows}
                         | {os.getpid(): os.getcwd()})
     real_panes, real_sessions = tmux.session_panes, tmux.list_sessions
     monkeypatch.setattr(tmux, "session_panes", lambda s: [(500, wt)] if s == ws.tmux_session else real_panes(s))
@@ -248,12 +249,12 @@ def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, monkeypatch):
 
 
 def _status(uids: tuple[int, ...] | None = None, gids: tuple[int, ...] | None = None,
-            cap_prm: int = 0) -> str:
-    """A /proc/<pid>/status: real, effective, saved and filesystem ids
-    (this user's unless given) and capabilities."""
+            cap_prm: int = 0, name: str = "runsvc", ppid: int = 1) -> str:
+    """A /proc/<pid>/status: its Name and parent, real, effective, saved and
+    filesystem ids (this user's unless given) and capabilities."""
     uids = uids or (os.getuid(),) * 4
     gids = gids or (os.getgid(),) * 4
-    return (f"Name:\trunsvc\nState:\tR (running)\nPPid:\t1\nUid:\t{chr(9).join(map(str, uids))}\n"
+    return (f"Name:\t{name}\nState:\tR (running)\nPPid:\t{ppid}\nUid:\t{chr(9).join(map(str, uids))}\n"
             f"Gid:\t{chr(9).join(map(str, gids))}\nCapPrm:\t{cap_prm:016x}\nCapEff:\t{cap_prm:016x}\n"
             "NoNewPrivs:\t0\nSeccomp:\t0\n")
 
@@ -286,14 +287,32 @@ STARTED = f"started {123456 / os.sysconf('SC_CLK_TCK'):.2f}s after boot, argv[0]
      f"Name ?, State ?, PPid 1 (systemd), Uid ?, Gid ?, CapEff ?, NoNewPrivs ?, Seccomp ?, {STARTED}"),
     # Whatever the service, this user's own process in the worktree keeps it.
     ("runner+shell", _status(uids=(0, UID, 0, UID)), True, "uid real 0, uid saved 0"),
+    # Linux's per-user service manager (``systemd --user``), refused for its
+    # CAP_WAKE_ALARM with this user's ids: it never runs in a project.
+    ("systemd", _status(name="systemd", cap_prm=1 << 35), False, None),
+    # Something else calling itself systemd, not started by PID 1: unknown.
+    ("systemd", _status(name="systemd", ppid=2000, cap_prm=1 << 35), True, "Name systemd, State R (running), "
+     "PPid 2000"),
+    ("ssh-agent", _status(name="ssh-agent"), False, None),   # it chdirs to / as it daemonizes
+    ("ignored", _status(name="syncd"), False, None),   # the repo's live_check_ignore names it
+    # Anything else refused keeps every worktree, and a removal says what it was.
+    ("unknown", _status(name="syncd"), True, "Name syncd"),
 ], ids=["proc-unreadable", "lsof-partial", "runner-root-ids", "runner-other-group", "runner-capabilities",
-        "runner-own-ids", "runner-no-status", "runner-and-a-shell-in-the-worktree"])
-def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeypatch, caplog,
+        "runner-own-ids", "runner-no-status", "runner-and-a-shell-in-the-worktree", "systemd-user-manager",
+        "systemd-not-from-pid-1", "ssh-agent", "live-check-ignore", "unknown-is-named"])
+def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeypatch, caplog, real_process_scan,
                                                      scan, refused, kept, logged):
     """One live process whose folder can't be read (or an lsof that failed
     part way) must not read as no process at all, unless the process isn't
-    this user's: it runs with another's uid or gid."""
+    this user's (it runs with another's uid or gid), or it is one that never
+    runs in a project: a known service manager or agent, or one the repo's
+    ``live_check_ignore`` names."""
     wt = _worktree(repo, "idea", days_old=30)
+    if scan == "ignored":
+        (repo / ".brindle").mkdir(exist_ok=True)
+        (repo / ".brindle" / "config.json").write_text(json.dumps({"live_check_ignore": ["syncd"]}))
+    ignore = disk.live_check_ignore(repo)
+    argv = {"systemd": "/usr/lib/systemd/systemd\0--user\0", "ssh-agent": "/usr/bin/ssh-agent\0-D\0"}
     fake = tmp_path / "proc"
     (fake / "self").mkdir(parents=True)
     monkeypatch.setattr(procs, "PROC", fake)
@@ -310,7 +329,9 @@ def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeyp
         for pid, cwd in rows.items():
             (fake / str(pid)).mkdir()
             os.symlink(cwd, fake / str(pid) / "cwd")
-            (fake / str(pid) / "cmdline").write_text("/opt/runner/bin/Runner.Listener\0--never-logged\0")
+            (fake / str(pid) / "cmdline").write_text(
+                argv.get(scan, "") if pid == 1354 and scan in argv
+                else "/opt/runner/bin/Runner.Listener\0--never-logged\0")
             (fake / str(pid) / "environ").write_text("MARKER=never-logged\0")
             if scan != "proc-unreadable" and (pid != 1354 or refused):
                 (fake / str(pid) / "status").write_text(refused if pid == 1354 else _status())
@@ -332,11 +353,17 @@ def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeyp
         monkeypatch.setattr(os, "readlink", readlink)
     try:
         if not kept:
-            assert set(procs.cwds()) == {100, *RUNNER}
+            assert set(procs.cwds(ignore)) == {100, *RUNNER}
         elif scan != "runner+shell":
             with pytest.raises(OSError):
-                procs.cwds()
+                procs.cwds(ignore)
         out = disk.clean(db, path=str(wt))
+        if scan == "unknown":   # it keeps any worktree, and the refusal says which process to excuse
+            other = workspaces.create(db, str(repo), "other").workspace
+            with pytest.raises(workspaces.WorkspaceError) as refusal:
+                workspaces.remove(db, other)
+            assert "process syncd (pid 1354)" in str(refusal.value), refusal.value
+            assert "add it to live_check_ignore if it never runs in your projects" in str(refusal.value)
     finally:
         if (fake / "200").exists():
             (fake / "200").chmod(0o755)

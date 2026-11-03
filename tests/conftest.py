@@ -102,6 +102,28 @@ _TEST_SERVER: list[str] = []
 _TEST_COUNT = [0]
 
 
+@pytest.fixture
+def real_process_scan():
+    """Opts a test out of ``process_scan``: it runs the real ``procs.cwds``
+    (against a fake /proc or lsof of its own)."""
+
+
+@pytest.fixture(autouse=True)
+def process_scan(request, monkeypatch):
+    """``procs.cwds`` without the host's processes: just this one, in its
+    folder, plus whatever the test adds to the dict returned (pid -> folder).
+    The real scan reads every process of this user on the machine, so a
+    removal or cleanup test would depend on what else runs there (a CI
+    runner's ``systemd --user``, a developer's dev server). Tests of the scan
+    itself ask for ``real_process_scan``."""
+    from brindle import procs
+
+    added: dict[int, str] = {}
+    if "real_process_scan" not in request.fixturenames:
+        monkeypatch.setattr(procs, "cwds", lambda ignore=(): {os.getpid(): os.getcwd(), **added})
+    return added
+
+
 @pytest.fixture(autouse=True)
 def _fresh_google_token_cache():
     """The Google token-expiry cache is process-wide; a test never inherits one."""
