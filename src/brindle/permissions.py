@@ -2095,6 +2095,59 @@ def _credential_options(args: list[str], valued: set[str]) -> tuple[list[str], s
     return operands, options
 
 
+# Credential-printing command paths, with each CLI's options that take a value and those that don't.
+_CLI_CREDENTIALS = {
+    "gh": (("auth", "token"),
+           {"-R", "--repo", "-h", "--hostname", "-u", "--user"},
+           {"--help", "--secure-storage", "--insecure-storage"}),
+    "gcloud": (("auth", "print-access-token"),
+               {"--project", "--account", "--configuration", "--billing-project", "--impersonate-service-account",
+                "--format", "--verbosity", "--flags-file", "--access-token-file", "--trace-token", "--lifetime",
+                "--filter", "--limit", "--page-size", "--sort-by", "--scopes", "--audiences"},
+               {"-q", "--quiet", "--log-http", "--no-log-http", "--user-output-enabled",
+                "--no-user-output-enabled", "-h", "--help"}),
+    "aws": (("configure", "export-credentials"),
+            {"--profile", "--region", "--endpoint-url", "--output", "--query", "--color", "--ca-bundle",
+             "--cli-binary-format", "--format", "--cli-read-timeout",
+             "--cli-connect-timeout"},
+            {"--debug", "--no-verify-ssl", "--no-paginate", "--no-sign-request", "--no-cli-pager",
+             "--cli-auto-prompt", "--no-cli-auto-prompt", "--version"}),
+}
+
+
+def _command_path(args: list[str], valued: set[str], flags: set[str], target: tuple[str, ...]) -> bool:
+    """Whether ``args`` may select ``target`` as the command path: an option
+    neither set knows may or may not consume the word after it."""
+    words: list[tuple[str, bool]] = []    # (operand, maybe an unknown option's value)
+    index, maybe = 0, False
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if arg == "--":
+            words.extend((a, False) for a in args[index:])
+            break
+        if arg.startswith("-") and arg != "-":
+            name, equals, _ = arg.partition("=")
+            if not name.startswith("--"):
+                name = "-" + arg[-1]    # the last of a cluster of short options takes any value
+            if name in valued and not equals:
+                index += 1
+            maybe = not equals and name not in valued and name not in flags
+            continue
+        words.append((arg, maybe))
+        maybe = False
+
+    def match(at: int, want: int) -> bool:
+        if want == len(target):
+            return True
+        if at == len(words):
+            return False
+        word, skippable = words[at]
+        return (word == target[want] and match(at + 1, want + 1)
+                or skippable and match(at + 1, want))
+    return match(0, 0)
+
+
 def _credential_shell(req: Request, part: ShellPart, args: list[str], depth: int) -> bool:
     """Find a shell's command string after actual options, never inside --norc."""
     index, command_string = 0, False
@@ -2197,20 +2250,16 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
                 return True
             index += 1
         return False
-    if program in ("gh", "gcloud", "aws"):
-        target = {"gh": ("auth", "token"), "gcloud": ("auth", "print-access-token"),
-                  "aws": ("configure", "export-credentials")}[program]
-        operands, _ = _credential_options(args, {"--project", "--account", "--configuration", "--billing-project",
-                                                "--impersonate-service-account", "--profile", "--region",
-                                                "--endpoint-url", "--hostname", "-h", "--format", "--verbosity",
-                                                "--flags-file", "--access-token-file", "--output", "--query"})
-        return tuple(operands[:2]) == target
+    if program in _CLI_CREDENTIALS:
+        target, valued, flags = _CLI_CREDENTIALS[program]
+        return _command_path(args, valued, flags, target)
     if program == "security":
         operands, options = _credential_options(args, {"-a", "-c", "-C", "-d", "-D", "-j", "-l", "-p", "-s", "-t"})
         return (bool(operands) and operands[0] in ("find-generic-password", "find-internet-password")
                 and bool(options & {"-w", "-g"}))
     if program == "dd":
-        return any(_credential_file(req, part, arg[3:]) for arg in args if arg.startswith("if="))
+        inputs = [arg[3:] for arg in args if arg.startswith("if=")]
+        return any(_credential_file(req, part, name) for name in [*inputs, *part.reads])
     if program in (*READERS, "awk", "less", "more", "strings", "od", "xxd"):
         return any(_credential_file(req, part, name) for name in [*words[1:], *part.written[1:], *part.reads])
     return False
@@ -2666,6 +2715,7 @@ SUBSTITUTION_DATA_OPTIONS: dict[tuple[str, str], tuple[str, ...]] = {
 }
 # Stands in for a substitution's output once its inner commands are checked.
 _SUBSTITUTED = "BRINDLESUBSTITUTION"
+_UNREADABLE = "BRINDLEUNREADABLE"    # a word prints_credentials' scan steps over
 
 
 def _substituted(req: Request, checks: list[str] | None, rules: list[Rule]) -> Request | Decision:
@@ -2929,7 +2979,7 @@ def _parameter_word(command: str, start: int, quoted: bool) -> tuple[int, list, 
         char = command[i]
         if char == "\\":
             i += 2
-        elif char == "'" and not quote:
+        elif char == "'" and not quote and not quoted:    # inside "${...}" a ' is literal
             end = command.find("'", i + 1)
             if end < 0:
                 return None
@@ -3001,6 +3051,11 @@ def _script_word(command: str, i: int, *, credential_scan: bool = False) -> tupl
                 i, inner_refs, inner_subs = parameter
                 refs.extend((s - start, e - start, name, q) for s, e, name, q in inner_refs)
                 subs.extend(inner_subs)
+            elif credential_scan and not quoted and command.startswith("$'", i):
+                close = re.match(r"\$'(?:[^'\\]|\\.)*'", command[i:])
+                if close is None:
+                    return None
+                i += close.end()
             elif command.startswith("${", i) or not quoted and command.startswith("$'", i):
                 return None
             else:
@@ -3072,6 +3127,11 @@ def _script_tokens(command: str, *, credential_scan: bool = False,
             spaced = False
             continue
         word = _script_word(command, i, credential_scan=credential_scan)
+        if word is None and partial is not None and credential_scan:
+            end = i + 1
+            while end < n and command[end] not in " \t\n;&|<>()":
+                end += 1
+            word = (_UNREADABLE, [], [], end)
         if word is None:
             return None
         raw, refs, subs, i = word
