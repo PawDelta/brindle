@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import select
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -292,8 +293,16 @@ class Connection:
                     await self._settled(answered)
 
     async def _write(self, data: bytes) -> None:
-        while data:
-            data = data[os.write(self.out_fd, data):]
+        """Write ``data`` to the client a pipe buffer's worth at a time,
+        waiting (not blocking) for room in between: a client slow to read its
+        end never stalls the event loop, so a cancel or EOF it sends
+        meanwhile is still read, and settles the request before its response
+        is through. A pipe only reports writable with PIPE_BUF bytes free,
+        so a write of at most that never blocks."""
+        view = memoryview(data)
+        while view:
+            await anyio.wait_writable(self.out_fd)
+            view = view[os.write(self.out_fd, view[:select.PIPE_BUF]):]
 
     async def _unanswered(self, request_id) -> None:
         _settle(request_id, False)

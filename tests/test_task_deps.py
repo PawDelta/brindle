@@ -16,7 +16,7 @@ import pytest
 
 from conftest import full_text, sh
 from brindle import agents, bus, mcp_server, tasks, workspaces
-from brindle.db import Agent, Workspace
+from brindle.db import DB, Agent, Workspace
 from test_merge_order import fake_spawn
 
 
@@ -656,10 +656,12 @@ def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
     assigns ran past the client's 120 s (2026-11-03): assign (and handoff)
     reply with the task id first, and admission, the worktree and the launch
     happen in the detached start afterwards. Repeated before that start
-    runs, it queues nothing more; a start that beat the reply is named in
-    it, never waited for."""
+    runs, it queues nothing more, and another task on the same files is
+    refused (overlap "block"); a start that beat the reply is named in it,
+    never waited for."""
     from brindle import spawn
 
+    (repo / ".brindle" / "config.json").write_text('{"overlap": "block", "pipeline": false, "review": false}')
     events, helpers = [], []
     real_delegate = agents.delegate
 
@@ -667,8 +669,8 @@ def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
         events.append("spawn")
         return real_delegate(*a, **k)
 
-    def call() -> str:
-        return asyncio.run(getattr(mcp_server, tool)("developer", "do A"))
+    def call(task: str = "do A") -> str:
+        return asyncio.run(getattr(mcp_server, tool)("developer", task, files=["app.py"]))
 
     monkeypatch.setattr(agents, "delegate", slow_delegate)
     monkeypatch.setattr(agents, "wait_for_result", lambda *a, **k: pytest.fail("the reply waited for the worker"))
@@ -682,8 +684,10 @@ def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
     out = call()
     events.append("reply")
     again = call()   # the same task, before its start has run
+    other = call("do B")   # another task on the same files, before either start has run
     [t] = db.list_tasks(str(repo))
     assert t.id in out and t.id in again and events == ["reply"] and helpers == [t.id], (out, again)
+    assert other.startswith("Not started") and f"queued task {t.id}" in other, other
     monkeypatch.setattr(spawn, "room", lambda: 4.0)
     assert tasks.start_when_room(db, t.id)   # what the detached helper runs once there's room
     assert events == ["reply", "spawn"] and db.get_task(t.id).agent_id
@@ -693,69 +697,83 @@ def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
 def test_cancelled_assign_never_launches(db, repo, boss, monkeypatch, when):
     """The client gave up on an assign (TaskStop, a disconnect) before brindle
     answered it, through the real stdio transport and MCP dispatcher: what it
-    queued is cancelled, and no worker ever starts for it later. Only a
-    response actually written releases the task to its start."""
+    queued is cancelled, and no worker ever starts for it later. Past the
+    handler, the response waits behind the client's full stdout pipe (a
+    slow reader); only a response actually written releases the task."""
     import anyio
 
     from brindle import autopilot, mcp_stdio, upgrade
-    from test_mcp_stale_engine import INIT, _send
+    from test_mcp_stale_engine import INIT, _answers, _send
 
     monkeypatch.setattr(upgrade, "preload", lambda: None)
     monkeypatch.setattr(upgrade, "install", SimpleNamespace(changed=lambda: False))
     monkeypatch.delenv(mcp_stdio.HANDOVER_ENV, raising=False)
-    inside, go, cancelled, settled = (threading.Event() for _ in range(4))
-    launched, gates = [], {}
-    real = autopilot.choose_profile, tasks.answered, tasks.drop_unanswered, mcp_server._Request.cancel
-    real_write = mcp_stdio.Connection._write
+    inside, go, cancelled, registered, settled = (threading.Event() for _ in range(5))
+    launched, seen = [], []
+    real = (autopilot.choose_profile, tasks.answered, tasks.drop_unanswered, mcp_server._Request.cancel,
+            mcp_stdio.after_reply)
 
     def held(*a, **k):
         inside.set()
         go.wait()
         return real[0](*a, **k)
 
-    async def gated(self, data):   # the response write, blocked until the test lets it through
-        if b'"id":1,' in data:
-            gates["writing"].set()
-            await gates["open"].wait()
-        await real_write(self, data)
-
     monkeypatch.setattr(autopilot, "choose_profile", held)
     monkeypatch.setattr(tasks, "answered", lambda *a: (real[1](*a), settled.set()))
     monkeypatch.setattr(tasks, "drop_unanswered", lambda *a: (real[2](*a), settled.set()))
     monkeypatch.setattr(mcp_server._Request, "cancel", lambda self: (real[3](self), cancelled.set()))
-    monkeypatch.setattr(mcp_stdio.Connection, "_write", gated)
+    monkeypatch.setattr(mcp_stdio, "after_reply", lambda rid, settle: registered.set() or real[4](rid, settle))
     monkeypatch.setattr(agents, "spawn", lambda *a, **k: launched.append("spawn") or fake_spawn(*a, **k))
     monkeypatch.setattr(tasks, "start_in_background", launched.append)
     cancel = {"method": "notifications/cancelled", "params": {"requestId": 1}}
+    call = {"id": 1, "method": "tools/call",
+            "params": {"name": "assign", "arguments": {"agent_profile": "developer", "task": "do A"}}}
+
+    def fill(fd: int) -> int:   # the client's stdout pipe, full: it isn't reading
+        os.set_blocking(fd, False)
+        filled = 0
+        for size in (65536, 4096, 512, 1):
+            while True:
+                try:
+                    filled += os.write(fd, b" " * size)
+                except BlockingIOError:
+                    break
+        os.set_blocking(fd, True)
+        return filled
+
+    def slow_client(from_client: int, from_server: int, filled: int) -> None:
+        registered.wait()   # the handler is done; its response waits for room in the pipe
+        seen.append(DB().list_tasks(str(repo))[0].state)   # this thread's own connection
+        if when == "while its reply is written":
+            _send(from_client, cancel)
+        elif when == "client gone":
+            os.close(from_client)
+        if when != "written":
+            settled.wait(30)   # bounds a server whose blocked write never reads the cancel
+        while filled:   # read what filled the pipe: now there's room for the response
+            filled -= len(os.read(from_server, filled))
 
     async def client():
-        gates.update(writing=anyio.Event(), open=anyio.Event())
         to_server, from_client = os.pipe()
-        _from_server, to_client = os.pipe()
+        from_server, to_client = os.pipe()
         conn = mcp_stdio.Connection(to_server, to_client, wants_reload=lambda reloaded: False,
                                     replace=lambda: False)
         async with anyio.create_task_group() as tg:
             tg.start_soon(conn.serve, mcp_server._run_server)
-            _send(from_client, INIT, {"method": "notifications/initialized"},
-                  {"id": 1, "method": "tools/call",
-                   "params": {"name": "assign", "arguments": {"agent_profile": "developer", "task": "do A"}}})
-            await anyio.to_thread.run_sync(inside.wait)
+            _send(from_client, INIT, {"method": "notifications/initialized"})
+            await _answers(from_server, 0)
             if when == "while it works":
+                _send(from_client, call)
+                await anyio.to_thread.run_sync(inside.wait)
                 _send(from_client, cancel)
                 await anyio.to_thread.run_sync(cancelled.wait)
                 go.set()
             else:
                 go.set()
-                await gates["writing"].wait()
-                [t] = db.list_tasks(str(repo))
-                assert t.state == tasks.UNANSWERED   # nothing released while the reply is unwritten
-                if when == "while its reply is written":
-                    _send(from_client, cancel)
-                elif when == "client gone":
-                    os.close(from_client)
-                if when != "written":
-                    await anyio.to_thread.run_sync(settled.wait)
-                gates["open"].set()
+                filled = fill(to_client)
+                _send(from_client, call)
+                await anyio.to_thread.run_sync(slow_client, from_client, from_server, filled)
+                assert seen == [tasks.UNANSWERED]   # nothing released while the reply is unwritten
             await anyio.to_thread.run_sync(settled.wait)
             if when != "client gone":
                 os.close(from_client)

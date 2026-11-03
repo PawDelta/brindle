@@ -189,6 +189,25 @@ def _intent_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> C
     return None
 
 
+def _queued_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> Clash | None:
+    """A clash if ``files`` matches the declared files of a task queued in
+    ``ws``'s repo that hasn't started its worker yet (its request still
+    replying, waiting, or starting in the background): assign/handoff start
+    workers after replying, so two tasks on the same files would otherwise
+    both pass the check before either worker exists. Its holder is the task
+    (``task:<id>``), a dependency that resolves once it merges."""
+    from brindle import autopilot
+    for t in (t for state in (UNANSWERED, *QUEUED, "starting") for t in db.list_tasks(ws.repo_root, state=state)):
+        for mine in files:
+            for theirs in _loads(t.files):
+                if _glob_match(mine, theirs):
+                    root = autopilot.root_of(db, t.caller_id) if t.caller_id else None
+                    return Clash(f"overlaps with queued task {t.id} ({t.branch or 'branch not cut yet'}) on "
+                                 f"{theirs}; consider depends_on or merging first",
+                                 f"task:{t.id}", root, root is not None and root not in own)
+    return None
+
+
 def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | None = None,
                caller_id: str | None = None) -> Clash | None:
     """What ``files`` overlaps: another active task's declared or
@@ -209,6 +228,9 @@ def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | 
                         branch = other_ws.branch if other_ws else "?"
                         return _held(db, own, f"overlaps with {t.agent_id} ({branch}) on {theirs}; "
                                      "consider depends_on or merging first", t.agent_id)
+        clash = _queued_overlap(db, ws, files, own)
+        if clash:
+            return clash
     if files:
         clash = _intent_overlap(db, ws, files, own)
         if clash:
