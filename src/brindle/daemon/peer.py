@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
 import socket
 import struct
 import sys
@@ -71,6 +72,12 @@ def with_peer(base: type[asyncio.Protocol]) -> type[asyncio.Protocol]:
     return PeerProtocol
 
 
+class _Panes(dict):
+    """Agent id -> the pids of its panes, and the pid of the tmux server
+    they are on (None when unknown)."""
+    server: int | None = None
+
+
 def _agent_panes() -> dict[str, list[int]]:
     """Live agents on this tmux server -> the pids of their panes."""
     from brindle import agents, tmux
@@ -78,14 +85,37 @@ def _agent_panes() -> dict[str, list[int]]:
 
     db = DB()
     try:
+        server = tmux.server_pid()
         panes = tmux.list_panes()
         owners = agents.pane_owners(db, panes)
-        return {a.id: tmux.window_pids(a.tmux_window) for a in db.list_agents()
-                if a.status not in ("done", "paused") and a.tmux_window
-                and agents.same_server(a, panes) and panes.get(a.tmux_window)
-                and agents.owns_pane(db, a, owners)}
+        found = _Panes({a.id: tmux.window_pids(a.tmux_window) for a in db.list_agents()
+                        if a.status not in ("done", "paused") and a.tmux_window
+                        and agents.same_server(a, panes) and panes.get(a.tmux_window)
+                        and agents.owns_pane(db, a, owners)})
+        found.server = server
+        return found
     finally:
         db.conn.close()
+
+
+def _claude_daemon(p: procs.Proc) -> bool:
+    """Claude Code's own daemon, which carries the environment of whoever
+    started it. Its command line alone proves nothing (``exec -a "claude
+    daemon"``): it must also be detached (its parent pid 1, launchd or init),
+    and run Claude Code's executable, by the kernel's account. A process an
+    agent starts has that agent's process for its parent, so it can't pass."""
+    if p.ppid != 1 or not procs.is_daemon(p):
+        return False
+    from brindle import providers
+
+    exe = process_probe.executable(p.pid)
+    binary = providers.claude_binary()
+    binary = shutil.which(binary) or binary
+    if not exe or not os.path.isabs(binary):
+        return False
+    exe, binary = os.path.realpath(exe), os.path.realpath(binary)
+    # A daemon started before an update runs the previous version's file.
+    return exe == binary or os.path.dirname(exe) == os.path.dirname(binary)
 
 
 def _ancestry(pid: int, identity: bool) -> Iterator[procs.Proc]:
@@ -125,39 +155,30 @@ def agent_caller(pid: int) -> str | None:
     the whole process table.
 
     The pane check covers the whole ancestry. What processes say of
-    themselves counts only below this process (known by its pid) and below
-    the topmost of Claude Code's daemons, which carries the environment of
-    whoever started it (:func:`brindle.procs.agent_pids` never walks
-    through it either). Only that one, topmost, is the boundary: a command line can claim
-    to be a daemon, but a process an agent starts sits below that agent's
-    own processes, under its pane or the real daemon, so a fake one hides
-    nothing the pane check or the real daemon's boundary doesn't cover."""
+    themselves counts for every ancestor below this process (known by its
+    pid), except Claude Code's daemon itself (:func:`_claude_daemon`), which
+    carries the environment of whoever started it. Being detached, it is
+    always the top of the ancestry, so skipping it skips nothing else."""
     chain: set[int] = set()
-    claims: list[tuple[int, str]] = []   # (position in the ancestry, agent) above a daemon
-    daemon = mine = None                 # positions of the topmost daemon and of this process
+    parents: set[int] = set()
+    mine = False
     for i, p in enumerate(_ancestry(pid, identity=True)):
         chain.add(p.pid)
-        if mine is not None:
-            continue
-        if i and p.pid == os.getpid():
-            mine = i
-        elif i and procs.is_daemon(p):
-            daemon = i
-        elif (aid := _launched_by(p)) is not None:
-            if daemon is None:
-                return f"the caller runs under brindle agent {aid}"
-            claims.append((i, aid))
-    if (aid := next((aid for i, aid in claims if daemon is not None and i < daemon), None)) is not None:
-        return f"the caller runs under brindle agent {aid}"
+        parents.add(p.ppid)
+        if mine or (i and p.pid == os.getpid()):
+            mine = True
+        elif not (i and _claude_daemon(p)) and (aid := _launched_by(p)) is not None:
+            return f"the caller runs under brindle agent {aid}"
     if not chain:
         # Gone already (a request sent before exiting) or not this user's:
         # unchecked is refused, or an agent could fire and exit.
         return "the caller can't be checked (it exited, or isn't this user's process)"
-    owners = _pane_owners(chain)
+    owners = _pane_owners(chain, parents=parents)
     return next((f"the caller runs under brindle agent {aid}" for aid in sorted(owners)), None)
 
 
-def _pane_owners(chain: set[int], *, fresh_only: bool = False) -> set[str]:
+def _pane_owners(chain: set[int], *, fresh_only: bool = False,
+                 parents: set[int] | None = None) -> set[str]:
     """The agents one of whose pane processes is in ``chain``.
 
     A snapshot is fresh while younger than PANE_TTL and taken since the last
@@ -165,7 +186,9 @@ def _pane_owners(chain: set[int], *, fresh_only: bool = False) -> set[str]:
     shows that a pane is an agent's, which may only ever refuse a caller, so
     ``fresh_only`` (whoever grants authority by it) never trusts that. A
     fresh one shows that a pane isn't an agent's only once tmux confirms
-    that none of ``chain``'s panes was split into an agent's window since.
+    that none of ``chain``'s panes was split into an agent's window since
+    (``parents``, the parent pids of ``chain``, spare that read when none
+    is the snapshot's tmux server).
     Otherwise this waits for a new snapshot, shared by every caller, and
     raises if it can't be taken, so the guard answers "unavailable" rather
     than letting the caller through.
@@ -190,7 +213,7 @@ def _pane_owners(chain: set[int], *, fresh_only: bool = False) -> set[str]:
                 _pane_refresh = (stamp, _pane_executor.submit(_agent_panes))
             pending = _pane_refresh
     if fresh is not None:
-        return _split_owners(fresh, chain)
+        return _split_owners(fresh, chain, parents)
     panes = pending[1].result()
     with _pane_lock:
         if _pane_refresh is pending:
@@ -203,13 +226,21 @@ def _owners(panes: dict[str, list[int]], chain: set[int]) -> set[str]:
     return {aid for aid, pids in panes.items() if chain.intersection(pids)}
 
 
-def _split_owners(panes: dict[str, list[int]], chain: set[int]) -> set[str]:
+def _split_owners(panes: dict[str, list[int]], chain: set[int], parents: set[int] | None) -> set[str]:
     """The agents of ``panes`` (a fresh snapshot) one of whose windows holds,
     by tmux now, a pane in ``chain``: a pane split into an agent's own
     window since the snapshot (``tmux split-window -t "$TMUX_PANE"``) runs
-    under the tmux server, not the agent, and is the agent's all the same."""
+    under the tmux server, not the agent, and is the agent's all the same.
+    Every pane's first process is the server's child, so tmux is asked only
+    when one of ``parents`` is the snapshot's server, or that is unknown or
+    no longer running: a caller outside tmux (the app) costs no tmux call."""
     from brindle import tmux
 
+    server = getattr(panes, "server", None)
+    if server is not None and parents is not None and server not in parents:
+        running = process_probe.process(server, command=True)
+        if running is not None and "tmux" in running.text:
+            return set()
     windows = tmux.pane_windows()
     if not (mine := {windows[pid] for pid in chain if pid in windows}):
         return set()
@@ -227,7 +258,8 @@ def caller_agents(pid: int) -> set[str]:
     for these (brindle.daemon.holds), and a supervisor answers as one. Like :func:`agent_caller`, it
     reads only ``pid``'s own ancestry."""
     try:
-        chain = {p.pid for p in _ancestry(pid, identity=False)}
-        return _pane_owners(chain, fresh_only=True) if chain else set()
+        ancestry = list(_ancestry(pid, identity=False))
+        chain, parents = {p.pid for p in ancestry}, {p.ppid for p in ancestry}
+        return _pane_owners(chain, fresh_only=True, parents=parents) if chain else set()
     except Exception:
         return set()

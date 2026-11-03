@@ -541,8 +541,8 @@ def test_daemon_start_raises_file_limit_before_binding(monkeypatch, soft, hard, 
     (410, None, set(), [410, 400]),     # a person's terminal
     (999, "can't be checked", set(), [999]),   # exited before the check: fire and forget
     # A command line saying "daemon run" under w1's pane cuts nothing short: a child
-    # that cleared its environment is still refused as w1, its pane's.
-    (330, "w1", {"w1"}, [330, 320, 300, 200, 100]),
+    # that cleared its environment is still refused, by the shell's or by the pane.
+    (330, "w1", {"w1"}, [330, 320]),
     (350, "w1", {"w1"}, [350, 340, 300, 200, 100]),
 ])
 def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, caller, refused_as, holds_for, chain):

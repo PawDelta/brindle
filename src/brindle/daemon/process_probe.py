@@ -90,6 +90,22 @@ def process(pid: int, *, environment: bool = False, command: bool = False) -> Pr
         raise
 
 
+def executable(pid: int) -> str | None:
+    """The file process ``pid`` runs, as the kernel has it (not its argv,
+    which it can set to anything), or None when that can't be read."""
+    try:
+        if sys.platform == "darwin":
+            lib = _libproc()
+            lib.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+            lib.proc_pidpath.restype = ctypes.c_int
+            buf = ctypes.create_string_buffer(4096)   # PROC_PIDPATHINFO_MAXSIZE
+            size = lib.proc_pidpath(pid, buf, len(buf))
+            return buf.raw[:size].decode(errors="replace") if size > 0 else None
+        return os.readlink(Path("/proc") / str(pid) / "exe")
+    except OSError:
+        return None
+
+
 def children(pid: int) -> list[int]:
     """The pids whose parent is ``pid``, without reading any of their details."""
     if sys.platform == "darwin":

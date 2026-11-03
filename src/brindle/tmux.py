@@ -1093,6 +1093,16 @@ def tagged_pane_ids(keys: Iterable[str], server: object = _THIS_SERVER) -> list[
     return [pane for pane, *tags in rows if any(tags)]
 
 
+def server_pid(server: object = _THIS_SERVER) -> int | None:
+    """The pid of the tmux server itself (every pane's first process is its
+    child), or None when it can't say."""
+    try:
+        out = _tmux("list-sessions", "-F", "#{pid}", check=False, server=server).stdout.split()
+    except TmuxError:
+        return None
+    return int(out[0]) if out and out[0].isdigit() else None
+
+
 def pane_windows(server: object = _THIS_SERVER) -> dict[int, str]:
     """Every pane's process id on ``server`` -> its window's id, as tmux has
     them now; empty when no server runs there. Raises TmuxError when the

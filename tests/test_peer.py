@@ -88,7 +88,7 @@ def test_caller_pane_snapshot_proves_ownership_when_expired_but_never_clears(mon
 _CONFIG = '{"mcpServers": {"brindle": {"env": {"BRINDLE_AGENT_ID": "ab1", "BRINDLE_HOME": "/h"}}}}'
 _TREE = {p.pid: p for p in [
     procs.Proc(300, 1, f"claude --mcp-config {_CONFIG} HOME=/u BRINDLE_AGENT_ID=ab1"),
-    procs.Proc(400, 300, "claude daemon run HOME=/u BRINDLE_AGENT_ID=ab1"),   # started by ab1
+    procs.Proc(400, 1, "claude daemon run HOME=/u BRINDLE_AGENT_ID=ab1"),   # started by ab1, detached
     procs.Proc(500, 400, f"claude --mcp-config {_CONFIG} HOME=/u"),   # ab1's session the daemon hosts
     procs.Proc(510, 500, "/bin/zsh -c make HOME=/u"),
     procs.Proc(511, 510, "curl --unix-socket daemon.sock HOME=/u"),
@@ -99,6 +99,8 @@ _TREE = {p.pid: p for p in [
     procs.Proc(710, 700, "curl --unix-socket daemon.sock HOME=/u"),   # dropped the variable
     procs.Proc(800, 400, "claude HOME=/u"),     # a person's session the daemon hosts
     procs.Proc(810, 800, "curl --unix-socket daemon.sock HOME=/u"),
+    procs.Proc(720, 700, "claude daemon HOME=/u"),     # exec -a "claude daemon": not detached
+    procs.Proc(730, 720, "curl --unix-socket daemon.sock HOME=/u"),
 ]}
 
 
@@ -107,11 +109,14 @@ _TREE = {p.pid: p for p in [
     (610, "ab2"),   # under the pre-started spare that owns ab2's MCP server
     (710, "ab3"),   # an ancestor's environment names the agent
     (810, None),    # the daemon's environment belongs to whoever started it
+    (730, "ab3"),   # a command line naming a daemon hides no ancestor's environment
 ])
 def test_caller_ancestry_finds_agents_without_a_pane(monkeypatch, caller, agent):
     monkeypatch.setenv("BRINDLE_HOME", "/h")
     monkeypatch.setattr(procs, "table", lambda: pytest.fail("caller read the full process table"))
     monkeypatch.setattr(probe, "process", lambda pid, **kw: _TREE.get(pid))
+    monkeypatch.setattr(probe, "executable", lambda pid: "/opt/claude/versions/2.1.0")
+    monkeypatch.setenv("BRINDLE_CLAUDE_BIN", "/opt/claude/versions/2.0.9")
     monkeypatch.setattr(probe, "children", lambda pid: [p.pid for p in _TREE.values() if p.ppid == pid],
                         raising=False)
     monkeypatch.setattr(peer, "_pane_cache", None)
