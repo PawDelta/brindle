@@ -119,11 +119,13 @@ def test_a_dismissed_sidebar_stays_gone_until_a_relaunch(db, tmp_path, session, 
         patch.setattr(sidebar_follow, "time", SimpleNamespace(monotonic=lambda: next(clock)))
 
         def contended(fd, operation):
+            assert operation == sidebar_follow.fcntl.LOCK_EX | sidebar_follow.fcntl.LOCK_NB
             raise BlockingIOError("sidebar lock held")
 
         patch.setattr(sidebar_follow.fcntl, "flock", contended)
         with pytest.raises(BlockingIOError):
             agents._ensure_sidebar(db, "root1", ws, win_a)
+        assert list(clock) == []
         assert db.get_sidebar_pane("root1") is None
     agents._ensure_sidebar(db, "root1", ws, win_a)
     sidebar = db.get_sidebar_pane("root1")
