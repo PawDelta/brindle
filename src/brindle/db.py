@@ -246,6 +246,16 @@ CREATE TABLE IF NOT EXISTS check_durations (
     updated_at REAL NOT NULL,
     PRIMARY KEY (repo_root, command)
 );
+-- The same, per branch: a branch's own last passing run is the baseline for
+-- its slow-run warning (a 1-file branch's run says little about a 47-file one).
+CREATE TABLE IF NOT EXISTS branch_check_durations (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    command TEXT NOT NULL,
+    seconds REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, branch, command)
+);
 -- Claude Code's own built-in subagents (its Agent tool), reported by the
 -- SubagentStart/SubagentStop hooks. Purely informational for the sidebar:
 -- kept out of `agents` so they never affect message delivery, is_alive,
@@ -2305,8 +2315,24 @@ class DB:
         ).fetchone()
         return row["seconds"] if row else None
 
-    def set_check_duration(self, repo_root: str, command: str, seconds: float) -> None:
+    def branch_check_duration(self, repo_root: str, branch: str, command: str) -> float | None:
+        """Seconds the last passing run of ``command`` took on ``branch``."""
+        row = self.conn.execute(
+            "SELECT seconds FROM branch_check_durations WHERE repo_root=? AND branch=? AND command=?",
+            (repo_root, branch, command),
+        ).fetchone()
+        return row["seconds"] if row else None
+
+    def set_check_duration(self, repo_root: str, command: str, seconds: float,
+                           branch: str | None = None) -> None:
         with self.tx() as c:
+            if branch is not None:
+                c.execute(
+                    "INSERT INTO branch_check_durations (repo_root, branch, command, seconds, updated_at) "
+                    "VALUES (?,?,?,?,?) ON CONFLICT(repo_root, branch, command) DO UPDATE SET "
+                    "seconds=excluded.seconds, updated_at=excluded.updated_at",
+                    (repo_root, branch, command, seconds, time.time()),
+                )
             c.execute(
                 "INSERT INTO check_durations (repo_root, command, seconds, updated_at) "
                 "VALUES (?,?,?,?) ON CONFLICT(repo_root, command) DO UPDATE SET "
