@@ -1323,6 +1323,9 @@ def daemon_cmd(
         conn = lifecycle.connection(lifecycle.running())
         typer.echo(json.dumps(conn, indent=2))
         raise typer.Exit(0 if conn["running"] else 1)
+    from brindle import redact
+
+    redact.guard_std()                  # the app keeps the daemon's stderr in app-daemon.log
     try:
         lifecycle.serve(unix=unix, tcp=tcp, idle_exit=idle_exit)
     except (lifecycle.DaemonError, OSError) as e:
@@ -3198,6 +3201,9 @@ def _native(agent_id: str, resume: Optional[str] = typer.Option(None, "--resume"
 def ended_cmd(agent_id: str) -> None:
     import signal
 
+    from brindle import redact
+
+    redact.guard_std()                  # its output is appended to hooks.log
     # Runs inside the window it's about to close; don't die with it.
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     agents.ended(DB(), agent_id)

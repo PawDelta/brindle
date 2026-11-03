@@ -18,7 +18,8 @@ import traceback
 from dataclasses import dataclass, field
 
 import brindle
-from brindle import agents, airgap, check_scope, pricing, sidebar_follow, sidebar_logo, tmux, upgrade, view, watch_costs
+from brindle import (agents, airgap, check_scope, pricing, redact, sidebar_follow, sidebar_logo, tmux, upgrade,
+                     view, watch_costs)
 from brindle.db import DB
 from brindle.service.inbox import awaiting_review, needs_you, summary  # noqa: F401 - moved; callers keep using watch.*
 
@@ -1131,6 +1132,8 @@ def run(repo_root: str | None, sidebar: bool = False) -> None:
     # Esc clears the filter; don't make it wait curses' default second to
     # tell a lone Esc from the start of an arrow key's escape sequence.
     os.environ.setdefault("ESCDELAY", "25")
+    if sidebar:
+        redact.guard_std(("stderr",))   # tmux keeps the sidebar's stderr in sidebar.log
     _log_to_file()
     # tmux hangs up the sidebar as it closes the pane: exit cleanly, stopping the
     # `claude -p /usage` the costs thread may be waiting on (its own session).
@@ -1162,7 +1165,7 @@ def _log_error(what: str) -> None:
     try:
         brindle_home().mkdir(parents=True, exist_ok=True)
         with open(brindle_home() / "sidebar.log", "a", encoding="utf-8") as f:
-            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {what}\n{traceback.format_exc()}\n")
+            f.write(redact.mask(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {what}\n{traceback.format_exc()}\n"))
     except OSError:
         pass
 
@@ -1177,7 +1180,7 @@ def _log_to_file() -> None:
     try:
         brindle_home().mkdir(parents=True, exist_ok=True)
         handler: logging.Handler = logging.FileHandler(brindle_home() / "watch.log", encoding="utf-8")
-        handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+        handler.setFormatter(redact.MaskingFormatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
     except OSError:
         handler = logging.NullHandler()
     root = logging.getLogger()
