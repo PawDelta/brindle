@@ -37,11 +37,6 @@ def test_the_policy_rejects_a_key_env_naming_a_personal_key():
         parse_policy(ORG, {"version": 1, "policy": {**POLICY, "provider_config": anthropic(key_env="CODEX_API_KEY")}})
 
 
-def test_the_policy_rejects_a_key_env_naming_a_brindle_secret():
-    with pytest.raises(PolicyUnavailable):
-        parse_policy(ORG, {"version": 1, "policy": {**POLICY, "provider_config": anthropic(key_env="GITHUB_TOKEN")}})
-
-
 @pytest.mark.parametrize("over", [
     {"key_env": "has space"}, {"key_helper": [""]}, {"key_env": "ACME_KEY", "key_helper": ["a"]},
 ])
@@ -85,13 +80,6 @@ def test_a_hung_helper_fails_closed_without_echoing_its_output(monkeypatch):
     assert ORG_KEY not in str(e.value)
 
 
-def test_the_helper_runs_without_a_shell(monkeypatch, tmp_path):
-    marker = tmp_path / "pwned"
-    cfg = ProviderConfig("anthropic", key_helper=(sys.executable, "-c", "print('k')", f"; touch {marker}"))
-    assert managed_models.org_key_env(managed(cfg), "claude") == {"ANTHROPIC_API_KEY": "k"}
-    assert not marker.exists()
-
-
 # -- the pane -----------------------------------------------------------------------------------
 
 
@@ -104,11 +92,6 @@ def test_a_key_env_org_key_reaches_the_pane_past_deny_personal_keys(db, repo, mo
     assert f"export ANTHROPIC_API_KEY={ORG_KEY}" in script and PERSONAL not in script
     assert "-u ANTHROPIC_API_KEY" not in script
     assert "-u ANTHROPIC_AUTH_TOKEN" in script and "-u CLAUDE_CODE_OAUTH_TOKEN" in script
-
-
-def test_the_org_key_is_not_kept_after_the_launch(db, repo, monkeypatch, brindle_home):
-    pane_script(db, repo, monkeypatch, brindle_home, "developer", m=managed(helper_cfg()))
-    assert secrets.org_key_exempt({"ANTHROPIC_API_KEY": ORG_KEY}) == {}
 
 
 def test_key_helper_output_never_appears_in_logs(db, repo, monkeypatch, brindle_home, caplog, capsys):

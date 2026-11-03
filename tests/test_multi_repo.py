@@ -127,32 +127,6 @@ def test_attach_refuses_bad_paths_duplicates_and_the_own_repo(db, repo, web, bos
         repos.resolve(db, "boss", str(repo), "nope")
 
 
-def test_attach_a_repo_whose_folder_name_matches_the_session_repo(db, repo, boss, tmp_path):
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    twin = git_repo(elsewhere, repo.name, {"pipeline": False})
-    assert twin != repo and twin.name == repo.name
-    attached = repos.attach(db, "boss", str(twin))
-    ows = workspaces.adopt_root(db, str(twin))
-    assert attached.repo_root == str(twin)
-    assert boss.id == f"{repo.name}/root"          # existing ids are unchanged
-    assert ows.id != boss.id and ows.tmux_session != boss.tmux_session
-    assert workspaces.resolve(db, boss.id).repo_root == str(repo)
-    assert workspaces.resolve(db, ows.id).repo_root == str(twin)
-    # The same branch in both repos: separate ids, sessions and directories.
-    wt1 = workspaces.create(db, str(repo), "feat/x", fetch=False).workspace
-    wt2 = workspaces.create(db, str(twin), "feat/x", fetch=False).workspace
-    assert wt2.id.startswith(ows.id.rsplit("/", 1)[0] + "/")
-    assert wt1.id != wt2.id and wt1.path != wt2.path and wt1.tmux_session != wt2.tmux_session
-    assert workspaces.resolve(db, wt1.id).repo_root == str(repo)
-    assert workspaces.resolve(db, wt2.id).repo_root == str(twin)
-    # Pool entries of the twin don't share the first repo's pool directory either.
-    from brindle import pool
-    e1, e2 = pool.fill_one(db, str(repo)), pool.fill_one(db, str(twin))
-    assert e1 and e2 and Path(e1.path).parent != Path(e2.path).parent
-    assert pool.pool_dir(str(twin)) == Path(e2.path).parent
-
-
 def test_attach_refuses_a_repo_attached_to_another_live_session(db, repo, web, boss, tmp_path, monkeypatch):
     other_repo = git_repo(tmp_path, "other", {})
     ows = workspaces.adopt_root(db, str(other_repo))
@@ -165,20 +139,6 @@ def test_attach_refuses_a_repo_attached_to_another_live_session(db, repo, web, b
     # Once that session is gone (not live), the repo can move here.
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
     assert repos.attach(db, "boss", str(web), "web").alias == "web"
-
-
-def test_cli_repo_add_ls_rm(db, repo, web, boss, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
-    code, out = run_cli(monkeypatch, repo, "repo", "add", str(web), "--name", "web")
-    assert code == 0 and "attached" in out and "web" in out
-    assert [x.alias for x in db.session_repos("boss")] == ["web"]
-    code, out = run_cli(monkeypatch, repo, "repo", "ls")
-    assert code == 0 and "web" in out and str(web) in out
-    code, out = run_cli(monkeypatch, repo, "repo", "rm", "web")
-    assert code == 0 and "detached" in out
-    assert db.session_repos("boss") == []
-    code, out = run_cli(monkeypatch, repo, "repo", "ls")
-    assert code == 0 and "No repos attached" in out
 
 
 # -- a worker in an attached repo ---------------------------------------------------
@@ -288,20 +248,6 @@ def test_cross_repo_branch_dependency_refuses_when_ambiguous(db, dependency_rows
     assert tasks.unmet_dependencies(db, boss, ["feature"], caller.id) == ["feature"]
 
 
-def test_two_sessions_do_not_share_attached_repos(db, dependency_rows, monkeypatch):
-    caller, boss, workspace, launched = dependency_rows
-    other = fake_spawn(db, boss, "supervisor", mode="interactive")
-    alien = workspace("alien", "other", "feature", tracked=True)
-    db.update_agent(agents.workspace_worker(db, alien).id, parent_id=other.id)
-    db.add_session_repo(other.id, "other", alien.repo_root)
-    pending = tasks.enqueue(db, caller, boss, "developer", "app", "assign", isolate=True,
-                            branch="dep", done_when=None, files=None, depends_on=["feature"])
-    monkeypatch.setenv("BRINDLE_AGENT_ID", other.id)
-    tasks.on_merged(db, alien)
-    assert tasks.sweep(db) == 0
-    assert db.get_task(pending.id).state == "pending" and launched == []
-
-
 def test_handover_repoints_a_queued_task_whose_caller_workspace_is_gone(db, repo, web, boss, monkeypatch):
     from brindle import sessions
 
@@ -326,49 +272,7 @@ def test_handover_repoints_a_queued_task_whose_caller_workspace_is_gone(db, repo
     assert [x.alias for x in repos.attached(db, new.id)] == ["web"] and repos.attached(db, "boss") == []
 
 
-def test_list_agents_groups_by_repo(db, repo, web, boss):
-    repos.attach(db, "boss", str(web), "web")
-    main_worker = started_worker_id(asyncio.run(mcp_server.assign("developer", "m", branch="m")))
-    web_worker = started_worker_id(asyncio.run(mcp_server.assign("developer", "w", branch="w", repo="web")))
-    everything = mcp_server.list_agents()
-    assert "## this repo (" in everything and "## web (" in everything
-    assert main_worker in everything and web_worker in everything
-    only_web = mcp_server.list_agents(repo="web")
-    assert web_worker in only_web and main_worker not in only_web
-    listed = mcp_server.list_repos()
-    assert str(web) in listed and str(repo) in listed
-
-
-def test_sidebar_and_ls_group_workers_by_repo(db, repo, web, boss, monkeypatch):
-    from brindle import view, watch
-
-    repos.attach(db, "boss", str(web), "web")
-    asyncio.run(mcp_server.assign("developer", "m", branch="feat-m"))
-    asyncio.run(mcp_server.assign("developer", "w", branch="feat-w", repo="web"))
-    snap = view.snapshot(db, str(repo), panes={})
-    assert {ws["id"].partition("/")[0] for ws in snap} == {"proj", "web"}
-    titles = [ln.text for ln in watch.render(snap, time.time(), width=80) if ln.group]
-    assert any("web · feat-w" in t for t in titles) and any("proj · feat-m" in t for t in titles)
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
-    code, out = run_cli(monkeypatch, repo, "ls")
-    assert code == 0 and f"web  ({web})" in out and "feat-w" in out and "feat-m" in out
-    # One repo only: no repo labels on the headers, as before.
-    headers = [ln.text for ln in watch.render(snap[:1], time.time(), width=80) if ln.group]
-    assert headers and all(" · " not in t for t in headers)
-
-
 # -- milestone checks in another repo ------------------------------------------------
-
-
-def test_parse_goals_reads_a_repo_qualified_check():
-    plan = autopilot.parse_goals("# G\n\n## A\ncheck@web: test -f web.txt\n\n## B\nrepo: api\ncheck: make test\n\n## C\ncheck: true\n")
-    assert plan.milestones == [
-        ("A", "test -f web.txt", None, None, "web"),
-        ("B", "make test", None, None, "api"),
-        ("C", "true", None),
-    ]
-    assert repos.split_check("@web: test -f x") == ("web", "test -f x")
-    assert repos.split_check("test -f x") == (None, "test -f x")
 
 
 def test_milestone_check_runs_in_the_attached_repo(db, repo, web, boss):

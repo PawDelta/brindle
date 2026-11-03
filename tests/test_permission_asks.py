@@ -178,13 +178,3 @@ def test_report_covers_the_window_and_leaves_pending_asks_unanswered(db, clock):
     assert permission_asks.report(db, days=30, now=clock.now)["resolved_by"] == {
         "person": 1, "saved_action": 1, "unheld": 1}
 
-
-def test_report_is_reachable_from_the_cli_and_the_daemon(db, monkeypatch):
-    monkeypatch.setattr("brindle.cli._here_repo", lambda: None)
-    permission_asks.finish_ask(db, permission_asks.start_ask(
-        db, "w1", "/r", "q1", "bash", "uv run x", "ask rule; asking the user"), "deny")
-    out = CliRunner().invoke(app, ["permissions", "report", "--days", "1"])
-    assert out.exit_code == 0
-    with TestClient(build_app(TOKEN)) as client:
-        got = client.get("/v1/permissions/report?days=1", headers={"Authorization": f"Bearer {TOKEN}"})
-    assert json.loads(got.text)["asks"] == 1

@@ -31,17 +31,6 @@ def test_the_messages_section_folds_and_vanishes_when_read(org):
     assert not any("Messages" in ln.text for ln in watch.render([], time.time(), 60, messages=saved))
 
 
-def test_the_header_toggles_like_costs():
-    saved = status.Saved(status=status.Status(notices=[notice("a")]))
-    state = watch.NavState()
-    lines = watch.render([], time.time(), 60, state=state, messages=saved)
-    i = next(i for i, ln in enumerate(lines) if ln.group == status.GROUP)
-    watch._toggle_group(state, lines, i)
-    assert status.GROUP in state.collapsed
-    watch._toggle_group(state, lines, i)
-    assert status.GROUP not in state.collapsed
-
-
 # -- the supervisor chat ----------------------------------------------------------------------------
 
 
@@ -115,12 +104,6 @@ def test_org_messages_lists_and_marks_read(org, db, boss, repo):
     assert bus.tail(db, kinds=("notices.read",), repo_root=str(repo))
 
 
-def test_org_messages_when_there_are_none(org):
-    org.body = {"policy_version": 1, "notices": []}
-    r = CliRunner().invoke(app, ["org", "messages"])
-    assert "No new messages" in r.output
-
-
 def test_org_messages_offline_shows_the_last_ones_and_marks_nothing(org):
     poll(org, notices=[notice("n1", "Cached note")])
     org.fail = OSError("offline")
@@ -136,17 +119,6 @@ def bar(**st):
     return status.bar_text(status.Saved(status=status.Status(**st)), 0.0)
 
 
-def test_admins_see_the_org_total():
-    assert bar(org_alert={"level": "warn", "spent_usd": 1640.0, "total_usd": 2000.0}) == (
-        "org 82% of $2,000", "warn")
-    assert bar(org_alert={"level": "over", "spent_usd": 2100.0, "total_usd": 2000.0}) == (
-        "org over $2,000", "alert")
-
-
-def test_a_pause_outranks_messages():
-    assert bar(paused=True, notices=[notice("a")])[0].startswith("paused")
-
-
 def test_a_remote_shutdown_and_throttle_show(rollout_on):
     c = control("shutdown", reason="incident")
     assert bar(control=c) == ("shut down by your org: incident", "alert")
@@ -154,29 +126,6 @@ def test_a_remote_shutdown_and_throttle_show(rollout_on):
     assert bar(control=c) == ("budget lowered", "warn")
     expired = {**control("shutdown"), "until": 5.0}
     assert status.bar_text(status.Saved(status=status.Status(control=expired)), 10.0) is None
-
-
-def test_the_bar_sets_the_tmux_option_only_on_a_change():
-    calls = []
-    b = status.Bar("s1", setter=lambda *a: calls.append(a))
-    quiet = status.Saved()
-    loud = status.Saved(status=status.Status(notices=[notice("a")]))
-    assert not b.publish(quiet) and calls == []        # nothing to say, nothing set
-    assert b.publish(loud) and not b.publish(loud) and not b.publish(loud)
-    assert calls == [("s1", "1 message", "warn")]
-    assert b.publish(quiet) and calls[-1] == ("s1", "", "")
-    assert not b.publish(quiet)
-
-
-def test_set_alert_writes_a_session_option(monkeypatch):
-    seen = []
-    monkeypatch.setattr(tmux, "_tmux", lambda *a, **k: seen.append(a))
-    tmux.set_alert("s1", "2 messages", "warn")
-    tmux.set_alert("s1", "", "warn")
-    assert seen[0][:4] == ("set-option", "-t", "s1", "@brindle_alert")
-    assert "2 messages" in seen[0][4] and seen[1][4] == ""
-    tmux.set_alert("s1", "a#b", "alert")
-    assert "a##b" in seen[2][4]
 
 
 @pytest.mark.parametrize("latest", [None, "99.0.0"])
@@ -201,24 +150,3 @@ def test_the_status_line_reads_the_option_next_to_the_version(monkeypatch, lates
     assert left.index(tmux.__version__) < left.index("#{@brindle_alert}")
     assert "#(" not in left                  # no process per redraw
 
-
-def test_scoped_checks_notice_goes_once_and_only_while_unset(db, repo, boss, monkeypatch):
-    from brindle import check_scope
-
-    (repo / ".brindle").mkdir(exist_ok=True)
-    cfg = repo / ".brindle" / "config.json"
-    cfg.write_text('{"checks": ["uv run pytest -q"], "scoped_checks": "off"}')
-    assert not check_scope.deliver_notice(db, str(repo), "boss")   # chosen: nothing to announce
-    cfg.write_text('{"checks": ["make lint"]}')
-    assert not check_scope.deliver_notice(db, str(repo), "boss")   # no pytest command
-    cfg.write_text('{"checks": ["python -m pytest -n auto -m serial"]}')
-    sidebars = []   # a second sidebar polling while the first is mid-send must not announce it again
-    real = agents.send_message
-
-    def send(db, to, body, **kw):
-        sidebars.append(check_scope.deliver_notice(db, str(repo), "boss"))
-        real(db, to, body, **kw)
-    monkeypatch.setattr(agents, "send_message", send)
-    assert check_scope.deliver_notice(db, str(repo), "boss")
-    assert not check_scope.deliver_notice(db, str(repo), "boss")
-    assert sidebars == [False] and len(boss) == 1

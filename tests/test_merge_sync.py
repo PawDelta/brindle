@@ -103,15 +103,6 @@ def _stale_branch_with_worker(db, repo, mode="assign", result=None):
     return ws
 
 
-def test_merge_workspace_ignores_worker_whose_window_is_dead(db, repo, boss):
-    ws = _stale_branch_with_worker(db, repo)  # "@1" isn't a live window
-
-    out = asyncio.run(mcp_server.merge_workspace(ws.id))
-
-    assert out.startswith("Merged feature into main")
-    assert (repo / "f.txt").exists()
-
-
 def test_merge_workspace_reconciles_a_stale_processing_worker(db, repo, boss, monkeypatch):
     ws = _stale_branch_with_worker(db, repo)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)

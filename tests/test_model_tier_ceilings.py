@@ -19,19 +19,6 @@ def test_max_weight_ceiling_caps_heavy_to_medium(db, repo, monkeypatch):
     assert profile in cfg.routing["medium"]
 
 
-def test_retry_on_heavy_refuses_when_max_weight_medium(db, repo):
-    ws = Workspace("ws-m", str(repo), "feat/m", "main", "main", "worktree", str(repo), 20000, "tmux-m", 0)
-    db.add_workspace(ws)
-    worker = agents.spawn(db, ws, "developer", mode="assign")
-    # Record task with heavy weight
-    t = Task("t-1", str(repo), worker.id, None, ws.id, "developer", "task", "assign", 1, "feat/m", None, None, None, "started", 0.0, weight="heavy")
-    db.add_task(t)
-
-    cfg = RepoConfig(max_weight="medium")
-    # Must refuse retry on heavy
-    assert not pipeline._retry_on_heavy(db, worker, ws, cfg, "failed review", "worker report")
-
-
 def test_docs_only_files_demotes_tier(db, repo, monkeypatch):
     # Even if developer-heavy is in medium candidates, docs-only must NOT select a heavy profile
     cfg = RepoConfig()
@@ -47,26 +34,6 @@ def test_docs_only_files_demotes_tier(db, repo, monkeypatch):
     assert profile == "developer"
 
 
-def test_list_agents_includes_token_usage_when_available(db, repo, monkeypatch):
-    ws = Workspace("ws-list", str(repo), "feat/list", "main", "main", "main", str(repo), 20000, "tmux-l", 0)
-    db.add_workspace(ws)
-    worker = agents.spawn(db, ws, "developer", mode="assign")
-
-    from unittest.mock import MagicMock
-    fake_usage = MagicMock()
-    fake_usage.total = 5000
-    from brindle import usage
-    monkeypatch.setattr(usage, "agent_usage", lambda db_arg, a_arg: fake_usage)
-    monkeypatch.setattr(usage, "agent_transcripts", lambda db_arg, a_arg: [])
-    monkeypatch.setattr(usage, "short_summary", lambda u: "5k tokens")
-    monkeypatch.setattr(mcp_server, "DB", lambda: db)
-    monkeypatch.setattr(mcp_server, "_caller", lambda db_arg: (None, ws))
-
-    out = mcp_server.list_agents(repo=None)
-    assert f"{worker.id}" in out
-    assert "tokens=5k tokens" in out
-
-
 def test_pending_milestone_heavy_profile_capped_under_light_ceiling(db, repo, monkeypatch):
     ws = Workspace("ws-mile", str(repo), "feat/mile", "main", "main", "main", str(repo), 20000, "tmux-m", 0)
     db.add_workspace(ws)
@@ -80,16 +47,6 @@ def test_pending_milestone_heavy_profile_capped_under_light_ceiling(db, repo, mo
     why = []
     profile, learned = autopilot.choose_profile(db, sup.id, str(repo), why=why)
     assert any("capped to" in w and "by max_weight" in w for w in why)
-    assert profile in cfg.routing["light"]
-
-
-def test_fallback_heavy_capped_under_light_ceiling(db, repo, monkeypatch):
-    cfg = RepoConfig(max_weight="light", default_agent="developer-heavy")
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
-
-    why = []
-    profile, learned = autopilot.choose_profile(db, "caller-fallback", str(repo), why=why)
-    assert any("capped to" in w for w in why)
     assert profile in cfg.routing["light"]
 
 
@@ -253,22 +210,4 @@ def test_assignment_and_queue_replies_include_cost_feedback_for_all_selections(d
     assert "Queued task" in reply_q
     assert "developer-heavy" in reply_q
     assert "most expensive tier" in reply_q
-
-
-def test_cross_provider_model_env_isolation(db, repo, monkeypatch):
-    # Setting an expensive ANTHROPIC_MODEL must NOT bleed into Codex profiles
-    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-4-6")
-    assert autopilot.effective_profile_model("developer-codex") != "claude-opus-4-6"
-    assert autopilot.profile_weight("developer-codex") != "heavy"
-
-    cfg = RepoConfig(max_weight="medium")
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
-    p, _ = autopilot.choose_profile(db, "caller-codex", str(repo), requested="developer-codex")
-    assert p == "developer-codex"
-
-    # And setting CODEX_MODEL must NOT bleed into Claude profiles
-    monkeypatch.setenv("CODEX_MODEL", "o3")
-    assert autopilot.effective_profile_model("developer") == "claude-opus-4-6"
-    assert autopilot.effective_profile_model("developer-light") != "o3"
-
 

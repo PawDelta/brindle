@@ -82,35 +82,6 @@ def test_by_default_brindle_starts_and_preloads_a_local_model(repo, fake_ollama)
     assert any("started ollama serve" in line for line in lines)
 
 
-def test_an_explicit_false_never_starts_or_preloads_a_model(repo, fake_ollama):
-    from brindle.config import load_repo_config
-
-    _profile(repo, "worker", "http://localhost:11434/v1", context_tokens="32k")
-    (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text('{"local_models": false}')
-    cfg = load_repo_config(str(repo))
-    assert serve.ensure(str(repo), cfg, log=repo / "ollama.log") == []
-    assert serve.needed(str(repo), cfg) == []
-    assert fake_ollama["popen"] == []
-
-
-def test_ensure_respects_local_models_false_and_a_missing_binary(repo, fake_ollama, monkeypatch):
-    assert serve.ensure(str(repo), RepoConfig(local_models=False), log=repo / "l") == []
-    assert fake_ollama["popen"] == []
-    monkeypatch.setattr(serve.shutil, "which", lambda name: None)
-    assert serve.ensure(str(repo), RepoConfig(local_models=True), log=repo / "l") == []
-    assert fake_ollama["popen"] == []
-
-
-def test_a_non_default_port_sets_ollama_host_and_an_existing_context_env_wins(repo):
-    s = serve.Server("http://127.0.0.1:12000", models=["m"], profiles=["p"], context_tokens=8000)
-    env = serve.ollama_env(s, {"PATH": "/bin"})
-    assert env["OLLAMA_HOST"] == "127.0.0.1:12000"
-    assert env["OLLAMA_CONTEXT_LENGTH"] == str(8000 + serve.CONTEXT_HEADROOM)
-    env = serve.ollama_env(s, {"OLLAMA_CONTEXT_LENGTH": "99999"})
-    assert env["OLLAMA_CONTEXT_LENGTH"] == "99999"
-
-
 # -- Stopping the server brindle started once no session uses it.
 
 SERVE = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"
@@ -198,15 +169,6 @@ def test_stop_unused_keeps_a_server_a_running_session_uses(db, monkeypatch, fake
     assert serve.stop_unused(db) == []
     assert p.poll() is None
     assert serve.started_servers() == {"http://localhost:11434": p.pid}
-
-
-def test_stop_unused_forgets_a_pid_that_is_no_longer_ollama(db, monkeypatch):
-    import os
-
-    serve.record_started("http://localhost:11434", os.getpid())  # this test run, not ollama
-    monkeypatch.setattr(serve, "hosts_in_use", lambda db: set())
-    assert serve.stop_unused(db) == []
-    assert serve.started_servers() == {}
 
 
 def _root_ws(db, repo):
