@@ -11,7 +11,7 @@ import type { GoalDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
 import type { SheetRef } from "../../routes";
 import { SessionsProvider } from "../../store/sessions";
 import { BASE_URL, PANE_DEAD_LINE, TOKEN, flush, FakeDaemon, type DaemonData, type Pane } from "../../test/fakeDaemon";
-import { REPO, root, waiting, windowOf, windowed, worker } from "../../test/fixtures";
+import { REPO, permission, permissionInTerminal, root, waiting, windowOf, windowed, worker } from "../../test/fixtures";
 import { NO_SHELL, NO_WINDOW } from "./ProviderSurface";
 import { SessionScreen } from "./SessionScreen";
 import { closeSessionLabel } from "./AgentMenu";
@@ -965,6 +965,21 @@ describe("SessionScreen, the pty view", () => {
     expect(v.opened[1].at).toEqual(v.opened[0].at);
     expect(screen.queryByTestId("state-card")).toBeNull();
     expect(screen.getByTestId("terminal").dataset.pty).toBe("1");
+    sync.stop();
+  });
+
+  it.each(["waiting", "processing", "idle", "unknown", "starting"])("keeps the live pane, not a card, over a running agent (%s) that is up on a shell or permission prompt", async (status) => {
+    const v = views({ kind: "ready", tmux: "tmux 3.8" });
+    const asking = { ...root, agents: [{ ...root.agents![0], status }] };
+    const { sync } = mount({ sup1: live, w1: live }, { workspaces: [asking, worker], inbox: [permissionInTerminal, permission] }, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
+    await waitFor(() => expect(v.opened).toHaveLength(1));
+    // The provider redraws for its prompt, and the sweep says the process is alive.
+    act(() => v.opened[0].handlers.onData(new TextEncoder().encode("\x1b[?1049hAllow this command?")));
+    await flush();
+    expect(screen.queryByTestId("state-card")).toBeNull();
+    expect(surface().dataset.card).toBe("live");
+    expect(screen.getByTestId("terminal").dataset.pty).toBe("1");
+    expect(v.opened[0].closed).toBe(false);
     sync.stop();
   });
 
