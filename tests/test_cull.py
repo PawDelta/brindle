@@ -544,14 +544,15 @@ def test_pane_reads_and_keys_go_to_the_agents_own_server(db, ws, other_server, m
     monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
     with pytest.raises(tmux.TmuxError):
         tmux.capture(pane, lines=5)  # nothing of the sort on this server
-    tmux.send_keys(pane, "-l", "hello from brindle", server=agents.server_of(a))
-    deadline = time.time() + 5
-    screen = ""
-    while time.time() < deadline and "hello from brindle" not in screen:
-        time.sleep(0.1)
-        screen = tmux.capture(pane, lines=5, server=agents.server_of(a))
-    assert "hello from brindle" in screen
-    assert tmux.window_activity(pane, server=agents.server_of(a)) is not None
+    # The calls the agent's own server is named for reach that server, not the one in use.
+    asked, real = [], tmux._tmux
+    monkeypatch.setattr(tmux, "_tmux", lambda *args, server=None, **kw: asked.append((args[0], server))
+                        or real(*args, server=server, **kw))
+    own = agents.server_of(a)
+    tmux.send_keys(pane, "-l", "hello from brindle", server=own)
+    tmux.capture(pane, lines=5, server=own)
+    assert tmux.window_activity(pane, server=own) is not None
+    assert asked and {server for _, server in asked} == {own} and own != other_server
     assert tmux.window_activity(pane) is None
 
 
