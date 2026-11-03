@@ -1400,6 +1400,11 @@ export class DaemonClient {
   }
 
   /* The best chunks of the repo's documents for `q`; none for an empty query. */
+  /* One indexed document's whole text (GET /kb/docs/{id}); id is the number in a map node's `local:kb:<id>`. */
+  kbDoc(repo: string, id: string) {
+    return this.get<{ id: number; title: string | null; url: string | null; text: string }>(`/kb/docs/${encodeURIComponent(id)}`, { repo });
+  }
+
   kbSearch(repo: string, q: string) {
     return this.get<KbHit[]>("/kb/search", { repo, q });
   }

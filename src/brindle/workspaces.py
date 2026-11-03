@@ -807,6 +807,7 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
 def _forget(db: DB, ws: Workspace, removed: Removed) -> Removed:
     from brindle import pipeline
 
+    git.run(["update-ref", "-d", f"refs/brindle/review-base/{ws.id}"], ws.repo_root, check=False)
     if not history.archive(db, ws, db.list_agents(ws.id), "workspace removed"):
         note = "; ".join(n for n in (removed.branch_note, _UNARCHIVED) if n)
         return Removed(removed.branch_deleted, note, removed.teardown)

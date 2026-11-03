@@ -120,7 +120,7 @@ class RepoConfig:
     max_agents: int = 5                # workers running at once per session; 0 means no cap
     check_timeout: int = 900           # seconds allowed for each check command
     wait_for_room: bool = True         # a new worker or check run waits while the machine is busy; false starts it at once
-    room_wait_max: int = 300           # seconds a worker waits for room before starting despite the load
+    room_wait_max: int = 300           # seconds a worker waits for room before its supervisor is told once (it never starts early)
     check_concurrency: int = 4         # check runs at once on this machine, across branches; the rest queue (0: no cap)
     usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
     limit_cooldown_minutes: int | None = None  # how long a provider that hit its limit counts as unavailable (default 300 for Antigravity)

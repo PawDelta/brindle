@@ -296,6 +296,20 @@ def kb_search(db: DB, request: Request) -> Any:
 
 
 @_json
+def kb_doc(db: DB, request: Request) -> Any:
+    """One indexed document's whole visible text, by the id the map's local
+    node carries (kb.document); 404 when it is not this repo's."""
+    try:
+        doc_id = int(request.path_params["id"])
+    except ValueError:
+        doc_id = -1
+    found = kb.document(db, knowledge.repo_key(_need_repo(request)), doc_id)
+    if found is None:
+        raise ServiceError("not_found", "no such document", 404)
+    return found
+
+
+@_json
 def list_profiles(db: DB, request: Request) -> Any:
     repo = _repo(request)
     out = []
@@ -958,6 +972,7 @@ ROUTES = [
     Route("/v1/decisions", decisions),
     Route("/v1/kb/sources", kb_sources),
     Route("/v1/kb/search", kb_search),
+    Route("/v1/kb/docs/{id}", kb_doc),
     Route("/v1/analysis-docs", analysis_docs),
     Route("/v1/analysis-docs/session-summary", analysis_doc_session_summary),
     # Before /analysis-docs/{id}.

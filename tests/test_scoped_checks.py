@@ -31,7 +31,10 @@ CAPPED_NOTE = check_scope.CAP_NOTE.format(max=1, tests=" ".join(CAPPED))
 EMPTY_NOTE = check_scope.CAP_NOTE.format(max=1, tests="none")
 BOTH = {"src/pkg/mod.py": MOD.replace("return 1", "return 3").replace("return 2", "return 4")}
 NARROWED =f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
+DYNAMIC = f"{PYTEST} tests/test_dynamic.py || [ $? -eq 5 ]"   # an unresolvable import runs its own file
+CAFE_NOTE = check_scope.FULL_NOTE.format(why="src/café.py is not in a package, so no import can name it")
 DYNAMIC_IMPORTS = {
+    "alias-loader": "from importlib import import_module as load\nload(name)\n",
     "fromlist": "__import__('pkg', fromlist=['new'])\n",
     "dynamic-fromlist": "__import__('pkg', fromlist=names)\n",
     "relative-level": "__import__('new', globals(), locals(), [], 1)\n",
@@ -46,23 +49,21 @@ DYNAMIC_IMPORTS = {
     ("infer", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1", "return 2", 1)},
      [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),
     ("infer", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1\n\n\ndef test_f", "return 2\n\n\ndef test_f")},
-     [PYTEST]),   # graphify failed on unlooked()
-    ("infer", PYTEST, {"src/pkg/new.py": "def h():\n    return 0\n",
-                       "tests/test_other.py": "from importlib import import_module as load\nload(name)\n"},
-     [PYTEST]),   # an unmapped module with an unresolved dynamic test import
+     [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),   # graphify failed on unlooked(): importers
+    ("alias-loader", PYTEST, {"src/pkg/new.py": "def h():\n    return 0\n"}, [DYNAMIC]),   # load(name) may be anything
     ("infer", PYTEST, {"src/pkg/pro/status.py": "X = 1\n",
                        "tests/test_other.py": "import pkg.pro.status\ndef test_new(): pass\n"},
      [f"{PYTEST} tests/test_direct.py tests/test_from.py tests/test_member.py tests/test_other.py || [ $? -eq 5 ]"]),
-    ("fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST]),
-    pytest.param("dynamic-fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST],
+    ("fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [DYNAMIC]),
+    pytest.param("dynamic-fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [DYNAMIC],
                  marks=pytest.mark.variant("review requested a nonliteral fromlist bypass")),
-    pytest.param("relative-level", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST],
+    pytest.param("relative-level", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [DYNAMIC],
                  marks=pytest.mark.variant("review requested positional relative import arguments")),
-    pytest.param("dynamic-level", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [PYTEST],
+    pytest.param("dynamic-level", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [DYNAMIC],
                  marks=pytest.mark.variant("review requested a nonliteral relative import level")),
     ("no-graph", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1", "return 2", 1)},
      [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),
-    pytest.param("infer", PYTEST, {"src/café.py": "X = 1\n"}, [PYTEST],
+    pytest.param("infer", PYTEST, {"src/café.py": "X = 1\n"}, [f"printf '%s\\n' {shlex.quote(CAFE_NOTE)}; {PYTEST}"],
                  marks=pytest.mark.variant("git C-quotes a non-ASCII name without -z; it was once skipped")),
     ("infer", PYTEST, {"tests/conftest.py": "X = 2\n"}, [PYTEST]),
     ("infer", PYTEST, {"pyproject.toml": "[x]\n"}, [PYTEST]),
