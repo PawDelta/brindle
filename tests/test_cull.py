@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from types import SimpleNamespace
 
@@ -27,6 +28,9 @@ def launch_as(agent_id, *, argv_config=True, env_only=False):
     if env_only:
         env["BRINDLE_AGENT_ID"] = agent_id
     proc = subprocess.Popen(args, env=env, start_new_session=True)
+    # Reaped the moment it exits: on macOS an unreaped child still answers
+    # kill(0), so procs.terminate would wait out its whole grace period.
+    threading.Thread(target=proc.wait, daemon=True).start()
     # Wait for its child: a fixed sleep loses the race on a loaded machine
     # (a parallel test run).
     deadline = time.monotonic() + 10
@@ -60,6 +64,15 @@ def proc_cleanup():
             # Already gone, or (macOS) a group whose exited leader isn't reaped yet.
             p.kill()
         p.wait(timeout=5)
+
+
+@pytest.fixture(autouse=True)
+def no_process_table(request, monkeypatch):
+    """Each sweep lists every process on the machine with ``ps`` (seconds on a
+    loaded one). No agent process runs here unless the test starts one with
+    launch_as (and proc_cleanup), so the others sweep an empty table."""
+    if "proc_cleanup" not in request.fixturenames:
+        monkeypatch.setattr(procs, "table", lambda: {})
 
 
 @pytest.fixture
@@ -99,10 +112,17 @@ def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup, monkeypa
     monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)
     monkeypatch.setattr(tmux, "kill_window", killed.append)
     monkeypatch.setattr(tmux, "kill_session", lambda *a, **k: None)
-    p = launch_as("abc12345")
-    proc_cleanup.append(p)
+    # The chat's CLI and its child, as procs.table lists them (stopping a real
+    # one is test_sweep_stops_processes_of_paused_agents).
+    config = json.dumps({"mcpServers": {"brindle": {"env": {
+        "BRINDLE_AGENT_ID": "abc12345", "BRINDLE_HOME": os.environ["BRINDLE_HOME"]}}}})
+    table = {900001: procs.Proc(900001, 1, f"claude --mcp-config {config}"),
+             900002: procs.Proc(900002, 900001, "python -m pytest")}
+    stopped = []
+    monkeypatch.setattr(procs, "table", lambda: table)
+    monkeypatch.setattr(procs, "terminate", lambda pids: stopped.extend(pids) or len(pids))
     cull.sweep(db)
-    p.wait(timeout=5)
+    assert sorted(stopped) == [900001, 900002]
     a = db.get_agent("abc12345")
     assert a.status == "paused" and a.dismissed_at is None  # still resumable, still shown
     assert {a: db.get_agent(a).status for a in ("w1", "r1", "other", "w2")} == {

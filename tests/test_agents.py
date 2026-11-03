@@ -1,3 +1,4 @@
+import functools
 import os
 import shutil
 import time
@@ -19,6 +20,13 @@ def fake_agent(db, ws, status="processing", mode="interactive", parent=None, age
     return a
 
 
+@pytest.fixture(autouse=True)
+def back_to_back_screen_reads(monkeypatch):
+    """send_message reconciles its target's status from two screen reads
+    0.7s apart; here they're taken back to back (still two, still compared)."""
+    monkeypatch.setattr(agents, "reconcile", functools.partial(agents.reconcile, gap=0))
+
+
 @pytest.fixture
 def ws(db, repo):
     return workspaces.create(db, str(repo), "feature").workspace
@@ -30,6 +38,11 @@ def _unreported_setup(db, ws, monkeypatch):
     fake_agent(db, ws, mode="assign", parent="boss")
     sent = []
     monkeypatch.setattr(agents, "send_message", lambda *a, **k: sent.append(a))
+    # Each stop's turn snapshot and conflict forecast are git work these
+    # alert tests don't look at (tests/test_rewind.py, test_tasks.py do).
+    from brindle import tasks
+    monkeypatch.setattr(agents, "snapshot_turn", lambda db_, a: None)
+    monkeypatch.setattr(tasks, "warn_predicted_conflicts", lambda db_, a: None)
     return sent
 
 

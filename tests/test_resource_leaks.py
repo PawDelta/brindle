@@ -4,6 +4,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,7 +21,7 @@ def gone(pid):
     return out.strip().startswith("Z")
 
 
-def test_an_app_server_that_never_answers_is_gone_with_its_children(tmp_path):
+def test_an_app_server_that_never_answers_is_gone_with_its_children(tmp_path, monkeypatch):
     """The hook trust step gave up on a silent ``codex app-server`` but killed
     only the process it started, leaving whatever that spawned running."""
     pidfile = tmp_path / "child.pid"
@@ -31,11 +32,17 @@ def test_an_app_server_that_never_answers_is_gone_with_its_children(tmp_path):
         wait = "import threading; threading.Event().wait()"
         child = subprocess.Popen([sys.executable, "-c", wait])
         open({str(pidfile)!r}, "w").write(str(child.pid))
+        print("starting up", flush=True)   # not an answer
         threading.Event().wait()
     """))
     fake.chmod(0o755)
+    # Its wait for an answer runs out once the child is up (the line above
+    # wakes it), not after the real seconds: should the pid file already be
+    # there when the wait starts, it just waits them out as before.
+    monkeypatch.setattr(codex_hook, "time",
+                        SimpleNamespace(monotonic=lambda: 1e9 if pidfile.exists() else 0.0))
 
-    with pytest.raises(codex_hook.CodexHookError):
+    with pytest.raises(codex_hook.CodexHookError, match="didn't answer"):
         codex_hook._AppServer(str(fake), [], 3.0)
 
     child = int(pidfile.read_text())
