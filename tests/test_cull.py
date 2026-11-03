@@ -503,3 +503,86 @@ def _race_check_lock_waiter_relocks(brindle_home, monkeypatch):
 ])
 def test_lock_cleanup(request, scenario):
     run_scenario(request, scenario)
+
+
+def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
+    add(db, ws, "boss", mode="interactive", status="paused", profile="supervisor")
+    add(db, ws, "w1", parent_id="boss", status="paused")
+    add(db, ws, "w2", parent_id=None, status="processing")   # its session went on without it
+    cull.sweep(db)
+    assert db.get_agent("w1").dismissed_at is None
+    assert db.get_agent("w2").dismissed_at is not None
+
+
+def test_pane_ownership_is_per_server(db, ws, other_server, monkeypatch):
+    # The same pane id on two servers: neither agent is a claim on the
+    # other's pane, and stopping one never touches the other's window.
+    here = tmux.current_server()
+    pane = live_pane(ws, "mine")
+    add(db, ws, "mine", status="processing", tmux_window=pane, created_at=time.time())
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
+    add(db, ws, "theirs", status="processing", tmux_window=pane, created_at=time.time())
+    assert db.get_agent("theirs").tmux_server == other_server
+    assert agents.owns_pane(db, db.get_agent("mine"))
+    assert agents.owns_pane(db, db.get_agent("theirs"))
+    assert not agents.is_alive(db.get_agent("theirs"))  # nothing on its own server
+    agents.close(db, "theirs")
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", here)
+    assert tmux.window_alive(pane), "closing the other server's agent killed this server's pane"
+    assert agents.is_alive(db.get_agent("mine"))
+
+
+def test_pane_reads_and_keys_go_to_the_agents_own_server(db, ws, other_server, monkeypatch):
+    # Reading an agent's screen or typing into its pane goes to the server
+    # its window is on, whatever server brindle is using at the time: on any
+    # other server the same pane id would be some other pane (or nothing).
+    tmux.ensure_session(ws.tmux_session, ws.path, {})
+    pane = tmux.new_window(ws.tmux_session, "abc12345", ws.path, ["cat"], {},
+                           tag=(agents.AGENT_TAG, "abc12345"))
+    add(db, ws, "abc12345", status="processing", tmux_window=pane)
+    a = db.get_agent("abc12345")
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
+    with pytest.raises(tmux.TmuxError):
+        tmux.capture(pane, lines=5)  # nothing of the sort on this server
+    tmux.send_keys(pane, "-l", "hello from brindle", server=agents.server_of(a))
+    deadline = time.time() + 5
+    screen = ""
+    while time.time() < deadline and "hello from brindle" not in screen:
+        time.sleep(0.1)
+        screen = tmux.capture(pane, lines=5, server=agents.server_of(a))
+    assert "hello from brindle" in screen
+    assert tmux.window_activity(pane, server=agents.server_of(a)) is not None
+    assert tmux.window_activity(pane) is None
+
+
+def test_idle_sweep_honors_the_unreported_alert_cooldown(db, ws, monkeypatch):
+    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor", tmux_window="@998")
+    add(db, ws, "w1", parent_id="boss", mode="assign", status_since=time.time() - 600)
+    db.update_agent("w1", unreported_noted=int(time.time()))   # alerted a moment ago
+    sent = []
+    monkeypatch.setattr(tmux, "window_activity", lambda target, **k: time.time() - 600)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append(to))
+    cull.sweep(db)
+    assert sent == []
+    db.update_agent("w1", unreported_noted=int(time.time()) - agents.UNREPORTED_REALERT_SECONDS - 1)
+    cull.sweep(db)
+    assert sent == ["boss"]
+
+
+def test_stale_after_zero_keeps_workers(db, ws, repo, monkeypatch):
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text('{"stale_after": 0}')
+    add(db, ws, "w1", result="done")
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    cull.sweep(db)
+    assert db.get_agent("w1").dismissed_at is None
+
+
+def test_the_daemon_is_never_included():
+    config = json.dumps({"BRINDLE_AGENT_ID": "abc12345", "BRINDLE_HOME": os.environ["BRINDLE_HOME"]})
+    t = {1: procs.Proc(1, 0, "init"),
+         10: procs.Proc(10, 1, f"/usr/bin/claude daemon run --spawned-by {config}"),
+         11: procs.Proc(11, 10, f"claude --mcp-config {config}")}
+    assert procs.agent_pids(["abc12345"], procs=t)["abc12345"] == {11}

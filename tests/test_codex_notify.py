@@ -123,3 +123,13 @@ def test_autopilot_codex_supervisor_is_told_to_keep_going(db, ws, monkeypatch):
         clock[0] += autopilot.NUDGE_BACKOFF + 1
         agents.handle_hook(db, "c1", "codex-notify", {"type": "agent-turn-complete"})
     assert len(pasted) == autopilot.MAX_NUDGES
+
+
+def test_supervisor_refuses_a_provider_that_cant_supervise(repo, monkeypatch):
+    from typer.testing import CliRunner
+
+    from brindle.cli import app
+
+    monkeypatch.chdir(repo)
+    res = CliRunner().invoke(app, ["supervisor", "--provider", "native"])
+    assert res.exit_code != 0 and "can't run the supervisor" in res.output

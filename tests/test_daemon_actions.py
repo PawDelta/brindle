@@ -178,9 +178,12 @@ def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(d
     ("app.py", "shown", None, 200),
     ("app.py", "read", None, 200),              # the base from GET .../file, the app's way
     ("app.py", "e69de29", None, 409),           # the empty blob: not what the file is now
+    ("app.py", "shown", "busy", 409),
     ("app.py", "shown", "hook-refuses", 409),   # the file goes back; the worker's index survives
     ("new.txt", "shown", None, 200),            # a file git doesn't track yet
+    ("new.txt", "shown", "hook-refuses", 409),  # ... refused: untracked again, as it was
     ("pkg/m.py", "shown", "deleted-refused", 409),  # its deletion staged, then refused: still staged
+    ("app.py", "shown", "to-head", 200),        # back to HEAD's content: no commit, the staged version goes
     pytest.param("app.py", "shown", "agent", 403, marks=pytest.mark.variant("an agent holding the token")),
     ("../proj/app.py", "shown", None, 400),
     ("out/m.py", "shown", None, 400),           # a symlinked directory leading out of the worktree
@@ -189,8 +192,8 @@ def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(d
                  marks=pytest.mark.variant("a name that is pathspec magic must not commit other work")),
     pytest.param("pkg/m.py", "shown", "swap", 400,
                  marks=pytest.mark.variant("a directory swapped for an escaping symlink mid-edit")),
-], ids=["edit-commits", "edit-read", "edit-stale", "edit-refused", "edit-new-file",
-        "edit-deleted-refused", "edit-agent",
+], ids=["edit-commits", "edit-read", "edit-stale", "edit-busy", "edit-refused", "edit-new-file",
+        "edit-new-file-refused", "edit-deleted-refused", "edit-to-head", "edit-agent",
         "edit-dotdot", "edit-symlink", "edit-git", "edit-pathspec", "edit-swap"])
 def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_path, monkeypatch,
                                                            path, base, setup, status):
@@ -2243,3 +2246,194 @@ def test_a_local_write_made_while_another_is_reading_is_not_lost(repo, monkeypat
     writer.join()
     assert errors == []
     assert real_read(config.scope_paths(repo)["local"]) == {"max_agents": 7}
+
+
+def test_user_scope_routing_judges_the_persons_profile_not_the_repos_same_named_one(repo, world, monkeypatch):
+    from brindle import doctor, providers, worker_models
+    from brindle.pro import managed_models, team_policy
+
+    for where, model in ((config.user_profiles_dir(), "user-model"), (repo / ".brindle" / "agents", "repo-model")):
+        where.mkdir(parents=True, exist_ok=True)
+        for name, provider in (("mine", "claude"), ("developer-codex", "codex")):
+            (where / f"{name}.md").write_text(f"---\nname: {name}\nprovider: {provider}\nmodel: {model}\n---\nWork.\n")
+    config.set_user("routing_light", "codex")       # the picker's pick, on the person's developer-codex
+    acc = Access(org_id="acme", allowed_providers=("claude", "codex"), allowed_models=("user-model",))
+    monkeypatch.setattr(team_policy, "access", lambda repo: acc)
+    monkeypatch.setattr(managed_models, "current", lambda repo: None)
+    monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
+    monkeypatch.setattr(doctor, "signin_providers", lambda: ["claude", "codex"])
+    monkeypatch.setattr(worker_models, "_signed_in", None)
+    code, body = _send("GET", f"/v1/routing?repo={repo}&scope=user&learned=0")
+    assert code == 200 and {p["name"]: p["allowed"] for p in body["profiles"]}["mine"] is True
+    assert body["tiers"]["light"]["values"] == ["developer-codex"]
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "user", "tiers": {"light": ["mine"]}})
+    assert code == 200, reply
+    assert [m["model"] for m in _send("GET", f"/v1/routing?repo={repo}&scope=user&learned=0")[1]["tiers"]["light"]["models"]] \
+        == ["user-model"]
+
+
+def test_hold_skipped_without_app(db, repo, world, answering, monkeypatch):
+    from brindle.daemon import events, holds
+
+    monkeypatch.setattr(events, "connected", 0)
+    monkeypatch.setattr(holds, "HOLDS", holds.Holds())
+    monkeypatch.setattr(holds.Holder, "wait", lambda self, seconds: pytest.fail("waited for nobody"))
+    # No events client: the daemon refuses the hold, so the hook returns at once and the CLI prompts.
+    assert agents.permission_request_decision(db, db.get_agent("wk"), {**ASK, "cwd": str(repo)}) is None
+    assert holds.HOLDS.agents() == []
+
+    # The last client leaving while the route awaits (the caller's ancestry) is refused too.
+    monkeypatch.setattr(events, "connected", 1)
+    monkeypatch.setattr(peer, "caller_agents", lambda pid: (setattr(events, "connected", 0), {"wk"})[1])
+    body = {"agent_id": "wk", "request_id": "r-gone", "digest": "d", "nonce": "n", "hold_until": time.time() + 60}
+    assert _send("POST", "/v1/holds", body, peer_pid=310, token=None)[0] == 503
+    assert holds.HOLDS.agents() == []
+
+
+def test_a_shell_opens_in_the_repo_each_call_and_closes(world, repo, tmp_path, monkeypatch):
+    from brindle import tmux
+
+    opened, killed = [], []
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
+    monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag:
+                        opened.append((cwd, argv, tag[1])) or f"%{len(opened)}")
+    monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
+        (f"%{i + 1}", "shell", True, tid) for i, (_, _, tid) in enumerate(opened)])
+    monkeypatch.setattr(tmux, "pane_window", lambda pane: "@" + pane[1:])
+    monkeypatch.setattr(tmux, "kill_window", killed.append)
+    code, first = _send("POST", "/v1/terminals/shell", {"cwd": str(repo)})
+    code2, second = _send("POST", "/v1/terminals/shell", {"cwd": str(repo)})
+    assert (code, code2, first["started"], second["started"]) == (200, 200, True, True)
+    assert first["terminal"] != second["terminal"] and first["target"] == "%1"
+    assert [(c, a) for c, a, _ in opened] == [(os.path.realpath(repo), ["/bin/zsh", "-l"])] * 2
+    # Typed into in the app's own tmux client, never through the API.
+    assert _send("POST", f"/v1/terminals/{first['terminal']}/input", {"text": "ls"})[0] == 404
+    assert _send("DELETE", f"/v1/terminals/{first['terminal']}")[0] == 200 and killed == ["@1"]
+    assert _send("DELETE", "/v1/terminals/t-0000000000000000")[0] == 404
+    # Refused outside attached repos, and without a cwd.
+    count = len(opened)
+    assert _send("POST", "/v1/terminals/shell", {"cwd": str(tmp_path)})[0] == 400
+    assert _send("POST", "/v1/terminals/shell", {})[0] == 400
+    assert len(opened) == count
+
+
+def test_deprecated_disable_preserves_goal_and_open_question(db, world):
+    autopilot.set_goal(db, "sup", "Ship", [("Build", "true", None)])
+    autopilot.need_user(db, "sup", "Which database?", ask=True)
+    code, reply = _send("POST", "/v1/goal/enabled", {"root": "sup", "enabled": False})
+    assert code == 200 and reply["enabled"] is True
+    ap = db.get_autopilot("sup")
+    assert ap.enabled and ap.goal == "Ship" and ap.state == "blocked" and ap.question
+
+
+def test_a_clone_that_git_refuses_fails_the_job_with_its_message(db, cloning, tmp_path):
+    code, _ = _send("POST", "/v1/repos/clone", {"url": "file:///nonexistent/gone.git", "parent_dir": str(tmp_path)})
+    assert code == 202
+    failed = bus.tail(db, kinds=("job.failed",))
+    assert failed and failed[0]["payload"]["error"]["code"] == "clone_failed"
+    assert "gone.git" in failed[0]["payload"]["error"]["message"]
+
+
+def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monkeypatch, tmp_path):
+    monkeypatch.delenv("BRINDLE_HOME", raising=False)
+    monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = tmp_path / ".brindle" / "config.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"delegation": "fast"}))
+
+    assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "default"})
+    assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "yolo"})[0] == 400
+    assert _send("PATCH", "/v1/user-settings", {})[0] == 400
+    assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "auto"})[0] == 200
+    assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "auto"})
+    assert json.loads(path.read_text()) == {"delegation": "fast", "claude_permission_mode": "auto"}
+    assert not list(path.parent.glob("*.tmp"))
+
+
+def test_session_diff_before_ready(db, repo, lead):
+    code, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
+    assert code == 200 and not reply["ready"]        # nothing ahead of main yet
+    assert _send("GET", "/v1/sessions/lead/pr/draft")[0] == 409
+    code, d = _send("GET", "/v1/sessions/lead/diff")
+    assert code == 200 and d["files"] == []
+
+
+def test_starting_a_session_with_a_name_keeps_it_on_the_new_root(db, world, monkeypatch):
+    from brindle.service import sessions as svc
+
+    root = db.get_agent("sup")
+    launched = []
+    monkeypatch.setattr(routes_actions, "session_blockers", lambda *a, **k: None)
+    monkeypatch.setattr(svc, "start", lambda *a, **k: launched.append(1) or svc.Started(root, world, False))
+    code, _ = _send("POST", "/v1/sessions", {"repo": world.repo_root, "name": 7})
+    assert code == 400 and launched == [] and db.get_agent("sup").name is None     # refused before any launch
+    code, reply = _send("POST", "/v1/sessions", {"repo": world.repo_root, "name": " Cache   work "})
+    assert code == 200 and reply["name"] == "Cache work"
+    assert db.get_agent("sup").name == "Cache work"
+
+
+def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo, world, monkeypatch):
+    from brindle import providers
+    from brindle.daemon import routes_read
+    from brindle.profiles import load_profile
+    from brindle.service import sessions as svc
+
+    before = config._read_json(config.scope_paths(str(repo))["local"])
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local", "kinds": {
+        "supervisor": {"model": "nope"}}})
+    assert code == 400 and config._read_json(config.scope_paths(str(repo))["local"]) == before   # nothing written
+
+    agent_dir = repo / ".brindle" / "agents"
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / "chat-alt.md").write_text(
+        "---\nname: chat-alt\nextends: developer\nprovider: codex\nmodel: gpt-test\neffort: high\n---\nHi.\n")
+    code, reply = _send("PUT", "/v1/routing", {"repo": str(repo), "scope": "local", "kinds": {
+        "supervisor": {"model": "chat-alt", "fallbacks": ["developer-gemini", "supervisor"]},
+        "reviewer": {"model": "reviewer-opencode", "fallbacks": ["reviewer-codex", "reviewer-gemini"]}}})
+    assert code == 200, reply
+    cfg = config.load_repo_config(str(repo))
+    kinds = routes_read._routing_kinds(db, cfg, str(repo))
+    assert (kinds["supervisor"].model, kinds["supervisor"].fallbacks, kinds["supervisor"].locked) == (
+        "chat-alt", ["developer-gemini", "supervisor"], True)
+    assert kinds["reviewer"].fallbacks == ["reviewer-codex", "reviewer-gemini"]
+    # Written to the scope asked for only.
+    assert "supervisor_profile" not in config._read_json(config.scope_paths(str(repo))["repo"])
+
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, agent, ws, **kw: launched.append(agent))
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    monkeypatch.setattr(svc, "preflight", lambda *a, **kw: [])
+    monkeypatch.setattr(svc, "cull_detached", lambda root: None)
+    monkeypatch.setattr("brindle.policy.check_assign",
+                        lambda cfg, root, name, *a: SimpleNamespace(allowed=name != "reviewer-codex", reason="no"))
+
+    def unusable(dead):
+        monkeypatch.setattr(providers, "unusable", lambda p, env=None: "down" if p in dead else None)
+        monkeypatch.setattr(agents, "unusable", providers.unusable)
+
+    # A new chat launches as the supervisor on the first choice that can run, with its model and effort.
+    unusable([])
+    svc.start(db, str(repo), autopilot=False)
+    chat = launched[-1]
+    got = agents._profile_for(db, chat, world)
+    assert (chat.profile, chat.provider, got.provider, got.model, got.effort) == (
+        "supervisor", "codex", "codex", "gpt-test", "high")
+    unusable(["codex"])                       # then the next in order: its own provider's defaults
+    svc.start(db, str(repo), autopilot=False)
+    assert (launched[-1].provider, agents._profile_for(db, launched[-1], world).model) == (
+        "antigravity", load_profile("developer-gemini", str(repo)).model)
+    svc.start(db, str(repo), provider="claude", autopilot=False)       # asked for by name: kept
+    assert agents._profile_for(db, launched[-1], world).model == load_profile("supervisor", str(repo)).model
+
+    # A review walks the pick and then the fallbacks: an unavailable provider and a policy denial are skipped.
+    unusable([])
+    assert agents._review_profile(db, world, None, cfg) == "reviewer-opencode"
+    unusable(["opencode"])
+    assert agents._review_profile(db, world, None, cfg) == "reviewer-gemini"
+    unusable(["opencode", "antigravity"])     # none left: the pick's own problem
+    with pytest.raises(agents.AgentError, match="'reviewer-opencode' can't run: down"):
+        agents._review_profile(db, world, None, cfg)
+    with pytest.raises(agents.AgentError, match="can't run"):       # asked for by name: no substitute
+        agents._review_profile(db, world, "reviewer-opencode", cfg)

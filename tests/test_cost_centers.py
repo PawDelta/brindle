@@ -99,3 +99,25 @@ def test_cli_fails_closed_without_the_feature(repo, monkeypatch, server):
     assert CliRunner().invoke(app, ["cost", "request", "--usd", "5", "--reason", "x"]).exit_code == 1
     assert CliRunner().invoke(app, ["cost", "requests"]).exit_code == 1
     assert not server.calls
+
+
+def test_denied_raises_nothing(repo, features, server):
+    cost_centers.request(25, "x", str(repo))
+    server.status = "denied"
+    assert "denied" in cost_centers.poll()[0]
+    assert cost_centers.month_raise() == 0
+
+
+def test_events_omit_repo_without_the_feature(slug_repo, features, monkeypatch):
+    monkeypatch.setattr(team_events.OrgKey, "ref", lambda self, s: "ref", raising=False)
+    assert "repo" not in _payload(slug_repo, {"team"})
+
+
+def test_poll_survives_server_errors(repo, features, server, monkeypatch):
+    cost_centers.request(25, "x", str(repo))
+
+    def boom(*a, **k):
+        raise cost_centers.CostCenterError("down")
+    monkeypatch.setattr(cost_centers, "_call", boom)
+    assert cost_centers.poll() == []
+    assert cost_centers.tracked()[0]["status"] == "pending"

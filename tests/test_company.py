@@ -52,3 +52,8 @@ def test_bad_org_ids_are_rejected_before_any_call(team):
     assert not calls(team)
 
 
+def test_a_malformed_answer_is_refused(team):
+    for body in ({"org_id": ORG}, {"org_id": ORG, "company_id": 7}, {"org_id": ORG, "company_id": ""}):
+        team.routes[f"GET {PATH}"] = [(200, body)]
+        code, _, err = run(team, "org", "company", "--org", ORG)
+        assert code == 1 and "no company state" in err

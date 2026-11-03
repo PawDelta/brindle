@@ -534,3 +534,56 @@ def test_signing_in_adopts_the_agents_launched_while_signed_out(monkeypatch):
     monkeypatch.setattr(signin_pause, "check", lambda provider, cache=False: 1 / 0)
     assert go(setup)[0]
 
+
+def test_claude_managed_settings_take_precedence(db, repo, tmp_path, monkeypatch):
+    Fake(monkeypatch)
+    go(claude("bedrock", aws=AWS))
+    managed = tmp_path / "managed.json"
+    managed.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://corp.example.com"}}))
+    monkeypatch.setenv("BRINDLE_CLAUDE_MANAGED_SETTINGS", str(managed))
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    env = agents.agent_env(ws, "a1", _claude_agent(ws))
+    assert "CLAUDE_CODE_USE_BEDROCK" not in env and "AWS_PROFILE" not in env
+
+
+def test_run_cmd_never_hands_a_probe_the_terminal():
+    # A probe that inherits the tty (claude exits by resetting its modes) shifts the sidebar.
+    probe = "import os; s = os.fstat(0); print(s.st_rdev == os.stat(os.devnull).st_rdev)"
+    read, write = os.pipe()
+    saved = os.dup(0)
+    os.dup2(read, 0)  # a stdin the child would otherwise inherit
+    try:
+        assert company_login.run_cmd([sys.executable, "-c", probe]) == (0, "True\n")
+    finally:
+        os.dup2(saved, 0)
+        for fd in (saved, read, write):
+            os.close(fd)
+
+
+def test_no_cached_entitlement_applies_no_stored_env(monkeypatch):
+    from brindle.pro import license
+
+    Fake(monkeypatch)
+    go(claude("bedrock", aws=AWS))
+    monkeypatch.setattr(license, "current", lambda **k: (_ for _ in ()).throw(license.LicenseError("not logged in")))
+    assert company_login.stored_env() == {}
+
+
+def test_pinned_models_without_the_claude_binary_are_not_ready(monkeypatch):
+    f = Fake(monkeypatch, missing={"claude"})
+    ok, out = go(claude("bedrock", aws=AWS, models=MODELS))
+    assert not ok
+    assert any(line.startswith("claude isn't installed; couldn't check model access") for line in out)
+    assert not any(line.startswith("Ready") for line in out)
+    assert not f.ran("/bin/claude")
+
+
+def test_route_model_only_when_the_route_env_reaches_the_launch(monkeypatch):
+    from brindle import providers
+
+    setup = claude("bedrock", aws=OWN_AWS, model_ids=(IDS[-1],), default_model=IDS[-1])
+    monkeypatch.setattr(company_login, "org_setup", lambda *a, **k: (ORG, setup))
+    monkeypatch.setattr(providers, "claude_org_managed", lambda: False)
+    off = [company_login.claude_model(m) for m in (None, "sonnet")]
+    company_login.store_env(ORG, company_login.claude_env(ORG, setup.claude))
+    assert (off, company_login.claude_model("sonnet")) == ([None, "sonnet"], IDS[-1])

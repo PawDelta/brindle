@@ -114,3 +114,11 @@ def test_set_agy_gemini_failed_write_leaves_the_original(tmp_path, monkeypatch):
     providers.set_agy_gemini()
     assert json.loads(path.read_text()) == {"theme": "dark", "modelProvider": "gemini"}
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_exec_api_key_accepts_a_stored_codex_key_under_chatgpt(codex, repo):
+    chatgpt(codex)
+    p = codex_profile(repo, "api_key")
+    assert pane_auth.key_problem(p, "codex", set(), False, exec_mode=True)
+    keystore.set_key("CODEX_API_KEY", KEY)
+    assert pane_auth.key_problem(p, "codex", set(), False, exec_mode=True) is None

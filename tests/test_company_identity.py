@@ -349,3 +349,77 @@ def test_federated_aws_identity_is_read_from_the_exchange_cache_without_the_cli(
     assert company_identity.matches(expected, ident) == (level == doctor.OK)
 
 
+def test_azure_profile_change_reprobes(monkeypatch, tmp_path):
+    f = touch(tmp_path / "home" / ".azure" / "azureProfile.json", "{}")
+    fake = cloud_cache_case(monkeypatch, "foundry", azure=AZURE)
+    company_identity.launch_problem("claude")
+    company_identity.launch_problem("claude")
+    assert fake.count("az", "account") == 1
+    f.write_text("{ changed }")
+    company_identity.launch_problem("claude")
+    assert fake.count("az", "account") == 2
+
+
+def test_other_clouds_credential_env_vars_reprobe(monkeypatch):
+    name = "GOOGLE_APPLICATION_CREDENTIALS"
+    monkeypatch.delenv(name, raising=False)
+    fake = cloud_cache_case(monkeypatch, "vertex", gcp=GCP)
+    company_identity.launch_problem("claude")
+    monkeypatch.setenv(name, "x")
+    company_identity.launch_problem("claude")
+    assert fake.count("gcloud", "config") == 2
+
+
+def test_foundry_by_base_url_checks_only_that_az_answers(monkeypatch, launch_cache):
+    from brindle import pane_auth
+
+    clock, _ = launch_cache
+    Fake(monkeypatch, {("az", "account"): (0, json.dumps({"id": "other-sub", "name": "Mine"}))})
+    policy(monkeypatch, claude_setup("foundry", azure=FOUNDRY_URL), enforce=True)
+    assert by_name()["claude identity"].level == doctor.OK            # any subscription
+    assert company_identity.launch_problem("claude") is None
+    assert company_identity.expected_ident(claude_setup("foundry", azure=FOUNDRY_URL)) is None
+    monkeypatch.setenv("AZURE_CLIENT_ID", "mine")
+    assert "AZURE_CLIENT_ID" not in pane_auth.deny_names("claude", "auto", None)   # the Azure sign-in is theirs
+    clock[0] += 301
+    Fake(monkeypatch, {("az", "account"): (1, "Please run 'az login'")})
+    assert by_name()["claude identity"].level == doctor.WARN
+    assert company_identity.launch_problem("claude")
+
+
+def test_other_azure_subscription_warns(monkeypatch):
+    Fake(monkeypatch, {("az", "account"): (0, json.dumps({"id": "other-sub", "name": "Mine"}))})
+    policy(monkeypatch, claude_setup("foundry", azure=AZURE))
+    c = by_name()["claude identity"]
+    assert c.level == doctor.WARN and "other-sub" in c.detail and "az account set" in c.detail
+
+
+@pytest.mark.parametrize("route,kw", [("vertex", {"gcp": FED_GCP}), ("foundry", {"azure": FED_AZURE})])
+def test_federated_gcp_and_azure_identity_is_the_policys_and_matches_itself(route, kw, monkeypatch):
+    fake = Fake(monkeypatch, missing={"gcloud", "az"})
+    claude = claude_setup(route, auth="federated", **kw)
+    ident = company_identity.claude_identity(ORG, claude)
+    assert ident.determined and ident.problem is None and not fake.calls
+    assert company_identity.matches(company_identity.expected_ident(claude), ident.ident)
+
+
+def test_undetermined_identity_never_blocks(monkeypatch):
+    Fake(monkeypatch, missing={"aws"})
+    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
+    assert company_identity.launch_check("claude") == (None, "identity_undetermined", "bedrock")
+    Fake(monkeypatch, {("aws", "sts"): (124, "timed out")})
+    assert company_identity.launch_problem("claude") is None
+
+
+def test_codex_is_never_blocked(monkeypatch):
+    Fake(monkeypatch)
+    policy(monkeypatch, claude_setup("bedrock", aws=AWS), codex=CodexSetup("chatgpt"), enforce=True)
+    assert company_identity.launch_problem("codex") is None
+
+
+def test_a_probe_is_cached_within_one_run(monkeypatch):
+    fake = Fake(monkeypatch, {("claude", "auth", "status"): CLAUDE_OK})
+    policy(monkeypatch, claude_setup("subscription", org_id=CLAUDE_ORG))
+    company_identity.identities()
+    company_identity.identities()
+    assert fake.count("claude", "auth", "status") == 1

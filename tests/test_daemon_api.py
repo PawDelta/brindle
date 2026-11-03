@@ -1067,3 +1067,70 @@ def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, e
     code, body = _get("/v1/analysis-docs/results", AUTH, "repo=/r")
     assert code == 200 and (body["enough"], body["compared"], body["briefed"]) == (enough, briefed, briefed + 1)
     assert (body["with_brief"], body["without_brief"]) == ((1.0, 3.0) if enough else (None, None))
+
+
+def test_peer_pid_names_the_unix_socket_caller():
+    a, b = socket.socketpair(socket.AF_UNIX)
+    with a, b:
+        assert peer.peer_pid(a) == os.getpid()
+
+
+@pytest.mark.parametrize("soft,hard,refused", [
+    (256, 4096, False), (256, resource.RLIM_INFINITY, False),
+    (256, 4096, True), (100000, 100000, False),
+])
+def test_daemon_start_raises_file_limit_before_binding(monkeypatch, soft, hard, refused):
+    limit = [soft, hard]
+
+    def setlimit(which, value):
+        if refused:
+            raise OSError("not permitted")
+        limit[:] = value
+
+    class Started(Exception):
+        pass
+
+    def prepare(*args, **kwargs):
+        if refused or soft == hard:
+            assert limit[0] == soft
+        else:
+            assert soft < limit[0] <= (hard if hard != resource.RLIM_INFINITY else 65536)
+        assert limit[1] == hard
+        raise Started()
+
+    monkeypatch.setattr(resource, "getrlimit", lambda which: tuple(limit))
+    monkeypatch.setattr(resource, "setrlimit", setlimit)
+    monkeypatch.setattr(lifecycle, "prepare", prepare)
+    with pytest.raises(Started):
+        lifecycle.serve()
+
+
+def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_home, monkeypatch):
+    from brindle.pro import auth
+    from brindle.pro.account import ProAccount
+
+    ent = license.Entitlement("user", "org", "pro", "active", frozenset(), 1, 0, 9999999999, "key")
+    monkeypatch.setattr(license, "current", lambda **kw: ent)
+    reads = []
+
+    def me(*args):
+        reads.append("me")
+        if len(reads) > 1:
+            raise auth.AuthError("offline", code="transport")
+        return {"name": "Sam Rivera", "email": "sam@example.com"}
+
+    def orgs(*args):
+        reads.append("orgs")
+        raise auth.AuthError("offline", code="transport")
+
+    monkeypatch.setattr(auth, "me", me)
+    monkeypatch.setattr(ProAccount, "orgs", orgs)
+    for _ in range(2):
+        code, body = _get("/v1/account", AUTH)
+        assert code == 200 and (body["name"], body["email"]) == ("Sam Rivera", "sam@example.com")
+    assert reads == ["me", "orgs"]
+    license.clear_cache()
+    for _ in range(2):
+        code, body = _get("/v1/account", AUTH)
+        assert code == 200 and body["signed_in"] and body["name"] is None and body["email"] is None
+    assert reads == ["me", "orgs", "me", "orgs"]

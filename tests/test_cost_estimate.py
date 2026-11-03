@@ -95,3 +95,14 @@ def test_reply_note_fails_closed(db, monkeypatch):
 
     monkeypatch.setattr(license, "has", explode)
     assert ce.reply_note(db, "/repo", [ce.TaskSpec("developer")]) is None
+
+
+def test_a_failing_price_function_is_unpriced_not_an_error(db):
+    seed(db, "/repo", 6)
+
+    def broken(*a):
+        raise RuntimeError("no table")
+
+    text = ce.describe([ce.TaskSpec("developer", "medium")], "reviewer", repo_root="/repo", db=db,
+                       price=broken, candidates=[])
+    assert "tokens" in text

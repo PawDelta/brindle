@@ -213,6 +213,7 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     assert codemap.seed_session(session_ws.path) is False
 
 
-
-
-
+def test_graphify_queries_are_pre_approved():
+    argv = ClaudeCode().command(LaunchContext("a1", load_profile("developer"), None))
+    allowed = argv[argv.index("--allowedTools") + 1]
+    assert "Bash(graphify query:*)" in allowed and "Bash(graphify affected:*)" in allowed
