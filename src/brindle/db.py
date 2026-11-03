@@ -1604,11 +1604,19 @@ class DB:
                             (since, agent_id, since))
         return cur.rowcount == 1, row["stuck_noted"] if row else None
 
-    def claim_unreported(self, agent_id: str, since: float, previous: float | None) -> bool:
-        """Claim the stop read by the caller, without replacing a newer alert."""
+    def claim_unreported(self, agent_id: str, since: float, previous: float | None,
+                         *, reopened_at: float | None, status_since: float | None) -> bool:
+        """Claim the stop read by the caller, without replacing a newer alert.
+
+        Reviewer recovery clears the alert so a later stop can be handled.
+        Its reopened_at changes in that same write: checking it prevents an
+        old snapshot from reclaiming the cleared alert and escalating the
+        reviewer just resumed. status_since also rejects a different turn.
+        """
         with self.tx() as c:
-            cur = c.execute("UPDATE agents SET unreported_noted=? WHERE id=? AND unreported_noted IS ?",
-                            (since, agent_id, previous))
+            cur = c.execute("UPDATE agents SET unreported_noted=? WHERE id=? AND unreported_noted IS ?"
+                            " AND reopened_at IS ? AND COALESCE(status_since, created_at) IS ?",
+                            (since, agent_id, previous, reopened_at, status_since))
         return cur.rowcount == 1
 
     def release_note(self, agent_id: str, since: float, previous: float | None,

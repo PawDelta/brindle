@@ -125,7 +125,7 @@ def test_a_piped_branch_nothing_works_on_is_reported_once_not_closed(db, repo, m
 
 
 @pytest.mark.parametrize("note", [cull.note_stalled, cull.note_silent, cull.note_idle_unreported,
-                                agents.tell_parent_unreported, "prompt", "doc"])
+                                agents.tell_parent_unreported, "prompt", "doc", "reviewer"])
 def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, tmp_path, monkeypatch, note):
     """The daemon and each session's MCP server sweep side by side: two that
     read the workers before either noted it send the note once between them."""
@@ -146,7 +146,16 @@ def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, tmp_path, monkeypa
         db.update_agent("w1", result=None, status="idle", created_at=old, status_since=old)
     if note is cull.note_silent:
         db.update_agent("w1", status="unknown")
-    alive = {"boss"} if note is cull.note_stalled else {"boss", "w1"}
+    fallbacks = []
+    if note == "reviewer":
+        db.update_agent("w1", result="done", pipeline="reviewing")
+        add(db, ws, "rev", "review", "reviewer", parent="boss")
+        monkeypatch.setattr(agents, "request_review", lambda *a, **kw: fallbacks.append(1))
+        monkeypatch.setattr(agents, "close_later", lambda *a: None)
+        monkeypatch.setattr(pipeline.learning, "note_reviewer", lambda *a, **kw: None)
+        monkeypatch.setattr(pipeline, "_cached_check_summary", lambda *a: None)
+        monkeypatch.setattr(pipeline, "_small_diff_stat", lambda *a: None)
+    alive = {"boss"} if note is cull.note_stalled else {"boss", "w1", "rev"}
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in alive)
     monkeypatch.setattr(agents, "owns_pane", lambda db_, a, owners=None: True)
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
@@ -166,12 +175,12 @@ def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, tmp_path, monkeypa
         monkeypatch.setattr(conn, "list_agents",
                             lambda ws_id=None, real=real: snapshot if ws_id is None else real(ws_id))
     now = time.time()
-    worker = next(a for a in snapshot if a.id == "w1")
+    worker = next(a for a in snapshot if a.id == ("rev" if note == "reviewer" else "w1"))
     version = 2
 
     def run(conn):
-        if note is agents.tell_parent_unreported:
-            note(conn, worker)
+        if note is agents.tell_parent_unreported or note == "reviewer":
+            agents.tell_parent_unreported(conn, worker)
         elif note == "prompt":
             prompt_answer.tell(conn, worker, "Continue?")
         elif note == "doc":
@@ -185,6 +194,7 @@ def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, tmp_path, monkeypa
         sent.append(to)
         if len(sent) == 1:
             run(other)  # the other process enters before this send returns
+        return "delivered"
 
     monkeypatch.setattr(agents, "send_message", send)
 
@@ -200,6 +210,14 @@ def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, tmp_path, monkeypa
         run(db)
         run(other)
         assert len(sent) == 1
+        if note == "reviewer":
+            assert fallbacks == []
+            db.set_status("rev", "processing")
+            db.set_status("rev", "idle")  # a genuinely new stop after the resume
+            worker = db.get_agent("rev")
+            run(other)
+            assert fallbacks == [1] and len(sent) == 1
+            return
         next_event()
 
         def fail(conn, to, body, **kw):

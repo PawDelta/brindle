@@ -4818,7 +4818,9 @@ def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False) -> boo
         # stopped. Not marked noted, so a real stop later still gets its alert.
         return False
     claimed_at = time.time()
-    if not db.claim_unreported(agent.id, claimed_at, agent.unreported_noted):
+    if not db.claim_unreported(agent.id, claimed_at, agent.unreported_noted,
+                               reopened_at=agent.reopened_at,
+                               status_since=agent.status_since or agent.created_at):
         return False
     sent = False
     try:
