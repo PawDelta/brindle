@@ -7,6 +7,13 @@ from brindle.cli import app
 runner = CliRunner()
 
 
+@pytest.mark.parametrize("expression", ["<<<EOF", "$((1<<2))"])
+def test_splitter_does_not_read_heredocs_in_other_operators(expression):
+    from brindle.permissions import _segments
+
+    assert ["printf", "%s", "a;b"] in _segments(f"echo {expression}\nprintf '%s' 'a;b'\n")
+
+
 def test_single_arg_allow():
     """Verify `brindle permissions allow <command>` with a single argument defaults to bash."""
     # We will test the CLI directly

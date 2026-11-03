@@ -1089,22 +1089,39 @@ def _declared_columns() -> dict[str, frozenset[str]]:
 
 
 def migrated_by_newer() -> bool:
-    """Whether a newer brindle has migrated the database: a ``user_version``
-    past this version's, or columns in this version's tables that its schema
-    doesn't declare (rows this version writes would leave them unset). Read
-    as is, without this version's own setup and migrations; False while there
-    is no database yet."""
+    """Whether the on-disk schema is incompatible with this version's writes."""
+    return migration_incompatibility() is not None
+
+
+def migration_incompatibility() -> str | None:
+    """Describe incompatible schema changes without running setup/migrations.
+
+    Extra tables and columns that can be omitted on insert are harmless.
+    Missing declared columns or extra required columns prevent correct writes.
+    A newer user_version is an explicit compatibility boundary regardless of
+    columns. No database yet means no incompatibility.
+    """
     try:
         conn = sqlite3.connect(db_path().resolve().as_uri() + "?mode=ro", uri=True)
     except sqlite3.Error:
-        return False
+        return None
     try:
-        if conn.execute("PRAGMA user_version").fetchone()[0] > SCHEMA_VERSION:
-            return True
-        declared = _declared_columns()
-        return any(cols - declared[t] for t, cols in _columns(conn).items() if t in declared)
+        issues = []
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            issues.append(f"user_version {version} exceeds supported {SCHEMA_VERSION}")
+        for table, declared in _declared_columns().items():
+            quoted = table.replace('"', '""')
+            columns = list(conn.execute(f'PRAGMA table_info("{quoted}")'))
+            missing = declared - {r[1] for r in columns}
+            required = {r[1] for r in columns if r[1] not in declared and r[3] and r[4] is None}
+            if missing:
+                issues.append(f"missing columns in {table}: {', '.join(sorted(missing))}")
+            if required:
+                issues.append(f"extra NOT NULL columns without defaults in {table}: {', '.join(sorted(required))}")
+        return "; ".join(issues) or None
     except sqlite3.Error:
-        return False
+        return None
     finally:
         conn.close()
 

@@ -1271,12 +1271,12 @@ def _command_texts(command: str) -> list[str]:
     each text still reads as shell words. ``$'...'`` honours its backslash
     escapes, an unquoted ``#`` that starts a word comments out the rest of its
     line, and a heredoc body is cut at every separator with its quotes read as
-    text. A quote that never closes falls back to cutting at every separator
-    (_SEPARATORS), so a stray apostrophe can't hide a command."""
+    text. Unclosed quotes, heredocs and unreadable constructs fall back to
+    cutting at every separator (_SEPARATORS), so they can't hide a command."""
     texts: list[str] = []
     text: list[str] = []
     stack: list[str] = []      # what is open: '"' (a double quote), "$(" or "`" (a substitution)
-    heredocs: list[str] = []   # delimiters of heredocs whose bodies start at the next newline
+    heredocs: list[tuple[str, bool]] = []   # delimiter and whether <<- strips tabs
 
     def quoted() -> bool:
         return bool(stack) and stack[-1] == '"'
@@ -1316,19 +1316,89 @@ def _command_texts(command: str) -> list[str]:
             j = command.find("\n", i)
             i = n if j < 0 else j      # the newline still cuts
             continue
-        if command.startswith("<<", i) and not quoted() and not command.startswith("<<<", i):
-            m = re.compile(r"<<-?[ \t]*([\"']?)(\w+)\1").match(command, i)
-            if m is not None:
-                heredocs.append(m.group(2))
-                text.append(m.group())
-                i = m.end()
-                continue
+        if command.startswith("$((", i):
+            # Only skip numeric arithmetic with the required adjacent closing
+            # pair. $((command); command) can instead run a subshell in $(...).
+            # Names, substitutions and other unsupported syntax use the fallback.
+            j, depth = i + 3, 2
+            while j < n and depth > 1:
+                if command[j] not in "0123456789 \t\n()+-*/%<>&|^~!?:=,":
+                    return re.split(_SEPARATORS, command)
+                if command[j] == "(":
+                    depth += 1
+                elif command[j] == ")":
+                    depth -= 1
+                j += 1
+            if depth != 1 or command[j:j + 1] != ")":
+                return re.split(_SEPARATORS, command)
+            j += 1
+            text.append(command[i:j])
+            i = j
+            continue
+        if command.startswith("<<<", i) and not quoted():
+            text.append("<<<")
+            i += 3
+            continue
+        if command.startswith("<<", i) and not quoted():
+            dash = command.startswith("<<-", i)
+            j = i + (3 if dash else 2)
+            while j < n and command[j] in " \t":
+                j += 1
+            start, quote, delimiter = j, "", []
+            # A delimiter is a shell word with quote removal, not a \w+
+            # identifier. Other quotes inside a quoted part are literal.
+            while j < n:
+                ch = command[j]
+                if not quote and ch in " \t\n;&|<>()":
+                    break
+                if not quote and command.startswith("$'", j):
+                    ansi = re.compile(r"\$'((?:[^'\\]|\\.)*)'", re.DOTALL).match(command, j)
+                    if ansi is None:
+                        return re.split(_SEPARATORS, command)
+                    delimiter.append(_ansi_c(ansi.group(1)))
+                    j = ansi.end()
+                    continue
+                if ch == "\\" and quote != "'":
+                    if j + 1 == n:
+                        return re.split(_SEPARATORS, command)
+                    following = command[j + 1]
+                    if not quote or following in '$`"\\\n':
+                        if following != "\n":
+                            delimiter.append(following)
+                        j += 2
+                        continue
+                if ch == quote:
+                    quote = ""
+                elif not quote and ch in "'\"":
+                    quote = ch
+                else:
+                    delimiter.append(ch)
+                j += 1
+            if quote or j == start:
+                return re.split(_SEPARATORS, command)
+            heredocs.append(("".join(delimiter), dash))
+            text.append(command[i:j])
+            i = j
+            continue
         if c == "\n" and heredocs and not quoted():
             cut()
             i += 1
-            for delimiter in heredocs:   # each body, through its closing line, is cut as the old splitter cut it
-                close = re.compile(r"^[ \t]*" + re.escape(delimiter) + r"[ \t]*$", re.MULTILINE).search(command, i)
-                end = close.end() if close is not None else n
+            for delimiter, dash in heredocs:
+                end = i
+                while end < n:
+                    line_end = command.find("\n", end)
+                    line_end = n if line_end < 0 else line_end
+                    line = command[end:line_end]
+                    end = min(line_end + 1, n)
+                    # An unquoted heredoc folds backslash-newline before
+                    # delimiter matching. Do not guess at physical boundaries
+                    # when a continuation could join this line to the next.
+                    if line.endswith("\\") and line_end < n:
+                        return re.split(_SEPARATORS, command)
+                    if (line.lstrip("\t") if dash else line) == delimiter:
+                        break
+                else:
+                    return re.split(_SEPARATORS, command)
                 texts.extend(re.split(_SEPARATORS, command[i:end]))
                 i = end
             heredocs.clear()
@@ -1363,7 +1433,7 @@ def _command_texts(command: str) -> list[str]:
         else:
             text.append(c)
         i += 1
-    if '"' in stack:
+    if stack or heredocs:
         return re.split(_SEPARATORS, command)
     texts.append("".join(text))
     return texts

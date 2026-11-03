@@ -136,7 +136,9 @@ export function ProviderSurface({ repo, agent, alive, sessionStatus, credentials
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md bg-shell-bg" data-testid="provider-surface" data-card={card?.kind ?? "live"}>
       {/* A real tmux client on a pty; nothing until the shell has said it can (its status). */}
-      {agent && live && ready && target && (
+      {/* Mounted under the "starting" card too: the card leaves once this view is live, and an agent
+          that stays "starting" while it waits on a startup prompt (trust, permission) is shown by it. */}
+      {agent && (live || card?.kind === "starting") && ready && target && (
         <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}`} at={{ server: agent.tmux_server ?? null, target }} open={ready.open} copy={ready.copy} paste={ready.paste} onView={setView} />
       )}
       {/* The engine's preflight items, from either Continue, whatever this pane shows: over a live
@@ -147,7 +149,7 @@ export function ProviderSurface({ repo, agent, alive, sessionStatus, credentials
         </div>
       )}
       {card && !preflight && (
-        <div className={`${left && showLeft ? "shrink-0" : "flex-1"} flex items-start justify-center overflow-auto bg-canvas p-s4`}>
+        <div className={`${card.kind === "starting" && ready && target ? "absolute inset-0 z-10" : left && showLeft ? "shrink-0" : "flex-1"} flex items-start justify-center overflow-auto bg-canvas p-s4`}>
             <section className={`${cardClass} flex w-full max-w-xl flex-col gap-s2 px-s3 py-s2`} aria-label={card.kind === "starting" ? `Starting ${name}` : card.kind === "disconnected" ? "Disconnected" : card.title} data-testid="state-card" data-kind={card.kind}>
               {card.kind === "starting" && (
                 <div className="flex items-center gap-s1">

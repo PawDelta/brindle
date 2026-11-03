@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 from brindle import agents, autopilot, coordinator, cost_estimate, git, history, kb, knowledge, mcp_stdio, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config
-from brindle.db import DB, Agent, Task, Workspace, migrated_by_newer
+from brindle.db import DB, Agent, Task, Workspace, migrated_by_newer, migration_incompatibility
 from brindle.profiles import list_profiles
 from brindle.view import last_activity
 
@@ -45,12 +45,12 @@ def _calling_agent() -> Agent | None:
     return DB().get_agent(agent_id) if agent_id else None
 
 
-def _migrated_under_us() -> bool:
-    """Whether a newer brindle has migrated the database: this server's code
+def _migrated_under_us() -> str | None:
+    """Why a newer brindle's database is incompatible: this server's code
     no longer writes the rows that version expects (see upgrade.py). Whether
     or not this install changed: a reload can land on code that is still
     older (another install migrated the database), or fail."""
-    return migrated_by_newer()
+    return migration_incompatibility()
 
 
 class _Server(MCPServer):
@@ -60,8 +60,8 @@ class _Server(MCPServer):
     Refuses every tool once a newer brindle migrated the database under it."""
 
     async def call_tool(self, name, arguments, context=None):
-        if _migrated_under_us():
-            raise ToolError(MIGRATED_ERROR)
+        if incompatibility := _migrated_under_us():
+            raise ToolError(f"{MIGRATED_ERROR}: {incompatibility}")
         try:
             request_id = context.request_context.request_id if context is not None else None
         except ValueError:   # a Context with no request behind it
