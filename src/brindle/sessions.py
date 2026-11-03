@@ -133,15 +133,30 @@ def handover_prompt(db: DB, old_root: Agent, note: str | None) -> str:
     )
 
 
+@dataclass
+class Handover:
+    agent: Agent                  # the supervisor that now has the session
+    why: str | None = None        # why a live supervisor in the destination didn't take it
+
+
 def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None, *,
              pause_old: bool = True) -> Agent:
-    """Hand a supervisor session to a new supervisor running in ``dest``.
+    """:func:`handover_to`'s supervisor."""
+    return handover_to(db, old_root_id, dest, note, pause_old=pause_old).agent
+
+
+def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = None, *,
+                pause_old: bool = True) -> Handover:
+    """Hand a supervisor session to a supervisor running in ``dest``: the
+    live one there, else a new one.
 
     Carries over the goal and milestones (with their last results), the
     workers (their ``parent_id``), queued and started tasks, and a handoff note
     that becomes the new supervisor's first message. The old supervisor's
     goal driver is blocked and, with ``pause_old``, the old session paused
-    (not when the old supervisor itself is calling: it ends its own turn)."""
+    (not when the old supervisor itself is calling: it ends its own turn).
+    A live supervisor with an unfinished goal of its own keeps it: a new
+    supervisor is started beside it, and ``why`` says so."""
     from brindle import autopilot as pilot
 
     old = db.get_agent(old_root_id)
@@ -151,8 +166,14 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
     prompt = handover_prompt(db, old, note)
     # A live supervisor already in ``dest`` takes the session over: a second
     # one there would split the work. Only with none (or a dead or paused
-    # one) is a new supervisor started.
-    new = _live_supervisor(db, dest, old_root_id)
+    # one) is a new supervisor started -- or when that live one is busy with
+    # an unfinished goal of its own, which taking over would overwrite.
+    new, why = _live_supervisor(db, dest, old_root_id), None
+    own = db.get_autopilot(new.id) if new else None
+    if own and own.goal and own.state != "done":
+        why = (f"{new.id} is live in {dest.id} with an unfinished goal of its own "
+               f"(\"{goal_line(db, new)}\"), so a new supervisor was started instead")
+        new = None
     took_over = new is not None
     if not took_over:
         # Always a supervisor, even from a session started as something else.
@@ -231,7 +252,7 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
     bus.publish_agent(db, "session.handover", new.id, from_root=old_root_id)
     if pause_old:
         agents.pause(db, old_root_id, stop_local_models=False)
-    return new
+    return Handover(new, why)
 
 
 def _live_supervisor(db: DB, ws: Workspace, other_than: str) -> Agent | None:

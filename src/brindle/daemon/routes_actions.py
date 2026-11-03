@@ -285,9 +285,9 @@ def rename_session(db: DB, params: dict, body: Body) -> Any:
 def handover_session(db: DB, params: dict, body: Body) -> Any:
     root, ws = _root(db, params["root"])
     dest = workspaces.checkout_for_target(db, ws.path, _get(body, "to", required=True))
-    new = sessions_mod.handover(db, root.id, dest, _get(body, "note"))
+    h = sessions_mod.handover_to(db, root.id, dest, _get(body, "note"))
     svc.cull_detached(dest.repo_root)
-    return SessionDTO.from_agent(new).to_json()
+    return {**SessionDTO.from_agent(h.agent).to_json(), **({"why": h.why} if h.why else {})}
 
 
 def transfer_session(db: DB, params: dict, body: Body) -> Any:

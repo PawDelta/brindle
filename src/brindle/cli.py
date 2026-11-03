@@ -791,6 +791,8 @@ def handover(
     db = DB()
     h = _run(svc.handover, db, os.getcwd(), to, note)
     typer.secho(f"✓ handed {h.old_id} over to {h.agent.id} in {h.workspace.id} ({h.workspace.branch})", fg="green")
+    if h.why:
+        typer.echo(f"  {h.why}")
     if attach:
         _attach(h.workspace, h.agent.tmux_window)
 

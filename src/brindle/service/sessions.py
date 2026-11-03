@@ -113,6 +113,7 @@ class Handed:
     old_id: str
     agent: Agent
     workspace: Workspace
+    why: str | None = None        # why a live supervisor there didn't take the session
 
 
 def ago(seconds: float) -> str:
@@ -406,9 +407,9 @@ def handover(db: DB, cwd: str, to: str, note: str | None = None) -> Handed:
     """Hand this repo's session to a new supervisor on the branch or worktree ``to``."""
     root_id = session_root(db, cwd)
     dest = workspaces.checkout_for_target(db, cwd, to)
-    new = sessions_mod.handover(db, root_id, dest, note)
+    h = sessions_mod.handover_to(db, root_id, dest, note)
     cull_detached(dest.repo_root)
-    return Handed(root_id, new, dest)
+    return Handed(root_id, h.agent, dest, h.why)
 
 
 def transfer_to_repo(db: DB, ws: Workspace, target_path: str, branch: str | None = None,

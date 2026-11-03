@@ -108,12 +108,17 @@ def test_checkout_for_target_reads_a_slashed_name_as_a_branch(db, repo, monkeypa
     assert ws.branch == "fix/handover" and not (repo / "fix").exists()
 
 
-def test_handover_to_a_live_supervisor_delivers_to_it_instead_of_starting_another(db, repo, monkeypatch):
+@pytest.mark.parametrize("own_goal", [None, "done", "running"])
+def test_handover_to_a_live_supervisor_delivers_to_it_instead_of_starting_another(db, repo, monkeypatch, own_goal):
     root = workspaces.adopt_root(db, str(repo))
     dest = workspaces.checkout_for(db, str(repo), branch="integration")
     add(db, root, "old")
     add(db, dest, "gone", status="paused")      # a paused chat there is not the one taking over
     add(db, dest, "there")
+    if own_goal:
+        db.add_autopilot("there")
+        autopilot.set_goal(db, "there", "its own work", [("mine", "true", None)])
+        db.update_autopilot("there", state=own_goal)
     worker = workspaces.create(db, str(repo), "w-branch").workspace
     add(db, worker, "w1", mode="assign", parent="old")
     db.add_autopilot("old")
@@ -122,15 +127,30 @@ def test_handover_to_a_live_supervisor_delivers_to_it_instead_of_starting_anothe
                      None, None, '["w1"]', "pending", time.time()))
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "there")
     monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
-    monkeypatch.setattr(agents, "spawn", lambda *a, **kw: pytest.fail("started a second supervisor"))
+    spawned = []
+
+    def fake_spawn(db_, ws, profile, **kw):
+        spawned.append(ws.id)
+        a = add(db_, ws, "new")
+        db_.add_autopilot("new")
+        return a
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
     told = []
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, *a, **kw: told.append((to, body)))
 
-    new = sessions.handover(db, "old", dest, "rule: never push to main", pause_old=False)
+    h = sessions.handover_to(db, "old", dest, "rule: never push to main", pause_old=False)
 
-    assert new.id == "there" and db.get_autopilot("there").goal == "ship it"
-    assert db.get_agent("w1").parent_id == "there" and db.get_task("t1").caller_id == "there"
-    assert [to for to, _ in told] == ["there"] and "rule: never push to main" in told[0][1]
+    # An unfinished goal of its own stays the live supervisor's: a new one takes the session, and says why.
+    to = "new" if own_goal == "running" else "there"
+    assert h.agent.id == to and db.get_autopilot(to).goal == "ship it"
+    assert db.get_agent("w1").parent_id == to and db.get_task("t1").caller_id == to
+    if own_goal == "running":
+        assert spawned == [dest.id] and told == [] and "unfinished goal" in h.why
+        assert db.get_autopilot("there").goal == "its own work"
+    else:
+        assert spawned == [] and h.why is None
+        assert [t for t, _ in told] == ["there"] and "rule: never push to main" in told[0][1]
 
 
 def test_handed_over_session_stops_advertising_its_goal(db, repo, monkeypatch):
