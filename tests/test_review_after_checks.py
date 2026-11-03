@@ -158,7 +158,7 @@ def test_the_real_check_path_reuses_a_pass_and_a_new_failure_starts_no_reviewer(
     ``db.set_check`` is a per-workspace record that ``run_checked`` never reads.)"""
     ran, results = [], [(True, "1 passed")]
     monkeypatch.setattr(gates, "_run_queued",
-                        lambda db_, ws_, cmd, env, timeout, cancel=None: ran.append(cmd) or results[0])
+                        lambda db_, ws_, cmd, *a, **kw: ran.append(cmd) or results[0])
     cfg = RepoConfig(checks=["suite"])
 
     assert agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg) is not None
