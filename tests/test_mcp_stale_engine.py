@@ -13,23 +13,42 @@ from brindle import mcp_server, mcp_stdio, upgrade
 from brindle.db import DB, SCHEMA_VERSION
 
 
-@pytest.mark.parametrize("migration", [
-    "ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT",
-    f"PRAGMA user_version={SCHEMA_VERSION + 1}",
+@pytest.mark.parametrize("migration, incompatible", [
+    ("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT", None),
+    ("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT NOT NULL DEFAULT ''", None),
+    ("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT NOT NULL", "workspaces: from_a_newer_engine"),
+    pytest.param("CREATE TABLE dev_only (required TEXT NOT NULL)", None,
+                 marks=pytest.mark.variant("an undeclared dev table must not block this version's writes")),
+    (f"PRAGMA user_version={SCHEMA_VERSION + 1}", "user_version"),
+    ("ALTER TABLE workspaces DROP COLUMN session_root", "workspaces: session_root"),
 ])
-def test_a_server_upgraded_under_refuses_tools_once_the_new_engine_migrated_the_database(monkeypatch, migration):
-    """The app's update migrated the database while a session's `brindle mcp`
-    kept its old code loaded: no tool runs that code against the migrated
-    database, the client is told to reconnect."""
-    monkeypatch.setattr(upgrade, "install", SimpleNamespace(changed=lambda: True))
+def test_a_server_upgraded_under_refuses_tools_once_the_new_engine_migrated_the_database(
+        monkeypatch, migration, incompatible):
+    """Only schema changes that prevent correct writes block tools and reload probes."""
+    from brindle import cli
+
+    monkeypatch.setattr(upgrade, "install", SimpleNamespace(changed=lambda: False))
     ran = []
     monkeypatch.setattr(mcp_server, "_caller",
                         lambda db: ran.append(1) or (None, SimpleNamespace(repo_root="/repo")))
-    DB().conn.execute(migration)
+    db = DB()
+    db.conn.execute(migration)
+    db.conn.close()
 
-    with pytest.raises(ToolError, match="/mcp → brindle → Reconnect"):
+    if incompatible:
+        with pytest.raises(ToolError) as error:
+            asyncio.run(mcp_server.mcp.call_tool("list_repos", {}))
+        assert incompatible in str(error.value)
+        assert ran == []
+    else:
         asyncio.run(mcp_server.mcp.call_tool("list_repos", {}))
-    assert ran == []
+        assert ran == [1]
+    assert brindle_db.migrated_by_newer() is bool(incompatible)
+    assert mcp_server._wants_reload(False) is bool(incompatible)
+    assert mcp_server._wants_reload(True) is False
+    with pytest.raises(cli.typer.Exit) as exit:
+        cli.mcp(check=True)
+    assert exit.value.exit_code == int(bool(incompatible))
 
 
 def _wire(monkeypatch):
@@ -83,7 +102,7 @@ def test_after_a_schema_bump_the_next_call_goes_to_the_reloaded_server(monkeypat
             async def client():
                 answers.extend(await _answers(from_server, 0))
                 update.installed = True
-                DB().conn.execute("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT")
+                DB().conn.execute("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT NOT NULL")
                 _send(from_client, {"id": 1, "method": "tools/call",
                                     "params": {"name": "list_repos", "arguments": {}}})
                 answers.extend(await _answers(from_server, 1))
