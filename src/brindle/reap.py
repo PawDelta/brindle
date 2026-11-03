@@ -31,7 +31,8 @@ written to in the last SESSION_GRACE seconds, a session of another brindle
 home (BRINDLE_HOME) or on another tmux server, a session holding a live
 agent of another workspace or a live supervisor's sidebar, a supervisor
 whose pause would close or change an attached session (a worker's shell,
-its sidebar's), and a worktree with uncommitted changes whose work
+its sidebar's) or one with recent output or a busy pane brindle didn't
+start, and a worktree with uncommitted changes whose work
 isn't finished (an orphan's folder with uncommitted changes is kept). An
 agent is only stopped from a session the listing shows on this server, of
 this home, with nobody attached (``_quiet_session``); a supervisor is kept
@@ -319,13 +320,20 @@ def _idle_supervisors(db: DB, now: float, live: set[str], panes,
         touched = _paused_sessions(db, tree, panes, session_of)
         if any(t.attached or not _ours(t) for t in touched):
             continue
-        last = max([a.created_at, a.status_since or 0, s.activity, *(t.activity for t in touched)])
+        # Closing them stops every process in them: one brindle didn't start (a
+        # dev server, a training run in a split pane) keeps the supervisor.
+        ids = {m.id for m in tree}
+        own = {m.tmux_window for m in tree if m.tmux_window} | {
+            p for p, tags in panes.tags.items() if tags.get(agents.AGENT_TAG) in ids}
+        if any(not p.idle() and p.id not in own for t in touched for p in t.panes):
+            continue
+        last = max([a.created_at, a.status_since or 0, _last_activity(s),
+                    *(_last_activity(t) for t in touched)])
         if now - last < days * DAY:
             continue
         if any(m.id in live and m.status not in ("paused", "done") and m.dismissed_at is None
                for m in tree[1:]):
             continue
-        ids = {m.id for m in tree}
         if any(t.caller_id in ids for t in db.list_tasks(ws.repo_root if ws else None, state="pending")):
             continue    # it is waiting for work it queued
         if _unfinished_dirty(db, tree):

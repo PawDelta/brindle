@@ -169,7 +169,7 @@ def test_finished_workers_sessions_are_reaped(db, repo, fake_tmux, monkeypatch, 
 
 
 @pytest.mark.parametrize("case", ["idle", "attached", "recent input", "running worker", "uncommitted work",
-                                  "attached worker shell"])
+                                  "attached worker shell", "recent output", "a job in a second pane"])
 def test_idle_supervisors_are_stopped_but_resumable(db, repo, fake_tmux, case):
     ws = workspaces.adopt_root(db, str(repo))
     add(db, ws, "boss", mode="interactive", profile="supervisor", tmux_window="%1")
@@ -179,7 +179,10 @@ def test_idle_supervisors_are_stopped_but_resumable(db, repo, fake_tmux, case):
     if case == "running worker":
         add(db, ws, "w1", parent_id="boss", status="processing", tmux_window="%2")
         live(fake_tmux, "%2")
-    fake_tmux.sessions = [session("brindle_proj_main", pane("%1", repo, cmd="claude"),
+    # A second pane the pause would close: logging in a shell, or a job brindle didn't start.
+    job = {"recent output": [pane("%8", repo, activity=NOW - 3600)],
+           "a job in a second pane": [pane("%8", repo, cmd="python")]}.get(case, [])
+    fake_tmux.sessions = [session("brindle_proj_main", pane("%1", repo, cmd="claude"), *job,
                                   attached=case == "attached",
                                   activity=NOW - 3600 if case == "recent input" else OLD)]
     if case == "attached worker shell":   # pause closes a reported worker's shell-only session
