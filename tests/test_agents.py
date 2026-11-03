@@ -164,7 +164,11 @@ CLAUDE_TYPING_WITH_INVERSE_CURSOR = (
 
 
 @pytest.mark.parametrize("screen,interactive,want", [
+    (CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES, True, None),  # not the real footer
+    (CLAUDE_PLACEHOLDER_GREY_256, True, None),  # grey 256-colour placeholder
+    (CLAUDE_PLACEHOLDER_TRUECOLOR_GREY, True, None),  # grey truecolor placeholder
     (CLAUDE_TYPING_WITH_INVERSE_CURSOR, True, "typing"),  # ignore the inverse-video cursor cell
+    ("❯\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing"),   # a long draft, prompt far above
 ])
 def test_claude_paste_blocked(screen, interactive, want):
     assert ClaudeCode().paste_blocked(screen, interactive) == want
@@ -313,6 +317,13 @@ def test_repo_read_dirs_become_read_only_allow_rules(ws):
     allowed = argv[argv.index("--allowedTools") + 1].split(",")
     assert f"Read(/{Path(ws.repo_root).resolve()}/results/**)" in allowed and "Read(//srv/data/**)" in allowed
     assert "--add-dir" not in argv
+    # --add-dir is variadic: a flag must follow the last one, or Claude Code reads the prompt as a directory.
+    from dataclasses import replace
+
+    profile = replace(load_profile("developer"), add_dirs=["/srv/cache", "/srv/refs"])
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
+    last = max(i for i, a in enumerate(argv) if a == "--add-dir")
+    assert argv[last + 2].startswith("--"), argv[last:]
 
 
 @pytest.mark.parametrize("tool, reports, ends", [

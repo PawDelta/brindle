@@ -119,6 +119,9 @@ def test_deleting_the_last_record_is_caught_by_the_head(brindle_home):
     assert report.broken_seq == 5 and "truncated" in report.reason and report.records == 4
     rewrite(brindle_home, ls[:-2])
     assert verify(REPO, home=brindle_home).broken_seq == 4
+    rewrite(brindle_home, ls[:2] + [b"not json"])         # an unreadable record is rejected at its seq
+    report = verify(REPO, home=brindle_home)
+    assert report.broken_seq == 3 and "unreadable" in report.reason
 
 
 def test_inserting_a_forged_record_breaks_the_chain(brindle_home):

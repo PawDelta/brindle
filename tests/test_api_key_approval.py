@@ -69,6 +69,10 @@ def test_doctor_fix_accepted_approves_and_then_stops_asking(tmp_path, monkeypatc
     monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
     doctor.fix(lambda p: False)   # declined: nothing is approved
     assert not _config(tmp_path).exists()
+    monkeypatch.setattr(doctor, "checks", lambda root: [])
+    r = runner.invoke(app, ["doctor", "--fix"], input="\n")   # the CLI's own prompt: an empty answer declines
+    assert r.exit_code == 0, r.output
+    assert not _config(tmp_path).exists()
     doctor.fix(lambda p: True)
     assert json.loads(_config(tmp_path).read_text())["customApiKeyResponses"]["approved"] == [KEY[-20:]]
     assert doctor.fix(lambda p: 1 / 0) == ["ANTHROPIC_API_KEY: already approved in Claude Code"]

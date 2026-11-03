@@ -56,11 +56,17 @@ def no_enterprise(monkeypatch):
 # -- each route parsed -------------------------------------------------------
 
 def test_org_routes_keep_org_id(no_enterprise):
-    route = "console"
-    s = parse({"claude": {"route": route, "org_id": UUID}})
+    s = parse({"claude": {"route": "console", "org_id": UUID}})
     assert isinstance(s, AgentSetup)
-    assert s.claude.route == route
-    assert s.claude.org_id == UUID
+    assert s.claude.route == "console" and s.claude.org_id == UUID
+
+
+def test_enforce_only_block_is_valid(enterprise):
+    s = parse({"enforce": True})
+    assert s.enforce is True and s.claude is None and s.codex is None
+    assert s.deny_personal_keys is None and s.exclusive is None and s.routing is False     # an older server
+    s = parse({"enforce": True, "deny_personal_keys": True, "exclusive": False})
+    assert s.deny_personal_keys is True and s.exclusive is False and s.routing is True
 
 
 def test_bedrock_route_keeps_aws_only(no_enterprise):
@@ -115,6 +121,16 @@ def test_unused_sub_blocks_are_pruned(no_enterprise):
 
 BAD_CASES = [
     ("aws sso_start_url with userinfo", {"claude": {"route": "bedrock", "aws": {**AWS, "sso_start_url": "https://u:p@x.example.com/start"}}}),
+    ("route missing its sub-block", {"claude": {"route": "bedrock"}}),
+    ("aws SSO group incomplete", {"claude": {"route": "bedrock", "aws": {k: v for k, v in AWS.items() if k != "role_name"}}}),
+    ("azure resource without subscription", {"claude": {"route": "foundry", "azure": {"resource": "acme-foundry"}}}),
+    ("model_ids not a list", {"claude": {"route": "bedrock", "aws": OWN_AWS, "model_ids": IDS[0]}}),
+    ("auth is not a known mode", {"claude": {"route": "vertex", "auth": "magic", "gcp": GCP}}),
+    ("deny_personal_keys not a bool", {"codex": {"route": "chatgpt"}, "deny_personal_keys": "yes"}),
+    ("exclusive not a bool", {"codex": {"route": "chatgpt"}, "exclusive": 1}),
+    ("federation max_session_age under an hour", {"claude": {
+        "route": "bedrock", "auth": "federated",
+        "aws": {"region": "us-west-2", "federation": {**FED_AWS, "max_session_age": 60}}}}),
     ("codex route", {"codex": {"route": "bing"}}),
     ("unknown nested field with a secret value", {"claude": {"route": "bedrock", "aws": AWS, "future": {"a": ["sk-ant-api03-abcdefghijklmnop"]}}}),
     ("enforce not a bool", {"enforce": "yes"}),
@@ -149,14 +165,6 @@ def test_enforce_dropped_without_enterprise(no_enterprise):
     s = parse({"enforce": True, "claude": {"route": "subscription", "org_id": UUID}})
     assert s.enforce is False
     assert s.claude.route == "subscription"
-
-
-def test_enforce_only_block_is_valid(enterprise):
-    s = parse({"enforce": True})
-    assert s.enforce is True and s.claude is None and s.codex is None
-    assert s.deny_personal_keys is None and s.exclusive is None and s.routing is False     # an older server
-    s = parse({"enforce": True, "deny_personal_keys": True, "exclusive": False})
-    assert s.deny_personal_keys is True and s.exclusive is False and s.routing is True
 
 
 def test_enforce_entitlement_error_fails_closed(monkeypatch):
