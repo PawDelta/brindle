@@ -3,6 +3,7 @@ into it, a session resuming and a merged session PR bring origin/main in when
 that's clean; a conflict blocks merges into it until a branch resolves it, and
 a branch behind origin/main gets no PR."""
 
+import shutil
 import time
 from pathlib import Path
 
@@ -37,10 +38,13 @@ def sess(db, repo, tmp_path, told, monkeypatch):
 
 
 @pytest.fixture
-def other(repo, tmp_path):
-    """Another clone, where commits land on origin/main without the session."""
+def other(repo, tmp_path, _repo_template):
+    """Another clone, where commits land on origin/main without the session:
+    the template's checkout, a clone of the same origin, pointed at this one."""
     path = tmp_path / "other"
-    sh(f"git clone -q {repo.parent / 'origin.git'} {path}", tmp_path)
+    shutil.copytree(_repo_template / "proj", path, symlinks=True)
+    cfg = path / ".git" / "config"
+    cfg.write_text(cfg.read_text().replace(str(_repo_template), str(tmp_path)))
     return path
 
 

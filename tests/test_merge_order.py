@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, conflicts, disk, gates, git, mcp_server, pipeline, services, tmux, workspaces
+from brindle import agents, config, conflicts, disk, gates, git, mcp_server, pipeline, services, tmux, workspaces
 from brindle.db import Agent, Workspace
 
 
@@ -186,6 +186,10 @@ def piped(db, repo, monkeypatch):
     monkeypatch.setattr(agents, "_detach", lambda argv: None)
     monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
     quiet_removal(monkeypatch)
+    # The config isn't committed, so `git show main:.brindle/config.json` fails
+    # on every read and the working tree's file is what counts: read it directly.
+    monkeypatch.setattr(config, "_read_shared", lambda root, branch: config._read_json(
+        root / config.CONFIG_DIR / config.CONFIG_FILE))
     return root
 
 
