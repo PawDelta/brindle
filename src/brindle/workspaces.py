@@ -330,7 +330,7 @@ def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created
                         shown = ", ".join(dirty_work[:5])
                         raise WorkspaceError(
                             f"workspace {ws.id} at {ws.path} appears damaged but has uncommitted or untracked work ({shown}). "
-                            f"Preserve your files, or remove with remove_workspace(\"{ws.id}\", force=True) to discard and recreate."
+                            "brindle won't overwrite it: commit or move those files, then assign again."
                         )
                     git.run(["checkout", "HEAD", "--", "."], ws.path)
                     return Created(ws, "existing", branch, [], None)
@@ -342,11 +342,29 @@ def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created
                 shown = ", ".join(surviving[:5])
                 raise WorkspaceError(
                     f"workspace {ws.id} at {ws.path} appears damaged but has surviving files ({shown}). "
-                    f"Preserve your files, or remove with remove_workspace(\"{ws.id}\", force=True) to discard and recreate."
+                    "brindle won't overwrite them: move them out of the folder, then assign again."
                 )
-        # The folder is deleted and made again at the same path: every pane of the
-        # workspace's session (no live worker, see above) would be left in the dead
-        # copy, so the session ends first, as remove() ends it.
+            # Nothing but a lost or broken .git link: check the branch out into this
+            # very folder, so panes, shells and a tmux server sitting in it keep a
+            # live directory (same inode). Only the link file goes.
+            if git_file.is_file() or git_file.is_symlink():
+                git_file.unlink()
+            git.run(["worktree", "prune"], repo_root, check=False)
+            try:
+                return Created(ws, git.add_worktree(repo_root, ws.path, branch, base), branch, [], None)
+            except git.GitError:
+                pass
+            # Repairing in place failed: replacing the folder would strand anything in it.
+            if disk.live_in(db, ws.path, own=ws):
+                raise WorkspaceError(
+                    f"workspace {ws.id} at {ws.path} is damaged and can't be repaired in place, and it "
+                    "is in use: a process or a pane is in it, someone is attached to its session (or "
+                    "that can't be told). It is kept; leave the folder (or close what runs there), "
+                    "then assign again."
+                )
+        # The folder is deleted (or already gone) and made again at the same path:
+        # every pane of the workspace's session (no live worker, see above) would be
+        # left in the dead copy, so the session ends first, as remove() ends it.
         _rescue_sidebar(db, ws)
         tmux.kill_session(ws.tmux_session)
         try:
