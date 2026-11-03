@@ -162,6 +162,10 @@ def test_two_live_sessions_attach_one_repo_and_each_merges_into_its_own_branch(
     db.add_agent(Agent("other", ows.id, "supervisor", "claude", None, "interactive", "processing",
                         "@1", None, time.time()))
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("boss", "other"))
+    # The repo's merge_into must not pull either session's workers onto its main.
+    cfg = web / ".brindle" / "config.json"
+    cfg.write_text(json.dumps({**json.loads(cfg.read_text()), "merge_into": "main"}))
+    sh("git add -A && git commit -qm merge-into", web)
     theirs = repos.attach(db, "other", str(web), "web")
     mine = repos.attach(db, "boss", str(web), "web")
     assert {mine.branch, theirs.branch} == {"brindle/session-2", "brindle/session-3"}
@@ -179,9 +183,18 @@ def test_two_live_sessions_attach_one_repo_and_each_merges_into_its_own_branch(
     assert (Path(target["boss"].path) / "boss.txt").exists() and not (Path(target["boss"].path) / "other.txt").exists()
     assert (Path(target["other"].path) / "other.txt").exists() and not (Path(target["other"].path) / "boss.txt").exists()
     assert not (web / "boss.txt").exists() and not (web / "other.txt").exists()   # the shared checkout's branch is untouched
-    # The cleanup sweep keeps a session's merge target while it's attached, even with nothing on it yet.
+    # Another session's merge target is reserved, even though no worker ever ran in it.
+    refused = asyncio.run(mcp_server.assign("developer", "w", branch=theirs.branch, repo="web"))
+    assert "belongs to session other" in refused, refused
+    assert not db.list_agents(target["other"].id)
+    # The cleanup sweep keeps a session's merge target while it's attached, with
+    # nothing on it yet and after a finished non-isolated worker ran there.
     monkeypatch.setattr(view, "UNUSED_WORKTREE_GRACE", -1)
     sh(f"git reset -q --hard {sh('git rev-parse main', web)}", Path(target["boss"].path))
+    assert not view.retired(db, target["boss"], set())
+    shared = started_worker_id(asyncio.run(mcp_server.assign("developer", "w", isolate=False, repo="web")))
+    assert db.get_agent(shared).workspace_id == target["boss"].id
+    db.set_status(shared, "done")
     assert not view.retired(db, target["boss"], set())
     assert repos.detach(db, "boss", "web").branch == mine.branch
     assert git.branch_exists(str(web), mine.branch)              # detach keeps the branch
