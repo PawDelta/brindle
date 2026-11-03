@@ -27,7 +27,7 @@ import time
 import uuid
 from pathlib import Path
 
-from brindle import git, spawn, workspaces
+from brindle import disk, git, spawn, workspaces
 from brindle.config import RepoConfig, load_repo_config, worktree_root, worktrees_dir
 from brindle.db import DB, PoolEntry, Workspace
 
@@ -259,6 +259,7 @@ def sweep(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> None:
         wt["worktree"]: wt["branch"].removeprefix("refs/heads/")
         for wt in git.list_worktrees(repo_root) if "branch" in wt
     }
+    cwds = False
     for base_dir in (pool_dir(repo_root, cfg), legacy_pool_dir(repo_root, db)):
         if not base_dir.is_dir():
             continue
@@ -269,6 +270,10 @@ def sweep(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> None:
             branch = branch_by_path.get(path)
             if branch is not None and branch not in pool_branches:
                 continue  # not a pool worktree (or claimed and renamed): not ours to touch
+            if cwds is False:
+                cwds = disk._cwds()   # read once for the whole sweep
+            if disk.live_in(db, path, cwds):
+                continue  # a forgotten row's folder something still runs in: kept
             git.run(["worktree", "remove", "--force", path], repo_root, check=False)
             shutil.rmtree(child, ignore_errors=True)
     git.run(["worktree", "prune"], repo_root, check=False)

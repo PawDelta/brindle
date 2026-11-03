@@ -2,6 +2,7 @@
 abandoned ones reported, retention of brindle's own files, the free-disk
 guard, and dead branches."""
 
+import dataclasses
 import json
 import os
 import subprocess
@@ -11,7 +12,8 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from brindle import (agents, config, cull, disk, doctor, git, history, pipeline, procs, spawn, tasks, tmux,
+from brindle import (agents, config, cull, disk, doctor, git, history, pipeline, pool, procs, sessions, spawn,
+                     tasks, tmux,
                      workspaces)
 from brindle.cli import app
 from brindle.daemon import routes_actions
@@ -126,6 +128,37 @@ def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, repo, 
 
     assert Path(ws.path).is_dir() == (other is not None)
     assert (db.get_workspace(ws.id) is not None) == (other is not None)
+
+
+@pytest.mark.parametrize("sweep", ["scratch", "pool"])
+def test_scratch_prune_and_pool_sweep_keep_a_folder_a_process_is_in(db, repo, monkeypatch, sweep):
+    """An old scratch session and an orphan pool folder (its row forgotten)
+    are deleted by folder alone, unless a process (fake table) is in them."""
+    ws = None
+    if sweep == "scratch":
+        ws = dataclasses.replace(workspaces.create(db, str(repo), "scratchy").workspace, created_at=0.0)
+        path = ws.path
+        monkeypatch.setattr(sessions.scratch, "sessions", lambda db: [ws])
+        monkeypatch.setattr(sessions.scratch, "commit_count", lambda ws: 0)
+        monkeypatch.setattr(tmux, "kill_session", lambda name: None)
+    else:
+        (repo / ".brindle").mkdir(exist_ok=True)
+        (repo / ".brindle" / "config.json").write_text(json.dumps({"setup": ["true"]}))
+        pool.fill(db, str(repo))
+        [entry] = db.pool_entries(str(repo), ready_only=False)
+        db.delete_pool_entry(entry.path)
+        path = entry.path
+    monkeypatch.setattr(procs, "table", lambda: {})
+    monkeypatch.setattr(procs, "cwds", lambda: {4242: os.path.realpath(path)})
+    monkeypatch.setattr(tmux, "session_panes", lambda name: [])
+    monkeypatch.setattr(tmux, "list_sessions", lambda: [])
+
+    if ws is not None:
+        assert sessions.prune_scratch(db) == 0
+        assert db.get_workspace(ws.id) is not None
+    else:
+        pool.sweep(db, str(repo))
+    assert Path(path).is_dir()
 
 
 @pytest.mark.parametrize("cleanup,child,attached", [
