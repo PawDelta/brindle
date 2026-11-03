@@ -18,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from brindle import agents, bus, git, history, knowledge, pool, scratch, tmux, workspaces
+from brindle import agents, bus, disk, git, history, knowledge, pool, scratch, tmux, workspaces
 from brindle.db import DB, Agent, Workspace
 
 # Free-tier retention. Read from the environment so a paid add-on (or a person
@@ -379,6 +379,8 @@ def prune_scratch(db: DB, now: float | None = None) -> int:
         has_work = scratch.commit_count(ws) > 0 or bool(git.dirty_files(ws.path))
         if has_work and not scratch.transferred_to(ws.path):
             continue  # untransferred work stays
+        if disk.live_in(db, ws.path, own=ws):
+            continue  # a shell, a pane or a dev server is in it: deleting would strand it
         for s in paused(db, ws.repo_root):
             _forget(db, s)
         # Done sessions aren't paused ones: their records go with the workspace.
