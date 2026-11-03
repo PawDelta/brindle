@@ -462,13 +462,20 @@ def cwds(ignore: frozenset[str] | set[str] | list[str] = frozenset()) -> dict[in
 
 
 def alive(pid: int) -> bool:
+    """Whether ``pid`` is a running process. On Linux a process that has
+    exited but isn't reaped yet (a zombie, e.g. an orphan waiting on its
+    new parent) still answers kill(0); it runs nothing, so it isn't alive."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    return True
+    try:
+        stat = (PROC / str(pid) / "stat").read_text()
+    except OSError:   # no /proc (macOS), or it exited just now
+        return True
+    return stat.rpartition(")")[2].split()[:1] != ["Z"]
 
 
 def terminate(pids: set[int] | list[int], grace: float = 3.0) -> int:

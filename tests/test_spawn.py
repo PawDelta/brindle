@@ -249,6 +249,18 @@ def _an_abandoned_read_leaves_no_process(tmp_path, monkeypatch):
     assert spawn.running() == 0
 
 
+def _an_unreaped_process_is_not_alive(tmp_path, monkeypatch):
+    """Linux keeps an exited, unreaped process as a zombie that still answers
+    kill(0) (an orphan waiting on a subreaper such as systemd --user)."""
+    stat = tmp_path / str(os.getpid()) / "stat"
+    stat.parent.mkdir()
+    monkeypatch.setattr(procs, "PROC", tmp_path)
+    stat.write_text(f"{os.getpid()} (sh (x)) Z 1 1 1 0 -1")
+    assert not procs.alive(os.getpid())
+    stat.write_text(f"{os.getpid()} (sh (x)) R 1 1 1 0 -1")
+    assert procs.alive(os.getpid())
+
+
 def _a_hung_up_sidebar_leaves_no_read_running(tmp_path):
     """tmux hangs up the sidebar while its costs thread waits on `claude -p
     /usage` (its own session, so the hangup never reaches it): the read is
@@ -439,6 +451,7 @@ def _row(scenario, id, why=None, **params):
     _row(_an_abandoned_read_leaves_no_process, "abandoned-read"),
     _row(_a_hung_up_sidebar_leaves_no_read_running, "hung-up-sidebar-read",
          "a read must not outlive the process that started it"),
+    _row(_an_unreaped_process_is_not_alive, "zombie-not-alive"),
     _row(_a_cancelled_request_stops_the_read_its_thread_left_running, "cancelled-read",
          "a cancelled request stops the read its worker thread left running"),
     _row(_a_post_whose_client_left_mid_action_runs_to_its_end, "client-left-post",
