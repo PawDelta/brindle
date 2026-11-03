@@ -629,17 +629,25 @@ def _rescue_sidebar(db: DB, ws: Workspace) -> None:
 
 
 def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | None = None,
-           keep_session: bool = False) -> Removed:
+           keep_session: bool = False, stop=()) -> Removed:
     """``delete_branch``: True deletes the branch (only if merged, unless
     ``force``), False keeps it, and None (the default) follows the repo's
     ``delete_merged_branches``: the branch goes once it is fully merged into
     its base, so finished branches don't pile up, and is kept otherwise.
     ``keep_session`` leaves the workspace's tmux session running: for a
     caller that itself runs in it (the pipeline's reviewer), which killing
-    the session would take down mid-cleanup."""
+    the session would take down mid-cleanup. ``stop``: agents of it to stop
+    first, once the worktree is known to go: kept, it keeps them."""
+    def stop_them():
+        from brindle import agents
+
+        for a in stop:
+            agents._stop(db, a)
+
     if ws.kind == "main":
         from brindle import pipeline
 
+        stop_them()
         if not keep_session:
             _rescue_sidebar(db, ws)
             tmux.kill_session(ws.tmux_session)
@@ -662,6 +670,7 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             )
         if not live:
             # Only stale rows share the folder: drop this row, keep the worktree.
+            stop_them()
             if not keep_session:
                 _rescue_sidebar(db, ws)
                 tmux.kill_session(ws.tmux_session)
@@ -677,12 +686,14 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
                 f"{ws.name} has uncommitted changes ({shown}). "
                 "Commit them, or pass --force to discard."
             )
-        if disk.live_in(db, ws.path, own=ws):   # before teardown or its session goes
+        # Before teardown, its agents or its session go.
+        if disk.live_in(db, ws.path, own=ws, keep_session=keep_session, stopping=[a.id for a in stop]):
             raise WorkspaceError(
-                f"{ws.name}'s worktree {ws.path} is in use: a pane of another session or a "
-                "process is in it (or that can't be told). It is kept for a later sweep; "
-                "pass --force to remove it anyway."
+                f"{ws.name}'s worktree {ws.path} is in use: a process or a pane of another session "
+                "is in it, someone is attached to its session (or that can't be told). It is kept "
+                "for a later sweep; pass --force to remove it anyway."
             )
+    stop_them()
 
     cfg = config_for(db, ws)
     teardown = None

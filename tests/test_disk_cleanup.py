@@ -128,6 +128,74 @@ def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, repo, 
     assert (db.get_workspace(ws.id) is not None) == (other is not None)
 
 
+@pytest.mark.parametrize("cleanup,child,attached", [
+    ("retired", None, False),
+    ("retired", "vite", False),
+    ("retired", "pytest", False),
+    ("retired", None, True),     # someone sits in its shell pane
+    ("post-merge", None, False),
+    ("post-merge", "vite", False),
+])
+def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, monkeypatch, cleanup, child,
+                                                                 attached):
+    """What the removal ends (the pane's own process when its session is
+    killed, the agents the pipeline stops) is excused; a dev server or test
+    run started in the workspace's own pane is not, though its environment
+    (TMUX=, a PWD in the worktree) and its paths there look like brindle's."""
+    ws = workspaces.create(db, str(repo), "shipped").workspace
+    Path(ws.path, "a.txt").write_text("a\n")
+    sh("git add a.txt && git commit -qm a", ws.path)
+    sh(f"git merge -q --no-ff -m m {ws.branch}", repo)
+    wt = os.path.realpath(ws.path)
+    keep = None
+    if cleanup == "post-merge":   # the worker's CLI in the pane; the approving reviewer runs this
+        mcp = json.dumps({"mcpServers": {"brindle": {"env": {
+            "BRINDLE_AGENT_ID": "w1", "BRINDLE_HOME": os.environ.get("BRINDLE_HOME")}}}})
+        pane = f"claude --mcp-config {mcp}"
+        db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "waiting",
+                           "@998", None, time.time()))
+        keep = Agent("r1", ws.id, "reviewer", "claude", None, "review", "done", "@999", None, time.time())
+        db.add_agent(keep)
+    else:
+        pane = "-zsh"
+        db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "done",
+                           "@999", None, time.time() - 7200))
+    command = {"vite": f"node {wt}/node_modules/.bin/vite",
+               "pytest": f"{wt}/.venv/bin/python3 {wt}/.venv/bin/pytest -q"}.get(child)
+    rows = [(500, 1, pane)] + ([(501, 500, command)] if command else [])
+    env = f"TMUX=/private/tmp/tmux-501/default,1,0 PWD={wt} HOME=/u"
+
+    def ps(argv, **kw):   # the faked process table, read as procs.table reads it
+        if argv[0] != "ps":
+            return read(argv, **kw)
+        shown = "".join(f"{pid} {ppid} {cmd}" + (f" {env}" if "e" in argv[1] else "") + "\n"
+                        for pid, ppid, cmd in rows)
+        return subprocess.CompletedProcess(argv, 0, shown, "")
+
+    read = spawn.read
+    monkeypatch.setattr(procs, "PROC", Path(repo, "no-proc"))
+    monkeypatch.setattr(spawn, "read", ps)
+    monkeypatch.setattr(procs, "cwds", lambda: {pid: wt for pid, _ppid, _cmd in rows}
+                        | {os.getpid(): os.getcwd()})
+    real_panes, real_sessions = tmux.session_panes, tmux.list_sessions
+    monkeypatch.setattr(tmux, "session_panes", lambda s: [(500, wt)] if s == ws.tmux_session else real_panes(s))
+    monkeypatch.setattr(tmux, "list_sessions", lambda: real_sessions() + [(ws.tmux_session, attached)])
+    stopped = []
+    monkeypatch.setattr(agents, "is_alive", lambda a, *rest, **kw: a.id == "w1" and a.status == "waiting"
+                        and "w1" not in stopped)
+    monkeypatch.setattr(agents, "_stop", lambda db, a: stopped.append(a.id))
+
+    if cleanup == "post-merge":
+        pipeline._remove(db, ws, keep=keep)
+    else:
+        cull.prune_retired(db)
+
+    removed = child is None and not attached
+    assert Path(ws.path).is_dir() == (not removed)
+    assert (db.get_workspace(ws.id) is None) == removed
+    assert stopped == (["w1"] if removed and keep else [])
+
+
 def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, monkeypatch):
     wt = _worktree(repo, "stalled", days_old=30)
     tip = sh("git rev-parse stalled", repo).strip()

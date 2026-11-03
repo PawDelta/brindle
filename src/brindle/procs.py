@@ -44,13 +44,30 @@ PROC = Path("/proc")   # Linux's process table; absent on macOS
 class Proc:
     pid: int
     ppid: int
-    text: str    # command line, plus (on macOS) the environment ps appends
+    text: str    # command line, plus the process's environment
+    cmd: str | None = None   # the command line alone (None: a hand-made table's ``text`` is one)
+
+
+def command_line(p: Proc) -> str:
+    """``p``'s command line, without its environment: what it runs, not
+    what it inherited (TMUX=, a PWD, whatever its parent had)."""
+    return p.text.split(" BRINDLE_", 1)[0].strip() if p.cmd is None else p.cmd.strip()
+
+
+def _ps(flags: str) -> dict[int, tuple[int, str]]:
+    listing = spawn.read(["ps", flags, "-o", "pid=,ppid=,command="], timeout=PS_LIMIT).stdout
+    out = {}
+    for line in listing.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            out[int(parts[0])] = (int(parts[1]), parts[2])
+    return out
 
 
 def table() -> dict[int, Proc]:
     """Every process of this user."""
     out: dict[int, Proc] = {}
-    proc = Path("/proc")
+    proc = PROC
     if (proc / "self" / "stat").exists():
         for d in proc.iterdir():
             if not d.name.isdigit():
@@ -62,14 +79,15 @@ def table() -> dict[int, Proc]:
             except OSError:
                 continue
             ppid = int(stat.rsplit(")", 1)[1].split()[1])
-            out[int(d.name)] = Proc(int(d.name), ppid, f"{cmd} {env}")
+            out[int(d.name)] = Proc(int(d.name), ppid, f"{cmd} {env}", cmd)
         return out
-    # macOS (BSD ps): `e` appends each process's environment to its command.
-    listing = spawn.read(["ps", "xeww", "-o", "pid=,ppid=,command="], timeout=PS_LIMIT).stdout
-    for line in listing.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
-            out[int(parts[0])] = Proc(int(parts[0]), int(parts[1]), parts[2])
+    # macOS (BSD ps): `e` appends each process's environment to its command,
+    # with nothing to tell where one ends, so the command line is read apart.
+    # A process that started between the two has no command line: it counts
+    # as a command (see is_command), whatever its environment says.
+    commands = _ps("xww")
+    for pid, (ppid, text) in _ps("xeww").items():
+        out[pid] = Proc(pid, ppid, text, commands.get(pid, (ppid, ""))[1])
     return out
 
 
@@ -83,7 +101,7 @@ def _ancestors(procs: dict[int, Proc]) -> set[int]:
 
 
 def _is_daemon(p: Proc) -> bool:
-    return bool(re.search(r"\bclaude daemon\b|\bdaemon run\b", p.text.split(" BRINDLE_", 1)[0]))
+    return bool(re.search(r"\bclaude daemon\b|\bdaemon run\b", command_line(p)))
 
 
 def _names_agent(p: Proc, agent_id: str) -> bool:
@@ -132,7 +150,7 @@ def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] 
             elif _is_brindle_mcp_for(p, aid) and _home_matches(p):
                 roots.add(p.pid)
                 parent = procs.get(p.ppid)
-                if parent and "bg-spare" in parent.text.split(" BRINDLE_", 1)[0]:
+                if parent and "bg-spare" in command_line(parent):
                     roots.add(parent.pid)   # a pre-started spare made for this agent
         found, queue = set(), [r for r in roots if r in procs]
         while queue:
@@ -190,10 +208,17 @@ def running_commands(agent_id: str, pane_pids: list[int] | None = None,
     return [procs[pid] for pid in pids if pid in procs and is_command(procs[pid])]
 
 
-def is_command(p: Proc) -> bool:
+def is_command(p: Proc, inside: str | None = None) -> bool:
     """Whether ``p`` looks like a command (a test run, a build, a dev server),
-    not a provider CLI, its MCP servers, hooks or a bare shell."""
-    cmd = p.text.split(" BRINDLE_", 1)[0].strip()
+    not a provider CLI, its MCP servers, hooks or a bare shell. Only its
+    command line counts, never its environment. ``inside``: a folder (a
+    worktree) whose paths count by their last part alone, so a
+    ``node_modules`` or a "brindle" in the folder's own path doesn't make
+    what runs from it plumbing."""
+    cmd = command_line(p)
+    for folder in sorted({inside, os.path.realpath(inside)}, key=len, reverse=True) if inside else ():
+        cmd = re.sub(re.escape(folder.rstrip(os.sep)) + r"(?:/(\S*))?",
+                     lambda m: os.path.basename(m.group(1) or "") or ".", cmd)
     first = os.path.basename(cmd.split(None, 1)[0]) if cmd else ""
     return not (first.lstrip("-") in _SHELLS or _PLUMBING.search(cmd) or _is_cli(cmd))
 

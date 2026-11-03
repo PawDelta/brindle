@@ -1549,14 +1549,12 @@ def _still_in_use(db: DB, ws: Workspace) -> str | None:
 
 def _remove(db: DB, ws: Workspace, keep: Agent | None = None) -> str:
     """Remove ``ws`` while ``keep`` (the agent running this code) survives:
-    the other agents' windows are stopped, but the session ``keep`` is in is
-    left for its own close."""
+    the other agents are stopped once the worktree is known to go (kept,
+    it keeps them), but the session ``keep`` is in is left for its own close."""
     try:
-        if keep is not None:
-            for a in db.list_agents(ws.id):
-                if a.id != keep.id and agents.is_alive(a):
-                    agents._stop(db, a)
-        removed = workspaces.remove(db, ws, force=False, keep_session=keep is not None)
+        others = [a for a in db.list_agents(ws.id)
+                  if keep is not None and a.id != keep.id and agents.is_alive(a)]
+        removed = workspaces.remove(db, ws, force=False, keep_session=keep is not None, stop=others)
         return f"Worktree removed; {removed.branch_note or 'branch kept'}."
     except workspaces.WorkspaceError as e:
         return f"(worktree kept: {e})"

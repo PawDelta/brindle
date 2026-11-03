@@ -203,13 +203,16 @@ def _cwds() -> dict[int, str] | None:
         return None
 
 
-def _its_own(db, ws) -> tuple[set[int], bool] | None:
+def _its_own(db, ws, keep_session: bool = False, stopping=()) -> tuple[set[int], bool] | None:
     """The processes ``ws``'s removal ends itself, and whether this process
-    is one of them: the shells, provider CLIs and brindle plumbing of its
-    own tmux session's panes and of its agents (``procs.agent_pids``). A
-    command one of them started (a dev server, a test run) is not among
-    them, and nor is anything of another session. None when the process
-    table can't be read."""
+    is among the workspace's own: the pane processes of its own tmux session
+    (unless ``keep_session``, which leaves them running), the shells, CLIs
+    and brindle plumbing of the agents ``stopping`` (ids the removal stops),
+    and this process and its ancestors, the caller doing the removal. What
+    any of them started (a dev server, a test run, anything nohup'd past
+    kill-session) is not among them, and nor is anything of another
+    session. Told apart by command line alone (``procs.is_command``). None
+    when the process table can't be read."""
     from brindle import procs, spawn, tmux
 
     try:
@@ -218,27 +221,33 @@ def _its_own(db, ws) -> tuple[set[int], bool] | None:
     except (OSError, spawn.Busy, subprocess.SubprocessError, tmux.TmuxError) as e:
         log.warning("brindle: can't see %s's own processes, so its worktree is kept: %s", ws.id, e)
         return None
-    ids = [a.id for a in db.list_agents(ws.id)]
+    excused = set() if keep_session else {pid for pid in panes if pid in table}
+    for pids in procs.agent_pids(list(stopping), None, table).values():
+        excused |= {pid for pid in pids if pid in table and not procs.is_command(table[pid], ws.path)}
     theirs = procs.descendants(panes, table) | set(panes)
-    for pids in procs.agent_pids(ids, None, table, through_ancestors=True).values():
+    for pids in procs.agent_pids([a.id for a in db.list_agents(ws.id)], None, table,
+                                 through_ancestors=True).values():
         theirs |= pids
-    mine = bool(procs._ancestors(table) & theirs)
-    return {pid for pid in theirs if pid in table and not procs.is_command(table[pid])}, mine
+    chain = procs._ancestors(table) & theirs
+    return excused | chain, bool(chain)
 
 
-def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, own=None) -> bool:
+def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, own=None,
+            keep_session: bool = False, stopping=()) -> bool:
     """Whether anything is live in ``path``: a running agent of a workspace
     there, any process whose folder is in it (a detached dev server, a shell
     on any tmux server or terminal, this very process) or a pane of brindle's
     tmux server. ``cwds``: ``_cwds()`` already taken. Unknown counts as live.
-    ``own``: the workspace being removed, whose own session, agents and their
-    shells and CLIs don't count (its removal ends them; see ``_its_own``)."""
+    ``own``: the workspace being removed, whose processes its removal ends
+    don't count (see ``_its_own``; ``keep_session`` and ``stopping`` say
+    what that removal ends), unless someone is attached to the session it
+    kills."""
     from brindle import tmux, workspaces
 
     real = os.path.realpath(path)
     excused, mine = set(), False
     if own is not None:
-        found = _its_own(db, own)
+        found = _its_own(db, own, keep_session, stopping)
         if found is None:
             return True
         excused, mine = found
@@ -248,8 +257,7 @@ def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, ow
     except OSError:
         pass
     cwds = _cwds() if cwds is False else cwds
-    if cwds is None or any(_inside(c, real) for pid, c in cwds.items()
-                           if pid not in excused and not (mine and pid == os.getpid())):
+    if cwds is None or any(_inside(c, real) for pid, c in cwds.items() if pid not in excused):
         return True
     for ws in db.find_workspaces():
         if own is not None and ws.id == own.id:
@@ -257,8 +265,10 @@ def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, ow
         if _inside(os.path.realpath(ws.path), real) and workspaces.live_workers(db, ws):
             return True
     try:
-        for name, _attached in tmux.list_sessions():
+        for name, attached in tmux.list_sessions():
             if own is not None and name == own.tmux_session:
+                if attached and not keep_session:
+                    return True
                 continue
             if any(p and _inside(os.path.realpath(p), real) for _pid, p in tmux.session_panes(name)):
                 return True

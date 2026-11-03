@@ -277,7 +277,7 @@ def _a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db, rep
         spawn.current().stop()             # the client leaves right after the first change
 
     monkeypatch.setattr(tmux, "kill_window", kill_window)
-    monkeypatch.setattr(procs, "Path", lambda p: tmp_path / "no-proc")    # ps, not /proc, on Linux too
+    monkeypatch.setattr(procs, "PROC", tmp_path / "no-proc")    # ps, not /proc, on Linux too
     monkeypatch.setattr(subprocess, "Popen", _FakePs)
     _FakePs.started = []
     monkeypatch.setattr(procs, "terminate", lambda pids, grace=3.0: terminated.update(pids) or len(pids))
@@ -285,7 +285,7 @@ def _a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes(db, rep
     with spawn.deadline(30):
         agents.pause_worker(db, db.get_agent("a1"))
     assert closed == ["%7"]
-    assert [argv[0] for argv in _FakePs.started] == ["ps"]   # admitted through spawn.read
+    assert [argv[0] for argv in _FakePs.started] == ["ps", "ps"]   # admitted through spawn.read
     assert terminated == {5001, 5002, 5003}
     assert all(s.ended_at is not None for s in db.native_subagents("a1"))
     assert db.get_agent("a1").status == "paused"
