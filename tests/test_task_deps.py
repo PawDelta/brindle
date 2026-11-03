@@ -652,7 +652,7 @@ def test_requeue_with_a_cancelled_dependency_asks_for_new_ones(db, repo, boss):
 
 @pytest.mark.parametrize("tool, start", [
     ("assign", "detached"), ("handoff", "detached"), ("handoff", "at once"),
-    ("assign", "behind a worker"), ("assign", "capped"),
+    ("assign", "behind a worker"), ("assign", "capped"), ("assign", "after a dependency"),
 ])
 def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
     """Under load every git and tmux step of a start waits for room, and
@@ -663,31 +663,53 @@ def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
     refused (overlap "block"); a start that beat the reply is named in it,
     never waited for. Behind a running worker, the git look at what it
     changed waits for the start too, which still refuses the overlap it
-    finds; and a team's worker cap holds for tasks both queued before
-    either start ran, even while the first is still starting."""
-    from brindle import policy, spawn
+    finds; a team's worker cap holds for tasks both queued before either
+    start ran, even when the first finishes between the second's reads; and
+    a dependency's worktree waits for the start for its identity lookup."""
+    from brindle import identity_lock, policy, spawn
 
     (repo / ".brindle" / "config.json").write_text('{"overlap": "block", "pipeline": false, "review": false}')
     events, helpers = [], []
-    real_delegate = agents.delegate
+    real_delegate, real_workers = agents.delegate, policy.worker_agents
 
     def slow_delegate(*a, **k):   # admission, worktree, setup and the tmux launch
         events.append("spawn")
-        if start == "capped":   # the other task's start, while this one is under way
-            for other_task in db.list_tasks(str(repo), state="pending"):
-                assert not tasks.start_when_room(db, other_task.id)
-        worker = real_delegate(*a, **k)
-        if start == "capped":   # its worker exists before its task names it: counted once
-            workers = policy.worker_agents(db, str(repo))
-            assert len(workers) + tasks.launching_workers(db, str(repo), workers) == 1
-        return worker
+        if start != "capped":
+            return real_delegate(*a, **k)
+        if events.count("spawn") > 1:
+            pytest.fail("a second worker started past the cap of 1")
+        [starting] = db.list_tasks(str(repo), state="starting")
+        launched = []
 
-    def call(task: str = "do A", files: tuple[str, ...] = ("app.py",)) -> str:
-        return asyncio.run(getattr(mcp_server, tool)("developer", task, files=list(files)))
+        def finish_between(db_, root):   # this start finishes between the other start's two reads
+            workers = real_workers(db_, root)
+            if not launched:
+                try:   # an error here would read as an unknown count, which the cap refuses anyway
+                    launched.append(real_delegate(*a, **k))
+                    mine = real_workers(db, root)   # its worker made, its task not naming it yet: counted once
+                    counted = len(mine) + tasks.launching_workers(db, root, mine)
+                    db.update_task(starting.id, agent_id=launched[0][0].id, state="started")
+                except Exception as e:  # noqa: BLE001
+                    pytest.fail(f"the first launch failed: {e!r}")
+                if counted != 1:
+                    pytest.fail(f"the first launch counted {counted} times")
+            return workers
 
+        monkeypatch.setattr(policy, "worker_agents", finish_between)
+        for other_task in db.list_tasks(str(repo), state="pending"):   # its own helper's connection
+            assert not tasks.start_when_room(DB(), other_task.id)
+        monkeypatch.setattr(policy, "worker_agents", real_workers)
+        return launched[0]
+
+    def call(task: str = "do A", files: tuple[str, ...] = ("app.py",), deps: list[str] | None = None) -> str:
+        return asyncio.run(getattr(mcp_server, tool)("developer", task, files=list(files), depends_on=deps))
+
+    if start in ("behind a worker", "after a dependency"):
+        worker = started_worker_id(call("do W", ()))
     if start == "behind a worker":   # its branch has changed app.py, which only git can tell
-        started_worker_id(call("do W", ()))
         monkeypatch.setattr(tasks, "_changed_files", lambda ws: events.append("git") or ["app.py"])
+    if start == "after a dependency":   # who holds its worktree: sign-in probes, up to a minute
+        monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: events.append("identity"))
     if start == "capped":   # as an org's max_parallel_workers of 1 decides
         monkeypatch.setattr(policy, "check_assign", lambda *a, running_workers=None, **k: (
             policy.allow() if running_workers == 0 else policy.deny("at most 1 parallel worker")))
@@ -700,6 +722,15 @@ def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
         return
     monkeypatch.setattr(tasks, "start_in_background", helpers.append, raising=False)
     monkeypatch.setattr(spawn, "room", lambda: 0.0)   # the machine at 0% idle
+    if start == "after a dependency":
+        out = call(deps=[worker])
+        events.append("reply")
+        [t] = [x for x in db.list_tasks(str(repo)) if x.task_text == "do A"]
+        assert t.id in out and events == ["reply"] and helpers == [], out
+        monkeypatch.setattr(spawn, "room", lambda: 4.0)
+        assert not tasks.start_when_room(db, t.id)   # still waits for it to merge
+        assert events[:2] == ["reply", "identity"] and "spawn" not in events
+        return
     out = call()
     events.append("reply")
     again = call()   # the same task, before its start has run

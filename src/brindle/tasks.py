@@ -510,8 +510,10 @@ def unmet_dependencies(
     been merged, so a dependency brindle is tracking as a task is judged by its
     recorded state (only 'merged' counts) instead; only a dependency brindle
     never started falls back to ancestry. Without ``inspect`` (assign/handoff
-    before replying) that git check is left to the start, which makes it
-    again before launching: such a dependency doesn't count as unmet here."""
+    before replying) that git check, and the check that no other identity
+    holds a dependency's worktree (``identity_lock``), are left to the
+    start, which makes them before launching: such a dependency doesn't
+    count as unmet here."""
     if not depends_on:
         return []
     from brindle import identity_lock
@@ -523,7 +525,7 @@ def unmet_dependencies(
         target_repo, task, ws = _resolve_dependency(
             db, caller_ws, dep, session_roots, dependent_task_id=dependent_task_id)
         resolved[dep] = (target_repo, task, ws)
-        if ws is not None:
+        if ws is not None and inspect:   # its lookup can probe sign-ins for a minute: the start's job
             identity_lock.ensure_workspace(db, ws)
 
     unmet = []
@@ -1163,8 +1165,11 @@ def _launch_refusal(db: DB, t: Task) -> str | None:
     from brindle.config import load_repo_config
 
     try:
-        workers = policy.worker_agents(db, t.repo_root)
-        running: int | None = len(workers) + launching_workers(db, t.repo_root, workers)
+        # One snapshot: a start that finishes between the two reads (its
+        # task 'started', its worker made) would be in neither.
+        with db.snapshot():
+            workers = policy.worker_agents(db, t.repo_root)
+            running: int | None = len(workers) + launching_workers(db, t.repo_root, workers)
     except Exception:  # noqa: BLE001 - the policy decides what an unknown count means
         running = None
     caller = db.get_agent(t.caller_id) if t.caller_id else None

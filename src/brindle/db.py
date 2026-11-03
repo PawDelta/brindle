@@ -1308,6 +1308,21 @@ class DB:
             self.conn.execute("ROLLBACK")
             raise
 
+    @contextmanager
+    def snapshot(self) -> Iterator[sqlite3.Connection]:
+        """Reads that see one moment of the database (a WAL read transaction
+        from the first read on), whatever other connections commit meanwhile,
+        without holding off their writes. Reads only; inside a transaction
+        already, they share that one."""
+        if self.conn.in_transaction:
+            yield self.conn
+            return
+        self.conn.execute("BEGIN")
+        try:
+            yield self.conn
+        finally:
+            self.conn.execute("COMMIT")
+
     # -- workspaces --------------------------------------------------------
 
     def add_workspace(self, ws: Workspace) -> None:
