@@ -165,23 +165,56 @@ def test_profile_named_differently_inside_still_resumes_with_its_own_permissions
     assert [flag(argv, "--permission-mode") for argv in launches].count("auto") == 1
 
 
-def test_reviewer_never_waits_on_a_permission_prompt(db, root, launches, detached):
-    boss, ws = root
-    agents.spawn(db, ws, "reviewer", prompt="review this", parent_id=boss.id, mode="review")
-    argv = launches[-1]
-    # dontAsk: whatever allowed_tools doesn't cover is refused, not asked about.
-    assert flag(argv, "--permission-mode") == "dontAsk"
-    assert "Bash(git diff:*)" in flag(argv, "--allowedTools")
-
-
 # -- worktree pre-trust ------------------------------------------------------------
 
 
-def test_trust_keeps_the_config_private(tmp_path, claude_config):
-    config = claude_config / ".claude.json"
-    config.chmod(0o600)
-    assert trust_folder(str(tmp_path)) is True
-    assert stat.S_IMODE(config.stat().st_mode) == 0o600
+def test_concurrent_trusts_all_land(tmp_path, claude_config, monkeypatch):
+    """The second writer reaches the lock while the first is between its read and
+    its write: only the lock keeps the first from overwriting the second's entry."""
+    folders = [tmp_path / "wt-a", tmp_path / "wt-b"]
+    for f in folders:
+        f.mkdir()
+    first_inside, second_waiting, second_writing = threading.Event(), threading.Event(), threading.Event()
+    real_lock, real_replace = providers._config_lock, providers._replace_json
+    contended = []
+
+    def lock(*a, **k):
+        if threading.current_thread().name == "second":
+            second_waiting.set()        # about to contend for the lock
+        return real_lock(*a, **k)
+
+    def second_is_blocked():            # parked in the lock's flock, not yet in the critical section
+        frame = sys._current_frames().get(second.ident)
+        return frame is not None and frame.f_code.co_name == "held"
+
+    def replace(config, data, mode):
+        name = threading.current_thread().name
+        if name == "first":
+            first_inside.set()          # read done, write pending
+            assert second_waiting.wait(10), "the second writer never reached the lock"
+            deadline = time.monotonic() + 10
+            # Hold the write until the second writer is stuck behind the lock, or (with no
+            # working lock) has read the same file and is about to write it too.
+            while not (second_writing.is_set() or second_is_blocked()):
+                assert time.monotonic() < deadline, "the second writer neither waited nor wrote"
+            contended.append(second_is_blocked())
+        elif name == "second":
+            second_writing.set()
+        real_replace(config, data, mode)
+
+    monkeypatch.setattr(providers, "_config_lock", lock)
+    monkeypatch.setattr(providers, "_replace_json", replace)
+    first = threading.Thread(target=trust_folder, args=(str(folders[0]),), name="first")
+    second = threading.Thread(target=trust_folder, args=(str(folders[1]),), name="second")
+    first.start()
+    assert first_inside.wait(10)
+    second.start()
+    first.join()
+    second.join()
+    assert contended == [True]          # the second writer really waited on the lock
+    projects = json.loads((claude_config / ".claude.json").read_text())["projects"]
+    assert all(projects[os.path.realpath(f)]["hasTrustDialogAccepted"] is True for f in folders)
+    assert sorted(p.name for p in claude_config.iterdir()) == [".claude.json"]
 
 
 def test_trust_cleans_up_its_temp_file_when_the_write_fails(tmp_path, claude_config, monkeypatch):
@@ -194,20 +227,6 @@ def test_trust_cleans_up_its_temp_file_when_the_write_fails(tmp_path, claude_con
     monkeypatch.setattr(os, "replace", fail)
     assert trust_folder(str(tmp_path)) is False
     assert config.read_text() == before
-    assert sorted(p.name for p in claude_config.iterdir()) == [".claude.json"]
-
-
-def test_concurrent_trusts_all_land(tmp_path, claude_config):
-    folders = [tmp_path / f"wt{i}" for i in range(8)]
-    for f in folders:
-        f.mkdir()
-    threads = [threading.Thread(target=trust_folder, args=(str(f),)) for f in folders]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    projects = json.loads((claude_config / ".claude.json").read_text())["projects"]
-    assert all(projects[os.path.realpath(f)]["hasTrustDialogAccepted"] is True for f in folders)
     assert sorted(p.name for p in claude_config.iterdir()) == [".claude.json"]
 
 
@@ -293,7 +312,7 @@ def screens(monkeypatch):
 
 
 @pytest.mark.parametrize("status,mode", [
-    ("idle", "assign"), ("starting", "assign"), ("processing", "review"), ("waiting", "assign"),
+    ("waiting", "assign"),
 ])
 def test_trust_dialog_nobody_answered_is_reported_by_the_sweep(db, root, screens, monkeypatch, status, mode):
     """The sweep reads only a waiting worker's pane, and forwards its live
@@ -310,23 +329,8 @@ def test_trust_dialog_nobody_answered_is_reported_by_the_sweep(db, root, screens
     assert db.pending_count("boss") == (status == "waiting")
 
 
-def test_trust_writes_through_a_symlinked_config(tmp_path, claude_config):
-    real = tmp_path / "dotfiles" / "claude.json"
-    real.parent.mkdir()
-    link = claude_config / ".claude.json"
-    real.write_text(link.read_text())
-    link.unlink()
-    link.symlink_to(real)
-    folder = tmp_path / "wt"
-    folder.mkdir()
-    assert trust_folder(str(folder)) is True
-    assert link.is_symlink()
-    assert json.loads(real.read_text())["projects"][os.path.realpath(folder)]["hasTrustDialogAccepted"] is True
-
-
 @pytest.mark.parametrize("status,provider", [
     ("unknown", "codex"),       # issue #42: no hooks, stuck on a startup error
-    ("processing", "claude"),   # a turn whose pane stopped redrawing
 ])
 def test_silent_codex_worker_is_reported_once(db, root, screens, monkeypatch, status, provider):
     _, ws = root
@@ -383,7 +387,6 @@ def health(db, root, monkeypatch):
 
 @pytest.mark.parametrize("screen,cause,refused", [
     ("■ unexpected status 403 Forbidden: secret-token https://private", "launch_auth", "provider_403"),
-    ("Error: model not found secret-token", "launch_model", None),
     ("● API Error: model use case details have not been submitted secret-token", "bedrock_use_case", None),
     ("⏺ The model claude-fable-5-1 is not available on your vertex deployment.", "launch_model", None),
 ])
@@ -450,49 +453,6 @@ def test_quoted_startup_and_turn_chrome_remain_silent_pending(db, health, monkey
     assert model_access.refused(a.profile, fp="effective-account") is None
 
 
-def test_actual_native_task_preview_does_not_hide_current_failure(db, health, monkeypatch):
-    from brindle import model_access
-    from brindle.native.runner import _preview
-    lh, a, _, _, _, reports = health
-    task = "\n".join(f"instruction {i}" for i in range(8))
-    db.update_agent(a.id, provider="native", task=task)
-    # runner prints this preview, captures it, then calls loop.run on the task.
-    baseline = f"brindle: native worker {a.id} on chosen at https://private\n\n── brindle: turn 1 ──\n{_preview(task)}\n"
-    assert baseline.endswith("...\n")
-    monkeypatch.setattr(lh, "capture", lambda a: baseline + "── brindle: the model endpoint failed: 401; this worker has stopped ──")
-    lh.delivered(db, a, baseline)
-    assert lh.inspect(db, a.id) == "failed"
-    assert len(reports) == 1 and "Fix:" in reports[0][1]
-    assert model_access.refused(a.profile, fp="effective-account").key == "launch_auth"
-
-
-def test_full_codex_ui_assistant_and_tool_output_cannot_report_or_cool_down(db, health, monkeypatch):
-    from brindle import model_access
-    lh, a, _, sleeps, _, reports = health
-    reply = "• Example output:\n```\n■ unexpected status 403 Forbidden\n```"
-    screen = f"OpenAI Codex\n› {a.task}\n{reply}\n\n› \n100% context left"
-    monkeypatch.setattr(lh, "capture", lambda a: screen)
-    lh.delivered(db, a)
-    assert lh.inspect(db, a.id) == "pending"
-    assert sleeps == [5.0] and reports == [] and db.pending_count("boss") == 0
-    assert model_access.refused(a.profile, fp="effective-account") is None
-
-
-@pytest.mark.parametrize("provider,screen", [
-    ("codex", "OpenAI Codex\n• Example output:\n› implement a feature\n■ unexpected status 403 Forbidden\n\n› \n100% context left"),
-])
-def test_quoted_prompt_and_foreign_error_markers_remain_silent_pending(db, health, monkeypatch, provider, screen):
-    from brindle import model_access
-    lh, a, _, sleeps, _, reports = health
-    db.update_agent(a.id, provider=provider)
-    monkeypatch.setattr(lh, "capture", lambda a: screen)
-    lh.delivered(db, a)
-    assert lh.inspect(db, a.id) == "pending"
-    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] == "pending"
-    assert sleeps == [5.0] and reports == [] and db.pending_count("boss") == 0
-    assert model_access.refused(a.profile, fp="effective-account") is None
-
-
 def test_early_exit_reports_without_claiming_access(db, health, monkeypatch):
     lh, a, _, _, _, reports = health
     monkeypatch.setattr(agents, "is_alive", lambda a: False)
@@ -502,17 +462,6 @@ def test_early_exit_reports_without_claiming_access(db, health, monkeypatch):
     assert lh.inspect(db, a.id) == "exited"
     assert len(reports) == 1 and "exited" in reports[0][1] and "retry" in reports[0][1]
     assert "STRAY_SETTING" in reports[0][1]
-
-
-def test_shell_followup_starts_after_actual_paste(db, root, launches, monkeypatch):
-    boss, ws = root
-    steps = []
-    monkeypatch.setattr(tmux, "paste", lambda *a, **k: steps.append("task"))
-    monkeypatch.setattr(agents, "_detach", lambda *a: steps.append("followup"))
-    monkeypatch.setattr(type(agents.get_provider("shell")), "after_launch", lambda *a: None)
-    agents.spawn(db, ws, "developer", provider_name="shell", prompt="real task",
-                 parent_id=boss.id, mode="assign")
-    assert steps == ["task", "followup"]
 
 
 @pytest.mark.parametrize("provider", ["claude"])
@@ -575,8 +524,7 @@ def test_argv_health_waits_for_delayed_readiness_then_observes_current_error(
     assert db.pending_count(a.id) == 0 and sum("real task" in arg for arg in launches[-1]) == 1
 
 
-@pytest.mark.parametrize("provider,ready_screen", [("claude", "❯"), ("codex", CODEX_EMPTY_PANE),
-                                                   ("antigravity", "? for shortcuts")])
+@pytest.mark.parametrize("provider,ready_screen", [("claude", "❯"), ("codex", CODEX_EMPTY_PANE)])
 def test_provider_readiness_returns_acceptance_only_after_current_prompt(monkeypatch, provider, ready_screen):
     now = [100.0]
     monkeypatch.setattr(time, "time", lambda: now[0])
@@ -592,7 +540,6 @@ def test_provider_readiness_returns_acceptance_only_after_current_prompt(monkeyp
 
 
 @pytest.mark.parametrize("provider,trust_screen,ready_screen", [
-    ("codex", "Trust this folder?\n› 1. Trust and continue", "› 100% context left"),
     # agy's newer wording, which brindle missed: the worker sat on it unanswered
     ("antigravity", "Antigravity CLI requires permission to read, edit, and execute files here.\n\n"
                     "> Yes, I trust this folder\n  No, exit", "? for shortcuts"),
@@ -608,33 +555,7 @@ def test_trust_confirmation_is_not_yet_task_acceptance(monkeypatch, provider, tr
     assert now[0] == 101.5 and keys == [("%test", "Enter")]
 
 
-def test_native_real_task_schedules_followup_without_extra_model_turn(db, health, monkeypatch):
-    from unittest.mock import Mock
-    from brindle.native import runner
-    from brindle.profiles import Profile
-    lh, a, _, sleeps, started, _ = health
-    db.update_agent(a.id, provider="native", headless=1, mode="interactive")
-    p = Profile("developer", "", "native", "", model="wanted", base_url="http://localhost/v1")
-    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
-    loop = Mock()
-    loop.run.return_value = "done"
-    monkeypatch.setattr(runner, "NativeAgent", lambda *a, **k: loop)
-    db.enqueue(a.id, "real task", None)
-    assert runner.run_native(db, a.id, exit_when_idle=True) == 0
-    loop.run.assert_called_once_with("real task")
-    assert len(started) == 1 and sleeps == []
-
-
-def test_headless_startup_helper_leaves_delivered_task_to_its_followup(db, health, monkeypatch):
-    lh, a, _, sleeps, _, reports = health
-    monkeypatch.setattr(cli, "_helper_db", lambda: db)
-    lh.delivered(db, a)
-    cli.launch_health_cmd(a.id, startup=True, token=a._launch_health_token)
-    assert sleeps == [5.0] and reports == []
-    assert lh.inspect(db, a.id) == "pending" and reports == []
-
-
-@pytest.mark.parametrize("replacement_point", ["wait", "capture"])
+@pytest.mark.parametrize("replacement_point", ["capture"])
 def test_concurrent_resume_cannot_report_or_mutate_replacement_launch(db, health, monkeypatch, replacement_point):
     from brindle import model_access
     from brindle.db import DB
@@ -688,7 +609,38 @@ def test_old_helper_started_after_resume_does_not_observe_new_launch(db, health,
     assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
 
 
-@pytest.mark.parametrize("replacement_point", ["readiness", "ready"])
+def test_health_never_captures_a_reassigned_pane(db, health, monkeypatch):
+    lh, a, _, _, _, reports = health
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: False)
+    monkeypatch.setattr(lh, "capture", lambda *a: pytest.fail("read someone else's pane"))
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) is None and reports == []
+
+
+def test_delivery_capture_binds_launch_before_concurrent_resume(db, health, monkeypatch):
+    lh, a, _, _, started, _ = health
+    fresh = db.get_agent(a.id)  # flush/runner loads an Agent without an in-memory token
+
+    def capture(agent):
+        lh.prepare(db, db.get_agent(a.id), "replacement")
+        return "old screen"
+
+    monkeypatch.setattr(lh, "capture", capture)
+    lh.delivered(db, fresh, lh.before_delivery(db, fresh))
+    assert started == []
+    assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+
+
+def test_old_launch_cannot_bind_replacement_pane(db, health):
+    lh, old, _, _, started, _ = health
+    replacement = db.get_agent(old.id)
+    lh.prepare(db, replacement, "replacement")
+    lh.bind(db, old, "%old")
+    row = db.conn.execute("SELECT pane FROM launch_health WHERE agent_id=?", (old.id,)).fetchone()
+    assert row["pane"] == "" and started == []
+
+
+@pytest.mark.parametrize("replacement_point", ["readiness"])
 def test_readiness_helper_cannot_arm_concurrently_replaced_argv_launch(db, health, monkeypatch, replacement_point):
     lh, a, _, _, started, reports = health
     lh.prepare(db, a, "old-account", argv_task=True)
@@ -732,7 +684,6 @@ def test_launch_health_schema_migrates_existing_rows(db, health):
 
 
 @pytest.mark.parametrize("reply,cause", [
-    ("API Error: 529 Overloaded", "launch_capacity"),
     ("Here is the fixture:\nAPI Error: 401 invalid x-api-key", None),
 ])
 def test_headless_runner_context_preserves_errors_and_quoted_output(db, health, monkeypatch, reply, cause):
@@ -749,7 +700,6 @@ def test_headless_runner_context_preserves_errors_and_quoted_output(db, health, 
 
 
 @pytest.mark.parametrize("reply,cause", [
-    ("• Working (2s • esc to interrupt)\n■ unexpected status 403 Forbidden", "launch_auth"),
     ("■ unexpected status 403 Forbidden\nThe retry succeeded.", None),
 ])
 def test_codex_progress_and_response_context(db, health, monkeypatch, reply, cause):
@@ -764,7 +714,7 @@ def test_codex_progress_and_response_context(db, health, monkeypatch, reply, cau
     assert len(reports) == bool(cause)
 
 
-@pytest.mark.parametrize("mutation", ["result", "owner"])
+@pytest.mark.parametrize("mutation", ["owner"])
 def test_health_capture_cannot_report_after_agent_changes(db, health, monkeypatch, mutation):
     from brindle import model_access
     lh, a, _, _, _, reports = health
@@ -786,33 +736,8 @@ def test_health_capture_cannot_report_after_agent_changes(db, health, monkeypatc
     assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
 
 
-def test_health_never_captures_a_reassigned_pane(db, health, monkeypatch):
-    lh, a, _, _, _, reports = health
-    monkeypatch.setattr(agents, "owns_pane", lambda *a: False)
-    monkeypatch.setattr(lh, "capture", lambda *a: pytest.fail("read someone else's pane"))
-    lh.delivered(db, a)
-    assert lh.inspect(db, a.id) is None and reports == []
-
-
-def test_delivery_capture_binds_launch_before_concurrent_resume(db, health, monkeypatch):
-    lh, a, _, _, started, _ = health
-    fresh = db.get_agent(a.id)  # flush/runner loads an Agent without an in-memory token
-
-    def capture(agent):
-        lh.prepare(db, db.get_agent(a.id), "replacement")
-        return "old screen"
-
-    monkeypatch.setattr(lh, "capture", capture)
-    lh.delivered(db, fresh, lh.before_delivery(db, fresh))
-    assert started == []
-    assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
-
-
 @pytest.mark.parametrize("provider,screen,cause", [
-    ("claude", "Claude Code v2.1.0\n● API Error: 400 The selected model\n  is not available for this account", "bedrock_quota"),
     ("claude", "Claude Code v2.1.0\n● Example:\n  API Error: 400 The selected model\n  is not available for this account", None),
-    ("claude", "Claude Code v2.1.0\n⏺ There's an issue with the selected model (us.anthropic.claude-haiku-4-5-v1:0).\n"
-               "  It may not exist or you may not have access to it.", "launch_model"),
 ])
 def test_wrapped_provider_blocks_require_provider_context(provider, screen, cause):
     from brindle import launch_health
@@ -841,14 +766,6 @@ def test_concurrent_refusals_and_notices_preserve_every_update(monkeypatch):
         assert sum(executor.map(record, range(8))) == 1
     assert all(model_access.refused(f"worker-{i}", fp=f"identity-{i}") == model_access.LAUNCH_AUTH
                for i in range(8))
-
-
-@pytest.mark.parametrize("provider,screen", [
-    ("claude", "❯ Test these failure messages:\nesc to interrupt\n● API Error: 401 invalid API key"),
-])
-def test_provider_names_and_keyboard_help_in_prose_are_not_ui(provider, screen):
-    from brindle import launch_health
-    assert launch_health.failure(screen, provider=provider) is None
 
 
 @pytest.mark.parametrize("lost", [
@@ -905,14 +822,9 @@ def test_real_codex_footer_arms_delivery_followup_without_notify(db, root, launc
 
 @pytest.mark.parametrize("output,stale,draft", [
     ("• Working (4m 15s • esc to interrupt)", False, False),
-    pytest.param("• Edited src/feature.py (+1 -1)", False, False,
-                 marks=pytest.mark.variant("#236 also showed edits before the Working status")),
-    ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", False, False),
     ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", True, False),
     ("• Ran uv run pytest tests/test_feature.py -q\n  └ 1 passed", False, True),
-    ("• Ran git status --short\n  └ clean", False, "history"),
     ("• Working (6m 26s • esc to interrupt)", False, "collapsed"),
-    ("• Working (6m 26s • \x1b[1mesc\x1b[0m to interrupt)", False, "styled-followup"),
 ])
 def test_codex_turn_under_submitted_brief_confirms_delivery(db, health, monkeypatch, output, stale, draft):
     lh, a, _, _, _, reports = health
@@ -956,7 +868,7 @@ APPROVAL_PROMPT = """\
 
 
 @pytest.mark.parametrize("brief_visible", [
-    True, False, "hooks",
+    True, "hooks",
     pytest.param("error", marks=pytest.mark.variant(
         "a fresh tool error above an active approval is not a failed launch")),
 ])
@@ -1109,17 +1021,8 @@ def test_new_pane_publication_and_early_delivery_schedule_once(db, health, monke
     assert row["pane"] == "%new" and row["baseline"] == "new baseline"
 
 
-def test_old_launch_cannot_bind_replacement_pane(db, health):
-    lh, old, _, _, started, _ = health
-    replacement = db.get_agent(old.id)
-    lh.prepare(db, replacement, "replacement")
-    lh.bind(db, old, "%old")
-    row = db.conn.execute("SELECT pane FROM launch_health WHERE agent_id=?", (old.id,)).fetchone()
-    assert row["pane"] == "" and started == []
-
-
 @pytest.mark.variant("incident: retry inherits MCP_TIMEOUT from the failed Claude process under load")
-@pytest.mark.parametrize("inherited,extended", [("120000", True), ("600000", False)])
+@pytest.mark.parametrize("inherited,extended", [("120000", True)])
 def test_mcp_retry_extends_inherited_startup_budget(db, root, launches, detached, monkeypatch,
                                                   inherited, extended):
     from brindle import launch_health

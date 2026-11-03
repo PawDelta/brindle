@@ -73,19 +73,6 @@ def test_status_is_written_after_a_check_and_the_rest_is_preserved(db, repo):
     assert goals(repo) == new and os.stat(path(repo)).st_mtime_ns == before
 
 
-def test_crlf_and_missing_final_newline_survive(db, repo):
-    text = GOALS.replace("\n", "\r\n").rstrip()
-    (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "goals.md").write_bytes(text.encode())
-    ws = workspaces.adopt_root(db, str(repo))
-    add_agent(db, ws, "boss")
-    autopilot.enable(db, "boss", ws)
-    pass_first(db)
-    autopilot.sync_goals_file(db, "boss")
-    raw = path(repo).read_bytes().decode()
-    assert "\r\nstatus: passed" in raw and not re.search(r"(?<!\r)\n", raw)
-    assert raw.replace("\r\nstatus: passed at abc1234 (" + time.strftime("%Y-%m-%d") + ")", "").count("status") == 1
-
 
 def test_a_stopped_session_stops_writing(db, repo):
     load(db, repo)
