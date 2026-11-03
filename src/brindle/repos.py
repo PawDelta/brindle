@@ -57,10 +57,11 @@ def require_entitled() -> None:
 class Attached:
     alias: str
     repo_root: str
+    branch: str | None = None    # the session's own branch there (see attach)
 
 
 def attached(db: DB, root_id: str) -> list[Attached]:
-    return [Attached(r.alias, r.repo_root) for r in db.session_repos(root_id)]
+    return [Attached(r.alias, r.repo_root, r.branch) for r in db.session_repos(root_id)]
 
 
 def own_root(db: DB, root_id: str) -> str | None:
@@ -100,22 +101,18 @@ def _owned(repo_root: str) -> bool:
         return True
 
 
-def _live_root(db: DB, root_id: str) -> bool:
-    from brindle import agents
-
-    root = db.get_agent(root_id)
-    return bool(root and root.mode == "interactive" and root.status != "paused" and agents.is_alive(root))
-
-
 def default_alias(repo_root: str) -> str:
     return git.slug(os.path.basename(repo_root.rstrip(os.sep))) or "repo"
 
 
 def attach(db: DB, root_id: str, path: str, alias: str | None = None) -> Attached:
     """Attach the repo at ``path`` to session ``root_id`` as ``alias``
-    (default: the folder's name). Refuses the session's own repo, an alias
-    already in use, a repo attached to another *live* session (two
-    sessions merging into one repo's branches would surprise both), and a
+    (default: the folder's name). The session gets its own branch and
+    worktree there (``brindle/session-N``, cut from what the repo's checkout
+    has checked out, as a second session in one repo does), which its
+    workers in that repo branch from and merge into: several sessions can
+    attach one repo without sharing a branch. Refuses the session's own
+    repo, an alias already in use, a repo this session already has, and a
     repo this user doesn't own. Needs the ``multi_repo`` entitlement."""
     require_entitled()
     repo_root = _normalize(path)
@@ -133,18 +130,19 @@ def attach(db: DB, root_id: str, path: str, alias: str | None = None) -> Attache
                             if a.repo_root != repo_root else f"{repo_root} is already attached as {alias!r}")
         if a.repo_root == repo_root:
             raise RepoError(f"{repo_root} is already attached as {a.alias!r}")
-    for r in db.session_repos():
-        if r.repo_root == repo_root and r.root_id != root_id and _live_root(db, r.root_id):
-            raise RepoError(
-                f"{repo_root} is attached to another running session ({r.root_id}); two sessions "
-                "merging into one repo's branches would collide. Detach it there (`brindle repo rm`) "
-                "or close that session first.")
-    db.add_session_repo(root_id, alias, repo_root)
-    return Attached(alias, repo_root)
+    from brindle.service import sessions as svc
+
+    try:
+        mine = svc.session_worktree(db, workspaces.adopt_root(db, repo_root))
+    except (git.GitError, workspaces.WorkspaceError) as e:
+        raise RepoError(f"couldn't make this session's branch in {repo_root}: {e}") from e
+    db.add_session_repo(root_id, alias, repo_root, mine.branch)
+    return Attached(alias, repo_root, mine.branch)
 
 
 def detach(db: DB, root_id: str, ref: str) -> Attached:
-    """Detach by alias or path. Its workers' worktrees and branches stay."""
+    """Detach by alias or path. The session's branch and worktree there, and
+    its workers' worktrees and branches, stay."""
     found = resolve_attached(db, root_id, ref)
     if found is None:
         raise RepoError(f"no attached repo {ref!r}; `brindle repo ls` lists them")
@@ -197,10 +195,36 @@ def resolve(db: DB, root_id: str, own_repo_root: str, ref: str | None) -> str:
     return found.repo_root
 
 
-def target_workspace(db: DB, repo_root: str) -> Workspace:
-    """The checkout of ``repo_root`` that workers for it branch from and
-    merge into: its main checkout, registered like the session's own."""
-    return workspaces.adopt_root(db, repo_root)
+def session_branch(db: DB, root_id: str, repo_root: str) -> str | None:
+    """Session ``root_id``'s own branch in attached repo ``repo_root`` (see
+    :func:`attach`), None if it has none."""
+    real = os.path.realpath(repo_root)
+    for r in db.session_repos(root_id):
+        if os.path.realpath(r.repo_root) == real:
+            return r.branch
+    return None
+
+
+def is_session_branch(db: DB, repo_root: str, branch: str | None) -> bool:
+    """Whether ``branch`` is some session's own branch in attached repo
+    ``repo_root``: its workers' merge target, kept while it's attached."""
+    return bool(branch) and any(r.repo_root == repo_root and r.branch == branch
+                                for r in db.session_repos())
+
+
+def target_workspace(db: DB, root_id: str, repo_root: str) -> Workspace:
+    """The checkout of ``repo_root`` that session ``root_id``'s workers there
+    branch from and merge into, and its milestone checks run in: the
+    session's own branch's worktree (made again if it's gone). A repo
+    attached before sessions had their own branch, or not attached at all,
+    uses its main checkout."""
+    branch = session_branch(db, root_id, repo_root)
+    if not branch:
+        return workspaces.adopt_root(db, repo_root)
+    for ws in db.find_workspaces(repo_root):
+        if ws.branch == branch and os.path.isdir(ws.path):
+            return ws
+    return workspaces.checkout_for(db, repo_root, branch=branch)
 
 
 def alias_of(db: DB, root_id: str, repo_root: str) -> str | None:
@@ -223,8 +247,9 @@ def guidance(db: DB, root_id: str) -> str | None:
             "This session also works in these repos (`brindle repo ls`):\n"
             f"{lines}\n\n"
             "Pass `repo=\"<alias>\"` to assign or handoff to put a worker there: it gets a "
-            "worktree in that repo, that repo's own checks and review, and merges into that "
-            "repo's branch. `depends_on` may name a task in another repo. A milestone check "
+            "worktree in that repo, that repo's own checks and review, and merges into this "
+            "session's own branch there (`brindle/session-N`, which other sessions don't touch). "
+            "`depends_on` may name a task in another repo. A milestone check "
             "for another repo is written `@<alias>: <command>`. list_agents and list_tasks "
             "cover every repo in the session (or one, with `repo`).")
 
@@ -233,7 +258,8 @@ def listing_text(db: DB, root_id: str) -> str:
     items = attached(db, root_id)
     if not items:
         return "No repos attached to this session. Attach one with `brindle repo add <path> [--name alias]`."
-    return "\n".join(f"{a.alias:<16} {a.repo_root}" for a in items)
+    return "\n".join(f"{a.alias:<16} {a.repo_root}" + (f"  (branch {a.branch})" if a.branch else "")
+                     for a in items)
 
 
 def split_check(check: str | None) -> tuple[str | None, str | None]:

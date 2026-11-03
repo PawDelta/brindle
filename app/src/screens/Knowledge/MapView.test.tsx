@@ -77,8 +77,10 @@ it("loads all docs automatically with sources, filters by path, and opens each n
   expect(initialDoc.textContent).toMatch(/feat\/cache.*session-1.*user-hannah.*Personal.*2026-11-02/);
   // The automatic whole-scope map still joins local records to the documents they share a path with.
   expect(screen.getByRole("button", { name: /Storage policy/ })).toBeTruthy();
-  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="p"]')).not.toBeNull();
-  expect(container.querySelector('[data-source="local:source:s"][data-target="p"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="d"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:source:s"][data-target="d"]')).not.toBeNull();
+  // Code paths are not nodes.
+  expect(container.querySelector('[data-node="p"]')).toBeNull();
   fireEvent.change(screen.getByLabelText("Code paths"), { target: { value: "src/cache" } });
   fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
   await screen.findByRole("button", { name: /Cache design/ });
@@ -86,11 +88,11 @@ it("loads all docs automatically with sources, filters by path, and opens each n
   await screen.findByRole("button", { name: /Storage policy/ });
   expect(screen.getByRole("button", { name: /Storage policy/ }).textContent).toMatch(/local-session.*1970-01-01/);
   expect(screen.getByRole("button", { name: /Imported.*cache/ }).textContent).toMatch(/\/repo\/src\/cache.*Team.*2026-11-02/);
-  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="p"]')).not.toBeNull();
-  expect(container.querySelector('[data-source="local:source:s"][data-target="p"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="d"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:source:s"][data-target="d"]')).not.toBeNull();
   expect(screen.queryByRole("button", { name: /Imported.*index.ts/ })).toBeNull();
   expect(screen.queryByRole("button", { name: /Imported.*\*/ })).toBeNull();
-  for (let i = 0; i < 6; i++) expect(container.querySelector(`[data-source="local:decision:pattern-${i}"][data-target="p"]`)).not.toBeNull();
+  for (let i = 0; i < 6; i++) expect(container.querySelector(`[data-source="local:decision:pattern-${i}"][data-target="d"]`)).not.toBeNull();
   expect(container.querySelector('[data-kind="supersedes"]')).not.toBeNull();
   expect(screen.queryByRole("button", { name: /Other rule|Repo rule|outside/ })).toBeNull();
   expect(requests.filter((r) => r.path.endsWith("/map")).at(-1)?.query).toEqual({ repo: "/repo", scope_kind: "user", scope_id: "u1", paths: '["src/cache"]', depth: "1" });
@@ -100,10 +102,10 @@ it("loads all docs automatically with sources, filters by path, and opens each n
   expect(screen.getByText(decision.body)).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: /Imported.*cache/ }));
   expect(openPath).toHaveBeenLastCalledWith("/repo/src/cache");
-  fireEvent.click(screen.getByRole("button", { name: /Imported.*localrepo/ }));
+  fireEvent.click(screen.getByRole("button", { name: /Imported.*: repo$/ }));
   expect(openPath).toHaveBeenLastCalledWith("/repo");
   rerender(<MapView {...props} sources={[{ id: "root-source", kind: "folder", scope: "/repo" }]} />);
-  expect(screen.getByRole("button", { name: /Imported.*localrepo/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Imported.*: repo$/ })).toBeTruthy();
   fireEvent.click(screen.getByRole("button", { name: /Document.*Cache design/ }));
   expect((await screen.findByTestId("doc-body")).textContent).toContain("Durable cache");
   expect(requests.at(-1)?.path).toBe("/analysis-docs/doc1");
@@ -115,7 +117,7 @@ it("loads all docs automatically with sources, filters by path, and opens each n
   fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
   await waitFor(() => expect(requests.at(-1)?.query.paths).toBe("[]"));
   await screen.findByRole("button", { name: /Storage policy/ });
-  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="p"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="d"]')).not.toBeNull();
   fireEvent.change(screen.getByLabelText("Code paths"), { target: { value: "" } });
   fireEvent.click(screen.getByRole("button", { name: "Explore area" }));
   await waitFor(() => expect(requests.at(-1)?.query.paths).toBe("[]"));
