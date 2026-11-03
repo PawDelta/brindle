@@ -1,20 +1,18 @@
 """Merges into one checkout are serialized by a file lock, and a transient
 index-lock failure is retried instead of being reported."""
 
-import os
 import subprocess
 import threading
 
 import pytest
 
+from conftest import sh
 from brindle import git, workspaces
+from test_merge_order import _repo_template, repo, worktree  # noqa: F401 - fixture
 
 
 def _feature(db, repo, name="feature", fname="new.py"):
-    ws = workspaces.create(db, str(repo), name).workspace
-    open(os.path.join(ws.path, fname), "w").write("x = 1\n")
-    git.commit_all(ws.path, "work")
-    return ws
+    return worktree(db, repo, name, files={fname: "x = 1\n"})
 
 
 def test_checkout_lock_gives_up_on_a_hung_holder(repo):
@@ -41,8 +39,7 @@ def test_checkout_lock_gives_up_on_a_hung_holder(repo):
 
 def test_merge_refuses_a_target_with_uncommitted_changes(db, repo, monkeypatch):
     (repo / "README.md").write_text("base\n")
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-qm", "readme"], cwd=repo, check=True)
+    sh("git add -A && git commit -qm readme", repo)
     ws = _feature(db, repo)
     (repo / "README.md").write_text("supervisor edit\n")
     # tracked uncommitted change blocks the merge outright, untouched

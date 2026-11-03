@@ -14,6 +14,7 @@ from brindle.daemon import session_review
 from brindle.db import Agent
 from brindle.service import inbox
 from brindle.service import sessions as svc
+from test_merge_order import _repo_template, quiet_removal, repo, worktree  # noqa: F401 - fixture
 
 
 @pytest.fixture
@@ -26,8 +27,9 @@ def told(monkeypatch):
 
 
 @pytest.fixture
-def sess(db, repo, tmp_path, told):
+def sess(db, repo, tmp_path, told, monkeypatch):
     """Session ``lead`` on branch ``sess`` (cut from main) in its own checkout."""
+    quiet_removal(monkeypatch)
     sh(f"git worktree add -q -b sess {tmp_path / 'sess'} main", repo)
     ws = workspaces.adopt_root(db, str(tmp_path / "sess"))
     db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, time.time()))
@@ -51,9 +53,7 @@ def commit(path: Path, name: str, text: str, push: bool = False) -> str:
 
 
 def worker(db, repo, name: str):
-    ws = workspaces.create(db, str(repo), name, base="sess", fetch=False).workspace
-    commit(Path(ws.path), f"{name}.txt", name)
-    return ws
+    return worktree(db, repo, name, base="sess", files={f"{name}.txt": name})
 
 
 def contains(path, sha: str) -> bool:
@@ -117,7 +117,7 @@ def test_a_conflicting_sync_blocks_merges_until_a_branch_resolves_it(db, repo, s
     assert not contains(sess.path, main) and sh("git status --porcelain", Path(sess.path)) == ""
     [item] = [i for i in inbox.items(db, str(repo), panes={}) if i.kind == "sync_conflict"]
     assert item.root_id == "lead" and "app.py" in item.detail
-    fix = workspaces.create(db, str(repo), "fix", base="sess", fetch=False).workspace
+    fix = workspaces.create(db, str(repo), "fix", base="sess", fetch=False).workspace   # sess isn't on origin
     sh("git merge -q origin/main || true", Path(fix.path))
     commit(Path(fix.path), "app.py", "both\n")
     assert pipeline.merge(db, None, fix).startswith("Merged")

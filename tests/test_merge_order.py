@@ -4,14 +4,75 @@ with the fewest overlapping hunks, syncing the rest onto the new tip."""
 import asyncio
 import json
 import re
+import shutil
 import time
 from pathlib import Path
 
 import pytest
 
 from conftest import sh
-from brindle import agents, conflicts, gates, mcp_server, pipeline, workspaces
-from brindle.db import Agent
+from brindle import agents, conflicts, disk, gates, git, mcp_server, pipeline, services, tmux, workspaces
+from brindle.db import Agent, Workspace
+
+
+# -- fast git state, shared with the other merge and pipeline test files ------------
+
+
+@pytest.fixture(scope="session")
+def _repo_template(tmp_path_factory):
+    """conftest's ``repo``, built with git once per test process."""
+    base = tmp_path_factory.mktemp("repo-template")
+    origin, work = base / "origin.git", base / "proj"
+    work.mkdir()
+    (work / "app.py").write_text("print('hi')\n")
+    (work / ".gitignore").write_text(".env\n")
+    (work / ".env").write_text("SECRET=1\n")
+    sh(f"git init -q --bare -b main {origin} && git init -q -b main && git add -A"
+       " && git -c user.name=t -c user.email=t@example.com commit -qm init"
+       f" && git remote add origin {origin} && git push -q -u origin main && git remote set-head origin main",
+       work)
+    return base
+
+
+@pytest.fixture
+def repo(tmp_path, _repo_template):
+    """conftest's ``repo`` (main with one commit, pushed to a bare origin),
+    copied from the template instead of rebuilt with nine git runs."""
+    for name in ("origin.git", "proj"):
+        shutil.copytree(_repo_template / name, tmp_path / name, symlinks=True)
+    cfg = tmp_path / "proj" / ".git" / "config"
+    cfg.write_text(cfg.read_text().replace(str(_repo_template), str(tmp_path)))
+    return tmp_path / "proj"
+
+
+def worktree(db, repo, branch: str, base: str = "main", files: dict[str, str] | None = None) -> Workspace:
+    """What ``workspaces.create`` leaves (the worktree, its base and its row),
+    in one shell run instead of a dozen git runs, with ``files`` committed.
+    ``create`` itself is covered where it is the behaviour (assign, sessions)."""
+    root = str(repo)
+    path = Path(root) / ".brindle" / "worktrees" / branch
+    sh(f"git worktree add -q --no-track -b {branch} {path} {base}"
+       f" && git config branch.{branch}.{git.BASE_CONFIG_KEY} {base}", repo)
+    if files:
+        for f, text in files.items():
+            (path / f).write_text(text)
+        sh("git add -A && git commit -qm work", path)
+    with open(Path(root) / ".git" / "info" / "exclude", "a") as fh:
+        fh.write("/.brindle/worktrees/\n")
+    slug = workspaces._db_slug(db, root)
+    ws = Workspace(f"{slug}/{branch}", root, branch, "worktree", branch, base, str(path),
+                   workspaces._next_port_base(db), workspaces._session_name(root, branch, slug), time.time())
+    db.add_workspace(ws)
+    return ws
+
+
+def quiet_removal(monkeypatch):
+    """``workspaces.remove`` without its machine-wide looks: the process
+    table and tmux panes (``disk.live_in``), docker and the tmux session.
+    The real ones run in test_history's merge_workspace tests."""
+    monkeypatch.setattr(disk, "live_in", lambda *a, **k: False)
+    monkeypatch.setattr(services, "down", lambda ws, cfg=None: [])
+    monkeypatch.setattr(tmux, "kill_session", lambda name: None)
 
 
 def add(db, ws, agent_id, mode, profile="developer", parent=None, status="idle", result=None,
@@ -40,10 +101,8 @@ def test_parse_hunks_does_not_take_a_body_line_for_a_file_header():
 
 
 def test_changed_files_keeps_unusual_names_as_themselves(db, repo):
-    ws = workspaces.create(db, str(repo), "names").workspace
     name = "café x.py"
-    (Path(ws.path) / name).write_text("x\n")
-    sh("git add -A && git commit -qm names", Path(ws.path))
+    ws = worktree(db, repo, "names", files={name: "x\n"})
     (Path(ws.path) / "sp ace.txt").write_text("y\n")            # untracked
     assert sorted(conflicts.changed_files(ws)) == [name, "sp ace.txt"]
     assert conflicts.hunks(ws) == {name: [(0, 0)]}
@@ -84,8 +143,10 @@ def edit(ws, name, text, commit=True):
         sh(f"git add -A && git commit -qm {name}", Path(ws.path))
 
 
-def test_the_warning_is_sent_once_per_pair_until_more_files_overlap(db, two_workers):
+def test_the_warning_is_sent_once_per_pair_until_more_files_overlap(db, two_workers, monkeypatch):
     (wa, wb), (wsa, wsb) = two_workers
+    real_snapshot = agents.snapshot_turn   # rewind's turn snapshots: wa's two turns are enough
+    monkeypatch.setattr(agents, "snapshot_turn", lambda db_, a: real_snapshot(db_, a) if a.id == wa else None)
     edit(wsa, "app.py", "a\n")
     edit(wsb, "app.py", "b\n")
     agents.handle_hook(db, wa, "stop", {})
@@ -124,15 +185,13 @@ def piped(db, repo, monkeypatch):
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
     monkeypatch.setattr(agents, "_detach", lambda argv: None)
     monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
+    quiet_removal(monkeypatch)
     return root
 
 
 def ready_branch(db, repo, name, worker_id, files: dict[str, str]):
     """A worker's branch with ``files`` committed, approved and marked ready."""
-    ws = workspaces.create(db, str(repo), name).workspace
-    for f, text in files.items():
-        (Path(ws.path) / f).write_text(text)
-    sh("git add -A && git commit -qm work", Path(ws.path))
+    ws = worktree(db, repo, name, files=files)
     add(db, ws, worker_id, "assign", parent="boss", status="processing",
         result=f"did {name}", pipeline="ready")
     add(db, ws, f"rev-{worker_id}", "review", "reviewer", parent="boss")
