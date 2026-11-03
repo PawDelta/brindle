@@ -1,9 +1,13 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { StorageReport, StorageWorktree } from "../../api/client";
+import { currentReclaimable, forgetReclaimable } from "../../store/storage";
 import { Storage } from "./Storage";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  forgetReclaimable();
+});
 
 const GB = 1024 ** 3;
 const tree = (branch: string, over: Partial<StorageWorktree> = {}): StorageWorktree => ({
@@ -40,5 +44,36 @@ describe("Storage", () => {
     expect(await screen.findByText(/Removed 1 worktree, 2\.0 GB given back/)).toBeTruthy();
     expect(client.cleanStorage).toHaveBeenCalledWith({ path: "/wt/old-idea" });
     expect(client.storage).toHaveBeenCalledTimes(2);
+  });
+
+  it("Clean all sends exactly the removable worktrees it showed, one path each", async () => {
+    const report = { ...REPORT, worktrees: [...REPORT.worktrees, tree("stale-2", { size: GB })] };
+    // The re-read after cleaning lists a worktree that was never shown: nothing is sent for it.
+    const client = {
+      storage: vi.fn().mockResolvedValueOnce(report).mockResolvedValue({ ...REPORT, worktrees: [tree("appeared-later")] }),
+      cleanStorage: vi.fn(async ({ path }: { path: string }) => ({ removed: [{ path, repo_root: "/repo", branch: path.slice(4), state: "abandoned" as const, size: GB, archived: null, branch_kept: null }], kept: [] })),
+    };
+    render(<Storage client={client} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Clean all" }));
+    expect(client.cleanStorage).not.toHaveBeenCalled();
+    fireEvent.click(within(screen.getByRole("group", { name: "Confirm clean" })).getByRole("button", { name: "Remove" }));
+
+    expect(await screen.findByText(/Removed 2 worktrees/)).toBeTruthy();
+    expect(client.cleanStorage.mock.calls.map(([t]) => t)).toEqual([{ path: "/wt/old-idea" }, { path: "/wt/stale-2" }]);
+  });
+
+  it("shows only the newest read when two land out of order, and keeps the shared figure from it", async () => {
+    const reads: Record<string, (r: StorageReport) => void> = {};
+    const client = { storage: vi.fn((repo?: string) => new Promise<StorageReport>((resolve) => (reads[repo!] = resolve))), cleanStorage: vi.fn() };
+    const { rerender } = render(<Storage client={client} repo="old" />);
+    rerender(<Storage client={client} repo="new" />);
+
+    await act(async () => reads.new({ ...REPORT, worktrees: [], reclaimable: 0 }));
+    await act(async () => reads.old({ ...REPORT, reclaimable: 9 * GB }));
+
+    expect(screen.queryAllByTestId("storage-worktree")).toEqual([]);
+    expect(screen.getByText(/0 MB could be given back/)).toBeTruthy();
+    expect(currentReclaimable()).toBe(0);
   });
 });

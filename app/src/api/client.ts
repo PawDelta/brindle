@@ -1474,9 +1474,11 @@ export class DaemonClient {
     return this.get<StorageReport>("/storage", { repo });
   }
 
-  /* Removes one worktree (merged or abandoned) or every abandoned one, each
-     branch tip archived first. The app asks the person before calling this. */
-  cleanStorage(target: { path: string } | { abandoned: true }) {
+  /* Removes one worktree (merged or abandoned; the engine checks it again),
+     its branch tip archived first. The app asks the person before calling
+     this, and sends one call per confirmed path: never the route's
+     `abandoned`, which removes whatever the engine lists at that moment. */
+  cleanStorage(target: { path: string }) {
     return this.post<StorageCleaned>("/storage/clean", target);
   }
 

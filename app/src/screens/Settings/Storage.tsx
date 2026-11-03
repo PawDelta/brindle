@@ -1,28 +1,33 @@
 /* Settings › Storage: brindle's disk use (GET /storage, disk.storage_report)
    by category, free space, and the abandoned worktrees (unmerged, no activity
    for a while) with their size and last activity. Clean removes one, Clean
-   all every abandoned one (POST /storage/clean), each after the person says
-   yes here, nothing removed before; the branch tip is archived first. A
+   all the removable abandoned ones shown when the person said yes (POST
+   /storage/clean once per confirmed path: never "every abandoned one", which
+   the engine would list afresh), nothing removed before; the engine checks
+   each again and archives its branch tip first. Only the newest report read
+   is shown (reads on the heavy lane can land out of order). A
    worktree the engine keeps (uncommitted changes, a live session, not
    brindle's) says why and has no Clean; one that changed since the report
    and was kept by the engine says why too. The figure the Inbox nudges on
    (store/storage) is kept current from here. An engine without the route
    leaves the section out. */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { DaemonError, type DaemonClient, type StorageCleaned, type StorageReport, type StorageWorktree } from "../../api/client";
 import { plain } from "../../api/wording";
 import { ago } from "../../components/ProviderConnect";
 import { alert, button, card, danger, h2, mono, notice, quiet } from "../../components/ui";
-import { bytes, noteReclaimable } from "../../store/storage";
+import { bytes, noteReclaimable, readStarted } from "../../store/storage";
 
 export type StorageClient = Pick<DaemonClient, "storage" | "cleanStorage">;
 
-const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
+const message = (e: unknown) =>
+  e instanceof DaemonError && e.code === "busy" ? "brindle is busy, try again in a moment." : plain(e instanceof Error ? e.message : String(e));
 const ARCHIVE = "refs/brindle-archive/";
 
-/* What is being confirmed: one worktree's path, or every abandoned one. */
-type Asking = { path: string } | { all: true } | null;
+/* What is being confirmed: one worktree's path, or the removable abandoned
+   ones shown when Clean all was pressed (exactly these are sent). */
+type Asking = { path: string } | { all: string[] } | null;
 
 export function Storage({ client, repo }: { client: StorageClient; repo?: string }) {
   const [report, setReport] = useState<StorageReport | null>(null);
@@ -33,19 +38,25 @@ export function Storage({ client, repo }: { client: StorageClient; repo?: string
   const [busy, setBusy] = useState(false);
   const [kept, setKept] = useState<Record<string, string>>({});
   const [done, setDone] = useState<string | null>(null);
+  // The newest read's stamp: an older read's answer is dropped.
+  const newest = useRef(0);
 
   const measure = useCallback(async () => {
+    const started = readStarted();
+    newest.current = started;
     setMeasuring(true);
     try {
       const r = await client.storage(repo);
+      noteReclaimable(r.reclaimable, started);
+      if (newest.current !== started) return;
       setReport(r);
       setError(null);
-      noteReclaimable(r.reclaimable);
     } catch (e) {
+      if (newest.current !== started) return;
       if (e instanceof DaemonError && e.status === 404) setAbsent(true);
       else setError(`Couldn't measure brindle's disk use: ${message(e)}`);
     } finally {
-      setMeasuring(false);
+      if (newest.current === started) setMeasuring(false);
     }
   }, [client, repo]);
 
@@ -58,12 +69,17 @@ export function Storage({ client, repo }: { client: StorageClient; repo?: string
   const abandoned = report?.worktrees.filter((t) => t.state === "abandoned") ?? [];
   const removable = abandoned.filter((t) => t.removable);
 
-  const clean = async (target: { path: string } | { abandoned: true }) => {
+  const clean = async (paths: string[]) => {
     setBusy(true);
     setError(null);
     setDone(null);
     try {
-      const out: StorageCleaned = await client.cleanStorage(target);
+      const out: StorageCleaned = { removed: [], kept: [] };
+      for (const path of paths) {
+        const got = await client.cleanStorage({ path });
+        out.removed.push(...got.removed);
+        out.kept.push(...got.kept);
+      }
       setKept(Object.fromEntries(out.kept.map((k) => [k.path, plain(k.reason)])));
       const freed = out.removed.reduce((n, r) => n + r.size, 0);
       if (out.removed.length) setDone(`Removed ${out.removed.length} worktree${out.removed.length === 1 ? "" : "s"}, ${bytes(freed)} given back. Each branch's last commit is kept under ${ARCHIVE}.`);
@@ -122,16 +138,16 @@ export function Storage({ client, repo }: { client: StorageClient; repo?: string
                 <span className="text-xs text-ink-3">{abandoned.length ? "Unmerged, with no activity for a while." : "None: nothing has been left behind."}</span>
                 <span className="flex-1" />
                 {abandoned.length > 0 && (
-                  <button type="button" className={button} disabled={busy || removable.length === 0} onClick={() => setAsking({ all: true })}>
+                  <button type="button" className={button} disabled={busy || removable.length === 0} onClick={() => setAsking({ all: removable.map((t) => t.path) })}>
                     Clean all
                   </button>
                 )}
               </div>
               {asking && "all" in asking && (
                 <Confirm
-                  text={`Remove ${removable.length} abandoned worktree${removable.length === 1 ? "" : "s"} (${bytes(removable.reduce((n, t) => n + t.size, 0))}) and their branches? Each branch's last commit is kept under ${ARCHIVE}. Worktrees with uncommitted changes stay.`}
+                  text={`Remove ${asking.all.length} abandoned worktree${asking.all.length === 1 ? "" : "s"} (${bytes(abandoned.filter((t) => asking.all.includes(t.path)).reduce((n, t) => n + t.size, 0))}) and their branches? Each branch's last commit is kept under ${ARCHIVE}. The ones marked Kept stay.`}
                   busy={busy}
-                  onYes={() => void clean({ abandoned: true })}
+                  onYes={() => void clean(asking.all)}
                   onNo={() => setAsking(null)}
                 />
               )}
@@ -145,7 +161,7 @@ export function Storage({ client, repo }: { client: StorageClient; repo?: string
                       busy={busy}
                       asking={asking !== null && "path" in asking && asking.path === t.path}
                       onAsk={() => setAsking({ path: t.path })}
-                      onYes={() => void clean({ path: t.path })}
+                      onYes={() => void clean([t.path])}
                       onNo={() => setAsking(null)}
                     />
                   ))}
