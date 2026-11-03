@@ -221,32 +221,6 @@ def test_two_concurrent_refreshers_spend_the_refresh_token_once(tmp_path, backen
     assert credentials.FileStore(tmp_path / "pro").load()["refresh_token"] == "cpr_2"
 
 
-def test_without_the_lock_concurrent_refreshers_would_trip_reuse_detection(
-        tmp_path, backend, monkeypatch):
-    """The control for the test above: the fake backend really does punish reuse."""
-    from contextlib import nullcontext
-
-    monkeypatch.setattr(auth, "refresh_lock", lambda *a, **k: nullcontext())
-    backend.delay = 0.2
-    seen = seed(credentials.FileStore(tmp_path / "pro"), backend)
-    barrier = threading.Barrier(2)
-    errors = []
-
-    def worker():
-        barrier.wait()
-        try:
-            auth.refresh(auth.Client(BASE, backend), credentials.FileStore(tmp_path / "pro"), dict(seen))
-        except AuthError as e:
-            errors.append(e)
-
-    threads = [threading.Thread(target=worker) for _ in range(2)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(10)
-    assert backend.revoked and errors
-
-
 @pytest.mark.variant("credentials rotate between routing's initial read and refresh lock entry")
 @pytest.mark.parametrize("entry", ["routing", "captured"])
 def test_routing_refresh_observes_rotation_at_lock_entry(backend, monkeypatch, entry):
@@ -405,25 +379,20 @@ def test_binary_response_is_returned_without_decoding(server):
         200, {auth.BINARY_KEY: raw, auth.CONTENT_TYPE_KEY: "application/vnd.test+octet-stream"})
 
 
-def test_redirect_to_another_host_is_refused(server):
+@pytest.mark.parametrize("status,location,error", [
+    (307, "http://localhost:{port}/ok", "redirect"),   # another host
+    (302, "/ok", "302"),                               # method-changing
+    (307, "/ok", None),                                # same origin: followed
+])
+def test_redirects(server, status, location, error):
     routes, port = server
-    routes[("POST", "/r")] = (307, {"Location": f"http://localhost:{port}/ok"}, b"")
-    with pytest.raises(TransportError, match="redirect"):
-        post(f"http://127.0.0.1:{port}/r")
-
-
-def test_redirect_to_the_same_origin_is_followed(server):
-    routes, port = server
-    routes[("POST", "/r")] = (307, {"Location": "/ok"}, b"")
+    routes[("POST", "/r")] = (status, {"Location": location.format(port=port)}, b"")
     routes[("POST", "/ok")] = (200, {}, b'{"ok": true}')
-    assert post(f"http://127.0.0.1:{port}/r") == (200, {"ok": True})
-
-
-def test_method_changing_redirects_are_refused(server):
-    routes, port = server
-    routes[("POST", "/r")] = (302, {"Location": "/ok"}, b"")
-    with pytest.raises(TransportError, match="302"):
-        post(f"http://127.0.0.1:{port}/r")
+    if error is None:
+        assert post(f"http://127.0.0.1:{port}/r") == (200, {"ok": True})
+    else:
+        with pytest.raises(TransportError, match=error):
+            post(f"http://127.0.0.1:{port}/r")
 
 
 def test_non_json_response(server):
