@@ -434,6 +434,10 @@ export interface MapNode {
   kind: "doc" | "path";
   title?: string;
   doc_id?: string;
+  /* Indexed on this device: open the file instead of the hosted doc reader. */
+  local_path?: string;
+  updated_at?: number;
+  topics?: string[];
   path?: string;
   paths?: string[];
   source?: DocSource;

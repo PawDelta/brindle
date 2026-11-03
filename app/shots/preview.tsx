@@ -13,6 +13,7 @@ import { PtyViewsProvider, wsPtyView, type PtyViews } from "../src/api/ptyView";
 import type { AppUpdateStatus, AppUpdates } from "../src/api/tauri";
 import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
 import type { Route } from "../src/routes";
+import { DEMO_OFFERED_KEY } from "../src/screens/Onboarding";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
 import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
@@ -60,6 +61,7 @@ const SCENES: Record<string, Route> = {
   agents: { screen: "agents" },
   "agents-make": { screen: "agents" },
   knowledge: { screen: "knowledge" },
+  "knowledge-map": { screen: "knowledge", view: "map" },
   "knowledge-record": { screen: "knowledge" },
   "knowledge-search": { screen: "knowledge" },
   settings: { screen: "settings" },
@@ -88,6 +90,22 @@ const SCENES: Record<string, Route> = {
 };
 
 const daemon = new FakeDaemon(structuredClone(data));
+if (scene === "knowledge-map") {
+  localStorage.setItem(DEMO_OFFERED_KEY, "1");
+  // The reported 0.5.12 account has no hosted docs in any of its scopes.
+  daemon.data.docScopes = [
+    { kind: "user", id: "personal", name: "Personal" },
+    { kind: "group", id: "t_cc0acb7c5cfb368c", name: "Founding Team" },
+    { kind: "org", id: "org_6e83ecddb131dfc35d43d5a8", name: "PawDelta" },
+  ];
+  daemon.data.knowledgeMap = { nodes: [], edges: [] };
+  daemon.data.kbDocuments = [
+    { id: "local:kb:1", kind: "doc", title: "State architecture", local_path: `${REPO}/docs/architecture.md`, paths: ["docs/architecture.md"], topics: ["state"], updated_at: 1793610000 },
+    { id: "local:kb:2", kind: "doc", title: "Terminal streaming", local_path: `${REPO}/docs/terminals.md`, paths: ["docs/terminals.md"], topics: ["terminals", "state"], updated_at: 1793610000 },
+    { id: "local:kb:3", kind: "doc", title: "Credential storage", local_path: "/home/sam/Notes/pawdelta-design/storage.md", paths: ["/home/sam/Notes/pawdelta-design/storage.md"], topics: ["secrets"], updated_at: 1793610000 },
+  ];
+  daemon.data.decisions.push({ ...daemon.data.decisions[0], id: "daemon-reads", topic: "Read-only daemon access", scope: ["docs/**", "src/brindle/daemon/**"] });
+}
 if (scene === "session-review") {
   daemon.data.sessionReview["sup-42"] = { ready: true, reasons: [], branch: "desktop/ux-revamp", base: "main", diff: "" };
   daemon.data.sessionBase["sup-42"] = { "src/session.ts": "export const ready = false;\n" };

@@ -50,6 +50,7 @@ the session, each pane its provider's own in the state its row shows),
 org's policy), `agents-make` (Medium's model list open, the custom agent
 builder under it),
 `knowledge` (three decisions as cards, two document folders),
+`knowledge-map` (Map on open: zero hosted docs in three scopes, local decisions, imported folders and indexed KB documents),
 `knowledge-record` (the record form open), `knowledge-search` (a search
 with a decision and two document passages found), `knowledge-empty` (a
 repo with no knowledge yet: how it gets there), `knowledge-add` (the add
