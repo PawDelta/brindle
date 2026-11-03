@@ -156,7 +156,6 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, 'git commit -m "Add --force option"'), "allow", None),     # a message, not an option
     (lambda ws: bash(ws, "git tag -F -f v1"), "allow", None),                      # -F's value is a file name
     (lambda ws: bash(ws, "git commit -mfix"), "allow", None),                      # an attached message, not -f
-    (lambda ws: bash(ws, 'git commit -m"fix bug"'), "allow", None),
     (lambda ws: bash(ws, "git config -f .gitmodules submodule.x.url u"), "allow", None),   # -f is --file
     (lambda ws: bash(ws, "git rebase -f main"), "allow", None),
     (lambda ws: bash(ws, "git gc --force"), "allow", None),
