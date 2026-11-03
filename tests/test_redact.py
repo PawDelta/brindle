@@ -123,6 +123,8 @@ def test_native_transcript_and_saved_state_are_masked_but_the_live_conversation_
     ("run with my-env-secret-42 set", "run with [redacted] set"),
     ("parallelism false, k9x and on in postgresql", "parallelism false, [redacted] and on in postgresql"),
     ("curl -u admin:kQzRvBnTxLpW pin 31415926535897", "curl -u admin:[redacted] pin [redacted]"),
+    ("mysql -uroot -pk9x db", "mysql -uroot -p[redacted] db"),
+    ("file tokenmy-env-secret-42x", "file token[redacted]x"),
     ("mysql://app:pw-fake@db:3306/app", "mysql://app:[redacted]@db:3306/app"),
     ('{"content": "' + KEY + "\\n" + KEY_BODY + "\\n" + KEY_BODY + '"}', '{"content": "[redacted]"}'),
     ("pw /opt9-secret here", "pw [redacted] here"),

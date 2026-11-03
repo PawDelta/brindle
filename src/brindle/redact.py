@@ -44,9 +44,9 @@ _KEY_HOLD = 16 * 1024   # a private key block is held (and masked to its END) th
 # A line end in text, or written as an escape (a key in JSON).
 _SEP = r"(?:\r?\n|\\r\\n|\\n)"
 # What may come before each line of a key shown as output: a line number
-# (cat -n, grep -n, the Read tool) or a log timestamp.
-_GUTTER = (r"(?:[ \t]*\d+[\t:|\u2192][ \t]*"
-           r"|[ \t]*\[?\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?\]?[ \t]*)")
+# (cat -n, grep -n, the Read tool, "[12] ", "  2  ") or a log timestamp, date optional.
+_GUTTER = (r"(?:[ \t]*(?:\d+[\t:|\u2192]|\[\d+\]|\d+(?=[ \t]))[ \t]*"
+           r"|[ \t]*\[?(?:\d{4}-\d\d-\d\d[T ])?\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?\]?[ \t]*)")
 # The lines of a PEM body: base64, its Proc-Type/DEK-Info headers, blank lines
 # (not the line end after the last one).
 _PEM_LINES = (rf"(?:[ \t]*{_SEP}{_GUTTER}?[ \t]*(?:Proc-Type:[^\n\\]*|DEK-Info:[^\n\\]*|[A-Za-z0-9+/=]+|(?={_SEP}))"
@@ -149,11 +149,15 @@ def _env_secret(value: str) -> bool:
 
 @functools.lru_cache(maxsize=8)
 def _env_pattern(values: tuple[str, ...]) -> re.Pattern[str] | None:
-    """The env values, longest first, each as a whole word: "on" or
-    "postgres" is not masked inside "postgresql"."""
+    """The env values, longest first, each matched wherever it appears
+    (``-phunter2``, ``x<token>``) unless it is a plain word, letters in one
+    case: that only as a whole word, so "postgres" is not masked inside
+    "postgresql"."""
     if not values:
         return None
-    return re.compile(r"(?<![\w-])(?:" + "|".join(map(re.escape, values)) + r")(?![\w-])")
+    return re.compile("|".join(
+        rf"(?<![A-Za-z]){re.escape(v)}(?![A-Za-z])" if v.isalpha() and (v.islower() or v.isupper()) else re.escape(v)
+        for v in values))
 
 
 def env_values(environ=None) -> list[str]:
