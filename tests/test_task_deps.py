@@ -116,23 +116,40 @@ def test_cross_session_overlap_warns_by_files_or_issue_number_until_merged(db, o
 
 @pytest.fixture(scope="module")
 def overlap_template(tmp_path_factory):
-    """Four reported worktrees on ``session`` (w0-w2 and ``landed``, merged
-    into it), made once; ``start`` is ``session`` as w3 is cut from it."""
+    """Reported worktrees on ``session`` (w0, and ``landed``, merged into it),
+    made once; ``start`` is ``session`` as w3 is cut from it."""
     base = tmp_path_factory.mktemp("overlap-template")
     repo_ = build_repo(base)
     sh("git branch session && git update-ref refs/remotes/origin/feat-w3 main", repo_)
     start = sh("git rev-parse session", repo_)
     made = {}
     with scratch_db(tmp_path_factory.mktemp("overlap-template-home")) as db_:
-        for name in ("w0", "w1", "w2", "landed"):
+        for name in ("w0", "landed"):
             made[name] = workspaces.create(db_, str(repo_), f"feat-{name}", base="session",
                                            run_setup=False).workspace
             commit_file(Path(made[name].path), f"{name}.py")
-    sh("git checkout -q session && git merge -q --no-ff feat-landed -m land && git checkout -q main", repo_)
+        sh("git checkout -q session && git merge -q --no-ff feat-landed -m land && git checkout -q main", repo_)
     return base, made, start
 
 
-@pytest.mark.slow("The overlap check under test runs ~90 real git reads over five worktrees")
+@pytest.fixture(scope="module")
+def session_b_template(tmp_path_factory):
+    """The repo with root B's ``session-b`` worktree, made once."""
+    base = tmp_path_factory.mktemp("session-b-template")
+    repo_ = build_repo(base)
+    with scratch_db(tmp_path_factory.mktemp("session-b-template-home")) as db_:
+        return base, workspaces.create(db_, str(repo_), "session-b", run_setup=False).workspace
+
+
+@pytest.fixture
+def repo(request, repo_template, tmp_path):
+    """conftest's repo; with root B's worktree for the tests that use ``two_sessions``."""
+    if "two_sessions" in request.fixturenames:
+        return copy_tree(request.getfixturevalue("session_b_template")[0], tmp_path)
+    return copy_tree(repo_template, tmp_path)
+
+
+@pytest.mark.slow("The overlap check under test runs ~50 real git reads over three worktrees")
 @pytest.mark.parametrize("w3_branch", [
     "feat-w3",
     pytest.param("origin/feat-w3", marks=pytest.mark.variant(
@@ -145,7 +162,7 @@ def test_overlap_check_git_calls_bounded(db, tmp_path, overlap_template, monkeyp
     template, made, start = overlap_template
     repo = copy_tree(template, tmp_path)
     root = workspaces.adopt_root(db, str(repo))
-    for name in ("w0", "w1", "w2", "w3", "landed"):
+    for name in ("w0", "w3", "landed"):
         if name == "w3":
             ws = workspaces.create(db, str(repo), w3_branch, base="session", start=start,
                                    run_setup=False).workspace
@@ -165,20 +182,22 @@ def test_overlap_check_git_calls_bounded(db, tmp_path, overlap_template, monkeyp
     assert tasks.find_clash(db, root, ["landed.py"]) is None
     verbs = [c[0] for c in calls]
     assert "fetch" not in verbs and "cherry" not in verbs and "patch-id" not in verbs
-    assert len(calls) <= 8 * 5 * 2, verbs    # 8 per worktree per check (69 measured; ~250 before)
+    assert len(calls) <= 8 * 3 * 2, verbs    # 8 per worktree per check
     calls.clear()
     assert tasks.find_clash(db, root, ["w3.py"]).holder == "w3"
     assert "merge-tree" not in {c[0] for c in calls}    # decided once per (branch, target) sha pair
 
 
 @pytest.fixture
-def two_sessions(db, repo, monkeypatch):
+def two_sessions(db, repo, session_b_template, monkeypatch):
     """Roots A (main checkout) and B (its own session branch) on one repo,
     overlap unset; B's worker runs on src/x.py. Returns B's worker id."""
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text('{"pipeline": false, "review": false}')
     root_a = workspaces.adopt_root(db, str(repo))
-    root_b = workspaces.create(db, str(repo), "session-b", run_setup=False).workspace
+    template, made = session_b_template
+    root_b = moved(made, template, repo.parent)
+    db.add_workspace(root_b)
     for name, ws in (("rootA", root_a), ("rootB", root_b)):
         db.add_agent(Agent(name, ws.id, "supervisor", "claude", None, "interactive", "processing",
                            "@0", None, time.time()))
