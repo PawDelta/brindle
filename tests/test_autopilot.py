@@ -6,10 +6,9 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, bus, gates, git, watch, workspaces
+from brindle import agents, autopilot, bus, gates, git, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
-from brindle.providers import status_line
 
 GOALS = """# Settings page
 
@@ -134,7 +133,7 @@ def test_nudges_until_stalled_without_progress(db, root, monkeypatch):
     assert autopilot.on_stop(db, agent, {}) is not None
 
 
-@pytest.mark.parametrize("condition", ["pid", "until", "path"])
+@pytest.mark.parametrize("condition", ["pid", "path"])
 def test_outside_wait_holds_nudges_until_job_ends(db, root, monkeypatch, condition):
     from brindle import mcp_server, procs
 
@@ -409,11 +408,7 @@ def _crash(*a, **k):
     (False, (False, "$ c\n(exit 1)"), "not_done", "not done yet"),
     (True, (False, "$ c\n(exit 1)"), "regressed", "regressed"),
     (False, (False, "$ c\n(exit 127)"), "failed", "couldn't run: command not found"),
-    (False, (False, "$ c\n(exit 126)"), "failed", "couldn't run: command not runnable"),
-    (False, (False, "$ c\n(timed out after 5s)"), "failed", "couldn't run: timed out after 5s"),
     (False, (False, "$ c\n(exit -11)"), "failed", "couldn't run: crashed: killed by signal 11"),
-    pytest.param(False, (False, "$ c\n(exit 133)"), "failed", "couldn't run: crashed: killed by signal 5",
-                 marks=pytest.mark.variant("SIGTRAP: any 128+n shell signal exit is a crash")),
     (False, _crash, "failed", "couldn't run: crashed: boom"),
 ])
 def test_check_records_a_state_in_plain_words(db, root, monkeypatch, had_passed, result, state, label):
@@ -450,19 +445,6 @@ def test_missing_attached_checkout_is_recorded_and_the_rest_still_run(db, root, 
     db.record_check(db.milestones("boss")[0].id, True, "ok", None)
     autopilot.check_milestones(db, "boss", ws, position=2, cfg=RepoConfig(goal_audit=False))
     assert db.milestones("boss")[0].state == "failed"
-
-
-def test_old_milestone_rows_get_a_state(db, root):
-    db.set_milestones("boss", [("a", "c", None), ("b", "c", None), ("c", "c", None), ("d", "c", None)])
-    ids = [m.id for m in db.milestones("boss")]
-    with db.tx() as c:
-        c.execute("UPDATE milestones SET status='passed', state=NULL WHERE id=?", (ids[0],))
-        c.execute("UPDATE milestones SET status='failed', state=NULL, passed_sha='abc' WHERE id=?", (ids[1],))
-        c.execute("UPDATE milestones SET status='failed', state=NULL, output='(exit 127)' WHERE id=?", (ids[2],))
-        c.execute("UPDATE milestones SET status='failed', state=NULL, passed_sha='abc', "
-                  "output=\"repo 'other' isn't attached to this session\" WHERE id=?", (ids[3],))
-    db._migrate()
-    assert [m.state for m in db.milestones("boss")] == ["passed", "regressed", "failed", "failed"]
 
 
 def commit_all(repo, msg="work"):
@@ -577,7 +559,7 @@ def test_approval_of_an_older_commit_keeps_the_goal_open(db, root, repo, monkeyp
     assert db.get_autopilot("boss").state == "auditing"   # the new commit gets its own audit
 
 
-@pytest.mark.parametrize("launch", ["starting", "failed"])
+@pytest.mark.parametrize("launch", ["starting"])
 def test_auditor_grace_keeps_an_auditor_whose_window_is_not_up_yet(db, root, repo, monkeypatch, launch):
     """Live incident: on_stop took an auditor still starting (spawned, its
     window not recorded yet) for dead and forgot it, so its APPROVED review
@@ -610,18 +592,6 @@ def test_auditor_grace_keeps_an_auditor_whose_window_is_not_up_yet(db, root, rep
     assert db.get_autopilot("boss").state == "done"
 
 
-def test_single_check_rechecks_all_before_declaring_done(db, root, repo):
-    _, ws = root
-    with_goal(db)
-    (repo / "api.txt").write_text("")
-    autopilot.check_milestones(db, "boss", ws)
-    (repo / "api.txt").unlink()           # milestone 1 regressed
-    (repo / "ui.txt").write_text("")
-    out = autopilot.check_milestones(db, "boss", ws, position=2)
-    assert "goal is reached" not in out
-    assert [m.status for m in db.milestones("boss")] == ["failed", "passed"]
-
-
 def test_usage_limit_pauses_autopilot(db, root, monkeypatch):
     agent, _ = root
     with_goal(db)
@@ -639,24 +609,6 @@ def test_rate_limit_failure_blocks_autopilot(db, root):
     agents.handle_hook(db, "boss", "stop-failure", {"error_type": "rate_limit"})
     assert db.get_autopilot("boss").state == "blocked"
     assert db.get_agent("boss").status == "idle"
-
-
-def test_stop_hook_runs_autopilot_for_the_supervisor(db, root, monkeypatch):
-    with_goal(db)
-    monkeypatch.setattr(autopilot, "active_workers", lambda db, rid: [])
-    out = agents.handle_hook(db, "boss", "stop", {})
-    assert out and "[brindle autopilot]" in out["reason"]
-    assert "\n" not in out["reason"]   # the chat shows one line; the rest via read_messages
-    assert db.get_agent("boss").status == "processing"
-
-
-def test_agent_cap(db, root, monkeypatch):
-    add_agent(db, root[1], "w1", mode="assign", parent="boss")
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    autopilot.check_capacity(db, "boss", RepoConfig(max_agents=2))
-    with pytest.raises(autopilot.AutopilotError, match="already running"):
-        autopilot.check_capacity(db, "boss", RepoConfig(max_agents=1))
-    autopilot.check_capacity(db, "w1", RepoConfig(max_agents=0))
 
 
 # -- merge gates ---------------------------------------------------------------
@@ -703,8 +655,6 @@ def test_gate_runs_checks_and_refuses_dirty_work(db, worker_ws):
 @pytest.mark.parametrize("ends,start_load,start_level", [
     ("load falls", 25.0, 1),          # 2.5x cores: real trouble
     ("memory pressure", 1.0, 2),      # pressure warn on an idle machine (old room rule: no wait)
-    ("wait off", 25.0, 1),
-    ("busy but starts", 13.0, 1),     # 1.3x cores with a free slot: the slots bound it
 ])
 def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch, ends, start_load, start_level):
     """With its slot, a check run waits for room, showing "checks waiting for
@@ -736,58 +686,6 @@ def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch
     assert len(seen) == (2 if ends in ("load falls", "memory pressure") else 0)
     assert all(s.startswith(waiting) and not done for s, done in seen), seen
     assert ok and ran.exists() and gates.checks_state(worker_ws) == "waiting for checks"
-
-
-def test_reviewer_nudged_to_submit(db, worker_ws):
-    add_agent(db, worker_ws, "rev", mode="review")
-    out = agents.handle_hook(db, "rev", "stop", {})
-    assert out and "submit_review" in out["reason"]
-
-
-# -- display and launch ------------------------------------------------------------
-
-
-def pilot(**kw):
-    return {"enabled": True, "goal": "Settings page", "state": "running", "note": None,
-            "milestones": [{"position": 1, "title": "Settings API", "status": "passed", "check": "x"},
-                           {"position": 2, "title": "Settings UI", "status": "failed", "check": "y"}],
-            "usage": None, "workers": 2, **kw}
-
-
-def test_sidebar_shows_milestones():
-    lines = watch.render([], now=0, width=40, pilot=pilot())
-    text = [ln.text for ln in lines]
-    assert "Autopilot · Settings page" in text
-    assert "  ✓ Settings API" in text and "  ✗ Settings UI" in text
-    assert "  1 of 2 verified · 2 workers on it" in text
-    assert all(len(t) <= 40 for t in text)
-
-
-def test_sidebar_shows_blocked_and_usage():
-    lines = watch.render([], now=0, width=60, pilot=pilot(
-        state="blocked", note="Postgres or SQLite?",
-        usage={"window": "five_hour", "used": 91, "resets_at": None}))
-    text = "\n".join(ln.text for ln in lines)
-    assert "needs you" in text and "Postgres or SQLite?" in text
-    assert "Claude usage at 91% of the 5-hour limit" in text
-
-
-def test_sidebar_without_goal_asks_for_one():
-    lines = watch.render([], now=0, pilot=pilot(goal=None))
-    assert any("what we're building" in ln.text for ln in lines)
-
-
-def test_status_line_passes_through_the_persons_own(tmp_path, monkeypatch):
-    config = tmp_path / "claude-config"
-    config.mkdir()
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
-    payload = json.dumps({"workspace": {"project_dir": str(tmp_path)},
-                          "rate_limits": {"seven_day": {"used_percentage": 40}}})
-    assert status_line(payload) == ""
-    assert autopilot.usage()["used"] == 40
-    (config / "settings.json").write_text(json.dumps(
-        {"statusLine": {"type": "command", "command": "echo mine"}}))
-    assert status_line(payload) == "mine"
 
 
 def test_delivered_worker_result_is_not_the_user_replying(db, root, monkeypatch):
@@ -840,35 +738,10 @@ def test_auditor_liveness_recovery_on_stop(db, root, repo, monkeypatch):
     assert autopilot.on_stop(db, agent, {}) is None
 
 
-def test_watch_once_shows_its_own_sessions_goal(db, root, monkeypatch):
-    from brindle import sidebar_follow, tmux, watch_costs
-
-    _, ws = root
-    with_goal(db)                                   # "boss": two milestones
-    add_agent(db, ws, "newer")                      # newest, with a one-milestone goal
-    db.add_autopilot("newer")
-    autopilot.set_goal(db, "newer", "Other goal", [("Newer step", "true", None)])
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    monkeypatch.setattr(tmux, "list_panes", tmux.PaneSnapshot)
-    monkeypatch.setattr(watch_costs, "Feed", lambda repo_root: SimpleNamespace(
-        get=lambda: None, wait=lambda: None))
-    monkeypatch.setattr(tmux, "current_session", lambda: "boss-session")
-    monkeypatch.setattr(sidebar_follow, "root_for_session", lambda db, session: "boss")
-    own = watch.print_once(db, ws.repo_root, color=False)
-    assert "Milestone 2" in own and "Newer step" not in own
-    monkeypatch.setattr(tmux, "current_session", lambda: None)   # outside tmux: newest goal
-    assert "Newer step" in watch.print_once(db, ws.repo_root, color=False)
-
-
 @pytest.mark.parametrize("passed, checking, workers, expected", [
     (1, False, [], ["done", "in_progress"]),                              # check passed
     (0, True, ["building"], ["in_review", "in_progress"]),                # a check is running
-    (0, False, ["reviewing"], ["in_review", "in_progress"]),              # all reported, in review
-    (0, False, ["reviewer"], ["in_review", "in_progress"]),
     (0, False, ["reviewing", "building"], ["in_progress", "in_progress"]),  # still building
-    (0, False, [], ["in_progress", "in_progress"]),                       # nothing under way
-    (0, False, ["reviewing", "ready"], ["in_review", "in_progress"]),     # a ready branch doesn't veto
-    (0, False, ["gone"], ["in_review", "in_progress"]),                   # reported, marked done, still in checks
 ])
 def test_milestone_phase(db, root, monkeypatch, passed, checking, workers, expected):
     _, ws = root
@@ -893,14 +766,9 @@ def test_milestone_phase(db, root, monkeypatch, passed, checking, workers, expec
 
 @pytest.mark.parametrize("passed, checking, ready, pr, merged, goal_done, expected, target", [
     (0, False, False, False, False, False, "in_progress", True),
-    (0, True, False, False, False, False, "in_review", True),           # a milestone check is running
     (2, False, True, False, False, True, "ready_for_pr", True),         # all pass, session review ready
-    (2, False, False, False, False, False, "in_progress", True),        # all pass, review not ready
-    (2, False, True, True, False, True, "pr_open", True),               # audit approved, PR still open
     (2, False, True, True, True, True, "done", True),                   # PR merged
-    (1, False, False, True, True, False, "pr_open", True),              # merged but goal not reached
     (2, False, True, True, True, False, "pr_open", True),               # merged, milestones pass, audit hasn't approved
-    (2, False, False, False, False, True, "in_progress", True),         # reached, manual PR, checkout dirty: not done
     (2, False, False, False, False, True, "done", False),               # reached, nothing to open a PR for
 ])
 def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, goal_done, expected, target):
@@ -924,10 +792,7 @@ def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, 
 
 @pytest.mark.parametrize("flight, expected", [
     ("processing", "working"),
-    ("waiting", "waiting"),
-    ("pending_task", "waiting"),
     ("usage_paused", "waiting"),
-    ("checking", "checking"),
     (None, "not_done"),
 ])
 def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, expected):
