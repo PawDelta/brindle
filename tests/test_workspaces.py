@@ -127,6 +127,7 @@ def test_remove_refuses_dirty_and_keeps_branch(db, repo, feature):
     assert sh(f"git rev-parse {disk.ARCHIVE_REF}plain", repo).strip()
 
 
+@pytest.mark.variant("input from real use: supervisors pass a worker's agent id, not a workspace name; the only test of that lookup")
 def test_remove_workspace_accepts_an_agent_id(db, feature, monkeypatch):
     ws = feature
     add(db, ws, "worker", "assign", result="finished")

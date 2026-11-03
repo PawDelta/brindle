@@ -96,6 +96,7 @@ def test_sweep_stops_processes_of_paused_agents(db, ws, proc_cleanup):
     assert any("leftover" in n for n in notes)
 
 
+@pytest.mark.variant("the only assertion that procs.terminate escalates to SIGKILL after the grace period; the sweep tests run these lines without checking the signal order")
 def test_a_process_ignoring_sigterm_is_killed_after_the_grace_period(monkeypatch):
     import signal
 
