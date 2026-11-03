@@ -103,6 +103,42 @@ def test_session_repo_branch_column_moves_out_and_no_released_table_gains_a_colu
             if t in now and now[t] - set(cols.split())} == {}
 
 
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_task_wait_noted_column_moves_to_task_notes_keeping_claims(tmp_path, monkeypatch, interleaved):
+    """A development database has tasks.wait_noted: opening it copies the
+    timestamps to task_notes and drops the column, even when another process
+    finishes that move between this one's check and its transaction. A task
+    already noted cannot claim its notice again; an unnoted one can."""
+    path = str(tmp_path / "state.db")
+    db = DB(path)
+    db.conn.execute("ALTER TABLE tasks ADD COLUMN wait_noted REAL")
+    for tid, noted in (("t1", 5.0), ("t2", None)):
+        db.conn.execute("INSERT INTO tasks (id, repo_root, caller_ws_id, profile, task_text, mode, "
+                        "isolate, state, created_at, wait_noted) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        (tid, "/r", "w", "p", "x", "m", 1, "pending", 1.0, noted))
+    db.conn.close()
+
+    real_tx = DB.tx
+    moved = []
+
+    def tx_after_other_process(self):
+        if not moved:
+            moved.append(1)
+            DB(path).conn.close()
+        return real_tx(self)
+
+    if interleaved:
+        monkeypatch.setattr(DB, "tx", tx_after_other_process)
+    db = DB(path)
+    assert bool(moved) == interleaved
+    assert "wait_noted" not in _columns(db.conn)["tasks"]
+    assert [tuple(r) for r in db.conn.execute("SELECT task_id, kind, noted FROM task_notes")] == [
+        ("t1", "wait", 5.0)]
+    assert not db.claim_wait_note("t1", 9.0)
+    assert db.claim_wait_note("t2", 9.0)
+    assert not db.claim_wait_note("t2", 10.0)
+
+
 @pytest.mark.variant("live incident 2026-10-30: an app update added columns and open sessions' inserts failed")
 def test_an_older_engine_writes_and_reads_rows_a_newer_engine_added_columns_to(tmp_path):
     """A newer brindle migrates the shared database while an older one (a
