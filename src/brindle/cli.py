@@ -389,6 +389,7 @@ def start(
     # handled by the detached cull.
     _pause_transferred(db, ws)
     _check_updates(ws.repo_root)
+    _say(svc.pull_main(db, ws))
     started = _run(svc.launch, db, ws, provider=provider, prompt=prompt, watch=watch, autopilot=autopilot)
     a = started.agent
     # After the chat's window exists and is recorded: the cull's session
@@ -3266,6 +3267,16 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
             gates.tell(db, caller, f"[brindle] No reviewer could start on `{ws.branch}` "
                                    f"({e}). Review it yourself with workspace_diff, then "
                                    "merge_workspace.")
+
+
+@app.command("_session-sync-checks", hidden=True)
+def session_sync_checks_cmd(workspace_id: str, old_sha: str) -> None:
+    """Run a session checkout's checks on the files a sync with origin's
+    default branch brought in, and tell its supervisor. Started detached by
+    brindle.session_sync."""
+    from brindle import session_sync
+
+    session_sync.run_checks(_helper_db(), workspace_id, old_sha)
 
 
 @app.command("_check-milestones", hidden=True)

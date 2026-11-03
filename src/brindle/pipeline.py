@@ -56,7 +56,7 @@ from contextlib import contextmanager
 
 from brindle import (
     agents, autopilot, bus, codemap, codemap_docs, conflicts, events, gates, git, history, learning, policy,
-    savings, tasks, workspaces,
+    savings, session_sync, tasks, workspaces,
 )
 from brindle.config import RepoConfig, load_repo_config
 from brindle.db import DB, Agent, Workspace
@@ -1675,6 +1675,12 @@ def _merge(db: DB, caller: Agent | None, ws: Workspace, squash: bool,
     verdict = policy.check_merge(cfg, ws, agents.workspace_worker(db, ws), caller)
     if not verdict.allowed:
         return f"Not merged: the repo's policy refused it: {verdict.reason}"
+    # Into a session's branch: bring origin's default branch into it first
+    # (under the base lock this merge holds), and refuse while that conflicts.
+    if (home := session_sync.session_checkout(db, ws)) is not None:
+        session_sync.sync(db, home)
+    if why := session_sync.merge_block(db, ws):
+        return f"Not merged: {why}"
     try:
         behind, _ahead = git.ahead_behind(ws.path, workspaces.require_base(ws))
         if behind:

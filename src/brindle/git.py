@@ -564,7 +564,7 @@ def sync(path: str | Path, base: str, strategy: str = "rebase") -> str:
     return ref
 
 
-def merge_local_base(path: str | Path, base: str) -> tuple[str, list[str]]:
+def merge_local_base(path: str | Path, base: str, no_ff: bool = False) -> tuple[str, list[str]]:
     """Merge the local ``base`` branch into HEAD, ignoring origin entirely:
     ``base`` here is the local branch a workspace merges back into, not its
     remote-tracking counterpart, so this never fetches. On a content conflict,
@@ -573,9 +573,10 @@ def merge_local_base(path: str | Path, base: str) -> tuple[str, list[str]]:
     success. A merge failure that isn't a content conflict (``merge.ff=only``,
     a failing hook, a missing git identity, ...) is aborted the same way but
     raised as a GitError, since there's nothing sensible to report as a sync
-    or a conflict."""
+    or a conflict. ``no_ff``: always a merge commit, even where HEAD could
+    fast-forward."""
     before = out(["rev-parse", "HEAD"], path)
-    proc = run(["merge", "--no-edit", base], path, check=False)
+    proc = run(["merge", "--no-edit", *(["--no-ff"] if no_ff else []), base], path, check=False)
     if proc.returncode != 0:
         conflicts = conflicting_files(path)
         run(["merge", "--abort"], path, check=False)

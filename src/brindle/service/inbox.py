@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import agents, autopilot, bus, identity_lock, permissions, prompt_answer, tmux, view
+from brindle import agents, autopilot, bus, identity_lock, permissions, prompt_answer, session_sync, tmux, view
 from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent
@@ -220,6 +220,10 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 out.append(InboxItemDTO(kind="proposed_checks", reason="checks proposed", **link,
                                         detail="\n".join(checks)))
             out += _pr_items(db, row.id, ws["branch"], link)
+            home = db.get_workspace(row.workspace_id)
+            if home and (stuck := session_sync.needs_you(db, home)):
+                out.append(InboxItemDTO(kind="sync_conflict", reason="session branch conflicts with origin",
+                                        detail=stuck, **link))
             login = db.get_login_state(row.id)
             if login and login.state == "auth_paused":
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",

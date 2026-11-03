@@ -511,6 +511,42 @@ CREATE TABLE IF NOT EXISTS session_pr_prep (
     prepared_at REAL NOT NULL,
     PRIMARY KEY (root_id, branch)
 );
+-- A session branch against origin/<default> as brindle last synced it
+-- (brindle.session_sync). state: synced | behind (its checkout was dirty) |
+-- conflict (files: the JSON list); upstream_sha: the origin commit looked at;
+-- told_sha: the origin commit the supervisor was last told about.
+CREATE TABLE IF NOT EXISTS session_sync (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    upstream_sha TEXT NOT NULL,
+    state TEXT NOT NULL,
+    files TEXT,
+    told_sha TEXT,
+    updated_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, branch)
+);
+-- A session PR that landed on the default branch as a squash (or rebase):
+-- squash_sha is that commit, covers_sha the session commit the PR carried,
+-- so a later sync records it as merged instead of re-applying it.
+CREATE TABLE IF NOT EXISTS session_squashes (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    squash_sha TEXT NOT NULL,
+    covers_sha TEXT NOT NULL,
+    recorded_at REAL NOT NULL,
+    PRIMARY KEY (repo_root, squash_sha)
+);
+-- A session PR that merged but whose landing commit (merge or squash) isn't
+-- known yet: looked up at each sync until it is (brindle.session_sync).
+CREATE TABLE IF NOT EXISTS session_pr_landings (
+    root_id TEXT NOT NULL,
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    url TEXT NOT NULL,
+    covers_sha TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (repo_root, branch, url)
+);
 -- The one reviewer of a workspace's commit (agents.request_review): only the
 -- dispatcher that inserts or takes over this row starts it. slot is '' for
 -- the commit's review, or the profile of a configured second review.
