@@ -5,15 +5,18 @@
 - exact token formats: GitHub (``ghp_``/``gho_``/``ghu_``/``ghs_``/``ghr_``,
   ``github_pat_``), GitLab ``glpat-``, Slack ``xox[abprs]-``, AWS access key
   ids (``AKIA``/``ASIA``), Google ``AIza``, Anthropic/OpenAI ``sk-``, JWTs,
-  SonarQube ``sqp_``/``squ_``/``sqa_``, Atlassian ``ATATT`` and private key
-  blocks;
+  SonarQube ``sqp_``/``squ_``/``sqa_``, Atlassian ``ATATT``, Stripe
+  ``sk_live_``/``rk_live_``, npm ``npm_``, Hugging Face ``hf_``, PyPI
+  ``pypi-``, Slack webhook URLs and private key blocks;
+- the password in a URL (``postgres://user:pw@host``);
 - the credential of any ``Authorization:`` header, and a ``Bearer``/``Basic``
   credential elsewhere when it has a digit in it (so prose stays);
 - a high-entropy value only when a secret-style label names it
   (``API_KEY=``, ``token:``, ``SECRET=``, ``password=``): bare hex, base64,
   commit SHAs and UUIDs pass through;
 - the actual values of secret-named environment variables in brindle's own
-  environment (:func:`env_values`), wherever they appear.
+  environment (:func:`env_values`), wherever they appear, unless the value
+  is too plain to be one (``false``, ``8080``, ``postgres``).
 
 It is applied where brindle writes or uploads text (the list, with each call
 site, is docs/investigations/secret-exposure.md), never to code, diffs,
@@ -29,14 +32,21 @@ import math
 import os
 import re
 import sys
+import threading
 from typing import Any
 
 from brindle import secrets
 
 REDACTED = "[redacted]"
 
+_KEY_HOLD = 16 * 1024   # a private key block is held (and masked to its END) this far at most
+# The lines of a PEM body: base64, its Proc-Type/DEK-Info headers, blank lines
+# (not the line end after the last one).
+_PEM_LINES = r"(?:[ \t]*\r?\n[ \t]*(?:Proc-Type:[^\n]*|DEK-Info:[^\n]*|[A-Za-z0-9+/=]+|(?=\r?\n))[ \t]*(?=\r?\n|\Z))*"
+# A key block runs to its END within _KEY_HOLD, or, with no END, over the
+# PEM body that follows it: never over the prose after it.
 _TOKEN = re.compile(
-    r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----.*?(?:-----END (?:[A-Z]+ )*PRIVATE KEY-----|\Z)"
+    rf"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----(?:.{{0,{_KEY_HOLD}}}?-----END (?:[A-Z]+ )*PRIVATE KEY-----|{_PEM_LINES})"
     r"|(?<![\w-])(?:"
     r"gh[pousr]_[A-Za-z0-9]{30,}"
     r"|github_pat_[A-Za-z0-9_]{30,}"
@@ -48,6 +58,11 @@ _TOKEN = re.compile(
     r"|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
     r"|sq[pua]_[A-Za-z0-9]{30,}"
     r"|ATATT[A-Za-z0-9_=-]{20,}"
+    r"|[sr]k_(?:live|test)_[A-Za-z0-9]{16,}"
+    r"|npm_[A-Za-z0-9]{36}"
+    r"|hf_[A-Za-z0-9]{30,}"
+    r"|pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}"
+    r"|https://hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9/_-]{20,}"
     r")(?![\w-])", re.DOTALL)
 _AUTH_PREFIX = r"\b(?:proxy-)?authorization[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic|token|digest)\s+)?"
 _AUTHORIZATION = re.compile(rf"(?i)({_AUTH_PREFIX})([^\s'\"`<>,;]+)")
@@ -58,12 +73,19 @@ _AUTH_SCHEME = re.compile(r"(?i)\b(bearer|basic)(\s+)(?=[A-Za-z._~+/-]*\d)([A-Za
 _LABEL_PREFIX = (r"\b[\w.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret|token|passw(?:or)?d|passphrase"
                  r"|credential|(?<![a-z])key)[\w.-]*[\"']?\s*[:=]\s*[\"']?")
 _LABELLED = re.compile(rf"(?i)({_LABEL_PREFIX})([^\s'\"`<>,;]{{8,}})")
+_URL_PASSWORD = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s/:@]*:)([^\s/@]+)(@)")
 # What a stream must hold until more text comes: a header, label or scheme whose
 # credential is still to come (mask finds it on the next line), or a private key
 # block not yet ended.
 _OPEN = re.compile(rf"(?i)(?:{_AUTH_PREFIX}|\b(?:bearer|basic)|{_LABEL_PREFIX})\s*\Z")
 _KEY_BEGIN = re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----")
-_KEY_END = re.compile(r"-----END (?:[A-Z]+ )*PRIVATE KEY-----")
+# What may follow a BEGIN line while its key block is still to end: PEM body,
+# then perhaps the start of the END line.
+_KEY_OPEN = re.compile(rf"{_PEM_LINES}(?:\r?\n(?!-----END (?:[A-Z]+ )*PRIVATE KEY-----)-[A-Z -]*)?\s*")
+# Where a stream that gave up on a key block picks up again: past its END, or
+# at the first line that is not PEM body.
+_KEY_RESUME = re.compile(r"(?m)-----END (?:[A-Z]+ )*PRIVATE KEY-----"
+                         r"|^(?![ \t]*(?:Proc-Type:|DEK-Info:|-----END ))(?=[^\n]*(?:[^\sA-Za-z0-9+/=]|\S[ \t]+\S))")
 # Where a stream that gave up on what it held (see MaskingStream) picks up again.
 _CREDENTIAL_END = re.compile(r"[^\s'\"`<>,;]+(?=[\s'\"`<>,;])")
 _LINE_END = re.compile(r"\n")
@@ -79,7 +101,9 @@ _PATH_NAME = re.compile(r"(?i)_(?:path|file|dir|home|sock|socket|config|url"
 # text. Decided by name only; a secret variable's value is masked whatever it is.
 _FLAG_NAME = re.compile(r"(?i)(?:^|_)(?:enable|enabled|disable|disabled|use|no|skip|allow|debug"
                         r"|verbose|max|min|limit|count)(?:_|$)")
-_SHORT_ENV = 8          # a shorter env value is masked only as a whole word
+# An env value that can't be a secret: a switch, a number, a port, a version.
+_PLAIN = re.compile(r"(?i)true|false|yes|no|on|off|none|null|[-+]?[\d.,_:]+")
+_SHORT_ENV = 16         # a shorter env value is masked only with a digit in it
 _HOLD_MAX = 64 * 1024   # an unfinished line longer than this is passed on in part
 _KEEP = 4096            # ... all but its last _KEEP characters (or longest secret)
 
@@ -108,15 +132,26 @@ def _secret_like(value: str) -> bool:
     return len(value) >= 16 and _entropy(value) >= 3.5 and 0.2 <= upper <= 0.8
 
 
+def _env_secret(value: str) -> bool:
+    """An env value worth masking everywhere it appears: not a switch or a
+    number, varied (no plain word like ``postgres``) and, when short, with
+    a letter and a digit in it."""
+    value = value.strip()
+    if not value or _PLAIN.fullmatch(value) or _entropy(value) < 3.0:
+        return False
+    return len(value) >= _SHORT_ENV or (any(c.isdigit() for c in value) and any(c.isalpha() for c in value))
+
+
 def env_values(environ=None) -> list[str]:
     """The values of secret-named variables in ``environ`` (default: brindle's
     own environment), longest first. A variable named for a path (``*_FILE``,
-    ``*_SOCK`` ...) or a switch (``*_ENABLED``) is left out."""
+    ``*_SOCK`` ...) or a switch (``*_ENABLED``) is left out, and so is a value
+    too plain to be a secret (see _env_secret)."""
     env = os.environ if environ is None else environ
     named = {*secrets.SECRET_ENV, *secrets.PERSONAL_KEYS}
     found = set()
     for name, value in env.items():
-        if not value:
+        if not _env_secret(value):
             continue
         if name in named or (_SECRET_NAME.search(name) and not _PATH_NAME.search(name)
                              and not _FLAG_NAME.search(name)):
@@ -129,13 +164,9 @@ def mask(text: str) -> str:
     if not isinstance(text, str) or not text:
         return text
     for value in env_values():
-        if value not in text:
-            continue
-        if len(value) >= _SHORT_ENV:
-            text = text.replace(value, REDACTED)
-        else:
-            text = re.sub(rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])", REDACTED, text)
+        text = text.replace(value, REDACTED)
     text = _TOKEN.sub(REDACTED, text)
+    text = _URL_PASSWORD.sub(lambda m: m.group(1) + REDACTED + m.group(3), text)
     text = _AUTHORIZATION.sub(lambda m: m.group(1) + REDACTED, text)
     text = _AUTH_SCHEME.sub(lambda m: m.group(1) + m.group(2) + REDACTED, text)
     return _LABELLED.sub(lambda m: m.group(1) + REDACTED if _secret_like(m.group(2)) else m.group(0), text)
@@ -166,7 +197,7 @@ def mask_data(value: Any) -> Any:
 
 def _spans(text: str) -> list[tuple[int, int]]:
     """Where in ``text`` something :func:`mask` would replace lies."""
-    found = [m.span() for p in (_TOKEN, _AUTHORIZATION, _AUTH_SCHEME, _LABELLED) for m in p.finditer(text)]
+    found = [m.span() for p in (_TOKEN, _URL_PASSWORD, _AUTHORIZATION, _AUTH_SCHEME, _LABELLED) for m in p.finditer(text)]
     for value in env_values():
         at = text.find(value)
         while at >= 0:
@@ -176,11 +207,13 @@ def _spans(text: str) -> list[tuple[int, int]]:
 
 
 def _open_key(text: str) -> int:
-    """Where in ``text`` a private key block that has not ended begins, or -1."""
-    begins = list(_KEY_BEGIN.finditer(text))
-    if begins and not _KEY_END.search(text, begins[-1].end()):
-        return begins[-1].start()
-    return -1
+    """Where in ``text`` a private key block that has not ended begins, or -1:
+    a BEGIN line followed by nothing but PEM body. Prose after it means the
+    block won't end (mask covers the body), so nothing is held for it."""
+    begin = None
+    for begin in _KEY_BEGIN.finditer(text):
+        pass
+    return begin.start() if begin and _KEY_OPEN.fullmatch(text, begin.end()) else -1
 
 
 def _open_credential(text: str) -> int:
@@ -215,16 +248,24 @@ class MaskingStream:
     private key block until its END line). A line longer than ``_HOLD_MAX`` is
     passed on in part, keeping back its last ``_KEEP`` characters the same
     way; what can't be split safely by four times that is dropped to the end
-    of the line, or of the key block or credential it was waiting on. :meth:`finish` is the end of the stream (at
-    exit) and passes on everything, masked."""
+    of the line, or of the credential it was waiting on. A key block is held
+    only while PEM body follows it, and ``_KEY_HOLD`` at most: then it is
+    passed on masked and the rest of its body dropped. :meth:`finish` is the
+    end of the stream (at exit) and passes on everything, masked. Writes from
+    several threads are taken one at a time."""
 
     def __init__(self, stream) -> None:
         self._stream = stream
+        self._lock = threading.RLock()
         self._pending = ""
         self._dropping: re.Pattern[str] | None = None   # what ends what is being dropped
         self._dropped = ""                               # the tail of it, for an end split across writes
 
     def write(self, text: str) -> int:
+        with self._lock:
+            return self._write(text)
+
+    def _write(self, text: str) -> int:
         n = len(text)
         if self._dropping:
             seen = self._dropped + text
@@ -241,22 +282,27 @@ class MaskingStream:
         if cut > 0:
             done, self._pending = self._pending[:cut], self._pending[cut:]
             self._stream.write(mask(done))
-        if len(self._pending) > 4 * _HOLD_MAX:     # can't be split safely: fail closed
+        key = _open_key(self._pending)
+        if key >= 0 and len(self._pending) - key > _KEY_HOLD:   # a key block that won't end
+            self._stream.write(mask(self._pending))
+            self._dropping, self._pending = _KEY_RESUME, ""
+        elif len(self._pending) > 4 * _HOLD_MAX:     # can't be split safely: fail closed
             self._stream.write(REDACTED)
-            self._dropping = (_KEY_END if _open_key(self._pending) >= 0
-                              else _CREDENTIAL_END if _open_credential(self._pending) >= 0 else _LINE_END)
+            self._dropping = _CREDENTIAL_END if _open_credential(self._pending) >= 0 else _LINE_END
             self._pending = ""
         return n
 
     def flush(self) -> None:
-        self._stream.flush()         # what is held stays held
+        with self._lock:
+            self._stream.flush()     # what is held stays held
 
     def finish(self) -> None:
-        if self._pending:
-            self._stream.write(mask(self._pending))
-            self._pending = ""
-        self._dropping, self._dropped = None, ""
-        self._stream.flush()
+        with self._lock:
+            if self._pending:
+                self._stream.write(mask(self._pending))
+                self._pending = ""
+            self._dropping, self._dropped = None, ""
+            self._stream.flush()
 
     def __getattr__(self, name: str):
         return getattr(self._stream, name)
