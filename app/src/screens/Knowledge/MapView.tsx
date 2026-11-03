@@ -4,6 +4,7 @@ import type { DecisionDTO } from "../../api/schema";
 import { alert, button, card, field, h2 } from "../../components/ui";
 import { Reader, scopeName } from "./DocsView";
 import { DecisionCard } from "./KnowledgeScreen";
+import { Markdown } from "./Markdown";
 import { docGraph } from "./graphLayout";
 import { joinLocal, MapGraph, type GraphNode } from "./MapGraph";
 
@@ -35,11 +36,13 @@ function MapArea({ client, repo, decisions, sources }: MapViewProps) {
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<GraphNode | null>(null);
   const [doc, setDoc] = useState<string | null>(null);
-  const [preview, setPreview] = useState<{ node: string; summary: string } | null>(null);
-  const selected = useRef<string | null>(null);
+  const [preview, setPreview] = useState<{ node: string; summary: string; text?: string } | null>(null);
+  const [local, setLocal] = useState<{ title: string; text: string } | null>(null);
+  const selected = useRef<{ node: string; gen: number } | null>(null);
+  const generation = useRef(0);
   useEffect(() => {
     let active = true;
-    selected.current = null;
+    selected.current = null; generation.current++; setLocal(null); setPreview(null);
     setScopes([]); setScopeKey(""); setArea(null); setResult(null); setOpen(null); setDoc(null); setError(null);
     if (repo) client.docScopes(repo).then((got) => {
       if (active) {
@@ -52,7 +55,7 @@ function MapArea({ client, repo, decisions, sources }: MapViewProps) {
   useEffect(() => {
     let active = true;
     const request = area;
-    selected.current = null;
+    selected.current = null; generation.current++; setLocal(null); setPreview(null);
     setResult(null); setOpen(null); setDoc(null); setError(null);
     if (repo && request) client.knowledgeMap(repo, request.scope, request.paths).then(
       (got) => { if (active) setResult({ request, map: got }); },
@@ -94,17 +97,33 @@ function MapArea({ client, repo, decisions, sources }: MapViewProps) {
   const select = (node: GraphNode) => {
     setOpen(node);
     setDoc(null);
+    setLocal(null);
+    // Activating the node already selected (a double-click) reuses its preview and in-flight fetch.
+    if (selected.current?.node === node.id) return;
+    const gen = ++generation.current;
+    // The selection is captured now: a response from an older generation is dropped.
+    selected.current = { node: node.id, gen };
     setPreview(null);
-    const id = node.kind === "doc" && !node.local_path ? node.doc_id ?? node.id : null;
-    // The node is captured now; a response for an older selection is dropped.
-    selected.current = node.id;
-    if (id && repo) client.doc(id, repo).then(
-      (got) => { if (selected.current === node.id) setPreview({ node: node.id, summary: got.summary || firstLine(got.files[0]?.md) }); },
-      () => {},
-    );
+    const current = () => generation.current === gen;
+    if (node.kind === "decision") setPreview({ node: node.id, summary: firstLine(node.decision.body) });
+    else if (node.kind === "imported") setPreview({ node: node.id, summary: `Imported folder${node.source.docs !== undefined ? ` · ${node.source.docs} documents` : ""} · ${node.path}` });
+    else if (node.kind === "doc" && repo) {
+      if (node.local_path) {
+        const path = node.local_path, title = node.title ?? node.id;
+        client.kbSearch(repo, title).then((hits) => {
+          const mine = hits.filter((h) => h.external_id === path || h.url === path);
+          const text = mine.map((h) => h.text).join("\n\n");
+          if (current() && text) setPreview({ node: node.id, summary: firstLine(text), text });
+        }, () => {});
+      } else client.doc(node.doc_id ?? node.id, repo).then(
+        (got) => { if (current()) setPreview({ node: node.id, summary: got.summary || firstLine(got.files[0]?.md) }); },
+        () => {},
+      );
+    }
     if (node.kind === "path" && node.path && area) { setInput(node.path); setArea({ scope: area.scope, paths: [node.path] }); }
   };
   const viewable = open?.kind === "doc" && !open.local_path ? open.doc_id ?? open.id : null;
+  const onDoc = viewable ? () => setDoc(viewable) : open?.kind === "doc" && preview?.node === open.id && preview.text ? () => setLocal({ title: open.title ?? open.id, text: preview.text! }) : undefined;
   return <section className="flex flex-col gap-s2" aria-label="Map" data-testid="map">
     <header><h2 className={h2}>Knowledge map</h2><p className="text-sm text-ink-2">All knowledge in this library scope, including local decisions and imported folders in Mine. Code paths optionally narrow the map. Shared paths and topics connect records.</p></header>
     {!repo ? <p className="text-ink-3">Choose a repo to explore its knowledge.</p> : <form onSubmit={submit} className={`${card} flex flex-wrap items-end gap-s1 p-s2`}>
@@ -116,9 +135,13 @@ function MapArea({ client, repo, decisions, sources }: MapViewProps) {
     {repo && !area && <p className="text-sm text-ink-3">Choose a library scope to load its map.</p>}
     {area && !map && !error && <p role="status">Loading neighbourhood…</p>}
     {graph && shown && <><p className="text-xs text-ink-3">{shown.nodes.length} documents and local records · {shown.edges.length} links · drag nodes or the background, scroll to zoom, click a node for details</p>
-      {shown.nodes.length ? <MapGraph {...graph} onOpen={select} preview={preview} onDoc={viewable ? () => setDoc(viewable) : undefined} /> : <p>No knowledge in this map yet.</p>}
+      {shown.nodes.length ? <MapGraph {...graph} onOpen={select} preview={preview} onDoc={onDoc} /> : <p>No knowledge in this map yet.</p>}
     </>}
     {open?.kind === "decision" && <ul><DecisionCard d={open.decision} /></ul>}
+    {local && <article data-testid="local-doc" className={`${card} flex flex-col gap-s1 p-s2`}>
+      <header className="flex items-center justify-between"><h3 className="font-medium">{local.title}</h3><button type="button" className={button} onClick={() => setLocal(null)}>Back</button></header>
+      <Markdown text={local.text} />
+    </article>}
     {doc && <Reader key={doc} client={client} repo={repo} id={doc} targets={scopes} titles={titles} onBack={close} onDeleted={close} onOpen={setDoc} onScopes={learn} />}
   </section>;
 }

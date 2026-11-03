@@ -15,7 +15,9 @@ it("shows local knowledge on open when the server library is empty", async () =>
   const local = [{ id: "local:kb:1", kind: "doc", title: "Indexed cache note", local_path: "/repo/src/cache/note.md", paths: ["src/cache/note.md"], topics: ["Storage policy"] },
     { id: "local:kb:2", kind: "doc", title: "Indexed storage plan", local_path: "/outside/notes/storage.md", paths: ["/outside/notes/storage.md"], topics: ["Storage policy"] }];
   const client = new DaemonClient({ baseUrl: "http://localhost", token: "t", fetch: async (input) => new Response(JSON.stringify(
-    String(input).includes("/scopes") ? { scopes: [{ kind: "user", id: "u1" }] } : { nodes: new URL(String(input)).searchParams.get("repo") === "/repo" ? local : [], edges: [] },
+    String(input).includes("/scopes") ? { scopes: [{ kind: "user", id: "u1" }] }
+      : String(input).includes("/kb/search") ? [{ chunk_id: "c1", heading_path: "", text: "Cache note body text", url: null, title: "Indexed cache note", external_id: "/repo/src/cache/note.md", updated_at: null, updated: null }, { chunk_id: "c2", heading_path: "", text: "Unrelated chunk", url: null, title: "Other", external_id: "/other.md", updated_at: null, updated: null }]
+      : { nodes: new URL(String(input)).searchParams.get("repo") === "/repo" ? local : [], edges: [] },
   )) });
   const { container, rerender } = render(<MapView client={client} repo="/repo" decisions={[decision, { ...decision, id: "global", topic: "Repo policy", scope: [] }, { ...decision, id: "peer", scope: ["docs/**"] }]}
     sources={[{ id: "cache", kind: "folder", scope: "/repo/src/cache", docs: 3 }, { id: "notes", kind: "folder", scope: "/outside/notes", docs: 1 }]} />);
@@ -28,6 +30,17 @@ it("shows local knowledge on open when the server library is empty", async () =>
   expect(screen.getByRole("button", { name: /Indexed storage plan/ })).toBeTruthy();
   expect(container.querySelector('[data-source="local:kb:1"][data-target="local:kb:2"]')).not.toBeNull();
   expect(container.querySelector('[data-source="local:source:cache"][data-target="local:kb:1"]')).not.toBeNull();
+  // Decision and folder nodes get a summary in the sidebar; a local doc opens in-app, never through the OS.
+  const details = () => screen.getByRole("complementary", { name: "Node details" }).textContent;
+  fireEvent.click(screen.getAllByRole("button", { name: /Storage policy/ })[0]);
+  expect(details()).toContain("Keep private notes here");
+  fireEvent.click(screen.getByRole("button", { name: /Imported.*cache/ }));
+  expect(details()).toContain("3 documents");
+  fireEvent.click(screen.getByRole("button", { name: /Indexed cache note/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open document" }));
+  expect(screen.getByTestId("local-doc").textContent).toContain("Cache note body text");
+  expect(screen.getByTestId("local-doc").textContent).not.toContain("Unrelated chunk");
+  expect(openLocalPath).not.toHaveBeenCalled();
   rerender(<MapView client={client} repo="/empty" decisions={[]} sources={[]} />);
   await waitFor(() => expect(container.querySelector("[data-node]")).toBeNull());
 });
@@ -122,7 +135,7 @@ it("loads all docs automatically with sources, filters by path, and opens each n
   expect(requests.filter((r) => r.path.endsWith("/map"))).toHaveLength(2);
   expect(JSON.stringify(requests)).not.toMatch(/private-d|Keep private|Local reason|\/repo\/src\/cache/);
   fireEvent.click(screen.getByRole("button", { name: /Storage policy/ }));
-  expect(screen.getByText(decision.body)).toBeTruthy();
+  expect(screen.getAllByText(decision.body)).toHaveLength(2);
   // Imported folders preview in the sidebar too; no node click reaches the OS.
   fireEvent.click(screen.getByRole("button", { name: /Imported.*cache/ }));
   expect(screen.getByRole("complementary", { name: "Node details" }).textContent).toContain("/repo/src/cache");
@@ -181,20 +194,26 @@ it("keeps an in-flight area request on a second trigger and discards it when the
   expect(screen.queryByRole("button", { name: /Previous repo/ })).toBeNull();
 });
 
-it("drops a preview response for a node that is no longer selected", async () => {
-  const pending: Record<string, (r: Response) => void> = {};
+it("drops a preview response from an older selection, even for the same node, and reuses a double-click's fetch", async () => {
+  const pending: { id: string; resolve: (r: Response) => void }[] = [];
   const client = new DaemonClient({ baseUrl: "http://localhost", token: "t", fetch: async (input) => {
     const url = new URL(String(input));
     if (url.pathname.endsWith("/scopes")) return new Response(JSON.stringify({ scopes: [{ kind: "user", id: "u1" }] }));
     if (url.pathname.endsWith("/map")) return new Response(JSON.stringify({ nodes: [{ id: "a", kind: "doc", doc_id: "a", title: "Doc A" }, { id: "b", kind: "doc", doc_id: "b", title: "Doc B" }], edges: [] }));
-    return new Promise<Response>((resolve) => { pending[url.pathname.split("/").at(-1)!] = resolve; });
+    return new Promise<Response>((resolve) => { pending.push({ id: url.pathname.split("/").at(-1)!, resolve }); });
   } });
   const doc = (id: string, summary: string) => new Response(JSON.stringify({ id, title: id, summary, files: [] }));
   render(<MapView client={client} repo="/repo" decisions={[]} sources={[]} />);
-  fireEvent.click(await screen.findByRole("button", { name: /Doc A/ }));
-  fireEvent.click(screen.getByRole("button", { name: /Doc B/ }));
-  await act(async () => { pending.b(doc("b", "Summary of B")); });
-  await act(async () => { pending.a(doc("a", "Summary of A")); });
-  expect(screen.getByText("Summary of B")).toBeTruthy();
-  expect(screen.queryByText("Summary of A")).toBeNull();
+  const click = (name: RegExp) => fireEvent.click(screen.getByRole("button", { name }));
+  await screen.findByRole("button", { name: /Doc A/ });
+  click(/Doc A/); click(/Doc A/);
+  expect(pending).toHaveLength(1);
+  click(/Doc B/); click(/Doc A/);
+  expect(pending.map((p) => p.id)).toEqual(["a", "b", "a"]);
+  await act(async () => { pending[2].resolve(doc("a", "Latest A")); });
+  await act(async () => { pending[0].resolve(doc("a", "Stale A")); });
+  await act(async () => { pending[1].resolve(doc("b", "Summary of B")); });
+  expect(screen.getByText("Latest A")).toBeTruthy();
+  expect(screen.queryByText("Stale A")).toBeNull();
+  expect(screen.queryByText("Summary of B")).toBeNull();
 });
