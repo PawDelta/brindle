@@ -338,9 +338,14 @@ def test_sweep_on_another_server_leaves_a_stale_looking_worker_alone(db, ws, oth
     add(db, ws, "w1", result="done", tmux_window="%0")
     add(db, ws, "w2", status="processing", tmux_window="%1")
     # A row an older brindle made (no tmux_server) counts as the default server's.
-    add(db, ws, "w3", status="processing", tmux_window="%2")
+    add(db, ws, "abc12345", status="processing", tmux_window="%2")
     with db.tx() as c:
-        c.execute("UPDATE agents SET tmux_server=NULL WHERE id='w3'")
+        c.execute("UPDATE agents SET tmux_server=NULL WHERE id='abc12345'")
+    config = json.dumps({"BRINDLE_AGENT_ID": "abc12345", "BRINDLE_HOME": os.environ["BRINDLE_HOME"]})
+    table = {1: procs.Proc(1, 0, "init"), 11: procs.Proc(11, 1, f"claude --mcp-config {config}")}
+    stopped = []
+    monkeypatch.setattr(procs, "table", lambda: table)
+    monkeypatch.setattr(procs, "terminate", lambda pids, **k: stopped.append(set(pids)) or len(pids))
     monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
     # Its own (default) server would be the user's real tmux: stand in for it
     # and record which server was asked.
@@ -349,7 +354,8 @@ def test_sweep_on_another_server_leaves_a_stale_looking_worker_alone(db, ws, oth
     assert cull.sweep(db) == []
     assert cull.prune_stale_agents(db) == []
     assert None in asked and other_server not in asked
-    for aid in ("w1", "w2", "w3"):
+    assert stopped == [], "the default server's agent was judged from another server's panes"
+    for aid in ("w1", "w2", "abc12345"):
         a = db.get_agent(aid)
         assert a.dismissed_at is None and a.status == ("idle" if aid == "w1" else "processing")
 
