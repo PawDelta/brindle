@@ -7,7 +7,7 @@ import threading
 import pytest
 
 from conftest import sh
-from brindle import git, workspaces
+from brindle import git, spawn, workspaces
 from test_merge_order import _repo_template, repo, worktree  # noqa: F401 - fixture
 
 
@@ -48,10 +48,27 @@ def test_merge_refuses_a_target_with_uncommitted_changes(db, repo, monkeypatch):
     assert (repo / "README.md").read_text() == "supervisor edit\n"
 
 
-def test_two_concurrent_merges_both_succeed(db, repo):
+def test_two_concurrent_merges_both_succeed(db, repo, monkeypatch):
     a = _feature(db, repo, "feat-a", "a.py")
     b = _feature(db, repo, "feat-b", "b.py")
     errors = []
+    # On a busy machine a git read outlasts spawn's first poll; it polls again
+    # and the merge carries on. Every read here outlasts one poll.
+    real_wait, polled_again = spawn._wait_read, []
+
+    def outlasts_first_poll(p, argv, input, *a, **k):
+        if input is None:
+            real = p.communicate
+
+            def first_poll(input=None, timeout=None):
+                p.communicate = real
+                polled_again.append(argv)
+                raise subprocess.TimeoutExpired(argv, timeout)
+
+            p.communicate = first_poll
+        return real_wait(p, argv, input, *a, **k)
+
+    monkeypatch.setattr(spawn, "_wait_read", outlasts_first_poll)
 
     def go(ws):
         try:
@@ -67,6 +84,7 @@ def test_two_concurrent_merges_both_succeed(db, repo):
 
     assert errors == []
     assert (repo / "a.py").exists() and (repo / "b.py").exists()
+    assert any(args[0] == "git" for args in polled_again)
 
 
 def test_persistent_index_failure_is_reported_after_retries(db, repo, monkeypatch):

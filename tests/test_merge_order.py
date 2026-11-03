@@ -207,6 +207,8 @@ def merged_subjects(repo):
     return sh("git log --merges --format=%s", repo).splitlines()
 
 
+@pytest.mark.slow("the one end-to-end run of the merge order: three real worktrees, two merges and a "
+                  "conflicting sync, ~125 git runs; 11s when the gate's machine is at load 200")
 def test_one_approval_merges_every_ready_branch_least_entangled_first(db, repo, piped):
     # a and c both rewrite app.py's first line; b only adds a file. Created
     # a, b, c: the oldest-first order would merge a first; the entanglement
