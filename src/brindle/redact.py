@@ -15,8 +15,8 @@
   (``API_KEY=``, ``token:``, ``SECRET=``, ``password=``): bare hex, base64,
   commit SHAs and UUIDs pass through;
 - the actual values of secret-named environment variables in brindle's own
-  environment (:func:`env_values`), wherever they appear, unless the value
-  is too plain to be one (``false``, ``8080``, ``postgres``).
+  environment (:func:`env_values`), wherever they appear as a whole word,
+  unless the value can't be one (``false``, ``8080``, ``1.2.3``).
 
 It is applied where brindle writes or uploads text (the list, with each call
 site, is docs/investigations/secret-exposure.md), never to code, diffs,
@@ -30,6 +30,7 @@ import atexit
 import logging
 import math
 import os
+import functools
 import re
 import sys
 import threading
@@ -40,9 +41,16 @@ from brindle import secrets
 REDACTED = "[redacted]"
 
 _KEY_HOLD = 16 * 1024   # a private key block is held (and masked to its END) this far at most
+# A line end in text, or written as an escape (a key in JSON).
+_SEP = r"(?:\r?\n|\\r\\n|\\n)"
+# What may come before each line of a key shown as output: a line number
+# (cat -n, grep -n, the Read tool) or a log timestamp.
+_GUTTER = (r"(?:[ \t]*\d+[\t:|\u2192][ \t]*"
+           r"|[ \t]*\[?\d{4}-\d\d-\d\d[T ]\d\d:\d\d:\d\d(?:[.,]\d+)?(?:Z|[+-]\d\d:?\d\d)?\]?[ \t]*)")
 # The lines of a PEM body: base64, its Proc-Type/DEK-Info headers, blank lines
 # (not the line end after the last one).
-_PEM_LINES = r"(?:[ \t]*\r?\n[ \t]*(?:Proc-Type:[^\n]*|DEK-Info:[^\n]*|[A-Za-z0-9+/=]+|(?=\r?\n))[ \t]*(?=\r?\n|\Z))*"
+_PEM_LINES = (rf"(?:[ \t]*{_SEP}{_GUTTER}?[ \t]*(?:Proc-Type:[^\n\\]*|DEK-Info:[^\n\\]*|[A-Za-z0-9+/=]+|(?={_SEP}))"
+              rf"[ \t]*(?=\r?\n|\\[rn]|[\"']|\Z))*")
 # A key block runs to its END within _KEY_HOLD, or, with no END, over the
 # PEM body that follows it: never over the prose after it.
 _TOKEN = re.compile(
@@ -80,12 +88,12 @@ _URL_PASSWORD = re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://[^\s/:@]*:)([^\s/@]+)(@)
 _OPEN = re.compile(rf"(?i)(?:{_AUTH_PREFIX}|\b(?:bearer|basic)|{_LABEL_PREFIX})\s*\Z")
 _KEY_BEGIN = re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----")
 # What may follow a BEGIN line while its key block is still to end: PEM body,
-# then perhaps the start of the END line.
-_KEY_OPEN = re.compile(rf"{_PEM_LINES}(?:\r?\n(?!-----END (?:[A-Z]+ )*PRIVATE KEY-----)-[A-Z -]*)?\s*")
+# then the line still being written (a stream passes on whole lines only).
+_KEY_OPEN = re.compile(rf"{_PEM_LINES}(?:[ \t]*\r?\n[^\n]*)?")
 # Where a stream that gave up on a key block picks up again: past its END, or
-# at the first line that is not PEM body.
-_KEY_RESUME = re.compile(r"(?m)-----END (?:[A-Z]+ )*PRIVATE KEY-----"
-                         r"|^(?![ \t]*(?:Proc-Type:|DEK-Info:|-----END ))(?=[^\n]*(?:[^\sA-Za-z0-9+/=]|\S[ \t]+\S))")
+# at the first whole line that is not PEM body.
+_KEY_RESUME = re.compile(rf"(?m)-----END (?:[A-Z]+ )*PRIVATE KEY-----"
+                         rf"|^(?!{_GUTTER}?[ \t]*(?:Proc-Type:|DEK-Info:|-----END |[A-Za-z0-9+/=]*[ \t]*(?:\r?\n|\Z)))")
 # Where a stream that gave up on what it held (see MaskingStream) picks up again.
 _CREDENTIAL_END = re.compile(r"[^\s'\"`<>,;]+(?=[\s'\"`<>,;])")
 _LINE_END = re.compile(r"\n")
@@ -101,9 +109,9 @@ _PATH_NAME = re.compile(r"(?i)_(?:path|file|dir|home|sock|socket|config|url"
 # text. Decided by name only; a secret variable's value is masked whatever it is.
 _FLAG_NAME = re.compile(r"(?i)(?:^|_)(?:enable|enabled|disable|disabled|use|no|skip|allow|debug"
                         r"|verbose|max|min|limit|count)(?:_|$)")
-# An env value that can't be a secret: a switch, a number, a port, a version.
-_PLAIN = re.compile(r"(?i)true|false|yes|no|on|off|none|null|[-+]?[\d.,_:]+")
-_SHORT_ENV = 16         # a shorter env value is masked only with a digit in it
+# An env value that can't be a secret: a switch, a short number (a port, a
+# count) or a version. Anything else in a secret-named variable is masked.
+_PLAIN = re.compile(r"(?i)true|false|yes|no|on|off|none|null|[-+]?\d{1,5}|v?\d+(?:\.\d+)+")
 _HOLD_MAX = 64 * 1024   # an unfinished line longer than this is passed on in part
 _KEEP = 4096            # ... all but its last _KEEP characters (or longest secret)
 
@@ -133,20 +141,26 @@ def _secret_like(value: str) -> bool:
 
 
 def _env_secret(value: str) -> bool:
-    """An env value worth masking everywhere it appears: not a switch or a
-    number, varied (no plain word like ``postgres``) and, when short, with
-    a letter and a digit in it."""
+    """An env value worth masking wherever it appears: anything but a switch,
+    a short number or a version."""
     value = value.strip()
-    if not value or _PLAIN.fullmatch(value) or _entropy(value) < 3.0:
-        return False
-    return len(value) >= _SHORT_ENV or (any(c.isdigit() for c in value) and any(c.isalpha() for c in value))
+    return bool(value) and not _PLAIN.fullmatch(value)
+
+
+@functools.lru_cache(maxsize=8)
+def _env_pattern(values: tuple[str, ...]) -> re.Pattern[str] | None:
+    """The env values, longest first, each as a whole word: "on" or
+    "postgres" is not masked inside "postgresql"."""
+    if not values:
+        return None
+    return re.compile(r"(?<![\w-])(?:" + "|".join(map(re.escape, values)) + r")(?![\w-])")
 
 
 def env_values(environ=None) -> list[str]:
     """The values of secret-named variables in ``environ`` (default: brindle's
     own environment), longest first. A variable named for a path (``*_FILE``,
     ``*_SOCK`` ...) or a switch (``*_ENABLED``) is left out, and so is a value
-    too plain to be a secret (see _env_secret)."""
+    that can't be a secret (see _env_secret)."""
     env = os.environ if environ is None else environ
     named = {*secrets.SECRET_ENV, *secrets.PERSONAL_KEYS}
     found = set()
@@ -163,8 +177,9 @@ def mask(text: str) -> str:
     """``text`` with every secret it holds replaced by REDACTED."""
     if not isinstance(text, str) or not text:
         return text
-    for value in env_values():
-        text = text.replace(value, REDACTED)
+    env = _env_pattern(tuple(env_values()))
+    if env:
+        text = env.sub(REDACTED, text)
     text = _TOKEN.sub(REDACTED, text)
     text = _URL_PASSWORD.sub(lambda m: m.group(1) + REDACTED + m.group(3), text)
     text = _AUTHORIZATION.sub(lambda m: m.group(1) + REDACTED, text)
@@ -198,11 +213,9 @@ def mask_data(value: Any) -> Any:
 def _spans(text: str) -> list[tuple[int, int]]:
     """Where in ``text`` something :func:`mask` would replace lies."""
     found = [m.span() for p in (_TOKEN, _URL_PASSWORD, _AUTHORIZATION, _AUTH_SCHEME, _LABELLED) for m in p.finditer(text)]
-    for value in env_values():
-        at = text.find(value)
-        while at >= 0:
-            found.append((at, at + len(value)))
-            at = text.find(value, at + 1)
+    env = _env_pattern(tuple(env_values()))
+    if env:
+        found += [m.span() for m in env.finditer(text)]
     return found
 
 

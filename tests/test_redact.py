@@ -25,6 +25,8 @@ TEXT = f"use {SLACK} and {PAT} to post"
 LABELLED_KEY = "QwErTyUiOpAsDfGhJkLzXcVbNm"
 MULTILINE = "line-one-x9\nline-two-y8"
 MASKED = "use [redacted] and [redacted] to post"
+KEY, KEY_END = "-----BEGIN " + "PRIVATE KEY-----", "-----END " + "PRIVATE KEY-----"
+KEY_BODY = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
 
 
 def _workspace(db, tmp_path):
@@ -119,14 +121,18 @@ def test_native_transcript_and_saved_state_are_masked_but_the_live_conversation_
     ("API_KEY=QwErTyUiOpAsDfGhJkLzXcVbNm", "API_KEY=[redacted]"),
     ("DB_PASSWORD=Xk29fLq0Zp7 and token: 1200", "DB_PASSWORD=[redacted] and token: 1200"),
     ("run with my-env-secret-42 set", "run with [redacted] set"),
-    ("parallelism false, k9x and on in postgresql", "parallelism false, k9x and on in postgresql"),
-    ("postgres://app:pw-fake@db:5432/app", "postgres://app:[redacted]@db:5432/app"),
+    ("parallelism false, k9x and on in postgresql", "parallelism false, [redacted] and on in postgresql"),
+    ("curl -u admin:kQzRvBnTxLpW pin 31415926535897", "curl -u admin:[redacted] pin [redacted]"),
+    ("mysql://app:pw-fake@db:3306/app", "mysql://app:[redacted]@db:3306/app"),
+    ('{"content": "' + KEY + "\\n" + KEY_BODY + "\\n" + KEY_BODY + '"}', '{"content": "[redacted]"}'),
     ("pw /opt9-secret here", "pw [redacted] here"),
     ("key file /Users/me/key.pem", "key file /Users/me/key.pem"),
 ])
 def test_mask(text, expected, monkeypatch):
     monkeypatch.setenv("MY_SERVICE_TOKEN", "my-env-secret-42")
-    monkeypatch.setenv("MY_PIN_TOKEN", "k9x")                 # too short and plain to mask everywhere
+    monkeypatch.setenv("MY_PIN_TOKEN", "k9x")
+    monkeypatch.setenv("SVC_API_PASSWORD", "kQzRvBnTxLpW")
+    monkeypatch.setenv("BANK_PASSWORD", "31415926535897")
     monkeypatch.setenv("MY_PASSWORD", "/opt9-secret")
     monkeypatch.setenv("SERVICE_PASSWORD", "on")
     monkeypatch.setenv("TOKENIZERS_PARALLELISM", "false")
@@ -182,13 +188,13 @@ def test_masking_stream_holds_a_secret_split_across_writes_lines_and_flushes(mon
     for text in (pad + PAT[:10], PAT[10:] + "\n", "env " + MULTILINE[:12], MULTILINE[12:] + " ok\n"):
         stream.write(text)
     assert out.getvalue() == pad + "[redacted]\nenv [redacted] ok\n"
-    key, end = "-----BEGIN " + "PRIVATE KEY-----", "-----END " + "PRIVATE KEY-----"
-    body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
+    key, end, body = KEY, KEY_END, KEY_BODY
     big = (body + "\n") * (4 * redact._HOLD_MAX // len(body))      # past where the stream gives up
     for writes in (["Authorization: Bearer\n", "AbCdEfGhIjKlMnOp\n", "ok\n"],
                    [key + "\n", body + "\n", end + "\n", "ok\n"],
                    [key + "\n", big, body + "\n", end + "\n", "ok\n"],
                    [key + "\n", big, body + "\n", "all ok\n"],         # no END: the log goes on
+                   [f"     1\t{key}\n", f"     2\t{body}\n", f"     3\t{body}\n", "all ok\n"],   # cat -n
                    ["Authorization: Bearer" + " " * 4 * redact._HOLD_MAX, "\nAbCdEfGhIjKlMnOp\n", "ok\n"]):
         out = io.StringIO()
         stream = redact.MaskingStream(out)
