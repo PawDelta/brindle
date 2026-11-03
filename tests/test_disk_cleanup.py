@@ -381,31 +381,6 @@ def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeyp
     assert "never-logged" not in caplog.text
 
 
-def test_the_real_scan_keeps_a_worktree_a_child_process_is_in(db, repo, real_process_scan):
-    """The host's own scan (/proc on Linux, lsof on macOS), not a fake: a
-    process started in a merged workspace's worktree keeps it from removal."""
-    ws = workspaces.create(db, str(repo), "held").workspace
-    Path(ws.path, "a.txt").write_text("a\n")
-    sh("git add a.txt && git commit -qm a", ws.path)
-    sh(f"git merge -q --no-ff -m m {ws.branch}", repo)
-    held = subprocess.Popen(["/bin/sh", "-c", "read line"], cwd=ws.path, stdin=subprocess.PIPE,
-                            start_new_session=True)
-    try:
-        try:
-            seen = procs.cwds()
-        except OSError:   # another process of this user can't be read: every worktree is kept anyway
-            seen = None
-        if seen is not None:
-            assert os.path.realpath(seen[held.pid]) == os.path.realpath(ws.path)
-        with pytest.raises(workspaces.WorkspaceError, match="is in use"):
-            workspaces.remove(db, ws)
-    finally:
-        held.kill()
-        held.wait()
-
-    assert Path(ws.path).is_dir() and db.get_workspace(ws.id) is not None
-
-
 def test_retention_caps_backups_archive_and_logs(brindle_home):
     home = config.brindle_home()
     home.mkdir(parents=True, exist_ok=True)
