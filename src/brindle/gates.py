@@ -150,7 +150,8 @@ def _write_outcome(path, ok: bool, output: str) -> None:
 
 SLOT_POLL = 1.0          # seconds between tries for a free slot
 SLOW_FACTOR = 2.0        # a run is "far past" its last duration at this multiple of it...
-SLOW_MIN_EXTRA = 60.0    # ...and at least this many seconds over
+SLOW_FOREIGN_FACTOR = 3.0   # the multiple when the baseline is another branch's run, not this one's
+SLOW_MIN_EXTRA = 60.0   # ...and at least this many seconds over
 SLOW_TIMEOUT_FRACTION = 0.75   # but never later than this share of check_timeout
 
 
@@ -352,8 +353,11 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
     slots = _concurrency(ws)
     env = {"PYTEST_XDIST_AUTO_NUM_WORKERS": str(check_xdist_workers(slots)), **env}
     with _check_slot(slots, cancel), _room_for_check(ws, cancel), marker("checks-running", ws.id):
-        last = db.check_duration(ws.repo_root, cmd)
-        watch = _watch_slow(db, ws, cmd, last, timeout) if last is not None else None
+        last = db.branch_check_duration(ws.repo_root, ws.branch, cmd)
+        factor = SLOW_FACTOR
+        if last is None:   # no run of its own yet: the repo-wide value is a weak baseline
+            last, factor = db.check_duration(ws.repo_root, cmd), SLOW_FOREIGN_FACTOR
+        watch = _watch_slow(db, ws, cmd, last, timeout, factor) if last is not None else None
         started = time.monotonic()
         try:
             extra = {} if cancel is None else {"cancel": cancel}
@@ -362,7 +366,7 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
             if watch:
                 watch.cancel()
         if ok:
-            db.set_check_duration(ws.repo_root, cmd, time.monotonic() - started)
+            db.set_check_duration(ws.repo_root, cmd, time.monotonic() - started, ws.branch)
         return ok, out
 
 
@@ -398,15 +402,16 @@ def checks_state(ws: Workspace) -> str:
     return "waiting for checks"
 
 
-def slow_after(last: float) -> float:
+def slow_after(last: float, factor: float = SLOW_FACTOR) -> float:
     """Seconds into a run at which it counts as far past its last duration."""
-    return max(last * SLOW_FACTOR, last + SLOW_MIN_EXTRA)
+    return max(last * factor, last + SLOW_MIN_EXTRA)
 
 
-def _watch_slow(db: DB, ws: Workspace, cmd: str, last: float, timeout: int) -> threading.Timer | None:
+def _watch_slow(db: DB, ws: Workspace, cmd: str, last: float, timeout: int,
+                factor: float = SLOW_FACTOR) -> threading.Timer | None:
     # Warn before check_timeout ends the run, even if the usual "far past" mark
     # lies beyond it: at ~75% of the timeout at the latest.
-    after = min(slow_after(last), SLOW_TIMEOUT_FRACTION * timeout)
+    after = min(slow_after(last, factor), SLOW_TIMEOUT_FRACTION * timeout)
     if db.path == ":memory:":
         return None
     timer = threading.Timer(after, _report_slow, args=(db.path, ws, cmd, last, after, timeout))
