@@ -3350,8 +3350,9 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
                             request_id: Annotated[Optional[str], typer.Option("--request-id")] = None,
                             second: Annotated[bool, typer.Option("--second-review")] = False,
                             slot: Annotated[Optional[str], typer.Option("--review-slot")] = None) -> None:
-    """Start the reviewer, then run a repo's checks beside it; the worker gets
-    the verdict and any failing checks together. Started detached from start_review, so the review still starts
+    """Run a repo's checks, then start the reviewer with their results in its
+    prompt (or, when a check fails, send the worker the failing output and
+    start none). Started detached from start_review, so the review still starts
     even if the MCP server that asked for it has exited."""
     from brindle import gates
     from brindle.config import load_repo_config
@@ -3370,8 +3371,8 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
         if worker and worker.pipeline == "reviewing":
             db.update_agent(worker.id, pipeline=None)   # nothing is reviewing it after all
         if db.get_agent(caller) if caller else None:
-            gates.tell(db, caller, f"[brindle] No reviewer could start on `{ws.branch}` "
-                                   f"({e}). Review it yourself with workspace_diff, then "
+            gates.tell(db, caller, f"[brindle] No reviewer could start on `{ws.branch}` after its "
+                                   f"checks ({e}). Review it yourself with workspace_diff, then "
                                    "merge_workspace.")
 
 

@@ -1,5 +1,5 @@
-"""With checks configured a detached run starts the reviewer and runs them
-beside it; a repo without checks is reviewed at once."""
+"""With checks configured the reviewer starts only after they finish, with
+their results in its prompt; a repo without checks is reviewed at once."""
 import asyncio
 import json
 import shutil
@@ -63,18 +63,17 @@ def detached(monkeypatch):
     return calls
 
 
-# -- a crash in the checks ---------------------------------------------------------------
+# -- the results are in the reviewer's prompt ------------------------------------------
 
 
 def test_a_crashing_check_run_still_starts_the_review_and_says_so(db, ws, boss, spawned, monkeypatch):
     monkeypatch.setattr(gates, "check_summary",
                         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
-    assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
-                                      RepoConfig(checks=["true"])).id == "rev1"
-    assert len(spawned) == 1
+    agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["true"]))
+    assert "crashed" in spawned[0] and "boom" in spawned[0]
 
 
-# -- the review runs in a detached process -----------------------------------------------
+# -- no reviewer until the checks finish -----------------------------------------------
 
 
 def test_with_checks_nothing_starts_until_a_detached_process_has_run_them(db, ws, boss, spawned, detached):
@@ -115,7 +114,7 @@ def test_the_run_gives_up_when_the_head_moves_during_the_checks(db, ws, boss, sp
     assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
                                       RepoConfig(checks=["suite"])) is None
     assert seen == {"before": False, "after": True}
-    assert len(spawned) == 1   # beside the checks, on the commit the branch then left
+    assert spawned == []
 
 
 def test_results_for_a_commit_the_branch_has_left_start_no_reviewer(db, ws, boss, spawned, monkeypatch):
@@ -126,7 +125,7 @@ def test_results_for_a_commit_the_branch_has_left_start_no_reviewer(db, ws, boss
     monkeypatch.setattr(gates, "check_summary", finishes_late)
     assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
                                       RepoConfig(checks=["suite"])) is None
-    assert len(spawned) == 1
+    assert spawned == []
 
 
 # -- the callers -----------------------------------------------------------------------

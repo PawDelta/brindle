@@ -1,7 +1,6 @@
-"""A verdict the pipeline holds for its commit's checks is acted on when the
-checks end, even though the reviewer's row was deleted seconds after it
-gave it; a verdict on record that nothing acted on is replayed once by the
-sweep; and a piped branch nothing is working on is reported, not closed."""
+"""A verdict on record that nothing acted on is replayed once by the sweep
+(even though the reviewer's row was deleted seconds after it gave it); and a
+piped branch nothing is working on is reported, not closed."""
 import time
 
 import pytest
@@ -41,25 +40,6 @@ def _assert_acted(db, acted, approved):
 
 
 @pytest.mark.parametrize("approved", [True, False])
-def test_verdict_held_for_checks_survives_its_reviewer_row(db, repo, acted, approved):
-    ws = _reported_merging(db, repo, time.time() - 60)
-    sha = gates.head(ws)
-    add(db, ws, "rev1", "review", "reviewer", parent="boss")
-    db.update_agent("rev1", review_sha=sha)
-    summary = "lgtm" if approved else "Blocker: the null check is missing."
-    with pipeline.review_run(ws.id):
-        pipeline.checks_started(db, ws, sha)
-        db.add_review(ws.id, sha, "rev1", approved, summary)
-        agents.finish_review(db, "rev1", ws.id)          # held: the checks still run
-        assert db.get_agent("w1").pipeline == "reviewing"
-        agents.close_removed(db, "rev1")                 # what close_later does 5 s on
-        assert db.get_agent("rev1") is not None          # kept while its verdict is held
-        db.delete_agent("rev1")                          # and replayed even when gone
-        pipeline.checks_finished(db, ws, sha, None)
-    _assert_acted(db, acted, approved)
-
-
-@pytest.mark.parametrize("approved", [True, False])
 def test_sweep_replays_a_verdict_nothing_acted_on_once(db, repo, acted, approved):
     now = time.time()
     ws = _reported_merging(db, repo, now - 600)
@@ -74,21 +54,18 @@ def test_sweep_replays_a_verdict_nothing_acted_on_once(db, repo, acted, approved
 
 
 @pytest.mark.parametrize("approved", [True, False])
-def test_sweep_reading_the_worker_before_checks_finished_does_not_act_again(db, repo, acted,
-                                                                             monkeypatch, approved):
-    """The sweep reads its workers once; a held verdict that checks_finished
-    acted on after that read is not replayed on the stale row."""
+def test_sweep_reading_the_worker_before_its_verdict_was_acted_on_does_not_act_again(db, repo, acted,
+                                                                                      monkeypatch, approved):
+    """The sweep reads its workers once; a verdict acted on after that read
+    is not replayed on the stale row."""
     now = time.time()
     ws = _reported_merging(db, repo, now - 600)
     sha = gates.head(ws)
     add(db, ws, "rev1", "review", "reviewer", parent="boss")
     db.update_agent("rev1", review_sha=sha)
-    with pipeline.review_run(ws.id):
-        pipeline.checks_started(db, ws, sha)
-        db.add_review(ws.id, sha, "rev1", approved, "lgtm" if approved else "Blocker: the null check is missing.")
-        agents.finish_review(db, "rev1", ws.id)
-        snapshot = db.list_agents()                      # the sweep's read: w1 still in review
-        pipeline.checks_finished(db, ws, sha, None)
+    snapshot = db.list_agents()                          # the sweep's read: w1 still in review
+    db.add_review(ws.id, sha, "rev1", approved, "lgtm" if approved else "Blocker: the null check is missing.")
+    agents.finish_review(db, "rev1", ws.id)
     rounds = db.get_agent("w1").pipeline_rounds
     real = db.list_agents
     monkeypatch.setattr(db, "list_agents", lambda ws_id=None: snapshot if ws_id is None else real(ws_id))
