@@ -43,6 +43,7 @@ import logging
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import time
@@ -190,39 +191,75 @@ def _inside(child: str, parent: str) -> bool:
     return child == parent or child.startswith(parent + os.sep)
 
 
-def _cwds() -> list[str] | None:
-    """Every process's folder (``procs.cwds``), resolved; None when they
-    can't be inspected."""
+def _cwds() -> dict[int, str] | None:
+    """Every process's folder by pid (``procs.cwds``), resolved; None when
+    they can't be inspected."""
     from brindle import procs
 
     try:
-        return [os.path.realpath(c) for c in procs.cwds().values()]
+        return {pid: os.path.realpath(c) for pid, c in procs.cwds().items()}
     except OSError as e:
         log.warning("brindle: can't see which processes use a worktree, so none is removed: %s", e)
         return None
 
 
-def live_in(db, path: str | Path, cwds: list[str] | None | bool = False) -> bool:
+def _its_own(db, ws) -> tuple[set[int], bool] | None:
+    """The processes ``ws``'s removal ends itself, and whether this process
+    is one of them: the shells, provider CLIs and brindle plumbing of its
+    own tmux session's panes and of its agents (``procs.agent_pids``). A
+    command one of them started (a dev server, a test run) is not among
+    them, and nor is anything of another session. None when the process
+    table can't be read."""
+    from brindle import procs, spawn, tmux
+
+    try:
+        table = procs.table()
+        panes = [pid for pid, _path in tmux.session_panes(ws.tmux_session)]
+    except (OSError, spawn.Busy, subprocess.SubprocessError, tmux.TmuxError) as e:
+        log.warning("brindle: can't see %s's own processes, so its worktree is kept: %s", ws.id, e)
+        return None
+    ids = [a.id for a in db.list_agents(ws.id)]
+    theirs = procs.descendants(panes, table) | set(panes)
+    for pids in procs.agent_pids(ids, None, table, through_ancestors=True).values():
+        theirs |= pids
+    mine = bool(procs._ancestors(table) & theirs)
+    return {pid for pid in theirs if pid in table and not procs.is_command(table[pid])}, mine
+
+
+def live_in(db, path: str | Path, cwds: dict[int, str] | None | bool = False, own=None) -> bool:
     """Whether anything is live in ``path``: a running agent of a workspace
     there, any process whose folder is in it (a detached dev server, a shell
     on any tmux server or terminal, this very process) or a pane of brindle's
-    tmux server. ``cwds``: ``_cwds()`` already taken. Unknown counts as live."""
+    tmux server. ``cwds``: ``_cwds()`` already taken. Unknown counts as live.
+    ``own``: the workspace being removed, whose own session, agents and their
+    shells and CLIs don't count (its removal ends them; see ``_its_own``)."""
     from brindle import tmux, workspaces
 
     real = os.path.realpath(path)
+    excused, mine = set(), False
+    if own is not None:
+        found = _its_own(db, own)
+        if found is None:
+            return True
+        excused, mine = found
     try:
-        if _inside(os.path.realpath(os.getcwd()), real):
+        if not mine and _inside(os.path.realpath(os.getcwd()), real):
             return True
     except OSError:
         pass
     cwds = _cwds() if cwds is False else cwds
-    if cwds is None or any(_inside(c, real) for c in cwds):
+    if cwds is None or any(_inside(c, real) for pid, c in cwds.items()
+                           if pid not in excused and not (mine and pid == os.getpid())):
         return True
     for ws in db.find_workspaces():
+        if own is not None and ws.id == own.id:
+            continue
         if _inside(os.path.realpath(ws.path), real) and workspaces.live_workers(db, ws):
             return True
     try:
         for name, _attached in tmux.list_sessions():
+            if own is not None and name == own.tmux_session:
+                continue
             if any(p and _inside(os.path.realpath(p), real) for _pid, p in tmux.session_panes(name)):
                 return True
     except tmux.TmuxTimeout:

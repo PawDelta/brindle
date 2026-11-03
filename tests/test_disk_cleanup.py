@@ -4,13 +4,15 @@ guard, and dead branches."""
 
 import json
 import os
+import subprocess
 import time
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
-from brindle import agents, config, disk, doctor, git, history, procs, spawn, tasks, workspaces
+from brindle import (agents, config, cull, disk, doctor, git, history, pipeline, procs, spawn, tasks, tmux,
+                     workspaces)
 from brindle.cli import app
 from brindle.daemon import routes_actions
 from brindle.db import Agent
@@ -92,6 +94,40 @@ def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, monkeypatch
     assert listed["removable"] is False and listed["reason"]
 
 
+@pytest.mark.parametrize("cleanup", ["post-merge", "retired"])
+@pytest.mark.parametrize("other", ["pane", "process", None])
+def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, repo, cleanup, other):
+    """The pipeline's post-merge removal and the sweep of retired workspaces
+    go through workspaces.remove: a pane of another session or a detached
+    process in the worktree keeps it, while the workspace's own session
+    (which the removal ends) doesn't."""
+    ws = workspaces.create(db, str(repo), "shipped").workspace
+    Path(ws.path, "a.txt").write_text("a\n")
+    sh("git add a.txt && git commit -qm a", ws.path)
+    sh(f"git merge -q --no-ff -m m {ws.branch}", repo)
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "done",
+                       "@999", None, time.time() - 7200))
+    tmux.ensure_session(ws.tmux_session, ws.path, {})
+    held = None
+    if other == "pane":
+        tmux._tmux("new-session", "-d", "-s", "someone-else", "-c", ws.path, "/bin/sh")
+    elif other == "process":   # a dev server started by hand, outside any pane
+        held = subprocess.Popen(["/bin/sh", "-c", "read line"], cwd=ws.path, stdin=subprocess.PIPE,
+                                start_new_session=True)
+    try:
+        if cleanup == "post-merge":
+            pipeline._remove(db, ws)
+        else:
+            cull.prune_retired(db)
+    finally:
+        if held:
+            held.kill()
+            held.wait()
+
+    assert Path(ws.path).is_dir() == (other is not None)
+    assert (db.get_workspace(ws.id) is not None) == (other is not None)
+
+
 def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, monkeypatch):
     wt = _worktree(repo, "stalled", days_old=30)
     tip = sh("git rev-parse stalled", repo).strip()
@@ -108,6 +144,36 @@ def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, monkeypatch):
     assert [r["archived"] for r in out["removed"]] == [f"{disk.ARCHIVE_REF}stalled"]
     assert not wt.exists() and _archived(repo, "stalled") == tip
     assert sh("git branch --list stalled", repo).strip() == ""
+
+
+@pytest.mark.parametrize("failure", ["proc-unreadable", "lsof-partial"])
+def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeypatch, failure):
+    """One live process whose folder can't be read (or an lsof that failed
+    part way) must not read as no process at all."""
+    wt = _worktree(repo, "idea", days_old=30)
+    fake = tmp_path / "proc"
+    (fake / "self").mkdir(parents=True)
+    monkeypatch.setattr(procs, "PROC", fake)
+    if failure == "proc-unreadable":
+        os.symlink("/", fake / "self" / "cwd")
+        for pid, cwd in (("100", "/"), ("200", str(wt))):
+            (fake / pid).mkdir()
+            os.symlink(cwd, fake / pid / "cwd")
+        (fake / "300").mkdir()               # exited while the scan ran: no cwd left
+        (fake / "200").chmod(0)              # live, but its folder can't be read
+    else:
+        listing = subprocess.CompletedProcess([], 1, stdout=f"p{os.getpid()}\nfcwd\nn/\np200\n",
+                                              stderr="lsof: can't stat a process")
+        monkeypatch.setattr(spawn, "read", lambda *a, **kw: listing)
+    try:
+        with pytest.raises(OSError):
+            procs.cwds()
+        out = disk.clean(db, path=str(wt))
+    finally:
+        if (fake / "200").exists():
+            (fake / "200").chmod(0o755)
+
+    assert out["removed"] == [] and wt.is_dir()
 
 
 def test_retention_caps_backups_archive_and_logs(brindle_home):

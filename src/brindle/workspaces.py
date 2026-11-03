@@ -677,6 +677,12 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
                 f"{ws.name} has uncommitted changes ({shown}). "
                 "Commit them, or pass --force to discard."
             )
+        if disk.live_in(db, ws.path, own=ws):   # before teardown or its session goes
+            raise WorkspaceError(
+                f"{ws.name}'s worktree {ws.path} is in use: a pane of another session or a "
+                "process is in it (or that can't be told). It is kept for a later sweep; "
+                "pass --force to remove it anyway."
+            )
 
     cfg = config_for(db, ws)
     teardown = None

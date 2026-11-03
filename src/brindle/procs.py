@@ -37,6 +37,7 @@ from brindle import spawn
 
 # Seconds ``ps`` may take, waiting for room included (see brindle.spawn).
 PS_LIMIT = 30.0
+PROC = Path("/proc")   # Linux's process table; absent on macOS
 
 
 @dataclass
@@ -186,17 +187,15 @@ def running_commands(agent_id: str, pane_pids: list[int] | None = None,
     procs = table() if procs is None else procs
     pids = agent_pids([agent_id], {agent_id: pane_pids or []}, procs,
                       through_ancestors=True).get(agent_id, set())
-    out = []
-    for pid in pids:
-        p = procs.get(pid)
-        if p is None:
-            continue
-        cmd = p.text.split(" BRINDLE_", 1)[0].strip()
-        first = os.path.basename(cmd.split(None, 1)[0]) if cmd else ""
-        if first.lstrip("-") in _SHELLS or _PLUMBING.search(cmd) or _is_cli(cmd):
-            continue
-        out.append(p)
-    return out
+    return [procs[pid] for pid in pids if pid in procs and is_command(procs[pid])]
+
+
+def is_command(p: Proc) -> bool:
+    """Whether ``p`` looks like a command (a test run, a build, a dev server),
+    not a provider CLI, its MCP servers, hooks or a bare shell."""
+    cmd = p.text.split(" BRINDLE_", 1)[0].strip()
+    first = os.path.basename(cmd.split(None, 1)[0]) if cmd else ""
+    return not (first.lstrip("-") in _SHELLS or _PLUMBING.search(cmd) or _is_cli(cmd))
 
 
 def all_agent_ids(procs: dict[int, Proc] | None = None) -> set[str]:
@@ -215,8 +214,9 @@ def cwds() -> dict[int, str]:
     """The current folder of every process of this user, whatever started it
     (a detached dev server, a shell on any tmux server or terminal). Raises
     OSError when it can't be told: a caller deciding whether something is in
-    use must then assume it is."""
-    proc = Path("/proc")
+    use must then assume it is: one process of this user it can't read
+    (not one that exited during the scan) or an lsof that failed part way."""
+    proc = PROC
     if (proc / "self" / "cwd").exists():
         out: dict[int, str] = {}
         for d in proc.iterdir():
@@ -224,8 +224,8 @@ def cwds() -> dict[int, str]:
                 try:
                     if d.stat().st_uid == os.getuid():
                         out[int(d.name)] = os.readlink(d / "cwd")
-                except OSError:
-                    continue
+                except (FileNotFoundError, ProcessLookupError):
+                    continue   # it exited meanwhile (or is a zombie): no folder to hold
         return out
     lsof = shutil.which("lsof") or "/usr/sbin/lsof"
     try:
@@ -233,14 +233,16 @@ def cwds() -> dict[int, str]:
                              timeout=PS_LIMIT)
     except (spawn.Busy, subprocess.SubprocessError) as e:
         raise OSError(f"lsof: {e}") from e
-    out, pid = {}, None
+    if listing.returncode != 0:   # some process it couldn't look at: the rest isn't all
+        raise OSError(f"lsof failed ({listing.stderr.strip() or listing.returncode})")
+    out, listed = {}, []
     for line in listing.stdout.splitlines():
         if line.startswith("p") and line[1:].isdigit():
-            pid = int(line[1:])
-        elif line.startswith("n") and pid is not None:
-            out[pid] = line[1:]
-    if not out:   # this process has a folder too: nothing listed means lsof failed
-        raise OSError(f"lsof listed no process ({listing.stderr.strip() or listing.returncode})")
+            listed.append(int(line[1:]))
+        elif line.startswith("n") and listed:
+            out[listed[-1]] = line[1:]
+    if os.getpid() not in out or set(listed) - set(out):   # this process has a folder too
+        raise OSError(f"lsof left out a process's folder ({listing.stderr.strip() or 'no error'})")
     return out
 
 
