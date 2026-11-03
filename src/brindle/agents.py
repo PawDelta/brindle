@@ -21,6 +21,7 @@ import sys
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
@@ -2928,15 +2929,71 @@ def workspace_worker(db: DB, ws: Workspace) -> Agent | None:
     return workers[0] if workers else None
 
 
-def is_linear_since(ws: Workspace, prev_sha: str) -> bool:
-    """Whether ``prev_sha`` is a plain ancestor of HEAD with no merge commits
-    between them, i.e. ``git diff prev_sha..HEAD`` alone captures everything
-    new since that commit. False after a rebase (prev_sha is no longer
-    reachable from HEAD) or a merge (the range isn't just the worker's own
-    commits)."""
-    if not git.ok(["merge-base", "--is-ancestor", prev_sha, "HEAD"], ws.path):
-        return False
-    return not git.out(["rev-list", "--merges", f"{prev_sha}..HEAD"], ws.path)
+def review_base_ref(ws_id: str) -> str:
+    return f"refs/brindle/review-base/{ws_id}"
+
+
+@dataclass
+class ReviewBase:
+    """Where a re-review's diff starts. ``sha`` None: no safe base, review the
+    whole diff. ``merged`` is the newest base commit merged in since;
+    ``edited`` the files a merge commit changed by hand."""
+    sha: str | None = None
+    merged: str | None = None
+    edited: list[str] = field(default_factory=list)
+    both: list[str] = field(default_factory=list)   # changed on both sides
+
+
+def review_base(ws: Workspace, prev_sha: str) -> ReviewBase:
+    """The commit to diff from so a re-review reads only the worker's new
+    changes. ``prev_sha`` itself when nothing was merged since. When only clean
+    merges of already-reviewed base commits came in, a commit pinned at
+    ``refs/brindle/review-base/<id>`` holding ``prev_sha`` merged with the
+    newest of them, so ``git diff <it>..HEAD`` is the worker's own work. Any
+    doubt or git error: ``sha`` None (the whole diff)."""
+    try:
+        if not git.ok(["merge-base", "--is-ancestor", prev_sha, "HEAD"], ws.path):
+            return ReviewBase()
+        merges = git.out(["rev-list", "--merges", "--reverse", f"{prev_sha}..HEAD"], ws.path).split()
+        if not merges:
+            return ReviewBase(sha=prev_sha)
+        if not ws.base_branch:
+            return ReviewBase()
+        newest = ""
+        for m in merges:
+            parents = git.out(["rev-list", "--parents", "-n", "1", m], ws.path).split()[1:]
+            if len(parents) != 2:
+                return ReviewBase()
+            p1, p2 = parents
+            if not git.ok(["merge-base", "--is-ancestor", p2, ws.base_branch], ws.path):
+                return ReviewBase()
+            clean = git.run(["merge-tree", "--write-tree", p1, p2], ws.path, check=False)
+            # Exit 1 is a conflict: git still wrote a tree (with markers), which
+            # a hand resolution differs from. Any other failure is git failing.
+            if clean.returncode not in (0, 1) or not clean.stdout.split():
+                return ReviewBase()
+            actual = git.out(["rev-parse", f"{m}^{{tree}}"], ws.path)
+            tree = clean.stdout.split()[0]
+            if tree != actual or clean.returncode == 1:
+                edited = git.paths(["diff", "--name-only", tree, actual], ws.path)
+                return ReviewBase(edited=edited)
+            newest = p2
+        merged = git.run(["merge-tree", "--write-tree", prev_sha, newest], ws.path, check=False)
+        if merged.returncode != 0:
+            return ReviewBase()
+        commit = git.out(["-c", "user.name=brindle", "-c", "user.email=brindle@localhost",
+                          "commit-tree", merged.stdout.split()[0], "-p", prev_sha,
+                          "-m", "review base"], ws.path)
+        # Files the merged base commits touched, and files the worker's own
+        # commits since prev touched (not the merges): an identical edit on
+        # both sides leaves no residual diff but is still worth a look.
+        theirs = set(git.paths(["diff", "--name-only", f"{prev_sha}...{newest}"], ws.path))
+        mine = set(git.paths(["log", "--first-parent", "--no-merges", "--name-only",
+                              "--format=", f"{prev_sha}..HEAD"], ws.path))
+        git.run(["update-ref", review_base_ref(ws.id), commit], ws.path)
+        return ReviewBase(sha=review_base_ref(ws.id), merged=newest, both=sorted(theirs & mine))
+    except git.GitError:
+        return ReviewBase()
 
 
 def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None = None,
@@ -3393,7 +3450,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     their results as ``check_summary`` for the reviewer's prompt. If the
     workspace already has a review at an earlier commit, the reviewer is
     pointed at just what changed since then, when that's a plain diff (see
-    ``is_linear_since``)."""
+    ``review_base``)."""
     from brindle import gates, launch_health
     from brindle.config import load_repo_config
 
@@ -3503,14 +3560,27 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     prev = db.last_review(ws.id)
     if prev and prev.sha != sha:
         prior = f"\n\nA previous review at {prev.sha[:8]} found:\n{(prev.summary or '').strip()}\n\n"
-        if is_linear_since(ws, prev.sha):
+        rb = review_base(ws, prev.sha)
+        if rb.sha == prev.sha:
             task += (prior + f"Focus on what changed since then (`git diff {prev.sha}..HEAD`), "
                      "plus a final sanity pass over the rest; you don't need to re-review it "
                      "from scratch.")
+        elif rb.sha:
+            task += (prior + f"Since then {base} was merged in cleanly (up to {rb.merged[:8]}); "
+                     "those changes were reviewed on their own branches. Focus on the worker's "
+                     f"own changes since your last review: `git diff {rb.sha}..HEAD`. First check "
+                     "each earlier finding is fixed, then a final sanity pass over the rest.")
+            both = rb.both
+            if both:
+                task += ("\n\nFiles changed on both sides (by the merged base commits and by the "
+                         "worker); check these interact correctly: " + ", ".join(both))
         else:
             task += (prior + "The branch has diverged since then (for example a rebase or a "
                      "merge), so review the whole current diff rather than just the recent "
                      "changes.")
+            if rb.edited:
+                task += ("\n\nA merge commit was edited by hand in these files: "
+                         + ", ".join(rb.edited))
 
     if focus:
         task += f"\n\nFocus: {focus}"
