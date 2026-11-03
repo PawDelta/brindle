@@ -2141,7 +2141,7 @@ def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, mon
                tmp_path)
         if how == "attached":
             monkeypatch.setattr(license, "has", lambda feature: feature == "multi_repo")
-            ws = repos.target_workspace(db, repos.attach(db, "sup", str(tmp_path / "other")).repo_root)
+            ws = repos.target_workspace(db, "sup", repos.attach(db, "sup", str(tmp_path / "other")).repo_root)
 
         def spawn():
             with pytest.raises(agents.AgentError) as e:

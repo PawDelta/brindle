@@ -1054,7 +1054,7 @@ def consent_identity(db: DB, repo: str, profile: str, provider: str, session: st
             target = None
         if target is None:
             raise AgentError(f"no session {session!r} in {repo}")
-        ws, parent = repos.target_workspace(db, target), root.id
+        ws, parent = repos.target_workspace(db, session, target), root.id
     who = Agent("", ws.id, profile, provider, parent, "assign" if parent else "interactive", "starting", "",
                 None, 0.0)
     return launch_identity(who, ws)[0]
@@ -2804,8 +2804,13 @@ def delegate(
             _check_branch_owner(db, caller, caller_ws.repo_root, branch)
             caller_ws = workspaces.refresh_branch(db, caller_ws)
             # merge_into applies to the supervisor's workers; a worker's own
-            # sub-workers still branch from (and merge back into) its branch.
+            # sub-workers still branch from (and merge back into) its branch,
+            # and a session's workers in a repo it attached use the session's
+            # own branch there (repos.attach), whatever that repo's merge_into.
             merge_into = load_repo_config(caller_ws.repo_root).merge_into
+            root = pilot.root_of(db, caller.id) if caller else None
+            if root and caller_ws.branch and repos.session_branch(db, root, caller_ws.repo_root) == caller_ws.branch:
+                merge_into = None
             base = merge_into if merge_into and not (caller and caller.parent_id) else caller_ws.branch
             start = start or (base if git.branch_exists(caller_ws.repo_root, base) else "HEAD")
             created = workspaces.create(
@@ -2829,11 +2834,17 @@ def delegate(
 
 def _check_branch_owner(db: DB, caller: Agent | None, repo_root: str, branch: str) -> None:
     """Naming a branch must not reuse another identity's worktree, nor
-    another session's: several sessions can share a checkout."""
+    another session's: several sessions can share a checkout. A session's
+    own branch in a repo it attached is reserved to it, worker or not."""
     from brindle import autopilot as pilot
     from brindle import identity_lock
 
     mine = pilot.root_of(db, caller.id) if caller else None
+    real = os.path.realpath(repo_root)
+    for r in db.session_repos():
+        if r.branch == branch and r.root_id != mine and os.path.realpath(r.repo_root) == real:
+            raise AgentError(f"branch {branch!r} belongs to session {r.root_id}: it's that session's "
+                             "merge target in this repo; pick another branch name")
     for other in db.find_workspaces(repo_root):
         if other.branch != branch:
             continue

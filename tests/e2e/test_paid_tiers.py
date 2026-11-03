@@ -1028,8 +1028,8 @@ def test_a_lapsed_plan_cannot_use_an_attached_repo(run, acct, db, repo, session,
     assert repos.resolve(db, session, str(repo), None) == str(repo)    # the own repo still works
 
 
-def test_a_repo_held_by_a_running_session_cannot_be_attached(run, acct, db, repo, session, tmp_path,
-                                                             monkeypatch):
+def test_a_repo_attached_to_a_running_session_can_be_attached_too(run, acct, db, repo, session, tmp_path,
+                                                                  monkeypatch):
     web = second_repo(tmp_path)
     other_root = second_repo(tmp_path, "other")
     ows = workspaces.adopt_root(db, str(other_root))
@@ -1039,4 +1039,5 @@ def test_a_repo_held_by_a_running_session_cannot_be_attached(run, acct, db, repo
     repos.attach(db, "other", str(web), "web")
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("boss", "other"))
     code, out = run("repo", "add", str(web))
-    assert code == 1 and "another running session" in out
+    assert code == 0, out
+    assert repos.session_branch(db, session, str(web)) != repos.session_branch(db, "other", str(web))

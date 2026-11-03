@@ -195,7 +195,7 @@ def _target(db: DB, caller: Agent | None, here: Workspace, repo: str | None) -> 
     repo_root = repos.resolve(db, root_id, here.repo_root, repo)
     if os.path.realpath(repo_root) == os.path.realpath(here.repo_root):
         return here
-    return repos.target_workspace(db, repo_root)
+    return repos.target_workspace(db, root_id, repo_root)
 
 
 def _session_repos(db: DB, caller: Agent | None, here: Workspace) -> list[tuple[str | None, str]]:

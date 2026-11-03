@@ -1357,7 +1357,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
             found = repos.resolve_attached(db, root_id, alias)
             if found is None:
                 return f"repo {alias!r} isn't attached to this session (`brindle repo ls`)"
-            other = repos.target_workspace(db, found.repo_root)
+            other = repos.target_workspace(db, root_id, found.repo_root)
             sites[alias] = (other, load_repo_config(other.repo_root), commit_of(other))
         return sites[alias]
 
