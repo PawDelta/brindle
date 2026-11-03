@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import type { DaemonClient, DocScope, KbSource, KnowledgeMap } from "../../api/client";
 import type { DecisionDTO } from "../../api/schema";
-import { openLocalPath } from "../../api/open";
 import { alert, button, card, field, h2 } from "../../components/ui";
 import { Reader, scopeName } from "./DocsView";
 import { DecisionCard } from "./KnowledgeScreen";
@@ -13,7 +12,6 @@ interface MapViewProps {
   repo?: string;
   decisions: DecisionDTO[];
   sources: KbSource[];
-  openPath?: (path: string) => Promise<void>;
 }
 
 const message = (e: unknown) => e instanceof Error ? e.message : String(e);
@@ -23,7 +21,10 @@ export function MapView(props: MapViewProps) {
   return <MapArea key={props.repo} {...props} />;
 }
 
-function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }: MapViewProps) {
+/* The first line of prose in a doc's markdown, as a stand-in summary. */
+const firstLine = (md = "") => md.split("\n").map((l) => l.trim()).find((l) => l && !l.startsWith("#"))?.slice(0, 240) ?? "";
+
+function MapArea({ client, repo, decisions, sources }: MapViewProps) {
   const [scopes, setScopes] = useState<DocScope[]>([]);
   const [scopeKey, setScopeKey] = useState("");
   const [input, setInput] = useState("");
@@ -34,8 +35,13 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<GraphNode | null>(null);
   const [doc, setDoc] = useState<string | null>(null);
+  const [preview, setPreview] = useState<{ node: string; summary: string; text?: string } | null>(null);
+  const [local, setLocal] = useState<{ id: string; title: string; text: string } | null>(null);
+  const selected = useRef<{ node: string; gen: number } | null>(null);
+  const generation = useRef(0);
   useEffect(() => {
     let active = true;
+    selected.current = null; generation.current++; setLocal(null); setPreview(null);
     setScopes([]); setScopeKey(""); setArea(null); setResult(null); setOpen(null); setDoc(null); setError(null);
     if (repo) client.docScopes(repo).then((got) => {
       if (active) {
@@ -48,6 +54,7 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
   useEffect(() => {
     let active = true;
     const request = area;
+    selected.current = null; generation.current++; setLocal(null); setPreview(null);
     setResult(null); setOpen(null); setDoc(null); setError(null);
     if (repo && request) client.knowledgeMap(repo, request.scope, request.paths).then(
       (got) => { if (active) setResult({ request, map: got }); },
@@ -84,13 +91,38 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
       return pending && same ? current : { scope, paths };
     });
   };
+  /* A click only previews: the sidebar shows the node, and the doc link opens
+     the in-app reader. Nothing here reaches the OS. */
   const select = (node: GraphNode) => {
     setOpen(node);
-    if (node.kind === "doc" && !node.local_path) setDoc(node.doc_id ?? node.id);
-    const localPath = node.kind === "imported" ? node.path : node.kind === "doc" ? node.local_path : undefined;
-    if (localPath) void openPath(localPath).catch((e: unknown) => setError(message(e)));
+    setDoc(null);
+    setLocal(null);
+    // Activating the node already selected (a double-click) reuses its preview and in-flight fetch.
+    if (selected.current?.node === node.id) return;
+    const gen = ++generation.current;
+    // The selection is captured now: a response from an older generation is dropped.
+    selected.current = { node: node.id, gen };
+    setPreview(null);
+    const current = () => generation.current === gen;
+    if (node.kind === "decision") setPreview({ node: node.id, summary: firstLine(node.decision.body) });
+    else if (node.kind === "imported") setPreview({ node: node.id, summary: `Imported folder${node.source.docs !== undefined ? ` · ${node.source.docs} documents` : ""} · ${node.path}` });
+    else if (node.kind === "doc" && repo) {
+      if (node.local_path) {
+        // The engine's own document id, from the node's `local:kb:<id>`; no search involved.
+        client.kbDoc(repo, node.id.replace(/^local:kb:/, "")).then((got) => {
+          if (current() && got.text) setPreview({ node: node.id, summary: firstLine(got.text), text: got.text });
+        }, () => {});
+      } else client.doc(node.doc_id ?? node.id, repo).then(
+        (got) => { if (current()) setPreview({ node: node.id, summary: got.summary || firstLine(got.files[0]?.md) }); },
+        () => {},
+      );
+    }
     if (node.kind === "path" && node.path && area) { setInput(node.path); setArea({ scope: area.scope, paths: [node.path] }); }
   };
+  /* The sidebar was closed: forget the selection so an old fetch can't land and a re-click starts afresh. */
+  const deselect = useCallback(() => { selected.current = null; generation.current++; setPreview(null); setOpen(null); }, []);
+  const viewable = open?.kind === "doc" && !open.local_path ? open.doc_id ?? open.id : null;
+  const onDoc = viewable ? () => setDoc(viewable) : open?.kind === "doc" && preview?.node === open.id && preview.text ? () => setLocal({ id: open.id, title: open.title ?? open.id, text: preview.text! }) : undefined;
   return <section className="flex flex-col gap-s2" aria-label="Map" data-testid="map">
     <header><h2 className={h2}>Knowledge map</h2><p className="text-sm text-ink-2">All knowledge in this library scope, including local decisions and imported folders in Mine. Code paths optionally narrow the map. Shared paths and topics connect records.</p></header>
     {!repo ? <p className="text-ink-3">Choose a repo to explore its knowledge.</p> : <form onSubmit={submit} className={`${card} flex flex-wrap items-end gap-s1 p-s2`}>
@@ -102,9 +134,10 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
     {repo && !area && <p className="text-sm text-ink-3">Choose a library scope to load its map.</p>}
     {area && !map && !error && <p role="status">Loading neighbourhood…</p>}
     {graph && shown && <><p className="text-xs text-ink-3">{shown.nodes.length} documents and local records · {shown.edges.length} links · drag nodes or the background, scroll to zoom, click a node for details</p>
-      {shown.nodes.length ? <MapGraph {...graph} onOpen={select} /> : <p>No knowledge in this map yet.</p>}
+      {shown.nodes.length ? <MapGraph {...graph} onOpen={select} onDeselect={deselect} preview={preview} onDoc={onDoc} /> : <p>No knowledge in this map yet.</p>}
     </>}
     {open?.kind === "decision" && <ul><DecisionCard d={open.decision} /></ul>}
+    {local && <Reader key={local.id} client={client} repo={repo} id={local.id} local={{ title: local.title, markdown: local.text }} targets={scopes} titles={titles} onBack={() => setLocal(null)} onDeleted={() => setLocal(null)} onOpen={setDoc} onScopes={learn} />}
     {doc && <Reader key={doc} client={client} repo={repo} id={doc} targets={scopes} titles={titles} onBack={close} onDeleted={close} onOpen={setDoc} onScopes={learn} />}
   </section>;
 }

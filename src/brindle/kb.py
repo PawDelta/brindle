@@ -26,6 +26,7 @@ from urllib.parse import unquote, urlsplit
 
 from brindle import knowledge, secrets
 from brindle.db import DB
+from brindle.redact import mask
 
 SOURCE_ADD = "source_add"
 SOURCE_REMOVE = "source_remove"
@@ -481,6 +482,46 @@ def search(db: DB, repo_key: str, query: str, sources: list[str] | None = None,
         args += sources
     rows = db.conn.execute(sql + " ORDER BY kb_fts.rank LIMIT ?", (*args, k)).fetchall()
     return [_hit(r) for r in rows]
+
+
+def document(db: DB, repo_key: str, doc_id: int) -> dict | None:
+    """One indexed local document of ``repo_key`` by id (the number in the map's
+    ``local:kb:<id>`` node): its title and the source file's own text, secrets
+    masked. None when it is not this repo's, is a tombstone, has only
+    quarantined chunks (the same visibility as the map), or its file is not a
+    regular file inside its source's folder."""
+    doc = db.conn.execute(
+        "SELECT d.id, d.title, d.url, d.updated_at, s.scope FROM kb_docs d JOIN kb_sources s ON s.id = d.source_id"
+        " WHERE d.id = ? AND s.repo_key = ? AND s.kind = 'folder' AND NOT d.tombstoned",
+        (doc_id, repo_key)).fetchone()
+    if doc is None:
+        return None
+    url = urlsplit(doc["url"] or "")
+    if url.scheme != "file" or url.netloc not in ("", "localhost"):
+        return None
+    path = Path(unquote(url.path))
+    try:
+        if path.is_symlink() or not path.resolve().is_relative_to(Path(doc["scope"]).resolve()) or not path.is_file():
+            return None
+        text = _safe_text(path.read_bytes().decode("utf-8-sig", errors="replace"))
+    except OSError:
+        return None
+    if text is None:
+        return None
+    return {"id": doc["id"], "title": doc["title"], "url": doc["url"], "updated_at": doc["updated_at"],
+            "text": text}
+
+
+def _safe_text(text: str) -> str | None:
+    """``text`` as it is now, whole except the chunks scan_document quarantines,
+    with secrets redacted by the KB policy and then by redact.mask. None when
+    nothing safe is left or a signature survives the removal."""
+    lines = _normalized(text).split("\n")
+    dropped = {n for chunk, reason in scan_document(text) if reason for n in chunk.lines}
+    kept = "\n".join(line for n, line in enumerate(lines) if n not in dropped)
+    if not kept.strip() or quarantine_reason(kept):
+        return None
+    return mask(redact(kept))
 
 
 def _hit(r) -> dict:

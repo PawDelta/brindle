@@ -223,13 +223,15 @@ def test_stuck_notice_names_the_pending_request(db, ws, monkeypatch, mode, age):
     turn_on(ws)
     agents.hook_main(db, a.id, "permission-request", json.dumps(
         claude_payload("Bash", {"command": "make deploy"})))
+    request = db.latest_permission_request(a.id)
+    db.update_permission_request(a.id, request["tool_use_id"], channel="hook")
     db.set_status(a.id, "waiting")
     db.update_agent(a.id, mode=mode, status_since=time.time() - age)
     sent = []
     monkeypatch.setattr(agents, "pane_owners", lambda db, panes: {})
     monkeypatch.setattr(agents, "owns_pane", lambda db, a, owners: True)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    monkeypatch.setattr(cull.tmux, "capture", lambda *a, **k: "")
+    monkeypatch.setattr(cull.tmux, "capture", lambda *a, **k: "✻ Pondering…")
     monkeypatch.setattr(agents, "send_message", lambda db, to, body, sender_id=None: sent.append(body))
     cull.note_stuck(db, time.time(), {})
     assert "Bash: make deploy" in sent[0] and "Only the user can answer it" in sent[0]

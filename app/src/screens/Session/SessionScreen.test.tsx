@@ -11,14 +11,25 @@ import type { GoalDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
 import type { SheetRef } from "../../routes";
 import { SessionsProvider } from "../../store/sessions";
 import { BASE_URL, PANE_DEAD_LINE, TOKEN, flush, FakeDaemon, type DaemonData, type Pane } from "../../test/fakeDaemon";
-import { REPO, root, waiting, windowOf, windowed, worker } from "../../test/fixtures";
+import { REPO, permission, permissionInTerminal, root, waiting, windowOf, windowed, worker } from "../../test/fixtures";
 import { NO_SHELL, NO_WINDOW } from "./ProviderSurface";
 import { SessionScreen } from "./SessionScreen";
 import { closeSessionLabel } from "./AgentMenu";
-import { sessionWork } from "./tree";
+import { agentIds, sessionTree, sessionWork } from "./tree";
+import { liveWorkers } from "../../store/overview";
 import { SessionContext, sidebarChanges } from "../../components/SessionContext";
 
 describe("sessionWork", () => {
+  it.each(["tree", "worker list", "worker count"])("excludes past workers from the %s while keeping their running children", (place) => {
+    const past = { ...worker.agents![0], status: "rewound" };
+    const dismissed = { ...past, id: "closed", status: "processing", dismissed_at: 1 };
+    const child = { ...worker.agents![0], id: "child", parent_id: past.id };
+    const workspaces = [root, { ...worker, agents: [past, dismissed, child] }];
+    if (place === "tree") expect([...agentIds(sessionTree(workspaces, "sup1"))]).toEqual(["sup1", "child"]);
+    if (place === "worker list") expect(sessionWork(workspaces, "sup1", root.id).agents.map((a) => a.id)).toEqual(["sup1", "child"]);
+    if (place === "worker count") expect(liveWorkers([past, dismissed, child], {})).toBe(1);
+  });
+
   const agent = (id: string, parent_id: string | null = null) => ({ id, profile: "claude", provider: "claude", status: "processing", mode: "worker", parent_id, subagents: [] });
   const ws = (id: string, ...agents: ReturnType<typeof agent>[]) => ({ id, name: id, branch: id, path: `/r/${id}`, agents });
 
@@ -220,6 +231,19 @@ const surface = () => screen.getByTestId("provider-surface");
 const title = () => screen.getByTestId("surface-title").textContent;
 
 describe("SessionScreen", () => {
+  it.each(["rewound", "dismissed"])("drops a %s selection from the surface and agent menu without a stopped badge or worker tab", async (reason) => {
+    const past = { ...worker.agents![0], status: reason === "rewound" ? "rewound" : "exited", dismissed_at: reason === "dismissed" ? 1 : null };
+    const { sync } = mount({ sup1: live }, { workspaces: [root, { ...worker, agents: [past] }] });
+    await waitFor(() => expect(shownAgent()).toBe("sup1"));
+    pick("w1");
+    await waitFor(() => expect(shownAgent()).toBe("sup1"));
+    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.queryByText("stopped", { exact: true })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "More actions" }));
+    expect(screen.queryByRole("menuitem", { name: "Rewind…" })).toBeNull();
+    sync.stop();
+  });
+
   it("shows live session changes before PR readiness in the chat's place, goes back to the chat with ← Chat or Esc keeping drafts, and edits hunks in either layout", async () => {
     sidebarChanges.shown = true;
     let holdDiff: Promise<void> | null = null;
@@ -884,11 +908,12 @@ describe("SessionScreen, the pty view", () => {
 
   it("shows the supervisor's and each worker's pane through a tmux client on its window, one view at a time", async () => {
     const v = views({ kind: "ready", tmux: "tmux 3.8" });
-    const { sync, term } = mount({ sup1: live, w1: live }, {}, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
+    const { daemon, sync, term } = mount({ sup1: live, w1: live }, { workspaces: [{ ...root, agents: [{ ...root.agents![0], status: "starting" }] }, worker], inbox: [permissionInTerminal, permission] }, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
     await waitFor(() => expect(v.opened).toHaveLength(1));
     expect(v.opened[0].at).toEqual({ server: "brindle", target: windowOf("sup1") });
     expect(screen.getByTestId("terminal").dataset.pty).toBe("1");
-    expect(surface().dataset.card).toBe("live");
+    await waitFor(() => expect(surface().dataset.card).toBe("live"));
+    for (const status of ["waiting", "processing", "idle", "unknown"]) { act(() => daemon.publish("agent.status", { root_id: "sup1", agent_id: "sup1", payload: { status } })); await flush(); expect(surface().dataset.card).toBe("live"); }
     // The client's bytes are drawn as they come; what xterm.js says goes back as is.
     act(() => v.opened[0].handlers.onData(new TextEncoder().encode("\x1b[?1049hclaude")));
     expect(term().written).toBe("\x1b[?1049hclaude");

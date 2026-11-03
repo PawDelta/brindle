@@ -20,7 +20,10 @@ CODEX_EDITS = ("  Would you like to make the following edits?\n\n  src/app.py (+
                "› 1. Yes, proceed (y)\n  2. No, and tell Codex what to do differently (esc)\n")
 AGY_PROMPT = "Requesting permission for:\n  git push\nRun this command?\n  Yes / No\nesc to cancel\n"
 
-PROMPTS = [("codex", CODEX_EDITS), ("antigravity", AGY_PROMPT)]
+PROMPTS = [("codex", CODEX_EDITS, True), ("antigravity", AGY_PROMPT, True),
+           ("antigravity", AGY_PROMPT + "\n⢿  Running command...\nesc to cancel\n", False),
+           pytest.param("antigravity", AGY_PROMPT + "\n⣻  Working...\nesc to cancel\n", False,
+                        marks=pytest.mark.variant("second busy pane reported in today's incident"))]
 
 
 def worker(db, ws, provider, status="processing", since=None):
@@ -40,11 +43,23 @@ def test_codex_busy_and_plain_screens():
     assert not prompt_answer.blocking_prompt("Would you like to run the following command?\n" + "line\n" * 30, "codex")
 
 
-@pytest.mark.parametrize("provider,screen", PROMPTS)
-def test_a_prompted_worker_shows_needs_you_and_its_supervisor_is_told(db, root, screens, provider, screen):  # noqa: F811
+@pytest.mark.parametrize("provider,screen,waiting", PROMPTS)
+def test_a_prompted_worker_shows_needs_you_and_its_supervisor_is_told(db, root, screens, provider, screen, waiting):  # noqa: F811
     _, ws = root
     screens["%w1"] = screen
     a = worker(db, ws, provider)
+    if not waiting:
+        assert not prompt_answer.at_turn_end(db, a)
+        agents.reconcile(db, a, samples=1)
+        reconciled = db.get_agent("w1").status
+        for mode in ("assign", "review"):
+            db.update_agent("w1", mode=mode, status="waiting", status_since=time.time() - cull.STUCK_AFTER - 5)
+            assert not cull.note_stuck(db, time.time(), {})
+        assert reconciled == "processing"
+        agents.reconcile(db, db.get_agent("w1"), samples=1)
+        assert db.get_agent("w1").status == "processing"
+        assert db.pending_count("boss") == 0
+        return
     agents.reconcile(db, a, samples=1)  # what the sidebar does every redraw
     assert db.get_agent("w1").status == "waiting"
     assert watch.needs_you({"status": "waiting", "id": "w1"}, {}) == "needs you"

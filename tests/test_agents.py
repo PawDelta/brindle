@@ -579,3 +579,49 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     assert sum("did A" in m for m in told) == 1, told
 
 
+
+
+@pytest.mark.parametrize("merged, edit, shared, want_edited, want_both", [
+    ("main", None, None, None, []),                      # a clean merge of the base, then a fix
+    ("main", "a.txt", None, ["a.txt"], []),              # the merge commit was edited by hand
+    ("other", None, None, [], []),                       # a branch that isn't in the base
+    ("main", "shared.txt", ("mine", "theirs"), ["shared.txt"], []),   # conflict resolved by hand
+    ("main", None, ("same", "same"), None, ["shared.txt"]),           # identical edit on both sides
+])
+def test_review_base_after_merge(tmp_path, merged, edit, shared, want_edited, want_both):
+    from types import SimpleNamespace
+
+    sh("git init -q -b main && git config user.name t && git config user.email t@t", tmp_path)
+    for n in ("a", "b", "c", "shared"):
+        (tmp_path / f"{n}.txt").write_text("1\n")
+    sh("git add -A && git commit -qm init && git checkout -qb feat", tmp_path)
+    (tmp_path / "a.txt").write_text("worker\n")
+    sh("git commit -qam w1", tmp_path)
+    prev = sh("git rev-parse HEAD", tmp_path)
+    if shared:
+        (tmp_path / "shared.txt").write_text(shared[0] + "\n")
+        sh("git commit -qam w2", tmp_path)
+    sh("git checkout -q main && git checkout -qb other", tmp_path)
+    (tmp_path / "b.txt").write_text("other\n")
+    if shared:
+        (tmp_path / "shared.txt").write_text(shared[1] + "\n")
+    sh("git commit -qam o1", tmp_path)
+    if merged == "main":
+        sh("git checkout -q main && git merge -q --ff-only other", tmp_path)
+    sh("git checkout -q feat", tmp_path)
+    sh(f"git merge -q --no-commit --no-ff {merged} || true", tmp_path)
+    if edit:
+        (tmp_path / edit).write_text("hand\n")
+    sh("git add -A && git commit -qm merge", tmp_path)
+    (tmp_path / "c.txt").write_text("fix\n")
+    sh("git commit -qam fix", tmp_path)
+
+    ws = SimpleNamespace(path=str(tmp_path), base_branch="main", id="w1")
+    rb = agents.review_base(ws, prev)
+    if want_edited is None:
+        assert rb.sha == agents.review_base_ref("w1")
+        assert rb.both == want_both
+        assert sh(f"git diff --name-only {rb.sha}..HEAD", tmp_path) == "c.txt"
+    else:
+        assert rb.sha is None
+        assert rb.edited == want_edited

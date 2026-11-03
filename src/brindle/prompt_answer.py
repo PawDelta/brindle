@@ -58,7 +58,10 @@ INPUT_BOX = re.compile(r"\? for shortcuts|\d+% context left|esc to interrupt|⏵
                        r"|\S…\s*\((?:\d+m\s*)?\d+s\b", re.I)   # the last: a busy spinner, "✳ Clauding… (1m 37s)"
 # A turn under way: a spinner before its timer shows ("✻ Pondering…"), or a
 # tool call or reply ("⏺ Read(…)", "⎿ Running…"). No startup prompt has these.
-BUSY_SPINNER = re.compile(r"(?m)^\s*[·✢✳✶✻✽*]\s*[^\W\d_][\w-]*…")
+BUSY_SPINNER = re.compile(
+    r"(?m)^\s*(?:[·✢✳✶✻✽*]\s*[^\W\d_][\w-]*…"
+    r"|[\u2801-\u28ff]\s*[^\n]+(?:…|\.{3})"
+    r"|(?:Working|Running command)(?:…|\.{3}))")
 WORKING = re.compile(BUSY_SPINNER.pattern + r"|^\s*[⏺⎿]")
 BRIEF_LETTERS = 10   # fewest letters in a screen line taken as part of the brief
 # Only the person answers these, whatever the model makes of them: their
@@ -95,7 +98,22 @@ CONFIG_PATH = re.compile(r"(?i)\.(?:mcp|claude|codex|gemini|agy)\b|settings(?:\.
 SECRET = re.compile(r"sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}"
                     r"|gh[pousr]_[A-Za-z0-9]{20,}|-----BEGIN"
                     r"|\b(?=[\w+=-]*[A-Za-z])(?=[\w+=-]*\d)[\w+=-]{40,}")
-PATH = re.compile(r"(?<![\w.~/])(?:~|/)[\w.@+-]*(?:/[\w.@+-]+)+")
+# A git object id (40 or 64 lowercase hex) that SECRET's long-word rule would
+# take for a credential is kept by redact() only when it is in a git context
+# (an argument of the git command itself, not of a command after it: the
+# context ends at a shell separator, quote or substitution; one end of a
+# `..`/`...` range; after "commit", "at" or "sha") and nothing near it on
+# the line names a secret, in any spelling (GITHUB_TOKEN, apiKey), or labels
+# it (`=`, `:`, the `@` of a URL's userinfo). Anything unsure is masked.
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_GIT_CONTEXT = re.compile(r"(?i)(?:\bgit\s+(?:diff|show|log|rev-parse|rev-list|checkout|switch|reset|cherry-pick"
+                          r"|merge|rebase|range-diff|describe|branch|tag|bisect|worktree|blame|name-rev)\b"
+                          r"[^\n;&|`$()<>{}'\"#\\]*"
+                          r"|\b(?:commit|at|sha)|\.\.\.?)\s*$")
+_SECRET_NAME = re.compile(r"(?i)token|key|secret|passw|passphrase|auth|bearer|credential")
+_SECRET_NEAR = re.compile(rf"{_SECRET_NAME.pattern}|[=:]\s*[\"'`]?\s*$")
+_NEAR = 120     # how far along the line, either way, a secret name counts as near
+PATH =re.compile(r"(?<![\w.~/])(?:~|/)[\w.@+-]*(?:/[\w.@+-]+)+")
 
 PROMPT = """\
 A command-line coding agent has just started and stopped on the screen below \
@@ -169,6 +187,11 @@ def brief_draft(screen: str, brief: str) -> bool:
             and sum(len(part) for part in parts if part in brief) >= 60)
 
 
+def pane_busy(screen: str) -> bool:
+    """A live activity indicator in the pane's current tail, across providers."""
+    return bool(BUSY_SPINNER.search("\n".join(_tail(screen))))
+
+
 def looks_like_prompt(screen: str) -> bool:
     """Whether the bottom of ``screen`` is a menu or question waiting for an
     answer: a selected menu line next to another option, or an "Enter to
@@ -197,6 +220,10 @@ def blocking_prompt(screen: str, provider: str, brief: str = "") -> bool:
     if brief_draft(screen, brief):
         return False
     screen = "\n".join(_tail(_past_brief(screen, brief)))
+    # A live spinner supersedes approval text still visible in the transcript,
+    # for every provider. "esc to cancel" alone also appears on real menus.
+    if pane_busy(screen):
+        return False
     return (get_provider(provider).tool_permission(screen)
             or _numbered_question(screen)
             or (looks_like_prompt(screen) and cached_kind(screen) != "not_a_prompt"))
@@ -373,8 +400,21 @@ def _may_answer(screen: str, decision: Decision) -> bool:
     return decision.kind != "trust" or _brindle_folder(screen)
 
 
+def _commit_id(text: str, m: re.Match) -> bool:
+    """Whether SECRET's match ``m`` in ``text`` is a git object id in a git
+    context with no secret label near it (see _GIT_CONTEXT)."""
+    if not _OBJECT_ID.fullmatch(m.group(0)):
+        return False
+    line = text.rfind("\n", 0, m.start()) + 1
+    before = text[max(line, m.start() - _NEAR):m.start()]
+    after = text[m.end():m.end() + _NEAR].split("\n", 1)[0]
+    if _SECRET_NEAR.search(before) or _SECRET_NAME.search(after) or after.startswith("@"):
+        return False
+    return bool(_GIT_CONTEXT.search(before) or after.startswith(".."))
+
+
 def redact(text: str) -> str:
-    return SECRET.sub("[redacted]", text)
+    return SECRET.sub(lambda m: m.group(0) if _commit_id(text, m) else "[redacted]", text)
 
 
 # Prompts nobody but the person may answer, by pane, for the launcher to
@@ -560,11 +600,17 @@ def tell(db, agent, prompt: str) -> bool:
     summary = " | ".join(prompt.splitlines())
     body = (f"Worker {a.id} ({a.profile}) is waiting on a prompt: {summary}\n\n"
             f"{attach}, or send it guidance if it is asking a task question.{request}\n\nThe prompt:\n{prompt}")
+    won, previous = db.claim_note(a.id, a.status_since)
+    if not won:
+        return False
     try:
-        agents.send_message(db, a.parent_id, body, sender_id=a.id)
-    except agents.AgentError:
-        db.enqueue(a.parent_id, body, a.id)
-    db.update_agent(a.id, stuck_noted=a.status_since)
+        try:
+            agents.send_message(db, a.parent_id, body, sender_id=a.id)
+        except agents.AgentError:
+            db.enqueue(a.parent_id, body, a.id)
+    except Exception:
+        db.release_note(a.id, a.status_since, previous)
+        raise
     return True
 
 

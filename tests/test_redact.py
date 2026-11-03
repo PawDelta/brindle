@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from brindle import ci_client, codemap, config, history, redact, watch
+from brindle import ci_client, codemap, config, history, prompt_answer, redact, watch
 from brindle.db import Agent, LearnedRule, Workspace
 from brindle.native import NativeAgent, Permissions, Toolbox, core_tools
 from brindle.native.client import Reply, ToolCall
@@ -145,6 +145,52 @@ def test_mask(text, expected, monkeypatch):
     monkeypatch.setenv("MY_TOKEN_ENABLED", "1")
     monkeypatch.setenv("SIGNING_KEY_FILE", "/Users/me/key.pem")
     assert redact.mask(text) == expected
+
+
+SHA = "d2e88092c10324ba5c702b3bed77e1434aa0bd0d"      # a commit id: 40 hex, no letter past f
+SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+def _variant(text, expected, why):
+    return pytest.param(text, expected, marks=pytest.mark.variant(why))
+
+
+@pytest.mark.parametrize("text, expected", [
+    # A git object id in a git context, with no secret label near it, is kept:
+    # the reviewer prompt line from the incident, and one end of a range.
+    (f"Focus on what changed since then (`git diff {SHA}..HEAD`)",
+     f"Focus on what changed since then (`git diff {SHA}..HEAD`)"),
+    (f"{SHA}..HEAD", f"{SHA}..HEAD"),
+    _variant(f"reviewed at {SHA}, sha {SHA256}", f"reviewed at {SHA}, sha {SHA256}",
+             "the other git contexts (after 'at' and 'sha') and a 64-hex sha256 object id"),
+    _variant("git log abc1234..HEAD", "git log abc1234..HEAD",
+             "a short id was never long enough to be taken for a credential"),
+    # Not an object id, labelled, next to a secret name, a URL's userinfo, or
+    # in no git context at all: masked as before.
+    (f"token={SHA}", "[redacted]"),
+    (f"GITHUB_TOKEN: {SHA}", "GITHUB_TOKEN: [redacted]"),
+    (f"checkout at {SHA}, the deploy token", "checkout at [redacted], the deploy token"),
+    (f"https://{SHA}@git.example.com/repo.git", "https://[redacted]@git.example.com/repo.git"),
+    (SHA, "[redacted]"),
+    _variant(f"Authorization: Bearer {SHA}", "Authorization: Bearer [redacted]",
+             "security probe: a hex credential in an auth header, 'bearer' before it"),
+    _variant(f"https://deploy:{SHA}@git.example.com/repo.git", "https://deploy:[redacted]@git.example.com/repo.git",
+             "security probe: a hex password in a URL, labelled by its colon"),
+    _variant(f"the signing secret is at {SHA}", "the signing secret is at [redacted]",
+             "security probe: 'at' right before the hash, a secret named earlier on the line"),
+    _variant(f"GITHUB_TOKEN is at {SHA}", "GITHUB_TOKEN is at [redacted]",
+             "bypass (review round 1): a compound secret name hides its word behind an underscore"),
+    _variant(f"git log; echo {SHA}", "git log; echo [redacted]",
+             "bypass (review round 1): a git command earlier on the line, the hash in a command after it"),
+    _variant(f"commit: {SHA}", "commit: [redacted]",
+             "a label colon in an otherwise git context fails closed"),
+    _variant(f"git diff {SHA.upper()}..HEAD", "git diff [redacted]..HEAD",
+             "uppercase hex is not what git prints: fail closed"),
+    _variant(f"git diff {SHA}..HEAD\nAPI_KEY={SHA256}", f"git diff {SHA}..HEAD\n[redacted]",
+             "a line end bounds the git context: a labelled id on the next line is masked"),
+])
+def test_pane_redact_keeps_commit_ids_in_git_context(text, expected):
+    assert prompt_answer.redact(text) == expected
 
 
 @pytest.mark.variant("ordinary hashes, ids, encodings and prose must never be masked")

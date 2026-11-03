@@ -97,15 +97,17 @@ def live(db: DB, repo_root: str) -> list[LiveSession]:
     whose recorded pane id a newer agent has since taken (tmux reuses ids)
     isn't live: that pane is the newer agent's. One tmux call answers for
     every agent, not one per agent (the app's first load waited on those)."""
+    from brindle.view import past_worker
+
     panes = tmux.list_panes()
     owners = agents.pane_owners(db, panes)
     out = []
     for ws in db.find_workspaces(repo_root):
         for a in db.list_agents(ws.id):
-            if (a.mode == "interactive" and a.status not in ("paused", "done")
+            if (not past_worker(a) and a.mode == "interactive" and a.status not in ("paused", "done")
                     and agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)):
                 running = [m for m in agents.tree(db, a.id)[1:]
-                           if m.mode != "interactive" and m.status not in ("paused", "done", "failed")
+                           if not past_worker(m) and m.mode != "interactive" and m.status not in ("paused", "done", "failed")
                            and agents.is_alive(m, panes)]
                 out.append(LiveSession(a, ws, goal_line(db, a), len(running)))
     return sorted(out, key=lambda s: s.root.created_at, reverse=True)
@@ -236,8 +238,11 @@ def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = No
         c.execute("UPDATE tasks SET caller_id=? WHERE caller_id=? AND state IN ('pending', 'started')",
                   (new.id, old_root_id))
         # The attached repos (brindle.repos) move across with the session.
-        c.execute("INSERT OR IGNORE INTO session_repos (root_id, alias, repo_root, added_at, branch) "
-                  "SELECT ?, alias, repo_root, added_at, branch FROM session_repos WHERE root_id=?",
+        c.execute("INSERT OR IGNORE INTO session_repos (root_id, alias, repo_root, added_at) "
+                  "SELECT ?, alias, repo_root, added_at FROM session_repos WHERE root_id=?",
+                  (new.id, old_root_id))
+        c.execute("INSERT OR IGNORE INTO session_repo_branches (root_id, alias, branch) "
+                  "SELECT ?, alias, branch FROM session_repo_branches WHERE root_id=?",
                   (new.id, old_root_id))
         c.execute("DELETE FROM session_repos WHERE root_id=?", (old_root_id,))
         # So does an outside job it waits on (wait_on), or the notice of one

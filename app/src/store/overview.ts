@@ -14,6 +14,9 @@ export const isFailed = (s: SessionDTO) => s.status === "failed";
 
 const STOPPED = new Set(["paused", "done", "failed"]);
 
+/* Engine records kept for history must never become stopped worker rows. */
+export const isPastWorker = (a: AgentDTO): boolean => a.dismissed_at != null || a.status === "rewound";
+
 /* Every agent a session started, at any depth (by parent_id). */
 export function descendants(agents: AgentDTO[], rootId: string): AgentDTO[] {
   const out: AgentDTO[] = [];
@@ -30,7 +33,7 @@ export function descendants(agents: AgentDTO[], rootId: string): AgentDTO[] {
 /* The workers still at work under a session, as brindle/sessions.py live()
    counts them: not interactive, not stopped, and alive. */
 export function liveWorkers(members: AgentDTO[], alive: Record<string, boolean>): number {
-  return members.filter((a) => a.mode !== "interactive" && !STOPPED.has(a.status) && alive[a.id] !== false).length;
+  return members.filter((a) => !isPastWorker(a) && a.mode !== "interactive" && !STOPPED.has(a.status) && alive[a.id] !== false).length;
 }
 
 /* The session an agent belongs to: the top of its parent chain in the

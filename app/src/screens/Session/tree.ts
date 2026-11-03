@@ -7,6 +7,7 @@
    still serves a closed agent's record). */
 
 import type { AgentDTO, WorkspaceDTO } from "../../api/schema";
+import { isPastWorker } from "../../store/overview";
 
 export interface AgentNode {
   agent: AgentDTO;
@@ -37,7 +38,12 @@ function climb(agent: AgentDTO, shown: Set<string>, hidden: Hidden): { shown?: s
 }
 
 export function sessionTree(workspaces: WorkspaceDTO[], root: string, hidden: Hidden = {}): AgentNode | null {
-  const all = entries(workspaces);
+  const every = entries(workspaces);
+  hidden = {
+    ...Object.fromEntries(every.filter((e) => isPastWorker(e.agent)).map(({ agent }) => [agent.id, agent.parent_id ?? null])),
+    ...hidden,
+  };
+  const all = every.filter((e) => !isPastWorker(e.agent));
   const shown = new Set(all.map((e) => e.agent.id));
   const parent = new Map(all.map((e) => [e.agent.id, climb(e.agent, shown, hidden).shown]));
   const seen = new Set<string>();
@@ -118,7 +124,7 @@ export function sessionWork(workspaces: WorkspaceDTO[], root: string, rootWorksp
   const own = rootWorkspace === null ? undefined : workspaces.find((ws) => ws.id === rootWorkspace);
   if (own) out.set(own.id, own);
   for (const { agent, workspace } of all) {
-    if (!reaches(agent.id)) continue;
+    if (isPastWorker(agent) || !reaches(agent.id)) continue;
     agents.push(agent);
     if (!out.has(workspace.id)) out.set(workspace.id, workspace);
   }
