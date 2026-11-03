@@ -97,14 +97,17 @@ SECRET = re.compile(r"sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{2
                     r"|\b(?=[\w+=-]*[A-Za-z])(?=[\w+=-]*\d)[\w+=-]{40,}")
 # A git object id (40 or 64 lowercase hex) that SECRET's long-word rule would
 # take for a credential is kept by redact() only when it is in a git context
-# (a git command's argument, one end of a `..`/`...` range, after "commit",
-# "at" or "sha") and nothing near it on the line names a secret or labels it
-# (a key name, `=`, `:`, the `@` of a URL's userinfo). Anything unsure is masked.
+# (an argument of the git command itself, not of a command after it: the
+# context ends at a shell separator, quote or substitution; one end of a
+# `..`/`...` range; after "commit", "at" or "sha") and nothing near it on
+# the line names a secret, in any spelling (GITHUB_TOKEN, apiKey), or labels
+# it (`=`, `:`, the `@` of a URL's userinfo). Anything unsure is masked.
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _GIT_CONTEXT = re.compile(r"(?i)(?:\bgit\s+(?:diff|show|log|rev-parse|rev-list|checkout|switch|reset|cherry-pick"
-                          r"|merge|rebase|range-diff|describe|branch|tag|bisect|worktree|blame|name-rev)\b[^\n]*"
+                          r"|merge|rebase|range-diff|describe|branch|tag|bisect|worktree|blame|name-rev)\b"
+                          r"[^\n;&|`$()<>{}'\"#\\]*"
                           r"|\b(?:commit|at|sha)|\.\.\.?)\s*$")
-_SECRET_NAME = re.compile(r"(?i)\b(?:token|key|secret|passw|passphrase|auth|bearer|credential)")
+_SECRET_NAME = re.compile(r"(?i)token|key|secret|passw|passphrase|auth|bearer|credential")
 _SECRET_NEAR = re.compile(rf"{_SECRET_NAME.pattern}|[=:]\s*[\"'`]?\s*$")
 _NEAR = 120     # how far along the line, either way, a secret name counts as near
 PATH =re.compile(r"(?<![\w.~/])(?:~|/)[\w.@+-]*(?:/[\w.@+-]+)+")
