@@ -1060,6 +1060,8 @@ export class DaemonError extends Error {
   readonly preflight?: PreflightDTO;
   /* Set on a 409 "not_ready": what keeps the session from a PR (session_review.NotReady). */
   readonly reasons?: string[];
+  /* Set on a 409 "preflight" of POST /demo: the practice repo kept for that launch. */
+  repo?: string;
 
   constructor(code: string, message: string, status: number, conflict?: SessionConflict, preflight?: PreflightDTO, reasons?: string[]) {
     super(message);
@@ -1117,10 +1119,16 @@ export class DaemonClient {
   }
 
   /* `brindle demo` from the app: a practice repo of brindle's own (never one of the person's)
-     and a session started there. Throws a DaemonError with `preflight` set as startSession does,
-     and code "airgap" in air-gap mode. */
+     and a session started there, on the CLI this Mac is signed in to. Throws a DaemonError with
+     `preflight` set as startSession does, and `repo` the practice repo kept for it (the next
+     start launches there), and code "airgap" in air-gap mode. */
   startDemo() {
     return this.post<DemoResult>("/demo", {});
+  }
+
+  /* DELETE /demo: the practice repo a held demo kept goes (the person didn't go on with it). */
+  cancelDemo() {
+    return this.delete<{ removed: string[] }>("/demo", {});
   }
 
   /* Resume a paused session (or recover its chat if it has stopped). */
@@ -1850,12 +1858,14 @@ export class DaemonClient {
     }
     const body: unknown = await response.json().catch(() => undefined);
     if (!response.ok) {
-      const got = body as { error?: { code?: string; message?: string }; conflict?: SessionConflict; preflight?: PreflightDTO | PreflightItemDTO[]; reasons?: string[] } | undefined;
+      const got = body as { error?: { code?: string; message?: string }; conflict?: SessionConflict; preflight?: PreflightDTO | PreflightItemDTO[]; reasons?: string[]; repo?: string } | undefined;
       if (got?.conflict) throw new DaemonError("conflict", got.conflict.message, response.status, got.conflict);
       const err = got?.error;
       if (got?.preflight) {
         const preflight = preflightResult(got.preflight);
-        throw new DaemonError("preflight", err?.message ?? `${preflight.provider} needs setting up first`, response.status, undefined, preflight);
+        const held = new DaemonError("preflight", err?.message ?? `${preflight.provider} needs setting up first`, response.status, undefined, preflight);
+        if (typeof got.repo === "string") held.repo = got.repo;
+        throw held;
       }
       throw new DaemonError(err?.code ?? "http", err?.message ?? response.statusText, response.status, undefined, undefined, Array.isArray(got?.reasons) ? got.reasons : undefined);
     }

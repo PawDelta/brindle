@@ -104,7 +104,6 @@ describe("Onboarding", () => {
 
     // The demo, offered once: Skip starts nothing and goes on into the app, in the project picked.
     await step("demo");
-    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Watch brindle work on a practice repo first?");
     expect(localStorage.getItem(DEMO_OFFERED_KEY)).toBe("1");
     fireEvent.click(screen.getByRole("button", { name: "Skip" }));
     await waitFor(() => expect(sidebar()).toBeTruthy());

@@ -23,7 +23,6 @@ import json
 import logging
 import os
 import secrets
-import shutil
 import stat
 import subprocess
 import threading
@@ -202,17 +201,14 @@ def _blocked(launches: list[tuple[Agent, Workspace]], keys_only: bool = False) -
     return preflight.Blocked(list(items.values())) if items else None
 
 
-def session_blockers(db: DB, repo: str, provider: str | None, *, read_only: bool = False,
-                     register: bool | None = None) -> preflight.Blocked | None:
+def session_blockers(db: DB, repo: str, provider: str | None, *, read_only: bool = False) -> preflight.Blocked | None:
     """What would stop a new supervisor chat in ``repo`` (on ``provider``, else
     its profile's) before its first turn. ``read_only`` (a GET): the checkout
     isn't registered, and the sign-in check sees only credentials (see
-    agents.launch_blockers). ``register=False``: the checkout isn't registered
-    either, but the check is the launch's own (the demo's practice repo, which
-    is removed again when something blocks it)."""
+    agents.launch_blockers)."""
     from brindle.profiles import load_profile
 
-    if not (not read_only if register is None else register):
+    if read_only:
         top = git.toplevel(repo)
         ws = db.workspace_by_path(top) or Workspace("preflight", git.main_repo_root(repo), "main", "main",
                                                     "HEAD", None, top, None, "", 0.0)
@@ -255,29 +251,70 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
 def start_demo(db: DB, params: dict, body: Body) -> Any:
     """``brindle demo`` from the app: the practice repo brindle.demo makes (two
     failing test files and a two-milestone goal, under ~/.brindle/demo/) and a
-    supervisor session started there, as the CLI starts it. Nothing is created
-    in the person's own repos. Refused in air-gap mode: the demo's agents are
-    hosted ones. A launch its CLI would stop on answers 409 ``preflight`` as
-    POST /sessions does, and the practice repo made for it is removed again."""
+    supervisor session started there, as the CLI starts it, every agent on
+    ``provider`` (else the CLI the person is signed in to: demo_provider).
+    Nothing is created in the person's own repos. Refused in air-gap mode: the
+    demo's agents are hosted ones. A launch its CLI would stop on answers 409
+    ``preflight`` as POST /sessions does, with the practice repo it was asked
+    for: that repo is kept (the items' actions name it) and the next start
+    launches in it; DELETE /demo removes it."""
     from brindle import airgap
     from brindle import demo as demo_mod
 
     if airgap.enabled():
         raise ServiceError("airgap", "The demo runs hosted agents, and air-gap mode is on on this Mac.", 403)
-    provider = _get(body, "provider")
-    root = demo_mod.create()
-    try:
-        blocked = session_blockers(db, str(root), provider, register=False)
-    except BaseException:
-        shutil.rmtree(root, ignore_errors=True)
-        raise
-    if blocked:
-        shutil.rmtree(root, ignore_errors=True)
-        return blocked
-    got = svc.start(db, str(root), provider=provider)
-    if not isinstance(got, svc.Started):     # a fresh repo has no session to open or choose
+    provider = _get(body, "provider") or demo_provider()
+    # One start at a time: a second press never launches into the repo the first is starting in.
+    with _DEMO_LOCK:
+        root = demo_mod.held(db, provider) or demo_mod.create(provider=provider)
+        blocked = session_blockers(db, str(root), provider)
+        if blocked:
+            return DemoBlocked(blocked.items, str(root))
+        got = svc.start(db, str(root), provider=provider)
+    if not isinstance(got, svc.Started):     # a repo no session ran in has none to open or choose
         return got
     return {**got.to_json(), "repo": got.workspace.repo_root, "notes": _notes(got.notes)}
+
+
+def cancel_demo(db: DB, params: dict, body: Body) -> Any:
+    """The person didn't go on with a demo its preflight held: its practice repo goes."""
+    from brindle import demo as demo_mod
+
+    with _DEMO_LOCK:
+        roots = demo_mod.unused(db)
+        for root in roots:
+            demo_mod.discard(db, root)
+    return {"removed": [str(r) for r in roots]}
+
+
+def demo_provider() -> str | None:
+    """The CLI the demo runs on: the person's last supervisor pick, else the
+    first the demo has profiles for, that this Mac is signed in to and the org
+    allows. None when none is (the supervisor profile's own: its preflight
+    then asks for the sign-in)."""
+    from brindle import demo as demo_mod
+    from brindle import doctor
+    from brindle.config import supervisor_pick
+    from brindle.pro import team_policy
+
+    acc = team_policy.access(None)
+    signed = doctor.signed_in_providers()
+    for p in (supervisor_pick(), *demo_mod.PROFILES):
+        if p in demo_mod.PROFILES and p in signed and acc.allows(p):
+            return p
+    return None
+
+
+@dataclass
+class DemoBlocked(preflight.Blocked):
+    """A demo launch held by its preflight, with the practice repo kept for it."""
+    repo: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {**super().to_json(), "repo": self.repo}
+
+
+_DEMO_LOCK = threading.Lock()
 
 
 def continue_session(db: DB, params: dict, body: Body) -> Any:
@@ -2434,6 +2471,7 @@ def _post(path: str, fn: Action) -> Route:
 ROUTES = [
     _post("/sessions", start_session),
     _post("/demo", start_demo),
+    Route("/v1/demo", _endpoint(cancel_demo), methods=["DELETE"]),
     _post("/sessions/{root}/continue", continue_session),
     _post("/sessions/{root}/pause", pause_session),
     _post("/sessions/{root}/close", close_session),

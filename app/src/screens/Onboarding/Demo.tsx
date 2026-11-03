@@ -5,8 +5,10 @@
    reviewed and merged). Start the demo opens that session; Skip goes on to
    the app as it would have. Offered once (remembered here as soon as it
    shows), never with the engine air-gapped (its agents are hosted ones), and
-   started again any time from New session (WatchDemo). A start the engine's
-   preflight refuses shows its items as New session's does. */
+   started again any time from New session (WatchDemo). It runs on the CLI
+   this Mac is signed in to (the engine picks it). A start the engine's
+   preflight holds shows its items as New session's does, against the
+   practice repo the engine keeps for it; Skip then has that repo removed. */
 
 import { useEffect, useState } from "react";
 import { DaemonError, type DaemonClient, type PreflightDTO } from "../../api/client";
@@ -44,21 +46,27 @@ function useDemo(client: DaemonClient, onStarted: (root: string, repo: string) =
   const { reload } = useSessions();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [preflight, setPreflight] = useState<PreflightDTO | null>(null);
+  /* A start the engine's preflight held: its items, and the practice repo kept for that launch. */
+  const [held, setHeld] = useState<{ items: PreflightDTO; repo?: string } | null>(null);
   const start = async () => {
     setBusy(true);
     setError(null);
     try {
       const got = await client.startDemo();
-      setPreflight(null);
+      setHeld(null);
       await Promise.all([reload().catch(() => undefined), refresh?.().catch(() => undefined)]);
       onStarted(got.id, got.repo);
     } catch (e) {
-      if (e instanceof DaemonError && e.preflight) setPreflight(e.preflight);
+      if (e instanceof DaemonError && e.preflight) setHeld({ items: e.preflight, repo: e.repo });
       else setError(message(e));
     } finally {
       setBusy(false);
     }
+  };
+  /* Not going on with a held start: its practice repo goes. */
+  const cancel = () => {
+    if (held) void client.cancelDemo().catch(() => undefined);
+    setHeld(null);
   };
   const problems = (
     <>
@@ -67,10 +75,10 @@ function useDemo(client: DaemonClient, onStarted: (root: string, repo: string) =
           The demo didn't start: {error}
         </p>
       )}
-      {preflight && <Preflight preflight={preflight} onRefresh={setPreflight} onLaunch={() => void start()} launchLabel="Start the demo" />}
+      {held && <Preflight preflight={held.items} onRefresh={(items) => setHeld({ ...held, items })} onLaunch={() => void start()} launchLabel="Start the demo" repo={held.repo} />}
     </>
   );
-  return { start, busy, problems };
+  return { start, cancel, busy, problems };
 }
 
 export function DemoOffer({ client, refresh, onStarted, onSkip }: {
@@ -115,7 +123,14 @@ export function DemoOffer({ client, refresh, onStarted, onSkip }: {
             <button type="button" className={big} onClick={() => void demo.start()}>
               Start the demo
             </button>
-            <button type="button" className={quiet} onClick={onSkip}>
+            <button
+              type="button"
+              className={quiet}
+              onClick={() => {
+                demo.cancel();
+                onSkip();
+              }}
+            >
               Skip
             </button>
           </>

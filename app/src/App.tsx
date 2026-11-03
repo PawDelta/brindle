@@ -293,8 +293,9 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
    without the route (an older one: 404), whose banner speaks for it. Any
    other failure (the network, a 500) says so in Starting's place, with
    Retry: a first launch never skips its setup on a hiccup. */
-/* The flow done, the demo is offered once (screens/Onboarding/Demo): Skip
-   goes where the flow would have, Start the demo opens the demo's session. */
+/* The flow done, or skipped on a first launch with a CLI signed in already,
+   the demo is offered once (screens/Onboarding/Demo): Skip goes where the
+   app would have, Start the demo opens the demo's session. */
 type Gate =
   | { kind: "checking"; error?: string }
   | { kind: "onboarding"; providers: ProviderInstalled[] }
@@ -315,8 +316,14 @@ function FirstLaunch(props: AppProps) {
       (rows) => {
         if (!live) return;
         if (!onboarded(rows)) return setGate({ kind: "onboarding", providers: rows });
+        // A first launch on this Mac with a CLI signed in already: nothing to set up. The demo is still
+        // offered once to someone new to brindle, whose engine knows no repo yet.
         markOnboarded();
-        setGate({ kind: "app" });
+        if (readDemoOffered()) return setGate({ kind: "app" });
+        client.repos().then(
+          (repos) => live && setGate(repos.length ? { kind: "app" } : { kind: "demo" }),
+          () => live && setGate({ kind: "app" }),
+        );
       },
       (e: unknown) => {
         if (!live) return;
