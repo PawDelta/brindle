@@ -1,8 +1,8 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../api/client";
-import { PtyViewsProvider, type PtyViewHandlers, type PtyViews } from "../api/ptyView";
+import { PtyViewsProvider, type PtyViews } from "../api/ptyView";
 import type { WorkspaceDTO } from "../api/schema";
 import { BASE_URL, FakeDaemon, TOKEN } from "../test/fakeDaemon";
 import { standInViews } from "../test/panes";

@@ -10,8 +10,8 @@ import { PtyViewsProvider, type PtyStatus, type PtyViewHandlers, type PtyViews, 
 import type { GoalDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
 import type { SheetRef } from "../../routes";
 import { SessionsProvider } from "../../store/sessions";
-import { BASE_URL, PANE_DEAD_LINE, TOKEN, flush, FakeDaemon, type DaemonData, type Pane } from "../../test/fakeDaemon";
-import { REPO, root, waiting, windowOf, windowed, worker } from "../../test/fixtures";
+import { BASE_URL, PANE_DEAD_LINE, TOKEN, FakeDaemon, type DaemonData, type Pane } from "../../test/fakeDaemon";
+import { REPO, root, windowOf, windowed, worker } from "../../test/fixtures";
 import { NO_SHELL, NO_WINDOW } from "./ProviderSurface";
 import { SessionScreen } from "./SessionScreen";
 import { closeSessionLabel } from "./AgentMenu";

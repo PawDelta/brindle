@@ -10,11 +10,8 @@ import { startSync } from "../../store/sync";
 import { StoreContext } from "../../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
-import { releaseNotesUrl, type AppUpdateStatus, type AppUpdates } from "../../api/tauri";
-import { watchAppUpdates } from "../../store/appUpdates";
 import { Permissions } from "../Settings/Permissions";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
-import { watchInbox } from "./notify";
 import { usePermissionAsks } from "./PermissionAsks";
 
 afterEach(cleanup);

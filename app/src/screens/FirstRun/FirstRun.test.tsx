@@ -2,7 +2,6 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Detection, InstallPane, Setup, SignIn, ToolName } from "../../api/setup";
 import { FirstRun, Launch } from ".";
-import { OUT_OF_DATE } from "./FirstRun";
 
 afterEach(cleanup);
 

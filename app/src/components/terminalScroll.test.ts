@@ -1,9 +1,6 @@
-import { act, cleanup, render } from "@testing-library/react";
-import { createElement } from "react";
+import { cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
-import { PtyTerminal } from "./PtyTerminal";
-import { GESTURE_GAP, notchPx, scrollByWheel, WheelLines, wheelReports } from "./terminalScroll";
+import { notchPx, scrollByWheel, WheelLines, wheelReports } from "./terminalScroll";
 
 /* The real xterm.js, recorded (as PtyTerminal.test.tsx). */
 const xterms = vi.hoisted(() => [] as import("@xterm/xterm").Terminal[]);

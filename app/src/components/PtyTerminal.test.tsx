@@ -2,7 +2,7 @@ import { act, cleanup, render } from "@testing-library/react";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
-import { COPIED_SHOWN, COPY_KEY, COPY_OR_INTERRUPT, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
+import { COPIED_SHOWN, COPY_OR_INTERRUPT, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
 
 /* The real xterm.js, recorded to read its buffer (as Terminal.test.tsx). */
 const xterms = vi.hoisted(() => [] as import("@xterm/xterm").Terminal[]);

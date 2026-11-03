@@ -10,7 +10,7 @@ import { startSync } from "../../store/sync";
 import { BASE_URL, FakeDaemon, TOKEN, flush } from "../../test/fakeDaemon";
 import { REPO, root } from "../../test/fixtures";
 import { standInViews } from "../../test/panes";
-import { GoalPanel, completion, goalPhase, outputTail } from "./GoalPanel";
+import { GoalPanel, goalPhase } from "./GoalPanel";
 import { UNKNOWN, type Readiness } from "./review";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
