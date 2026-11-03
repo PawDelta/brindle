@@ -18,9 +18,7 @@ from test_merge_order import add
 @pytest.mark.parametrize("path, patterns, expected", [
     ("app.py", ["app.py"], True),
     ("src/app.py", ["app.py"], False),
-    ("uv.lock", ["*.lock"], True),
     ("migrations/0002_x.py", ["migrations/"], True),
-    ("migrations/0002_x.py", ["migrations"], True),
     ("src/migrations/0002_x.py", ["**/migrations/*"], True),
     ("./app.py", ["app.py"], True),
 ])

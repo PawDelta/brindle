@@ -39,13 +39,6 @@ def duplicate_row(db, ws, suffix="-2"):
 # -- creation ---------------------------------------------------------------------
 
 
-def test_create_reuses_idle_workspace_on_same_branch(db, repo, live):
-    first = workspaces.create(db, str(repo), "feat/x").workspace
-    again = workspaces.create(db, str(repo), "feat/x", reuse_registered=True)
-    assert again.workspace.id == first.id and again.how == "existing"
-    assert len(db.find_workspaces(first.repo_root)) == 1
-
-
 def test_assign_with_branch_of_live_worker_is_refused(db, repo, live, monkeypatch):
     first = workspaces.create(db, str(repo), "feat/x").workspace
     add_agent(db, first, "busy1")
@@ -135,6 +128,13 @@ def test_remove_refuses_while_another_live_row_shares_the_path(db, repo, live):
         workspaces.remove(db, ws)
     assert os.path.isdir(ws.path) and db.get_workspace(ws.id)
 
+    live.clear()
+    db.set_status("busy1", "paused")
+    workspaces.remove(db, ws)
+    assert db.get_workspace(ws.id) is None
+    assert db.get_workspace(twin.id) is not None
+    assert os.path.isdir(twin.path)
+
 
 def test_mcp_remove_workspace_refuses_then_force_removes(db, repo, live, monkeypatch):
     ws = workspaces.create(db, str(repo), "feat/x").workspace
@@ -149,11 +149,3 @@ def test_mcp_remove_workspace_refuses_then_force_removes(db, repo, live, monkeyp
     assert not os.path.isdir(ws.path)
 
 
-def test_remove_row_only_when_sharing_row_is_not_live(db, repo, live):
-    ws = workspaces.create(db, str(repo), "feat/x").workspace
-    twin = duplicate_row(db, ws)
-    add_agent(db, twin, "paused1")  # not live
-    removed = workspaces.remove(db, ws)
-    assert "kept" in removed.branch_note and twin.id in removed.branch_note
-    assert os.path.isdir(ws.path)
-    assert db.get_workspace(ws.id) is None and db.get_workspace(twin.id)

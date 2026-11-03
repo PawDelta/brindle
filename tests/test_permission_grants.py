@@ -239,21 +239,18 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     assert grants.pending_asks(db) == []
 
 
-@pytest.mark.parametrize("approved, sibling, decision", [
-    ("git log --oneline -5", "git diff HEAD~1 | head -50", "allow"),                          # read-only git
-    ("ls -la src | head", "cd src && grep -rn foo . | wc -l", "allow"),                       # read-only shell
-    ("uv run pytest tests/test_a.py -q 2>&1 | tail -5", "uv run pytest tests/test_b.py", "allow"),   # a test run
-    ("npm ls --depth=0", "npm ls react | head -3", "allow"),                                  # a tool's query
-    ("uv run pytest tests/test_a.py", "cd / && uv run pytest", "ask"),                        # another project's
-    ("uv run pytest tests/test_a.py -q 2>&1 | tail -5", "uv run rm -rf build", "ask"),        # uv run, no test
-    ("uv run pytest tests/test_a.py", "uv run pytest --basetemp=src", "ask"),                 # deletes src
-    ("uv run pytest tests/test_a.py", "uv run pytest -k @args.txt", "ask"),                   # options from a file
-    ("npm config get registry | head", "npm config set registry https://example.invalid", "ask"),   # a write
-    ("ls -la src | head", "ls && cd $DIR && cat secret.txt", "ask"),                          # where, unknown
-    ("git log --oneline -5", "git log -1 && git reset --hard", "ask"),                        # a write beside it
-    ("grep -rn foo src | head", "grep -rn foo src > found.txt", "ask"),                       # a redirect writes
+@pytest.mark.parametrize("approved, siblings", [
+    ("git log --oneline -5", [("git diff HEAD~1 | head -50", "allow"), ("git log -1 && git reset --hard", "deny")]),
+    ("ls -la src | head", [("cd src && grep -rn foo . | wc -l", "allow"), ("ls && cd $DIR && cat secret.txt", "ask")]),
+    ("uv run pytest tests/test_a.py -q 2>&1 | tail -5", [("uv run pytest tests/test_b.py", "allow"),
+                                                           ("uv run rm -rf build", "ask")]),
+    ("npm ls --depth=0", [("npm ls react | head -3", "allow")]),
+    ("uv run pytest tests/test_a.py", [("cd / && uv run pytest", "ask"), ("uv run pytest --basetemp=src", "ask"),
+                                       ("uv run pytest -k @args.txt", "ask")]),
+    ("npm config get registry | head", [("npm config set registry https://example.invalid", "ask")]),
+    ("grep -rn foo src | head", [("grep -rn foo src > found.txt", "ask")]),
 ])
-def test_approval_covers_its_family(db, ws, approved, sibling, decision):
+def test_approval_covers_its_family(db, ws, approved, siblings):
     """Approving one ask at its proposed scope lets every command of the same
     family through, however it is piped or chained; never one with any other part."""
     permissions.apply_preset("secure")
@@ -265,65 +262,65 @@ def test_approval_covers_its_family(db, ws, approved, sibling, decision):
     [item] = grants.groups(grants.pending_asks(db, ws.repo_root))
     grants.decide_group(db, item.key, "general", "timed", 15)
     assert hook.done.wait(5) and hook.answer == "allow_once"
-    assert decide(bash(ws, sibling)).decision == decision
+    for sibling, decision in siblings:
+        assert decide(bash(ws, sibling)).decision == decision, sibling
 
 
-@pytest.mark.parametrize("command, found", [
-    ("cd app && npm test", ["dev/tests"]),                              # a leading cd: the rest runs in app
-    ("cd app && mkdir dist && git add dist", ["files/write-worktree", "git/local"]),   # changes, there too
-    ("git status && cd {ws}/app && git log -3", ["git/readonly"]),      # a cd in the chain, inside the checkout
-    ("cd $DIR && npm test", None),                                      # where only the run knows
-    ("cd / && npm test", None),                                         # another project's
-    ("cd app ; npm test", None),                                        # the cd may have failed
-    ("cd app && npm test || npm test", None),                           # runs where the cd failed
-    ("ls | cd app && npm test", None),                                  # the cd ran in the pipeline's subshell
-    ("! cd app && npm test", None),                                     # runs only where the cd failed
-    ("cd / && ls && {{ cd {ws} && ls; }} | npm test", None),           # the group's cd ran in its own subshell
-])
-def test_cd_chain_keeps_its_family(ws, command, found):
+def test_cd_chain_keeps_its_family(ws):
     """What runs after a cd it surely followed (``cd x && ...``) runs where
     the cd led; after one that may have failed, where is unknown."""
     (Path(ws.path) / "app").mkdir()
-    assert grants.families(bash(ws, command.format(ws=ws.path))) == found
+    for command, found in [
+        ("cd app && npm test", ["dev/tests"]),
+        ("cd app && mkdir dist && git add dist", ["files/write-worktree", "git/local"]),
+        ("git status && cd {ws}/app && git log -3", ["git/readonly"]),
+        ("cd $DIR && npm test", None),                                      # where only the run knows
+        ("cd / && npm test", None),                                         # another project's
+        ("cd app ; npm test", None),                                        # the cd may have failed
+        ("cd app && npm test || npm test", None),                           # runs where the cd failed
+        ("ls | cd app && npm test", None),                                  # the cd ran in the pipeline's subshell
+        ("! cd app && npm test", None),                                     # runs only where the cd failed
+        ("cd / && ls && {{ cd {ws} && ls; }} | npm test", None),           # the group's cd ran in its own subshell
+    ]:
+        assert grants.families(bash(ws, command.format(ws=ws.path))) == found, command
 
 
-@pytest.mark.parametrize("approved, sibling, decision", [
-    ("git add -A", "git commit -m wip && git switch -c topic && git stash pop && git rebase main", "allow"),
-    ("git add -A", "git branch -D old && git tag -d v1 && git stash drop && git merge -s ours topic", "allow"),
-    ("npm install", "uv add httpx && cd {lib} && npm add -D left-pad", "allow"),     # in another attached repo
-    ("mkdir -p build", "sed -i '' s/a/b/ app.py && rm -rf build/x > out.log && cp app.py build/", "allow"),
-    ("mkdir -p build", "rm -rf {lib}/dist && echo x > {other}/notes.txt", "allow"),   # another repo, its worktree
-    ("uv run pytest tests/test_a.py", "cd {lib} && uv run pytest", "allow"),
-    ("git add -A", "git commit -m wip && git push origin HEAD:main", "ask"),        # never a push
-    ("git add -A", "git push -f origin feature", "deny"),
-    ("git add -A", "git reset --hard", "ask"),
-    ("git add -A", "git clean -fdx", "deny"),
-    ("git add -A", "git checkout -- .", "ask"),                                     # the whole checkout
-    ("git add -A", "git -c core.hooksPath=/x commit -m wip", "ask"),
-    ("git add -A", "git rebase --exec make main", "ask"),                           # runs a command
-    *(pytest.param("git add -A", c, "ask", marks=pytest.mark.variant("bypass: an option spelled another way"))
-      for c in ["git rebase -x'touch {out}/x' main", "git rebase --exe=make main", "git merge -s evil topic",
-                "git rebase -S --exec=make main", "git merge -S -sevil topic"]),
-    ("npm install", "npm install -g left-pad", "ask"),                             # outside the project
-    ("npm install", "npm install --cache={out} foo", "ask"),
-    pytest.param("npm install", ".venv/bin/pip install --log={out}/log httpx", "ask",
-                 marks=pytest.mark.variant("bypass: an option's value writes outside")),
-    ("mkdir -p build", "cp notes.txt build/", "ask"),                              # build/notes.txt links out
-    *(pytest.param("mkdir -p build", c, "ask", marks=pytest.mark.variant("bypass: a destination cp doesn't name last"))
-      for c in ["cp --target-directory=build notes.txt", "cp -RT src build", "cp -R src/ build"]),
-    ("mkdir -p build", "cp -R src copied && echo changed > copied/link/file", "ask"),   # src/link leads out
-    ("mkdir -p build", "sed -i'{out}/*' s/a/b/ app.py", "ask"),                    # its backup, outside
-    ("npm install", "sudo npm install", "ask"),
-    ("npm install", "npm install $(cat pkgs)", "ask"),                             # brindle can't read it
-    ("npm install", "cd {out} && npm install", "ask"),
-    ("mkdir -p build", "rm -rf {ws}", "ask"),                                      # a repo root
-    ("mkdir -p build", "rm -rf {lib}", "ask"),
-    ("mkdir -p build", "rm -rf {out}/x", "ask"),                                   # outside every repo
-    ("mkdir -p build", "mv app.py {out}/", "ask"),
-    ("mkdir -p build", "echo x > {out}/notes.txt", "ask"),
-    ("mkdir -p build", "echo x > .git/hooks/pre-commit", "ask"),
+@pytest.mark.parametrize("approved, siblings", [
+    ("git add -A", [("git commit -m wip && git switch -c topic && git stash pop && git rebase main", "allow"),
+                    ("git tag -d v1 && git stash drop && git merge -s ours topic", "allow"),
+                    ("git branch -D old && git merge -s ours topic", "deny"),         # branch -D: d-git-force
+                    ("git commit -m wip && git push origin HEAD:main", "ask"),        # never a push
+                    ("git push -f origin feature", "deny"),
+                    ("git reset --hard", "deny"),                                     # d-git-force
+                    ("git clean -fdx", "deny"),
+                    ("git checkout -- .", "ask"),                                     # the whole checkout
+                    ("git -c core.hooksPath=/x commit -m wip", "ask"),
+                    ("git rebase --exec make main", "ask"),                           # runs a command
+                    # bypass attempts: an option spelled another way
+                    ("git rebase -x'touch {out}/x' main", "ask"), ("git rebase --exe=make main", "ask"),
+                    ("git merge -s evil topic", "ask"), ("git merge -S -sevil topic", "ask")]),
+    ("npm install", [("uv add httpx && cd {lib} && npm add -D left-pad", "allow"),   # in another attached repo
+                     ("npm install -g left-pad", "ask"),                             # outside the project
+                     ("npm install --cache={out} foo", "ask"),
+                     (".venv/bin/pip install --log={out}/log httpx", "ask"),         # an option's value writes outside
+                     ("sudo npm install", "ask"),
+                     ("npm install $(cat pkgs)", "ask"),                             # brindle can't read it
+                     ("cd {out} && npm install", "ask")]),
+    ("mkdir -p build", [("sed -i '' s/a/b/ app.py && rm -rf build/x > out.log && cp app.py build/", "allow"),
+                        ("rm -rf {lib}/dist && echo x > {other}/notes.txt", "allow"),   # another repo, its worktree
+                        ("cp notes.txt build/", "ask"),                              # build/notes.txt links out
+                        ("cp --target-directory=build notes.txt", "ask"), ("cp -RT src build", "ask"), ("cp -R src/ build", "ask"),
+                        ("cp -R src copied && echo changed > copied/link/file", "ask"),   # src/link leads out
+                        ("sed -i'{out}/*' s/a/b/ app.py", "ask"),                    # its backup, outside
+                        ("rm -rf {ws}", "ask"),                                      # a repo root
+                        ("rm -rf {lib}", "ask"),
+                        ("rm -rf {out}/x", "ask"),                                   # outside every repo
+                        ("mv app.py {out}/", "ask"),
+                        ("echo x > {out}/notes.txt", "ask"),
+                        ("echo x > .git/hooks/pre-commit", "ask")]),
+    ("uv run pytest tests/test_a.py", [("cd {lib} && uv run pytest", "allow")]),
 ])
-def test_approval_widens_to_change_families(db, ws, tmp_path, approved, sibling, decision):
+def test_approval_widens_to_change_families(db, ws, tmp_path, approved, siblings):
     """An approved local git change, install or file change covers every
     other of its family in any repo of the asking agent's session or its worktrees;
     never a push, a reset or clean of a checkout, a delete of a repo, a write
@@ -346,11 +343,12 @@ def test_approval_widens_to_change_families(db, ws, tmp_path, approved, sibling,
     [item] = grants.groups(grants.pending_asks(db, ws.repo_root))
     grants.decide_group(db, item.key, "general", "timed", 15)
     assert hook.done.wait(5) and hook.answer == "allow_once"
-    sibling = sibling.format(ws=ws.path, lib=lib, other=other, out=out)
-    assert decide(replace(bash(ws, sibling), agent="w1")).decision == decision
+    for sibling, decision in siblings:
+        sibling = sibling.format(ws=ws.path, lib=lib, other=other, out=out)
+        assert decide(replace(bash(ws, sibling), agent="w1")).decision == decision, sibling
 
 
-@pytest.mark.parametrize("agent, kind, target, group, decision", [
+_REPO_CASES = [
     ("w1", "write", "{lib}/x.py", ("files", "write-worktree"), "allow"),    # a second repo attached to the session
     ("w1", "bash", "sed -i '' s/a/b/ {lib}/x.py", ("files", "write-worktree"), "allow"),
     ("w1", "write", "{lib}/protected/x.py", ("files", "write-worktree"), "deny"),   # a relative deny reaches it
@@ -359,8 +357,10 @@ def test_approval_widens_to_change_families(db, ws, tmp_path, approved, sibling,
     ("w1", "bash", "sed -i '' s/a/b/ {alien}/x.py", ("files", "write-outside"), "ask"),
     ("w1", "bash", "git -C {alien} status", ("git", "other"), "ask"),
     ("", "write", "{lib}/x.py", ("files", "write-outside"), "ask"),         # no session known: its own checkout only
-])
-def test_session_repos_count_as_checkout(db, ws, tmp_path, agent, kind, target, group, decision):
+]
+
+
+def test_session_repos_count_as_checkout(db, ws, tmp_path):
     """Every repo attached to the asking agent's session is in the checkout
     for the worktree matcher, relative path rules, git -C, the write classes
     and the change families; another session's repo is not."""
@@ -377,13 +377,14 @@ def test_session_repos_count_as_checkout(db, ws, tmp_path, agent, kind, target, 
     db.add_session_repo("boss", "lib", str(tmp_path / "lib"))
     db.add_session_repo("boss2", "alien", str(tmp_path / "alien"))
     worker(db, ws, "w1")
-    target = target.format(lib=tmp_path / "lib", alien=tmp_path / "alien")
-    req = replace(write(ws, "x.py"), path=target) if kind == "write" else bash(ws, target)
-    req = replace(req, agent=agent)
-    assert permission_groups.classify(req, permissions.all_rules(ws.repo_root)) == [group]
-    if kind == "bash":
-        assert grants.families(req) == (["/".join(group)] if decision == "allow" else None)
-    assert decide(req).decision == decision
+    for agent, kind, target, group, decision in _REPO_CASES:
+        target = target.format(lib=tmp_path / "lib", alien=tmp_path / "alien")
+        req = replace(write(ws, "x.py"), path=target) if kind == "write" else bash(ws, target)
+        req = replace(req, agent=agent)
+        assert permission_groups.classify(req, permissions.all_rules(ws.repo_root)) == [group], target
+        if kind == "bash":
+            assert grants.families(req) == (["/".join(group)] if decision == "allow" else None), target
+        assert decide(req).decision == decision, target
 
 
 def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_blocks(db, ws):
@@ -445,18 +446,18 @@ BYPASS = pytest.mark.variant("spelled so the families don't read it: a bypass at
     (DEPLOYS, "gh workflow run release.yml", "deny", None),
     pytest.param(DEPLOYS, "gh --repo o/r workflow run release.yml", "deny", None, marks=BYPASS),
     pytest.param(DEPLOYS, "vercel --prod", "deny", None, marks=BYPASS),
+    pytest.param(PACKAGES, "npm --prefix web install left-pad", "deny", None, marks=BYPASS),
+    # However many wrappers or options lead to it: no limit on the reading drops it.
+    pytest.param(PACKAGES, "npm " + "--registry https://registry.npmjs.org " * 33 + "install left-pad", "deny", None,
+                 marks=BYPASS),
     ({"group": "network/fetch", "decision": "ask"}, "curl -s https://example.com", "ask", 60),
     (PACKAGES, "pip install requests", "deny", None),
     (PACKAGES, "python -m pip install requests", "deny", None),
     pytest.param(PACKAGES, "python -I -m pip install requests", "deny", None, marks=BYPASS),
-    pytest.param(PACKAGES, "npm --prefix web install left-pad", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "npm --location global install left-pad", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "sudo --user root npm install left-pad", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "uv pip install httpx", "deny", None, marks=BYPASS),
-    # However many wrappers or options lead to it: no limit on the reading drops it.
     pytest.param(PACKAGES, "env env env env env npm install left-pad", "deny", None, marks=BYPASS),
-    pytest.param(PACKAGES, "npm " + "--registry https://registry.npmjs.org " * 33 + "install left-pad", "deny", None,
-                 marks=BYPASS),
     ({"group": "shell/unchecked", "decision": "deny"}, 'eval "$X"', "deny", None),
     (None, "npm install left-pad", "allow", None),
 ])

@@ -295,8 +295,9 @@ def test_secrets_never_reach_a_pane_whatever_env_allow_says():
                                                                    "BRINDLE_PRO_TOKEN"]))
     for secret in ("GITHUB_TOKEN", "GH_TOKEN", "GH_ENTERPRISE_TOKEN", "BRINDLE_PRO_TOKEN", "CI_JOB_TOKEN"):
         assert secret in unset, secret
-    assert {"DATABASE_URL", "OPENAI_API_KEY", "HTTPS_PROXY", "GIT_AUTHOR_NAME"} <= unset
-    for kept in ("PATH", "HOME", "BRINDLE_HOME", "LC_ALL", "NPM_TOKEN", "AWS_REGION", "ANTHROPIC_API_KEY"):
+    # A secret-looking name never passes, even allowed; a proxy is on the built-in allowlist.
+    assert {"DATABASE_URL", "OPENAI_API_KEY", "NPM_TOKEN", "GIT_AUTHOR_NAME"} <= unset
+    for kept in ("PATH", "HOME", "BRINDLE_HOME", "LC_ALL", "HTTPS_PROXY", "AWS_REGION", "ANTHROPIC_API_KEY"):
         assert kept not in unset, kept
     # A profile cannot claim a secret as its api_key_env or env name.
     assert "GITHUB_TOKEN" not in secrets.provider_credentials("native", "GITHUB_TOKEN")
@@ -367,8 +368,8 @@ def test_the_real_new_window_scrubs_secrets_and_applies_env_allow(repo, monkeypa
     monkeypatch.setattr(tmux, "set_pane_tag", lambda *a, **k: None)
     tmux.new_window("s", "n", str(repo), ["x"], {}, keep=secrets.provider_credentials("claude"),
                     allow=["NPM_TOKEN"])
-    assert {"DATABASE_URL", "GITHUB_TOKEN", "BRINDLE_PRO_TOKEN"} <= real["unset"]
-    assert not ({"PATH", "NPM_TOKEN", "ANTHROPIC_API_KEY"} & real["unset"])
+    assert {"DATABASE_URL", "GITHUB_TOKEN", "BRINDLE_PRO_TOKEN", "NPM_TOKEN"} <= real["unset"]
+    assert not ({"PATH", "ANTHROPIC_API_KEY"} & real["unset"])
 
 
 def test_a_codex_worker_with_rules_gets_them_in_its_prompt(repo, agents_dir, launched, pro, monkeypatch):

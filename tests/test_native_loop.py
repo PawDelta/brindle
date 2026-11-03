@@ -77,7 +77,8 @@ class FakeEndpoint:
 
 
 @pytest.fixture
-def fake():
+def fake(monkeypatch):
+    monkeypatch.setattr("brindle.native.runner.ollama_kind", lambda endpoint, *a: False)
     ep = FakeEndpoint()
     yield ep
     ep.close()
@@ -156,6 +157,10 @@ def test_bad_tool_arguments_go_back_to_the_model_as_an_error(fake, tmp_path):
     assert "must be a JSON object" in r2["content"]
     # Both were recorded as errors in the conversation itself.
     assert [m["is_error"] for m in a.messages if m["role"] == "tool"] == [True, True]
+
+
+
+
 
 
 def test_unknown_tool_is_an_error_not_a_crash(fake, tmp_path):
@@ -325,7 +330,7 @@ def test_bash_prefix_and_exact_rules():
     assert split_commands("a b&&c  d ||e;f|g") == ["a b", "c d", "e", "f", "g"]
 
 
-@pytest.mark.parametrize("command,covered", [
+_SPLIT_CASES = [
     ('grep -rn "x | y" .', True),  # an operator inside quotes is part of a word
     ("git log | grep x", True),
     ("pytest 2>&1 | tail", True),  # an fd dup
@@ -354,14 +359,18 @@ def test_bash_prefix_and_exact_rules():
     ("git status |", False),  # a list left open
     ("git status ; ; ls", False),  # an empty command
     ("git status ; < /etc/passwd", False),  # a command of only a redirection
-])
-def test_uncovered_part_splits_every_operator_and_fails_closed(command, covered):
+]
+
+
+def test_uncovered_part_splits_every_operator_and_fails_closed():
     specs = ["git status:*", "git log:*", "git diff:*", "grep:*", "pytest:*", "tail:*", "ls:*", "diff:*",
              "uv run:*", "python -m pytest:*"]
-    assert (uncovered_part(specs, command) is None) == covered
+    for case in _SPLIT_CASES:
+        command, covered = getattr(case, "values", case)
+        assert (uncovered_part(specs, command) is None) == covered, command
 
 
-@pytest.mark.parametrize("command,covered", [
+_CD_CASES = [
     ("cd a/b && pytest", True),
     ("cd a && cd .. && pytest", True),
     ("ls x && cd a/b && pytest", False),  # what ran first may have swapped a/b for a symlink out
@@ -380,13 +389,17 @@ def test_uncovered_part_splits_every_operator_and_fails_closed(command, covered)
     ("cd a || cd a/b && cd ../.. && pytest", False),
     pytest.param("cd a | cd a/b && cd ../.. && pytest", False,
                  marks=pytest.mark.variant("a cd in a pipe changes a subshell")),
-])
-def test_uncovered_part_follows_cd_as_bash_does(tmp_path, command, covered):
+]
+
+
+def test_uncovered_part_follows_cd_as_bash_does(tmp_path):
     ws = tmp_path / "ws"
     (ws / "a" / "b" / "c").mkdir(parents=True)
     (ws / "sub").symlink_to(ws / "a" / "b" / "c")
     (ws / "out").symlink_to(tmp_path)
-    assert (uncovered_part(["pytest:*", "ls:*"], command, cd_root=str(ws)) is None) == covered
+    for case in _CD_CASES:
+        command, covered = getattr(case, "values", case)
+        assert (uncovered_part(["pytest:*", "ls:*"], command, cd_root=str(ws)) is None) == covered, command
 
 
 def test_each_part_of_a_compound_command_may_match_a_different_rule():

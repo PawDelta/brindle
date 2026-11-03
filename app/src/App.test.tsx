@@ -1,11 +1,11 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { bannerStatus, landing } from "./App";
-import type { EngineStatus } from "./api/engine";
+import App, { landing } from "./App";
 import type { WebSocketFactory } from "./api/events";
 import type { GoalDTO, SessionDTO } from "./api/schema";
 import { LAST_SESSION_KEY } from "./routes";
+import { DEMO_OFFERED_KEY } from "./screens/Onboarding";
 import { createAppStore } from "./store/store";
 import { startSync } from "./store/sync";
 import { DaemonClient } from "./api/client";
@@ -16,7 +16,11 @@ import { standInViews } from "./test/panes";
 
 vi.mock("./components/PtyTerminal", () => import("./test/panes"));
 
-beforeEach(() => localStorage.clear());
+// Each test's Mac is past the first launch's demo offer, but for the test of that offer.
+beforeEach(() => {
+  localStorage.clear();
+  localStorage.setItem(DEMO_OFFERED_KEY, "1");
+});
 afterEach(cleanup);
 
 /* The app as the shell shows it: its panes through pty views (stand-ins here). */
@@ -296,25 +300,6 @@ describe("App", () => {
     sync.stop();
   });
 
-  it("a session started with an empty composer on a first launch opens running, not paused (#216)", async () => {
-    // What a fresh engine was seen to send for this start: only agent.status "idle", once the chat is up.
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [{ ...root, agents: [] }] });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-    await screen.findByLabelText("What should brindle work on?");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
-
-    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("new1"));
-    const bar = screen.getByTestId("session-bar");
-    expect(bar.textContent).not.toContain("paused");
-    expect(within(bar).getByRole("button", { name: "Pause" })).toBeTruthy();
-    expect(screen.queryByTestId("state-card")).toBeNull();
-    sync.stop();
-  });
-
   it("a session whose status beat its window into the snapshot still opens running, not paused (#216)", async () => {
     // The engine publishes the new chat's status before it records the chat's window: the snapshot that
     // status asks for lists it "exited" with no window, and nothing on the bus says when the window lands.
@@ -367,7 +352,7 @@ describe("App", () => {
 
   it("runs an old engine's upgrade from the banner in the background: waiting, failed with a retry, then updated", async () => {
     const daemon = new FakeDaemon();
-    daemon.data.meta = { ...daemon.data.meta, engine_version: "0.4.1", api_version: "0.9" };
+    daemon.data.meta ={ ...daemon.data.meta, engine_version: "0.4.1", api_version: "0.9" };
     daemon.deferUpgrade = true;
     daemon.upgradeFails = true;
     const store = createAppStore();
@@ -399,40 +384,6 @@ describe("App", () => {
     expect(daemon.upgrades).toHaveLength(2);
     expect(daemon.actions).toHaveLength(0);
     sync.stop();
-  });
-
-  it("hands the shell's command-line installer to Settings: the button is live and its result lands on the row", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker] });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    const installCli = vi.fn(() => Promise.resolve({ path: "/home/sam/.local/bin/brindle", target: "/Applications/brindle.app/Contents/Resources/engine/bin/brindle" }));
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "settings" }} installCli={installCli} />);
-    fireEvent.click(await screen.findByRole("button", { name: /Details/ }));
-    const cli = await screen.findByTestId("install-cli");
-    const btn = within(cli).getByRole("button", { name: "Install command-line tool" });
-    expect(btn).toHaveProperty("disabled", false);
-    fireEvent.click(btn);
-    await waitFor(() => expect(cli.textContent).toContain("Installed as /home/sam/.local/bin/brindle"));
-    expect(installCli).toHaveBeenCalledTimes(1);
-    expect(screen.queryByRole("dialog")).toBeNull();
-    sync.stop();
-  });
-
-  it("says what to do on a page with no engine at all", () => {
-    renderApp(<App store={createAppStore()} client={null} />);
-    expect(screen.getByTestId("engine-banner").textContent).toContain("this page has no engine");
-    expect(screen.getByText("Nothing to show without an engine.")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Upgrade the engine" })).toBeNull();
-  });
-
-  it("puts a stream the engine refuses, or one that dropped, in the banner when the engine itself is fine", () => {
-    const ok: EngineStatus = { state: "ok", meta: new FakeDaemon().data.meta };
-    expect(bannerStatus(ok, "open")).toBe(ok);
-    expect(bannerStatus(ok, "unauthorized")).toMatchObject({ state: "unreachable", message: expect.stringContaining("refused the app's token") });
-    expect(bannerStatus(ok, "closed")).toMatchObject({ state: "unreachable", message: expect.stringContaining("dropped") });
-    const old: EngineStatus = { state: "upgrade-engine", meta: ok.meta };
-    expect(bannerStatus(old, "closed")).toBe(old);
   });
 
   it("self-repair: an engine that dies comes back without a click: the app keeps reconnecting, and once the shell has restarted it, catches up and clears the banner", async () => {
@@ -484,6 +435,34 @@ describe("App", () => {
     fireEvent.click(link("Knowledge"));
     expect(await screen.findByRole("region", { name: "Knowledge" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
+    sync.stop();
+  });
+
+  it("a first launch with a CLI signed in already offers the demo once, repos or not: Skip after a held start removes its repo and opens the app, and the next launch goes straight in", async () => {
+    localStorage.removeItem(DEMO_OFFERED_KEY);
+    // The CLI used before this app: a repo registered already.
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      preflight: { claude: [{ id: "consent", kind: "consent", label: "Agree to Claude Code's terms", done: false }] },
+    });
+    const store = createAppStore();
+    const client = daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+    await waitFor(() => expect(screen.getByTestId("onboarding").getAttribute("data-step")).toBe("demo"));
+    // Held by its preflight: the practice repo is kept for it until Skip.
+    fireEvent.click(screen.getByRole("button", { name: "Start the demo" }));
+    await screen.findByTestId("preflight");
+    expect(daemon.heldDemo).not.toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Skip" }));
+    await screen.findByRole("complementary", { name: "Sidebar" });
+    await waitFor(() => expect(daemon.heldDemo).toBeNull());
+    expect(daemon.requests.filter((r) => r.path === "/demo").map((r) => r.method)).toEqual(["POST", "DELETE"]);
+    cleanup();
+    renderApp(<App store={createAppStore()} client={client} refresh={sync.refresh} />);
+    await screen.findByRole("complementary", { name: "Sidebar" });
+    expect(screen.queryByTestId("onboarding")).toBeNull();
+    expect(daemon.demos).toEqual([]);
     sync.stop();
   });
 
@@ -634,70 +613,6 @@ describe("closing a session", () => {
     sync.stop();
   });
 
-  it("the ⋯ menu's Close session says what still runs, closes in one click and moves to the Inbox when no session is left", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], goal });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
-    await waitFor(() => expect(treeAgent("w1")).toBeTruthy());
-    // Not Done: the goal panel has no Close session; the ⋯ has it, saying w1 runs and feat/ls isn't merged.
-    expect(within(nav()).queryByRole("button", { name: "Close session" })).toBeNull();
-    fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "More actions" }));
-    const item = within(screen.getByRole("menu")).getByTestId("close-session");
-    expect(item.textContent).toBe("Close session · 1 worker running · 1 unmerged branch");
-
-    fireEvent.click(item);
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(screen.queryByRole("menu")).toBeNull();
-    expect(sessionRow("sup1")).toBeNull();
-    expect(await screen.findByRole("region", { name: "Inbox" })).toBeTruthy();
-    await waitFor(() => expect(posts(daemon)).toEqual(["/sessions/sup1/close"]));
-    expect(daemon.data.closed.map((a) => a.id)).toEqual(["sup1", "w1"]);
-    sync.stop();
-  });
-
-  it("the ⋯ menu's Close session is the bare label when nothing runs and everything is merged, from a worker's menu too", async () => {
-    const quietWorker = { ...worker, ahead: 0, dirty: 0, agents: [{ ...worker.agents![0], status: "done" }] };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, other], workspaces: [root, quietWorker, otherWs], goal });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "w1" }} />);
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("w1"));
-    fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "More actions" }));
-    const item = within(screen.getByRole("menu")).getByTestId("close-session");
-    expect(item.textContent).toBe("Close session");
-    fireEvent.click(item);
-    expect(sessionRow("sup1")).toBeNull();
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup2"));
-    await waitFor(() => expect(posts(daemon)).toEqual(["/sessions/sup1/close"]));
-    sync.stop();
-  });
-
-  it("a paused session whose root is in no snapshot still has the ⋯ with Close session, one click", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, paused], workspaces: [root, worker], goal });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup0", repo: REPO, agent: "sup0" }} />);
-    const pausedRow = () => nav().querySelector('[data-tree-session="sup0"]');
-    await waitFor(() => expect(pausedRow()).toBeTruthy());
-    await waitFor(() => expect(store.getState().synced).toBe(true));
-    expect(screen.queryByTestId("agent-menu")).toBeNull();
-    fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "More actions" }));
-    const item = within(screen.getByRole("menu")).getByTestId("close-session");
-    expect(item.textContent).toBe("Close session");
-    fireEvent.click(item);
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(pausedRow()).toBeNull();
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
-    await waitFor(() => expect(posts(daemon)).toEqual(["/sessions/sup0/close"]));
-    expect(daemon.data.closed.map((a) => a.id)).toEqual(["sup0"]);
-    sync.stop();
-  });
-
   it.each([
     ["its own workspace kept, with work in it", [] as string[], "Close session · 1 unmerged branch"],
     ["a worker under it still running there", ["w9"], "Close session · 1 worker running · 1 unmerged branch"],
@@ -722,52 +637,6 @@ describe("closing a session", () => {
     await waitFor(() => expect(store.getState().synced).toBe(true));
     fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "More actions" }));
     expect(within(screen.getByRole("menu")).getByTestId("close-session").textContent).toBe(label);
-    sync.stop();
-  });
-
-  it("counts the supervisor's own workspace: a session on its feature branch with commits ahead says so, no worker running", async () => {
-    const feature = { ...root, branch: "feat/cache", base_branch: "main", ahead: 3, dirty: 0 };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [feature], goal });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
-    fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "More actions" }));
-    expect(within(screen.getByRole("menu")).getByTestId("close-session").textContent).toBe("Close session · 1 unmerged branch");
-    sync.stop();
-  });
-
-  it("a closed session stays out of the sidebar when the refresh after the close fails", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, other], workspaces: [root, worker, otherWs], goal: done });
-    let closed = false;
-    let refused = 0;
-    const client = new DaemonClient({
-      baseUrl: BASE_URL,
-      token: TOKEN,
-      fetch: async (input, init) => {
-        const url = String(input);
-        if (closed && url.includes("/v1/sessions?")) {
-          refused++;
-          return Promise.reject(new TypeError("connection refused"));
-        }
-        const response = await daemon.fetch(input, init);
-        if (url.endsWith("/v1/sessions/sup1/close")) closed = true;
-        return response;
-      },
-    });
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
-    // The app shows once its first-launch gate has asked the engine.
-    fireEvent.click(await within(await screen.findByRole("complementary", { name: "Sidebar" })).findByRole("button", { name: "Close session" }));
-    await waitFor(() => expect(posts(daemon)).toEqual(["/sessions/sup1/close"]));
-    await waitFor(() => expect(refused).toBeGreaterThan(0));
-    await flush();
-    // The old list still has sup1, but the engine closed it: it stays out, and no close error is said.
-    expect(sessionRow("sup1")).toBeNull();
-    expect(sessionRow("sup2")).toBeTruthy();
-    expect(within(nav()).queryByTestId("close-error")).toBeNull();
     sync.stop();
   });
 

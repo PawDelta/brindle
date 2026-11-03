@@ -43,7 +43,7 @@ test.beforeAll(async ({ browserName }, info) => {
   // The bridge, built as the app's Rust is, serving this page's origin and this server alone.
   execFileSync("cargo", ["build", "--quiet", "--example", "pty_ws", "--manifest-path", join(DESKTOP, "src-tauri/Cargo.toml")], { stdio: "inherit" });
   const origin = `http://127.0.0.1:${new URL(info.project.use.baseURL!).port}`;
-  bridge = spawn(join(DESKTOP, "src-tauri/target/debug/examples/pty_ws"), [origin, server], { stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, TMUX: "" } });
+  bridge = spawn(join(process.env.CARGO_TARGET_DIR ?? join(DESKTOP, "src-tauri/target"), "debug/examples/pty_ws"), [origin, server], { stdio: ["ignore", "pipe", "inherit"], env: { ...process.env, TMUX: "" } });
   const listening = await new Promise<string>((ok, fail) => {
     createInterface({ input: bridge!.stdout! }).on("line", (line) => line.startsWith("pty_ws listening") && ok(line));
     bridge!.on("exit", (code) => fail(new Error(`pty_ws exited ${code}`)));

@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import agents, autopilot, bus, identity_lock, permissions, prompt_answer, tmux, view
+from brindle import agents, autopilot, bus, identity_lock, permissions, prompt_answer, session_sync, tmux, view
 from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent
@@ -220,12 +220,32 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 out.append(InboxItemDTO(kind="proposed_checks", reason="checks proposed", **link,
                                         detail="\n".join(checks)))
             out += _pr_items(db, row.id, ws["branch"], link)
+            home = db.get_workspace(row.workspace_id)
+            if home and (stuck := session_sync.needs_you(db, home)):
+                out.append(InboxItemDTO(kind="sync_conflict", reason="session branch conflicts with origin",
+                                        detail=stuck, **link))
             login = db.get_login_state(row.id)
             if login and login.state == "auth_paused":
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
-    return out + _doc_items(db, repo_root) + _setup_items() + _org_blocks(db, repo_root) + _org_notices()
+    return (out + _idle_items(db, repo_root) + _doc_items(db, repo_root) + _setup_items()
+            + _org_blocks(db, repo_root) + _org_notices())
+
+
+def _idle_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
+    """Supervisors the sweep stopped after days without input (brindle.reap),
+    until they are continued or closed."""
+    from brindle import reap
+
+    out = []
+    for a, detail in reap.idle_stopped(db):
+        ws = db.get_workspace(a.workspace_id)
+        if ws is None or (repo_root and ws.repo_root != repo_root) or identity_lock.locked_by(a.id):
+            continue
+        out.append(InboxItemDTO(kind="idle_stopped", reason="stopped while idle; `brindle continue` resumes it",
+                                detail=detail, agent_id=a.id, workspace_id=ws.id, root_id=a.id))
+    return out
 
 
 def _doc_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:

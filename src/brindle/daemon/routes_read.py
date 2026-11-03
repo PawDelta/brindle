@@ -592,6 +592,16 @@ def _routing_kinds(db: DB, cfg: config.RepoConfig, repo: str, learn: bool = True
     return kinds
 
 
+@_heavy_json
+def get_storage(db: DB, request: Request) -> Any:
+    """brindle's disk use: every worktree classified merged / abandoned / active
+    with its size and why it must stay (``disk.storage_report``). On the heavy
+    lane: measuring walks every worktree."""
+    from brindle import disk
+
+    return disk.storage_report(db, _repo(request))
+
+
 @_json
 def get_doctor(db: DB, request: Request) -> Any:
     return [dataclasses.asdict(c) for c in doctor.checks(_repo(request), db=db)]
@@ -779,6 +789,8 @@ def analysis_doc_map(db: DB, request: Request) -> Any:
     listed = docs_api("GET", "/analysis-docs", repo=_repo(request), query=query)
     docs = {d["doc_id"]: {**d, "scope": d.get("scope") or scope}
             for d in listed.get("docs") or [] if isinstance(d, dict) and isinstance(d.get("doc_id"), str)}
+    # Local documents belong to the repo on this device, never a shared scope.
+    local = kb.map_documents(db, _need_repo(request), paths) if scope["kind"] == "user" else []
 
     def doc_paths(doc: dict) -> list[str]:
         declared = doc.get("paths") or []
@@ -804,8 +816,8 @@ def analysis_doc_map(db: DB, request: Request) -> Any:
         ids = {n["id"] for n in nodes}
         edges = [{"source": e["from"], "target": e["to"], "kind": e["kind"]}
                  for e in got.get("edges") or [] if e.get("from") in ids and e.get("to") in ids]
-        return {"nodes": nodes, "edges": edges}
-    nodes, edges = [], []
+        return {"nodes": [*nodes, *local], "edges": edges}
+    nodes, edges = list(local), []
     seen_paths = set()
     for doc_id, doc in docs.items():
         files = doc_paths(doc)
@@ -970,6 +982,7 @@ ROUTES = [
     Route("/v1/routing", get_routing),
     Route("/v1/debug", get_debug),
     Route("/v1/doctor", get_doctor),
+    Route("/v1/storage", get_storage),
     # Before the action routes' DELETE /v1/providers/{provider}.
     Route("/v1/providers/installed", providers_installed),
     Route("/v1/providers/{provider}/preflight", provider_preflight),

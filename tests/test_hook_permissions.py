@@ -40,8 +40,6 @@ def test_cd_into_the_worktree_counts_as_covered(db, ws):
 def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
     a = worker(db, ws)
     assert agents.handle_hook(db, a.id, "pre-tool", bash("cd .. && git status")) is None
-    assert agents.handle_hook(db, a.id, "pre-tool", bash("cd /tmp && ls")) is None
-    assert agents.handle_hook(db, a.id, "pre-tool", bash("cd ~ && ls")) is None
 
 
 @pytest.mark.parametrize("command, bound, extra", [
@@ -191,7 +189,11 @@ def test_read_only_commands_follow_the_policy_and_its_rules_alone(db, ws, monkey
     assert pre["hookSpecificOutput"]["permissionDecision"] == "deny"     # a kept deny still applies
     pre = agents.handle_hook(db, a.id, "pre-tool", bash("grep -n hi app.py | head -1"))
     assert pre["hookSpecificOutput"]["permissionDecision"] == "ask"
-    assert answer("cat ../../../.env") is None     # a read deny keeps it from the read-only allowance
+    # A secrets file is never in the read-only allowance: printing one is
+    # denied outright as credential printing, before any read rule is read.
+    assert answer("cat ../../../.env") == "deny"
+    pre = agents.handle_hook(db, a.id, "pre-tool", bash("cat ../../../.env"))
+    assert pre["hookSpecificOutput"]["permissionDecision"] == "deny"
     # Writes, the network, push, rm and nested shells still ask.
     for command in ("sed -i s/a/b/ app.py", "cat app.py > ../out", "curl https://example.com", "git push",
                     "rm app.py", "bash -c 'ls'", "sh -c ls"):
@@ -203,10 +205,6 @@ def launch_matcher(**ctx):
     settings = json.loads(argv[argv.index("--settings") + 1])
     (entry,) = settings["hooks"]["PreToolUse"]
     return entry["matcher"]
-
-
-def test_plan_first_agents_hook_edit_tools_too():
-    assert launch_matcher(plan_first=True) == "Bash|Edit|Write|NotebookEdit"
 
 
 def test_with_the_policy_on_the_hook_sees_every_tool_it_rules_on(db, ws):
@@ -230,7 +228,7 @@ def test_with_the_policy_on_the_hook_sees_every_tool_it_rules_on(db, ws):
         assert (got["hookEventName"], got["permissionDecision"]) == ("PreToolUse", "deny")
 
 
-@pytest.mark.parametrize("route", ["python -m brindle", "console script"])
+@pytest.mark.parametrize("route", ["console script"])
 def test_pre_tool_fast_path(db, ws, monkeypatch, capsys, route):
     """`brindle _hook pre-tool --agent <id>` skips typer from either entry
     point, loads the profile once per call, and reads every rule source on

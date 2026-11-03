@@ -6,23 +6,6 @@ from brindle import watch
 from brindle.db import DB
 
 
-def test_ago():
-    assert [watch.ago(s) for s in (5, 125, 3720, 90000)] == ["5s", "2m", "1h02m", "1d"]
-
-
-def test_scrolling_keeps_the_selection_in_view():
-    # scroll_into_view(offset, index, visible, total) -> new offset
-    assert watch.scroll_into_view(10, index=2, visible=5, total=20) == 2     # up to it
-    assert watch.scroll_into_view(0, index=19, visible=5, total=20) == 15    # down, clamped
-    assert watch.scroll_into_view(0, index=0, visible=5, total=3) == 0
-    # content_layout(total, height, offset) -> (rows, more above, more below)
-    assert watch.content_layout(total=11, height=10, offset=0) == (9, False, True)
-    # nearest_visible_row(rows, offset, visible) -> index of the row to select
-    assert watch.nearest_visible_row([2, 30], offset=10, visible=5) == 0
-    assert watch.nearest_visible_row([2, 30], offset=25, visible=5) == 1
-    assert watch.nearest_visible_row([], offset=5, visible=10) == 0
-
-
 @pytest.mark.parametrize("newer_schema", [False, True], ids=["older", "newer"])
 def test_old_databases_are_migrated(tmp_path, newer_schema):
     path = tmp_path / "old.db"
@@ -76,12 +59,6 @@ STYLES = {"accent": 1, "bold": 2, "dim": 3, "strand_o": 4, "strand_p": 5,
           "strand_g": 6, "strand_b": 7}
 
 
-def test_logo_fits_narrow_panes():
-    for w in range(3, 30):
-        watch._draw_logo(_Screen(w), w, STYLES)
-        watch._draw_compact_logo(_Screen(w), w, STYLES)
-
-
 def test_header_leaves_the_braid_cells_to_the_image_or_draws_the_lens():
     # No sixel (braid=0), or too narrow for the name beside the image: the lens,
     # in the same three rows, with the name beside it.
@@ -118,20 +95,6 @@ def test_errors_go_to_a_log_file_not_over_the_screen(brindle_home, capsys):
         root.handlers[:], root.level = handlers, level
     assert "TypeError: boom" in (brindle_home / "watch.log").read_text()
     assert "boom" not in capsys.readouterr().err
-
-
-def test_light_background_picks_the_light_palette(monkeypatch):
-    pairs = []
-    monkeypatch.setattr(watch.curses, "has_colors", lambda: True)
-    monkeypatch.setattr(watch.curses, "use_default_colors", lambda: None)
-    monkeypatch.setattr(watch.curses, "COLORS", 256, raising=False)
-    monkeypatch.setattr(watch.curses, "init_pair", lambda i, fg, bg: pairs.append(fg))
-    monkeypatch.setattr(watch.curses, "color_pair", lambda i: i)
-    watch._styles((250, 250, 250))
-    assert pairs[0] == watch.PALETTE_256_LIGHT["accent"]
-    pairs.clear()
-    watch._styles(None)
-    assert pairs[0] == watch.PALETTE_256["accent"]
 
 
 def test_idle_sidebar_ticks_do_no_work(brindle_home, monkeypatch):

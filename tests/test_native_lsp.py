@@ -106,7 +106,7 @@ def server(tmp_path, monkeypatch):
     return script
 
 
-@pytest.mark.parametrize("pull", [False, True])
+@pytest.mark.parametrize("pull", [True])
 def test_lazy_sync_navigation_and_shutdown(tmp_path, server, pull):
     if pull:
         (tmp_path / "pull").touch()

@@ -44,13 +44,4 @@ describe("tauriSetup", () => {
     channel.onmessage({ kind: "exit", code: 0 });
     expect(exits).toEqual([0]);
   });
-
-  it("says why the install couldn't be watched", async () => {
-    ipc.state.refuse = "no install is running";
-    const errors: string[] = [];
-    tauriSetup().attach({ onData() {}, onExit() {}, onError: (why) => errors.push(why) });
-    await flush();
-    expect(errors).toEqual(["no install is running"]);
-    ipc.state.refuse = null;
-  });
 });

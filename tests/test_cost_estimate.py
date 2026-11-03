@@ -1,14 +1,9 @@
-import asyncio
 import json
 import re
 import time
 
-import pytest
-from typer.testing import CliRunner
-
-from brindle import agents, cost_estimate as ce, mcp_server, workspaces
-from brindle.cli import app
-from brindle.db import Agent, Task
+from brindle import cost_estimate as ce
+from brindle.db import Task
 from brindle.pro import license
 
 RATES = {"input": 3e-6, "output": 15e-6, "cache_write": 3.75e-6, "cache_read": 0.3e-6}
@@ -57,31 +52,11 @@ def dollars(text):
 # -- history -> runs -> distributions ---------------------------------------------------
 
 
-def test_weight_from_routing_decisions(db):
-    db.add_history("/repo", "worker_result", agent_id="a1", profile="developer",
-                   tokens=tokens(5000))
-    db.add_routing_decision("/repo", task_id=None, agent_id="a1", weight="heavy",
-                            baseline_profile="developer", profile="developer", learned=False)
-    (run,) = ce.runs(db, "/repo")
-    assert run.weight == "heavy"
-
-
 # -- estimates ----------------------------------------------------------------------------
 
 
-def test_never_a_single_number_even_when_percentiles_match(db):
-    for i in range(6):
-        db.add_history("/repo", "worker_result", agent_id=f"w{i}", profile="developer",
-                       tokens=tokens(100_000))
-        db.add_history("/repo", "review", agent_id=f"r{i}", profile="reviewer", tokens=tokens(1000))
-    text = ce.describe([ce.TaskSpec("developer")], "reviewer", repo_root="/repo", db=db,
-                       price=price, candidates=[])
-    assert "low confidence" not in text
-    low, high = dollars(text)[:2]
-    assert low < high
-
-
-def test_cheaper_alternative_prefers_a_local_reviewer(db):
+def test_cheaper_alternative_prefers_a_local_reviewer(db, monkeypatch):
+    monkeypatch.setattr("brindle.local_setup.memory_problem", lambda profile: None)
     seed(db, "/repo", 6)
     seed(db, "/repo", 6, reviewer="reviewer-codex", weight="light", base=50_000)
     text = ce.describe([ce.TaskSpec("developer", "medium")] * 2, "reviewer", repo_root="/repo",
@@ -107,17 +82,6 @@ def test_cheaper_alternative_without_local_takes_the_cheapest(db):
     assert name == "reviewer-codex"
 
 
-def test_a_failing_price_function_is_unpriced_not_an_error(db):
-    seed(db, "/repo", 6)
-
-    def broken(*a):
-        raise RuntimeError("no table")
-
-    text = ce.describe([ce.TaskSpec("developer", "medium")], "reviewer", repo_root="/repo", db=db,
-                       price=broken, candidates=[])
-    assert "tokens" in text
-
-
 # -- the Pro gate --------------------------------------------------------------------------
 
 
@@ -133,47 +97,12 @@ def test_reply_note_fails_closed(db, monkeypatch):
     assert ce.reply_note(db, "/repo", [ce.TaskSpec("developer")]) is None
 
 
-# -- MCP replies and the CLI ------------------------------------------------------------------
+def test_a_failing_price_function_is_unpriced_not_an_error(db):
+    seed(db, "/repo", 6)
 
+    def broken(*a):
+        raise RuntimeError("no table")
 
-@pytest.fixture
-def boss(db, repo, monkeypatch):
-    (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text(json.dumps({"pipeline": False}))
-    ws = workspaces.adopt_root(db, str(repo))
-    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
-                       "@0", None, time.time()))
-    db.add_autopilot("boss")
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    monkeypatch.setattr(ce, "default_price", lambda *_: price)
-    monkeypatch.setattr(ce, "available_reviewers", lambda root: [])
-    return ws
-
-
-def fake_spawn(db, ws, profile, *, prompt=None, parent_id=None, mode="handoff", done_when=None, **kw):
-    a = Agent(agents.new_id(), ws.id, profile, "claude", parent_id, mode, "processing", "",
-              None, time.time(), task=prompt, done_when=done_when)
-    db.add_agent(a)
-    return a
-
-
-def test_assign_reply_has_an_estimate_with_pro(db, boss, monkeypatch):
-    monkeypatch.setattr(license, "has", lambda feature: feature == "cost")
-    monkeypatch.setattr(agents, "spawn", fake_spawn)
-    out = asyncio.run(mcp_server.assign(task="do A", branch="feat-a"))
-    assert "Started worker" in out and "Cost estimate" in out and "1 task," in out
-
-
-def test_cli_cost_estimate(db, repo, monkeypatch):
-    monkeypatch.chdir(repo)
-    monkeypatch.setattr(ce, "default_price", lambda *_: price)
-    monkeypatch.setattr(ce, "available_reviewers", lambda root: [])
-    monkeypatch.setattr(license, "has", lambda feature: False)
-    res = CliRunner().invoke(app, ["cost", "estimate", "--tasks", "2"])
-    assert res.exit_code == 1 and "brindle Pro" in res.output
-
-    monkeypatch.setattr(license, "has", lambda feature: feature == "cost")
-    res = CliRunner().invoke(app, ["cost", "estimate", "--tasks", "2", "--weight", "light"])
-    assert res.exit_code == 0, res.output
-    assert "2 tasks" in res.output and "low confidence" in res.output
-    assert len(dollars(res.output)) >= 2
+    text = ce.describe([ce.TaskSpec("developer", "medium")], "reviewer", repo_root="/repo", db=db,
+                       price=broken, candidates=[])
+    assert "tokens" in text

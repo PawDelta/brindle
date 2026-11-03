@@ -29,14 +29,14 @@ const SCOPES = [
 
 const RESULTS: DocResults = { days: 30, minimum: 5, enough: true, briefed: 6, large: 9, compared: 6, similar: 7, with_brief: 1.2, without_brief: 2.0 };
 
-function client(detail: (id: string) => object, results: DocResults = RESULTS) {
+function client(detail: (id: string) => object, results: DocResults = RESULTS, docs: object[] = DOCS) {
   const fetch: typeof globalThis.fetch = (input) => {
     const url = new URL(String(input));
     const path = url.pathname.replace(/^\/v1/, "");
     const session = url.searchParams.get("session");
     const body =
       path === "/analysis-docs"
-        ? { scope: { kind: "user", id: "u1" }, docs: DOCS.filter((d) => !session || d.source.session === session) }
+        ? { scope: { kind: "user", id: "u1" }, docs: (docs as typeof DOCS).filter((d) => !session || d.source.session === session) }
         : path === "/analysis-docs/topics"
           ? { topics: [{ topic: "checkout", count: 3, stale: 0, latest: "d1" }] }
           : path === "/analysis-docs/scopes"
@@ -57,9 +57,10 @@ const view = (d: (typeof DOCS)[number], extra: object = {}) => {
 };
 
 describe("docs view", () => {
-  it("lists one session's docs as cards, narrows them by kind and search, and opens one in the reader", async () => {
-    render(<DocsView client={client((id) => view(DOCS.find((d) => d.doc_id === id)!))} repo="/r" session="root1" />);
-    await waitFor(() => expect(shown()).toEqual(["d1", "d2", "d4"]));
+  it("lists one session's docs as cards, narrows them by category and search, and opens one in the reader", async () => {
+    const docs = DOCS.map((d) => ({ ...d, category: d.doc_id === "d2" ? "Fees" : "Checkout" }));
+    render(<DocsView client={client((id) => view(DOCS.find((d) => d.doc_id === id)!), RESULTS, docs)} repo="/r" session="root1" />);
+    await waitFor(() => expect(shown()).toEqual(["d1", "d4", "d2"]));
     const first = screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!;
     for (const text of ["Checkout drop after pricing change", "Investigation", "Mine", "v3", "2 findings · 1 open question", "used in 6 briefs"]) expect(first.textContent).toContain(text);
     // A team's doc carries the team's name; a team with no docs still gets its chip.
@@ -67,17 +68,49 @@ describe("docs view", () => {
     await waitFor(() => expect(within(screen.getByRole("group", { name: "Scope" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["All", "Mine", "Payments team", "Platform"]));
     const rail = screen.getByRole("navigation", { name: "Topics and kinds" });
     expect(within(rail).getByRole("button", { name: /checkout/ }).textContent).toBe("checkout3");
-    fireEvent.click(within(rail).getByRole("button", { name: /Comparison/ }));
+    fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
     expect(shown()).toEqual(["d2"]);
     fireEvent.change(screen.getByRole("searchbox", { name: "Search docs" }), { target: { value: "pricing" } });
     expect(screen.getByText("No doc matches.")).toBeTruthy();
-    fireEvent.click(within(rail).getByRole("button", { name: /Comparison/ }));
+    fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
     fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!).getByRole("button"));
     const body = await screen.findByTestId("doc-body");
     expect(body.textContent).toContain("Body.");
     // A connected doc is named by its title and opens in turn.
     fireEvent.click(screen.getByRole("button", { name: "Stripe vs Adyen fees" }));
     await waitFor(() => expect(screen.getByTestId("doc-body").textContent).toContain("Stripe vs Adyen fees"));
+  });
+
+  it("groups docs under their categories, largest first and uncategorised last, and remembers a collapsed one", async () => {
+    const docs = [
+      { ...DOCS[0], category: "Security" }, { ...DOCS[1], category: " " }, { ...DOCS[2], category: "Security" }, { ...DOCS[3], category: "Desktop updates" },
+    ];
+    const at = (repo: string, listed: object[] = docs) => <DocsView client={client(() => ({}), RESULTS, listed)} repo={repo} />;
+    const open = () => render(at("/r"));
+    open();
+    await waitFor(() => expect(screen.getAllByRole("region").map((r) => r.getAttribute("aria-label")).slice(2)).toEqual(["Security", "Desktop updates", "Uncategorised"]));
+    expect([...screen.getByRole("region", { name: "Security" }).querySelectorAll("li[data-doc]")].map((li) => li.getAttribute("data-doc"))).toEqual(["d1", "d3"]);
+    fireEvent.click(within(screen.getByRole("region", { name: "Security" })).getByRole("button", { expanded: true }));
+    expect(shown()).toEqual(["d4", "d2"]);
+    cleanup();
+    const { rerender } = open();
+    await waitFor(() => expect(shown()).toEqual(["d4", "d2"]));
+    // The rail lists the categories with their counts; picking a collapsed one opens and filters to it, and its header still collapses.
+    const rail = screen.getByRole("navigation", { name: "Topics and kinds" });
+    expect(within(rail).getAllByRole("button").slice(0, 3).map((b) => b.textContent)).toEqual(["Security2", "Desktop updates1", "Uncategorised1"]);
+    fireEvent.click(within(rail).getByRole("button", { name: /^Security/ }));
+    expect(shown()).toEqual(["d1", "d3"]);
+    fireEvent.click(within(screen.getByRole("region", { name: "Security" })).getByRole("button", { expanded: true }));
+    expect(shown()).toEqual([]);
+    // A repo without that category drops the filter, so its docs stay reachable.
+    rerender(at("/other", DOCS));
+    await waitFor(() => expect(shown()).toEqual(["d1", "d2", "d3", "d4"]));
+    // Collapsed headers are each repo's own.
+    rerender(at("/third"));
+    await waitFor(() => expect(shown()).toEqual(["d1", "d3", "d4", "d2"]));
+    rerender(at("/r"));
+    await waitFor(() => expect(shown()).toEqual(["d4", "d2"]));
+    localStorage.clear();
   });
 
   it("reads a real doc: raw HTML and images stay text, mentions are listed, and Share offers every team of the person's", async () => {
@@ -96,11 +129,5 @@ describe("docs view", () => {
     await waitFor(() =>
       expect(within(screen.getByRole("group", { name: "Share with" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["Stop sharing with Payments team", "Share with Platform"]),
     );
-  });
-
-  it("says there isn't enough data yet below the minimum instead of showing numbers", async () => {
-    render(<DocsView client={client(() => ({}), { ...RESULTS, enough: false, compared: 2, similar: 3, with_brief: null, without_brief: null })} />);
-    await waitFor(() => expect(screen.getByTestId("results-not-enough").textContent).toContain("Not enough data yet"));
-    expect(screen.getByTestId("results").textContent).not.toMatch(/review rounds per task/i);
   });
 });

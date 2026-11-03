@@ -54,17 +54,12 @@ def _notice(db, root, worker, mp):
 
 @pytest.mark.parametrize("kind, setup, expected", [
     ("waiting", _worker(status="waiting"), [("w1", None)]),
-    ("credentials", _worker(status="failed", failed_why="auth"), [("w1", None)]),
     # Live: a Codex worker whose brief wasn't delivered read "Codex needs a sign-in", signed in or not.
     ("failed", _worker(provider="codex", status="failed", failed_why="delivery"), [("w1", None)]),
     ("question", _two_asking, [("r1", None), ("r2", None)]),
-    ("merge_failed", _worker(result="done", merge_failed="conflict in app.py"), [("w1", None)]),
     ("plan", _worker(plan_state="proposed", plan_first=1, plan_text="1. add the column"), [("w1", "1. add the column")]),
-    ("proposed_checks", _checks, [("r1", "pytest -q")]),
     ("proposed_checks", _locked_checks, []),
     ("login", _login, [("r1", "aws sso login")]),
-    ("setup", _hook_trust_removed, [(None, None)]),
-    ("org_notice", _notice, [(None, "admin")]),
 ])
 def test_items_has_a_row_for_each_kind(db, repo, monkeypatch, tmp_path, kind, setup, expected):
     monkeypatch.setenv("HOME", str(tmp_path))

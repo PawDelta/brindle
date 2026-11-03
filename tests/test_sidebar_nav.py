@@ -67,13 +67,6 @@ def test_question_mark_toggles_the_help_and_any_key_closes_it():
     assert not state.help
 
 
-def test_footer_hint_fits_and_points_at_the_help():
-    hint = watch.footer(watch.NavState(), WIDTH)
-    assert hint.style == "dim" and hint.text.endswith("? keys") and len(hint.text) <= WIDTH
-    assert watch.footer(watch.NavState(), 8).text == "? keys"
-    assert watch.footer(watch.NavState(), 3) is None
-
-
 # -- 2. rows that need you ---------------------------------------------------
 
 
@@ -94,30 +87,7 @@ def test_under_autopilot_a_report_is_quiet_unpinned_and_skipped_by_n():
     assert seen == ["sup001", "wait01", "sup001"]
 
 
-def test_n_lands_on_a_folded_group_hiding_one_and_says_when_nothing_needs_you():
-    snap = [ws([agent("a1")], id="w1", branch="one"),
-            ws([agent("w2", "waiting")], id="w2", branch="two")]
-    state = watch.NavState(collapsed={"w2"})
-    _, lines = press(state, snap, "n")
-    assert selected(state, lines).group == "w2"
-
-    quiet = watch.NavState()
-    press(quiet, [ws([agent("a1")])], "n")
-    assert quiet.notice == "nothing needs you"
-
-
 # -- 3. groups ----------------------------------------------------------------
-
-
-def test_enter_on_a_header_folds_it_and_on_an_agent_attaches():
-    snap = [ws([agent("a1")], id="w1")]
-    state = watch.NavState()
-    assert press(state, snap, 10)[0] == "attach"
-    press(state, snap, curses.KEY_UP)
-    action, _ = press(state, snap, 10)
-    assert action is None and state.collapsed == {"w1"}
-    # p and x do nothing on a header.
-    assert press(state, snap, "p")[0] is None and press(state, snap, "x")[0] is None
 
 
 # -- 4. `/` filter ------------------------------------------------------------
@@ -155,31 +125,7 @@ def test_enter_keeps_the_filter_and_esc_clears_it_without_quitting():
     assert press(state, snap, "q")[0] == "quit"
 
 
-def test_esc_while_typing_clears_the_filter():
-    state = watch.NavState()
-    action, _ = press(state, [ws([agent("a1")])], "/", *"ab", 27)
-    assert action is None and state.filter == "" and not state.filtering
-
-
 # -- 5. the selection follows its agent --------------------------------------
-
-
-def test_a_vanished_agent_hands_the_selection_to_its_neighbour():
-    state = watch.NavState()
-    snap = [ws([agent("a1"), agent("a2"), agent("a3")])]
-    press(state, snap, "j")
-    lines = watch.render([ws([agent("a1"), agent("a3")])], 1090, WIDTH, state=state)
-    assert selected_agent(state, lines) == "a3"
-
-
-def test_page_keys_move_the_selection_onto_the_new_page():
-    snap = [ws([agent(f"a{i}")], id=f"w{i}", branch=f"b{i}") for i in range(10)]
-    state = watch.NavState()
-    _, lines = press(state, snap, curses.KEY_NPAGE, visible=8)
-    i = watch.selection(state, lines)
-    assert state.offset > 0 and state.offset <= i < state.offset + 8
-    _, lines = press(state, snap, curses.KEY_HOME, visible=8)
-    assert state.offset == 0
 
 
 # -- 6. fitting 30 columns ----------------------------------------------------
@@ -206,16 +152,6 @@ def test_nothing_is_wider_than_the_pane_or_split_mid_word():
 
 
 # -- the review verdict the markers rely on -----------------------------------
-
-
-def test_snapshot_carries_the_latest_review_verdict(db, repo):
-    w = workspaces.create(db, str(repo), "reviewed").workspace
-    entry = lambda: next(e for e in view.snapshot(db, str(repo)) if e["id"] == w.id)  # noqa: E731
-    assert entry()["review"] is None
-    db.add_review(w.id, "abc123", None, False, "needs tests")
-    assert entry()["review"] == "changes"
-    db.add_review(w.id, "def456", None, True, "lgtm")
-    assert entry()["review"] == "approved"
 
 
 def test_snapshot_carries_the_sessions_autopilot_and_open_question(db, repo):

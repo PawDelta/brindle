@@ -13,16 +13,30 @@ A task whose worker would start on a machine with no room for it
 (``spawn.no_room``; ``agents.delegate`` raises ``NoRoom``) is queued the
 same way, 'pending' with the reason in ``waiting``, and started by a
 detached helper (``start_when_room``) once there's room.
+
+assign/handoff never start a worker inside the MCP request: under load its
+worktree, setup and launch can take minutes. They queue the task
+'unanswered' (``UNANSWERED``), reply with its id, and only then release it
+(``answered``) to that detached helper; a request cancelled before its
+reply cancels it instead (``drop_unanswered``). Before replying they check
+only what the database knows (``declared_clash``); the start checks what
+takes git (``inspected_clash``, a branch's ancestry) and the repo's policy
+again (``_claim_admitted``) before it launches.
 """
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
+import fcntl
 import fnmatch
+import hashlib
 import json
 import os
 import re
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import PurePath
 
@@ -105,9 +119,14 @@ def _issue_numbers(text: str | None) -> set[str]:
 
 def _reported_unmerged(db: DB, repo_root: str) -> list[tuple[Task, Agent, Workspace]]:
     """Started tasks in ``repo_root``, from any session, whose worker has
-    reported but whose branch isn't merged into the repo's default branch yet:
-    the work still exists and will land later."""
+    reported but whose branch isn't merged into the repo's default branch, or
+    into its workspace's base branch (the session branch), yet: the work still
+    exists and will land later. Cheap on the assign path: no fetch, one ref
+    listing, and each branch decided once per (branch, target) commit pair
+    without the patch-id fallback (git.merged_into)."""
     out = []
+    refs: dict[str, str] | None = None
+    defaults: list[str] = []
     for t in db.list_tasks(repo_root, state="started"):
         agent = db.get_agent(t.agent_id) if t.agent_id else None
         if agent is None or agent.result is None:
@@ -115,8 +134,15 @@ def _reported_unmerged(db: DB, repo_root: str) -> list[tuple[Task, Agent, Worksp
         other_ws = db.get_workspace(agent.workspace_id)
         if other_ws is None or other_ws.kind != "worktree":
             continue
-        if git.merged_into_default(repo_root, other_ws.branch):
-            continue
+        try:
+            if refs is None:
+                refs = git.ref_shas(repo_root)
+                defaults = git.default_targets(repo_root, refs)
+            session = [other_ws.base_branch] if other_ws.base_branch else []
+            if git.merged_into(repo_root, other_ws.branch, session + defaults, refs=refs):
+                continue
+        except git.GitError:
+            pass    # can't tell: still unmerged work as far as overlap goes
         out.append((t, agent, other_ws))
     return out
 
@@ -170,6 +196,25 @@ def _intent_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> C
     return None
 
 
+def _queued_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> Clash | None:
+    """A clash if ``files`` matches the declared files of a task queued in
+    ``ws``'s repo that hasn't started its worker yet (its request still
+    replying, waiting, or starting in the background): assign/handoff start
+    workers after replying, so two tasks on the same files would otherwise
+    both pass the check before either worker exists. Its holder is the task
+    (``task:<id>``), a dependency that resolves once it merges."""
+    from brindle import autopilot
+    for t in (t for state in (UNANSWERED, *QUEUED, "starting") for t in db.list_tasks(ws.repo_root, state=state)):
+        for mine in files:
+            for theirs in _loads(t.files):
+                if _glob_match(mine, theirs):
+                    root = autopilot.root_of(db, t.caller_id) if t.caller_id else None
+                    return Clash(f"overlaps with queued task {t.id} ({t.branch or 'branch not cut yet'}) on "
+                                 f"{theirs}; consider depends_on or merging first",
+                                 f"task:{t.id}", root, root is not None and root not in own)
+    return None
+
+
 def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | None = None,
                caller_id: str | None = None) -> Clash | None:
     """What ``files`` overlaps: another active task's declared or
@@ -178,20 +223,44 @@ def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | 
     issue (#NNN) as one of those, or another session's live intent. A task is
     another session's when its root differs from ``caller_id``'s (without
     one: from the roots of ``ws``'s agents)."""
+    return (declared_clash(db, ws, files, caller_id)
+            or inspected_clash(db, ws, files, task_text, caller_id))
+
+
+def _running_overlap(db: DB, ws: Workspace, files: list[str], own: set[str], changed: bool) -> Clash | None:
+    """A clash with a running task's declared files, or (``changed``) with
+    the files its branch has actually changed, which takes git to tell."""
+    for t, _agent, other_ws in running_tasks(db, ws.repo_root):
+        candidates = (_changed_files(other_ws) if other_ws else []) if changed else _loads(t.files)
+        for mine in files:
+            for theirs in candidates:
+                if _glob_match(mine, theirs):
+                    branch = other_ws.branch if other_ws else "?"
+                    return _held(db, own, f"overlaps with {t.agent_id} ({branch}) on {theirs}; "
+                                 "consider depends_on or merging first", t.agent_id)
+    return None
+
+
+def declared_clash(db: DB, ws: Workspace, files: list[str] | None,
+                   caller_id: str | None = None) -> Clash | None:
+    """``find_clash`` on what the database knows alone: the declared files of
+    running and queued tasks. No git and no process: assign/handoff check
+    this before replying, and the rest (``inspected_clash``) at launch."""
+    if not files:
+        return None
+    own = _own_roots(db, ws, caller_id)
+    return _running_overlap(db, ws, files, own, changed=False) or _queued_overlap(db, ws, files, own)
+
+
+def inspected_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | None = None,
+                    caller_id: str | None = None) -> Clash | None:
+    """The rest of ``find_clash``, which reads git and can wait minutes on a
+    loaded machine: running tasks' changed files, other sessions' intents
+    and reported but unmerged work. A queued task's start checks it just
+    before launching (``_start_if_ready``)."""
     own = _own_roots(db, ws, caller_id)
     if files:
-        for t, _agent, other_ws in running_tasks(db, ws.repo_root):
-            candidates = list(_loads(t.files))
-            if other_ws:
-                candidates += _changed_files(other_ws)
-            for mine in files:
-                for theirs in candidates:
-                    if _glob_match(mine, theirs):
-                        branch = other_ws.branch if other_ws else "?"
-                        return _held(db, own, f"overlaps with {t.agent_id} ({branch}) on {theirs}; "
-                                     "consider depends_on or merging first", t.agent_id)
-    if files:
-        clash = _intent_overlap(db, ws, files, own)
+        clash = _running_overlap(db, ws, files, own, changed=True) or _intent_overlap(db, ws, files, own)
         if clash:
             return clash
     mine_issues = _issue_numbers(task_text)
@@ -199,7 +268,7 @@ def find_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: str | 
         return None
     for t, _agent, other_ws in _reported_unmerged(db, ws.repo_root):
         where = f"{t.agent_id} ({_where(other_ws)})"
-        candidates = _loads(t.files) + _changed_files(other_ws)
+        candidates = _loads(t.files) + _changed_files(other_ws) if files else []
         for mine in files or []:
             for theirs in candidates:
                 if _glob_match(mine, theirs):
@@ -429,7 +498,7 @@ def _dep_task(db: DB, repo_root: str, dep: str) -> Task | None:
 
 def unmet_dependencies(
     db: DB, caller_ws: Workspace, depends_on: list[str] | None, caller_id: str | None = None,
-    *, dependent_task_id: str | None = None,
+    *, dependent_task_id: str | None = None, inspect: bool = True,
 ) -> list[str]:
     """``depends_on`` entries not yet merged into ``caller_ws``'s branch.
 
@@ -440,7 +509,11 @@ def unmet_dependencies(
     would trivially satisfy a plain git ancestry check even though it hasn't
     been merged, so a dependency brindle is tracking as a task is judged by its
     recorded state (only 'merged' counts) instead; only a dependency brindle
-    never started falls back to ancestry."""
+    never started falls back to ancestry. Without ``inspect`` (assign/handoff
+    before replying) that git check, and the check that no other identity
+    holds a dependency's worktree (``identity_lock``), are left to the
+    start, which makes them before launching: such a dependency doesn't
+    count as unmet here."""
     if not depends_on:
         return []
     from brindle import identity_lock
@@ -452,7 +525,7 @@ def unmet_dependencies(
         target_repo, task, ws = _resolve_dependency(
             db, caller_ws, dep, session_roots, dependent_task_id=dependent_task_id)
         resolved[dep] = (target_repo, task, ws)
-        if ws is not None:
+        if ws is not None and inspect:   # its lookup can probe sign-ins for a minute: the start's job
             identity_lock.ensure_workspace(db, ws)
 
     unmet = []
@@ -468,7 +541,8 @@ def unmet_dependencies(
             # its branch can't be an ancestor here; judge it by its merge record.
             if ws is None or not db.merged_sha(ws.id):
                 unmet.append(dep)
-        elif not git.ok(["merge-base", "--is-ancestor", _dep_branch(db, dep), "HEAD"], caller_ws.path):
+        elif inspect and not git.ok(["merge-base", "--is-ancestor", _dep_branch(db, dep), "HEAD"],
+                                    caller_ws.path):
             unmet.append(dep)
     return unmet
 
@@ -592,19 +666,21 @@ def enqueue(
     *, isolate: bool, branch: str | None, done_when: str | None,
     files: list[str] | None, depends_on: list[str] | None, plan_first: bool | None = None,
     weight: str | None = None, analysis_doc: bool = False, waiting: str | None = None,
-    pipeline: str | None = None,
+    pipeline: str | None = None, unanswered: bool = False,
 ) -> Task:
     """Record a task that can't start yet: no worker, no workspace, just what
     it takes to start it once its dependencies are merged, or (``waiting``,
     why) once the machine has room for it. ``pipeline``: the pipeline state
-    its worker starts in (a branch's second attempt or conflict resolver)."""
+    its worker starts in (a branch's second attempt or conflict resolver).
+    ``unanswered``: queued by a request that hasn't replied yet, so nothing
+    starts it until ``answered`` (or ``drop_unanswered`` cancels it)."""
     t = Task(
         id=new_id(), repo_root=caller_ws.repo_root, agent_id=None,
         caller_id=caller.id if caller else None, caller_ws_id=caller_ws.id,
         profile=profile, task_text=task_text, mode=mode, isolate=int(isolate),
         branch=branch, done_when=done_when, files=_dumps(files),
-        depends_on=_dumps(depends_on), state="pending", created_at=time.time(), weight=weight,
-        analysis_doc=1 if analysis_doc else None,
+        depends_on=_dumps(depends_on), state=UNANSWERED if unanswered else "pending",
+        created_at=time.time(), weight=weight, analysis_doc=1 if analysis_doc else None,
     )
     db.add_task(t)
     if plan_first is not None:
@@ -615,9 +691,56 @@ def enqueue(
         db.update_task(t.id, pipeline=pipeline)
     bus.publish(db, "task.queued", repo_root=t.repo_root, task_id=t.id, caller_id=t.caller_id,
                 depends_on=depends_on or [], waiting=waiting)
-    if waiting:
+    if waiting and unanswered:
+        db.update_task(t.id, waiting=waiting, waiting_since=time.time())   # its helper starts at answered
+    elif waiting:
         wait_for_room(db, t, waiting)
     return db.get_task(t.id) or t
+
+
+# A task an MCP request (assign/handoff) queued before it replied: nothing
+# starts it, no sweep included, until the reply is on its way (``answered``).
+# A request its client cancelled or dropped never replies: ``drop_unanswered``.
+UNANSWERED = "unanswered"
+
+# Set while a request releases its tasks: a worker started right there is
+# named by the reply that follows, so its caller gets no "Started" message.
+_replying: contextvars.ContextVar[bool] = contextvars.ContextVar("brindle_tasks_replying", default=False)
+
+
+def answered(db: DB, task_ids: list[str], start: set[str]) -> None:
+    """The request that queued ``task_ids`` is replying: they may start now.
+    Those in ``start`` (nothing to wait on) get their detached start
+    (``start_in_background``); the others start once their dependencies
+    merge, as any queued task."""
+    token = _replying.set(True)
+    try:
+        for task_id in task_ids:
+            if move(db, task_id, UNANSWERED, "pending") and task_id in start:
+                start_in_background(task_id)
+    finally:
+        _replying.reset(token)
+
+
+def drop_unanswered(db: DB, task_ids: list[str]) -> None:
+    """The request that queued ``task_ids`` was cancelled, or its client went,
+    before it replied: cancel them, so no worker ever starts for them."""
+    for task_id in task_ids:
+        move(db, task_id, UNANSWERED, "cancelled")
+
+
+def cancel_reason(db: DB, task_id: str) -> str | None:
+    """Why task ``task_id`` was cancelled, as its caller was told."""
+    row = db.conn.execute("SELECT payload FROM events WHERE kind='task.cancelled' AND task_id=? "
+                          "ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+    return json.loads(row[0]).get("reason") if row and row[0] else None
+
+
+def start_in_background(task_id: str) -> None:
+    """Start pending task ``task_id`` from a detached helper (``start_when_room``):
+    it looks for room, cuts the worktree and launches the worker, all after
+    the request that queued it has replied. Tests replace it."""
+    _wait_in_background(task_id)
 
 
 # -- waiting for room ---------------------------------------------------------------
@@ -628,10 +751,30 @@ ROOM_POLL = 5.0   # seconds between the waiting helper's looks at the machine
 FORCED = "started despite load by supervisor"   # what a forced start's message says
 
 
-def room_wait(repo_root: str | None = None) -> str | None:
+def room_wait(repo_root: str | None = None, profile: str | None = None) -> str | None:
     """Why a worker should not start now (``spawn.no_room``), or None: the
-    machine has room, or the repo's ``wait_for_room`` is off."""
+    machine has room, or the repo's ``wait_for_room`` is off, or ``profile``
+    is a subagent profile (it starts no process of brindle's)."""
+    if profile is not None and repo_root is not None and not agents.launches_process(profile, repo_root):
+        return None
     return spawn.no_room(repo_root)
+
+
+def _room_wait_overrun(t: Task, why: str) -> str | None:
+    """A start's explanation once its persisted room wait exceeds the limit.
+
+    Use the original waiting time, so helper restarts and changing load
+    reasons cannot extend the wait. Dependencies and session pauses are
+    still checked by the caller before the task can be claimed.
+    """
+    from brindle.config import load_repo_config
+
+    if t.waiting_since is None or why.startswith("waiting for disk"):
+        return None  # low disk holds until there's space: starting anyway could fill it
+    elapsed = time.time() - t.waiting_since
+    if elapsed > load_repo_config(t.repo_root).room_wait_max:
+        return f"started after waiting {elapsed / 60:.0f} min: {why}"
+    return None
 
 
 def load_counts(db: DB) -> tuple[int, int]:
@@ -681,7 +824,14 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
         raise ValueError(str(e)) from e
     if unmet:
         raise ValueError(f"Task {task_id} still waits on {', '.join(unmet)}.")
-    if not db.claim_forced_task(t.id):   # the single forced-start slot, taken with the task
+    launch, overlap = _launch_overlap(db, t, caller_ws)   # forced past the load, never past overlap
+    if not launch:
+        raise ValueError(f"Task {task_id} didn't start: it {overlap}.")
+    # The single forced-start slot, taken with the task, if the policy lets it start.
+    claimed, refused = _claim_admitted(db, t, db.claim_forced_task)
+    if refused:
+        raise ValueError(f"Task {task_id} can't start now: the repo's policy refused it: {refused}")
+    if not claimed:
         now = db.get_task(t.id)
         if now is not None and now.state == "pending":
             raise ValueError("Another worker was just started despite the load and is still starting; "
@@ -691,6 +841,7 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
         worker = start_queued(db, t)
     except agents.AgentError as e:
         db.release_forced_task(t.id)   # frees the slot
+        db.update_task(t.id, started_at=None)
         raise ValueError(f"It could not start: {e}") from e
     text = f"Started {worker.id} for task {t.id} ({FORCED})."
     if t.caller_id and (caller is None or caller.id != t.caller_id):
@@ -701,13 +852,15 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
     return text
 
 
-def room_duplicate(db: DB, caller_id: str | None, repo_root: str, task_text: str) -> Task | None:
-    """A task ``caller_id`` queued for room in ``repo_root`` with the same
-    brief, waiting or being started right now: a repeated assign of it must
-    never start a second worker, whatever the load is by then."""
-    return next((t for state in ("pending", "starting") for t in db.list_tasks(repo_root, state=state)
-                 if t.waiting is not None and t.caller_id == caller_id and t.task_text == task_text),
-                None)
+def room_duplicate(db: DB, caller_id: str | None, repo_root: str, task_text: str,
+                   branch: str | None = None) -> Task | None:
+    """A task ``caller_id`` queued in ``repo_root`` with the same brief and
+    branch that hasn't started its worker yet (queued by a request still
+    replying, waiting for room or dependencies, starting in the background,
+    or being started right now): a repeated assign of it must never start a
+    second worker, whatever the load is by then."""
+    return next((t for state in (UNANSWERED, "pending", "starting") for t in db.list_tasks(repo_root, state=state)
+                 if t.caller_id == caller_id and t.task_text == task_text and t.branch == branch), None)
 
 
 def wait_for_room(db: DB, t: Task, why: str) -> None:
@@ -728,19 +881,21 @@ def _wait_in_background(task_id: str) -> None:
 
 def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
     """The detached helper's loop: start task ``task_id`` once there's room
-    (``_start_if_ready`` looks), telling its caller. Ends when it starts, or
-    when the task is no longer waiting (cancelled, held, started by a
+    or its room wait limit expires (``_start_if_ready`` looks), telling its
+    caller how it was admitted. Ends when it starts, or
+    when the task is no longer pending (cancelled, held, started by a
     sweep) or its session is paused (``on_resumed`` takes over). Returns
-    whether it started it."""
+    whether it started it. A task assign/handoff just queued
+    (``start_in_background``) has no ``waiting`` until it finds no room."""
     pause = threading.Event()
     while True:
         t = db.get_task(task_id)
-        if t is None or t.state != "pending" or t.waiting is None or session_paused(db, t):
+        if t is None or t.state != "pending" or session_paused(db, t):
             return False
-        why = room_wait(t.repo_root)
-        if why is None:
+        why = room_wait(t.repo_root, t.profile)
+        if why is None or _room_wait_overrun(t, why):
             # Unless a dependency added since holds it: merging that starts it.
-            return _start_if_ready(db, t, "room on the machine", check_room=False)
+            return _start_if_ready(db, t, "room on the machine", check_room=why is not None)
         if why != t.waiting:
             db.set_task_waiting(t.id, why, time.time())   # list_tasks shows the machine as it is now
         pause.wait(poll)
@@ -775,8 +930,9 @@ def on_resumed(db: DB, root_id: str) -> None:
 
 
 def start_with_room_now(db: DB, t: Task) -> bool:
-    """Start pending task ``t`` now if the machine has room (and its
-    dependencies are merged), telling its caller; else it keeps waiting."""
+    """Start pending task ``t`` now if the machine has room or its room
+    wait limit expires (and its dependencies are merged), telling its
+    caller; else it keeps waiting."""
     return _start_if_ready(db, t, "room on the machine")
 
 
@@ -963,10 +1119,128 @@ def on_merged(db: DB, ws: Workspace) -> None:
             _start_if_ready(db, t, dep_ref)
 
 
+def launching_workers(db: DB, repo_root: str, workers: list[Agent]) -> int:
+    """How many of ``repo_root``'s tasks claimed to start ('starting') have no
+    worker among ``workers`` (``policy.worker_agents``) yet: each is about to
+    be one more worker at work. A claimed task's worker is the first one of
+    its caller made since the claim (``started_at``) that no task names yet,
+    so a worker whose task is still linking it isn't counted twice."""
+    linked = {t.agent_id for t in db.list_tasks(repo_root) if t.agent_id}
+    spare = sorted((a for a in workers if a.id not in linked), key=lambda a: a.created_at)
+    count = 0
+    for t in db.list_tasks(repo_root, state="starting"):
+        since = t.started_at or t.created_at
+        mine = next((a for a in spare if a.parent_id == t.caller_id and a.created_at >= since), None)
+        if mine is None:
+            count += 1
+        else:
+            spare.remove(mine)
+    return count
+
+
+@contextlib.contextmanager
+def _launch_lock(repo_root: str) -> Iterator[None]:
+    """Launch admission in ``repo_root``, one start at a time across every
+    brindle process: the count of workers at work, the policy's decision on
+    it and the claim happen together, so two starts can't both take the last
+    slot the policy allows (``_claim_admitted``)."""
+    from brindle.config import brindle_home
+
+    locks = brindle_home() / "locks"
+    locks.mkdir(parents=True, exist_ok=True)
+    name = hashlib.sha256(repo_root.encode()).hexdigest()[:16]
+    with open(locks / f"launch-{name}.lock", "w") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def _launch_refusal(db: DB, t: Task) -> str | None:
+    """Why the repo's policy refuses to start ``t`` now, else None: decided
+    again at launch, since assign/handoff decided before queueing it, and
+    counting the workers being started (``launching_workers``) as at work."""
+    from brindle import policy
+    from brindle.config import load_repo_config
+
+    try:
+        # One snapshot: a start that finishes between the two reads (its
+        # task 'started', its worker made) would be in neither.
+        with db.snapshot():
+            workers = policy.worker_agents(db, t.repo_root)
+            running: int | None = len(workers) + launching_workers(db, t.repo_root, workers)
+    except Exception:  # noqa: BLE001 - the policy decides what an unknown count means
+        running = None
+    caller = db.get_agent(t.caller_id) if t.caller_id else None
+    d = policy.check_assign(
+        load_repo_config(t.repo_root), t.repo_root, t.profile, t.task_text, t.mode,
+        files=_loads(t.files) or None, weight=t.weight, branch=t.branch, actor=caller,
+        running_workers=running,
+    )
+    return None if d.allowed else d.reason
+
+
+def _claim_admitted(db: DB, t: Task, claim) -> tuple[bool, str | None]:
+    """Claim pending task ``t`` with ``claim`` (``db.claim_task`` or
+    ``db.claim_forced_task``) if the repo's policy lets it start now:
+    (claimed, the policy's refusal). Under ``_launch_lock``, so the slot it
+    takes counts for the next start's decision."""
+    with _launch_lock(t.repo_root):
+        now = db.get_task(t.id)
+        if now is None or now.state != "pending":
+            return False, None
+        refused = _launch_refusal(db, now)
+        if refused:
+            return False, refused
+        if not claim(t.id):
+            return False, None
+        db.update_task(t.id, started_at=time.time())   # when it took its slot (launching_workers)
+        return True, None
+
+
+def _launch_overlap(db: DB, t: Task, caller_ws: Workspace) -> tuple[bool, str | None]:
+    """Check pending task ``t`` for the overlap only git can tell
+    (``inspected_clash``) just before it launches, and handle it by the
+    repo's ``overlap`` setting as assign handles a declared one: (whether it
+    may launch, the clash's warning). Queueing makes it wait on the holder's
+    merge; blocking cancels it; either way its caller is told."""
+    from brindle import autopilot
+    from brindle.config import load_repo_config
+
+    clash = inspected_clash(db, caller_ws, _loads(t.files), t.task_text, t.caller_id)
+    if clash is None:
+        return True, None
+    how = overlap_mode(load_repo_config(t.repo_root).overlap, clash.cross_session)
+    if how == "queue" and not clash.holder:   # an intent has no worker to wait for
+        how = "warn"
+    deps = _loads(t.depends_on)
+    proceed = False
+    if how == "queue":
+        outcome = f"queued as task {t.id} until {clash.holder} merges"
+        # False: it was claimed, cancelled or changed meanwhile, and isn't this start's to launch.
+        if set_dependencies(db, t.id, [*deps, str(clash.holder)], deps) and t.caller_id:
+            try:
+                agents.send_message(db, t.caller_id, f"Task {t.id} waits for {clash.holder} to merge "
+                                    f"before its worker starts: it {clash.warning}.", sender_id=None)
+            except agents.AgentError:
+                pass
+    elif how == "block":
+        outcome = "refused"
+        _cancel(db, t.id, f"it {clash.warning}. Two workers editing the same files end in conflicts: "
+                "fold it into that worker's task (send_message), or requeue it with depends_on")
+    else:
+        outcome, proceed = "allowed to start with a warning", True
+    if clash.cross_session and t.caller_id:
+        notify_clash(db, autopilot.root_of(db, t.caller_id), clash, outcome)
+    return proceed, clash.warning
+
+
 def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> bool:
     """Start pending task ``t`` if every dependency is merged and the
-    machine has room for it (else it waits for room: ``wait_for_room``), and
-    tell its caller. The task is claimed first, so a second call (a sweep racing a
+    machine has room for it or its room wait limit expires (else it waits
+    for room: ``wait_for_room``), and tell its caller why it started.
+    The task is claimed first, so a second call (a sweep racing a
     merge) finds it taken. A dependency that can never merge cancels it; a
     start that fails cancels it too, with the reason sent to its caller
     (``requeue`` makes a new one). Returns whether it started."""
@@ -980,30 +1254,60 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     except agents.AgentError as e:
         _cancel(db, t.id, str(e))
         return False
-    why = room_wait(t.repo_root) if check_room else None
-    if why:
+    why = room_wait(t.repo_root, t.profile) if check_room else None
+    overrun = _room_wait_overrun(t, why) if why else None
+    if why and overrun is None:
         wait_for_room(db, t, why)
         return False
-    if not db.claim_task(t.id):
+    launch, overlap = _launch_overlap(db, t, caller_ws)
+    if not launch:
+        return False
+    claimed, refused = _claim_admitted(db, t, db.claim_task)
+    if refused:
+        _cancel(db, t.id, f"the repo's policy refused it: {refused}")
+    if not claimed:
         return False
     try:
         new_worker = start_queued(db, t)
-    except agents.AgentError as e:
-        db.update_task(t.id, state="pending")
-        _cancel(db, t.id, f"it could not start: {e}")
+    except Exception as e:  # noqa: BLE001 - from a detached helper: its caller must hear why
+        db.update_task(t.id, state="pending", started_at=None)
+        reason = str(e).strip()
+        if not isinstance(e, agents.AgentError) or not reason:
+            reason = f"{type(e).__name__}: {reason}" if reason else type(e).__name__
+        _cancel(db, t.id, f"couldn't start a worker on profile {t.profile!r}: {reason}")
         return False
-    if t.caller_id:
+    if t.caller_id and not _replying.get():
         try:
-            text = (f"Started {new_worker.id} for task {t.id} (was waiting for room: {t.waiting})."
-                    if t.waiting else f"Started {new_worker.id} (was waiting on {dep_ref}).")
             new_ws = db.get_workspace(new_worker.workspace_id)
-            warning = agents.add_dirs_warning(new_worker, new_ws) if new_ws else None
-            if warning:
+            if overrun:
+                text = f"Started {new_worker.id} for task {t.id} ({overrun})."
+            elif t.waiting:
+                text = f"Started {new_worker.id} for task {t.id} (was waiting for room: {t.waiting})."
+            elif _loads(t.depends_on):
+                text = f"Started {new_worker.id} (was waiting on {dep_ref})."
+            else:   # just queued by assign/handoff, which replied with the task id
+                text = (f"Started worker {new_worker.id} ({new_worker.profile}) for task {t.id}"
+                        + (f" in workspace {new_ws.id} on branch {new_ws.branch}." if new_ws else "."))
+            if not agents.runs_process(new_worker) and new_ws:   # the caller's own Agent tool runs it
+                text = f"Task {t.id} is ready.\n\n{agents.subagent_brief(new_worker, new_ws)}"
+            for warning in [*([overlap] if overlap else []), *_launch_warnings(new_worker, new_ws)]:
                 text += f"\nWarning: {warning}"
             agents.send_message(db, t.caller_id, text, sender_id=None)
         except agents.AgentError:
             pass
     return True
+
+
+def _launch_warnings(worker: Agent, ws: Workspace | None) -> list[str]:
+    """What the caller should know about a worker started from the queue:
+    the warnings assign's reply gave when it started the worker itself."""
+    if ws is None:
+        return []
+    from brindle import antigravity, codex_hook
+
+    found = (agents.add_dirs_warning(worker, ws), codex_hook.launch_warning(worker.provider, ws.path),
+             antigravity.launch_warning(worker, ws))
+    return [w for w in found if w]
 
 
 def sweep(db: DB) -> int:
@@ -1105,9 +1409,15 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
         wait_for_room(db, new, why)
         return (f"Requeued task {old.id} as {new.id}, waiting for room: {why}. "
                 "It starts on its own when there's room.")
+    claimed, refused = _claim_admitted(db, new, db.claim_task)   # the slot it takes counts for others
+    if not claimed:
+        reason = f"the repo's policy refused it: {refused}" if refused else "it was started or cancelled meanwhile"
+        _cancel(db, new.id, reason)
+        raise ValueError(f"Requeued task {old.id} as {new.id}, but it didn't start: {reason}.")
     try:
         worker = start_queued(db, new)
     except agents.AgentError as e:
+        db.update_task(new.id, state="pending", started_at=None)   # so the cancel below applies
         _cancel(db, new.id, f"it could not start: {e}")
         raise ValueError(f"Nothing left to wait on, but the worker could not start: {e}") from e
     return f"Requeued task {old.id} as {new.id}: nothing to wait on, started worker {worker.id}."

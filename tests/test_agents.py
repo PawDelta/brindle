@@ -438,6 +438,7 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
 
     # The real spawn, with a launch that only marks the agent running.
     monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: db_.set_status(a.id, "processing"))
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.status not in ("paused", "done"))
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text('{"pipeline": false}')
     root = workspaces.adopt_root(db, str(repo))
@@ -467,8 +468,8 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     reminder = autopilot.on_stop(db, boss, {})
     assert t.id in reminder["reason"]
     assert db.get_autopilot("boss").nudges == 0
-    # However long the machine stays full, the task waits rather than overload it.
-    db.update_task(t.id, waiting_since=time.time() - 86400)
+    # Before the room wait limit, the task stays queued while the machine is full.
+    db.update_task(t.id, waiting_since=time.time() - 60)
     tasks.sweep(db)
     assert db.get_task(t.id).state == "pending" and len(db.list_agents()) == 1
 

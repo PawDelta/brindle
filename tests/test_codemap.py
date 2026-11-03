@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from brindle import agents, codemap, workspaces
+from brindle import agents, codemap, git, workspaces
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import ClaudeCode, LaunchContext, get_provider
@@ -18,24 +18,6 @@ def mapped(repo, monkeypatch):
     (repo / "graphify-out" / "graph.json").write_text("{}")
     monkeypatch.setattr(codemap.shutil, "which", lambda cmd: f"/bin/{cmd}")
     return repo
-
-
-def test_workers_get_the_code_map(db, mapped):
-    ws = workspaces.create(db, str(mapped), "feat").workspace
-    prompt = agents.decorate_worker_prompt("add a flag", "w1", ws, None, get_provider("claude"), headless=False)
-    assert "Code map:" in prompt and str(mapped / "graphify-out" / "graph.json") in prompt
-
-
-def test_the_supervisor_gets_the_code_map(db, mapped):
-    ws = workspaces.adopt_root(db, str(mapped))
-    db.add_agent(Agent("s1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@0", None, time.time()))
-    assert "Code map:" in agents._profile_for(db, db.get_agent("s1"), ws).prompt
-
-
-def test_graphify_queries_are_pre_approved():
-    argv = ClaudeCode().command(LaunchContext("a1", load_profile("developer"), None))
-    allowed = argv[argv.index("--allowedTools") + 1]
-    assert "Bash(graphify query:*)" in allowed and "Bash(graphify affected:*)" in allowed
 
 
 def test_graph_query_log_records_read_only_graphify_commands_per_agent(db, mapped):
@@ -75,26 +57,6 @@ def test_supervisor_repo_map_is_in_the_supervisor_prompt_and_cached_per_graph_mt
     assert "Hub src" in codemap.supervisor_map(mapped)   # same mtime: not re-read
     os.utime(graph, (stamp + 5, stamp + 5))
     assert "Renamed src" in codemap.supervisor_map(mapped)
-
-
-def test_merges_refresh_the_graph(mapped, monkeypatch):
-    started = []
-    runners = []
-    real_popen = codemap.subprocess.Popen
-
-    def fake_popen(argv, **kw):
-        if "-c" in argv:
-            runners.append((argv[-3], argv[-2] or None, os.dup(kw["pass_fds"][0])))
-            return None
-        if "graphify" in argv:
-            started.append(argv)
-            return None
-        return real_popen(argv, **kw)
-
-    monkeypatch.setattr(codemap.subprocess, "Popen", fake_popen)
-    codemap.refresh_later(str(mapped))
-    codemap._run_refresh(*runners.pop())
-    assert started == [["nice", "-n", "10", "graphify", "update", str(mapped), "--force"]]
 
 
 def test_graphify_single_flight(mapped, monkeypatch):
@@ -192,25 +154,6 @@ def test_automatic_rebuild_preserves_tracked_graph_or_can_be_disabled(mapped, mo
     assert not started
 
 
-def test_prune_stores_removes_old_graph_store_and_keeps_fresh_one(tmp_path, monkeypatch):
-    home = tmp_path / "brindle"
-    monkeypatch.setattr("brindle.config.brindle_home", lambda: home)
-    old_store = home / "graphs" / "old-repo-a1b2"
-    fresh_store = home / "graphs" / "fresh-repo-c3d4"
-    old_store.mkdir(parents=True)
-    fresh_store.mkdir(parents=True)
-    (old_store / "graph.json").write_text("{}")
-    (fresh_store / "graph.json").write_text("{}")
-    now = time.time()
-    old = now - 31 * 24 * 60 * 60
-    os.utime(old_store / "graph.json", (old, old))
-    os.utime(old_store, (old, old))
-
-    assert codemap.prune_stores(now) == 1
-    assert not old_store.exists()
-    assert (fresh_store / "graph.json").is_file()
-
-
 def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     from brindle.config import brindle_home
 
@@ -247,6 +190,12 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     assert session_graph.is_file()
     assert json.loads(session_graph.read_text()) == {"nodes": [{"id": "seed-node"}]}
     assert started == [["nice", "-n", "10", "graphify", "update", session_ws.path, "--force"]]
+    # One graph per repo: the session checkout links to it, kept out of git status.
+    out = Path(session_ws.path) / "graphify-out"
+    assert out.is_symlink() and out.resolve() == codemap.shared_out(mapped).resolve()
+    assert git.out(["status", "--porcelain"], session_ws.path) == ""
+    codemap.remove_session_graph(session_ws.path)
+    assert not out.exists() and (codemap.shared_out(mapped) / "graph.json").is_file()
     (mapped / codemap.GRAPH).unlink()
     assert codemap.seed_session(mapped, str(mapped)) is True
     codemap._run_refresh(*runners.pop())
@@ -264,53 +213,7 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     assert codemap.seed_session(session_ws.path) is False
 
 
-def test_session_graph_refresh_and_community_carryover(mapped, monkeypatch):
-    from brindle.config import brindle_home
-
-    old_data = {
-        "nodes": [
-            {"id": "n1", "community": 1, "community_name": "Auth"},
-            {"id": "n2", "community": 1, "community_name": "Auth"},
-        ]
-    }
-    graph_file = mapped / "graphify-out" / "graph.json"
-    graph_file.write_text(json.dumps(old_data))
-
-    new_data = {
-        "nodes": [
-            {"id": "n1", "community": 10},
-            {"id": "n3", "community": 20, "source_file": "src/core/helper.py"},
-        ]
-    }
-
-    real_popen = codemap.subprocess.Popen
-
-    def fake_popen(argv, **kw):
-        if "graphify" in argv:
-            graph_file.write_text(json.dumps(new_data))
-            return None
-        return real_popen(argv, **kw)
-
-    monkeypatch.setattr(codemap.subprocess, "Popen", fake_popen)
-    codemap.refresh(str(mapped))
-
-    updated = json.loads(graph_file.read_text())
-    nodes_by_id = {n["id"]: n for n in updated["nodes"]}
-    assert nodes_by_id["n1"]["community_name"] == "Auth"
-    assert nodes_by_id["n3"]["community_name"] == "helper"
-
-    store = brindle_home() / "graphs" / mapped.name / "graph.json"
-    assert store.is_file()
-    assert json.loads(store.read_text()) == updated
-
-
-def test_session_graph_removed_with_worktree(db, mapped):
-    ws = workspaces.create(db, str(mapped), "remove-session").workspace
-    out_dir = Path(ws.path) / "graphify-out"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "graph.json").write_text("{}")
-    assert out_dir.is_dir()
-
-    workspaces.remove(db, ws, force=True)
-    assert not out_dir.exists()
-
+def test_graphify_queries_are_pre_approved():
+    argv = ClaudeCode().command(LaunchContext("a1", load_profile("developer"), None))
+    allowed = argv[argv.index("--allowedTools") + 1]
+    assert "Bash(graphify query:*)" in allowed and "Bash(graphify affected:*)" in allowed

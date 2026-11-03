@@ -142,20 +142,20 @@ def test_assign_without_isolate_shares_the_checkout(db, repo, boss):
 
 
 def test_handoff_returns_the_result_once_the_worker_reports(db, repo, boss, monkeypatch):
+    """handoff replies at once with its worker's id, never waiting for it;
+    wait_for_worker returns the result once the worker reports, and the copy
+    forwarded to the supervisor's inbox is dropped: it arrives once."""
     configure(repo, pipeline=False)
     monkeypatch.setattr(agents, "wait_for_result", lambda db_, wid, secs: db_.get_agent(wid).result)
-    orig = agents.spawn
-
-    def spawn_and_report(db_, ws, profile, **kw):
-        a = orig(db_, ws, profile, **kw)
-        commit(ws, "h.py")
-        db_.set_result(a.id, "wrote h.py")
-        return a
-
-    monkeypatch.setattr(agents, "spawn", spawn_and_report)
-    out = run(mcp_server.handoff("developer", "write h.py", branch="feat-h", wait_seconds=5))
-    assert "finished" in out and "wrote h.py" in out and "1 commit(s) ahead of main" in out
-    assert "h.py" in out
+    out = run(mcp_server.handoff("developer", "write h.py", branch="feat-h"))
+    wid = re.search(r'wait_for_worker\(agent_id="(\w+)"\)', out).group(1)
+    assert db.get_agent(wid).result is None
+    commit(ws_of(db, repo, "feat-h"), "h.py")
+    agents.report_result(db, wid, "wrote h.py", docs_checked=True)
+    result = run(mcp_server.wait_for_worker(wid, wait_seconds=5))
+    assert "finished" in result and "wrote h.py" in result and "1 commit(s) ahead of main" in result
+    inbox = [full_text(db, "boss", db.pop_pending("boss").body) for _ in range(db.pending_count("boss"))]
+    assert not any("wrote h.py" in m for m in inbox), inbox
 
 
 def test_blank_task_is_refused(db, repo, boss):

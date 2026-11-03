@@ -1026,5 +1026,3 @@ def test_a_repo_held_by_a_running_session_cannot_be_attached(run, acct, db, repo
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("boss", "other"))
     code, out = run("repo", "add", str(web))
     assert code == 1 and "another running session" in out
-
-

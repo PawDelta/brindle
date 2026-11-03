@@ -44,7 +44,7 @@ export type Route =
      a provider's problem Settings › Providers); `ask` counts the requests, so asking
      again while the page is open scrolls again; `rule`: a permission rule to open in its
      editor, from the Inbox's permission items. */
-  | { screen: "settings"; section?: "providers" | "permissions"; ask?: number; rule?: string }
+  | { screen: "settings"; section?: "providers" | "permissions" | "storage"; ask?: number; rule?: string }
   /* One repo's checks, rules and overrides of the person's settings (from its sidebar heading or Settings). */
   | { screen: "project-settings"; repo?: string }
   | { screen: "account"; section?: "usage"; ask?: number }

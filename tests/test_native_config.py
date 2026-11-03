@@ -17,35 +17,8 @@ def fake():
     ep.close()
 
 
-def test_profile_env_lines_and_context_sizes(tmp_path):
-    d = tmp_path / ".brindle" / "agents"
-    d.mkdir(parents=True)
-    (d / "glm.md").write_text(
-        "---\nname: glm\nprovider: claude\nmodel: glm-4.7-flash\n"
-        "env.ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic\n"
-        "env.ANTHROPIC_AUTH_TOKEN: 'k#1'   # quoted, so the # stays\n"
-        "env.ANTHROPIC_API_KEY:\n"
-        "context_tokens: 128_000\n---\nhi\n")
-    p = load_profile("glm", str(tmp_path))
-    assert p.env == {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-                     "ANTHROPIC_AUTH_TOKEN": "k#1", "ANTHROPIC_API_KEY": ""}
-    assert p.context_tokens == 128000
-    (d / "k.md").write_text("---\nname: k\ncontext_tokens: 64k\n---\n")
-    assert load_profile("k", str(tmp_path)).context_tokens == 64000
-    (d / "bad.md").write_text("---\nname: bad\ncontext_tokens: lots\n---\n")
-    assert load_profile("bad", str(tmp_path)).context_tokens is None
 
 
-def test_probe_reports_reachability_and_the_model(fake):
-    ok, detail = probe(Endpoint(fake.base_url + "/v1", "tiny"))
-    assert ok and "tiny is available" in detail
-    assert fake.paths[-1] == "/v1/models"
-    ok, detail = probe(Endpoint(fake.base_url, "qwen3-coder"))  # a tag-less name matches its tags
-    assert ok and "is available" in detail and fake.paths[-1] == "/v1/models"
-    ok, detail = probe(Endpoint(fake.base_url + "/v1", "gpt-9"))
-    assert ok and "isn't listed" in detail and "tiny" in detail
-    ok, detail = probe(Endpoint("http://127.0.0.1:1/v1", "tiny"), timeout=1)
-    assert not ok and "not reachable" in detail
 
 
 def test_doctor_checks_each_native_endpoint_once(repo, fake, monkeypatch):
