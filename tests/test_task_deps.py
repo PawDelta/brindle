@@ -4,16 +4,19 @@ workspace is removed unmerged instead); list_tasks(full=true), requeue, and
 assign/handoff's dry_run."""
 
 import asyncio
+import os
 import re
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from conftest import full_text, sh
 from brindle import agents, bus, mcp_server, tasks, workspaces
-from brindle.db import Agent, Workspace
+from brindle.db import DB, Agent, Workspace
 from test_merge_order import fake_spawn
 
 
@@ -76,7 +79,7 @@ def test_overlapping_tasks_are_blocked(db, repo, monkeypatch):
     db.add_agent(Agent("boss", root.id, "supervisor", "claude", None, "interactive", "idle", "@0", None,
                        time.time()))
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    monkeypatch.setattr(tasks, "find_clash", lambda db_, ws_, files, text=None, caller_id=None:
+    monkeypatch.setattr(tasks, "declared_clash", lambda db_, ws_, files, caller_id=None:
                         tasks.Clash("overlaps with w0 (feat/a) on ledger.py", "w0", "boss"))
     delegated = []
     monkeypatch.setattr(agents, "delegate", lambda *a, **k: delegated.append(a))
@@ -642,6 +645,207 @@ def test_requeue_with_a_cancelled_dependency_asks_for_new_ones(db, repo, boss):
     mcp_server.cancel_task(b.id)  # cascades to c
     out = mcp_server.requeue(c.id)
     assert out.startswith("Error") and "depends_on" in out
+
+
+# -- replying before the start ---------------------------------------------------
+
+
+@pytest.mark.parametrize("tool, start", [
+    ("assign", "detached"), ("handoff", "detached"), ("handoff", "at once"),
+    ("assign", "behind a worker"), ("assign", "capped"), ("assign", "after a dependency"),
+])
+def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
+    """Under load every git and tmux step of a start waits for room, and
+    assigns ran past the client's 120 s (2026-11-03): assign (and handoff)
+    reply with the task id first, and admission, the worktree and the launch
+    happen in the detached start afterwards. Repeated before that start
+    runs, it queues nothing more, and another task on the same files is
+    refused (overlap "block"); a start that beat the reply is named in it,
+    never waited for. Behind a running worker, the git look at what it
+    changed waits for the start too, which still refuses the overlap it
+    finds; a team's worker cap holds for tasks both queued before either
+    start ran, even when the first finishes between the second's reads; and
+    a dependency's worktree waits for the start for its identity lookup."""
+    from brindle import identity_lock, policy, spawn
+
+    (repo / ".brindle" / "config.json").write_text('{"overlap": "block", "pipeline": false, "review": false}')
+    events, helpers = [], []
+    real_delegate, real_workers = agents.delegate, policy.worker_agents
+
+    def slow_delegate(*a, **k):   # admission, worktree, setup and the tmux launch
+        events.append("spawn")
+        if start != "capped":
+            return real_delegate(*a, **k)
+        if events.count("spawn") > 1:
+            pytest.fail("a second worker started past the cap of 1")
+        [starting] = db.list_tasks(str(repo), state="starting")
+        launched = []
+
+        def finish_between(db_, root):   # this start finishes between the other start's two reads
+            workers = real_workers(db_, root)
+            if not launched:
+                try:   # an error here would read as an unknown count, which the cap refuses anyway
+                    launched.append(real_delegate(*a, **k))
+                    mine = real_workers(db, root)   # its worker made, its task not naming it yet: counted once
+                    counted = len(mine) + tasks.launching_workers(db, root, mine)
+                    db.update_task(starting.id, agent_id=launched[0][0].id, state="started")
+                except Exception as e:  # noqa: BLE001
+                    pytest.fail(f"the first launch failed: {e!r}")
+                if counted != 1:
+                    pytest.fail(f"the first launch counted {counted} times")
+            return workers
+
+        monkeypatch.setattr(policy, "worker_agents", finish_between)
+        for other_task in db.list_tasks(str(repo), state="pending"):   # its own helper's connection
+            assert not tasks.start_when_room(DB(), other_task.id)
+        monkeypatch.setattr(policy, "worker_agents", real_workers)
+        return launched[0]
+
+    def call(task: str = "do A", files: tuple[str, ...] = ("app.py",), deps: list[str] | None = None) -> str:
+        return asyncio.run(getattr(mcp_server, tool)("developer", task, files=list(files), depends_on=deps))
+
+    if start in ("behind a worker", "after a dependency"):
+        worker = started_worker_id(call("do W", ()))
+    if start == "behind a worker":   # its branch has changed app.py, which only git can tell
+        monkeypatch.setattr(tasks, "_changed_files", lambda ws: events.append("git") or ["app.py"])
+    if start == "after a dependency":   # who holds its worktree: sign-in probes, up to a minute
+        monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: events.append("identity"))
+    if start == "capped":   # as an org's max_parallel_workers of 1 decides
+        monkeypatch.setattr(policy, "check_assign", lambda *a, running_workers=None, **k: (
+            policy.allow() if running_workers == 0 else policy.deny("at most 1 parallel worker")))
+    monkeypatch.setattr(agents, "delegate", slow_delegate)
+    monkeypatch.setattr(agents, "wait_for_result", lambda *a, **k: pytest.fail("the reply waited for the worker"))
+    if start == "at once":   # conftest's start runs as the reply is released
+        out = call()
+        [t] = db.list_tasks(str(repo))
+        assert events == ["spawn"] and f'wait_for_worker(agent_id="{t.agent_id}")' in out, out
+        return
+    monkeypatch.setattr(tasks, "start_in_background", helpers.append, raising=False)
+    monkeypatch.setattr(spawn, "room", lambda: 0.0)   # the machine at 0% idle
+    if start == "after a dependency":
+        out = call(deps=[worker])
+        events.append("reply")
+        [t] = [x for x in db.list_tasks(str(repo)) if x.task_text == "do A"]
+        assert t.id in out and events == ["reply"] and helpers == [], out
+        monkeypatch.setattr(spawn, "room", lambda: 4.0)
+        assert not tasks.start_when_room(db, t.id)   # still waits for it to merge
+        assert events[:2] == ["reply", "identity"] and "spawn" not in events
+        return
+    out = call()
+    events.append("reply")
+    again = call()   # the same task, before its start has run
+    other = call("do B")   # another task on the same files, before either start has run
+    [t] = [x for x in db.list_tasks(str(repo)) if x.task_text == "do A"]
+    assert t.id in out and t.id in again and events == ["reply"] and helpers == [t.id], (out, again)
+    assert other.startswith("Not started") and f"queued task {t.id}" in other, other
+    monkeypatch.setattr(spawn, "room", lambda: 4.0)
+    if start == "behind a worker":
+        assert not tasks.start_when_room(db, t.id)
+        assert events == ["reply", "git"] and db.get_task(t.id).state == "cancelled"
+        return
+    if start == "capped":
+        c = call("do C", ("c.py",))   # accepted: no worker is at work yet
+        [t_c] = [x for x in db.list_tasks(str(repo)) if x.task_text == "do C"]
+        assert t_c.id in c and helpers == [t.id, t_c.id], c
+    assert tasks.start_when_room(db, t.id)   # what the detached helper runs once there's room
+    assert events == ["reply", "spawn"] and db.get_task(t.id).agent_id
+    if start == "capped":
+        assert db.get_task(t_c.id).state == "cancelled" and "at most 1" in tasks.cancel_reason(db, t_c.id)
+        assert policy.running_workers(db, str(repo)) == 1
+
+
+@pytest.mark.parametrize("when", ["while it works", "while its reply is written", "client gone", "written"])
+def test_cancelled_assign_never_launches(db, repo, boss, monkeypatch, when):
+    """The client gave up on an assign (TaskStop, a disconnect) before brindle
+    answered it, through the real stdio transport and MCP dispatcher: what it
+    queued is cancelled, and no worker ever starts for it later. Past the
+    handler, the response waits behind the client's full stdout pipe (a
+    slow reader); only a response actually written releases the task."""
+    import anyio
+
+    from brindle import autopilot, mcp_stdio, upgrade
+    from test_mcp_stale_engine import INIT, _answers, _send
+
+    monkeypatch.setattr(upgrade, "preload", lambda: None)
+    monkeypatch.setattr(upgrade, "install", SimpleNamespace(changed=lambda: False))
+    monkeypatch.delenv(mcp_stdio.HANDOVER_ENV, raising=False)
+    inside, go, cancelled, registered, settled = (threading.Event() for _ in range(5))
+    launched, seen = [], []
+    real = (autopilot.choose_profile, tasks.answered, tasks.drop_unanswered, mcp_server._Request.cancel,
+            mcp_stdio.after_reply)
+
+    def held(*a, **k):
+        inside.set()
+        go.wait()
+        return real[0](*a, **k)
+
+    monkeypatch.setattr(autopilot, "choose_profile", held)
+    monkeypatch.setattr(tasks, "answered", lambda *a: (real[1](*a), settled.set()))
+    monkeypatch.setattr(tasks, "drop_unanswered", lambda *a: (real[2](*a), settled.set()))
+    monkeypatch.setattr(mcp_server._Request, "cancel", lambda self: (real[3](self), cancelled.set()))
+    monkeypatch.setattr(mcp_stdio, "after_reply", lambda rid, settle: registered.set() or real[4](rid, settle))
+    monkeypatch.setattr(agents, "spawn", lambda *a, **k: launched.append("spawn") or fake_spawn(*a, **k))
+    monkeypatch.setattr(tasks, "start_in_background", launched.append)
+    cancel = {"method": "notifications/cancelled", "params": {"requestId": 1}}
+    call = {"id": 1, "method": "tools/call",
+            "params": {"name": "assign", "arguments": {"agent_profile": "developer", "task": "do A"}}}
+
+    def fill(fd: int) -> int:   # the client's stdout pipe, full: it isn't reading
+        os.set_blocking(fd, False)
+        filled = 0
+        for size in (65536, 4096, 512, 1):
+            while True:
+                try:
+                    filled += os.write(fd, b" " * size)
+                except BlockingIOError:
+                    break
+        os.set_blocking(fd, True)
+        return filled
+
+    def slow_client(from_client: int, from_server: int, filled: int) -> None:
+        registered.wait()   # the handler is done; its response waits for room in the pipe
+        seen.append(DB().list_tasks(str(repo))[0].state)   # this thread's own connection
+        if when == "while its reply is written":
+            _send(from_client, cancel)
+        elif when == "client gone":
+            os.close(from_client)
+        if when != "written":
+            settled.wait(30)   # bounds a server whose blocked write never reads the cancel
+        while filled:   # read what filled the pipe: now there's room for the response
+            filled -= len(os.read(from_server, filled))
+
+    async def client():
+        to_server, from_client = os.pipe()
+        from_server, to_client = os.pipe()
+        conn = mcp_stdio.Connection(to_server, to_client, wants_reload=lambda reloaded: False,
+                                    replace=lambda: False)
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(conn.serve, mcp_server._run_server)
+            _send(from_client, INIT, {"method": "notifications/initialized"})
+            await _answers(from_server, 0)
+            if when == "while it works":
+                _send(from_client, call)
+                await anyio.to_thread.run_sync(inside.wait)
+                _send(from_client, cancel)
+                await anyio.to_thread.run_sync(cancelled.wait)
+                go.set()
+            else:
+                go.set()
+                filled = fill(to_client)
+                _send(from_client, call)
+                await anyio.to_thread.run_sync(slow_client, from_client, from_server, filled)
+                assert seen == [tasks.UNANSWERED]   # nothing released while the reply is unwritten
+            await anyio.to_thread.run_sync(settled.wait)
+            if when != "client gone":
+                os.close(from_client)
+
+    anyio.run(client)
+    [t] = db.list_tasks(str(repo))
+    if when == "written":
+        assert t.state == "pending" and launched == [t.id]
+        return
+    tasks.sweep(db)
+    assert db.get_task(t.id).state == "cancelled" and launched == []
 
 
 # -- waiting for room ------------------------------------------------------------

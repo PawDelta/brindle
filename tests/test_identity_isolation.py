@@ -166,7 +166,8 @@ def test_assign_with_depends_on_a_locked_branch_says_why(db, repo, ws, who, monk
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     who.ident = OTHER
     out = asyncio.run(mcp_server.assign(task="build on it", depends_on=["w1"]))
-    assert out == LOCKED
+    # Its start (as the reply goes) checks who holds the worktree, never the reply itself.
+    assert out == f"Not started: {LOCKED}"
 
 
 # -- what the views show -----------------------------------------------------------------

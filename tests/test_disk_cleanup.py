@@ -247,34 +247,104 @@ def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, monkeypatch):
     assert sh("git branch --list stalled", repo).strip() == ""
 
 
-@pytest.mark.parametrize("failure", ["proc-unreadable", "lsof-partial"])
-def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeypatch, failure):
+def _status(uids: tuple[int, ...] | None = None, gids: tuple[int, ...] | None = None,
+            cap_prm: int = 0) -> str:
+    """A /proc/<pid>/status: real, effective, saved and filesystem ids
+    (this user's unless given) and capabilities."""
+    uids = uids or (os.getuid(),) * 4
+    gids = gids or (os.getgid(),) * 4
+    return (f"Name:\trunsvc\nState:\tR (running)\nPPid:\t1\nUid:\t{chr(9).join(map(str, uids))}\n"
+            f"Gid:\t{chr(9).join(map(str, gids))}\nCapPrm:\t{cap_prm:016x}\nCapEff:\t{cap_prm:016x}\n"
+            "NoNewPrivs:\t0\nSeccomp:\t0\n")
+
+
+RUNNER = (2100, 2101, 2102, 2103, 2104)   # pytest and its xdist workers, in the checkout
+UID, GID = os.getuid(), os.getgid()
+IDS = f"Uid {UID} {UID} {UID} {UID}, Gid {GID} {GID} {GID} {GID}"
+STARTED = f"started {123456 / os.sysconf('SC_CLK_TCK'):.2f}s after boot, argv[0] Runner.Listener"
+
+
+@pytest.mark.parametrize("scan, refused, kept, logged", [
+    ("proc-unreadable", None, True, "nor can its ids (PermissionError), so it counts as in use: pid 200, "
+     "Name ?, State ?, PPid ? (?)"),
+    ("lsof-partial", None, True, None),
+    # GitHub's ubuntu runner: a service whose /proc entry shows this user as
+    # its owner (its effective uid), but whose folder the kernel won't show
+    # this user because it runs with another's ids. Not this user's, any
+    # more than a root process is.
+    ("runner", _status(uids=(0, UID, 0, UID)), False,
+     "runs with another's ids (uid real 0, uid saved 0), so it isn't this user's: pid 1354, Name runsvc"),
+    ("runner", _status(gids=(GID + 1,) * 4), False,
+     f"runs with another's ids (gid real {GID + 1}, gid effective {GID + 1}"),
+    # Refused with this user's own ids (capabilities, non-dumpable, a
+    # security module): can't be told, so in use; logged to tell what it is.
+    ("runner", _status(cap_prm=1 << 10), True, "CapEff 0000000000000400"),
+    ("runner", _status(), True, "a process with this user's ids has a folder that can't be read, so it "
+     "counts as in use: pid 1354, Name runsvc, State R (running), PPid 1 (systemd), "
+     f"{IDS}, CapEff 0000000000000000, NoNewPrivs 0, Seccomp 0, {STARTED}"),
+    ("runner", None, True, f"nor can its ids (FileNotFoundError), so it counts as in use: pid 1354, "
+     f"Name ?, State ?, PPid 1 (systemd), Uid ?, Gid ?, CapEff ?, NoNewPrivs ?, Seccomp ?, {STARTED}"),
+    # Whatever the service, this user's own process in the worktree keeps it.
+    ("runner+shell", _status(uids=(0, UID, 0, UID)), True, "uid real 0, uid saved 0"),
+], ids=["proc-unreadable", "lsof-partial", "runner-root-ids", "runner-other-group", "runner-capabilities",
+        "runner-own-ids", "runner-no-status", "runner-and-a-shell-in-the-worktree"])
+def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeypatch, caplog,
+                                                     scan, refused, kept, logged):
     """One live process whose folder can't be read (or an lsof that failed
-    part way) must not read as no process at all."""
+    part way) must not read as no process at all, unless the process isn't
+    this user's: it runs with another's uid or gid."""
     wt = _worktree(repo, "idea", days_old=30)
     fake = tmp_path / "proc"
     (fake / "self").mkdir(parents=True)
     monkeypatch.setattr(procs, "PROC", fake)
-    if failure == "proc-unreadable":
-        os.symlink("/", fake / "self" / "cwd")
-        for pid, cwd in (("100", "/"), ("200", str(wt))):
-            (fake / pid).mkdir()
-            os.symlink(cwd, fake / pid / "cwd")
-        (fake / "300").mkdir()               # exited while the scan ran: no cwd left
-        (fake / "200").chmod(0)              # live, but its folder can't be read
-    else:
+    if scan == "lsof-partial":
         listing = subprocess.CompletedProcess([], 1, stdout=f"p{os.getpid()}\nfcwd\nn/\np200\n",
                                               stderr="lsof: can't stat a process")
         monkeypatch.setattr(spawn, "read", lambda *a, **kw: listing)
+    else:
+        os.symlink(str(repo), fake / "self" / "cwd")
+        (fake / "self" / "status").write_text(_status())
+        rows = {100: "/", 200: str(wt)} if scan == "proc-unreadable" else (
+            {100: "/", **{pid: str(repo) for pid in RUNNER}, 1354: str(wt)}
+            | ({2200: str(wt / "src")} if scan == "runner+shell" else {}))
+        for pid, cwd in rows.items():
+            (fake / str(pid)).mkdir()
+            os.symlink(cwd, fake / str(pid) / "cwd")
+            (fake / str(pid) / "cmdline").write_text("/opt/runner/bin/Runner.Listener\0--never-logged\0")
+            (fake / str(pid) / "environ").write_text("MARKER=never-logged\0")
+            if scan != "proc-unreadable" and (pid != 1354 or refused):
+                (fake / str(pid) / "status").write_text(refused if pid == 1354 else _status())
+        if scan != "proc-unreadable":
+            # its stat: parent pid 1, started 123456 clock ticks after boot (field 22)
+            (fake / "1354" / "stat").write_text(f"1354 (run svc) R 1 {'0 ' * 17}123456 0 0\n")
+            (fake / "1").mkdir()                 # its parent, with no folder of its own to read
+            (fake / "1" / "status").write_text("Name:\tsystemd\n")
+        (fake / "300").mkdir()               # exited while the scan ran: no cwd left
+        if scan == "proc-unreadable":
+            (fake / "200").chmod(0)          # live, but its folder can't be read
+        real_readlink = os.readlink
+
+        def readlink(path, *a, **kw):   # the kernel refusing /proc/1354/cwd, its status still readable
+            if Path(path) == fake / "1354" / "cwd":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_readlink(path, *a, **kw)
+
+        monkeypatch.setattr(os, "readlink", readlink)
     try:
-        with pytest.raises(OSError):
-            procs.cwds()
+        if not kept:
+            assert set(procs.cwds()) == {100, *RUNNER}
+        elif scan != "runner+shell":
+            with pytest.raises(OSError):
+                procs.cwds()
         out = disk.clean(db, path=str(wt))
     finally:
         if (fake / "200").exists():
             (fake / "200").chmod(0o755)
 
-    assert out["removed"] == [] and wt.is_dir()
+    assert (out["removed"] == []) == kept and wt.is_dir() == kept
+    said = [r.getMessage() for r in caplog.records if r.name == "brindle.procs"]
+    assert (logged is None and said == []) or any(logged in m for m in said), said
+    assert "never-logged" not in caplog.text
 
 
 def test_retention_caps_backups_archive_and_logs(brindle_home):

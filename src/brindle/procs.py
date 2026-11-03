@@ -24,6 +24,7 @@ its ancestors are never included.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -38,6 +39,7 @@ from brindle import spawn
 # Seconds ``ps`` may take, waiting for room included (see brindle.spawn).
 PS_LIMIT = 30.0
 PROC = Path("/proc")   # Linux's process table; absent on macOS
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -284,12 +286,82 @@ def all_agent_ids(procs: dict[int, Proc] | None = None) -> set[str]:
     return ids
 
 
+def _status(d: Path) -> dict[str, list[str]]:
+    """``d/status`` (``/proc/<pid>/status``, readable by anyone) by field."""
+    out = {}
+    for line in (d / "status").read_text().splitlines():
+        key, _, value = line.partition(":")
+        out[key] = value.split()
+    return out
+
+
+def _not_this_users(d: Path) -> bool:
+    """Whether the process at ``d`` (``/proc/<pid>``), whose folder this user
+    was refused, runs with another's ids: a uid or gid (real, effective,
+    saved or filesystem) other than this user's. That is one thing the kernel
+    refuses it for (ptrace_may_access), though ``d`` shows this user as its
+    owner when only its effective uid is this user's: a system service like
+    that is no more this user's than a root process, which ``cwds`` leaves
+    out too. False (so: can't be told) when its ids are all this user's
+    (capabilities, say, non-dumpable, or a security module refused it) or
+    can't be read. Either way it logs one warning saying what the process is
+    (``_describe``)."""
+    try:
+        status = _status(d)
+        uids, gids = [int(u) for u in status["Uid"]], [int(g) for g in status["Gid"]]
+    except (OSError, KeyError, ValueError) as e:
+        log.warning("brindle: a process's folder can't be read and nor can its ids (%s), so it counts "
+                    "as in use: %s", type(e).__name__, _describe(d, {}))
+        return False
+    slots = ("real", "effective", "saved", "filesystem")
+    differ = [f"{kind} {slot} {n}" for kind, ids, mine in (("uid", uids, os.getuid()), ("gid", gids, os.getgid()))
+              for slot, n in zip(slots, ids) if n != mine]
+    if differ:
+        log.warning("brindle: a process's folder can't be read, but it runs with another's ids (%s), so it "
+                    "isn't this user's: %s", ", ".join(differ), _describe(d, status))
+        return True
+    log.warning("brindle: a process with this user's ids has a folder that can't be read, so it counts "
+                "as in use: %s", _describe(d, status))
+    return False
+
+
+def _describe(d: Path, status: dict[str, list[str]]) -> str:
+    """What the process at ``d`` is, for a log: its pid, Name, State, parent
+    (pid and Name), ids, CapEff, NoNewPrivs, Seccomp, start (seconds since
+    boot) and the basename of argv[0]. Nothing else of its command line and
+    never its environment. Whatever can't be read shows as ``?``."""
+    def field(st: dict[str, list[str]], key: str) -> str:
+        return " ".join(st.get(key, [])) or "?"
+
+    ppid, start = field(status, "PPid"), "?"
+    try:
+        after = (d / "stat").read_text().rsplit(")", 1)[1].split()   # fields 3 on
+        ppid = after[1] if ppid == "?" else ppid
+        start = f"{int(after[19]) / os.sysconf('SC_CLK_TCK'):.2f}s"   # field 22, in clock ticks
+    except (OSError, IndexError, ValueError):
+        pass
+    try:
+        parent = field(_status(PROC / ppid), "Name") if ppid.isdigit() else "?"
+    except OSError:
+        parent = "?"
+    try:
+        argv0 = (d / "cmdline").read_bytes().split(b"\0", 1)[0].decode(errors="replace")
+        argv0 = os.path.basename(argv0) or "?"
+    except OSError:
+        argv0 = "?"
+    return (f"pid {d.name}, Name {field(status, 'Name')}, State {field(status, 'State')}, PPid {ppid} "
+            f"({parent}), Uid {field(status, 'Uid')}, Gid {field(status, 'Gid')}, "
+            f"CapEff {field(status, 'CapEff')}, NoNewPrivs {field(status, 'NoNewPrivs')}, "
+            f"Seccomp {field(status, 'Seccomp')}, started {start} after boot, argv[0] {argv0}")
+
+
 def cwds() -> dict[int, str]:
     """The current folder of every process of this user, whatever started it
     (a detached dev server, a shell on any tmux server or terminal). Raises
     OSError when it can't be told: a caller deciding whether something is in
     use must then assume it is: one process of this user it can't read
-    (not one that exited during the scan) or an lsof that failed part way."""
+    (not one that exited during the scan, nor one running with another's
+    ids: see ``_not_this_users``) or an lsof that failed part way."""
     proc = PROC
     if (proc / "self" / "cwd").exists():
         out: dict[int, str] = {}
@@ -300,6 +372,9 @@ def cwds() -> dict[int, str]:
                         out[int(d.name)] = os.readlink(d / "cwd")
                 except (FileNotFoundError, ProcessLookupError):
                     continue   # it exited meanwhile (or is a zombie): no folder to hold
+                except PermissionError:
+                    if not _not_this_users(d):
+                        raise
         return out
     lsof = shutil.which("lsof") or "/usr/sbin/lsof"
     try:
