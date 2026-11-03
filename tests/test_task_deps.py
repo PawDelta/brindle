@@ -4,11 +4,13 @@ workspace is removed unmerged instead); list_tasks(full=true), requeue, and
 assign/handoff's dry_run."""
 
 import asyncio
+import os
 import re
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -614,11 +616,16 @@ def test_requeue_with_a_cancelled_dependency_asks_for_new_ones(db, repo, boss):
 # -- replying before the start ---------------------------------------------------
 
 
-def test_assign_returns_before_spawn(db, repo, boss, monkeypatch):
+@pytest.mark.parametrize("tool, start", [("assign", "detached"), ("handoff", "detached"), ("handoff", "at once")])
+def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
     """Under load every git and tmux step of a start waits for room, and
-    assigns ran past the client's 120 s (2026-11-03): assign replies with
-    its task id first, and admission, the worktree and the launch happen in
-    the detached start afterwards."""
+    assigns ran past the client's 120 s (2026-11-03): assign (and handoff)
+    reply with the task id first, and admission, the worktree and the launch
+    happen in the detached start afterwards. Repeated before that start
+    runs, it queues nothing more; a start that beat the reply is named in
+    it, never waited for."""
+    from brindle import spawn
+
     events, helpers = [], []
     real_delegate = agents.delegate
 
@@ -626,49 +633,106 @@ def test_assign_returns_before_spawn(db, repo, boss, monkeypatch):
         events.append("spawn")
         return real_delegate(*a, **k)
 
-    from brindle import spawn
+    def call() -> str:
+        return asyncio.run(getattr(mcp_server, tool)("developer", "do A"))
 
     monkeypatch.setattr(agents, "delegate", slow_delegate)
+    monkeypatch.setattr(agents, "wait_for_result", lambda *a, **k: pytest.fail("the reply waited for the worker"))
+    if start == "at once":   # conftest's start runs as the reply is released
+        out = call()
+        [t] = db.list_tasks(str(repo))
+        assert events == ["spawn"] and f'wait_for_worker(agent_id="{t.agent_id}")' in out, out
+        return
     monkeypatch.setattr(tasks, "start_in_background", helpers.append, raising=False)
     monkeypatch.setattr(spawn, "room", lambda: 0.0)   # the machine at 0% idle
-    out = asyncio.run(mcp_server.assign("developer", "do A"))
+    out = call()
     events.append("reply")
+    again = call()   # the same task, before its start has run
     [t] = db.list_tasks(str(repo))
-    assert t.id in out and events == ["reply"] and helpers == [t.id], out
+    assert t.id in out and t.id in again and events == ["reply"] and helpers == [t.id], (out, again)
     monkeypatch.setattr(spawn, "room", lambda: 4.0)
     assert tasks.start_when_room(db, t.id)   # what the detached helper runs once there's room
     assert events == ["reply", "spawn"] and db.get_task(t.id).agent_id
 
 
-def test_cancelled_assign_never_launches(db, repo, boss, monkeypatch):
-    """The client gave up on an assign (TaskStop, a disconnect) while brindle
-    was still working on it: what it queued is cancelled, and no worker ever
-    starts for it later."""
-    from brindle import autopilot
+@pytest.mark.parametrize("when", ["while it works", "while its reply is written", "client gone", "written"])
+def test_cancelled_assign_never_launches(db, repo, boss, monkeypatch, when):
+    """The client gave up on an assign (TaskStop, a disconnect) before brindle
+    answered it, through the real stdio transport and MCP dispatcher: what it
+    queued is cancelled, and no worker ever starts for it later. Only a
+    response actually written releases the task to its start."""
+    import anyio
 
-    inside, go, launched = threading.Event(), threading.Event(), []
-    real_choose = autopilot.choose_profile
+    from brindle import autopilot, mcp_stdio, upgrade
+    from test_mcp_stale_engine import INIT, _send
+
+    monkeypatch.setattr(upgrade, "preload", lambda: None)
+    monkeypatch.setattr(upgrade, "install", SimpleNamespace(changed=lambda: False))
+    monkeypatch.delenv(mcp_stdio.HANDOVER_ENV, raising=False)
+    inside, go, cancelled, settled = (threading.Event() for _ in range(4))
+    launched, gates = [], {}
+    real = autopilot.choose_profile, tasks.answered, tasks.drop_unanswered, mcp_server._Request.cancel
+    real_write = mcp_stdio.Connection._write
 
     def held(*a, **k):
         inside.set()
         go.wait()
-        return real_choose(*a, **k)
+        return real[0](*a, **k)
+
+    async def gated(self, data):   # the response write, blocked until the test lets it through
+        if b'"id":1,' in data:
+            gates["writing"].set()
+            await gates["open"].wait()
+        await real_write(self, data)
 
     monkeypatch.setattr(autopilot, "choose_profile", held)
+    monkeypatch.setattr(tasks, "answered", lambda *a: (real[1](*a), settled.set()))
+    monkeypatch.setattr(tasks, "drop_unanswered", lambda *a: (real[2](*a), settled.set()))
+    monkeypatch.setattr(mcp_server._Request, "cancel", lambda self: (real[3](self), cancelled.set()))
+    monkeypatch.setattr(mcp_stdio.Connection, "_write", gated)
     monkeypatch.setattr(agents, "spawn", lambda *a, **k: launched.append("spawn") or fake_spawn(*a, **k))
-    monkeypatch.setattr(tasks, "start_in_background", launched.append, raising=False)
+    monkeypatch.setattr(tasks, "start_in_background", launched.append)
+    cancel = {"method": "notifications/cancelled", "params": {"requestId": 1}}
 
-    async def cancelled_mid_call():
-        call = asyncio.ensure_future(mcp_server.assign("developer", "do A"))
-        await asyncio.to_thread(inside.wait)
-        call.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await call
-        go.set()   # asyncio.run waits for the request's thread to finish
+    async def client():
+        gates.update(writing=anyio.Event(), open=anyio.Event())
+        to_server, from_client = os.pipe()
+        _from_server, to_client = os.pipe()
+        conn = mcp_stdio.Connection(to_server, to_client, wants_reload=lambda reloaded: False,
+                                    replace=lambda: False)
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(conn.serve, mcp_server._run_server)
+            _send(from_client, INIT, {"method": "notifications/initialized"},
+                  {"id": 1, "method": "tools/call",
+                   "params": {"name": "assign", "arguments": {"agent_profile": "developer", "task": "do A"}}})
+            await anyio.to_thread.run_sync(inside.wait)
+            if when == "while it works":
+                _send(from_client, cancel)
+                await anyio.to_thread.run_sync(cancelled.wait)
+                go.set()
+            else:
+                go.set()
+                await gates["writing"].wait()
+                [t] = db.list_tasks(str(repo))
+                assert t.state == tasks.UNANSWERED   # nothing released while the reply is unwritten
+                if when == "while its reply is written":
+                    _send(from_client, cancel)
+                elif when == "client gone":
+                    os.close(from_client)
+                if when != "written":
+                    await anyio.to_thread.run_sync(settled.wait)
+                gates["open"].set()
+            await anyio.to_thread.run_sync(settled.wait)
+            if when != "client gone":
+                os.close(from_client)
 
-    asyncio.run(cancelled_mid_call())
+    anyio.run(client)
+    [t] = db.list_tasks(str(repo))
+    if when == "written":
+        assert t.state == "pending" and launched == [t.id]
+        return
     tasks.sweep(db)
-    assert launched == [] and [t.state for t in db.list_tasks(str(repo))] == ["cancelled"]
+    assert db.get_task(t.id).state == "cancelled" and launched == []
 
 
 # -- waiting for room ------------------------------------------------------------

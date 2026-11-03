@@ -42,6 +42,37 @@ _CHUNK = 65536
 _NEVER = object()
 
 
+# -- replies a tool waits on --------------------------------------------------
+
+# Request id (as a string) -> what to call once its response is written, or
+# once it never will be (``after_reply``).
+_after: dict[str, Callable[[bool], None]] = {}
+_serving = 0   # Connections serving in this process
+
+
+def after_reply(request_id, settle: Callable[[bool], None]) -> bool:
+    """Have ``settle(True)`` called once the response to ``request_id`` has
+    been written to the client, or ``settle(False)`` once it never will be:
+    the client cancelled the request, or went away (EOF, a failed write)
+    first. Called on the event loop: ``settle`` must be quick. False, with
+    nothing registered, when no Connection serves this process."""
+    if not _serving:
+        return False
+    _after[str(request_id)] = settle
+    return True
+
+
+def _settle(request_id, written: bool) -> None:
+    settle = _after.pop(str(request_id), None)
+    if settle is not None:
+        settle(written)
+
+
+def _settle_all() -> None:
+    for request_id in list(_after):
+        _settle(request_id, False)
+
+
 @dataclass
 class Handover:
     """What the new process needs of the connection: the client's
@@ -113,16 +144,23 @@ class Connection:
     async def serve(self, run: Callable[..., Awaitable[None]]) -> None:
         """Serve until the client closes stdin, or this process is replaced.
         ``run(read_stream, write_stream)`` drives the MCP server."""
+        global _serving
         read_send, read_recv = anyio.create_memory_object_stream(0)
         write_send, write_recv = anyio.create_memory_object_stream(0)
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(self._write_all, write_recv)
-            tg.start_soon(run, read_recv, write_send)
-            async with read_send:
-                await self._replay(read_send)
-                await self._read_all(read_send)
-            if self.replaced:
-                tg.cancel_scope.cancel()
+        _serving += 1
+        try:
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(self._write_all, write_recv)
+                tg.start_soon(run, read_recv, write_send)
+                async with read_send:
+                    await self._replay(read_send)
+                    await self._read_all(read_send)
+                if self.replaced:
+                    tg.cancel_scope.cancel()
+        finally:
+            _serving -= 1
+            if not _serving:
+                _settle_all()   # whatever is still unwritten never will be
 
     # -- reading ---------------------------------------------------------------
 
@@ -158,7 +196,8 @@ class Connection:
             if line is None:
                 continue        # idle, or woken: look again
             if line == b"":
-                return          # the client closed stdin
+                _settle_all()   # the client closed stdin: no reply still to come reaches it
+                return
             message = _parse(line)
             if held is not None:
                 if _answers_old_work(message, self._in_flight):
@@ -224,9 +263,13 @@ class Connection:
             self._in_flight.add(message.id)
             self._idle = anyio.Event()
             # A request the client cancelled is never answered: it ends here.
-            metadata = ServerMessageMetadata(on_request_unanswered=lambda rid=message.id: self._settled(rid))
+            metadata = ServerMessageMetadata(on_request_unanswered=lambda rid=message.id: self._unanswered(rid))
         elif isinstance(message, types.JSONRPCNotification) and message.method == "notifications/initialized":
             self._initialized = True
+        elif isinstance(message, types.JSONRPCNotification) and message.method == "notifications/cancelled":
+            # Also after its handler returned, while the response still waits to
+            # be written: the client stops waiting for it either way.
+            _settle((message.params or {}).get("requestId"), False)
         await send.send(SessionMessage(message, metadata))
 
     # -- writing ---------------------------------------------------------------
@@ -239,10 +282,22 @@ class Connection:
                     message, types.JSONRPCResponse | types.JSONRPCError) else None
                 if answered != _INIT_ID:
                     data = (message.model_dump_json(by_alias=True, exclude_unset=True) + "\n").encode()
-                    while data:
-                        data = data[os.write(self.out_fd, data):]
+                    try:
+                        await self._write(data)
+                    except BaseException:
+                        _settle_all()   # the client is gone: nothing more reaches it
+                        raise
                 if answered is not None:
+                    _settle(answered, True)
                     await self._settled(answered)
+
+    async def _write(self, data: bytes) -> None:
+        while data:
+            data = data[os.write(self.out_fd, data):]
+
+    async def _unanswered(self, request_id) -> None:
+        _settle(request_id, False)
+        await self._settled(request_id)
 
     async def _settled(self, request_id) -> None:
         self._in_flight.discard(request_id)

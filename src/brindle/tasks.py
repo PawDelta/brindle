@@ -684,9 +684,12 @@ ROOM_POLL = 5.0   # seconds between the waiting helper's looks at the machine
 FORCED = "started despite load by supervisor"   # what a forced start's message says
 
 
-def room_wait(repo_root: str | None = None) -> str | None:
+def room_wait(repo_root: str | None = None, profile: str | None = None) -> str | None:
     """Why a worker should not start now (``spawn.no_room``), or None: the
-    machine has room, or the repo's ``wait_for_room`` is off."""
+    machine has room, or the repo's ``wait_for_room`` is off, or ``profile``
+    is a subagent profile (it starts no process of brindle's)."""
+    if profile is not None and repo_root is not None and not agents.launches_process(profile, repo_root):
+        return None
     return spawn.no_room(repo_root)
 
 
@@ -774,13 +777,15 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
     return text
 
 
-def room_duplicate(db: DB, caller_id: str | None, repo_root: str, task_text: str) -> Task | None:
-    """A task ``caller_id`` queued for room in ``repo_root`` with the same
-    brief, waiting or being started right now: a repeated assign of it must
-    never start a second worker, whatever the load is by then."""
-    return next((t for state in ("pending", "starting") for t in db.list_tasks(repo_root, state=state)
-                 if t.waiting is not None and t.caller_id == caller_id and t.task_text == task_text),
-                None)
+def room_duplicate(db: DB, caller_id: str | None, repo_root: str, task_text: str,
+                   branch: str | None = None) -> Task | None:
+    """A task ``caller_id`` queued in ``repo_root`` with the same brief and
+    branch that hasn't started its worker yet (queued by a request still
+    replying, waiting for room or dependencies, starting in the background,
+    or being started right now): a repeated assign of it must never start a
+    second worker, whatever the load is by then."""
+    return next((t for state in (UNANSWERED, "pending", "starting") for t in db.list_tasks(repo_root, state=state)
+                 if t.caller_id == caller_id and t.task_text == task_text and t.branch == branch), None)
 
 
 def wait_for_room(db: DB, t: Task, why: str) -> None:
@@ -812,7 +817,7 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
         t = db.get_task(task_id)
         if t is None or t.state != "pending" or session_paused(db, t):
             return False
-        why = room_wait(t.repo_root)
+        why = room_wait(t.repo_root, t.profile)
         if why is None or _room_wait_overrun(t, why):
             # Unless a dependency added since holds it: merging that starts it.
             return _start_if_ready(db, t, "room on the machine", check_room=why is not None)
@@ -1057,7 +1062,7 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     except agents.AgentError as e:
         _cancel(db, t.id, str(e))
         return False
-    why = room_wait(t.repo_root) if check_room else None
+    why = room_wait(t.repo_root, t.profile) if check_room else None
     overrun = _room_wait_overrun(t, why) if why else None
     if why and overrun is None:
         wait_for_room(db, t, why)
@@ -1085,6 +1090,8 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
             else:   # just queued by assign/handoff, which replied with the task id
                 text = (f"Started worker {new_worker.id} ({new_worker.profile}) for task {t.id}"
                         + (f" in workspace {new_ws.id} on branch {new_ws.branch}." if new_ws else "."))
+            if not agents.runs_process(new_worker) and new_ws:   # the caller's own Agent tool runs it
+                text = f"Task {t.id} is ready.\n\n{agents.subagent_brief(new_worker, new_ws)}"
             for warning in _launch_warnings(new_worker, new_ws):
                 text += f"\nWarning: {warning}"
             agents.send_message(db, t.caller_id, text, sender_id=None)
