@@ -263,14 +263,18 @@ def start_demo(db: DB, params: dict, body: Body) -> Any:
 
     if airgap.enabled():
         raise ServiceError("airgap", "The demo runs hosted agents, and air-gap mode is on on this Mac.", 403)
-    provider = _get(body, "provider") or demo_provider()
-    # One start at a time: a second press never launches into the repo the first is starting in.
-    with _DEMO_LOCK:
+    # One start at a time: a second while one runs is refused, never a second repo and supervisor.
+    if not _DEMO_LOCK.acquire(blocking=False):
+        raise ServiceError("busy", "The demo is already starting.", 409)
+    try:
+        provider = _get(body, "provider") or demo_provider()
         root = demo_mod.held(db, provider) or demo_mod.create(provider=provider)
         blocked = session_blockers(db, str(root), provider)
         if blocked:
             return DemoBlocked(blocked.items, str(root))
         got = svc.start(db, str(root), provider=provider)
+    finally:
+        _DEMO_LOCK.release()
     if not isinstance(got, svc.Started):     # a repo no session ran in has none to open or choose
         return got
     return {**got.to_json(), "repo": got.workspace.repo_root, "notes": _notes(got.notes)}

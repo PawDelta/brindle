@@ -316,14 +316,9 @@ function FirstLaunch(props: AppProps) {
       (rows) => {
         if (!live) return;
         if (!onboarded(rows)) return setGate({ kind: "onboarding", providers: rows });
-        // A first launch on this Mac with a CLI signed in already: nothing to set up. The demo is still
-        // offered once to someone new to brindle, whose engine knows no repo yet.
+        // A first launch on this Mac with a CLI signed in already: nothing to set up, the demo still offered once.
         markOnboarded();
-        if (readDemoOffered()) return setGate({ kind: "app" });
-        client.repos().then(
-          (repos) => live && setGate(repos.length ? { kind: "app" } : { kind: "demo" }),
-          () => live && setGate({ kind: "app" }),
-        );
+        setGate(readDemoOffered() ? { kind: "app" } : { kind: "demo" });
       },
       (e: unknown) => {
         if (!live) return;

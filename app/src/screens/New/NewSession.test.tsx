@@ -250,7 +250,15 @@ describe("NewSession", () => {
     expect(daemon.demos).toEqual([]);
     fireEvent.click(within(card).getByRole("button", { name: "Agree" }));
     await waitFor(() => expect(within(card).getByRole("button", { name: "Start the demo" })).toHaveProperty("disabled", false));
-    fireEvent.click(within(card).getByRole("button", { name: "Start the demo" }));
+    // While that start is under way, every way to start the demo waits: a double click sends one request.
+    daemon.holdLaunch = true;
+    const launch = within(card).getByRole("button", { name: "Start the demo" });
+    fireEvent.click(launch);
+    fireEvent.click(launch);
+    await waitFor(() => expect(launch).toHaveProperty("disabled", true));
+    expect(screen.getByRole("button", { name: "Starting the demo…" })).toHaveProperty("disabled", true);
+    await waitFor(() => expect(posts(daemon).filter((r) => r.path === "/demo")).toHaveLength(2));
+    daemon.finishLaunch();
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", "/home/u/.brindle/demo/textkit-1"));
     expect(posts(daemon).map((r) => r.path)).toEqual(["/demo", "/providers/claude/preflight/consent", "/demo"]);
     stop();

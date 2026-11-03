@@ -339,12 +339,23 @@ def demo_launches(db, monkeypatch):
     return launched
 
 
-@pytest.mark.parametrize("case,status", [("codex-only", 200), ("airgap", 403)])
+@pytest.mark.parametrize("case,status", [("codex-only", 200), ("overlapping", 200), ("airgap", 403)])
 def test_the_demo_runs_in_a_practice_repo_on_the_cli_signed_in(db, world, brindle_home, demo_launches, monkeypatch,
                                                                case, status):
     if case == "airgap":
         monkeypatch.setenv("BRINDLE_AIRGAP", "1")
+    second = []
+    if case == "overlapping":
+        # A second press arrives while the first is launching its supervisor: refused, nothing more made.
+        launch = agents.spawn
+
+        def spawn_while_another_arrives(*a, **k):
+            second.append(_send("POST", "/v1/demo"))
+            return launch(*a, **k)
+
+        monkeypatch.setattr(agents, "spawn", spawn_while_another_arrives)
     code, reply = _send("POST", "/v1/demo")
+    assert [c for c, _ in second] == ([409] if case == "overlapping" else [])
     made = sorted((brindle_home / "demo").glob("textkit-*"))
     assert code == status, reply
     if case == "airgap":
