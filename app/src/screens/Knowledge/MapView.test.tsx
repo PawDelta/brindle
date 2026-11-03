@@ -38,8 +38,11 @@ it("shows local knowledge on open when the server library is empty", async () =>
   expect(details()).toContain("3 documents");
   fireEvent.click(screen.getByRole("button", { name: /Indexed cache note/ }));
   fireEvent.click(await screen.findByRole("button", { name: "Open document" }));
-  expect(screen.getByTestId("local-doc").textContent).toContain("Cache note body text");
-  expect(screen.getByTestId("local-doc").textContent).toContain("Beyond any search hit");
+  // The same Reader that opens remote docs, fed the local doc's own text.
+  expect(screen.getByTestId("reader")).toBeTruthy();
+  expect(screen.getByTestId("doc-body").textContent).toContain("Cache note body text");
+  expect(screen.getByTestId("doc-body").textContent).toContain("Beyond any search hit");
+  expect(screen.queryByRole("button", { name: "Share" })).toBeNull();
   expect(openLocalPath).not.toHaveBeenCalled();
   rerender(<MapView client={client} repo="/empty" decisions={[]} sources={[]} />);
   await waitFor(() => expect(container.querySelector("[data-node]")).toBeNull());

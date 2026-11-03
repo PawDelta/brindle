@@ -4,7 +4,6 @@ import type { DecisionDTO } from "../../api/schema";
 import { alert, button, card, field, h2 } from "../../components/ui";
 import { Reader, scopeName } from "./DocsView";
 import { DecisionCard } from "./KnowledgeScreen";
-import { Markdown } from "./Markdown";
 import { docGraph } from "./graphLayout";
 import { joinLocal, MapGraph, type GraphNode } from "./MapGraph";
 
@@ -37,7 +36,7 @@ function MapArea({ client, repo, decisions, sources }: MapViewProps) {
   const [open, setOpen] = useState<GraphNode | null>(null);
   const [doc, setDoc] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ node: string; summary: string; text?: string } | null>(null);
-  const [local, setLocal] = useState<{ title: string; text: string } | null>(null);
+  const [local, setLocal] = useState<{ id: string; title: string; text: string } | null>(null);
   const selected = useRef<{ node: string; gen: number } | null>(null);
   const generation = useRef(0);
   useEffect(() => {
@@ -123,7 +122,7 @@ function MapArea({ client, repo, decisions, sources }: MapViewProps) {
   /* The sidebar was closed: forget the selection so an old fetch can't land and a re-click starts afresh. */
   const deselect = useCallback(() => { selected.current = null; generation.current++; setPreview(null); setOpen(null); }, []);
   const viewable = open?.kind === "doc" && !open.local_path ? open.doc_id ?? open.id : null;
-  const onDoc = viewable ? () => setDoc(viewable) : open?.kind === "doc" && preview?.node === open.id && preview.text ? () => setLocal({ title: open.title ?? open.id, text: preview.text! }) : undefined;
+  const onDoc = viewable ? () => setDoc(viewable) : open?.kind === "doc" && preview?.node === open.id && preview.text ? () => setLocal({ id: open.id, title: open.title ?? open.id, text: preview.text! }) : undefined;
   return <section className="flex flex-col gap-s2" aria-label="Map" data-testid="map">
     <header><h2 className={h2}>Knowledge map</h2><p className="text-sm text-ink-2">All knowledge in this library scope, including local decisions and imported folders in Mine. Code paths optionally narrow the map. Shared paths and topics connect records.</p></header>
     {!repo ? <p className="text-ink-3">Choose a repo to explore its knowledge.</p> : <form onSubmit={submit} className={`${card} flex flex-wrap items-end gap-s1 p-s2`}>
@@ -138,10 +137,7 @@ function MapArea({ client, repo, decisions, sources }: MapViewProps) {
       {shown.nodes.length ? <MapGraph {...graph} onOpen={select} onDeselect={deselect} preview={preview} onDoc={onDoc} /> : <p>No knowledge in this map yet.</p>}
     </>}
     {open?.kind === "decision" && <ul><DecisionCard d={open.decision} /></ul>}
-    {local && <article data-testid="local-doc" className={`${card} flex flex-col gap-s1 p-s2`}>
-      <header className="flex items-center justify-between"><h3 className="font-medium">{local.title}</h3><button type="button" className={button} onClick={() => setLocal(null)}>Back</button></header>
-      <Markdown text={local.text} />
-    </article>}
+    {local && <Reader key={local.id} client={client} repo={repo} id={local.id} local={{ title: local.title, markdown: local.text }} targets={scopes} titles={titles} onBack={() => setLocal(null)} onDeleted={() => setLocal(null)} onOpen={setDoc} onScopes={learn} />}
     {doc && <Reader key={doc} client={client} repo={repo} id={doc} targets={scopes} titles={titles} onBack={close} onDeleted={close} onOpen={setDoc} onScopes={learn} />}
   </section>;
 }

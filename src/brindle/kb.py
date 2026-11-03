@@ -26,6 +26,7 @@ from urllib.parse import unquote, urlsplit
 
 from brindle import knowledge, secrets
 from brindle.db import DB
+from brindle.redact import mask
 
 SOURCE_ADD = "source_add"
 SOURCE_REMOVE = "source_remove"
@@ -484,21 +485,32 @@ def search(db: DB, repo_key: str, query: str, sources: list[str] | None = None,
 
 
 def document(db: DB, repo_key: str, doc_id: int) -> dict | None:
-    """One indexed document of ``repo_key`` by id (the number in the map's
-    ``local:kb:<id>`` node): its title, source link and non-quarantined chunk
-    text in document order. None when it is not this repo's, is a tombstone or
-    has only quarantined chunks, the same visibility as search."""
+    """One indexed local document of ``repo_key`` by id (the number in the map's
+    ``local:kb:<id>`` node): its title and the source file's own text, secrets
+    masked. None when it is not this repo's, is a tombstone, has only
+    quarantined chunks (the same visibility as the map), or its file is not a
+    regular file inside its source's folder."""
     doc = db.conn.execute(
-        "SELECT d.id, d.title, d.url, d.updated_at FROM kb_docs d JOIN kb_sources s ON s.id = d.source_id"
-        " WHERE d.id = ? AND s.repo_key = ? AND NOT d.tombstoned", (doc_id, repo_key)).fetchone()
+        "SELECT d.id, d.title, d.url, d.updated_at, s.scope FROM kb_docs d JOIN kb_sources s ON s.id = d.source_id"
+        " WHERE d.id = ? AND s.repo_key = ? AND s.kind = 'folder' AND NOT d.tombstoned",
+        (doc_id, repo_key)).fetchone()
     if doc is None:
         return None
-    chunks = db.conn.execute("SELECT text FROM kb_chunks WHERE doc_id = ? AND quarantined IS NULL ORDER BY rowid",
-                             (doc_id,)).fetchall()
-    if not chunks:
+    if db.conn.execute("SELECT 1 FROM kb_chunks WHERE doc_id = ? AND quarantined IS NULL", (doc_id,)).fetchone() is None \
+            and db.conn.execute("SELECT 1 FROM kb_chunks WHERE doc_id = ?", (doc_id,)).fetchone() is not None:
+        return None
+    url = urlsplit(doc["url"] or "")
+    if url.scheme != "file" or url.netloc not in ("", "localhost"):
+        return None
+    path = Path(unquote(url.path))
+    try:
+        if path.is_symlink() or not path.resolve().is_relative_to(Path(doc["scope"]).resolve()) or not path.is_file():
+            return None
+        text = path.read_bytes().decode("utf-8-sig", errors="replace")
+    except OSError:
         return None
     return {"id": doc["id"], "title": doc["title"], "url": doc["url"], "updated_at": doc["updated_at"],
-            "text": "\n\n".join(c["text"] for c in chunks)}
+            "text": mask(text)}
 
 
 def _hit(r) -> dict:

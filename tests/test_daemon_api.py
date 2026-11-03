@@ -892,17 +892,22 @@ def test_knowledge_search_returns_hits_for_an_indexed_doc(seeded, db):
     assert _get("/v1/kb/search", AUTH, f"repo={seeded['repo']}")[1] == []
 
 
-def test_knowledge_doc_returns_the_whole_document_in_order(seeded, db):
-    body = "\n\n".join(f"## Part {i}\n\nline {i} sqlite" for i in range(12))
-    (Path(seeded["repo"]) / "NOTES.md").write_text(f"# Storage\n\n{body}\n")
+def test_knowledge_doc_reads_the_source_file(seeded, db, tmp_path):
+    secret = "AKIA" + "TESTKEYEXAMPLE00"
+    source = "# Storage\n\n## Engine\n\n### Pragmas\n\nuse sqlite\n\n## Backup\n\nnightly\n"
+    (Path(seeded["repo"]) / "NOTES.md").write_text(f"{source}\nkey {secret}\n")
     key = knowledge.repo_key(seeded["repo"])
     kb_mod.sync(db, kb_mod.sources(db, key)[0]["id"])
     node = next(n for n in kb_mod.map_documents(db, seeded["repo"], []) if n["title"] == "Storage")
     doc_id = node["id"].removeprefix("local:kb:")
     code, doc = _get(f"/v1/kb/docs/{doc_id}", AUTH, f"repo={seeded['repo']}")
-    assert code == 200 and [doc["text"].index(f"line {i}") for i in range(12)] == sorted(doc["text"].index(f"line {i}") for i in range(12))
+    assert code == 200 and doc["text"].startswith(source) and secret not in doc["text"] and kb_mod.REDACTED in doc["text"]
     assert _get(f"/v1/kb/docs/{doc_id}", AUTH, "repo=/elsewhere")[0] == 404
-    assert _get("/v1/kb/docs/nope", AUTH, f"repo={seeded['repo']}")[0] == 404
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside\n")
+    db.conn.execute("UPDATE kb_docs SET url = ? WHERE id = ?", (outside.as_uri(), doc_id))
+    db.conn.commit()
+    assert _get(f"/v1/kb/docs/{doc_id}", AUTH, f"repo={seeded['repo']}")[0] == 404
 
 
 def test_profiles_detail_lints_a_broken_profile(seeded):
