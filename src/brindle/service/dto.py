@@ -121,6 +121,7 @@ class AgentDTO(_DTO):
     provider: str
     status: str
     mode: str
+    dismissed_at: float | None = None
     # Set (instead of the rest) when another identity holds the session.
     locked: str | None = None
     tokens: str | None = None

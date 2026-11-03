@@ -211,6 +211,18 @@
         }
       },
       "properties": {
+        "dismissed_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dismissed At"
+        },
         "headless": {
           "anyOf": [
             {
@@ -6660,6 +6672,18 @@
       "$defs": {
         "AgentDTO": {
           "properties": {
+            "dismissed_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Dismissed At"
+            },
             "headless": {
               "anyOf": [
                 {
