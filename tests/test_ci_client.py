@@ -339,6 +339,19 @@ def test_oidc_fetch_parses_the_actions_answer(monkeypatch):
         ci_client._fetch_oidc("http://token.actions.test/x", "req")
 
 
+def test_plans_up_to_256kb_verify(plan, tmp_path):
+    big = plan(instructions="x" * (180 * 1024))
+    assert 200 * 1024 < len(big) <= 256 * 1024
+    assert len(ci_client.verify_plan(big, repo=REPO)["instructions"]) == 180 * 1024
+    server = Server(big)
+    assert ci_client.start(REPO, {"kind": "issue", "issue": 1}, tmp_path, client=server.client, token=CI_TOKEN,
+                           providers=[], say=lambda s: None) == 0
+    assert (tmp_path / "plan.jwt").read_text() == big
+    too_big = plan(instructions="x" * (200 * 1024))
+    with pytest.raises(CIError, match="malformed plan"):
+        ci_client.verify_plan(too_big, repo=REPO)
+
+
 def test_report_posts_job_status(plan, tmp_path):
     t = FakeTransport({"POST /ci/runs/run_1/job-status": [(200, {})]})
     oidc = ci_client.OIDC({"ACTIONS_ID_TOKEN_REQUEST_URL": "https://t.actions.test/x",
@@ -418,6 +431,21 @@ def test_run_reports_needs_user(plan, ci_repo, tmp_path):
     assert adapter.stopped == [adapter.launched[0][0]]
     ev = evidence_of(server.results[0])
     assert ev["final_state"] == "needs_user" and ev["question"] == "which database?"
+
+
+def test_run_fails_fast_when_the_supervisor_cant_start(plan, ci_repo, tmp_path):
+    base = head(ci_repo)
+    token = plan(base_sha=base)
+
+    class Stuck(FakeAdapter):
+        def launch(self, db, ws, instructions, profile):
+            raise ci_adapters.AdapterError("Claude Code stopped on its first-run theme picker, "
+                                           "which nobody in CI can answer")
+    server = Server(token)
+    with pytest.raises(CIError, match="claude supervisor couldn't start: .*theme picker") as e:
+        ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
+                      db=DB(), adapters={"claude": Stuck("claude")}, sleep=lambda s: None, say=lambda s: None)
+    assert e.value.code == "launch" and server.events == []
 
 
 def test_milestones_carry_the_plans_ids_and_may_lack_a_check(plan, ci_repo, tmp_path):
