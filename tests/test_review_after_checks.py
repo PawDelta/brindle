@@ -150,6 +150,29 @@ def test_the_run_gives_up_when_the_head_moves_during_the_checks(db, ws, boss, sp
     assert spawned == []
 
 
+def test_the_real_check_path_reuses_a_pass_and_a_new_failure_starts_no_reviewer(
+        db, ws, boss, spawned, monkeypatch):
+    """Only the command execution is faked: a commit that already passed is
+    not run again, and after HEAD moves the failing run starts no reviewer
+    and reaches the caller. (The cache is by tree, written by a real pass;
+    ``db.set_check`` is a per-workspace record that ``run_checked`` never reads.)"""
+    ran, results = [], [(True, "1 passed")]
+    monkeypatch.setattr(gates, "_run_queued",
+                        lambda db_, ws_, cmd, env, timeout, cancel=None: ran.append(cmd) or results[0])
+    cfg = RepoConfig(checks=["suite"])
+
+    assert agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg) is not None
+    assert agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg) is not None
+    assert ran == ["suite"] and len(spawned) == 2   # the second run reused the pass
+
+    commit(ws, "more.py")
+    results[0] = (False, "1 failed\nexit code 1")
+    assert agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg) is None
+    assert ran == ["suite", "suite"] and len(spawned) == 2
+    [msg] = inbox(db, "boss")
+    assert "checks failed" in msg and "1 failed" in msg
+
+
 def test_results_for_a_commit_the_branch_has_left_start_no_reviewer(db, ws, boss, spawned, monkeypatch):
     def finishes_late(db_, ws_, cfg, cancel=None):
         commit(ws, "more.py")   # moved after the last check ended
