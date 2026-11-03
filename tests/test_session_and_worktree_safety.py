@@ -91,6 +91,8 @@ def test_a_wiped_worktree_is_repaired_in_the_same_folder(db, repo, ended, damage
     assert (Path(ws.path) / ".git").exists() and (Path(ws.path) / "app.py").exists()
     if damage is not shutil.rmtree:
         assert Path(ws.path).stat().st_ino == inode and ended == []
+    else:
+        assert ended == [ws.tmux_session]   # a folder added afresh ends the session that sat in the old one
 
 
 def test_a_wiped_worktree_something_lives_in_is_never_replaced(db, repo, ended, monkeypatch):
