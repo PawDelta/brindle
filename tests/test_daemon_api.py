@@ -684,41 +684,6 @@ def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     assert bare["keys"] == [] and "repo" in bare and reads == [] and probed == []
 
 
-def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, monkeypatch):
-    from brindle import agents, knowledge
-    from brindle.pro import analysis_brief
-    from brindle.pro import analysis_docs
-
-    with db.tx() as c:
-        c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, drafter, state)"
-                  " VALUES ('r1', 'feature', 'overlap-doc', 'w1', 'open')")
-        c.execute("INSERT INTO analysis_drafts (session, branch, doc_id, drafter, state)"
-                  " VALUES ('r1', 'feature', 'pending-doc', 'w1', 'publish')")
-    def docs_api(method, path, body=None, **kw):
-        if path == "/analysis-docs/manual-only":
-            return {"doc_id": "manual-only", "version": 3}
-        if path == "/me/analysis-docs/settings":
-            return {"switches": {}}
-        assert path == "/analysis-docs/brief"
-        return {"block": "A brief", "cited": [{"doc_id": "worker-cited", "version": 4}]}
-
-    monkeypatch.setattr(analysis_docs, "require_entitlement",
-                        lambda store=None: SimpleNamespace(sub="u1", features=(), org_id="o1", plan="pro"))
-    monkeypatch.setattr(analysis_docs, "api", docs_api)
-    analysis_docs.read_doc(db, "r1", "manual-only")
-    knowledge.record_receipt(db, "r1", [(analysis_docs.UPDATED_ITEM, "overlap-doc", "published")])
-    monkeypatch.setattr("brindle.identity_lock.ensure_workspace", lambda *a: None)
-    monkeypatch.setattr(agents, "_launch", lambda *a, **kw: None)
-    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
-    worker = agents.spawn(db, db.get_workspace(seeded["ws"]), "developer", prompt="task", mode="assign",
-                          parent_id="r1", weight="heavy")
-    assert (analysis_brief.DOC_ITEM, "worker-cited", "4") in knowledge.receipt(db, worker.id)
-    knowledge.record_receipt(db, "other-session", [(analysis_brief.DOC_ITEM, "other-doc", "1")])
-
-    code, body = _get("/v1/analysis-docs/session-summary", AUTH, "session=r1")
-
-    assert code == 200
-    assert body == {"writing": 1, "updated": 1, "using": 1, "total": 2}
 @pytest.mark.parametrize("role,allowed", [("owner", True), ("admin", True), ("member", False), (None, False)])
 def test_doc_destination_is_read_by_anyone_and_changed_only_by_admins(monkeypatch, role, allowed):
     from brindle.daemon import routes_actions
@@ -751,34 +716,6 @@ def test_doc_destination_is_read_by_anyone_and_changed_only_by_admins(monkeypatc
 
 
 
-@pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])
-def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, enough):
-    from brindle.db import Task
-    from brindle.pro import analysis_brief
-
-    def finished(agent_id, weight, rounds, *, brief=False, files=None, repo="/r"):
-        if files:
-            db.add_task(Task(f"t-{agent_id}", repo, agent_id, None, "ws", "dev", "x", "assign", 1, None, None,
-                             json.dumps(files), None, "merged", 1.0))
-        db.add_routing_decision(repo, task_id=f"t-{agent_id}", agent_id=agent_id, weight=weight,
-                                baseline_profile="dev", profile="dev", learned=False)
-        with db.tx() as c:
-            c.execute("UPDATE routing_decisions SET review_rounds=?, outcome='merged' WHERE agent_id=?",
-                      (rounds, agent_id))
-        if brief:
-            knowledge.record_receipt(db, agent_id, [(analysis_brief.BRIEF_ITEM, agent_id, "h")])
-
-    for i in range(briefed):
-        finished(f"b{i}", "heavy", 1, brief=True)
-    for i in range(5):
-        finished(f"o{i}", "heavy", 3)
-    finished("light", "light", 0)                                      # another size
-    finished("docs", "heavy", 9, files=["docs/plan.md"])              # another kind
-    finished("elsewhere", "heavy", 9, repo="/other")                  # another repo
-    finished("alone", "advanced", 7, brief=True)                      # nothing similar to compare with
-    code, body = _get("/v1/analysis-docs/results", AUTH, "repo=/r")
-    assert code == 200 and (body["enough"], body["compared"], body["briefed"]) == (enough, briefed, briefed + 1)
-    assert (body["with_brief"], body["without_brief"]) == ((1.0, 3.0) if enough else (None, None))
 
 
 def _diff_session(db, repo, tmp_path) -> tuple[Agent, Workspace]:

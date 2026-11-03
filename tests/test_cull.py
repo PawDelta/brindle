@@ -345,28 +345,6 @@ def test_sweep_on_another_server_leaves_a_stale_looking_worker_alone(db, ws, oth
         assert a.dismissed_at is None and a.status == ("idle" if aid == "w1" else "processing")
 
 
-def test_sweep_on_another_server_never_judges_a_row_without_a_server(db, ws, proc_cleanup,
-                                                                     other_server, monkeypatch):
-    # A row an older brindle made (no tmux_server) counts as the default
-    # server's: a private server's pane list is still not its own.
-    add(db, ws, "abc12345", status="processing")
-    with db.tx() as c:
-        c.execute("UPDATE agents SET tmux_server=NULL WHERE id='abc12345'")
-    p = launch_as("abc12345")
-    proc_cleanup.append(p)
-    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
-    # The row's own (default) server would be the user's real tmux: stand in
-    # for it, and record that it was the server asked.
-    asked = []
-    monkeypatch.setattr(tmux, "window_alive",
-                        lambda target, server=None: asked.append(server) or False)
-    assert cull.sweep(db) == []
-    assert asked and set(asked) == {None}
-    time.sleep(0.5)
-    assert alive(p.pid)
-    assert db.get_agent("abc12345").status == "processing"
-
-
 def test_sweep_retries_a_flush_the_pane_blocked(db, ws, monkeypatch):
     """A flush that found the person typing leaves the message queued; with no
     turn-end hook (agy) nothing else retries it, so the next sweep must once

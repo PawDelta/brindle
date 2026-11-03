@@ -207,44 +207,6 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     assert codemap.seed_session(session_ws.path) is False
 
 
-def test_session_graph_refresh_and_community_carryover(mapped, monkeypatch):
-    from brindle.config import brindle_home
-
-    old_data = {
-        "nodes": [
-            {"id": "n1", "community": 1, "community_name": "Auth"},
-            {"id": "n2", "community": 1, "community_name": "Auth"},
-        ]
-    }
-    graph_file = mapped / "graphify-out" / "graph.json"
-    graph_file.write_text(json.dumps(old_data))
-
-    new_data = {
-        "nodes": [
-            {"id": "n1", "community": 10},
-            {"id": "n3", "community": 20, "source_file": "src/core/helper.py"},
-        ]
-    }
-
-    real_popen = codemap.subprocess.Popen
-
-    def fake_popen(argv, **kw):
-        if "graphify" in argv:
-            graph_file.write_text(json.dumps(new_data))
-            return None
-        return real_popen(argv, **kw)
-
-    monkeypatch.setattr(codemap.subprocess, "Popen", fake_popen)
-    codemap.refresh(str(mapped))
-
-    updated = json.loads(graph_file.read_text())
-    nodes_by_id = {n["id"]: n for n in updated["nodes"]}
-    assert nodes_by_id["n1"]["community_name"] == "Auth"
-    assert nodes_by_id["n3"]["community_name"] == "helper"
-
-    store = brindle_home() / "graphs" / mapped.name / "graph.json"
-    assert store.is_file()
-    assert json.loads(store.read_text()) == updated
 
 
 

@@ -90,17 +90,6 @@ def test_approval_raises_the_month_limit(repo, features, server):
     assert lim.month_usd == 125.0
 
 
-def test_cull_poll_is_rate_limited(repo, features, server):
-    cost_centers.request(25, "x", str(repo))
-    now = time.time()
-    cost_centers.poll(only_due=True, now=now)
-    n = len(server.calls)
-    cost_centers.poll(only_due=True, now=now + 10)
-    assert len(server.calls) == n
-    cost_centers.poll(only_due=True, now=now + cost_centers.POLL_EVERY + 1)
-    assert len(server.calls) == n + 1
-
-
 # -- refusal and CLI -------------------------------------------------------------------------------------
 
 

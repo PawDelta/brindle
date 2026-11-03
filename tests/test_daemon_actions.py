@@ -384,6 +384,17 @@ def test_creating_a_profile_writes_the_user_agent_file_and_refuses_what_is_wrong
     assert (code, path.read_text()) == (409, before)
 
 
+def test_creating_a_profile_refuses_a_model_the_org_does_not_allow(world, repo, monkeypatch):
+    from brindle.pro import team_policy
+
+    monkeypatch.setattr(team_policy, "access", lambda repo: Access(org_id="acme", allowed_models=("opus",)))
+    body = {"repo": str(repo), "name": "my-agent", "description": "", "provider": "claude",
+            "effort": None, "instructions": "x", "rules": []}
+    assert _send("POST", "/v1/profiles", {**body, "model": "haiku"})[0] == 403
+    assert not (config.user_profiles_dir() / "my-agent.md").exists()
+    assert _send("POST", "/v1/profiles", {**body, "model": "opus"})[0] == 200
+
+
 PINNED = AgentSetup(claude=ClaudeSetup(route="bedrock", models=ModelsSetup(opus="us.anthropic.claude-opus-x-v1:0")),
                     enforce=True)
 
@@ -494,7 +505,35 @@ def test_api_key_lifecycle(db, world, monkeypatch, provider_http, action, stored
     assert SECRET not in json.dumps(got)
 
 
-NOFLOCK = False   # True: children skip flock, which must make the lock test below fail
+@pytest.mark.parametrize("during", ["replaced", "deleted"])
+def test_api_key_lifecycle_check_result_stays_with_the_key_it_checked(db, monkeypatch, provider_http, during):
+    from brindle import key_check, keys_cmds, keystore
+
+    name, newer = "ANTHROPIC_API_KEY", "sk-ant-replacement-0123456789"
+    keys_cmds.store(name, SECRET, None)
+
+    asked = []
+
+    def rejects_while_the_key_changes(url, headers):
+        if asked:                       # the replacement's own check
+            return 200, {}
+        asked.append(url)
+        if during == "replaced":
+            keys_cmds.store(name, newer, None)
+        else:
+            keys_cmds.remove(name)
+        return 401, {}
+
+    monkeypatch.setattr(key_check, "_get", rejects_while_the_key_changes)
+    keys_cmds.retest(name)
+    rec = keystore.get_record(name)
+    if during == "replaced":
+        assert rec["value"] == newer and rec["status"] == "verified"
+    else:
+        assert rec == {}
+
+
+NOFLOCK = False  # True: children skip flock, which must make the lock test below fail
 
 
 @pytest.mark.parametrize("fault", ["lock-unavailable", "delete-during-update"])
@@ -589,6 +628,28 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
         assert windows[again["terminal"]][2] is False
 
 
+
+
+def test_terminal_input_takes_one_printable_line_into_an_action_terminal_only(world, monkeypatch):
+    from brindle import providers, tmux
+
+    windows, typed = {}, []
+    monkeypatch.setattr(providers, "claude_binary", lambda: "claude")
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a: None)
+    monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag:
+                        windows.setdefault(tag[1], argv) and f"%{len(windows)}")
+    monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
+        (f"%{i + 1}", "login claude", True, tid) for i, tid in enumerate(windows)])
+    monkeypatch.setattr(tmux, "send_keys", lambda target, *keys, **kw: typed.append((target, *keys)))
+    assert _send("POST", "/v1/providers/claude/login", {"method": "device"})[0] == 400
+    code, reply = _send("POST", "/v1/providers/claude/login", {"method": "console"})
+    assert code == 200 and windows[reply["terminal"]] == ["claude", "auth", "login", "--console"]
+    code, sent = _send("POST", f"/v1/terminals/{reply['terminal']}/input", {"text": "ab-12"})
+    assert code == 200 and typed == [("%1", "-l", "--", "ab-12"), ("%1", "Enter")]
+    # One printable line only, and only into a running action terminal (never an agent's pane).
+    assert _send("POST", f"/v1/terminals/{reply['terminal']}/input", {"text": "a\nb"})[0] == 400
+    assert _send("POST", "/v1/terminals/wk/input", {"text": "ab-12"})[0] == 404
+    assert len(typed) == 2
 
 
 class _FakeCLI:
@@ -1947,6 +2008,36 @@ def test_a_scratch_session_transfers_into_a_repo_and_a_real_one_is_refused(db, w
     assert (code, reply["error"]["code"]) == (400, "invalid")
 
 
+@pytest.mark.parametrize("what,fails", [("upgrade", False), ("upgrade", True), ("hook", False), ("hook", True)])
+def test_a_background_setup_job_is_shared_while_it_runs_and_reports_on_the_bus(
+        db, world, monkeypatch, tmp_path, what, fails):
+    from brindle import codex_hook
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    path = "/v1/engine/upgrade" if what == "upgrade" else "/v1/setup/codex-hook"
+    runs, again = [], []
+
+    def work():
+        runs.append(1)
+        again.append(_send("POST", path))      # pressed again while it runs
+        if what == "hook" and fails:
+            raise codex_hook.CodexHookError("Codex didn't answer")
+        return (1 if fails else 0), "uv line"
+
+    if what == "upgrade":
+        monkeypatch.setattr(routes_actions, "_run_upgrade", work)
+    else:
+        monkeypatch.setattr(codex_hook, "inspect", lambda binary, command=None: SimpleNamespace(command="hook"))
+        monkeypatch.setattr(codex_hook, "trust", lambda binary, st: work())
+    code, reply = _send("POST", path)
+    assert code == 202 and runs == [1] and again == [(202, reply)]
+    events = bus.tail(db, kinds=("job.done", "job.failed"))
+    assert [(e["kind"], e["payload"]["job"]) for e in events] == [
+        ("job.failed" if fails else "job.done", reply["job"])]
+    if fails:
+        assert events[0]["payload"]["error"]["code"] == ("upgrade_failed" if what == "upgrade" else "codex_hook_failed")
+
+
 def test_kb_sources_add_sync_and_remove_a_folder(db, repo, world, tmp_path, monkeypatch):
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -2000,6 +2091,16 @@ def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tm
     assert any(e["payload"]["job"] == reply["job"] for e in bus.tail(db, kinds=("job.progress",)))
     again, err = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
     assert (again, err["error"]["code"]) == (409, "exists")
+
+
+def test_a_second_clone_press_gets_the_job_already_queued(db, cloning, tmp_path, monkeypatch):
+    queued = []
+    monkeypatch.setattr(routes_actions, "_spawn", queued.append)
+    body = {"url": cloning, "parent_dir": str(tmp_path)}
+    (c1, first), (c2, second) = _send("POST", "/v1/repos/clone", body), _send("POST", "/v1/repos/clone", body)
+    assert (c1, c2, second["job"], len(queued)) == (202, 202, first["job"], 1)
+    queued[0]()
+    assert [e["kind"] for e in bus.tail(db, kinds=("job.done", "job.failed"))] == ["job.done"]
 
 
 @pytest.mark.parametrize("url", [

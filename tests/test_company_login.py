@@ -460,9 +460,16 @@ def test_federated_routes_set_their_hook_and_run_no_cloud_cli(route, expected, a
 
 def test_a_failed_exchange_is_not_ready_and_keeps_no_env(hook, monkeypatch):
     Fake(monkeypatch)
+    go(claude("bedrock", aws=AWS))
+    assert company_login.stored_env()                  # an earlier route's env is stored
     monkeypatch.setattr(cloud_credential, "check", lambda *a, **k: "AWS refused the role (AccessDenied)")
     ok, out = go(federated("bedrock"))
     assert not ok and any("AccessDenied" in line for line in out)
+    assert company_login.stored_env() == {}
+    Fake(monkeypatch)
+    go(claude("bedrock", aws=AWS))
+    Fake(monkeypatch, {("az", "account", "show"): (1, ""), ("az", "login"): (1, "")})
+    go(claude("foundry", azure=AZURE))                 # a failed login clears the old route too
     assert company_login.stored_env() == {}
 
 

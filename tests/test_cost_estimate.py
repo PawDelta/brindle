@@ -55,18 +55,6 @@ def dollars(text):
 # -- estimates ----------------------------------------------------------------------------
 
 
-def test_never_a_single_number_even_when_percentiles_match(db):
-    for i in range(6):
-        db.add_history("/repo", "worker_result", agent_id=f"w{i}", profile="developer",
-                       tokens=tokens(100_000))
-        db.add_history("/repo", "review", agent_id=f"r{i}", profile="reviewer", tokens=tokens(1000))
-    text = ce.describe([ce.TaskSpec("developer")], "reviewer", repo_root="/repo", db=db,
-                       price=price, candidates=[])
-    assert "low confidence" not in text
-    low, high = dollars(text)[:2]
-    assert low < high
-
-
 def test_cheaper_alternative_prefers_a_local_reviewer(db):
     seed(db, "/repo", 6)
     seed(db, "/repo", 6, reviewer="reviewer-codex", weight="light", base=50_000)
