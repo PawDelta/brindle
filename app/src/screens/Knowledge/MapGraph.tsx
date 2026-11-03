@@ -3,7 +3,7 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import type { DocScope, KbSource, KnowledgeMap, MapEdge, MapNode } from "../../api/client";
 import { bounds, createSim, docGraph, heatAt, moveTo, pointOf, settle, step, type DocEdge, type Group, type Point, type Sim } from "./graphLayout";
 
-export type LocalNode = { id: string; kind: "decision"; title: string; decision: DecisionDTO } | { id: string; kind: "imported"; title: string; source: KbSource; path: string };
+export type LocalNode = ({ id: string; kind: "decision"; title: string; decision: DecisionDTO } | { id: string; kind: "imported"; title: string; source: KbSource; path: string }) & { paths?: string[]; topics?: string[] };
 export type GraphNode = MapNode | LocalNode;
 
 /* Compare path segments, never topic/title similarity or raw string prefixes.
@@ -98,6 +98,38 @@ export function joinLocal(
   const edges = [...map.edges];
   // Local records have no team or organization membership.
   if (filter.scope.kind !== "user") return { nodes, edges };
+  const whole = filter.paths.length === 0;
+  // The local library exists independently of hosted documents, including
+  // unscoped decisions and imported folders outside the repo checkout.
+  if (whole) {
+    const local: LocalNode[] = decisions.map((decision) => ({
+      id: `local:decision:${decision.id}`, kind: "decision", title: decision.topic,
+      decision, paths: decision.scope, topics: [decision.topic],
+    }));
+    for (const source of sources) {
+      if (source.kind !== "folder" || !source.scope) continue;
+      local.push({ id: `local:source:${source.id}`, kind: "imported",
+        title: source.scope.replace(/\/+$/, "").split("/").at(-1) || source.scope,
+        source, path: source.scope, paths: [source.scope] });
+    }
+    const held = (node: GraphNode): string[] => node.kind === "decision" ? node.decision.scope
+      : node.kind === "imported" ? [node.path] : node.paths ?? (node.path ? [node.path] : []);
+    const normal = (path: string) => relative(path, repo) ?? path;
+    for (let i = 0; i < local.length; i++) {
+      for (const other of [...map.nodes, ...local.slice(i + 1)]) {
+        const shared = held(local[i]).some((a) => held(other).some((b) => {
+          const left = normal(a), right = normal(b);
+          if (left.startsWith("/") !== right.startsWith("/")) return false;
+          return decisionMatches(left, right)
+            || (local[i].kind === "imported" && containsPath(left, right))
+            || (other.kind === "imported" && containsPath(right, left))
+            || (local[i].kind === "decision" && other.kind === "imported" && decisionMatches(left, `${right}/**`));
+        }));
+        if (shared) edges.push({ source: local[i].id, target: other.id, kind: "shared_path" });
+      }
+    }
+    return { nodes: [...nodes, ...local], edges };
+  }
   const selected = filter.paths.map((p) => relative(p, repo)).filter((p): p is string => p !== null);
   const nodePaths = (node: MapNode) => [...(node.paths ?? []), ...(node.path ? [node.path] : [])]
     .map((p) => relative(p, repo))

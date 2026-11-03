@@ -8,6 +8,22 @@ afterEach(cleanup);
 
 const decision: DecisionDTO = { id: "private-d", repo_key: "r", topic: "Storage policy", body: "Keep private notes here", rationale: "Local reason", scope: ["src/cache/**"], status: "accepted", created_at: 1, author_session: "local-session" };
 
+it("shows local knowledge on open when the server library is empty", async () => {
+  const client = new DaemonClient({ baseUrl: "http://localhost", token: "t", fetch: async (input) => new Response(JSON.stringify(
+    String(input).includes("/scopes") ? { scopes: [{ kind: "user", id: "u1" }] } : { nodes: [], edges: [] },
+  )) });
+  const { container, rerender } = render(<MapView client={client} repo="/repo" decisions={[decision, { ...decision, id: "global", topic: "Repo policy", scope: [] }, { ...decision, id: "peer", scope: ["docs/**"] }]}
+    sources={[{ id: "cache", kind: "folder", scope: "/repo/src/cache", docs: 3 }, { id: "notes", kind: "folder", scope: "/outside/notes", docs: 1 }]} />);
+  expect(await screen.findAllByRole("button", { name: /Storage policy/ })).toHaveLength(2);
+  expect(screen.getByRole("button", { name: /Repo policy/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Imported.*cache/ })).toBeTruthy();
+  expect(screen.getByRole("button", { name: /Imported.*notes/ })).toBeTruthy();
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="local:source:cache"]')).not.toBeNull();
+  expect(container.querySelector('[data-source="local:decision:private-d"][data-target="local:decision:peer"]')).not.toBeNull();
+  rerender(<MapView client={client} repo="/repo" decisions={[]} sources={[]} />);
+  expect(container.querySelector("[data-node]")).toBeNull();
+});
+
 it.each([false, true])("applies a scope change immediately and discards older responses (pending: %s)", async (pending) => {
   const finish: { url: URL; resolve: (value: Response) => void }[] = [];
   const client = new DaemonClient({ baseUrl: "http://localhost", token: "t", fetch: async (input) => {

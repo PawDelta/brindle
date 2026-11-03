@@ -13,6 +13,7 @@ import { PtyViewsProvider, wsPtyView, type PtyViews } from "../src/api/ptyView";
 import type { AppUpdateStatus, AppUpdates } from "../src/api/tauri";
 import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
 import type { Route } from "../src/routes";
+import { DEMO_OFFERED_KEY } from "../src/screens/Onboarding";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
 import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
@@ -60,6 +61,7 @@ const SCENES: Record<string, Route> = {
   agents: { screen: "agents" },
   "agents-make": { screen: "agents" },
   knowledge: { screen: "knowledge" },
+  "knowledge-map": { screen: "knowledge", view: "map" },
   "knowledge-record": { screen: "knowledge" },
   "knowledge-search": { screen: "knowledge" },
   settings: { screen: "settings" },
@@ -87,6 +89,17 @@ const SCENES: Record<string, Route> = {
 };
 
 const daemon = new FakeDaemon(structuredClone(data));
+if (scene === "knowledge-map") {
+  localStorage.setItem(DEMO_OFFERED_KEY, "1");
+  // The reported 0.5.12 account has no hosted docs in any of its scopes.
+  daemon.data.docScopes = [
+    { kind: "user", id: "personal", name: "Personal" },
+    { kind: "group", id: "t_cc0acb7c5cfb368c", name: "Founding Team" },
+    { kind: "org", id: "org_6e83ecddb131dfc35d43d5a8", name: "PawDelta" },
+  ];
+  daemon.data.knowledgeMap = { nodes: [], edges: [] };
+  daemon.data.decisions.push({ ...daemon.data.decisions[0], id: "daemon-reads", topic: "Read-only daemon access", scope: ["docs/**", "src/brindle/daemon/**"] });
+}
 if (scene === "settings-login" || scene === "settings-signin") {
   daemon.data.providers = freshProviders({
     claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" },
