@@ -31,6 +31,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from brindle import spawn
@@ -46,6 +47,26 @@ except ImportError:     # Windows: threads are still serialized
 ACCOUNT = "default"
 MAX_BLOB = 64 * 1024
 FORCE_ENV = "BRINDLE_PRO_CREDENTIAL_STORE"
+KEYCHAIN_READ_TTL = 30.0  # seconds before another process's changes become visible
+
+
+@dataclass
+class _KeychainRead:
+    # One lock per identity lets unrelated keys load in parallel while readers
+    # of the same key share the in-flight lookup and serialize with mutations.
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    expires: float = 0.0
+    blob: str | None = None
+
+    def invalidate(self) -> None:
+        self.expires = 0.0
+        self.blob = None
+
+
+# Stores are recreated by default_store, so instances must share reads, including
+# missing items. Keep immutable blobs here so callers cannot mutate cached records.
+_keychain_reads: dict[tuple[str, str], _KeychainRead] = {}
+_keychain_lock = threading.RLock()
 
 
 class CredentialError(Exception):
@@ -72,11 +93,19 @@ def _decode(blob: str) -> dict | None:
 
 
 class KeychainStore:
-    """macOS login keychain via the ``security`` CLI."""
+    """macOS login keychain via the ``security`` CLI.
+
+    Reads (including missing items) are shared by service and account for
+    KEYCHAIN_READ_TTL seconds. Other processes' changes appear after expiry;
+    save/delete in this process invalidate immediately, even on failure.
+    Cached records are decoded afresh so callers can safely modify them.
+    """
     name = "keychain"
 
     def __init__(self, service: str, account: str = ACCOUNT, label: str = "brindle") -> None:
         self.service, self.account, self.label = service, account, label
+        with _keychain_lock:
+            self._read = _keychain_reads.setdefault((service, account), _KeychainRead())
 
     def _run(self, args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
         if args[0] == "find-generic-password":     # a lookup: a brindle.spawn read
@@ -84,24 +113,41 @@ class KeychainStore:
         return spawn.action(["security", *args], input=stdin, timeout=STORE_WRITE_LIMIT)
 
     def load(self) -> dict | None:
-        r = self._run(["find-generic-password", "-a", self.account, "-s", self.service, "-w"])
-        if r.returncode == 44:   # errSecItemNotFound
-            return None
-        if r.returncode != 0:
-            raise CredentialError(f"keychain read failed (security exit {r.returncode})")
-        return _decode(r.stdout)
+        # Serialize a miss with writes and other readers: an in-flight read must
+        # not put an old value back after save/delete invalidates it.
+        with self._read.lock:
+            if time.monotonic() < self._read.expires:
+                return _decode(self._read.blob) if self._read.blob is not None else None
+            self._read.invalidate()
+            r = self._run(["find-generic-password", "-a", self.account, "-s", self.service, "-w"])
+            if r.returncode == 44:   # errSecItemNotFound
+                blob, value = None, None
+            elif r.returncode != 0:
+                raise CredentialError(f"keychain read failed (security exit {r.returncode})")
+            else:
+                blob = r.stdout
+                value = _decode(blob)  # failed reads and corrupt records are never cached
+            self._read.blob = blob
+            self._read.expires = time.monotonic() + KEYCHAIN_READ_TTL
+            return value
 
     def save(self, creds: dict) -> None:
         # The blob is base64 (no quotes, spaces or backslashes), so quoting is safe;
         # account, service and label are brindle's own fixed strings and variable names.
         line = (f'add-generic-password -U -a "{self.account}" -s "{self.service}" '
                 f'-l "{self.label}" -w "{_encode(creds)}"\n')
-        r = self._run(["-i"], stdin=line)
-        if r.returncode != 0 or "error" in (r.stderr or "").lower():
-            raise CredentialError(f"keychain write failed (security exit {r.returncode})")
+        with self._read.lock:
+            # Invalidate even on failure: a command may have changed the store
+            # before reporting an error. Never retain a possibly obsolete secret.
+            self._read.invalidate()
+            r = self._run(["-i"], stdin=line)
+            if r.returncode != 0 or "error" in (r.stderr or "").lower():
+                raise CredentialError(f"keychain write failed (security exit {r.returncode})")
 
     def delete(self) -> None:
-        self._run(["delete-generic-password", "-a", self.account, "-s", self.service])
+        with self._read.lock:
+            self._read.invalidate()
+            self._run(["delete-generic-password", "-a", self.account, "-s", self.service])
 
 
 class SecretServiceStore:
@@ -336,8 +382,8 @@ _reads: contextvars.ContextVar[dict[str, str | None] | None] = contextvars.Conte
 @contextlib.contextmanager
 def reading():
     """Within this block each stored key is read from the store once (on
-    macOS every read runs ``security``): for a read-only pass that checks
-    many candidates, each asking for the same keys. Nothing outlives it."""
+    macOS the process cache also shares reads across blocks): for a read-only
+    pass that checks many candidates, each asking for the same keys."""
     token = _reads.set({})
     try:
         yield
