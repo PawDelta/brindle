@@ -627,9 +627,6 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
                 continue
             # The spell starts at the report that put it in review, or at a
             # later reviewer's start (a fallback review, say).
-            if pipeline.release_held(db, ws):   # its verdict waited on a check run that died
-                done.append(f"acted on the review of `{ws.branch}`, whose check run died")
-                continue
             reviewers = [r for r in db.list_agents(ws.id) if r.mode == "review"]
             reviewing = any(r.dismissed_at is None and r.status not in ("paused", "done")
                             and agents.is_alive(r, panes) for r in reviewers)
