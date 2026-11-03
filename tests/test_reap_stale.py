@@ -49,8 +49,8 @@ def session(name, *panes, attached=False, home=None, activity=OLD):
     return tmux.SessionInfo(name, attached, OLD, activity, home or str(brindle_home()), list(panes))
 
 
-def pane(pane_id, path, pid=4242, cmd="zsh"):
-    return tmux.PaneInfo(pane_id, pid, str(path), cmd, False, "", OLD)
+def pane(pane_id, path, pid=4242, cmd="zsh", activity=OLD):
+    return tmux.PaneInfo(pane_id, pid, str(path), cmd, False, "", activity)
 
 
 def add(db, ws, agent_id, **kw):
@@ -66,7 +66,10 @@ def live(t, *pane_ids):
 @pytest.mark.parametrize("case,reaped", [
     ("no row", True),
     ("worktree gone, worker left in it", True),
+    ("worktree gone, another workspace's worker in it", False),
     ("attached", False),
+    ("recent input", False),
+    ("recent output", False),
     ("uncommitted work in its folder", False),
     ("git status fails", False),   # unknown is never clean
     pytest.param("another brindle home", False,
@@ -76,10 +79,12 @@ def test_orphan_sessions_are_reaped_by_the_sweep(db, repo, tmp_path, fake_tmux, 
     folder = tmp_path / "plain"
     folder.mkdir()
     name = "brindle_proj_old"
-    if case == "worktree gone, worker left in it":
+    if case.startswith("worktree gone"):
         ws = Workspace("proj/old", str(repo), "old", "worktree", "old", "main", str(tmp_path / "gone"),
                        None, name, OLD)
         db.add_workspace(ws)
+        if "another workspace" in case:   # its pane moved into this session
+            ws = workspaces.adopt_root(db, str(repo))
         add(db, ws, "agy1", provider="antigravity", tmux_window="%7")
         live(fake_tmux, "%7")
         folder = tmp_path / "gone"
@@ -91,7 +96,8 @@ def test_orphan_sessions_are_reaped_by_the_sweep(db, repo, tmp_path, fake_tmux, 
             raise git.GitBusy("git status: no room")
         monkeypatch.setattr(git, "dirty_files", refused)
         folder = repo
-    fake_tmux.sessions = [session(name, pane("%7", folder), attached=case == "attached",
+    fake_tmux.sessions = [session(name, pane("%7", folder, activity=NOW if case == "recent output" else OLD),
+                                  attached=case == "attached", activity=NOW if case == "recent input" else OLD,
                                   home="/elsewhere" if case == "another brindle home" else None)]
 
     before = doctor.reap_checks(db)
@@ -100,8 +106,8 @@ def test_orphan_sessions_are_reaped_by_the_sweep(db, repo, tmp_path, fake_tmux, 
     assert (name in fake_tmux.killed) == reaped
     assert any(name in line for line in lines) == reaped
     assert (4242 in fake_tmux.stopped) == reaped   # its processes first
-    if case == "worktree gone, worker left in it":
-        assert db.get_agent("agy1").dismissed_at is not None
+    if case.startswith("worktree gone"):
+        assert (db.get_agent("agy1").dismissed_at is not None) == reaped
     # doctor: what it would reap before, what it reaped after
     assert (name in before[1].detail) == reaped
     assert (name in doctor.reap_checks(db)[0].detail) == reaped
@@ -115,11 +121,13 @@ def test_orphan_sessions_are_reaped_by_the_sweep(db, repo, tmp_path, fake_tmux, 
     # The leftover session goes, but a worker running elsewhere is no occupant of it.
     ("merged, reported worker on another tmux server", True),
     ("merged, reported worker in an attached session", True),
+    ("merged, another workspace's live worker in its session", False),
 ])
 def test_finished_workers_sessions_are_reaped(db, repo, fake_tmux, monkeypatch, case, killed):
     ws = workspaces.create(db, str(repo), "feat-done").workspace
     db.conn.execute("UPDATE workspaces SET created_at=? WHERE id=?", (OLD, ws.id))
-    reported = "did it" if case in ("merged, worker reported", "closed worker left a shell") else None
+    reported = "did it" if case in ("merged, worker reported", "closed worker left a shell") \
+        or "another workspace" in case else None
     elsewhere = "reported worker" in case
     if case == "merged, worker still working":
         add(db, ws, "w1", tmux_window="%3", status="processing")
@@ -139,6 +147,10 @@ def test_finished_workers_sessions_are_reaped(db, repo, fake_tmux, monkeypatch, 
         live(fake_tmux, "%3")
     fake_tmux.sessions = [session(ws.tmux_session, pane("%3", ws.path, cmd="zsh" if case ==
                                                          "closed worker left a shell" else "claude"))]
+    if "another workspace" in case:
+        add(db, workspaces.adopt_root(db, str(repo)), "x1", tmux_window="%4", status="processing")
+        live(fake_tmux, "%4")
+        fake_tmux.sessions[0].panes.append(pane("%4", repo, cmd="claude"))
     if case == "merged, reported worker in an attached session":
         live(fake_tmux, "%9")
         fake_tmux.sessions.append(session("brindle_proj_alt", pane("%9", ws.path, cmd="claude"), attached=True))
@@ -147,6 +159,8 @@ def test_finished_workers_sessions_are_reaped(db, repo, fake_tmux, monkeypatch, 
 
     assert (ws.tmux_session in fake_tmux.killed) == killed
     assert "brindle_proj_alt" not in fake_tmux.killed
+    if "another workspace" in case:
+        assert db.get_agent("x1").dismissed_at is None
     if case == "merged, worker reported":
         assert db.get_agent("w1").dismissed_at is not None
     if elsewhere:
@@ -154,7 +168,8 @@ def test_finished_workers_sessions_are_reaped(db, repo, fake_tmux, monkeypatch, 
     assert os.path.isdir(ws.path)   # the worktree itself is never touched here
 
 
-@pytest.mark.parametrize("case", ["idle", "attached", "recent input", "running worker", "uncommitted work"])
+@pytest.mark.parametrize("case", ["idle", "attached", "recent input", "running worker", "uncommitted work",
+                                  "attached worker shell"])
 def test_idle_supervisors_are_stopped_but_resumable(db, repo, fake_tmux, case):
     ws = workspaces.adopt_root(db, str(repo))
     add(db, ws, "boss", mode="interactive", profile="supervisor", tmux_window="%1")
@@ -167,6 +182,10 @@ def test_idle_supervisors_are_stopped_but_resumable(db, repo, fake_tmux, case):
     fake_tmux.sessions = [session("brindle_proj_main", pane("%1", repo, cmd="claude"),
                                   attached=case == "attached",
                                   activity=NOW - 3600 if case == "recent input" else OLD)]
+    if case == "attached worker shell":   # pause closes a reported worker's shell-only session
+        wws = workspaces.create(db, str(repo), "feat-shell").workspace
+        add(db, wws, "w1", parent_id="boss", result="did it", status="done")
+        fake_tmux.sessions.append(session(wws.tmux_session, pane("%2", wws.path), attached=True))
 
     reap.run(db)
     reap.run(db)

@@ -26,10 +26,12 @@ the agent rows, and stops:
    and task mostly match a branch merged since it started is reported once,
    never stopped.
 
-Never touched: a session with a client attached, one created in the last
-SESSION_GRACE seconds, a session of another brindle home (BRINDLE_HOME) or
-on another tmux server, a session holding a live agent or a live
-supervisor's sidebar, and a worktree with uncommitted changes whose work
+Never touched: a session with a client attached, one created, typed in or
+written to in the last SESSION_GRACE seconds, a session of another brindle
+home (BRINDLE_HOME) or on another tmux server, a session holding a live
+agent of another workspace or a live supervisor's sidebar, a supervisor
+whose pause would close or change an attached session (a worker's shell,
+its sidebar's), and a worktree with uncommitted changes whose work
 isn't finished (an orphan's folder with uncommitted changes is kept). An
 agent is only stopped from a session the listing shows on this server, of
 this home, with nobody attached (``_quiet_session``); a supervisor is kept
@@ -140,6 +142,30 @@ def _finished(a: Agent) -> bool:
     return view._finished(a)
 
 
+def _last_activity(s: tmux.SessionInfo) -> float:
+    """The last input a client gave ``s`` or output any of its panes made."""
+    return max([s.activity, *(p.activity for p in s.panes)])
+
+
+def _paused_sessions(db: DB, tree: list[Agent], panes,
+                     session_of: dict[str, tmux.SessionInfo]) -> list[tmux.SessionInfo]:
+    """The listed sessions ``agents.pause`` of ``tree`` may close or change:
+    each member's workspace session, the sessions its panes are in, and the
+    supervisor's sidebar's."""
+    by_name = {s.name: s for s in session_of.values()}
+    found: dict[str, tmux.SessionInfo] = {}
+    for m in tree:
+        ws = db.get_workspace(m.workspace_id)
+        if ws is not None and ws.tmux_session in by_name:
+            found[ws.tmux_session] = by_name[ws.tmux_session]
+        if m.tmux_window and agents.same_server(m, panes) and m.tmux_window in session_of:
+            found[session_of[m.tmux_window].name] = session_of[m.tmux_window]
+    sidebar = db.get_sidebar_pane(tree[0].id)
+    if sidebar in session_of:
+        found[session_of[sidebar].name] = session_of[sidebar]
+    return list(found.values())
+
+
 def _kill(s: tmux.SessionInfo, stop_procs: bool) -> Callable[[], None]:
     def act() -> None:
         if stop_procs:
@@ -166,7 +192,7 @@ def _sessions(db: DB, now: float, panes, live: set[str], sessions: list[tmux.Ses
                      if r["root_id"] in live}
     for s in sessions:
         if (only is not None and s.name != only) or s.attached or not _ours(s) \
-                or now - s.created < SESSION_GRACE:
+                or now - s.created < SESSION_GRACE or now - _last_activity(s) < SESSION_GRACE:
             continue
         pane_ids = {p.id for p in s.panes}
         tagged = {panes.tags.get(p, {}).get(agents.AGENT_TAG) for p in pane_ids} - {None, ""}
@@ -179,6 +205,8 @@ def _sessions(db: DB, now: float, panes, live: set[str], sessions: list[tmux.Ses
         live_here = [a for a in all_agents if a.id in in_session and a.id in live]
         if windowed or pane_ids & live_sidebars:
             continue
+        if ws is not None and any(a.workspace_id != ws.id for a in live_here):
+            continue    # another workspace's live agent runs here: never this session's to stop
         gone = ws is not None and not os.path.isdir(ws.path)
         if ws is None and not live_here:
             folders = {p.path for p in s.panes if p.path and os.path.isdir(p.path)}
@@ -285,10 +313,15 @@ def _idle_supervisors(db: DB, now: float, live: set[str], panes,
         s = _quiet_session(a, panes, session_of)
         if days <= 0 or s is None:
             continue   # no session to look at means no telling whether someone's attached
-        last = max(a.created_at, a.status_since or 0, s.activity)
+        tree = agents.tree(db, a.id)
+        # Every session the pause closes or changes, not just the chat's: a
+        # worker's shell someone attached to, or typed in, keeps it running.
+        touched = _paused_sessions(db, tree, panes, session_of)
+        if any(t.attached or not _ours(t) for t in touched):
+            continue
+        last = max([a.created_at, a.status_since or 0, s.activity, *(t.activity for t in touched)])
         if now - last < days * DAY:
             continue
-        tree = agents.tree(db, a.id)
         if any(m.id in live and m.status not in ("paused", "done") and m.dismissed_at is None
                for m in tree[1:]):
             continue
