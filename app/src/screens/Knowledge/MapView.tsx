@@ -5,6 +5,7 @@ import { openLocalPath } from "../../api/open";
 import { alert, button, card, field, h2 } from "../../components/ui";
 import { Reader, scopeName } from "./DocsView";
 import { DecisionCard } from "./KnowledgeScreen";
+import { docGraph } from "./graphLayout";
 import { joinLocal, MapGraph, type GraphNode } from "./MapGraph";
 
 interface MapViewProps {
@@ -58,6 +59,8 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
     () => map && repo && area ? joinLocal(map, decisions, sources, repo, area) : null,
     [map, decisions, sources, repo, area],
   );
+  // What the graph shows: documents and the local records that reach them.
+  const shown = useMemo(() => graph && docGraph(graph.nodes, graph.edges), [graph]);
   const titles = useMemo(() => new Map((map?.nodes ?? []).filter((n) => n.kind === "doc").map((n) => [n.doc_id ?? n.id, n.title ?? n.id])), [map]);
   const learn = useCallback(() => {}, []);
   const close = () => setDoc(null);
@@ -97,8 +100,8 @@ function MapArea({ client, repo, decisions, sources, openPath = openLocalPath }:
     {error && <p role="alert" className={alert}>{error}</p>}
     {repo && !area && <p className="text-sm text-ink-3">Choose a library scope to load its map.</p>}
     {area && !map && !error && <p role="status">Loading neighbourhood…</p>}
-    {graph && <><div className="flex flex-wrap gap-s2 text-xs text-ink-3"><span>{graph.nodes.length} nodes · {graph.edges.length} connections</span><span>Code areas · Documents · Local decisions and folders</span><span>Dashed: supersedes</span></div>
-      {graph.nodes.length ? <MapGraph {...graph} onOpen={select} /> : <p>No knowledge in this map yet.</p>}
+    {graph && shown && <><p className="text-xs text-ink-3">{shown.nodes.length} documents and local records · {shown.edges.length} links · drag nodes or the background, scroll to zoom, click a node for details</p>
+      {shown.nodes.length ? <MapGraph {...graph} onOpen={select} /> : <p>No knowledge in this map yet.</p>}
     </>}
     {open?.kind === "decision" && <ul><DecisionCard d={open.decision} /></ul>}
     {doc && <Reader key={doc} client={client} repo={repo} id={doc} targets={scopes} titles={titles} onBack={close} onDeleted={close} onOpen={setDoc} onScopes={learn} />}
