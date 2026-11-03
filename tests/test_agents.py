@@ -38,12 +38,17 @@ def _unreported_setup(db, ws, monkeypatch):
     fake_agent(db, ws, mode="assign", parent="boss")
     sent = []
     monkeypatch.setattr(agents, "send_message", lambda *a, **k: sent.append(a))
-    # Each stop's turn snapshot and conflict forecast are git work these
-    # alert tests don't look at (tests/test_rewind.py, test_tasks.py do).
+    return sent
+
+
+def _no_turn_work(monkeypatch):
+    """Each stop's turn snapshot and conflict forecast are git work. The first
+    stop of test_no_unreported_alert_while_a_long_command_runs (no changes yet)
+    and the first stops of test_unreported_alert_still_fires_once_when_nothing_is_running
+    (after a commit) run them for real; the many stops after those skip them."""
     from brindle import tasks
     monkeypatch.setattr(agents, "snapshot_turn", lambda db_, a: None)
     monkeypatch.setattr(tasks, "warn_predicted_conflicts", lambda db_, a: None)
-    return sent
 
 
 def test_no_unreported_alert_while_a_long_command_runs(db, ws, monkeypatch):
@@ -51,6 +56,7 @@ def test_no_unreported_alert_while_a_long_command_runs(db, ws, monkeypatch):
     running = {"on": True}
     monkeypatch.setattr(agents, "command_running", lambda db_, a: running["on"])
     agents.handle_hook(db, "a1", "stop", {})                              # reminded
+    _no_turn_work(monkeypatch)   # its first stop ran it on a branch with no changes yet
     agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})      # turn ends, command going
     assert sent == [] and not db.get_agent("a1").unreported_noted
     db.update_agent("a1", result="done")                                  # it later reports
@@ -68,6 +74,7 @@ def test_unreported_alert_still_fires_once_when_nothing_is_running(db, ws, monke
     agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
     assert len(sent) == 1 and sent[0][1] == "boss"
     assert "parser.py" in sent[0][2]   # what it did, so the supervisor needn't go and look
+    _no_turn_work(monkeypatch)
     for _ in range(3):   # agy polling a command: brief resumes between stops give no new alert
         agents.handle_hook(db, "a1", "pre-tool", {})
         agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
@@ -93,6 +100,7 @@ def test_command_running_sees_a_command_under_an_antigravity_worker_so_not_stopp
     monkeypatch.setattr(agents, "owns_pane", lambda d, a: True)
     monkeypatch.setattr(agents.tmux, "window_pids", lambda w: [10])
     sent = _unreported_setup(db, ws, monkeypatch)
+    _no_turn_work(monkeypatch)
     db.update_agent("a1", provider="antigravity")
     agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
     assert sent == []   # the test run is going: not stopped

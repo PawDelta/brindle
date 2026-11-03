@@ -160,7 +160,7 @@ def test_continue_cmd_reloads_fresh_window_for_failed_root_with_attach(db, repo,
     assert attached_windows == ["%new"]
 
 
-def test_stop_failure_payloads_with_enums_and_last_assistant_message(db, repo, no_pane):
+def test_stop_failure_payloads_with_enums_and_last_assistant_message(db, repo):
     ws = Workspace("ws-enums", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-e", 0)
     db.add_workspace(ws)
     sup = agents.spawn(db, ws, "developer", mode="interactive", autopilot=True)
@@ -307,7 +307,7 @@ def test_launch_resolves_effective_credentials_before_signed_out_probe(db, repo,
     assert "signed in" in str(exc.value).lower()
 
 
-def test_continue_cmd_does_not_clear_blocked_state_when_resume_fails_or_owner_block(db, repo, monkeypatch, no_pane):
+def test_continue_cmd_does_not_clear_blocked_state_when_resume_fails_or_owner_block(db, repo, monkeypatch):
     from brindle import cli, procs, workspaces
     ws = Workspace("ws-cli-block", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-cb", 0)
     db.add_workspace(ws)
