@@ -708,39 +708,17 @@ def decide_all(reqs: list[Request] | None, *, checks: list[str] | None = None,
     return next(d for d in decisions if d.decision == "ask")
 
 
-_SESSION_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
-_SESSION_WRAPPERS = ("env", "command", "exec", "nohup", "sudo")
-_INLINE_CODE = frozenset("cemprE")    # -c, -e, -m, -p, -r, -E: the program is on the command line
+CODEX_PRE_TOOL_UNCHECKED = ("brindle couldn't check this call against the permission policy, so it doesn't "
+                            "run; try again, and if it keeps failing tell your supervisor (send_message)")
 
 
-def stdin_session(command: str | None) -> bool:
-    """Whether ``command`` starts a shell or interpreter with nothing to run
-    (no script, no -c/-e code) and no input given: what it runs comes later,
-    typed into it with Codex's write_stdin, which no PreToolUse hook sees."""
-    from brindle.native.permissions import _simple_commands
-
-    if not command or "<" in command:
-        return False    # its input is a file or a heredoc
-    parsed = _simple_commands(command) or []
-    piped = False
-    for words, after in parsed:
-        while words and (os.path.basename(words[0]) in _SESSION_WRAPPERS or _ASSIGNMENT.match(words[0])):
-            words = words[1:]
-        program = re.sub(r"[\d.]+$", "", os.path.basename(words[0])) if words else ""
-        if not piped and (program in _SESSION_SHELLS or program in _INTERPRETERS):
-            args = words[1:]
-            operands = [a for a in args if a == "-" or not a.startswith("-")]
-            inline = any(a.startswith("-") and not a.startswith("--") and set(a[1:]) & _INLINE_CODE
-                         or a in ("--eval", "--print", "--command") for a in args)
-            if operands == ["-"] or not operands and not inline and not set(args) & {"--version", "-V", "--help", "-h"}:
-                return True
-        piped = after == "|"
-    return False
-
-
-def codex_pre_tool_output(decision: Decision) -> dict | None:
+def codex_pre_tool_output(decision: Decision | None) -> dict | None:
     """What Codex's PreToolUse hook prints: only a deny (Codex can't ask from
-    PreToolUse, and an allow is left to its own approvals); None otherwise."""
+    PreToolUse, and an allow is left to its own approvals); None otherwise.
+    None for ``decision`` is a check that couldn't finish: Codex would run the
+    call on no answer, with nothing after it to stop it, so that's a deny too."""
+    if decision is None:
+        decision = Decision("deny", CODEX_PRE_TOOL_UNCHECKED)
     if decision.decision != "deny":
         return None
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",

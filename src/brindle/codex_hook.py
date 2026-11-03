@@ -71,6 +71,11 @@ TIMEOUT = 86400 + 30
 PRE_TOOL_EVENT = "codex-pre-tool"
 PRE_TOOL_MATCHER = "^(Bash|apply_patch|mcp__.*)$"
 PRE_TOOL_SECONDS = 120
+# Codex's unified exec keeps a command's process open for write_stdin, which
+# never runs PreToolUse again: a shell started there would run whatever is
+# typed into it unchecked. With the policy on, Codex runs each command once
+# (its plain shell tool), so every command it runs is one PreToolUse saw.
+ONE_SHOT_EXEC = ["-c", "features.unified_exec=false"]
 SOURCE = "sessionFlags"
 
 
@@ -270,7 +275,9 @@ def launch_flags(cwd: str | None, review: bool = False) -> list[str]:
                 return []
         else:
             command = hook_command()
-        return config_flags(command) if ensure(command=command) == TRUSTED else []
+        if ensure(command=command) != TRUSTED:
+            return []
+        return [*config_flags(command), *(ONE_SHOT_EXEC if policy_on(cwd) else [])]
     except Exception:  # noqa: BLE001 - never stop a launch over this
         return []
 

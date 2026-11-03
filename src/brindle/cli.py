@@ -3097,6 +3097,8 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
         except Exception:  # noqa: BLE001
             agent_id = None
     if not agent_id:
+        if event == agents.CODEX_PRE_TOOL:   # no output runs the call: brindle couldn't check it
+            typer.echo(json.dumps(agents.codex_pre_tool_failure()))
         return
     # Codex's notify passes the JSON as an argument; Claude Code's hooks use stdin.
     text = payload if payload is not None else sys.stdin.read()
@@ -3112,6 +3114,8 @@ def hook(event: str, agent: Optional[str] = typer.Option(None, "--agent"),
         try:  # any failure means no output: the person is asked as usual
             out = agents.hook_main(DB(), agent_id, event, text, trusted=agent is not None)
         except Exception:  # noqa: BLE001
+            if event == agents.CODEX_PRE_TOOL:
+                typer.echo(json.dumps(agents.codex_pre_tool_failure()))
             return
     else:
         out = agents.hook_main(DB(), agent_id, event, text, trusted=agent is not None)

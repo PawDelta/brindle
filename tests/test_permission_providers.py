@@ -523,6 +523,13 @@ def test_codex_app_server_silent_reader_cannot_block_rpc_deadline(monkeypatch):
     assert released.is_set() and proc.killed and proc.waited
 
 
+def hook_command_of(flag):
+    """The command in a ``-c hooks.<Event>=...`` definition."""
+    import re
+
+    return json.loads(re.search(r'command=("(?:[^"\\]|\\.)*")', flag).group(1))
+
+
 class FakeAppServer:
     """Stands in for `codex app-server`: lists brindle's hook, and stores trust
     the way Codex does (config.toml hooks.state)."""
@@ -543,7 +550,7 @@ class FakeAppServer:
                 event = {"PermissionRequest": "permission_request", "PreToolUse": "pre_tool_use"}[
                     flag.split("=", 1)[0].removeprefix("hooks.")]
                 hooks.append({"key": f"/<session-flags>/config.toml:{event}:0:0", "source": "sessionFlags",
-                              "command": json.loads(flag.split("command=", 1)[1].split(",timeout=")[0]),
+                              "command": hook_command_of(flag),
                               "currentHash": current, "trustStatus": "trusted" if trusted else "untrusted"})
             return {"data": [{"cwd": "/", "errors": [], "warnings": [], "hooks": hooks}]}
         if method == "config/batchWrite":
@@ -646,13 +653,14 @@ def _sandboxed(command):
     pytest.param("cat $HOME/.npmrc", "deny", marks=pytest.mark.variant("bypass attempt")),
     pytest.param("python3 -c \"print(open(__import__('os').path.expanduser('~/.aws/credentials')).read())\"",
                  "deny", marks=pytest.mark.variant("bypass attempt")),
-    ("bash", "deny"),   # what it runs would come through write_stdin, which PreToolUse never sees
     ("git status", None),
 ])
 def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monkeypatch, command, expected):
     """Codex runs a sandboxed command without asking, so its PermissionRequest
     hook never sees it: the launch passes a PreToolUse hook, run before every
-    shell command, which answers brindle's denies."""
+    shell command, which answers brindle's denies. Codex runs each command
+    once (no unified exec): write_stdin into a live shell (bash -m, env --
+    bash, sh -c bash ...) would never reach PreToolUse."""
     import re
 
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
@@ -661,12 +669,47 @@ def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monke
     argv = launch_argv(ws)
     [flag] = [arg for arg in argv if arg.startswith("hooks.PreToolUse=")]
     assert argv[argv.index(flag) - 1] == "-c"
+    assert argv[argv.index("features.unified_exec=false") - 1] == "-c"
     assert re.search(flag.split('matcher="', 1)[1].split('"', 1)[0], "Bash")
-    hook = json.loads(flag.split("command=", 1)[1].split(",timeout=")[0])
+    hook = hook_command_of(flag)
     assert codex_hook.status() == codex_hook.TRUSTED   # trusted with the PermissionRequest hook
     payload = {**codex_payload("Bash", {"command": command}, ws.path), "hook_event_name": "PreToolUse"}
     out = agents.hook_main(db, a.id, hook.rsplit(" ", 1)[1], json.dumps(payload), trusted=False)
     assert (json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out else None) == expected
+
+
+@pytest.mark.parametrize("broken,command,reason", [
+    ("bookkeeping", "env", "would print credentials"),   # the policy's own deny still stands
+    ("policy", "git status", permissions.CODEX_PRE_TOOL_UNCHECKED),
+    ("agent", "git status", permissions.CODEX_PRE_TOOL_UNCHECKED),
+    ("cli", "git status", permissions.CODEX_PRE_TOOL_UNCHECKED),
+])
+def test_codex_pre_tool_fails_closed(db, ws, monkeypatch, broken, command, reason):
+    """Codex runs a call its PreToolUse hook gives no answer for, and nothing
+    after it would stop a sandboxed one: a check that can't finish denies."""
+    import sqlite3
+
+    from brindle import prompt_answer
+
+    turn_on(ws)
+    a = worker(db, ws)
+    if broken == "bookkeeping":
+        def locked(*args, **kwargs):
+            raise sqlite3.OperationalError("database is locked")
+        monkeypatch.setattr(prompt_answer, "settled", locked)
+    if broken == "policy":
+        def unreadable(*args, **kwargs):
+            raise RuntimeError("profile unreadable")
+        monkeypatch.setattr("brindle.profiles.profile_rules_for", unreadable)
+    payload = json.dumps({**codex_payload("Bash", {"command": command}, ws.path), "hook_event_name": "PreToolUse"})
+    if broken == "cli":
+        monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)
+        monkeypatch.setattr(antigravity, "agent_from_parent", lambda: None)
+        out = CliRunner().invoke(app, ["_hook", "codex-pre-tool"], input=payload).output
+    else:
+        out = agents.hook_main(db, "gone" if broken == "agent" else a.id, "codex-pre-tool", payload)
+    answer = json.loads(out)["hookSpecificOutput"]
+    assert answer["permissionDecision"] == "deny" and reason in answer["permissionDecisionReason"]
 
 
 @pytest.mark.variant("live incident #239: upgrading 0.4.1 to 0.4.2 left the old trust, and a Codex reviewer stopped at Hooks need review")
