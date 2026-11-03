@@ -100,6 +100,20 @@ def _reap_run_leftovers(known: set[str]) -> list[str]:
 # The tmux server socket of the test running now (see test_tmux_server).
 _TEST_SERVER: list[str] = []
 _TEST_COUNT = [0]
+_REAL_RUN = subprocess.run
+_TMUX_PATH: list[str | None] = []
+# Starts the running test's tmux server (and keeper) if it isn't yet.
+_START_TEST_SERVER: list = []
+
+
+def _tmux_path() -> str | None:
+    """The machine's tmux, looked up once per run (a test that fakes it
+    missing, or narrows PATH, does so after this is decided)."""
+    from brindle import tmux
+
+    if not _TMUX_PATH:
+        _TMUX_PATH.append(shutil.which(tmux._bin()))
+    return _TMUX_PATH[0]
 
 
 @pytest.fixture
@@ -141,17 +155,47 @@ def test_tmux_server(monkeypatch):
     BRINDLE_TMUX_SOCKET, so it can only reach that test's dead server, never
     the one a later test is using. A keeper session also prevents closing the
     last test-owned session from taking down the server before new-window
-    (#199). The teardown hook reaps the server after all fixtures finish."""
+    (#199). The teardown hook reaps the server after all fixtures finish.
+
+    The server starts lazily, with the keeper, just before this process's
+    first tmux command that could start it: most tests never touch tmux, and
+    starting and reaping a server is most of an empty test's overhead. A test
+    whose tmux use runs in a child process asks for ``tmux_server_up``."""
     from brindle import tmux
 
     _TEST_COUNT[0] += 1
     name = f"brindle-test-{os.getpid()}-{_TEST_COUNT[0]}"
     _TEST_SERVER[:] = [name]
     monkeypatch.setenv("BRINDLE_TMUX_SOCKET", name)
-    if shutil.which(tmux._bin()):
-        # Use a plain shell and no user config so the keeper stays alive
-        # independently of the agent panes and the user's tmux settings.
-        tmux._tmux("-f", os.devnull, "new-session", "-d", "-s", "brindle-test-keeper", "/bin/sh")
+    real_start = tmux._start
+    binary = _tmux_path()
+    started: list[bool] = [] if binary else [False]
+
+    def keeper() -> None:
+        if not started:
+            started.append(True)
+            # Use a plain shell and no user config so the keeper stays alive
+            # independently of the agent panes and the user's tmux settings.
+            # The real subprocess.run: a test faking tmux's runs sees only its own.
+            _REAL_RUN([binary, "-u", "-L", name, "-f", os.devnull, "new-session", "-d", "-s",
+                       "brindle-test-keeper", "/bin/sh"], capture_output=True)
+
+    def start(base, args, input=None):
+        if (not started and base[-2:] == ["-L", name] and not tmux._is_read(args)
+                and args[:1] != ("kill-server",)):
+            keeper()
+        return real_start(base, args, input)
+
+    monkeypatch.setattr(tmux, "_start", start)
+    _START_TEST_SERVER[:] = [keeper]
+    return keeper
+
+
+@pytest.fixture
+def tmux_server_up(test_tmux_server):
+    """The test's tmux server, keeper and all, started now rather than at its
+    first in-process tmux command (for tmux use that happens in a child)."""
+    test_tmux_server()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -254,9 +298,15 @@ def pytest_runtest_teardown(item, nextitem):
     from brindle import tmux
 
     yield
+    _START_TEST_SERVER.clear()
     while _TEST_SERVER:
+        name = _TEST_SERVER.pop()
+        # Most tests never start their server (it starts lazily): no socket,
+        # nothing to stop, and no tmux run to find that out.
+        if not (tmux.socket_dir() / name).exists():
+            continue
         try:
-            tmux.reap_server(_TEST_SERVER.pop())
+            tmux.reap_server(name)
         except tmux.TmuxError:
             pass
     leaked = _reap_run_leftovers(_KNOWN_SOCKETS)
@@ -329,6 +379,13 @@ def no_real_agent_cli(tmp_path, monkeypatch):
 
     def guarded_init(self, args, *a, **kw):
         check(args)
+        # A child that may use tmux (tmux itself, a brindle CLI or helper) finds
+        # the test's server already up, keeper and all (see test_tmux_server).
+        if _START_TEST_SERVER and not isinstance(args, (str, os.PathLike)):
+            argv = [os.fspath(x) for x in args[:5]]
+            if (argv and os.path.basename(executable(argv)) in ("tmux", "brindle")
+                    or "brindle" in argv):
+                _START_TEST_SERVER[0]()
         real_init(self, args, *a, **kw)
 
     # tmux windows run their command from a script, so its argv is checked here.
@@ -585,18 +642,42 @@ def db(brindle_home):
     return DB()
 
 
-@pytest.fixture
-def repo(tmp_path):
-    """A repo on ``main`` with one commit, pushed to a bare ``origin``."""
-    origin = tmp_path / "origin.git"
-    sh(f"git init -q --bare -b main {origin}", tmp_path)
-    work = tmp_path / "proj"
+@pytest.fixture(scope="session")
+def _repo_template(tmp_path_factory):
+    """``repo``'s repo and origin, built once per run (about seven git runs)."""
+    base = tmp_path_factory.mktemp("repo-template")
+    origin = base / "origin.git"
+    work = base / "proj"
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+    for k in ("GIT_DIR", "GIT_WORK_TREE"):
+        env.pop(k, None)
+
+    def git(*args, cwd=work):
+        _REAL_RUN(["git", *args], cwd=cwd, env=env, check=True, capture_output=True)
+
+    git("init", "-q", "--bare", "-b", "main", str(origin), cwd=base)
     work.mkdir()
-    sh("git init -q -b main", work)
+    git("init", "-q", "-b", "main")
     (work / "app.py").write_text("print('hi')\n")
     (work / ".gitignore").write_text(".env\n")
     (work / ".env").write_text("SECRET=1\n")
-    sh("git add -A && git commit -qm init", work)
-    sh(f"git remote add origin {origin} && git push -q -u origin main", work)
-    sh("git remote set-head origin main", work)
+    git("add", "-A")
+    git("commit", "-qm", "init")
+    git("remote", "add", "origin", str(origin))
+    git("push", "-q", "-u", "origin", "main")
+    git("remote", "set-head", "origin", "main")
+    return base
+
+
+@pytest.fixture
+def repo(tmp_path, _repo_template):
+    """A repo on ``main`` with one commit, pushed to a bare ``origin``: a
+    copy of a template built once, with its origin's path made this test's."""
+    for name in ("origin.git", "proj"):
+        shutil.copytree(_repo_template / name, tmp_path / name, symlinks=True)
+    work = tmp_path / "proj"
+    config = work / ".git" / "config"
+    config.write_text(config.read_text().replace(
+        f"url = {_repo_template / 'origin.git'}\n", f"url = {tmp_path / 'origin.git'}\n"))
     return work
