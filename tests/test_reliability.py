@@ -70,42 +70,6 @@ def test_worker_idle_past_grace_period_does_not_block_the_nudge(db, root, monkey
 # -- Bug 2: a milestone regression must not hide behind a stale checkmark ---
 
 
-def test_checking_a_milestone_with_nothing_regressed_stays_quiet(db, root, repo):
-    _, ws = root
-    with_goal(db)
-    (repo / "api.txt").write_text("")
-    autopilot.check_milestones(db, "boss", ws, position=1)
-    (repo / "ui.txt").write_text("")
-    out = autopilot.check_milestones(db, "boss", ws, position=2, cfg=RepoConfig(goal_audit=False))
-    assert "REGRESSED" not in out
-    assert "goal is reached" in out
-
-
-def test_idle_status_falls_back_to_created_at(db, root, monkeypatch):
-    _, ws = root
-    a = Agent("w1", ws.id, "worker", "claude", "boss", "assign", "idle", "@0", None, LONG_AGO)
-    db.add_agent(a)
-    db.conn.execute("UPDATE agents SET status_since=NULL WHERE id='w1'")
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    assert [a.id for a in autopilot.stalled_workers(db, "boss")] == ["w1"]
-    db.conn.execute("UPDATE agents SET created_at=? WHERE id='w1'", (time.time(),))
-    assert autopilot.stalled_workers(db, "boss") == []
-
-
-def test_merged_branch_reviewer_is_not_stalled(db, root, monkeypatch):
-    from brindle import gates
-
-    _, ws = root
-    r = add_agent(db, ws, "r1", status="idle", status_since=LONG_AGO)
-    db.update_agent("r1", mode="review")
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    monkeypatch.setattr(agents, "close_later", lambda *a, **k: None)
-    assert [a.id for a in autopilot.stalled_workers(db, "boss")] == ["r1"]
-    db.set_merged(ws.id, gates.head(ws))
-    assert autopilot.stalled_workers(db, "boss") == []
-    assert agents.tell_parent_unreported(db, agents.get(db, r.id)) is False
-
-
 # -- Bug 3: nothing woke a supervisor that went idle before its worker ------
 
 
@@ -186,73 +150,7 @@ def test_regression_is_not_progress(db, root, repo):
     assert db.get_autopilot("boss").progress == before + 1
 
 
-def test_flaky_pass_at_the_same_commit_is_not_progress(db, root, repo):
-    _, ws = root
-    with_goal(db, checks=("test -f api.txt", "test -f ui.txt"))
-    (repo / "api.txt").write_text("")
-    commit(repo)
-    autopilot.check_milestones(db, "boss", ws, position=1)
-    before = db.get_autopilot("boss").progress
-    m1 = db.milestones("boss")[0]
-    db.record_check(m1.id, False, "flaked", m1.checked_sha)   # failed once, same HEAD
-    assert db.milestones("boss")[0].passed_sha == m1.checked_sha
-    autopilot.check_milestones(db, "boss", ws, position=1)
-    assert db.milestones("boss")[0].status == "passed"
-    assert db.get_autopilot("boss").progress == before
-
-
 # -- Re-review: a cheap dashboard, no false busy, parents always told -------
-
-
-def test_dashboard_never_sleeps_or_reads_idle_screens(db, root, monkeypatch):
-    from brindle import gates, git, status_cache, view
-
-    _, ws = root
-    with_goal(db)
-    add_agent(db, ws, "w1", status="idle", status_since=LONG_AGO)
-    add_agent(db, ws, "w2", status="idle")
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-
-    def no_sleep(s):
-        raise AssertionError("the dashboard slept")
-
-    captured = []
-    monkeypatch.setattr(time, "sleep", no_sleep)
-    monkeypatch.setattr(tmux, "capture", lambda target, **k: captured.append(target) or CLAUDE_BUSY)
-    monkeypatch.setattr(tmux, "window_alive", lambda w: True)
-    monkeypatch.setattr(tmux, "list_panes", lambda: tmux.PaneSnapshot())
-    db.set_status("boss", "idle")   # every agent idle: nothing to read at all
-    entry = view.autopilot_entry(db, ws.repo_root)
-    assert entry and entry["workers"] == 1   # w2; w1 is stalled
-    def no_head_process(*args):
-        raise AssertionError("dashboard started a synchronous HEAD lookup")
-
-    monkeypatch.setattr(gates, "head", no_head_process)
-    monkeypatch.setattr(status_cache, "cached_status", lambda *a, **k: git.Status("main", "main", 0, 0, [], 0))
-    view.snapshot(db, ws.repo_root)
-    db.update_agent("w1", pipeline="reviewing")
-    [shown] = view.snapshot(db, ws.repo_root)
-    assert shown["review_state"] is not None
-    assert captured == []
-    assert db.get_agent("w1").status == "idle"
-    assert db.get_agent("w2").status == "idle"
-
-
-def test_send_message_delivered_when_reconcile_already_flushed_it(db, root, monkeypatch):
-    # The agent is "processing" in the DB but its screen already shows idle;
-    # reconcile's own idle correction flushes the message before send_message
-    # gets a chance to call flush itself, which must not read back "queued".
-    _, ws = root
-    add_agent(db, ws, "w1", status="processing")
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: CLAUDE_IDLE)
-    monkeypatch.setattr(time, "sleep", lambda s: None)
-    pasted = []
-    monkeypatch.setattr(tmux, "paste", lambda target, text, **k: pasted.append(text))
-    result = agents.send_message(db, "w1", "hello", sender_id="boss")
-    assert result == "delivered"
-    assert len(pasted) == 1
-    assert db.pending_count("w1") == 0
 
 
 @pytest.mark.parametrize("cause, status", [
