@@ -1455,10 +1455,11 @@ def handover(to: str, note: str | None = None) -> str:
         return "No session to hand over."
     try:
         dest = workspaces.checkout_for_target(db, ws.path, to)
-        new = sessions.handover(db, root_id, dest, note, pause_old=False)
+        h = sessions.handover_to(db, root_id, dest, note, pause_old=False)
     except (git.GitError, workspaces.WorkspaceError, agents.AgentError, ValueError) as e:
         return f"Handover failed: {e}"
-    return (f"Handed the session over to {new.id} in {dest.id} ({dest.branch}). Your goal, workers and "
+    return (f"Handed the session over to {h.agent.id} in {dest.id} ({dest.branch})"
+            + (f": {h.why}" if h.why else "") + ". Your goal, workers and "
             "queued tasks are now theirs; tell the user and stop.")
 
 
