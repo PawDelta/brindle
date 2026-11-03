@@ -144,45 +144,115 @@ CODEX_PROFILE = "brindle-worker"
 
 def _codex_denied_reads() -> list[str]:
     from brindle import keystore
-    from brindle.config import brindle_home
     from brindle.daemon import lifecycle
     from brindle.pro import credentials
 
-    home = brindle_home()
-    return [*CODEX_DENIED_READS, str(lifecycle.info_path()), str(home / keystore.KEYS_SERVICE),
-            str(home / credentials.SERVICE), os.path.join(codex_home(), "auth.json")]
+    return [*CODEX_DENIED_READS, str(lifecycle.info_path()), str(brindle_home() / keystore.KEYS_SERVICE),
+            str(credentials.file_store_dir()), os.path.join(codex_home(), "auth.json")]
 
 
-def codex_legacy_sandbox() -> str | None:
-    """Why Codex would ignore brindle's permissions profile (its docs: a
-    ``sandbox_mode`` anywhere in the config, or full access chosen as the
-    default, wins over ``default_permissions``), or None."""
-    cfg = _codex_config()
-    if "sandbox_mode" in cfg or any(isinstance(p, dict) and "sandbox_mode" in p
-                                    for p in (cfg.get("profiles") or {}).values()):
-        return "your Codex config.toml sets sandbox_mode"
-    if cfg.get("default_permissions") == ":danger-full-access":
-        return "your Codex config.toml runs commands with full access (default_permissions)"
-    return None
+# Codex's system-wide config layer (below the user's and the project's).
+CODEX_SYSTEM_CONFIG = "/etc/codex/config.toml"
+
+
+class CodexSandboxRefused(RuntimeError):
+    """The permission policy is on, but Codex would ignore brindle's sandbox profile."""
+
+
+def _codex_layers(cwd: str) -> list[tuple[str, dict | None]]:
+    """Every Codex config layer a launch in ``cwd`` reads, highest precedence
+    first, as (file, its settings; None if unreadable). Codex's own answer
+    (app-server ``config/read``, which covers managed layers too), counting
+    a project layer Codex hasn't loaded yet because the folder isn't
+    trusted: brindle trusts it at launch (trust_codex_project). If Codex
+    can't say, the files in its documented order: ``.codex/config.toml``
+    from ``cwd`` up to the project root, the user's, the system's."""
+    from brindle import codex_hook
+
+    try:
+        server = codex_hook._AppServer(codex_binary(), [])
+        try:
+            result = server.call("config/read", {"includeLayers": True, "cwd": cwd})
+        finally:
+            server.close()
+        layers = []
+        for layer in result["layers"]:
+            name = layer.get("name") or {}
+            where = name.get("file") or (os.path.join(name["dotCodexFolder"], "config.toml")
+                                         if name.get("dotCodexFolder") else f"Codex's {name.get('type')} config")
+            cfg = layer.get("config")
+            layers.append((str(where), cfg if isinstance(cfg, dict) else {}))
+        return layers
+    except Exception:  # noqa: BLE001 - Codex missing, too old (no layers) or not answering: read the files
+        pass
+    import tomllib
+
+    files, here = [], os.path.abspath(cwd)
+    while True:
+        files.append(os.path.join(here, ".codex", "config.toml"))
+        if os.path.exists(os.path.join(here, ".git")) or os.path.dirname(here) == here:
+            break
+        here = os.path.dirname(here)
+    layers = []
+    for path in [*files, os.path.join(codex_home(), "config.toml"), CODEX_SYSTEM_CONFIG]:
+        try:
+            with open(path, "rb") as f:
+                layers.append((path, tomllib.load(f)))
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            layers.append((path, None))
+    return layers
+
+
+def codex_sandbox_base(cwd: str) -> str:
+    """The permissions profile brindle's own builds on for a Codex worker in
+    ``cwd`` (the person's resolved ``default_permissions``, else Codex's
+    workspace sandbox). Raises CodexSandboxRefused when Codex would ignore
+    brindle's profile, or run it with full access: a ``sandbox_mode`` in any
+    layer (or the active profile) wins over ``default_permissions``."""
+    off = 'or turn the permission policy off for this repo ("permission_policy": "off" in .brindle/config.local.json)'
+    why = ("brindle won't start this Codex worker: permission_policy is on, but {} so Codex would ignore the "
+           "sandbox profile that stops its commands reading credential files. {}, " + off)
+    layers = _codex_layers(cwd)
+    for where, cfg in layers:
+        if cfg is None:
+            raise CodexSandboxRefused(why.format(f"brindle can't read {where},", f"Fix {where}"))
+    active = next((c["profile"] for _, c in layers if isinstance(c.get("profile"), str)), None)
+    for where, cfg in layers:
+        if "sandbox_mode" in cfg:
+            raise CodexSandboxRefused(why.format(f"{where} sets sandbox_mode,", f"Remove sandbox_mode from {where}"))
+        own = (cfg.get("profiles") or {}).get(active) if active and isinstance(cfg.get("profiles"), dict) else None
+        for key in ("sandbox_mode", "default_permissions"):
+            if isinstance(own, dict) and key in own:
+                raise CodexSandboxRefused(why.format(f"{where} sets {key} in [profiles.{active}],",
+                                                     f"Remove {key} from [profiles.{active}] in {where}"))
+    where, base = next(((w, c["default_permissions"]) for w, c in layers if "default_permissions" in c),
+                       ("", ":workspace"))
+    if base == ":danger-full-access":
+        raise CodexSandboxRefused(why.format(f'{where} sets default_permissions = ":danger-full-access",',
+                                             f"Remove default_permissions from {where}"))
+    return base if isinstance(base, str) else ":workspace"
 
 
 def _codex_sandbox(ctx: LaunchContext) -> list[str]:
     """The ``-c`` flags for a Codex worker's sandbox. With the permission
     policy on: a permissions profile for this launch only, the person's own
     default (else Codex's workspace sandbox) plus brindle's writable build
-    caches, with every credential store read-denied. Otherwise (or where
-    Codex would ignore a profile, codex_legacy_sandbox) the writable roots
-    the older way. Nothing in the person's config files changes."""
+    caches, with every credential store read-denied; where Codex would
+    ignore that profile the launch is refused (codex_sandbox_base).
+    Otherwise the writable roots the older way. Nothing in the person's
+    config files changes."""
     from brindle.codex_hook import policy_on
 
     roots = _codex_writable_roots(ctx)
-    if not (ctx.cwd and policy_on(ctx.cwd)) or codex_legacy_sandbox():
+    if not (ctx.cwd and policy_on(ctx.cwd)):
         return ["-c", f"sandbox_workspace_write.writable_roots={json.dumps(roots)}"] if roots else []
-    base = _codex_config().get("default_permissions")
+    base = codex_sandbox_base(ctx.cwd)
     entries = {**{root: "write" for root in roots}, **{path: "deny" for path in _codex_denied_reads()}}
     table = "{" + ",".join(f"{json.dumps(k)}={json.dumps(v)}" for k, v in entries.items()) + "}"
     return ["-c", f"default_permissions={json.dumps(CODEX_PROFILE)}",
-            "-c", f"permissions.{CODEX_PROFILE}.extends={json.dumps(base if isinstance(base, str) else ':workspace')}",
+            "-c", f"permissions.{CODEX_PROFILE}.extends={json.dumps(base)}",
             "-c", f"permissions.{CODEX_PROFILE}.filesystem={table}"]
 
 

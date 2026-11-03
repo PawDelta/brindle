@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
@@ -561,6 +562,20 @@ class FakeAppServer:
             config.write_text(own + "".join(f'[hooks.state."{key}"]\ntrusted_hash = "{value["trusted_hash"]}"\n'
                                             for key, value in edit["value"].items()))
             return {"status": "ok"}
+        if method == "config/read":
+            # Like Codex's: every layer, highest precedence first, a project
+            # layer listed (with a disabledReason) even before its folder is trusted.
+            import tomllib
+
+            from brindle import providers
+
+            found = [({"type": "project", "dotCodexFolder": os.path.join(params["cwd"], ".codex")},
+                      os.path.join(params["cwd"], ".codex", "config.toml")),
+                     ({"type": "user", "file": str(config), "profile": None}, str(config)),
+                     ({"type": "system", "file": providers.CODEX_SYSTEM_CONFIG}, providers.CODEX_SYSTEM_CONFIG)]
+            return {"config": {}, "origins": {}, "layers": [
+                {"name": name, "version": "", "config": tomllib.loads(Path(path).read_text())}
+                for name, path in found if os.path.exists(path)]}
         raise AssertionError(method)
 
     def close(self):
@@ -677,31 +692,52 @@ def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monke
     assert (json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out else None) == expected
 
 
-@pytest.mark.parametrize("policy,own_config,profile", [
-    ("on", "", True),
-    ("off", "", False),
-    ("on", 'sandbox_mode = "workspace-write"\n', False),   # Codex would ignore a profile: said at launch
+class SilentAppServer:
+    """A `codex app-server` that doesn't answer (Codex missing or too old)."""
+    def __init__(self, binary, flags, timeout=30.0):
+        raise codex_hook.CodexHookError("no codex")
+
+
+@pytest.mark.parametrize("policy,layer,setting,server", [
+    ("on", None, "", FakeAppServer),
+    ("off", "user", 'sandbox_mode = "workspace-write"\n', FakeAppServer),
+    # Codex would ignore brindle's profile (sandbox_mode wins), or run it with
+    # full access: the launch is refused, naming the file to change.
+    ("on", "user", 'sandbox_mode = "workspace-write"\n', FakeAppServer),
+    ("on", "project", 'sandbox_mode = "danger-full-access"\n', FakeAppServer),
+    ("on", "system", 'sandbox_mode = "workspace-write"\n', FakeAppServer),
+    ("on", "user", 'default_permissions = ":danger-full-access"\n', FakeAppServer),
+    ("on", "user", 'profile = "x"\n[profiles.x]\nsandbox_mode = "workspace-write"\n', FakeAppServer),
+    ("on", "project", 'sandbox_mode = "workspace-write"\n', SilentAppServer),   # Codex can't say: its files
 ])
-def test_codex_sandbox_denies_reading_credentials(ws, monkeypatch, policy, own_config, profile):
+def test_codex_sandbox_denies_reading_credentials(ws, tmp_path, monkeypatch, policy, layer, setting, server):
     """With the policy on, Codex's own sandbox refuses every sandboxed command
     (and any shell typed into later) a read of each credential store, for
-    this launch only, whatever the hooks see; the build caches stay writable."""
+    this launch only, whatever the hooks see; the build caches stay writable.
+    A config layer that would make Codex ignore that profile refuses the launch."""
     import tomllib
 
     from brindle import build_caches, providers
+    from brindle.pro import credentials
 
-    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    monkeypatch.setattr(codex_hook, "_AppServer", server)
+    monkeypatch.setattr(providers, "CODEX_SYSTEM_CONFIG", str(tmp_path / "etc-codex" / "config.toml"))
     set_local(ws.repo_root, "permission_policy", policy)
-    config = codex_hook.codex_home() / "config.toml"
-    config.parent.mkdir(parents=True, exist_ok=True)
-    config.write_text(own_config)
+    config = {"user": codex_hook.codex_home() / "config.toml", "project": Path(ws.path, ".codex", "config.toml"),
+              "system": Path(providers.CODEX_SYSTEM_CONFIG)}.get(layer)
+    if config:
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(setting)
+    if policy == "on" and layer:
+        with pytest.raises(providers.CodexSandboxRefused) as refused:
+            launch_argv(ws)
+        assert str(config) in str(refused.value)
+        return
     argv = launch_argv(ws)
     flags = dict(a.split("=", 1) for a in argv if a.startswith(("default_permissions=", "permissions.")))
-    assert bool(flags) == profile
-    assert config.read_text().startswith(own_config)   # the sandbox profile is this launch's, not the config's
-    if not profile:
+    assert bool(flags) == (policy == "on")
+    if policy == "off":
         assert any(a.startswith("sandbox_workspace_write.writable_roots=") for a in argv)
-        assert bool(codex_hook.launch_warning("codex", ws.path)) == (policy == "on")
         return
     name = providers.CODEX_PROFILE
     assert json.loads(flags["default_permissions"]) == name
@@ -711,9 +747,9 @@ def test_codex_sandbox_denies_reading_credentials(ws, monkeypatch, policy, own_c
     for path in ("~/.aws", "~/.ssh", "~/.npmrc", "~/.git-credentials", "~/.docker/config.json", "~/.config/gh"):
         assert table[path] == "deny", path
     assert {os.path.realpath(p) for p, access in table.items() if access == "deny" and p.startswith("/")} >= {
-        os.path.join(home, "daemon.json"), os.path.join(home, "brindle-keys"), os.path.join(home, "brindle-pro")}
+        os.path.join(home, "daemon.json"), os.path.join(home, "brindle-keys"),
+        os.path.realpath(credentials.FileStore().path.parent)}
     assert table[build_caches.uv_cache_dir()] == "write"
-    assert codex_hook.launch_warning("codex", ws.path) is None
 
 
 @pytest.mark.parametrize("event,chars,expected", [
@@ -792,7 +828,8 @@ def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatc
     (codex_hook.codex_home() / "config.toml").write_text("")  # the person takes the trust out
     FakeAppServer.calls = []
     assert flag not in launch_argv(ws, mode="review")
-    assert FakeAppServer.calls == [] and codex_hook.status() == codex_hook.REMOVED
+    # Not asked to trust it again (config/read is the sandbox check's).
+    assert [m for m, _ in FakeAppServer.calls if m != "config/read"] == [] and codex_hook.status() == codex_hook.REMOVED
 
 
 def test_unverifiable_trust_is_reported_not_called_trusted(db, ws, monkeypatch):

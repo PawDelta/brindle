@@ -1222,9 +1222,12 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     mcp_recovery = bool(agent.mode == "review" and agent.review_sha and db.conn.execute(
         "SELECT 1 FROM review_mcp_retries WHERE workspace_id=? AND sha=?",
         (ws.id, agent.review_sha)).fetchone())
-    argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
-                                          mode=agent.mode, plan_first=bool(agent.plan_first),
-                                          mcp_recovery=mcp_recovery))
+    try:
+        argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
+                                              mode=agent.mode, plan_first=bool(agent.plan_first),
+                                              mcp_recovery=mcp_recovery))
+    except providers.CodexSandboxRefused as e:
+        raise AgentError(str(e)) from e
     if provider.name == "codex":
         from brindle import codex_hook
 
@@ -1386,7 +1389,7 @@ def run_headless(db: DB, agent_id: str, resume: str | None = None, *,
             from brindle import launch_health
             launch_health.delivered(db, agent, launch_health.before_delivery(db, agent))
             code = subprocess.call(provider.command(ctx), cwd=ws.path, stdin=subprocess.DEVNULL)
-        except OSError as e:
+        except (OSError, providers.CodexSandboxRefused) as e:
             print(f"brindle: couldn't start {provider.name}: {e}", flush=True)
             code = 127
         session = session or new_session
