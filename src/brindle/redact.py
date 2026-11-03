@@ -49,16 +49,24 @@ _TOKEN = re.compile(
     r"|sq[pua]_[A-Za-z0-9]{30,}"
     r"|ATATT[A-Za-z0-9_=-]{20,}"
     r")(?![\w-])", re.DOTALL)
-_AUTHORIZATION = re.compile(
-    r"(?i)(\b(?:proxy-)?authorization[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic|token|digest)\s+)?)"
-    r"([^\s'\"`<>,;]+)")
+_AUTH_PREFIX = r"\b(?:proxy-)?authorization[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic|token|digest)\s+)?"
+_AUTHORIZATION = re.compile(rf"(?i)({_AUTH_PREFIX})([^\s'\"`<>,;]+)")
 # Outside an Authorization header a credential has a digit in it: "basic functionality" is prose.
 _AUTH_SCHEME = re.compile(r"(?i)\b(bearer|basic)(\s+)(?=[A-Za-z._~+/-]*\d)([A-Za-z0-9._~+/-]{8,}=*)")
 # A secret-style label, then its value. The value is masked only when it looks
 # like a secret (see _secret_like), so "token: 1200" or "password: hunter" stay.
-_LABELLED = re.compile(
-    r"(?i)(\b[\w.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret|token|passw(?:or)?d|passphrase"
-    r"|credential|(?<![a-z])key)[\w.-]*[\"']?\s*[:=]\s*[\"']?)([^\s'\"`<>,;]{8,})")
+_LABEL_PREFIX = (r"\b[\w.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret|token|passw(?:or)?d|passphrase"
+                 r"|credential|(?<![a-z])key)[\w.-]*[\"']?\s*[:=]\s*[\"']?")
+_LABELLED = re.compile(rf"(?i)({_LABEL_PREFIX})([^\s'\"`<>,;]{{8,}})")
+# What a stream must hold until more text comes: a header, label or scheme whose
+# credential is still to come (mask finds it on the next line), or a private key
+# block not yet ended.
+_OPEN = re.compile(rf"(?i)(?:{_AUTH_PREFIX}|\b(?:bearer|basic)|{_LABEL_PREFIX})\s*\Z")
+_KEY_BEGIN = re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----")
+_KEY_END = re.compile(r"-----END (?:[A-Z]+ )*PRIVATE KEY-----")
+# Where a stream that gave up on what it held (see MaskingStream) picks up again.
+_CREDENTIAL_END = re.compile(r"[^\s'\"`<>,;]+(?=[\s'\"`<>,;])")
+_LINE_END = re.compile(r"\n")
 _SECRET_NAME = re.compile(r"(?i)token|secret|passw|passphrase|api_?key|access_?key|private_?key"
                           r"|credential|(?:^|_)pat$|(?:^|_)key$")
 # A variable named for where a secret is kept (a key file, a socket) holds a
@@ -167,13 +175,29 @@ def _spans(text: str) -> list[tuple[int, int]]:
     return found
 
 
+def _open_key(text: str) -> int:
+    """Where in ``text`` a private key block that has not ended begins, or -1."""
+    begins = list(_KEY_BEGIN.finditer(text))
+    if begins and not _KEY_END.search(text, begins[-1].end()):
+        return begins[-1].start()
+    return -1
+
+
+def _open_credential(text: str) -> int:
+    """Where in ``text`` a header or label whose credential is still to come
+    begins, or -1."""
+    m = _OPEN.search(text, max(0, len(text.rstrip()) - 1024))
+    return m.start() if m else -1
+
+
 def _safe_cut(text: str, cut: int) -> int:
     """``cut`` moved back until masking ``text[:cut]`` on its own masks all
     it would in ``text``: no match lies across it, and what follows it is not
-    the start of a multiline secret still to come."""
+    the start of a multiline secret, key block or credential still to come."""
     spans = _spans(text)
     starts = [at for value in env_values() if "\n" in value
               for at in range(max(0, len(text) - len(value) + 1), len(text)) if value.startswith(text[at:])]
+    starts += [at for at in (_open_key(text), _open_credential(text)) if at >= 0]
     while True:
         moved = min([cut, *starts, *(s for s, e in spans if s < cut < e)])
         if moved == cut:
@@ -187,24 +211,28 @@ class MaskingStream:
     Text is passed on only as whole lines, and only up to where nothing that
     could be a secret runs on into what is still held: across ``flush`` too,
     since the next write may complete a token (or a multiline secret, or the
-    credential after ``Authorization: Bearer``). A line longer than
-    ``_HOLD_MAX`` is passed on in part, keeping back its last ``_KEEP``
-    characters the same way; one that can't be split safely by four times
-    that is dropped to its end. :meth:`finish` is the end of the stream (at
+    credential after ``Authorization: Bearer``, even on the next line, or a
+    private key block until its END line). A line longer than ``_HOLD_MAX`` is
+    passed on in part, keeping back its last ``_KEEP`` characters the same
+    way; what can't be split safely by four times that is dropped to the end
+    of the line, or of the key block or credential it was waiting on. :meth:`finish` is the end of the stream (at
     exit) and passes on everything, masked."""
 
     def __init__(self, stream) -> None:
         self._stream = stream
         self._pending = ""
-        self._dropping = False
+        self._dropping: re.Pattern[str] | None = None   # what ends what is being dropped
+        self._dropped = ""                               # the tail of it, for an end split across writes
 
     def write(self, text: str) -> int:
         n = len(text)
         if self._dropping:
-            end = text.find("\n")
-            if end < 0:
+            seen = self._dropped + text
+            end = self._dropping.search(seen)
+            if end is None:
+                self._dropped = seen[-256:]
                 return n
-            self._dropping, text = False, text[end + 1:]
+            self._dropping, self._dropped, text = None, "", seen[end.end():]
         self._pending += text
         cut = self._pending.rfind("\n") + 1
         if len(self._pending) - cut > _HOLD_MAX:   # no line end in sight: don't hold it all
@@ -215,7 +243,9 @@ class MaskingStream:
             self._stream.write(mask(done))
         if len(self._pending) > 4 * _HOLD_MAX:     # can't be split safely: fail closed
             self._stream.write(REDACTED)
-            self._pending, self._dropping = "", True
+            self._dropping = (_KEY_END if _open_key(self._pending) >= 0
+                              else _CREDENTIAL_END if _open_credential(self._pending) >= 0 else _LINE_END)
+            self._pending = ""
         return n
 
     def flush(self) -> None:
@@ -225,7 +255,7 @@ class MaskingStream:
         if self._pending:
             self._stream.write(mask(self._pending))
             self._pending = ""
-        self._dropping = False
+        self._dropping, self._dropped = None, ""
         self._stream.flush()
 
     def __getattr__(self, name: str):

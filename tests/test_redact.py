@@ -158,7 +158,7 @@ def test_archived_transcript_masks_values_json_escapes(tmp_path, db, monkeypatch
     assert lines[1:] == ["not json: [redacted]", redact.REDACTED]
 
 
-def test_masking_stream_holds_a_token_split_across_writes_and_flushes(monkeypatch):
+def test_masking_stream_holds_a_secret_split_across_writes_lines_and_flushes(monkeypatch):
     monkeypatch.setenv("MULTILINE_SECRET", MULTILINE)
     out = io.StringIO()
     stream = redact.MaskingStream(out)
@@ -177,3 +177,16 @@ def test_masking_stream_holds_a_token_split_across_writes_and_flushes(monkeypatc
     for text in (pad + PAT[:10], PAT[10:] + "\n", "env " + MULTILINE[:12], MULTILINE[12:] + " ok\n"):
         stream.write(text)
     assert out.getvalue() == pad + "[redacted]\nenv [redacted] ok\n"
+    key, end = "-----BEGIN " + "PRIVATE KEY-----", "-----END " + "PRIVATE KEY-----"
+    body = "MIIEvQIBADANBgkqhkiG9w0BAQEFAASC"
+    big = (body + "\n") * (4 * redact._HOLD_MAX // len(body))      # past where the stream gives up
+    for writes in (["Authorization: Bearer\n", "AbCdEfGhIjKlMnOp\n", "ok\n"],
+                   [key + "\n", body + "\n", end + "\n", "ok\n"],
+                   [key + "\n", big, body + "\n", end + "\n", "ok\n"],
+                   ["Authorization: Bearer" + " " * 4 * redact._HOLD_MAX, "\nAbCdEfGhIjKlMnOp\n", "ok\n"]):
+        out = io.StringIO()
+        stream = redact.MaskingStream(out)
+        for text in writes:
+            stream.write(text)
+        assert "AbCdEfGhIjKlMnOp" not in out.getvalue() and body not in out.getvalue()
+        assert out.getvalue().endswith("ok\n")
