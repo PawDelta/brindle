@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from brindle import ci_client, codemap, config, history, redact, watch
+from brindle import ci_client, codemap, config, history, prompt_answer, redact, watch
 from brindle.db import Agent, LearnedRule, Workspace
 from brindle.native import NativeAgent, Permissions, Toolbox, core_tools
 from brindle.native.client import Reply, ToolCall
@@ -145,6 +145,34 @@ def test_mask(text, expected, monkeypatch):
     monkeypatch.setenv("MY_TOKEN_ENABLED", "1")
     monkeypatch.setenv("SIGNING_KEY_FILE", "/Users/me/key.pem")
     assert redact.mask(text) == expected
+
+
+SHA = "d2e88092c10324ba5c702b3bed77e1434aa0bd0d"      # a commit id: 40 hex, no letter past f
+SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+
+@pytest.mark.parametrize("text, expected", [
+    # A git object id in a git context, with no secret label near it, is kept.
+    (f"Focus on what changed since then (`git diff {SHA}..HEAD`)",
+     f"Focus on what changed since then (`git diff {SHA}..HEAD`)"),
+    (f"reviewed at {SHA}, sha {SHA256}", f"reviewed at {SHA}, sha {SHA256}"),
+    (f"{SHA}..HEAD", f"{SHA}..HEAD"),
+    pytest.param("git log abc1234..HEAD", "git log abc1234..HEAD",
+                 marks=pytest.mark.variant("a short id was never long enough to be taken for a credential")),
+    # Labelled, next to a secret name, or in no git context at all: masked as before.
+    (f"token={SHA}", "[redacted]"),
+    (f"GITHUB_TOKEN: {SHA}", "GITHUB_TOKEN: [redacted]"),
+    (SHA, "[redacted]"),
+    (f"Authorization: Bearer {SHA}", "Authorization: Bearer [redacted]"),
+    (f"https://deploy:{SHA}@git.example.com/repo.git", "https://deploy:[redacted]@git.example.com/repo.git"),
+    (f"the signing secret is at {SHA}", "the signing secret is at [redacted]"),
+    (f"checkout at {SHA}, the deploy token", "checkout at [redacted], the deploy token"),
+    (f"commit: {SHA}", "commit: [redacted]"),
+    (f"git diff {SHA.upper()}..HEAD", "git diff [redacted]..HEAD"),
+    (f"git diff {SHA}..HEAD\nAPI_KEY={SHA256}", f"git diff {SHA}..HEAD\n[redacted]"),
+])
+def test_pane_redact_keeps_commit_ids_in_git_context(text, expected):
+    assert prompt_answer.redact(text) == expected
 
 
 @pytest.mark.variant("ordinary hashes, ids, encodings and prose must never be masked")

@@ -95,7 +95,19 @@ CONFIG_PATH = re.compile(r"(?i)\.(?:mcp|claude|codex|gemini|agy)\b|settings(?:\.
 SECRET = re.compile(r"sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}"
                     r"|gh[pousr]_[A-Za-z0-9]{20,}|-----BEGIN"
                     r"|\b(?=[\w+=-]*[A-Za-z])(?=[\w+=-]*\d)[\w+=-]{40,}")
-PATH = re.compile(r"(?<![\w.~/])(?:~|/)[\w.@+-]*(?:/[\w.@+-]+)+")
+# A git object id (40 or 64 lowercase hex) that SECRET's long-word rule would
+# take for a credential is kept by redact() only when it is in a git context
+# (a git command's argument, one end of a `..`/`...` range, after "commit",
+# "at" or "sha") and nothing near it on the line names a secret or labels it
+# (a key name, `=`, `:`, the `@` of a URL's userinfo). Anything unsure is masked.
+_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_GIT_CONTEXT = re.compile(r"(?i)(?:\bgit\s+(?:diff|show|log|rev-parse|rev-list|checkout|switch|reset|cherry-pick"
+                          r"|merge|rebase|range-diff|describe|branch|tag|bisect|worktree|blame|name-rev)\b[^\n]*"
+                          r"|\b(?:commit|at|sha)|\.\.\.?)\s*$")
+_SECRET_NAME = re.compile(r"(?i)\b(?:token|key|secret|passw|passphrase|auth|bearer|credential)")
+_SECRET_NEAR = re.compile(rf"{_SECRET_NAME.pattern}|[=:]\s*[\"'`]?\s*$")
+_NEAR = 120     # how far along the line, either way, a secret name counts as near
+PATH =re.compile(r"(?<![\w.~/])(?:~|/)[\w.@+-]*(?:/[\w.@+-]+)+")
 
 PROMPT = """\
 A command-line coding agent has just started and stopped on the screen below \
@@ -373,8 +385,21 @@ def _may_answer(screen: str, decision: Decision) -> bool:
     return decision.kind != "trust" or _brindle_folder(screen)
 
 
+def _commit_id(text: str, m: re.Match) -> bool:
+    """Whether SECRET's match ``m`` in ``text`` is a git object id in a git
+    context with no secret label near it (see _GIT_CONTEXT)."""
+    if not _OBJECT_ID.fullmatch(m.group(0)):
+        return False
+    line = text.rfind("\n", 0, m.start()) + 1
+    before = text[max(line, m.start() - _NEAR):m.start()]
+    after = text[m.end():m.end() + _NEAR].split("\n", 1)[0]
+    if _SECRET_NEAR.search(before) or _SECRET_NAME.search(after) or after.startswith("@"):
+        return False
+    return bool(_GIT_CONTEXT.search(before) or after.startswith(".."))
+
+
 def redact(text: str) -> str:
-    return SECRET.sub("[redacted]", text)
+    return SECRET.sub(lambda m: m.group(0) if _commit_id(text, m) else "[redacted]", text)
 
 
 # Prompts nobody but the person may answer, by pane, for the launcher to
