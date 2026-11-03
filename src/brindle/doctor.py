@@ -477,6 +477,7 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
             out.append(Check(OK, "leftover processes", "none"))
     except Exception as e:  # noqa: BLE001
         out.append(Check(WARN, "leftover processes", f"couldn't check: {e}"))
+    out.extend(reap_checks(db))
 
     if repo_root:
         try:
@@ -574,6 +575,22 @@ def disk_checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
                          f"{names}{more}: `brindle clean --branches` deletes them, keeping each tip "
                          f"under {disk.ARCHIVE_REF}<branch>"))
     return out
+
+
+def reap_checks(db: DB | None = None) -> list[Check]:
+    """What the sweep reaped lately (brindle.reap), and what it would reap now."""
+    from brindle import reap
+
+    try:
+        reap_db = db if db is not None else DB()
+        with closing(reap_db.conn) if db is None else nullcontext():
+            reaped = reap.recent(reap_db)
+            would = reap.run(reap_db, dry_run=True)
+    except Exception as e:  # noqa: BLE001
+        return [Check(WARN, "reaped", f"couldn't check: {e}")]
+    return [Check(OK, "reaped", "\n".join(reaped[:20]) if reaped else "nothing in the last 7 days"),
+            Check(WARN if would else OK, "to reap",
+                  "\n".join(would) + "\n(the next sweep does this)" if would else "nothing")]
 
 
 def routing_checks(cfg, repo_root: str) -> list[Check]:

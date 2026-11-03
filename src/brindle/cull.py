@@ -21,7 +21,10 @@ A sweep, run by the sidebar every minute, when ``brindle`` starts, and by
    or branch, so its supervisor can still review and merge the work.
 
 It also stops the Ollama server brindle started once no running session uses
-it (see brindle.native.serve.stop_unused).
+it (see brindle.native.serve.stop_unused), and reaps what outlived its work
+(see brindle.reap): orphan and finished workers' tmux sessions, empty shells,
+supervisors idle for days (paused, resumable), old coordinator rows, and
+workers whose branch already landed.
 
 Interactive agents (supervisor chats) are never closed here; only their
 leftover processes are stopped.
@@ -299,6 +302,12 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     # 6. Finished work: merged worktrees and ones whose folder is gone leave
     # the live view, archived (not only when someone runs `brindle prune`).
     done.extend(prune_retired(db, now, cautious=True))
+
+    # 7. What outlived its work: orphan and finished tmux sessions, empty
+    # shells, idle supervisors, old coordinator rows, superseded workers.
+    from brindle import reap
+
+    done.extend(reap.run(db, now))
     return done
 
 

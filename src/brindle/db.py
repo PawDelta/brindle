@@ -742,6 +742,17 @@ CREATE TABLE IF NOT EXISTS doc_requests (
     why TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+-- What the sweep reaped (brindle.reap): tmux sessions, stopped supervisors,
+-- superseded workers, notices sent once. `brindle doctor` lists recent rows;
+-- an 'idle_supervisor' row is an Inbox item while its root stays paused.
+CREATE TABLE IF NOT EXISTS reaped (
+    at REAL NOT NULL,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,          -- a tmux session name or an agent id
+    root_id TEXT,                  -- the session root it belonged to, if known
+    detail TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reaped_target ON reaped(kind, target);
 CREATE INDEX IF NOT EXISTS kb_chunks_doc ON kb_chunks(doc_id);
 CREATE TABLE IF NOT EXISTS kb_links (
     chunk_id TEXT NOT NULL REFERENCES kb_chunks(id) ON DELETE CASCADE,

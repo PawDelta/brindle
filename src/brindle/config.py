@@ -128,6 +128,8 @@ class RepoConfig:
     graphify_auto_refresh: bool = True  # rebuild untracked code maps automatically; queries work when false
     stale_after: int = 30              # minutes before an idle, reported worker is closed; 0: never
     stall_alert_after: int = 10        # minutes a piped branch may sit with nothing working on it before the supervisor is told; 0: never
+    idle_supervisor_days: float = 3    # days without input before an idle supervisor is stopped (resumable); 0: never
+    superseded_after: float = 6        # hours without activity before a worker whose work already landed is stopped; 0: never
     pipeline: bool = True              # brindle reviews and merges reported branches itself (brindle.pipeline)
     review_start_delay: int = 60       # seconds before recovering a reported branch with no review in progress
     goal_audit: bool = True            # an adversarial reviewer checks a finished goal against the original request before it counts as reached
@@ -397,6 +399,7 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
                 "check_concurrency", "wait_for_room", "room_wait_max", "min_free_disk_gb", "delete_pushed_branches",
                 "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
+                "idle_supervisor_days", "superseded_after",
                 "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
                 "auto_merge_default_branch", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
