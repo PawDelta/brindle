@@ -12,6 +12,7 @@ import pytest
 from conftest import run_scenario, sh
 
 from brindle import agents, git, procs, providers, spawn, status_cache, tmux
+from brindle.daemon import routes_actions
 from brindle.daemon.app import Deadlines
 from brindle.db import Agent, Workspace
 
@@ -34,6 +35,14 @@ def _until(cond, within: float = 5.0) -> bool:
     while not cond() and time.monotonic() < end:
         threading.Event().wait(0.02)
     return cond()
+
+
+def _room(monkeypatch, load, level, expected):
+    monkeypatch.setattr(spawn, "_cores", lambda: 8)
+    monkeypatch.setattr(spawn, "_load", lambda: load)
+    monkeypatch.setattr(spawn, "pressure", lambda: level)
+    monkeypatch.setattr(spawn, "_running", 1)
+    assert spawn.room() == expected
 
 
 def _a_high_load_average_with_idle_cpus_leaves_room(monkeypatch):
@@ -131,6 +140,14 @@ def _past_its_deadline_nothing_starts_even_with_room(tmp_path):
     assert not marker.exists()
 
 
+def _a_started_helper_commits_its_request_and_a_started_read_does_not():
+    with spawn.deadline(30) as dl:
+        spawn.start(["true"], write=False).wait()
+        assert not dl.committed and spawn.left(100) <= 30      # a read is still held to the deadline
+        spawn.detach(["true"]).wait()
+        assert dl.committed and spawn.left(100) == 100
+
+
 def _serve(method: str, handler, disconnect_when=None, cancel_when=None) -> None:
     """One request through Deadlines whose route runs ``handler`` on a thread,
     as Starlette runs a sync route. The client disconnects once
@@ -186,6 +203,21 @@ def _an_abandoned_read_leaves_no_process(tmp_path, monkeypatch):
     assert spawn.running() == 0
 
 
+def _a_cancelled_request_stops_the_read_its_thread_left_running():
+    got: list[BaseException] = []
+
+    def handler() -> None:
+        try:
+            spawn.read(["tail", "-f", "/dev/null"])
+        except spawn.Busy as e:
+            got.append(e)
+
+    t0 = time.monotonic()
+    _serve("GET", handler, cancel_when=lambda: spawn.running() == 1)
+    assert got
+    assert time.monotonic() - t0 < 5       # the cancellation, not the 30 second deadline
+
+
 def _a_post_whose_client_left_mid_action_runs_to_its_end(tmp_path):
     """Once an action has started the request is a transaction: the action
     and the reads after it (bookkeeping, a rollback) finish, client or not."""
@@ -202,6 +234,27 @@ def _a_post_whose_client_left_mid_action_runs_to_its_end(tmp_path):
 
     _serve("POST", handler, disconnect_when=started.exists)
     assert got == ["done\n", True, "after\n"]
+
+
+def _an_edit_whose_client_leaves_as_it_commits_keeps_the_commit(repo, monkeypatch):
+    """The reads after the commit (its sha) once failed on the stopped
+    deadline, and the rollback put the old file back under the new commit."""
+    ws = Workspace("w", str(repo), "w", "worktree", "main", "main", str(repo), None, "s", 1.0)
+    real = git.run
+
+    def run(args, *a, **kw):
+        proc = real(args, *a, **kw)
+        if "commit" in args:
+            spawn.current().stop()         # the client leaves the moment the commit is made
+        return proc
+
+    monkeypatch.setattr(git, "run", run)
+    base = sh("git rev-parse HEAD:app.py", repo)
+    with spawn.deadline(30):
+        _, commit = routes_actions.commit_edit(ws, "app.py", b"new\n", base, "edit")
+    assert commit == sh("git rev-parse HEAD", repo)
+    assert sh("git show HEAD:app.py", repo) == "new"
+    assert (repo / "app.py").read_bytes() == b"new\n"
 
 
 class _FakePs:
@@ -271,6 +324,15 @@ def _warm_fans_out_under_the_request_deadline(monkeypatch):
     assert sorted(stopped) == ["a", "b"]
 
 
+def _a_hash_whose_clean_filter_stalls_stops_at_the_deadline(repo):
+    sh("git config filter.stall.clean 'tail -f /dev/null' && echo '*.txt filter=stall' > .gitattributes", repo)
+    t0 = time.monotonic()
+    with spawn.deadline(0.5), pytest.raises(git.GitBusy):
+        git.hash_blob(repo, b"x\n", "a.txt")
+    assert time.monotonic() - t0 < 5
+    assert spawn.running() == 0
+
+
 def _a_git_status_stopped_partway_leaves_no_index_lock(repo, tmp_path):
     """git status holds .git/index.lock while it asks a dirty submodule for
     its own status; a submodule whose fsmonitor hook never answers keeps it
@@ -295,15 +357,26 @@ def _row(scenario, id, why=None, **params):
 
 
 @pytest.mark.parametrize("scenario, params", [
+    _row(_room, "room-pressure-critical", load=2.0, level=4, expected=-1.0),
     _row(_a_high_load_average_with_idle_cpus_leaves_room, "room-idle-cpu-high-loadavg"),
     _row(_a_start_whose_room_sample_outlasts_its_deadline_is_refused, "room-sample-past-deadline"),
+    _row(_checks_and_setup_run_at_normal_priority, "normal-priority-checks"),
     _row(_with_no_room_only_waiting_work_waits_and_a_request_read_starts_at_once, "overload-no-room"),
     _row(_past_its_deadline_nothing_starts_even_with_room, "deadline-passed"),
+    _row(_a_started_helper_commits_its_request_and_a_started_read_does_not, "subprocess-helper-vs-read",
+         "only a helper whose request committed may outlive it; a read must not"),
     _row(_an_abandoned_read_leaves_no_process, "abandoned-read"),
+    _row(_a_cancelled_request_stops_the_read_its_thread_left_running, "cancelled-read",
+         "a cancelled request stops the read its worker thread left running"),
     _row(_a_post_whose_client_left_mid_action_runs_to_its_end, "client-left-post",
          "an action whose client left still finishes"),
+    _row(_an_edit_whose_client_leaves_as_it_commits_keeps_the_commit, "client-left-edit",
+         "an edit whose client left as it commits keeps its commit"),
     _row(_a_stop_whose_client_leaves_once_the_window_is_closed_still_finishes, "client-left-stop",
          "a stop whose client left still finishes"),
+    _row(_warm_fans_out_under_the_request_deadline, "deadline-warm",
+         "a warm-up fanned out across sessions must still end at the request deadline"),
+    _row(_a_hash_whose_clean_filter_stalls_stops_at_the_deadline, "deadline-hash"),
     _row(_a_git_status_stopped_partway_leaves_no_index_lock, "stopped-git-status",
          "a stopped git status leaves no index.lock"),
 ])

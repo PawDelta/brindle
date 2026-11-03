@@ -10,6 +10,8 @@ from brindle import cli, updates
 @pytest.mark.parametrize("cached, age, reply, local, disabled, expected, requests", [
     ("0.4.0", 10, None, False, False, "0.4.0", 0),
     ("0.3.8", 86400, "0.4.0", False, False, "0.4.0", 1),
+    ("0.4.0", 10, None, True, False, None, 0),
+    ("0.4.0", 10, None, False, True, None, 0),
     ("0.4.0", 86400, "locked", False, False, "0.4.0", 0),
     pytest.param(None, 0, "bad#(shell)", False, False, None, 1,
                  marks=pytest.mark.variant("malformed PyPI data must not reach tmux")),
@@ -50,6 +52,8 @@ def test_daily_check(brindle_home, monkeypatch, cached, age, reply, local, disab
 
 
 @pytest.mark.parametrize("opt_in, available, fails, launched", [
+    (False, True, False, False),
+    (True, False, False, False),
     (True, True, False, True),
     (True, True, True, False),
 ])

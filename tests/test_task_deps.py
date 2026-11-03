@@ -417,6 +417,16 @@ def test_cancellation_cascades_to_a_task_depending_on_the_cancelled_one(db, repo
     assert "Cancelled" in first.body and "Cancelled" in second.body
     assert worker_a in bodies and b_task.id in bodies
 
+    before = db.list_tasks(str(repo))
+    workers_before = db.list_agents()
+    asyncio.run(mcp_server.assign("developer", "do D", branch="feat-d",
+                                  depends_on=["feat-b"]))
+    assert db.list_tasks(str(repo)) == before
+    assert db.list_agents() == workers_before
+    out = mcp_server.requeue(c_task.id)
+    assert out.startswith("Error")
+    assert db.list_tasks(str(repo)) == before
+
 
 # -- cancel_task ------------------------------------------------------------------
 
@@ -480,6 +490,10 @@ def started_a(db):
 def test_requeue_a_cancelled_task_copies_it_and_keeps_dependencies(db, repo, boss):
     a = started_a(db)
     b = queued_task(db, repo, a, plan_first=True)
+    before = db.list_tasks(str(repo))
+    assert mcp_server.requeue("nope").startswith("Error")
+    assert mcp_server.requeue(b.id).startswith("Error")
+    assert db.list_tasks(str(repo)) == before
     mcp_server.cancel_task(b.id)
     db.update_task(b.id, weight="light")
     # A's task is still started, so the dependency is still waiting.
