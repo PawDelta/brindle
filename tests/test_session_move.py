@@ -23,6 +23,10 @@ def test_checkout_for_adopts_a_worktree_the_user_made(db, repo, tmp_path):
     ws = workspaces.checkout_for(db, str(repo), branch="topic")
     assert ws.path == str(mine.resolve()) and ws.repo_root == str(repo)
     assert workspaces.checkout_for(db, str(repo), worktree=str(mine)).id == ws.id
+    with pytest.raises(workspaces.WorkspaceError):
+        workspaces.checkout_for(db, str(repo), branch="other", worktree=str(mine))
+    assert git.current_branch(mine) == "topic"
+    assert db.get_workspace(ws.id) == ws and mine.is_dir()
 
 
 def test_checkout_for_worktree_path_creates_it_with_the_branch(db, repo, tmp_path):

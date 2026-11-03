@@ -14,7 +14,7 @@ import brindle
 from brindle import agents, mcp_server, profiles, upgrade, watch
 
 
-@pytest.mark.parametrize("exit_kind", ["broken_pipe"])
+@pytest.mark.parametrize("exit_kind", ["broken_pipe", "eof"])
 def test_mcp_transport_failure_delivers_recovery_without_mcp(db, monkeypatch, exit_kind):
     from brindle.db import Agent, Workspace
 

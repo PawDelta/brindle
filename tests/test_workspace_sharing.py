@@ -128,6 +128,13 @@ def test_remove_refuses_while_another_live_row_shares_the_path(db, repo, live):
         workspaces.remove(db, ws)
     assert os.path.isdir(ws.path) and db.get_workspace(ws.id)
 
+    live.clear()
+    db.set_status("busy1", "paused")
+    workspaces.remove(db, ws)
+    assert db.get_workspace(ws.id) is None
+    assert db.get_workspace(twin.id) is not None
+    assert os.path.isdir(twin.path)
+
 
 def test_mcp_remove_workspace_refuses_then_force_removes(db, repo, live, monkeypatch):
     ws = workspaces.create(db, str(repo), "feat/x").workspace

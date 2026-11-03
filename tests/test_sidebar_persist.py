@@ -9,10 +9,11 @@ behaviour under test is genuine tmux pane/hook plumbing.
 """
 
 import time
+from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, tmux, workspaces
+from brindle import agents, sidebar_follow, tmux, workspaces
 from brindle.db import Agent, Workspace
 from brindle.sidebar_follow import sidebar_here
 
@@ -109,12 +110,29 @@ def test_sidebar_killed_with_a_workers_session_comes_back_in_the_root_session(db
             tmux.kill_session(worker_s)
 
 
-def test_a_dismissed_sidebar_stays_gone_until_a_relaunch(db, tmp_path, session):
+def test_a_dismissed_sidebar_stays_gone_until_a_relaunch(db, tmp_path, session, monkeypatch):
     win_a = make_window(session, "winA")
     ws = make_workspace(db, tmp_path, "winA", session)
     fake_agent(db, ws, win_a, "root1")
+    with monkeypatch.context() as patch:
+        clock = iter((0.0, agents.SIDEBAR_LOCK_TIMEOUT))
+        patch.setattr(sidebar_follow, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+
+        def contended(fd, operation):
+            raise BlockingIOError("sidebar lock held")
+
+        patch.setattr(sidebar_follow.fcntl, "flock", contended)
+        with pytest.raises(BlockingIOError):
+            agents._ensure_sidebar(db, "root1", ws, win_a)
+        assert db.get_sidebar_pane("root1") is None
     agents._ensure_sidebar(db, "root1", ws, win_a)
     sidebar = db.get_sidebar_pane("root1")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(tmux, "get_pane_tag", lambda pane, tag: "root1")
+        agents.dismiss_sidebar(db, None)
+        agents.dismiss_sidebar(db, "%replaced-sidebar")
+        assert db.get_sidebar_pane("root1") == sidebar
 
     agents.dismiss_sidebar(db, sidebar)  # the person pressed q
     tmux.kill_pane(sidebar)

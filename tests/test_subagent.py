@@ -27,6 +27,12 @@ def _started(db) -> Agent:
 
 
 def test_handoff_makes_a_workspace_and_starts_nothing(db, boss, monkeypatch):
+    before = db.list_agents()
+    for mode in ("interactive", "review"):
+        with pytest.raises(agents.AgentError):
+            agents.spawn(db, boss, "subagent", prompt="x", mode=mode)
+        assert db.list_agents() == before
+
     def no_tmux(*a, **k):
         raise AssertionError("a subagent worker gets no tmux window")
 
@@ -54,6 +60,13 @@ def test_handoff_makes_a_workspace_and_starts_nothing(db, boss, monkeypatch):
 
 
 def test_subagent_is_working_until_completed_then_merges_and_removes(db, boss, repo):
+    process_worker = Agent("process", boss.id, "developer", "claude", "boss", "assign", "processing",
+                           "@1", None, time.time())
+    db.add_agent(process_worker)
+    before = db.get_agent(process_worker.id)
+    mcp_server.complete_subagent(process_worker.id, "done")
+    assert db.get_agent(process_worker.id) == before
+
     out = asyncio.run(mcp_server.assign("subagent", "Add a file", branch="feat/file"))
     worker = _started(db)
     ws = db.get_workspace(worker.workspace_id)

@@ -289,7 +289,53 @@ def _the_sweep_adopts_when_the_sign_in_check_failed(w, brindle_login, monkeypatc
     assert identity_lock.locked_by("c1") == OK.ident
 
 
+def _an_unused_org_route_checks_the_personal_signin(w, brindle_login, monkeypatch):
+    w.route = "bedrock"
+    monkeypatch.setattr(company_login, "route_in_use", _REAL_ROUTE_IN_USE)
+    monkeypatch.setattr(company_identity, "claude_identity", lambda org_id, claude, cache=True: (
+        Identity("claude", "AWS federated role", determined=False) if claude is not None else w.claude))
+    w.agent("c1")
+    w.claude = PERSONAL
+    assert signin_pause.check("claude")[0].ident == PERSONAL.ident
+    signin_pause.run(w.db)
+    assert w.messages == [] and w.status("c1") == "processing"
+    w.claude = OUT
+    signin_pause.run(w.db)
+    assert w.status("c1") == "paused"
+
+
+def _cloud_signin_resumes_only_after_the_fingerprint_changes(w, brindle_login, monkeypatch):
+    brindle_login["in"] = True
+    w.route = "bedrock"
+    w.agent("c1")
+    w.claude = OUT
+    signin_pause.run(w.db)
+    assert w.status("c1") == "paused"
+    w.claude = AWS_OK
+    signin_pause.run(w.db)
+    assert w.status("c1") == "paused" and w.claude_probes == 1
+    w.fp = "fp2"
+    signin_pause.run(w.db)
+    assert w.status("c1") == "processing" and w.resumed == ["c1"]
+
+
+def _setup_without_a_brindle_login_keeps_agents_adoptable(w, brindle_login, monkeypatch):
+    w.claude = PERSONAL
+    w.agent("c1")
+    signin_pause.record_launch(w.db.get_agent("c1"))
+    assert signin_pause.adopt(OK.ident, signed_in=False) == ["c1"]
+    assert signin_pause.recorded_identity("c1") == OK.ident
+    assert signin_pause._load()["unowned"] == ["c1"]
+    brindle_login["in"] = True
+    assert signin_pause.adopt(OTHER_ORG.ident) == ["c1"]
+    assert signin_pause.recorded_identity("c1") == OTHER_ORG.ident
+    assert signin_pause._load()["unowned"] == []
+
+
 @pytest.mark.parametrize("scenario", [
+    _an_unused_org_route_checks_the_personal_signin,
+    _cloud_signin_resumes_only_after_the_fingerprint_changes,
+    _setup_without_a_brindle_login_keeps_agents_adoptable,
     _an_agent_recorded_under_a_brindle_login_is_never_adopted,
     _the_sweep_adopts_when_the_sign_in_check_failed,
 ], ids=lambda f: f.__name__.strip("_"))

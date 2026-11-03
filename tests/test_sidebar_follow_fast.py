@@ -10,7 +10,8 @@ from brindle.db import Agent, Workspace
 
 @pytest.mark.parametrize(
     ("reported_window", "reported_tag", "should_skip"),
-    [("@window", "root", True), ("@other", "root", False)],
+    [("@window", "root", True), ("@other", "root", False),
+     ("@window", "different-root", False)],
 )
 def test_sidebar_follow_fast_skip_requires_matching_window_and_tag(
     monkeypatch, reported_window, reported_tag, should_skip,
@@ -59,6 +60,7 @@ def test_sidebar_follow_fast_skip_requires_matching_window_and_tag(
     else:
         with pytest.raises(AssertionError, match="slow path reached"):
             sidebar_follow.sidebar_follow(FakeDB(), "session")
+        assert sent == []
     assert calls == [("%sidebar", "@brindle_sidebar")]
 
 

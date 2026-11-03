@@ -113,6 +113,7 @@ def test_cross_session_overlap_warns_by_files_or_issue_number_until_merged(db, o
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197") is None
 
 
+@pytest.mark.slow("Builds five real Git worktrees and merges one to bound overlap Git calls and verify caching")
 @pytest.mark.parametrize("w3_branch", [
     "feat-w3",
     pytest.param("origin/feat-w3", marks=pytest.mark.variant(
@@ -255,6 +256,7 @@ def dependency_rows(db, tmp_path, monkeypatch):
 @pytest.mark.parametrize(("event", "upstream_kind"), [
     ("merged", "task"), ("removed", "task"), ("requeue_merged", "task"),
     ("requeue_removed", "worker"), ("requeue_pending", "workspace"),
+    ("requeue_removed", "task"), ("requeue_removed", "workspace"),
 ])
 def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, monkeypatch, event, upstream_kind):
     caller, boss, workspace, launched = dependency_rows
@@ -324,7 +326,8 @@ def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, 
         assert launched == [db.get_task(pending.id).agent_id]
 
 
-def test_requeue_preserves_an_upstream_that_has_no_worker_yet(db, dependency_rows, finish="merged"):
+@pytest.mark.parametrize("finish", ["merged", "cancelled"])
+def test_requeue_preserves_an_upstream_that_has_no_worker_yet(db, dependency_rows, finish):
     caller, boss, workspace, launched = dependency_rows
     engine = workspace("engine", "engine")
     db.add_session_repo(caller.id, "engine", engine.repo_root)
@@ -348,7 +351,8 @@ def test_requeue_preserves_an_upstream_that_has_no_worker_yet(db, dependency_row
 
 
 @pytest.mark.variant("An accepted exact worker ID must still dispatch after its repository is detached")
-def test_exact_worker_dependency_dispatches_after_repo_detach(db, dependency_rows, event="removed"):
+@pytest.mark.parametrize("event", ["merged", "removed"])
+def test_exact_worker_dependency_dispatches_after_repo_detach(db, dependency_rows, event):
     caller, boss, workspace, launched = dependency_rows
     upstream = workspace("engine-worker", "engine", "feature", tracked=True)
     db.add_session_repo(caller.id, "engine", upstream.repo_root)

@@ -65,15 +65,18 @@ def test_a_reused_pane_id_only_counts_for_the_newest_agent(db, repo, root):
 # old autopilot goal, while the real session looked idle.
 
 
-def test_the_hook_command_wins_over_a_stale_environment(db, repo, root, monkeypatch):
+@pytest.mark.parametrize("explicit_agent", [True, False])
+def test_the_hook_command_wins_over_a_stale_environment(db, repo, root, monkeypatch, explicit_agent):
     from typer.testing import CliRunner
 
     from brindle.cli import app
 
     add(db, root, "old", status="idle", age=LONG_AGO)
     add(db, root, "new", status="idle")
+    if not explicit_agent:
+        db.update_agent("new", session_ref="s-new")
     monkeypatch.setenv("BRINDLE_AGENT_ID", "old")  # what the daemon's process carries
-    res = CliRunner().invoke(app, ["_hook", "prompt-submit", "--agent", "new"],
+    res = CliRunner().invoke(app, ["_hook", "prompt-submit"] + (["--agent", "new"] if explicit_agent else []),
                              input='{"session_id": "s-new", "prompt": "hi"}')
     assert res.exit_code == 0, res.output
     assert db.get_agent("new").status == "processing"

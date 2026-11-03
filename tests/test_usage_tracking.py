@@ -232,3 +232,9 @@ def test_antigravity_transcript_without_model_uses_worker_launch_model(db, tmp_p
                             now, transcript_path=str(t2))
     assert usage.antigravity_agent_usage(db, no_model_worker).model == "unknown"
 
+    missing_ref = Agent("missing", "ws1", "developer", "antigravity", None, "assign", "idle", "", None,
+                        now, session_ref="missing-session")
+    no_ref = Agent("unrecorded", "ws1", "developer", "antigravity", None, "assign", "idle", "", None, now)
+    assert usage.antigravity_agent_usage(db, missing_ref) is None
+    assert usage.antigravity_agent_usage(db, no_ref) is None
+
