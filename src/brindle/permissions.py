@@ -1259,11 +1259,82 @@ def is_tracked(path: str | None, roots: list[str]) -> bool:
     return False
 
 
+def _command_texts(command: str) -> list[str]:
+    """``command`` cut at the shell's separators (``;&|``, newline,
+    parentheses, backticks, ``$(``) that quoting leaves active: never inside
+    single quotes, and inside double quotes only where a substitution opens
+    or closes. A cut inside double quotes closes the quote and reopens it, so
+    each text still reads as shell words."""
+    texts: list[str] = []
+    text: list[str] = []
+    stack: list[str] = []      # what is open: '"' (a double quote), "$(" or "`" (a substitution)
+
+    def quoted() -> bool:
+        return bool(stack) and stack[-1] == '"'
+
+    def cut() -> None:
+        if quoted():
+            text.append('"')
+        texts.append("".join(text))
+        text.clear()
+
+    def reopen() -> None:
+        if quoted():
+            text.append('"')
+
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            text.append(command[i:i + 2])
+            i += 2
+            continue
+        if c == "'" and not quoted():
+            j = command.find("'", i + 1)
+            j = n if j < 0 else j + 1
+            text.append(command[i:j])
+            i = j
+            continue
+        if command.startswith("$(", i):
+            cut()
+            stack.append("$(")
+            i += 2
+            continue
+        if c == "`":
+            cut()
+            if stack and stack[-1] == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+            reopen()
+        elif c == '"':
+            if quoted():
+                stack.pop()
+            else:
+                stack.append('"')
+            text.append(c)
+        elif quoted():
+            text.append(c)
+        elif c == ")":
+            cut()
+            if stack and stack[-1] == "$(":
+                stack.pop()
+            reopen()
+        elif c in ";&|\n(":
+            cut()
+        else:
+            text.append(c)
+        i += 1
+    texts.append("".join(text))
+    return texts
+
+
 def _segments(command: str) -> list[list[str]]:
-    """Each simple command in ``command``, split at the shell's separators,
-    as words (best effort: only used to find things to deny)."""
+    """Each simple command in ``command``, split at the shell's separators
+    outside quotes (_command_texts), as words (best effort: only used to
+    find things to deny)."""
     out = []
-    for part in re.split(r"[;&|\n()`]|\$\(", command):
+    for part in _command_texts(command):
         try:
             words = shlex.split(part)
         except ValueError:
