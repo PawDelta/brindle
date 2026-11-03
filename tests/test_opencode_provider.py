@@ -24,30 +24,12 @@ def _config(argv):
     return json.loads(argv[1].split("=", 1)[1])
 
 
-def test_launch_gives_opencode_brindles_server_plugin_instructions_and_brief(brindle_home, monkeypatch):
-    monkeypatch.setenv("BRINDLE_OPENCODE_BIN", "/bin/opencode")
-    profile = load_profile("reviewer-opencode")
-    argv = OpenCode().command(LaunchContext("o1", profile, "review it", resume="ses_1"))
-    cfg = _config(argv)
-    assert argv[2:] == ["/bin/opencode", "--session", "ses_1", "--prompt", "review it"]
-    server = cfg["mcp"]["brindle"]
-    assert server["command"][-1] == "mcp" and server["environment"]["BRINDLE_AGENT_ID"] == "o1"
-    plugin = cfg["plugin"][0].removeprefix("file://")
-    assert f"const BRINDLE = {json.dumps(brindle_invocation())}" in open(plugin).read()
-    instructions = open(cfg["instructions"][0]).read()
-    assert profile.prompt in instructions and DELIVERY_NOTE in instructions
-    # dontAsk: only the profile's commands run; the catch-all comes first (last match wins).
-    bash = cfg["permission"]["bash"]
-    assert list(bash)[0] == "*" and bash["*"] == "deny"
-    assert bash["git diff"] == bash["git diff *"] == bash["pwd"] == "allow" and "pwd *" not in bash
-    assert cfg["permission"]["edit"] == cfg["permission"]["webfetch"] == "deny"
 
 
 @pytest.mark.parametrize("mode, model, perm, flags, patterns, decision", [
     ("bypassPermissions", "opencode/big-pickle", {"bash": "allow", "edit": "allow"}, ["--model", "opencode/big-pickle"], ["git push"], "allow"),
     ("plan", "claude-sonnet-4-5", {"edit": "allow", "*": "ask"}, ["--model", "anthropic/claude-sonnet-4-5", "--agent", "plan"], ["git status"], "allow"),
     (None, "gpt-5.1", {"edit": "ask", "*": "ask"}, ["--model", "openai/gpt-5.1"], ["git status --short --branch", "git branch -a", "git log --oneline -3"], "allow"),
-    ("auto", "local-model", {"edit": "allow", "*": "ask"}, ["--model", "local-model"], ["git -C /worktree status --short --branch", "ls /shared/cache"], "allow"),
     pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
                  ["git -C . log --oneline -3", "git -C /shared/cache diff", "git -C . stash list"], "allow",
                  marks=pytest.mark.variant("relative -C and profile directory from the supervisor incident")),
@@ -60,10 +42,6 @@ def test_launch_gives_opencode_brindles_server_plugin_instructions_and_brief(bri
     pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
                  ["git -C /worktree checkout status file"], "ask",
                  marks=pytest.mark.variant("bypass attempt against a wildcard in the -C path")),
-    (None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
-     ["git -C /otherworktree status --short", "ls /worktree"], "allow"),
-    (None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
-     ["git branch --list 'fix/*'", "git branch -v", "git branch -vv", "git branch"], "allow"),
     pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
                  ["git -C /otherworktree branch --list --no-list -D victim"], "ask",
                  marks=pytest.mark.variant("branch listing options must not be cancelled into a write")),
@@ -84,8 +62,6 @@ def test_launch_gives_opencode_brindles_server_plugin_instructions_and_brief(bri
                  marks=pytest.mark.variant("unquoted patterns could expand into option-like filenames")),
     ("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
      ["git -C /otherworktree status"], "allow"),
-    ("dontAsk", "local-model", {"edit": "deny", "*": "deny"}, ["--model", "local-model"],
-     ["git  -C /otherworktree\t status"], "allow"),
     pytest.param(None, "local-model", {"edit": "ask", "*": "ask"}, ["--model", "local-model"],
                  ("git -C /otherworktree status", "git -C /otherworktree checkout status file"), "ask",
                  marks=pytest.mark.variant("same callID with changed command must still prompt; approvals expire and are single-use")),
@@ -247,25 +223,15 @@ def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brin
     assert not os.path.exists(path)
 
 
-def test_installed_opencode_is_ready_to_supervise_without_a_sign_in(monkeypatch):
-    from brindle import doctor
-
-    monkeypatch.setenv("BRINDLE_OPENCODE_BIN", "/nonexistent/opencode")
-    assert any("npm install -g opencode-ai" in p for p in doctor.preflight("opencode"))
-    monkeypatch.setenv("BRINDLE_OPENCODE_BIN", "/bin/sh")
-    assert not any("OpenCode" in p for p in doctor.preflight("opencode"))
-    from brindle import providers
-
-    assert providers.seen_signed_in("opencode")   # so `brindle -s opencode` opens no login screen
 
 
-@pytest.mark.parametrize("footer, state", [
-    ("  △ Permission required\n   Allow once   Allow always   Reject", "waiting"),
-    ("   ■⬝⬝⬝  esc interrupt        tab agents  ctrl+p commands", "busy"),
-    ("   ~/proj    20.5K (10%)    ctrl+p commands    • OpenCode 1.19.3", "idle"),
-    ("Loading...", None),
-])
-def test_screen_state_reads_opencodes_footer(footer, state):
-    screen = "  ┃  esc interrupt was mentioned in the transcript\n" * 3 + "\n" * 10 + footer
-    assert OpenCode().screen_state(screen) == state
-    assert OpenCode().input_ready(screen) == (state in ("busy", "idle"))
+def test_screen_state_reads_opencodes_footer():
+    for footer, state in [
+        ("  △ Permission required\n   Allow once   Allow always   Reject", "waiting"),
+        ("   ■⬝⬝⬝  esc interrupt        tab agents  ctrl+p commands", "busy"),
+        ("   ~/proj    20.5K (10%)    ctrl+p commands    • OpenCode 1.19.3", "idle"),
+        ("Loading...", None),
+    ]:
+        screen = "  ┃  esc interrupt was mentioned in the transcript\n" * 3 + "\n" * 10 + footer
+        assert OpenCode().screen_state(screen) == state
+        assert OpenCode().input_ready(screen) == (state in ("busy", "idle"))

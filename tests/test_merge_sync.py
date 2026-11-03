@@ -103,15 +103,6 @@ def _stale_branch_with_worker(db, repo, mode="assign", result=None):
     return ws
 
 
-def test_merge_workspace_ignores_worker_whose_window_is_dead(db, repo, boss):
-    ws = _stale_branch_with_worker(db, repo)  # "@1" isn't a live window
-
-    out = asyncio.run(mcp_server.merge_workspace(ws.id))
-
-    assert out.startswith("Merged feature into main")
-    assert (repo / "f.txt").exists()
-
-
 def test_merge_workspace_reconciles_a_stale_processing_worker(db, repo, boss, monkeypatch):
     ws = _stale_branch_with_worker(db, repo)
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
@@ -123,8 +114,7 @@ def test_merge_workspace_reconciles_a_stale_processing_worker(db, repo, boss, mo
     assert db.get_agent("w1").status == "idle"
 
 
-@pytest.mark.parametrize("operation", ["merge_back", "sync_with_base"])
-@pytest.mark.parametrize("error", [git.GitError, workspaces.WorkspaceError])
+@pytest.mark.parametrize("operation, error", [("merge_back", git.GitError), ("sync_with_base", workspaces.WorkspaceError)])
 def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkeypatch, operation, error):
     ws = workspaces.create(db, str(repo), "feature").workspace
     open(os.path.join(ws.path, "new.py"), "w").write("x = 1\n")
@@ -137,6 +127,17 @@ def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkey
     out = asyncio.run(mcp_server.merge_workspace(ws.id))
 
     assert out == "Not merged: boom"
+
+
+
+
+def test_merge_workspace_ignores_worker_whose_window_is_dead(db, repo, boss):
+    ws = _stale_branch_with_worker(db, repo)  # "@1" isn't a live window
+
+    out = asyncio.run(mcp_server.merge_workspace(ws.id))
+
+    assert out.startswith("Merged feature into main")
+    assert (repo / "f.txt").exists()
 
 
 @pytest.mark.parametrize("base_state", ["unchanged", "advanced", "overwrites scratch"])

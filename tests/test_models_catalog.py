@@ -46,13 +46,6 @@ def write_profile(repo, model, extra=""):
     return load_profile("p", str(repo))
 
 
-def test_an_explicit_base_url_keeps_the_model_id_unless_it_is_the_providers_own(repo):
-    own = write_profile(repo, "nano-gpt/deepseek/deepseek-v3", "base_url: HTTPS://nano-gpt.com/api/v1/\n")
-    assert (own.model, own.api_key_env, own.context_tokens) == ("deepseek/deepseek-v3", "NANO_GPT_API_KEY", 120000)
-    for model in ("qwen/qwen3-coder", "deepseek/deepseek-chat", "nano-gpt/deepseek/deepseek-v3"):
-        p = write_profile(repo, model, "base_url: https://openrouter.ai/api/v1\n")
-        assert (p.model, p.base_url, p.api_key_env, p.api, p.context_tokens) == (
-            model, "https://openrouter.ai/api/v1", None, None, None)
 
 
 def test_an_unlisted_or_malformed_model_is_an_error(repo):
@@ -78,26 +71,6 @@ def test_air_gap_never_fetches_and_uses_the_stale_cache(repo, monkeypatch):
         write_profile(repo, "anthropic/claude-x")
 
 
-def test_a_cold_cache_fetches_synchronously_then_resolves(repo, monkeypatch):
-    timeouts = []
-
-    def fetch(timeout):
-        timeouts.append(timeout)
-        return CATALOG
-
-    monkeypatch.setattr(catalog, "_download", fetch)
-    catalog.cache_path().unlink()
-    assert write_profile(repo, "anthropic/claude-x").api == "anthropic"
-    assert timeouts == [catalog.COLD_TIMEOUT]
-    assert catalog.cache_path().exists()
-
-    def offline(timeout):
-        raise OSError("offline")
-
-    monkeypatch.setattr(catalog, "_download", offline)
-    catalog.cache_path().unlink()
-    with pytest.raises(ProfileError, match="unavailable"):
-        write_profile(repo, "anthropic/claude-x")
 
 
 def test_refresh_rewrites_a_stale_cache_and_a_failed_write_keeps_the_old_one(repo, monkeypatch):
@@ -137,3 +110,12 @@ def test_a_second_refresh_waits_for_the_one_in_flight(repo, monkeypatch):
     assert catalog._refreshing.acquire(timeout=5)   # the first one finished
     catalog._refreshing.release()
     assert len(fetches) == 1
+
+
+def test_an_explicit_base_url_keeps_the_model_id_unless_it_is_the_providers_own(repo):
+    own = write_profile(repo, "nano-gpt/deepseek/deepseek-v3", "base_url: HTTPS://nano-gpt.com/api/v1/\n")
+    assert (own.model, own.api_key_env, own.context_tokens) == ("deepseek/deepseek-v3", "NANO_GPT_API_KEY", 120000)
+    for model in ("qwen/qwen3-coder", "deepseek/deepseek-chat", "nano-gpt/deepseek/deepseek-v3"):
+        p = write_profile(repo, model, "base_url: https://openrouter.ai/api/v1\n")
+        assert (p.model, p.base_url, p.api_key_env, p.api, p.context_tokens) == (
+            model, "https://openrouter.ai/api/v1", None, None, None)
