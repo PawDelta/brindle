@@ -124,17 +124,27 @@ def test_a_piped_branch_nothing_works_on_is_reported_once_not_closed(db, repo, m
     assert len(told) == 1
 
 
-def test_two_sweeps_reading_one_snapshot_report_a_stalled_branch_once(db, repo, monkeypatch):
+@pytest.mark.parametrize("note, says", [(cull.note_stalled, "nothing is working on"),
+                                        (cull.note_silent, "has shown nothing new")])
+def test_two_sweeps_reading_one_snapshot_send_a_note_once(db, repo, monkeypatch, note, says):
     """The daemon and each session's MCP server sweep side by side: two that
-    read the workers before either noted the stall send it once between them."""
+    read the workers before either noted it send the note once between them."""
+    from brindle import tmux
     from brindle.db import DB
 
     ws = _reported(db, repo)
     old = time.time() - 7200
-    db.update_agent("w1", pipeline="fixing", created_at=old, status_since=old)
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    if note is cull.note_stalled:   # a dead worker's branch in a fix round
+        db.update_agent("w1", pipeline="fixing", created_at=old, status_since=old)
+    else:                           # a live worker whose pane has printed nothing
+        db.update_agent("w1", result=None, status="unknown", created_at=old)
+    alive = {"boss", "w1"} if note is cull.note_silent else {"boss"}
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in alive)
+    monkeypatch.setattr(agents, "owns_pane", lambda db_, a, owners=None: True)
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
     monkeypatch.setattr(agents, "same_server", lambda a, panes=None: True)
+    monkeypatch.setattr(tmux, "window_activity", lambda window, server=None: old)
+    monkeypatch.setattr(tmux, "capture", lambda window, lines=40, server=None: "")
     snapshot = db.list_agents()
     other = DB()
     for conn in (db, other):
@@ -142,7 +152,7 @@ def test_two_sweeps_reading_one_snapshot_report_a_stalled_branch_once(db, repo, 
         monkeypatch.setattr(conn, "list_agents",
                             lambda ws_id=None, real=real: snapshot if ws_id is None else real(ws_id))
     now = time.time()
-    cull.note_stalled(db, now, {})
-    cull.note_stalled(other, now, {})
-    told = [b for b in inbox(db) if ws.branch in b and "nothing is working on" in b]
+    note(db, now, {})
+    note(other, now, {})
+    told = [b for b in inbox(db) if ws.branch in b and says in b]
     assert len(told) == 1

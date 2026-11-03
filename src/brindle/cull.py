@@ -488,11 +488,8 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 f"It can't continue until someone answers it.{attach} "
                 f"or remove the workspace if it's no longer needed.{auto_mode_note(a, ws)}"
                 f"{request}\n\nIts screen:\n{tail}")
-        try:
-            agents.send_message(db, a.parent_id, body, sender_id=a.id)
-        except agents.AgentError:
-            continue  # its supervisor isn't running; try again on a later sweep
-        db.update_agent(a.id, stuck_noted=since)
+        if not _send_note(db, a, since, body):
+            continue  # noted by another sweep, or its supervisor isn't running (tried again later)
         done.append(f"told {a.parent_id} that worker {a.id} is stuck on a prompt")
     return done
 
@@ -659,13 +656,8 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
                     f"request_review(\"{ws.id}\") to get it reviewed.")
         else:
             continue
-        if a.stuck_noted == since:
+        if a.stuck_noted == since or not _send_note(db, a, since, body):
             continue
-        try:
-            agents.send_message(db, a.parent_id, body, sender_id=a.id)
-        except agents.AgentError:
-            continue
-        db.update_agent(a.id, stuck_noted=since)
         done.append(f"told {a.parent_id} that reported worker {a.id} is stuck")
     return done
 
@@ -674,22 +666,32 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
 PIPED = ("reviewing", "fixing", "ready")
 
 
+def _send_note(db: DB, a: Agent, since: float, body: str) -> bool:
+    """Send ``a``'s supervisor ``body``, once per ``since`` (kept in
+    stuck_noted). Every brindle process sweeps from its own read of the
+    workers, so the note is claimed in the database before it is sent: only
+    one of them sends it, and the claim is let go if the send fails."""
+    won, previous = db.claim_note(a.id, since)
+    if not won:
+        return False
+    try:
+        agents.send_message(db, a.parent_id, body, sender_id=a.id)
+    except agents.AgentError:
+        db.release_note(a.id, since, previous)
+        return False
+    return True
+
+
 def _tell_stalled(db: DB, a: Agent, since: float, body: str, *, claimed: bool = False) -> list[str]:
     """Tell ``a``'s supervisor ``body`` about its piped branch, once per
-    ``since`` (kept in stuck_noted, as the other notes do). Every brindle
-    process sweeps from its own read of the workers, so the note is claimed
-    in the database before it is sent: only one of them sends it. A caller
-    that has ``claimed`` it already says so."""
-    previous = None
-    if not claimed:
-        won, previous = db.claim_note(a.id, since)
-        if not won:
+    ``since`` (see ``_send_note``). A caller that has ``claimed`` it already
+    says so."""
+    if claimed:
+        try:
+            agents.send_message(db, a.parent_id, f"[brindle pipeline] {body}", sender_id=a.id)
+        except agents.AgentError:
             return []
-    try:
-        agents.send_message(db, a.parent_id, f"[brindle pipeline] {body}", sender_id=a.id)
-    except agents.AgentError:
-        if not claimed:
-            db.release_note(a.id, since, previous)
+    elif not _send_note(db, a, since, f"[brindle pipeline] {body}"):
         return []
     return [f"told {a.parent_id} that the branch of {a.id} is stalled"]
 
@@ -799,11 +801,8 @@ def note_silent(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 f"{int((now - last) // 60)} min and hasn't reported. {why} {look} "
                 "cancel it and assign the task to another profile."
                 f"\n\nIts screen:\n{tail}")
-        try:
-            agents.send_message(db, a.parent_id, body, sender_id=a.id)
-        except agents.AgentError:
+        if not _send_note(db, a, last, body):
             continue
-        db.update_agent(a.id, stuck_noted=last)
         done.append(f"told {a.parent_id} that worker {a.id} has gone silent")
     return done
 
