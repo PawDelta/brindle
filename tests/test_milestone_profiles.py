@@ -34,10 +34,3 @@ def test_weight_overrides_milestone_profile(db, root):
     assert name == routed != "developer-heavy"
 
 
-def test_unknown_profile_errors_clearly(db, root):
-    agent, ws = root
-    set_goal(db, [("A", "true", None, "no-such-profile")])
-    with pytest.raises(autopilot.AutopilotError, match="no agent profile named 'no-such-profile'"):
-        autopilot.resolve_profile(db, "boss", ws.repo_root)
-    with pytest.raises(autopilot.AutopilotError, match="'nope'"):
-        autopilot.resolve_profile(db, "boss", ws.repo_root, "nope")

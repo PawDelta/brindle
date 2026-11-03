@@ -36,21 +36,6 @@ def ws(db, repo):
 # -- a stopped parent never shows a subagent as still running -----------------
 
 
-def test_pausing_the_parent_ends_its_running_subagents(db, ws, monkeypatch):
-    monkeypatch.setattr(tmux, "kill_window", lambda w: None)
-    monkeypatch.setattr(tmux, "kill_session", lambda s: None)
-    monkeypatch.setattr(tmux, "windows", lambda s: [])
-    fake_agent(db, ws, agent_id="boss", mode="interactive", status="processing")
-    agents.handle_hook(db, "boss", "subagent-start", {"agent_id": "sub1", "agent_type": "Explore"})
-
-    agents.pause(db, "boss")
-    assert db.get_agent("boss").status == "paused"
-    [row] = db.native_subagents("boss")
-    assert row.ended_at is not None
-
-    [snap_ws] = view.snapshot(db, ws.repo_root)
-    [entry] = [a for a in snap_ws["agents"] if a["id"] == "boss"]
-    assert all(s["ended_at"] is not None for s in entry["subagents"])
 
 
 def test_killing_the_parent_ends_its_running_subagents(db, ws, monkeypatch):

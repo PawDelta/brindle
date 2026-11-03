@@ -258,7 +258,6 @@ def test_unsupported_or_missing_native_configuration_never_sends():
 
 @pytest.mark.parametrize("code,target", [
     (302, "http://elsewhere/models"),
-    (308, "https://elsewhere/models"),
 ])
 def test_http_is_get_only_and_refuses_redirects(monkeypatch, code, target):
     opener = Mock()

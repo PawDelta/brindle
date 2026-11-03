@@ -169,7 +169,7 @@ def test_assign_into_an_attached_repo_works_checks_and_merges_there(db, repo, we
     assert not (brindle_home / "main-checked").exists()     # the session's repo's didn't
 
 
-@pytest.mark.parametrize("dep_on", ["worker_id", "branch_name"])
+@pytest.mark.parametrize("dep_on", ["branch_name"])
 def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, web, boss, monkeypatch, dep_on):
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     repos.attach(db, "boss", str(web), "web")

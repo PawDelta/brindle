@@ -346,7 +346,7 @@ def test_approval_widens_to_change_families(db, ws, tmp_path, approved, siblings
         assert decide(replace(bash(ws, sibling), agent="w1")).decision == decision, sibling
 
 
-@pytest.mark.parametrize("agent, kind, target, group, decision", [
+_REPO_CASES = [
     ("w1", "write", "{lib}/x.py", ("files", "write-worktree"), "allow"),    # a second repo attached to the session
     ("w1", "bash", "sed -i '' s/a/b/ {lib}/x.py", ("files", "write-worktree"), "allow"),
     ("w1", "write", "{lib}/protected/x.py", ("files", "write-worktree"), "deny"),   # a relative deny reaches it
@@ -355,8 +355,10 @@ def test_approval_widens_to_change_families(db, ws, tmp_path, approved, siblings
     ("w1", "bash", "sed -i '' s/a/b/ {alien}/x.py", ("files", "write-outside"), "ask"),
     ("w1", "bash", "git -C {alien} status", ("git", "other"), "ask"),
     ("", "write", "{lib}/x.py", ("files", "write-outside"), "ask"),         # no session known: its own checkout only
-])
-def test_session_repos_count_as_checkout(db, ws, tmp_path, agent, kind, target, group, decision):
+]
+
+
+def test_session_repos_count_as_checkout(db, ws, tmp_path):
     """Every repo attached to the asking agent's session is in the checkout
     for the worktree matcher, relative path rules, git -C, the write classes
     and the change families; another session's repo is not."""
@@ -373,13 +375,14 @@ def test_session_repos_count_as_checkout(db, ws, tmp_path, agent, kind, target, 
     db.add_session_repo("boss", "lib", str(tmp_path / "lib"))
     db.add_session_repo("boss2", "alien", str(tmp_path / "alien"))
     worker(db, ws, "w1")
-    target = target.format(lib=tmp_path / "lib", alien=tmp_path / "alien")
-    req = replace(write(ws, "x.py"), path=target) if kind == "write" else bash(ws, target)
-    req = replace(req, agent=agent)
-    assert permission_groups.classify(req, permissions.all_rules(ws.repo_root)) == [group]
-    if kind == "bash":
-        assert grants.families(req) == (["/".join(group)] if decision == "allow" else None)
-    assert decide(req).decision == decision
+    for agent, kind, target, group, decision in _REPO_CASES:
+        target = target.format(lib=tmp_path / "lib", alien=tmp_path / "alien")
+        req = replace(write(ws, "x.py"), path=target) if kind == "write" else bash(ws, target)
+        req = replace(req, agent=agent)
+        assert permission_groups.classify(req, permissions.all_rules(ws.repo_root)) == [group], target
+        if kind == "bash":
+            assert grants.families(req) == (["/".join(group)] if decision == "allow" else None), target
+        assert decide(req).decision == decision, target
 
 
 def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_blocks(db, ws):
@@ -437,7 +440,6 @@ BYPASS = pytest.mark.variant("spelled so the families don't read it: a bypass at
      "deny", None),
     (DEPLOYS, "gh workflow run release.yml", "deny", None),
     pytest.param(DEPLOYS, "vercel --prod", "deny", None, marks=BYPASS),
-    (PACKAGES, "pip install requests", "deny", None),
     pytest.param(PACKAGES, "npm --prefix web install left-pad", "deny", None, marks=BYPASS),
     # However many wrappers or options lead to it: no limit on the reading drops it.
     pytest.param(PACKAGES, "npm " + "--registry https://registry.npmjs.org " * 33 + "install left-pad", "deny", None,

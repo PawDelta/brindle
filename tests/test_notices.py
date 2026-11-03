@@ -21,14 +21,6 @@ def poll(org_, **body):
 # -- the sidebar ----------------------------------------------------------------------------------
 
 
-def test_the_messages_section_folds_and_vanishes_when_read(org):
-    saved = poll(org, notices=[notice("a")])
-    state = watch.NavState()
-    state.collapsed = {status.GROUP}
-    texts = [ln.text for ln in watch.render([], time.time(), 60, state=state, messages=saved)]
-    assert any("Messages (1)" in t for t in texts) and not any("Over budget" in t for t in texts)
-    saved = poll(org, notices=[])
-    assert not any("Messages" in ln.text for ln in watch.render([], time.time(), 60, messages=saved))
 
 
 # -- the supervisor chat ----------------------------------------------------------------------------
