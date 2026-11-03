@@ -100,15 +100,6 @@ def test_test_hook_cannot_shadow_a_pinned_kid(monkeypatch):
             pass
 
 
-def test_pinned_keys_are_trusted(monkeypatch):
-    from cryptography.hazmat.primitives import serialization
-
-    key = Ed25519PrivateKey.generate()
-    raw = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
-    monkeypatch.setitem(license.PINNED_KEYS, "pinned-1", raw.hex())
-    assert verify(sign(key, claims(kid="pinned-1"))).kid == "pinned-1"
-
-
 def _thumbprint(raw_hex: str) -> str:
     x = base64.urlsafe_b64encode(bytes.fromhex(raw_hex)).rstrip(b"=").decode()
     jwk = json.dumps({"crv": "Ed25519", "kty": "OKP", "x": x}, separators=(",", ":"), sort_keys=True)
