@@ -109,11 +109,9 @@ function MapArea({ client, repo, decisions, sources }: MapViewProps) {
     else if (node.kind === "imported") setPreview({ node: node.id, summary: `Imported folder${node.source.docs !== undefined ? ` · ${node.source.docs} documents` : ""} · ${node.path}` });
     else if (node.kind === "doc" && repo) {
       if (node.local_path) {
-        const path = node.local_path, title = node.title ?? node.id;
-        client.kbSearch(repo, title).then((hits) => {
-          const mine = hits.filter((h) => h.external_id === path || h.url === path);
-          const text = mine.map((h) => h.text).join("\n\n");
-          if (current() && text) setPreview({ node: node.id, summary: firstLine(text), text });
+        // The engine's own document id, from the node's `local:kb:<id>`; no search involved.
+        client.kbDoc(repo, node.id.replace(/^local:kb:/, "")).then((got) => {
+          if (current() && got.text) setPreview({ node: node.id, summary: firstLine(got.text), text: got.text });
         }, () => {});
       } else client.doc(node.doc_id ?? node.id, repo).then(
         (got) => { if (current()) setPreview({ node: node.id, summary: got.summary || firstLine(got.files[0]?.md) }); },
@@ -122,6 +120,8 @@ function MapArea({ client, repo, decisions, sources }: MapViewProps) {
     }
     if (node.kind === "path" && node.path && area) { setInput(node.path); setArea({ scope: area.scope, paths: [node.path] }); }
   };
+  /* The sidebar was closed: forget the selection so an old fetch can't land and a re-click starts afresh. */
+  const deselect = useCallback(() => { selected.current = null; generation.current++; setPreview(null); setOpen(null); }, []);
   const viewable = open?.kind === "doc" && !open.local_path ? open.doc_id ?? open.id : null;
   const onDoc = viewable ? () => setDoc(viewable) : open?.kind === "doc" && preview?.node === open.id && preview.text ? () => setLocal({ title: open.title ?? open.id, text: preview.text! }) : undefined;
   return <section className="flex flex-col gap-s2" aria-label="Map" data-testid="map">
@@ -135,7 +135,7 @@ function MapArea({ client, repo, decisions, sources }: MapViewProps) {
     {repo && !area && <p className="text-sm text-ink-3">Choose a library scope to load its map.</p>}
     {area && !map && !error && <p role="status">Loading neighbourhood…</p>}
     {graph && shown && <><p className="text-xs text-ink-3">{shown.nodes.length} documents and local records · {shown.edges.length} links · drag nodes or the background, scroll to zoom, click a node for details</p>
-      {shown.nodes.length ? <MapGraph {...graph} onOpen={select} preview={preview} onDoc={onDoc} /> : <p>No knowledge in this map yet.</p>}
+      {shown.nodes.length ? <MapGraph {...graph} onOpen={select} onDeselect={deselect} preview={preview} onDoc={onDoc} /> : <p>No knowledge in this map yet.</p>}
     </>}
     {open?.kind === "decision" && <ul><DecisionCard d={open.decision} /></ul>}
     {local && <article data-testid="local-doc" className={`${card} flex flex-col gap-s1 p-s2`}>

@@ -250,7 +250,7 @@ function fitView(s: Sim, w: number, h: number): View {
 /* The map as documents and how they connect: code paths are not nodes but
    what links documents, and a document's paths are listed in its details,
    where clicking one narrows the map to it. */
-export function MapGraph({ nodes: given, edges: givenEdges, onOpen, preview, onDoc }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void; preview?: { node: string; summary: string } | null; onDoc?(): void }) {
+export function MapGraph({ nodes: given, edges: givenEdges, onOpen, onDeselect, preview, onDoc }: { nodes: GraphNode[]; edges: MapEdge[]; onOpen(node: GraphNode): void; onDeselect?(): void; preview?: { node: string; summary: string } | null; onDoc?(): void }) {
   const { nodes, edges, paths } = useMemo(() => docGraph(given, givenEdges), [given, givenEdges]);
   const frame = useRef<HTMLDivElement>(null);
   /* The frame's width, and its height above the legend. */
@@ -295,6 +295,14 @@ export function MapGraph({ nodes: given, edges: givenEdges, onOpen, preview, onD
   const view = manual?.sim === sim ? manual.view : fitted;
   const selected = picked?.nodes === nodes ? picked.id : null;
   const focusGroup = shown?.lines === lines ? shown.group : null;
+  // Closing the details, Escape or a background click all end the selection; the owner drops what it had started for it.
+  const hadSelection = useRef(false);
+  const deselected = useRef(onDeselect);
+  deselected.current = onDeselect;
+  useEffect(() => {
+    if (selected === null && hadSelection.current) deselected.current?.();
+    hadSelection.current = selected !== null;
+  }, [selected]);
   const live = useRef({ view, sim, fitted, size, lines, selected });
   live.current = { view, sim, fitted, size, lines, selected };
   const uid = `kg${useId().replace(/[^\w-]/g, "")}`;

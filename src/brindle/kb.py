@@ -483,6 +483,24 @@ def search(db: DB, repo_key: str, query: str, sources: list[str] | None = None,
     return [_hit(r) for r in rows]
 
 
+def document(db: DB, repo_key: str, doc_id: int) -> dict | None:
+    """One indexed document of ``repo_key`` by id (the number in the map's
+    ``local:kb:<id>`` node): its title, source link and non-quarantined chunk
+    text in document order. None when it is not this repo's, is a tombstone or
+    has only quarantined chunks, the same visibility as search."""
+    doc = db.conn.execute(
+        "SELECT d.id, d.title, d.url, d.updated_at FROM kb_docs d JOIN kb_sources s ON s.id = d.source_id"
+        " WHERE d.id = ? AND s.repo_key = ? AND NOT d.tombstoned", (doc_id, repo_key)).fetchone()
+    if doc is None:
+        return None
+    chunks = db.conn.execute("SELECT text FROM kb_chunks WHERE doc_id = ? AND quarantined IS NULL ORDER BY rowid",
+                             (doc_id,)).fetchall()
+    if not chunks:
+        return None
+    return {"id": doc["id"], "title": doc["title"], "url": doc["url"], "updated_at": doc["updated_at"],
+            "text": "\n\n".join(c["text"] for c in chunks)}
+
+
 def _hit(r) -> dict:
     return {"chunk_id": r["chunk_id"], "heading_path": r["heading_path"], "text": r["text"],
             "url": r["url"], "title": r["title"], "updated_at": r["updated_at"], "external_id": r["external_id"],

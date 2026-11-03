@@ -892,6 +892,19 @@ def test_knowledge_search_returns_hits_for_an_indexed_doc(seeded, db):
     assert _get("/v1/kb/search", AUTH, f"repo={seeded['repo']}")[1] == []
 
 
+def test_knowledge_doc_returns_the_whole_document_in_order(seeded, db):
+    body = "\n\n".join(f"## Part {i}\n\nline {i} sqlite" for i in range(12))
+    (Path(seeded["repo"]) / "NOTES.md").write_text(f"# Storage\n\n{body}\n")
+    key = knowledge.repo_key(seeded["repo"])
+    kb_mod.sync(db, kb_mod.sources(db, key)[0]["id"])
+    node = next(n for n in kb_mod.map_documents(db, seeded["repo"], []) if n["title"] == "Storage")
+    doc_id = node["id"].removeprefix("local:kb:")
+    code, doc = _get(f"/v1/kb/docs/{doc_id}", AUTH, f"repo={seeded['repo']}")
+    assert code == 200 and [doc["text"].index(f"line {i}") for i in range(12)] == sorted(doc["text"].index(f"line {i}") for i in range(12))
+    assert _get(f"/v1/kb/docs/{doc_id}", AUTH, "repo=/elsewhere")[0] == 404
+    assert _get("/v1/kb/docs/nope", AUTH, f"repo={seeded['repo']}")[0] == 404
+
+
 def test_profiles_detail_lints_a_broken_profile(seeded):
     agents_dir = Path(seeded["repo"]) / ".brindle" / "agents"
     agents_dir.mkdir(parents=True)

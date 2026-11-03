@@ -16,7 +16,7 @@ it("shows local knowledge on open when the server library is empty", async () =>
     { id: "local:kb:2", kind: "doc", title: "Indexed storage plan", local_path: "/outside/notes/storage.md", paths: ["/outside/notes/storage.md"], topics: ["Storage policy"] }];
   const client = new DaemonClient({ baseUrl: "http://localhost", token: "t", fetch: async (input) => new Response(JSON.stringify(
     String(input).includes("/scopes") ? { scopes: [{ kind: "user", id: "u1" }] }
-      : String(input).includes("/kb/search") ? [{ chunk_id: "c1", heading_path: "", text: "Cache note body text", url: null, title: "Indexed cache note", external_id: "/repo/src/cache/note.md", updated_at: null, updated: null }, { chunk_id: "c2", heading_path: "", text: "Unrelated chunk", url: null, title: "Other", external_id: "/other.md", updated_at: null, updated: null }]
+      : String(input).includes("/kb/docs/") ? { id: 1, title: "Indexed cache note", url: "file:///repo/src/cache/note.md", text: "Cache note body text\n\n## Later section\n\nBeyond any search hit" }
       : { nodes: new URL(String(input)).searchParams.get("repo") === "/repo" ? local : [], edges: [] },
   )) });
   const { container, rerender } = render(<MapView client={client} repo="/repo" decisions={[decision, { ...decision, id: "global", topic: "Repo policy", scope: [] }, { ...decision, id: "peer", scope: ["docs/**"] }]}
@@ -39,7 +39,7 @@ it("shows local knowledge on open when the server library is empty", async () =>
   fireEvent.click(screen.getByRole("button", { name: /Indexed cache note/ }));
   fireEvent.click(await screen.findByRole("button", { name: "Open document" }));
   expect(screen.getByTestId("local-doc").textContent).toContain("Cache note body text");
-  expect(screen.getByTestId("local-doc").textContent).not.toContain("Unrelated chunk");
+  expect(screen.getByTestId("local-doc").textContent).toContain("Beyond any search hit");
   expect(openLocalPath).not.toHaveBeenCalled();
   rerender(<MapView client={client} repo="/empty" decisions={[]} sources={[]} />);
   await waitFor(() => expect(container.querySelector("[data-node]")).toBeNull());
@@ -216,4 +216,13 @@ it("drops a preview response from an older selection, even for the same node, an
   expect(screen.getByText("Latest A")).toBeTruthy();
   expect(screen.queryByText("Stale A")).toBeNull();
   expect(screen.queryByText("Summary of B")).toBeNull();
+  // Closing the details invalidates what was started: reopening A fetches afresh and ignores the old response.
+  click(/Doc B/);
+  fireEvent.click(screen.getByRole("button", { name: "Close details" }));
+  click(/Doc B/);
+  expect(pending.map((p) => p.id)).toEqual(["a", "b", "a", "b", "b"]);
+  await act(async () => { pending[4].resolve(doc("b", "Fresh B")); });
+  await act(async () => { pending[3].resolve(doc("b", "Closed-selection B")); });
+  expect(screen.getByText("Fresh B")).toBeTruthy();
+  expect(screen.queryByText("Closed-selection B")).toBeNull();
 });
