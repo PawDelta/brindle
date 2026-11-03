@@ -40,7 +40,7 @@ def test_handoff_makes_a_workspace_and_starts_nothing(db, boss, monkeypatch):
     ws = db.get_workspace(worker.workspace_id)
     assert ws.kind == "worktree" and ws.branch == "feat/greet" and ws.base_branch == "main"
     assert os.path.isdir(ws.path)
-    assert worker.parent_id == "boss" and worker.mode == "handoff"
+    assert worker.parent_id == "boss" and worker.mode == "handoff_detached"   # nobody waits on a handoff
     assert worker.tmux_window == "" and worker.status == "processing"
     # The reply says exactly what to do next.
     for piece in (ws.path, "feat/greet", worker.id, "complete_subagent", "Agent tool",
